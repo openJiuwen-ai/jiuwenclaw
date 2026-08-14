@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def _agent_cron_jobs_path(service_id: str, agent_id: str) -> Path:
-    return resolve_tenant_agent_root_dir(service_id, agent_id) / "home" / "cron_jobs.json"
+    sid = str(service_id or "default")
+    aid = str(agent_id or "default")
+    return resolve_tenant_agent_root_dir(sid, aid) / "home" / "cron_jobs.json"
 
 
 def _agent_store(service_id: str, agent_id: str) -> CronJobStore:

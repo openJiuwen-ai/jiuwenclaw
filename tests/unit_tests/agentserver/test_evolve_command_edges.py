@@ -2,9 +2,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from openjiuwen.agent_evolving.trajectory import FileTrajectoryStore
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -114,6 +116,11 @@ async def test_evolve_slash_allows_team_without_lazy_registering(monkeypatch):
 @pytest.mark.anyio
 async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch, auto_save):
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.setattr(
+        evolution_helpers,
+        "get_builtin_skill_names",
+        lambda: {"builtin-demo"},
+    )
 
     class _FakeSkillEvolutionRail:
         pass
@@ -146,6 +153,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "enabled": True,
             "review_trigger": False,
             "auto_save": auto_save,
+            "skill_create": False,
         },
         "model_name": "configured-model",
     }
@@ -158,6 +166,8 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     monkeypatch.setattr(interface_deep_module, "SubagentRail", _FakeSubagentRail)
     monkeypatch.setattr(adapter, "_resolve_runtime_language", lambda: "en")
     monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
+    monkeypatch.setattr(interface_deep_module, "get_skill_create_enabled", lambda _config: False)
 
     configure_calls = []
 
@@ -179,17 +189,22 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     assert len(registered) == 2
     assert isinstance(registered[0], _FakeEvolutionInterruptRail)
     assert isinstance(registered[1], _FakeSkillEvolutionRail)
-    assert configure_calls == [
-        {
-            "skills_dir": [str(interface_deep_module.get_agent_skills_dir())],
-            "llm": adapter._model,  # pylint: disable=protected-access
-            "model": "default-model",
-            "review_trigger": False,
-            "auto_save": auto_save,
-            "disabled_skills": ["disabled-demo"],
-            "language": "en",
-        }
-    ]
+    assert len(configure_calls) == 1
+    call = dict(configure_calls[0])
+    store = call.pop("trajectory_store")
+    assert isinstance(store, FileTrajectoryStore)
+    assert store._base_dir == JiuWenSwarmDeepAdapter._resolve_evolution_trajectory_dir()  # pylint: disable=protected-access
+    assert call == {
+        "skills_dir": adapter._resolve_skill_dirs(),  # pylint: disable=protected-access
+        "llm": adapter._model,  # pylint: disable=protected-access
+        "model": "default-model",
+        "review_trigger": False,
+        # Rail always persists experiences; config auto_save only gates version merge.
+        "auto_save": True,
+        # Execution-disabled + package builtins (sorted by merge_evolution_disabled_skills).
+        "disabled_skills": ["builtin-demo", "disabled-demo"],
+        "language": "en",
+    }
 
 
 def test_sync_active_evolution_review_agent_after_reload_restores_retained_rail(monkeypatch):
@@ -342,17 +357,15 @@ async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regu
 
 
 @pytest.mark.anyio
-async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
+async def test_agent_evolve_rebuild_routes_to_removed_message(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
     adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
 
     async def _fake_handler(query, _context):
         assert query == "/evolve_rebuild demo-skill"
         return {
-            "result_type": "followup",
-            "action": "run_rebuild_followup",
-            "followup_prompt": "review and rebuild demo-skill",
-            "skill_name": "demo-skill",
+            "result_type": "error",
+            "output": "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild`",
         }
 
     monkeypatch.setattr(interface_deep_module, "handle_evolution_slash_command", _fake_handler)
@@ -365,9 +378,8 @@ async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
 
     assert result is not None
     assert result["slash_command"] == "evolve_rebuild"
-    assert result["result_type"] == "followup"
-    assert result["action"] == "run_rebuild_followup"
-    assert result["skill_name"] == "demo-skill"
+    assert result["result_type"] == "error"
+    assert "skills.evolution.rebuild" in result["output"]
 
 
 @pytest.mark.anyio

@@ -129,6 +129,8 @@ class E2AEnvelope:
     # 企业多租户 / OfficeClaw：可选；wire 顶层或由 agent_ref 派生
     agent_id: str | None = None
     service_id: str | None = None
+    # 数据目录逻辑键（Runtime 解析后可为明文；发往 AgentServer 前一般为 MD5 hex）
+    workspace_dir: str | None = None
 
     # --- 网关 RPC（原 req_method）；ACP 转入时同字段承载 JSON-RPC method ---
     method: str | None = None
@@ -426,6 +428,7 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         source_agent_id=data.get("source_agent_id"),
         agent_id=_resolve_wire_agent_id(data),
         service_id=_resolve_wire_service_id(data),
+        workspace_dir=_normalize_optional_wire_str(data.get("workspace_dir")),
         method=raw_method,
         params=params,
         ext_method=data.get("ext_method"),

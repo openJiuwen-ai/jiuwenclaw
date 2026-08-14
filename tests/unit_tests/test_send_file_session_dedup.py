@@ -1,4 +1,6 @@
 import asyncio
+import sys
+import types
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,7 +31,7 @@ def test_partition_and_mark_sent_files():
     assert skipped == []
 
 
-def test_send_file_skips_duplicate_after_success(tmp_path):
+def test_send_file_skips_duplicate_after_success(tmp_path, monkeypatch):
     file_path = tmp_path / "handoff.md"
     file_path.write_text("hello", encoding="utf-8")
 
@@ -41,10 +43,18 @@ def test_send_file_skips_duplicate_after_success(tmp_path):
     mock_server = MagicMock()
     mock_server.send_push = AsyncMock()
 
+    class _FakeAgentWebSocketServer:
+        @staticmethod
+        def get_instance():
+            return mock_server
+
+    monkeypatch.setitem(
+        sys.modules,
+        "jiuwenswarm.server.agent_ws_server",
+        types.SimpleNamespace(AgentWebSocketServer=_FakeAgentWebSocketServer),
+    )
+
     with patch(
-        "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
-        return_value=mock_server,
-    ), patch(
         "jiuwenswarm.server.runtime.session.session_history.append_history_record",
     ):
         first = asyncio.run(toolkit.send_file(str(file_path)))

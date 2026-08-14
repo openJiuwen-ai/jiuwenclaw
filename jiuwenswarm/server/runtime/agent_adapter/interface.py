@@ -550,7 +550,26 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_ENTERPRISE_INSTALL: "handle_skills_web_install",
+    ReqMethod.SKILLS_ENTERPRISE_UNINSTALL: "handle_skills_web_uninstall",
 }
+
+# Evolution version RPCs (archives/rollback/rebuild) are handled by DeepAdapter.
+_SKILL_EVOLUTION_RAIL_ROUTES: frozenset[ReqMethod] = frozenset(
+    {
+        ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+        ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ReqMethod.SKILLS_EVOLUTION_REBUILD,
+    }
+)
+
+# Web 企业装卸（对外 RPC 仍为 skills.enterprise.*）
+_SKILLS_WEB_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_web_install",
+        "handle_skills_web_uninstall",
+    }
+)
 
 # Preserve cross-service context-size hints if they are present in request.params.
 _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
@@ -952,12 +971,12 @@ class JiuWenSwarm:
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
+        # 多租户：user_workspace_dir 为租户根（service_{sid}/agent_{aid}），再拼相对 workspace/sessions
         enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
-        if enterprise and tenant_root:
+        if tenant_root:
             user_ws = Path(tenant_root)
             self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
             self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
@@ -971,8 +990,8 @@ class JiuWenSwarm:
         self._skilldev_service = None
 
     def _history_kwargs(self) -> dict[str, Any]:
-        """企业版 history/metadata 写入时附带 sessions_root."""
-        if self._sessions_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+        """history/metadata 写入时附带 sessions_root（租户隔离）."""
+        if self._sessions_dir is not None:
             return {"sessions_root": self._sessions_dir}
         return {}
 
@@ -1054,6 +1073,7 @@ class JiuWenSwarm:
             bind_memory_agent_id,
             bind_memory_workspace_dir,
         )
+        from jiuwenswarm.common.local_env_config import bind_agent_env_ns
 
         ws = Path(self._resolve_workspace_dir())
         agent_root = ws.parent
@@ -1069,8 +1089,14 @@ class JiuWenSwarm:
             or getattr(self, "_agent_id", None)
             or "default"
         )
+        mem_sid = (
+            getattr(self, "_env_service_id", None)
+            or getattr(self, "_service_id", None)
+            or "default"
+        )
         mem_aid_token = bind_memory_agent_id(str(mem_aid))
-        return tenant_tokens, (mem_ws_token, mem_aid_token)
+        env_ns_token = bind_agent_env_ns(str(mem_sid), str(mem_aid))
+        return tenant_tokens, (mem_ws_token, mem_aid_token, env_ns_token)
 
     @staticmethod
     def _reset_tenant_request_context(tenant_tokens: Any, mem_token: Any) -> None:
@@ -1079,9 +1105,14 @@ class JiuWenSwarm:
             reset_memory_agent_id,
             reset_memory_workspace_dir,
         )
+        from jiuwenswarm.common.local_env_config import reset_agent_env_ns
 
         if isinstance(mem_token, tuple):
-            mem_ws_token, mem_aid_token = mem_token
+            if len(mem_token) == 3:
+                mem_ws_token, mem_aid_token, env_ns_token = mem_token
+                reset_agent_env_ns(env_ns_token)
+            else:
+                mem_ws_token, mem_aid_token = mem_token
             reset_memory_agent_id(mem_aid_token)
             reset_memory_workspace_dir(mem_ws_token)
         else:
@@ -1137,6 +1168,18 @@ class JiuWenSwarm:
             refresh_team_shared_skill_links_across_managers(session_id)
         except Exception as exc:
             logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+
+    async def refresh_enabled_skills_from_db(self) -> None:
+        """企业账本变更后轻量刷新启用集（直读 DB + 重建 SkillUseRail）。
+
+        适配器不支持时回退 ``create_instance``。
+        """
+        adapter = self._ensure_adapter()
+        refresh = getattr(adapter, "refresh_enabled_skills_from_db", None)
+        if callable(refresh):
+            await refresh()
+            return
+        await self.create_instance()
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1762,15 +1805,73 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _handle_skills_evolution_rail_request(
+        self, request: AgentRequest
+    ) -> AgentResponse | None:
+        """Forward skills.evolution.archives/rollback/rebuild to DeepAdapter."""
+        if request.req_method not in _SKILL_EVOLUTION_RAIL_ROUTES:
+            return None
+
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_ROLLBACK:
+            handler_name = "handle_skills_evolution_rollback"
+        elif request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            handler_name = "handle_skills_evolution_rebuild"
+        else:
+            handler_name = "handle_skills_evolution_archives"
+
+        adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        if request.req_method == ReqMethod.SKILLS_EVOLUTION_REBUILD:
+            ensure = getattr(adapter, "ensure_instance", None)
+            if callable(ensure):
+                await ensure()
+
+        handler = getattr(adapter, handler_name, None)
+        if handler is None:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": f"missing handler {handler_name}"},
+                metadata=request.metadata,
+            )
+        try:
+            payload = await handler(request.params if isinstance(request.params, dict) else {})
+        except Exception as exc:
+            logger.error("[JiuWenSwarm] skills.evolution rail 请求处理失败: %s", exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _handle_skills_request(self, request: AgentRequest) -> AgentResponse | None:
         """处理 Skills 相关请求，返回 None 表示不是 Skills 请求."""
+        evolution_response = await self._handle_skills_evolution_rail_request(request)
+        if evolution_response is not None:
+            return evolution_response
+
         if request.req_method not in _SKILL_ROUTES:
             return None
 
         handler_name = _SKILL_ROUTES[request.req_method]
         handler = getattr(self._skill_manager, handler_name)
         try:
-            payload = await handler(request.params)
+            params = dict(request.params) if isinstance(request.params, dict) else {}
+            if handler_name in _SKILLS_WEB_HANDLERS and os.getenv("AGENT_RUNTIME", "").strip():
+                if self._service_id and not str(params.get("service_id") or "").strip():
+                    params["service_id"] = self._service_id
+                if self._agent_id and not str(params.get("agent_id") or "").strip():
+                    params["agent_id"] = self._agent_id
+            payload = await handler(params)
             _reload_after_skills = handler_name in [
                 "handle_skills_install",
                 "handle_skills_import_local",
@@ -1779,15 +1880,16 @@ class JiuWenSwarm:
                 "handle_skills_clawhub_download",
                 "handle_skills_team_skills_hub_install",
             ]
+            _enterprise_web_handler = handler_name in _SKILLS_WEB_HANDLERS
             if handler_name == "handle_skills_skillnet_install" and payload.get("pending"):
                 _reload_after_skills = False
-            if _reload_after_skills:
+            if _enterprise_web_handler and payload.get("success") is not False:
+                if os.getenv("AGENT_RUNTIME", "").strip():
+                    await self.refresh_enabled_skills_from_db()
+            elif _reload_after_skills and payload.get("success") is not False:
                 await self.create_instance()
                 self._refresh_team_shared_skill_links(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
-                # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
-                # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
-                # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
                 self._refresh_team_shared_skill_links(request.session_id)
         except Exception as exc:
@@ -2759,6 +2861,12 @@ class JiuWenSwarm:
             if permission_reservation is not None:
                 permission_reservation.release_if_unstarted()
             raise
+
+        observe_external_task = getattr(
+            self._session_manager, "observe_external_task", None
+        )
+        if callable(observe_external_task):
+            observe_external_task(session_id, stream_task)
 
         suppress_a2ui_stream = False
         a2ui_pending_render_sent = False

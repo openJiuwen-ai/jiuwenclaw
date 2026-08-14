@@ -1233,37 +1233,33 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
 
 @pytest.mark.asyncio
 async def test_runtime_rail_multi_tenant_workspace_dirs(monkeypatch):
-    """企业版多租户：AGENT_RUNTIME 下 prompt 使用租户隔离的 workspace/config 路径。"""
+    """测试注入 workspace_dir 时 _resolve_agent_workspace_and_config 返回正确路径。"""
     monkeypatch.setenv("AGENT_RUNTIME", "1")
 
     builder = SystemPromptBuilder(language="cn")
+    workspace_root = Path("/tmp/test_jiuwenswarm/workspace_abc/agent/workspace")
     runtime_rail = RuntimePromptRail(
         language="cn",
         channel="web",
         agent_id="test_agent_001",
         service_id="test_service_001",
     )
+    runtime_rail.set_runtime_paths(workspace_dir=str(workspace_root))
     runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
 
-    expected_base = Path("/tmp/test_jiuwenswarm/service_test_service_001/agent_test_agent_001")
-    with patch(
-        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
-        return_value=expected_base,
-    ):
-        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-        await runtime_rail.before_model_call(ctx)
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await runtime_rail.before_model_call(ctx)
 
     prompt = builder.build()
 
     assert "config" in prompt
     assert "workspace" in prompt
-    assert "service_test_service_001" in prompt
-    assert "agent_test_agent_001" in prompt
+    assert "workspace_abc" in prompt
     assert "Agent 内部数据目录" in prompt
 
-    # 验证完整绝对路径（兼容 Windows/Linux 分隔符；hh 布局为 agent/workspace）
+    expected_base = workspace_root.parent.parent
     expected_config = str(expected_base / "config")
-    expected_workspace = str(expected_base / "agent" / "workspace")
+    expected_workspace = str(workspace_root)
     expected_config_win = expected_config.replace("/", "\\")
     expected_workspace_win = expected_workspace.replace("/", "\\")
     assert (
@@ -1317,3 +1313,28 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
     assert (
         expected_workspace in prompt or expected_workspace_win in prompt
     ), f"Workspace path not found: {expected_workspace}"
+
+
+def test_interface_deep_skill_rail_uses_multi_tenant_paths():
+    """测试 get_multi_tenant_skill_dirs 按 service_id/agent_id 解析路径。"""
+    from jiuwenswarm.common.utils import get_multi_tenant_skill_dirs
+
+    with patch(
+        "jiuwenswarm.common.utils.get_multi_tenant_user_workspace_dir",
+    ) as mock_workspace:
+        mock_workspace.return_value = Path("/tmp/test/service_key123/agent_key123")
+        skill_dirs = get_multi_tenant_skill_dirs(service_id="key123", agent_id="key123")
+
+    assert len(skill_dirs) == 1
+    assert "service_key123" in str(skill_dirs[0]) or "agent_key123" in str(skill_dirs[0])
+    assert "skills" in str(skill_dirs[0])
+    assert "workspace" in str(skill_dirs[0])
+
+    with patch(
+        "jiuwenswarm.common.utils.get_agent_skills_dir",
+    ) as mock_single:
+        mock_single.return_value = Path("/home/user/.jiuwenswarm/skills")
+        skill_dirs_single = get_multi_tenant_skill_dirs()
+
+    assert len(skill_dirs_single) == 1
+    assert skill_dirs_single[0].as_posix() == "/home/user/.jiuwenswarm/skills"

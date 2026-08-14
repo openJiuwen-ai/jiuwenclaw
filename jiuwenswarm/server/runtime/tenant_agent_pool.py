@@ -58,10 +58,10 @@ def filter_cached_agent_managers(values: Iterable[Any]) -> list[Any]:
 class TenantAgentPool:
     """多租户 AgentManager 管理器（单例）.
 
-    根据 agent_id + service_id 维护多个 AgentManager 实例，实现租户隔离。
+    根据 agent_id + service_id + workspace_key 维护多个 AgentManager 实例。
     每个 AgentManager 管理该租户内的多个 Agent 实例（按 channel_id 区分）。
 
-    service_id 由 chat_id + bot_app_id 组合而成。
+    service_id / agent_id 用于路由与 tip；workspace_key 决定数据目录。
     """
 
     _instance: ClassVar[TenantAgentPool | None] = None
@@ -71,7 +71,7 @@ class TenantAgentPool:
         cache_max_size: int | None = None,
         cache_ttl: int | None = None,
     ) -> None:
-        # LRU 缓存: key=(agent_id, service_id), value=AgentManager 实例
+        # LRU 缓存: key=(agent_id, service_id, workspace_key), value=AgentManager 实例
         # 默认 None：不限制容量与 TTL，避免长阻塞（如 ask_user_question）期间误淘汰 AgentManager
         self._agent_wrappers = AsyncLRUCache(
             max_size=cache_max_size,
@@ -151,28 +151,28 @@ class TenantAgentPool:
     async def initialize(self, channel_id: str = "", extra_config: dict[str, Any] | None = None) \
             -> dict[str, Any] | None:
         """初始化默认租户的 AgentManager（主要用于 ACP 通道）."""
-        agent_id, service_id = "acp", "global_acp"
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = "acp", "global_acp", "workspace_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         return await agent_manager.initialize(channel_id, extra_config)
 
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
         """获取默认租户的客户端能力."""
-        agent_manager = self._get_agent_manager_nowait("acp", "global_acp")
+        agent_manager = self._get_agent_manager_nowait("acp", "global_acp", "workspace_acp")
         if agent_manager is None:
             return {}
         return agent_manager.get_client_capabilities(channel_id)
 
     def get_agent_nowait(self) -> Any | None:
         """获取默认 Agent 实例（同步，不自动创建）."""
-        agent_manager = self._get_agent_manager_nowait("acp", "global_acp")
+        agent_manager = self._get_agent_manager_nowait("acp", "global_acp", "workspace_acp")
         if agent_manager is None:
             return None
         return agent_manager.get_agent_nowait()
 
     async def create_session(self, channel_id: str = "", session_id: str | None = None) -> str:
         """创建会话."""
-        agent_id, service_id = "acp", "global_acp"
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        agent_id, service_id, workspace_key = "acp", "global_acp", "workspace_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         return await agent_manager.create_session(channel_id, session_id)
 
     async def cleanup(self) -> None:
@@ -408,7 +408,7 @@ class TenantAgentPool:
         )
 
         aggregate = ReloadAggregateResult()
-        cache_key = self._build_cache_key(agent_id, service_id)
+        cache_key = self._build_cache_key(agent_id, service_id, "default")
         agent_manager = await self._agent_wrappers.get(cache_key)
         if agent_manager is None:
             log_agent_config_hot_reload(
@@ -439,15 +439,17 @@ class TenantAgentPool:
     async def _ensure_agent_manager(
             self,
             agent_id: str,
-            service_id: str | None = None,
+            service_id: str,
+            workspace_key: str,
             *,
             config_base: Any = None,
             env_overrides: Any = None,
     ) -> Any:
-        """确保 agent_id + service_id 对应的 AgentManager 实例已创建（线程安全）."""
+        """确保 agent_id + service_id + workspace_key 对应的 AgentManager 已创建."""
         request_agent_id = agent_id
         request_service_id = service_id or "default"
-        cache_key = self._build_cache_key(agent_id, service_id)
+        request_workspace_key = (workspace_key or "").strip() or "default"
+        cache_key = self._build_cache_key(agent_id, service_id, request_workspace_key)
         lock = self._get_lock(cache_key)
 
         registry = TenantCatalogRegistry.get_instance()
@@ -470,15 +472,22 @@ class TenantAgentPool:
                 return agent_manager
 
             logger.info(
-                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s",
+                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s, workspace_key=%s",
                 agent_id,
                 service_id,
+                request_workspace_key,
             )
 
             try:
+                # 工作目录按 service_id/agent_id 隔离：service_{sid}/agent_{aid}/
                 agent_dir_path = get_multi_tenant_user_workspace_dir(
                     request_service_id, request_agent_id
                 )
+                if agent_dir_path is None:
+                    raise ValueError(
+                        f"invalid tenant workspace: agent_id={agent_id!r}, "
+                        f"service_id={service_id!r}"
+                    )
 
                 import os
                 # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).
@@ -520,18 +529,25 @@ class TenantAgentPool:
                         self._lock_loops.pop(stale_key, None)
 
                 logger.info(
-                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
+                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s, workspace_key=%s path=%s",
                     agent_id,
                     service_id,
+                    request_workspace_key,
+                    agent_dir_path,
                 )
                 return agent_manager
             except Exception as e:
                 logger.error("[TenantAgentPool] 创建 AgentManager 失败: %s", e)
                 raise
 
-    def _get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+    def _get_agent_manager_nowait(
+            self,
+            agent_id: str,
+            service_id: str,
+            workspace_key: str,
+    ) -> Any | None:
         """同步获取 AgentManager 实例（不自动创建）."""
-        cache_key = self._build_cache_key(agent_id, service_id)
+        cache_key = self._build_cache_key(agent_id, service_id, workspace_key)
         try:
             loop = asyncio.get_running_loop()
             future = asyncio.run_coroutine_threadsafe(
@@ -543,12 +559,19 @@ class TenantAgentPool:
             return None
 
     @staticmethod
-    def _build_cache_key(agent_id: str, service_id: str | None) -> tuple[str, str | None]:
+    def _build_cache_key(
+            agent_id: str,
+            service_id: str | None,
+            workspace_key: str | None = None,
+    ) -> tuple[str, str | None, str]:
         """Tenant pool key as a tuple to avoid delimiter collisions."""
-        return (agent_id, service_id)
+        wk = (workspace_key or "").strip() or "default"
+        return (agent_id, service_id, wk)
 
-    async def _evict_manager_cache(self, agent_id: str, service_id: str) -> None:
-        cache_key = self._build_cache_key(agent_id, service_id)
+    async def _evict_manager_cache(
+            self, agent_id: str, service_id: str, workspace_key: str = "default",
+    ) -> None:
+        cache_key = self._build_cache_key(agent_id, service_id, workspace_key)
         agent_manager = await self._agent_wrappers.get(cache_key)
         if agent_manager is not None:
             try:
@@ -608,7 +631,7 @@ class TenantAgentPool:
         """Optional smoke create/destroy for a tenant."""
         warmup_session = "__warmup__"
         try:
-            agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+            agent_manager = await self._ensure_agent_manager(agent_id, service_id, "default")
             await agent_manager.get_agent(
                 channel_id=channel_id,
                 mode="agent",
@@ -726,6 +749,7 @@ class TenantAgentPool:
                     agent_manager = await self._ensure_agent_manager(
                         agent_id,
                         service_id,
+                        "default",
                         config_base=spec.config,
                         env_overrides=materialized_env,
                     )
@@ -855,6 +879,12 @@ class TenantAgentPool:
             "skills.evolution.save",
         }
     )
+    _DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
+        {
+            "skills.evolution.archives",
+            "skills.evolution.rollback",
+        }
+    )
     _PREFERRED_CONTROL_AGENT_IDS: tuple[str, ...] = ("office", "jiuwenclaw", "assistant")
 
     @staticmethod
@@ -980,10 +1010,10 @@ class TenantAgentPool:
         guard = self.require_officeclaw_agent(request)
         if guard is not None:
             return guard
-        agent_id, service_id = self.extract_ids(request)
+        agent_id, service_id, workspace_key = self.extract_ids(request)
         agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
-        cache_key = self._build_cache_key(agent_id, service_id)
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        cache_key = self._build_cache_key(agent_id, service_id, workspace_key)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         try:
             return await agent_manager.process_message(request)
         finally:
@@ -1006,10 +1036,10 @@ class TenantAgentPool:
                 is_complete=True,
             )
             return
-        agent_id, service_id = self.extract_ids(request)
+        agent_id, service_id, workspace_key = self.extract_ids(request)
         agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
-        cache_key = self._build_cache_key(agent_id, service_id)
-        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        cache_key = self._build_cache_key(agent_id, service_id, workspace_key)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
         try:
             async for chunk in agent_manager.process_message_stream(request):
                 yield chunk
@@ -1030,22 +1060,25 @@ class TenantAgentPool:
         return normalize_env_ns_id(stripped, default=default)
 
     @staticmethod
-    def extract_ids(request: AgentRequest):
-        """从请求中提取 agent_id 和 service_id."""
+    def extract_ids(request: AgentRequest) -> tuple[str, str, str]:
+        """从请求中提取 agent_id、service_id 与 workspace_key."""
         agent_id = getattr(request, "agent_id", None)
         service_id = getattr(request, "service_id", None)
+        workspace_key = getattr(request, "workspace_dir", None)
 
         if request.channel_id == "acp":
-            return "acp", "global_acp"
+            return "acp", "global_acp", "workspace_acp"
 
         if request.channel_id == "officeclaw":
             aid = TenantAgentPool.normalize_tenant_id(agent_id)
             sid = TenantAgentPool.normalize_tenant_id(service_id)
-            return aid, sid
+            wk = TenantAgentPool.normalize_tenant_id(workspace_key, default="default")
+            return aid, sid, wk
 
         agent_id = TenantAgentPool.normalize_tenant_id(agent_id)
         service_id = TenantAgentPool.normalize_tenant_id(service_id)
-        return agent_id, service_id
+        workspace_key = TenantAgentPool.normalize_tenant_id(workspace_key, default="default")
+        return agent_id, service_id, workspace_key
 
     async def reload_agent_config(
             self,
@@ -1059,9 +1092,11 @@ class TenantAgentPool:
         aid = self.normalize_tenant_id(agent_id)
         if aid == "acp":
             sid = "global_acp"
+            workspace_key = "workspace_acp"
         else:
             sid = self.normalize_tenant_id(service_id)
-        agent_manager = await self._ensure_agent_manager(aid, sid)
+            workspace_key = "default"
+        agent_manager = await self._ensure_agent_manager(aid, sid, workspace_key)
         channel_id = "acp" if aid == "acp" else "default"
         await agent_manager.reload_agent_config(
             channel_id=channel_id,
@@ -1073,13 +1108,17 @@ class TenantAgentPool:
         """获取当前活跃的 AgentManager 实例数量."""
         return self._agent_wrappers.__len__()
 
-    async def get_agent_manager(self, agent_id: str, service_id: str) -> Any:
+    async def get_agent_manager(
+            self, agent_id: str, service_id: str, workspace_key: str = "default"
+    ) -> Any:
         """获取指定租户的 AgentManager 实例."""
-        return await self._ensure_agent_manager(agent_id, service_id)
+        return await self._ensure_agent_manager(agent_id, service_id, workspace_key)
 
-    def get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+    def get_agent_manager_nowait(
+            self, agent_id: str, service_id: str, workspace_key: str = "default"
+    ) -> Any | None:
         """同步获取 AgentManager 实例（不自动创建）."""
-        return self._get_agent_manager_nowait(agent_id, service_id)
+        return self._get_agent_manager_nowait(agent_id, service_id, workspace_key)
 
     def iter_agent_managers_nowait(self) -> list[Any]:
         """Return cached ``AgentManager`` instances without creating new ones."""

@@ -206,8 +206,8 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 
 
 def _sessions_dir_for_request(request: AgentRequest) -> Path:
-    """Resolve tenant ``…/agent/sessions`` for an AgentRequest."""
-    agent_id, service_id = TenantAgentPool.extract_ids(request)
+    """Resolve tenant ``service_{sid}/agent_{aid}/agent/sessions`` for an AgentRequest."""
+    agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
     return resolve_tenant_sessions_dir(service_id, agent_id)
 
 
@@ -1424,7 +1424,26 @@ class AgentWebSocketServer:
                     env.method,
                     env.is_stream,
                 )
-                request = e2a_to_agent_request(env)
+                try:
+                    request = e2a_to_agent_request(env)
+                except ValueError:
+                    logger.warning(
+                        "[E2A][compat] unknown E2A method=%r request_id=%s — replying error",
+                        env.method,
+                        env.request_id,
+                    )
+                    from jiuwenswarm.common.schema.agent import AgentResponse as _AgentResponse
+                    from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire as _encode_wire
+                    err_resp = _AgentResponse(
+                        request_id=env.request_id or "",
+                        channel_id=env.channel or "web",
+                        ok=False,
+                        payload={"error": f"unknown method: {env.method}", "code": "UNKNOWN_METHOD"},
+                    )
+                    wire = _encode_wire(err_resp, response_id=env.request_id or "")
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                    return
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -2399,6 +2418,11 @@ class AgentWebSocketServer:
     async def _handle_unary(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
+        from jiuwenswarm.telemetry.context_propagation import (
+            bind_incoming_request,
+            reset_incoming_request,
+        )
+
         manager = getattr(self, "_agent_manager", None)
         foreground = (
             request.req_method in _CODE_MODE_SYNC_METHODS
@@ -2406,13 +2430,17 @@ class AgentWebSocketServer:
             and hasattr(manager, "begin_foreground_chat")
             and hasattr(manager, "end_foreground_chat")
         )
-        if foreground:
-            await manager.begin_foreground_chat()
+        binding = bind_incoming_request(request)
         try:
-            await self._handle_unary_impl(ws, request, send_lock)
-        finally:
             if foreground:
-                await manager.end_foreground_chat()
+                await manager.begin_foreground_chat()
+            try:
+                await self._handle_unary_impl(ws, request, send_lock)
+            finally:
+                if foreground:
+                    await manager.end_foreground_chat()
+        finally:
+            reset_incoming_request(binding)
 
     async def _handle_unary_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -2476,6 +2504,25 @@ class AgentWebSocketServer:
             )
             return
 
+        # Disk-only evolution RPCs must go through AgentManager so skill_path roots
+        # are bound into session-registered dirs (enterprise parity). Do not use the
+        # skills.* stateless short-circuit, which skips that binding.
+        if request.req_method in (
+            ReqMethod.SKILLS_EVOLUTION_ARCHIVES,
+            ReqMethod.SKILLS_EVOLUTION_ROLLBACK,
+        ):
+            resp = await self._agent_manager.process_message(request)
+            if getattr(resp, "agent_ref", None) is None:
+                resp.agent_ref = request.agent_ref
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await send_wire_payload(ws, wire)
+            logger.info(
+                "[AgentWebSocketServer] 非流式响应已发送 (disk-only evolution): request_id=%s",
+                request.request_id,
+            )
+            return
+
         # 无状态请求（skills / skilldev / plugins / symphony）不需要 mode 解析和
         # code mode 状态管理，直接走 process_message 即可。用轻量 agent 获取，不触发
         # adapter 重建（恢复 8f54b26a7 误删的短路，并修正 5084467df 触发重建的缺陷）。
@@ -2532,6 +2579,11 @@ class AgentWebSocketServer:
     async def _handle_stream(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
+        from jiuwenswarm.telemetry.context_propagation import (
+            bind_incoming_request,
+            reset_incoming_request,
+        )
+
         manager = getattr(self, "_agent_manager", None)
         foreground = (
             request.req_method in _CODE_MODE_SYNC_METHODS
@@ -2539,13 +2591,17 @@ class AgentWebSocketServer:
             and hasattr(manager, "begin_foreground_chat")
             and hasattr(manager, "end_foreground_chat")
         )
-        if foreground:
-            await manager.begin_foreground_chat()
+        binding = bind_incoming_request(request)
         try:
-            await self._handle_stream_impl(ws, request, send_lock)
-        finally:
             if foreground:
-                await manager.end_foreground_chat()
+                await manager.begin_foreground_chat()
+            try:
+                await self._handle_stream_impl(ws, request, send_lock)
+            finally:
+                if foreground:
+                    await manager.end_foreground_chat()
+        finally:
+            reset_incoming_request(binding)
 
     async def _handle_stream_impl(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -4313,8 +4369,12 @@ class AgentWebSocketServer:
                 pool = TenantAgentPool.peek_instance()
                 if pool is None:
                     return {}
-                agent_id, service_id = TenantAgentPool.extract_ids(request)
-                manager = pool.get_agent_manager_nowait(agent_id, service_id)
+                agent_id, service_id, workspace_key = TenantAgentPool.extract_ids(request)
+                manager = pool.get_agent_manager_nowait(
+                    agent_id,
+                    service_id,
+                    workspace_key,
+                )
                 managers = [manager] if manager is not None else []
             else:
                 managers = [self._agent_manager]
@@ -4335,6 +4395,8 @@ class AgentWebSocketServer:
         # change immediately instead of waiting for the next tool call's
         # get_permissions_snapshot refresh.
         read_only_methods = {
+            ReqMethod.PERMISSIONS_ENABLED_GET,
+            ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET,
             ReqMethod.PERMISSIONS_TOOLS_GET,
             ReqMethod.PERMISSIONS_TOOLS_LIST,
             ReqMethod.PERMISSIONS_RULES_GET,
@@ -7459,7 +7521,7 @@ class AgentWebSocketServer:
     def _effective_config_for_request(request: AgentRequest) -> Any:
         """Return the OfficeClaw tenant snapshot; native gateway keeps disk config."""
         if request.channel_id == "officeclaw":
-            agent_id, service_id = TenantAgentPool.extract_ids(request)
+            agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
             spec = TenantCatalogRegistry.get_instance().get(service_id, agent_id)
             if spec is not None and isinstance(spec.config, dict):
                 return spec.config
@@ -7556,7 +7618,7 @@ class AgentWebSocketServer:
                         return
 
                 raw_agent = getattr(request, "agent_id", None)
-                agent_id, service_id = TenantAgentPool.extract_ids(request)
+                agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
                 if (
                     request.channel_id == "officeclaw"
                     or (raw_agent is not None and str(raw_agent).strip())

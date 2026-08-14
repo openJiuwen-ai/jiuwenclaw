@@ -44,8 +44,8 @@ _IMAGE_ARTIFACT_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
 })
 
-# 文件路径检测的正则表达式模式（仿 PR#1440，配合图像扩展名白名单过滤）
-_IMAGE_FILE_PATH_PATTERNS = [
+# 文件路径检测的正则表达式模式（仿 PR#1440；调用方按扩展名白名单过滤）
+_FILE_PATH_PATTERNS = [
     # Windows绝对路径 (D:\path, D:/path)
     re.compile(r'[A-Za-z]:[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+'),
     # Unix绝对路径 (/path/to/file)
@@ -58,11 +58,82 @@ _IMAGE_FILE_PATH_PATTERNS = [
 ]
 
 _PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
+_PYTHON_SCRIPT_EXTENSIONS = frozenset({".py", ".pyw"})
 
 
 def _clean_path_candidate(path_str: str) -> str:
     """清理正则提取到的路径候选首尾非法字符。"""
     return path_str.strip().strip(_PATH_TRAILING_CHARS).strip()
+
+
+def _parse_tool_args_payload(tool_args: Any) -> dict[str, Any]:
+    if tool_args is None:
+        return {}
+    payload: Any = tool_args
+    if isinstance(tool_args, str):
+        try:
+            payload = json.loads(tool_args)
+        except (TypeError, ValueError):
+            return {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _tool_result_to_text(tool_result: Any) -> str:
+    if tool_result is None:
+        return ""
+    if isinstance(tool_result, str):
+        return tool_result
+    if isinstance(tool_result, dict):
+        return json.dumps(tool_result, ensure_ascii=False)
+    if hasattr(tool_result, "__dict__"):
+        return str(tool_result)
+    return str(tool_result)
+
+
+def _extract_raw_paths_from_result_text(tool_result: Any) -> list[str]:
+    """从工具输出结果中正则提取路径候选（不按扩展名过滤）。"""
+    result_text = _tool_result_to_text(tool_result)
+    if not result_text:
+        return []
+
+    seen: set[str] = set()
+    paths: list[str] = []
+    for pattern in _FILE_PATH_PATTERNS:
+        for match in pattern.findall(result_text):
+            cleaned = _clean_path_candidate(match)
+            if not cleaned:
+                continue
+            identity = cleaned.replace("\\", "/").lower()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            paths.append(cleaned)
+    return paths
+
+
+def _extract_file_paths_from_write_tool(
+    tool_name: str,
+    tool_args: Any,
+    tool_result: Any,
+) -> list[str]:
+    """从 write/edit 类工具参数或结果中提取产物路径。"""
+    paths: list[str] = []
+    payload = _parse_tool_args_payload(tool_args)
+    for key in ("path", "file_path", "target_file", "abs_file_path"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            paths.append(value)
+
+    if paths:
+        return list(dict.fromkeys(paths))
+
+    if tool_name in {"write_file", "edit_file", "write", "write_text_file"}:
+        for candidate in _extract_raw_paths_from_result_text(tool_result):
+            if Path(candidate).suffix.lower() in _PYTHON_SCRIPT_EXTENSIONS:
+                paths.append(candidate)
+    return list(dict.fromkeys(paths))
 
 
 def _extract_image_paths_from_tool_result(tool_result: Any) -> list[str]:
@@ -71,34 +142,11 @@ def _extract_image_paths_from_tool_result(tool_result: Any) -> list[str]:
     仿 PR#1440 的正则提取思路，范围限定为图像扩展名白名单。
     处理字符串、字典、对象三类结果。
     """
-    if tool_result is None:
-        return []
-
-    if isinstance(tool_result, str):
-        result_text = tool_result
-    elif isinstance(tool_result, dict):
-        result_text = json.dumps(tool_result, ensure_ascii=False)
-    elif hasattr(tool_result, "__dict__"):
-        result_text = str(tool_result)
-    else:
-        result_text = str(tool_result)
-
-    seen: set[str] = set()
-    paths: list[str] = []
-    for pattern in _IMAGE_FILE_PATH_PATTERNS:
-        for match in pattern.findall(result_text):
-            cleaned = _clean_path_candidate(match)
-            if not cleaned:
-                continue
-            identity = cleaned.replace("\\", "/").lower()
-            if identity in seen:
-                continue
-            if Path(cleaned).suffix.lower() not in _IMAGE_ARTIFACT_EXTENSIONS:
-                continue
-            seen.add(identity)
-            paths.append(cleaned)
-
-    return paths
+    return [
+        path
+        for path in _extract_raw_paths_from_result_text(tool_result)
+        if Path(path).suffix.lower() in _IMAGE_ARTIFACT_EXTENSIONS
+    ]
 
 
 @dataclass
@@ -134,6 +182,12 @@ class TaskExecutionRail(DeepAgentRail):
 
     # 触发图像产物后处理 hook 的工具
     IMAGE_TOOLS = frozenset({"generate_image"})
+    FILE_ARTIFACT_TOOLS = frozenset({
+        "write_file",
+        "edit_file",
+        "write",
+        "write_text_file",
+    })
 
     def __init__(self) -> None:
         super().__init__()
@@ -251,6 +305,10 @@ class TaskExecutionRail(DeepAgentRail):
             await self._trigger_image_artifact_hook(ctx)
             return
 
+        if tool_name in self.FILE_ARTIFACT_TOOLS:
+            await self._trigger_artifact_post_process_hook(ctx)
+            return
+
     async def _trigger_image_artifact_hook(
         self, ctx: AgentCallbackContext
     ) -> None:
@@ -330,6 +388,87 @@ class TaskExecutionRail(DeepAgentRail):
             session_id,
             tool_name,
             len(image_paths),
+        )
+
+    async def _trigger_artifact_post_process_hook(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """文件产物落盘后触发 ARTIFACT_POST_PROCESS 扩展 hook。"""
+        session = ctx.session
+        if session is None:
+            return
+        try:
+            session_id = session.get_session_id()
+        except Exception:
+            logger.debug(
+                "[TaskExecutionRail] artifact post-process hook: "
+                "failed to get session_id",
+                exc_info=True,
+            )
+            return
+
+        tool_args = getattr(ctx.inputs, "tool_args", None)
+        tool_result = getattr(ctx.inputs, "tool_result", None)
+        artifact_paths = _extract_file_paths_from_write_tool(
+            ctx.inputs.tool_name,
+            tool_args,
+            tool_result,
+        )
+        if not artifact_paths:
+            return
+
+        task_id = _ACTIVE_TASK_ID.get()
+        tool_name = ctx.inputs.tool_name
+
+        try:
+            from jiuwenswarm.extensions.registry import ExtensionRegistry
+            from jiuwenswarm.extensions.hook_event import (
+                AgentServerHookEvents,
+            )
+            from jiuwenswarm.extensions.hooks_context import (
+                ArtifactPostProcessHookContext,
+            )
+        except ImportError as exc:
+            logger.warning(
+                "[TaskExecutionRail] skip artifact post-process hook, "
+                "import failed: %s",
+                exc,
+            )
+            return
+
+        hook_ctx = ArtifactPostProcessHookContext(
+            session_id=session_id,
+            tool_name=tool_name,
+            task_id=task_id,
+            artifact_paths=artifact_paths,
+        )
+        try:
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.ARTIFACT_POST_PROCESS,
+                hook_ctx,
+            )
+        except RuntimeError:
+            logger.warning(
+                "[TaskExecutionRail] skip artifact post-process hook: "
+                "ExtensionRegistry not initialized",
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "[TaskExecutionRail] artifact post-process hook failed "
+                "session_id=%s tool=%s error=%s",
+                session_id,
+                tool_name,
+                exc,
+            )
+            return
+
+        logger.info(
+            "[TaskExecutionRail] artifact post-process hook done "
+            "session_id=%s tool=%s count=%d",
+            session_id,
+            tool_name,
+            len(artifact_paths),
         )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:

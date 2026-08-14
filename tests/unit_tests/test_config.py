@@ -140,13 +140,7 @@ class TestConfigFunctions:
             ({"react": {"evolution": {"auto_save": "true"}}}, False),
         ],
     )
-    def test_evolution_auto_save_config_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        config,
-        expected,
-    ):
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+    def test_evolution_auto_save_config_values(self, config, expected):
         assert get_evolution_auto_save_enabled(config) is expected
 
     @staticmethod
@@ -154,33 +148,9 @@ class TestConfigFunctions:
         def _raise() -> dict:
             raise OSError("config unavailable")
 
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
         monkeypatch.setattr("jiuwenswarm.common.config.get_config", _raise)
 
         assert get_evolution_auto_save_enabled() is False
-
-    @pytest.mark.parametrize(
-        ("env_value", "config", "expected"),
-        [
-            (None, {"react": {"evolution": {"auto_save": True}}}, True),
-            (None, {"evolution": {"auto_save": True}}, True),
-            ("false", {"react": {"evolution": {"auto_save": True}}}, False),
-            ("true", {"react": {"evolution": {"auto_save": False}}}, True),
-        ],
-    )
-    def test_evolution_auto_save_config_and_env_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        env_value,
-        config,
-        expected,
-    ):
-        if env_value is None:
-            monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
-        else:
-            monkeypatch.setenv("EVOLUTION_AUTO_SAVE", env_value)
-
-        assert get_evolution_auto_save_enabled(config) is expected
 
     @pytest.mark.parametrize(
         ("env_value", "config", "fallback", "expected"),
@@ -318,7 +288,6 @@ symphony:
         monkeypatch: pytest.MonkeyPatch,
     ):
         monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
         template_path = tmp_path / "template.yaml"
         user_config_path = tmp_path / "config.yaml"
         template_path.write_text(

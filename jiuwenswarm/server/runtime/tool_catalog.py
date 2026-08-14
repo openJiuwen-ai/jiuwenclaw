@@ -21,6 +21,7 @@ _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _FALLBACK_UNKNOWN_TEMPLATE = "工具「{name}」（暂无简短说明）"
 
 __all__ = [
+    "collect_tools_catalog_from_claws",
     "collect_tools_catalog_from_swarms",
     "get_registered_tools_catalog",
     "get_stable_tools_catalog",
@@ -247,7 +248,9 @@ def get_registered_tools_catalog(ability_manager: Any) -> list[dict[str, str]]:
 
 def is_placeholder_short_description(text: str) -> bool:
     normalized = str(text or "").strip()
-    if not normalized or normalized in {"未知工具。", "未知工具"}:
+    if not normalized:
+        return True
+    if normalized in {"未知工具。", "未知工具"}:
         return True
     return "暂无简短说明" in normalized
 
@@ -301,20 +304,27 @@ def merge_tools_catalog_entries(
     return by_name
 
 
-def collect_tools_catalog_from_swarms(
-    swarms: Iterable[Any],
-) -> dict[str, dict[str, str]]:
-    """Union registered tools from initialized ``JiuWenSwarm`` instances."""
+def collect_tools_catalog_from_claws(claws: Iterable[Any]) -> dict[str, dict[str, str]]:
+    """Union registered tools from initialized agent runtime wrappers."""
     catalogs: list[list[dict[str, str]]] = []
-    for swarm in swarms or []:
-        list_catalog = getattr(swarm, "get_registered_tools_catalog", None)
-        if not callable(list_catalog):
+    for claw in claws or []:
+        if claw is None:
+            continue
+        list_fn = getattr(claw, "get_registered_tools_catalog", None)
+        if not callable(list_fn):
             continue
         try:
-            entries = list_catalog()
+            entries = list_fn()
         except Exception:
             logger.exception("[tool_catalog] get_registered_tools_catalog failed")
             continue
         if entries:
             catalogs.append(entries)
     return merge_tools_catalog_entries(catalogs)
+
+
+def collect_tools_catalog_from_swarms(
+    swarms: Iterable[Any],
+) -> dict[str, dict[str, str]]:
+    """Backward-compatible Team runtime catalog collector."""
+    return collect_tools_catalog_from_claws(swarms)

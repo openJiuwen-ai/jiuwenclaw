@@ -348,10 +348,6 @@ def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether evolution approvals may auto-save without user action."""
     try:
-        raw = get_local_config("EVOLUTION_AUTO_SAVE")
-        env_auto_save = _get_bool_env(None if raw is None else str(raw))
-        if env_auto_save is not None:
-            return env_auto_save
         if config is None:
             config = get_config()
         if not isinstance(config, dict):
@@ -909,6 +905,81 @@ def update_permissions_deny_guidance_in_config(msg: str) -> None:
 _VALID_PERM_LEVEL = frozenset({"allow", "ask", "deny"})
 _VALID_RULE_SEVERITY = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
 _RULE_MUTABLE_KEYS = frozenset({"tools", "pattern", "severity", "action", "description", "match_type"})
+
+
+def normalize_permissions_tool_level(raw: Any) -> str | None:
+    if isinstance(raw, str):
+        level = raw.strip().lower()
+        if level in ("guard", "ask"):
+            return "ask"
+        if level in _VALID_PERM_LEVEL:
+            return level
+        return None
+    if isinstance(raw, dict):
+        star = raw.get("*")
+        if star is not None:
+            return normalize_permissions_tool_level(star)
+    return None
+
+
+def get_permissions_defaults_level() -> str:
+    cfg = get_config() or {}
+    raw = (cfg.get("permissions") or {}).get("defaults", "guard")
+    return normalize_permissions_tool_level(raw) or "ask"
+
+
+def build_permissions_tools_list_view(
+    catalog_by_name: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    from jiuwenswarm.server.runtime.tool_catalog import ui_list_short_description
+
+    catalog = dict(catalog_by_name or {})
+    explicit = get_permissions_tools().get("tools")
+    if not isinstance(explicit, dict):
+        explicit = {}
+    default_level = get_permissions_defaults_level()
+
+    seen: set[str] = set()
+    tools_out: list[dict[str, Any]] = []
+
+    for name in sorted(catalog.keys()):
+        seen.add(name)
+        entry = catalog.get(name, {})
+        raw_explicit = explicit.get(name)
+        if raw_explicit is not None:
+            level = normalize_permissions_tool_level(raw_explicit) or default_level
+            configured = True
+        else:
+            level = default_level
+            configured = False
+
+        short = ui_list_short_description(
+            name,
+            description=str(entry.get("description", "") or ""),
+            short_description=str(entry.get("short_description", "") or ""),
+        )
+        tools_out.append({
+            "name": name,
+            "short_description": short,
+            "level": level,
+            "configured": configured,
+            "registered": True,
+        })
+
+    for name in sorted(explicit.keys()):
+        if name in seen:
+            continue
+        raw_explicit = explicit.get(name)
+        level = normalize_permissions_tool_level(raw_explicit) or default_level
+        tools_out.append({
+            "name": name,
+            "short_description": "",
+            "level": level,
+            "configured": True,
+            "registered": False,
+        })
+
+    return {"default_level": default_level, "tools": tools_out}
 
 
 def get_permissions_tools() -> dict[str, Any]:

@@ -231,6 +231,39 @@ wheels = [
 ]
 
 [[package]]
+name = "argon2-cffi"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "argon2-cffi-bindings" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/89/ce5af8a7d472a67cc819d5d998aa8c82c5d860608c4db9f46f1162d7dab9/argon2_cffi-25.1.0.tar.gz", hash = "sha256:694ae5cc8a42f4c4e2bf2ca0e64e51e23a040c6a517a85074683d3959e1346c1", size = 45706, upload-time = "2025-06-03T06:55:32.073Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/d3/a8b22fa575b297cd6e3e3b0155c7e25db170edf1c74783d6a31a2490b8d9/argon2_cffi-25.1.0-py3-none-any.whl", hash = "sha256:fdc8b074db390fccb6eb4a3604ae7231f219aa669a2652e0f20e16ba513d5741", size = 14657, upload-time = "2025-06-03T06:55:30.804Z" },
+]
+
+[[package]]
+name = "argon2-cffi-bindings"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/2d/db8af0df73c1cf454f71b2bbe5e356b8c1f8041c979f505b3d3186e520a9/argon2_cffi_bindings-25.1.0.tar.gz", hash = "sha256:b957f3e6ea4d55d820e40ff76f450952807013d361a65d7f28acc0acbf29229d", size = 1783441, upload-time = "2025-07-30T10:02:05.147Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/57/96b8b9f93166147826da5f90376e784a10582dd39a393c99bb62cfcf52f0/argon2_cffi_bindings-25.1.0-cp39-abi3-macosx_10_9_universal2.whl", hash = "sha256:aecba1723ae35330a008418a91ea6cfcedf6d31e5fbaa056a166462ff066d500", size = 54121, upload-time = "2025-07-30T10:01:50.815Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/08/a9bebdb2e0e602dde230bdde8021b29f71f7841bd54801bcfd514acb5dcf/argon2_cffi_bindings-25.1.0-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:2630b6240b495dfab90aebe159ff784d08ea999aa4b0d17efa734055a07d2f44", size = 29177, upload-time = "2025-07-30T10:01:51.681Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/02/d297943bcacf05e4f2a94ab6f462831dc20158614e5d067c35d4e63b9acb/argon2_cffi_bindings-25.1.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:7aef0c91e2c0fbca6fc68e7555aa60ef7008a739cbe045541e438373bc54d2b0", size = 31090, upload-time = "2025-07-30T10:01:53.184Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/93/44365f3d75053e53893ec6d733e4a5e3147502663554b4d864587c7828a7/argon2_cffi_bindings-25.1.0-cp39-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1e021e87faa76ae0d413b619fe2b65ab9a037f24c60a1e6cc43457ae20de6dc6", size = 81246, upload-time = "2025-07-30T10:01:54.145Z" },
+    { url = "https://files.pythonhosted.org/packages/09/52/94108adfdd6e2ddf58be64f959a0b9c7d4ef2fa71086c38356d22dc501ea/argon2_cffi_bindings-25.1.0-cp39-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d3e924cfc503018a714f94a49a149fdc0b644eaead5d1f089330399134fa028a", size = 87126, upload-time = "2025-07-30T10:01:55.074Z" },
+    { url = "https://files.pythonhosted.org/packages/72/70/7a2993a12b0ffa2a9271259b79cc616e2389ed1a4d93842fac5a1f923ffd/argon2_cffi_bindings-25.1.0-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:c87b72589133f0346a1cb8d5ecca4b933e3c9b64656c9d175270a000e73b288d", size = 80343, upload-time = "2025-07-30T10:01:56.007Z" },
+    { url = "https://files.pythonhosted.org/packages/78/9a/4e5157d893ffc712b74dbd868c7f62365618266982b64accab26bab01edc/argon2_cffi_bindings-25.1.0-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:1db89609c06afa1a214a69a462ea741cf735b29a57530478c06eb81dd403de99", size = 86777, upload-time = "2025-07-30T10:01:56.943Z" },
+    { url = "https://files.pythonhosted.org/packages/74/cd/15777dfde1c29d96de7f18edf4cc94c385646852e7c7b0320aa91ccca583/argon2_cffi_bindings-25.1.0-cp39-abi3-win32.whl", hash = "sha256:473bcb5f82924b1becbb637b63303ec8d10e84c8d241119419897a26116515d2", size = 27180, upload-time = "2025-07-30T10:01:57.759Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/c6/a759ece8f1829d1f162261226fbfd2c6832b3ff7657384045286d2afa384/argon2_cffi_bindings-25.1.0-cp39-abi3-win_amd64.whl", hash = "sha256:a98cd7d17e9f7ce244c0803cad3c23a7d379c301ba618a5fa76a67d116618b98", size = 31715, upload-time = "2025-07-30T10:01:58.56Z" },
+    { url = "https://files.pythonhosted.org/packages/42/b9/f8d6fa329ab25128b7e98fd83a3cb34d9db5b059a9847eddb840a0af45dd/argon2_cffi_bindings-25.1.0-cp39-abi3-win_arm64.whl", hash = "sha256:b0fdbcf513833809c882823f98dc2f931cf659d9a1429616ac3adebb49f5db94", size = 27149, upload-time = "2025-07-30T10:01:59.329Z" },
+]
+
+[[package]]
 name = "ast-serialize"
 version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1788,6 +1821,7 @@ source = { editable = "." }
 dependencies = [
     { name = "a2ui-agent-sdk" },
     { name = "aiosqlite" },
+    { name = "asyncpg" },
     { name = "chromadb" },
     { name = "croniter" },
     { name = "dingtalk-stream" },
@@ -1802,6 +1836,7 @@ dependencies = [
     { name = "lark-oapi" },
     { name = "loguru" },
     { name = "lxml" },
+    { name = "minio" },
     { name = "mutagen" },
     { name = "numpy" },
     { name = "openjiuwen", extra = ["claude", "codex"] },
@@ -1814,6 +1849,7 @@ dependencies = [
     { name = "portalocker" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "python-json-logger" },
     { name = "python-multipart" },
     { name = "python-socks" },
     { name = "python-telegram-bot" },
@@ -1825,6 +1861,7 @@ dependencies = [
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "websockets" },
     { name = "wecom-aibot-sdk" },
 ]
@@ -1876,6 +1913,9 @@ harmony = [
     { name = "slack-bolt" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "wecom-aibot-sdk" },
+]
+redis = [
+    { name = "redis" },
 ]
 ssh = [
     { name = "asyncssh" },
@@ -1939,6 +1979,7 @@ requires-dist = [
     { name = "a2ui-agent-sdk", marker = "extra == 'harmony'", specifier = "==0.2.1" },
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "aiosqlite", marker = "extra == 'harmony'", specifier = ">=0.22.1" },
+    { name = "asyncpg", specifier = ">=0.29" },
     { name = "asyncssh", marker = "extra == 'ssh'", specifier = ">=2.14.0,<2.24" },
     { name = "asyncssh", marker = "extra == 'test'", specifier = ">=2.14.0,<2.24" },
     { name = "chromadb", specifier = ">=1.5.0" },
@@ -1961,20 +2002,21 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.27" },
     { name = "httpx", extras = ["socks"], marker = "extra == 'harmony'", specifier = ">=0.27" },
     { name = "jiuwenswarm-tui", marker = "extra == 'tui'", directory = "packages/jiuwenswarm-tui" },
-    { name = "json-repair", specifier = ">=0.30.0" },
-    { name = "json-repair", marker = "extra == 'harmony'", specifier = ">=0.30.0" },
+    { name = "json-repair", specifier = ">=0.58.0" },
+    { name = "json-repair", marker = "extra == 'harmony'", specifier = ">=0.58.0" },
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "lark-oapi", marker = "extra == 'harmony'", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "loguru", marker = "extra == 'harmony'", specifier = ">=0.7.3" },
     { name = "lxml", specifier = ">=6.1.0" },
     { name = "lxml", marker = "extra == 'harmony'", specifier = ">=6.1.0" },
+    { name = "minio", specifier = ">=7.2.0" },
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=dev-stable" },
+    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=dev-stable" },
+    { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=dev-stable" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.28.0" },
@@ -1997,6 +2039,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=7.0.0" },
     { name = "pytest-html", marker = "extra == 'test'", specifier = ">=4.1.1" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.14.0" },
+    { name = "python-json-logger", specifier = ">=2.0.0" },
     { name = "python-multipart", specifier = ">=0.0.27" },
     { name = "python-multipart", marker = "extra == 'harmony'", specifier = ">=0.0.27" },
     { name = "python-socks", specifier = ">=2.8.1" },
@@ -2008,6 +2051,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'harmony'", specifier = ">=6.0" },
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
+    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
     { name = "ruamel-yaml", specifier = ">=0.18.0" },
     { name = "ruamel-yaml", marker = "extra == 'harmony'", specifier = ">=0.18.0" },
     { name = "skillnet-ai", specifier = "==0.0.16" },
@@ -2019,11 +2063,12 @@ requires-dist = [
     { name = "tree-sitter-bash", specifier = ">=0.25.0,<0.26.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'harmony'", specifier = ">=0.30" },
+    { name = "uvloop", marker = "sys_platform != 'win32'", specifier = "==0.22.1" },
     { name = "websockets", specifier = ">=12.0" },
     { name = "wecom-aibot-sdk", specifier = ">=1.0.5" },
     { name = "wecom-aibot-sdk", marker = "extra == 'harmony'", specifier = ">=1.0.5" },
 ]
-provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "shell-ast", "test"]
+provides-extras = ["harmony", "a2a", "ssh", "redis", "desktop", "dev", "tui", "distribute", "shell-ast", "test"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2547,6 +2592,22 @@ wheels = [
 ]
 
 [[package]]
+name = "minio"
+version = "7.2.20"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "argon2-cffi" },
+    { name = "certifi" },
+    { name = "pycryptodome" },
+    { name = "typing-extensions" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/40/df/6dfc6540f96a74125a11653cce717603fd5b7d0001a8e847b3e54e72d238/minio-7.2.20.tar.gz", hash = "sha256:95898b7a023fbbfde375985aa77e2cd6a0762268db79cf886f002a9ea8e68598", size = 136113, upload-time = "2025-11-27T00:37:15.569Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3e/9a/b697530a882588a84db616580f2ba5d1d515c815e11c30d219145afeec87/minio-7.2.20-py3-none-any.whl", hash = "sha256:eb33dd2fb80e04c3726a76b13241c6be3c4c46f8d81e1d58e757786f6501897e", size = 93751, upload-time = "2025-11-27T00:37:13.993Z" },
+]
+
+[[package]]
 name = "mmh3"
 version = "5.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2911,7 +2972,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#21f8beaebf159d8605f2291f887b05a821bbfd2b" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=dev-stable#3d055589e8458c86389dd9633d24a0a2bec6042c" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },

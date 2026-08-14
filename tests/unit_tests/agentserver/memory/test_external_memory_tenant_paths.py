@@ -14,13 +14,19 @@ from jiuwenswarm.common.local_env_config import (
     reset_local_env_state_for_tests,
     reset_task_env_overlay,
 )
+from tests.unit_tests.tenant_workspace_test_helpers import (
+    patch_multi_tenant_workspace_dirs,
+    tenant_workspace_key,
+    tenant_workspace_root,
+)
 
 
 def test_resolve_ltm_dir_isolates_tenants(tmp_path, monkeypatch):
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         emc,
         "get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
+        lambda sid, aid=None: tenant_workspace_root(tmp_path, sid, aid),
     )
     office = emc._resolve_ltm_dir("default", "office")
     default = emc._resolve_ltm_dir("default", "default")
@@ -58,7 +64,7 @@ def test_resolve_openjiuwen_store_paths_falls_back_to_tenant_ltm(tmp_path, monke
     monkeypatch.setattr(
         emc,
         "_resolve_ltm_dir",
-        lambda sid=None, aid=None: tmp_path / f"{sid}_{aid}" / "ltm",
+        lambda sid=None, aid=None: tmp_path / tenant_workspace_key(sid, aid) / "ltm",
     )
     reset_local_env_state_for_tests()
     kv, vec, db = emc.resolve_openjiuwen_store_paths(
@@ -72,17 +78,18 @@ def test_resolve_openjiuwen_store_paths_falls_back_to_tenant_ltm(tmp_path, monke
 
 
 def test_resolve_ltm_dir_uses_bound_agent_env_ns(tmp_path, monkeypatch):
+    patch_multi_tenant_workspace_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         emc,
         "get_multi_tenant_user_workspace_dir",
-        lambda sid, aid: tmp_path / f"service_{sid}" / f"agent_{aid}",
+        lambda sid, aid=None: tenant_workspace_root(tmp_path, sid, aid),
     )
     reset_local_env_state_for_tests()
     ns = bind_agent_env_ns("bound_svc", "bound_aid")
     try:
         path = emc._resolve_ltm_dir()
-        assert "agent_bound_aid" in str(path)
         assert "service_bound_svc" in str(path)
+        assert "agent_bound_aid" in str(path)
     finally:
         reset_agent_env_ns(ns)
         reset_local_env_state_for_tests()

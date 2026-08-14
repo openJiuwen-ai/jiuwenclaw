@@ -513,7 +513,7 @@ async def test_sync_preempt_clears_staged_rebuilds_pending(mock_warmup):
     pool = TenantAgentPool.get_instance()
     await pool.sync_agents_configs(_sync_payload(revision="r1"))
 
-    agent_manager = await pool._ensure_agent_manager("office", "default")
+    agent_manager = await pool._ensure_agent_manager("office", "default", "default")
     mock_adapter = MagicMock()
     mock_adapter.is_working.return_value = True
     mock_adapter._pending_reload = ("old-config", {"MODEL_NAME": "old"})
@@ -790,7 +790,7 @@ class TestOfficeclawGuard:
             params={},
         )
         assert TenantAgentPool.require_officeclaw_agent(req) is None
-        assert TenantAgentPool.extract_ids(req) == ("default", "default")
+        assert TenantAgentPool.extract_ids(req) == ("default", "default", "default")
 
     @staticmethod
     def test_require_officeclaw_tenant_not_registered():

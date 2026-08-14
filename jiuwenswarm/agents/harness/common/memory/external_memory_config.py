@@ -102,17 +102,17 @@ def _nonempty_str(value: Any) -> str | None:
 def _resolve_tenant_agent_workspace_dir(
     service_id: str | None = None,
     agent_id: str | None = None,
+    *,
+    workspace_key: str | None = None,
 ) -> Path:
     """``service_{sid}/agent_{aid}/agent/workspace`` (jiuwenswarm layout)."""
+    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
     sid = normalize_tenant_scope_id(service_id)
     aid = normalize_tenant_scope_id(agent_id)
     base = get_multi_tenant_user_workspace_dir(sid, aid)
     if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            "failed to resolve multi-tenant workspace for LTM "
-            f"(service_id={sid!r}, agent_id={aid!r})"
+        raise TypeError(
+            f"invalid tenant for workspace: service_id={sid!r}, agent_id={aid!r}"
         )
     return base / "agent" / "workspace"
 

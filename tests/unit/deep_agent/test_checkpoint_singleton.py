@@ -1,13 +1,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Tests for process-wide checkpoint singleton in interface_deep."""
+"""Tests for per-agent checkpoint setup in interface_deep."""
 
 from __future__ import annotations
 
 import asyncio
+import warnings
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Protobuf gencode version.*",
+)
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as iface
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -20,11 +27,24 @@ def _reset_checkpoint_singleton():
     iface.reset_shared_checkpoint_for_tests()
 
 
+def _make_adapter() -> JiuWenSwarmDeepAdapter:
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    adapter._checkpointer = None
+    adapter._checkpoint_init_lock = asyncio.Lock()
+    adapter._stream_event_rail = None
+    adapter._env_service_id = "svc"
+    adapter._env_agent_id = "agent"
+    adapter._service_id = "svc"
+    adapter._agent_id = "agent"
+    return adapter
+
+
 @pytest.mark.asyncio
-async def test_set_checkpoint_initializes_once(monkeypatch):
+async def test_set_checkpoint_initializes_once(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("CHECKPOINT_DB_TYPE", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME", raising=False)
     mock_checkpointer = MagicMock(name="checkpointer")
+    adapter = _make_adapter()
 
     with patch.object(
         iface.CheckpointerFactory,
@@ -37,22 +57,28 @@ async def test_set_checkpoint_initializes_once(monkeypatch):
         iface,
         "_build_mysql_async_engine",
         new=AsyncMock(),
-    ) as mysql_mock:
-        await JiuWenSwarmDeepAdapter.set_checkpoint()
-        await JiuWenSwarmDeepAdapter.set_checkpoint()
+    ) as mysql_mock, patch.object(
+        iface,
+        "get_multi_tenant_user_workspace_dir",
+        return_value=tmp_path,
+    ):
+        await adapter.set_checkpoint()
+        await adapter.set_checkpoint()
 
     assert create_mock.await_count == 1
-    assert set_default_mock.call_count == 2
-    set_default_mock.assert_called_with(mock_checkpointer)
+    assert adapter._checkpointer is mock_checkpointer
+    # Per-agent checkpointers must not overwrite the process-wide default.
+    set_default_mock.assert_not_called()
     mysql_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_set_checkpoint_reuses_mysql_engine(monkeypatch):
+async def test_set_checkpoint_reuses_mysql_engine(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("AGENT_RUNTIME", "1")
     monkeypatch.setenv("CHECKPOINT_DB_TYPE", "mysql")
     mock_engine = MagicMock(name="mysql_engine")
     mock_checkpointer = MagicMock(name="checkpointer")
+    adapter = _make_adapter()
 
     with patch.object(
         iface,
@@ -62,15 +88,20 @@ async def test_set_checkpoint_reuses_mysql_engine(monkeypatch):
         iface.CheckpointerFactory,
         "create",
         new=AsyncMock(return_value=mock_checkpointer),
-    ) as create_mock:
+    ) as create_mock, patch.object(
+        iface,
+        "get_multi_tenant_user_workspace_dir",
+        return_value=tmp_path,
+    ):
         await asyncio.gather(
-            JiuWenSwarmDeepAdapter.set_checkpoint(),
-            JiuWenSwarmDeepAdapter.set_checkpoint(),
-            JiuWenSwarmDeepAdapter.set_checkpoint(),
+            adapter.set_checkpoint(),
+            adapter.set_checkpoint(),
+            adapter.set_checkpoint(),
         )
 
     assert mysql_mock.await_count == 1
     assert create_mock.await_count == 1
+    assert adapter._checkpointer is mock_checkpointer
     create_conf = create_mock.await_args_list[0].args[0].conf
     assert create_conf["db_client"] is mock_engine
 

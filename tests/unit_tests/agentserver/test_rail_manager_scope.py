@@ -10,6 +10,7 @@ from jiuwenswarm.agents.harness.common.plugins.rail_manager import (
     get_rail_manager,
 )
 from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
+from tests.unit_tests.tenant_workspace_test_helpers import tenant_workspace_key
 
 
 @pytest.fixture(autouse=True)
@@ -25,20 +26,26 @@ def test_get_rail_manager_requires_scope():
 
 
 def test_rail_manager_pool_isolates_tenants(monkeypatch, tmp_path):
-    def _workspace(service_id: str | None, agent_id: str | None) -> Path | None:
-        if service_id == "svc-a" and agent_id == "agent-1":
-            return tmp_path / "tenant-a"
-        if service_id == "svc-b" and agent_id == "agent-2":
-            return tmp_path / "tenant-b"
-        return None
+    monkeypatch.setenv("AGENT_RUNTIME", "1")
+
+    def _workspace(service_id: str, agent_id: str | None = None) -> Path:
+        mapping = {
+            ("svc-a", "agent-1"): tmp_path / "tenant-a",
+            ("svc-b", "agent-2"): tmp_path / "tenant-b",
+        }
+        return mapping.get((service_id, agent_id), tmp_path / f"{service_id}_{agent_id}")
 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.plugins.rail_manager.get_multi_tenant_user_workspace_dir",
         _workspace,
     )
 
-    scope_a = RuntimeScopeKey.from_ids("svc-a", "agent-1")
-    scope_b = RuntimeScopeKey.from_ids("svc-b", "agent-2")
+    scope_a = RuntimeScopeKey.from_ids(
+        "svc-a", "agent-1", workspace_key=tenant_workspace_key("svc-a", "agent-1")
+    )
+    scope_b = RuntimeScopeKey.from_ids(
+        "svc-b", "agent-2", workspace_key=tenant_workspace_key("svc-b", "agent-2")
+    )
 
     mgr_a = get_rail_manager(scope_a)
     mgr_b = get_rail_manager(scope_b)
@@ -48,7 +55,9 @@ def test_rail_manager_pool_isolates_tenants(monkeypatch, tmp_path):
     assert mgr_b.extensions_dir == tmp_path / "tenant-b" / "agent" / "workspace" / "extensions"
 
     assert get_rail_manager(scope_a) is mgr_a
-    assert get_rail_manager(("svc-b", "agent-2")) is mgr_b
+    assert get_rail_manager(
+        ("svc-b", "agent-2", tenant_workspace_key("svc-b", "agent-2"))
+    ) is mgr_b
 
 
 def test_rail_manager_pool_remove_disposes():

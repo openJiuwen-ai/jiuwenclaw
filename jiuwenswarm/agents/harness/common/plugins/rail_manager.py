@@ -51,17 +51,19 @@ class RailExtension:
 
 
 class RailManager:
-    """Rail 扩展管理器（按租户 ``(service_id, agent_id)`` 分桶）."""
+    """Rail 扩展管理器（按租户 ``(service_id, agent_id, workspace_key)`` 分桶）."""
 
     def __init__(
         self,
         *,
         service_id: str = "default",
         agent_id: str = "default",
+        workspace_key: str = "default",
     ):
         """初始化 Rail 管理器."""
         self.service_id = (service_id or "default").strip() or "default"
         self.agent_id = (agent_id or "default").strip() or "default"
+        self.workspace_key = (workspace_key or "default").strip() or "default"
         self._extensions: dict[str, RailExtension] = {}
 
         self.extensions_dir.mkdir(parents=True, exist_ok=True)
@@ -72,9 +74,10 @@ class RailManager:
         self._rail_instances: dict[str, Any] = {}
 
         logger.info(
-            "[RailManager] 初始化完成 tenant=(%s,%s) 扩展目录: %s",
+            "[RailManager] 初始化完成 tenant=(%s,%s,%s) 扩展目录: %s",
             self.service_id,
             self.agent_id,
+            self.workspace_key,
             self.extensions_dir,
         )
 
@@ -86,8 +89,13 @@ class RailManager:
         self._agent_instance = None
 
     def _resolve_extensions_dir(self) -> Path:
-        workspace = get_multi_tenant_user_workspace_dir(self.service_id, self.agent_id)
-        if workspace is not None:
+        import os
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            workspace = get_multi_tenant_user_workspace_dir(
+                self.service_id, self.agent_id
+            )
+            if workspace is None:
+                return get_agent_workspace_dir() / "extensions"
             return workspace / "agent" / "workspace" / "extensions"
         return get_agent_workspace_dir() / "extensions"
 
@@ -575,11 +583,11 @@ def get_rail_manager(scope: Any) -> RailManager:
 class RailManagerPool:
     """Process-level pool of per-tenant RailManager instances."""
 
-    _managers: dict[tuple[str, str], RailManager] = {}
+    _managers: dict[tuple[str, str, str], RailManager] = {}
     _lock = threading.Lock()
 
     @classmethod
-    def _normalize_tenant(cls, scope: Any) -> tuple[str, str]:
+    def _normalize_tenant(cls, scope: Any) -> tuple[str, str, str]:
         if scope is None:
             raise TypeError(
                 "RailManagerPool requires a non-None scope; "
@@ -587,26 +595,34 @@ class RailManagerPool:
             )
         tenant = getattr(scope, "tenant", None)
         if callable(tenant):
-            sid, aid = tenant()
+            parts = tenant()
+            sid = parts[0] if len(parts) > 0 else "default"
+            aid = parts[1] if len(parts) > 1 else "default"
+            wk = parts[2] if len(parts) > 2 else getattr(scope, "workspace_key", "default")
             return (
                 (str(sid or "default").strip() or "default"),
                 (str(aid or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
             )
         if isinstance(scope, (tuple, list)) and len(scope) >= 2:
+            wk = scope[2] if len(scope) >= 3 else "default"
             return (
                 (str(scope[0] or "default").strip() or "default"),
                 (str(scope[1] or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
             )
         sid = getattr(scope, "service_id", None)
         aid = getattr(scope, "agent_id", None)
-        if sid is not None or aid is not None:
+        wk = getattr(scope, "workspace_key", None)
+        if sid is not None or aid is not None or wk is not None:
             return (
                 (str(sid or "default").strip() or "default"),
                 (str(aid or "default").strip() or "default"),
+                (str(wk or "default").strip() or "default"),
             )
         raise TypeError(
             f"unsupported rail manager scope type: {type(scope)!r}; "
-            "expected RuntimeScopeKey or (service_id, agent_id)"
+            "expected RuntimeScopeKey or (service_id, agent_id[, workspace_key])"
         )
 
     @classmethod
@@ -615,16 +631,17 @@ class RailManagerPool:
         with cls._lock:
             mgr = cls._managers.get(key)
             if mgr is None:
-                mgr = RailManager(service_id=key[0], agent_id=key[1])
+                mgr = RailManager(service_id=key[0], agent_id=key[1], workspace_key=key[2])
                 cls._managers[key] = mgr
             return mgr
 
     @classmethod
-    def remove(cls, service_id: str, agent_id: str) -> bool:
+    def remove(cls, service_id: str, agent_id: str, workspace_key: str = "default") -> bool:
         """Evict one tenant RailManager from the process pool."""
         key = (
             (str(service_id or "default").strip() or "default"),
             (str(agent_id or "default").strip() or "default"),
+            (str(workspace_key or "default").strip() or "default"),
         )
         with cls._lock:
             mgr = cls._managers.pop(key, None)
@@ -634,9 +651,10 @@ class RailManagerPool:
             mgr.dispose()
         except Exception:
             logger.warning(
-                "[RailManagerPool] dispose failed tenant=(%s,%s)",
+                "[RailManagerPool] dispose failed tenant=(%s,%s,%s)",
                 key[0],
                 key[1],
+                key[2],
                 exc_info=True,
             )
         return True

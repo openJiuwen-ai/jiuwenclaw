@@ -148,6 +148,11 @@ from jiuwenswarm.openjiuwen_streaming_tool_patch import apply_streaming_tool_wai
 apply_skip_tool_tool_message_patch()
 apply_streaming_tool_wait_timeout_patch()
 
+# Batch-scoped tool concurrency limits from react.concurrency (AbilityManager hook).
+from jiuwenswarm.server.tool_concurrency import apply_tool_concurrency_limit
+
+apply_tool_concurrency_limit()
+
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
 from jiuwenswarm.server.runtime.debug_trace.task_tool_patch import (
@@ -193,6 +198,19 @@ atexit.register(_atexit_log_exit_reason)
 
 
 async def _run(host: str, port: int) -> None:
+    from jiuwenswarm.telemetry.runtime import ProcessTelemetryLifecycle
+
+    telemetry_lifecycle = ProcessTelemetryLifecycle(
+        logger=logger,
+        process_name="AgentServer",
+    )
+    try:
+        await _run_with_telemetry(host, port, telemetry_lifecycle)
+    finally:
+        await telemetry_lifecycle.stop()
+
+
+async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
     from jiuwenswarm.agents.harness.team.remote_member_bootstrap import run_teammate_bootstrap_daemon
@@ -216,8 +234,21 @@ async def _run(host: str, port: int) -> None:
     extension_manager = ExtensionManager(
         registry=extension_registry,
     )
+    telemetry_lifecycle.bind_extension_manager(extension_manager)
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+    await telemetry_lifecycle.start(
+        process_role="agentserver",
+        registry=extension_registry,
+        extension_manager=extension_manager,
+    )
+
+    try:
+        from jiuwenswarm.server.runtime.code_source_unicode import register_code_source_unicode_hook
+
+        register_code_source_unicode_hook()
+    except Exception:  # noqa: BLE001
+        logger.warning("[AgentServer] code_source_unicode hook registration skipped", exc_info=True)
 
     try:
         from jiuwenswarm.infrastructure.log_masking.engine import LogMaskingEngine
@@ -422,5 +453,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

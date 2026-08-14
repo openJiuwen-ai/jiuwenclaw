@@ -39,6 +39,9 @@ from jiuwenswarm.common.config import (
     get_skill_create_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    merge_evolution_disabled_skills,
+)
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
 
 logger = logging.getLogger(__name__)
@@ -213,9 +216,26 @@ def build_member_rails(
 
     try:
         if role != "leader":
-            rail = TaskPlanningRail()
+            from openjiuwen.harness.rails.task_planning_rail import (
+                resolve_task_planning_rail_kwargs,
+            )
+
+            # Prefer team_workspace.config (full or react section); else global config.
+            full_cfg = config if isinstance(config, dict) else get_config()
+            react_cfg = (
+                full_cfg.get("react")
+                if isinstance(full_cfg.get("react"), dict)
+                else full_cfg
+            )
+            rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
+            rail = TaskPlanningRail(**rail_kwargs)
             rails_list.append(rail)
-            logger.info("[TeamRuntime] TaskPlanningRail created")
+            logger.info(
+                "[TeamRuntime] TaskPlanningRail created "
+                "enable_progress_repeat=%s list_tool_call_interval=%s",
+                rail.enable_progress_repeat,
+                rail.list_tool_call_interval,
+            )
     except Exception as exc:
         logger.warning("[TeamRuntime] TaskPlanningRail failed: %s", exc)
 
@@ -276,7 +296,9 @@ def build_member_rails(
                 auto_save=evolution_auto_save,
                 review_trigger=evolution_review_trigger,
                 team_id=team_id,
-                disabled_skills=load_execution_disabled_skills(),
+                disabled_skills=merge_evolution_disabled_skills(
+                    load_execution_disabled_skills()
+                ),
             )
             rails_list.append(
                 EvolutionInterruptRail(
@@ -531,7 +553,9 @@ def build_skill_evolution_rail(
             model=model_name,
             review_runtime=review_runtime,
             auto_save=True,
-            disabled_skills=load_execution_disabled_skills(),
+            disabled_skills=merge_evolution_disabled_skills(
+                load_execution_disabled_skills()
+            ),
         )
         has_team_trajectory_sink = team_trajectory_sink is not None and bool(team_id)
         if has_team_trajectory_sink:

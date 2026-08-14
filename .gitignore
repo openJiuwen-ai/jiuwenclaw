@@ -17,6 +17,7 @@ ENV/
 .coverage.*
 coverage.xml
 htmlcov/
+.telemetry-evidence/
 
 # Node.js / Frontend
 **/node_modules/

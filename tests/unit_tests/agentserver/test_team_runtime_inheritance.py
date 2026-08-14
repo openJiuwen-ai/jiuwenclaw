@@ -133,6 +133,48 @@ def test_build_member_rails_omits_task_planning_for_leader_only():
     assert any(type(rail).__name__ == "TaskPlanningRail" for rail in teammate_rails)
 
 
+def test_build_member_rails_applies_task_planning_config_for_teammate():
+    """Team non-leader TaskPlanningRail reads react.task_planning (yaml/env)."""
+    teammate_rails = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+        team_workspace=TeamWorkspaceInfo(
+            config={
+                "react": {
+                    "task_planning": {
+                        "enable_progress_repeat": False,
+                        "list_tool_call_interval": 7,
+                    }
+                }
+            }
+        ),
+    )
+    planning = next(
+        rail for rail in teammate_rails if type(rail).__name__ == "TaskPlanningRail"
+    )
+    assert planning.enable_progress_repeat is False
+    assert planning.list_tool_call_interval == 7
+
+    # Also accept react-section-shaped config (no outer "react" key).
+    react_shaped = build_member_rails(
+        member_info=MemberInfo(role="teammate"),
+        runtime=RuntimeInfo(language="cn"),
+        team_workspace=TeamWorkspaceInfo(
+            config={
+                "task_planning": {
+                    "enable_progress_repeat": "false",
+                    "list_tool_call_interval": "3",
+                }
+            }
+        ),
+    )
+    planning2 = next(
+        rail for rail in react_shaped if type(rail).__name__ == "TaskPlanningRail"
+    )
+    assert planning2.enable_progress_repeat is False
+    assert planning2.list_tool_call_interval == 3
+
+
 # -- resolve_model_config tests --
 
 def test_resolve_model_config_from_default():

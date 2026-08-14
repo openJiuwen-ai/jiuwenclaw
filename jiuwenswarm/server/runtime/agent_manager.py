@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
 
+# Disk control-plane RPCs: list/rollback archives via EvolutionStore only.
+# Must not call create_instance() (which constructs llm clients).
+_DISK_ONLY_EVOLUTION_METHODS: frozenset[str] = frozenset(
+    {
+        "skills.evolution.archives",
+        "skills.evolution.rollback",
+    }
+)
+
 
 def _normalize_channel_id(channel_id: str | None) -> str:
     return str(channel_id or "default").strip() or "default"
@@ -503,7 +512,13 @@ class AgentManager:
                 sub_mode_key or None,
                 project_dir or None,
             )
-            agent = JiuWenSwarm()
+            agent = JiuWenSwarm(
+                user_workspace_dir=str(self._user_workspace_dir)
+                if self._user_workspace_dir is not None
+                else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
             setattr(agent, "_env_agent_id", self._env_agent_id)
             setattr(agent, "_env_service_id", self._env_service_id)
             if self._user_workspace_dir is not None:
@@ -1365,6 +1380,66 @@ class AgentManager:
             existing_modes,
         )
 
+    async def _process_disk_only_evolution(self, request: Any) -> Any:
+        """Handle archives/rollback without create_instance / LLM client.
+
+        Prefer a warm agent if one already exists; otherwise use an ephemeral
+        JiuWenSwarm that only needs DeepAdapter + EvolutionStore.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.evolution_version import (
+            disk_only_evolution_skill_dirs,
+        )
+        from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+        from jiuwenswarm.server.runtime.agent_adapter.session_skill_dirs import (
+            bind_session_registered_skill_dirs,
+            reset_session_registered_skill_dirs,
+        )
+
+        channel_id = getattr(request, "channel_id", "") or "default"
+        params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
+        mode_full = params.get("mode", "agent")
+        mode = str(mode_full).split(".")[0] if mode_full else "agent"
+        workspace_dir = params.get("workspace_dir")
+
+        bound_skill_dirs = disk_only_evolution_skill_dirs(params)
+        skill_dirs_token = None
+        overlay_token = None
+        try:
+            if bound_skill_dirs:
+                skill_dirs_token = bind_session_registered_skill_dirs(bound_skill_dirs)
+
+            existing = self.get_agent_nowait(
+                channel_id,
+                mode,
+                project_dir=workspace_dir,
+            )
+            if existing is not None:
+                return await existing.process_message(request)
+
+            agent = JiuWenSwarm(
+                user_workspace_dir=str(self._user_workspace_dir)
+                if self._user_workspace_dir
+                else None,
+                agent_id=self.agent_id,
+                service_id=self.service_id,
+            )
+            if self._latest_env_overrides:
+                overlay = build_effective_env_overlay(self._latest_env_overrides)
+                if overlay:
+                    overlay_token = bind_task_env_overlay(overlay)
+            logger.info(
+                "[AgentManager] disk-only evolution RPC via ephemeral agent "
+                "(skip create_instance): method=%s channel=%s",
+                getattr(getattr(request, "req_method", None), "value", getattr(request, "req_method", None)),
+                channel_id,
+            )
+            return await agent.process_message(request)
+        finally:
+            if overlay_token is not None:
+                reset_task_env_overlay(overlay_token)
+            if skill_dirs_token is not None:
+                reset_session_registered_skill_dirs(skill_dirs_token)
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -1376,6 +1451,11 @@ class AgentManager:
         """
         try:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
+            req_method = getattr(request, "req_method", None)
+            req_method_value = getattr(req_method, "value", req_method)
+            if isinstance(req_method_value, str) and req_method_value in _DISK_ONLY_EVOLUTION_METHODS:
+                return await self._process_disk_only_evolution(request)
+
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = params.get("mode", "agent")

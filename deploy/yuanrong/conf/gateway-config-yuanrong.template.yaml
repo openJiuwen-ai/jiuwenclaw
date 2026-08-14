@@ -395,7 +395,7 @@ react:
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进（挂载后被动扫描始终开启）
     review_trigger: false      # true = 软触发 review follow-up
-    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
+    auto_save: true            # true = 自演进审批无需用户点击自动通过（内部开关）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
   a2x_registry:
@@ -413,6 +413,13 @@ react:
     # team.transport.params.bootstrap_direct_addr when available.
     dataset: "team_pool"
     endpoint: ""
+
+  # 同轮多个受控 tool 的批次内并发
+  concurrency:
+    enabled: true
+    tool_limits:
+      web_search: 10
+      task_tool: 10
 
 tools:
   - todo

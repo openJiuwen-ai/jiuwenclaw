@@ -31,7 +31,7 @@
 | `/evolve` | Skill 自演进入口：触发 Skill 演进（见下文） |
 | `/evolve_list` | 查看某个 Skill 的演进经验库（见下文） |
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
-| `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
+| `/evolve_rollback` | 回滚 Skill 到归档 SemVer 版本（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
 | `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
@@ -345,7 +345,8 @@
 | `/evolve <skill_name> [user_query]` | 为指定 Skill 触发演进。`agent.plan` 会扫描当前会话中的工具失败、用户纠错等信号；Team 模式必须提供 `user_query`。 |
 | `/evolve_list <skill_name> [--sort score]` | 按分数查看某个 Skill 的演进经验，展示记录数、平均分、使用/反馈统计、section 与内容预览。 |
 | `/evolve_simplify <skill_name> [user_intent]` | 生成经验库整理方案，用于合并重复经验、拆分过长经验或清理低价值经验；尾随文本会作为整理意图传入后端。 |
-| `/evolve_rebuild <skill_name> [user_intent]` | 生成重建 `SKILL.md` 的 follow-up prompt，并继续作为一次普通 Agent / Team 任务执行。 |
+| `/evolve_rollback <skill_name> [version\|latest]` | 回滚到成对 SemVer 归档；省略 version 时列出可用版本。 |
+| ~~`/evolve_rebuild`~~ | **已移除**。请使用控制面 `skills.evolution.rebuild` 采纳经验并生成新版本；`auto_save=true` 时会在经验落盘后自动生成版本。 |
 
 #### 审批流程
 
@@ -360,7 +361,7 @@
 /evolve pptx 修复导出失败时的错误处理
 /evolve_list pptx --sort score
 /evolve_simplify pptx 合并重复的导出失败经验
-/evolve_rebuild pptx 强化 Troubleshooting 和 Examples
+/evolve_rollback pptx latest
 ```
 
 ### `/branch`（分支会话）

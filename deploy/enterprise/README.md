@@ -295,7 +295,7 @@ sunrpc                585728  10 nfsd,auth_rpcgss,lockd,nfsv3,nfs_acl,nfs
 
 本部署工具提供一键部署 NFS 存储供给组件，组件底层基于 nfs-subdir-external-provisioner 实现，提供标准 K8s StorageClass，业务 Pod 可通过 PVC 动态申领独立 NFS 存储子目录，实现数据持久化挂载。
 ```
-./deploy.sh up nfs_sc          # 部署 NF S存储供给组件（基础依赖，只需也只能一次）
+./deploy.sh up nfs-sc          # 部署 NF S存储供给组件（基础依赖，只需也只能一次）
 ```
 部署完成后自动生成对应 StorageClass，搭配 CLAW_MOUNT_TYPE=pvc 模式使用，可自动创建隔离式 NFS 持久卷。
 
@@ -762,6 +762,9 @@ pod_logs_20260707_163022/
 ```
 # 本地执行机器≠CCE集群节点，关闭本地宿主机端口占用检测，避免端口状态误判阻断渲染
 NO_CHECK_PORTS=true
+
+# 当启用日志模块、NFS模块，或运行模式MODE=dev时必填；值为CCE集群内某个目标节点名称，用于将模块调度到该节点运行
+CURRENT_NODE_NAME=
 
 # 选取CCE节点的空闲端口（端口区间30000-32767）
 GATEWAY_NODE_PORT=

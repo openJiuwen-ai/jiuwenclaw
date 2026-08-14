@@ -21,7 +21,17 @@ Skill 自演进机制的核心价值在于：
 
 ### 2.1 自演进配置开关
 
-Skill 自动演进功能通过在配置信息中开启自演进总开关 `react.evolution.enabled` 启用。挂载演进 Rail 后，系统会在对话和工具执行后自动进行被动信号扫描；可选开启 `review_trigger`（软触发 Review）与 `auto_save`（自动保存审批）。
+Skill 自动演进功能通过在配置信息中开启自演进总开关 `react.evolution.enabled` 启用。挂载演进 Rail 后，系统会在对话和工具执行后自动进行被动信号扫描；可选开启 `review_trigger`（软触发 Review）。
+
+**`react.evolution.auto_save` 产品语义（本仓）：**
+
+| 开关 | 含义 |
+|---|---|
+| `evolution.enabled`（Rail 已挂载） | 自演进开启；**生成的经验一律写入** `evolutions.json` |
+| `auto_save=true` | 经验落盘后，**自动**走版本合并（bump SemVer / 写 `changelog.md` / 更新 `SKILL.md`） |
+| `auto_save=false` | 经验仍自动落盘；**不**自动出版本，需调用 `skills.evolution.rebuild` 采纳并生成版本 |
+
+版本回滚可使用 slash `/evolve_rollback` 或 RPC `skills.evolution.rollback` / `skills.evolution.archives`。
 
 ![打开自演进自动检测](../assets/images/skill演进_自动检测开关.png)
 
@@ -71,9 +81,20 @@ Skill 自动演进功能通过在配置信息中开启自演进总开关 `react.
 ```
 ~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
 ├── SKILL.md           # Skill 源文档
+├── changelog.md       # 版本变更说明（rebuild/complete 后追加）
 ├── evolutions.json    # 演进经验记录 ← 在这里编辑
+├── archive/           # SemVer 成对归档（SKILL.vX.Y.Z.md + evolutions.vX.Y.Z.json）
 └── ...
 ```
+
+### 2.6 版本管理 RPC
+
+| Method | 说明 |
+|---|---|
+| `skills.evolution.archives` | 列出可回滚的归档版本（disk-only） |
+| `skills.evolution.rollback` | 回滚到指定/`latest` 版本（disk-only；回滚后清空 live `evolutions.json`） |
+| `skills.evolution.rebuild` | 采纳经验并生成新版本（prepare → LLM 改写 → SemVer/changelog/clear） |
+| `skills.evolution.status/get/save` | 查看/编辑 live 经验条目 |
 
 **常用操作：**
 - 添加新记录：在 `entries` 数组中追加新对象

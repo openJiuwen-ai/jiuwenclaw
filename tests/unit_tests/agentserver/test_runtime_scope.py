@@ -22,8 +22,9 @@ def test_runtime_scope_key_defaults():
     scope = RuntimeScopeKey()
     assert scope.service_id == "default"
     assert scope.agent_id == "default"
+    assert scope.workspace_key == "default"
     assert scope.session_id == ""
-    assert scope.tenant() == ("default", "default")
+    assert scope.tenant() == ("default", "default", "default")
 
 
 def test_runtime_scope_key_from_ids():
@@ -31,7 +32,7 @@ def test_runtime_scope_key_from_ids():
     assert scope.service_id == "svc-a"
     assert scope.agent_id == "agent-b"
     assert scope.session_id == "sess-1"
-    assert scope.session_key() == ("svc-a", "agent-b", "sess-1")
+    assert scope.session_key() == ("svc-a", "agent-b", "default", "sess-1")
 
 
 def test_runtime_scope_key_with_session():
@@ -45,7 +46,7 @@ def test_runtime_scope_key_with_session():
 def test_runtime_scope_key_from_adapter():
     adapter = _FakeAdapter(service_id="office", agent_id="assistant")
     scope = RuntimeScopeKey.from_adapter(adapter)
-    assert scope.tenant() == ("office", "assistant")
+    assert scope.tenant() == ("office", "assistant", "default")
 
 
 def test_runtime_scope_key_from_request():
@@ -57,7 +58,7 @@ def test_runtime_scope_key_from_request():
     class FakePool:
         @staticmethod
         def extract_ids(request):
-            return (request.agent_id, request.service_id)
+            return (request.agent_id, request.service_id, "default")
 
     fake_mod.TenantAgentPool = FakePool
     module_key = "jiuwenswarm.server.runtime.tenant_agent_pool"
@@ -66,7 +67,7 @@ def test_runtime_scope_key_from_request():
     try:
         req = _FakeRequest(agent_id="a1", service_id="s1")
         scope = RuntimeScopeKey.from_request(req)
-        assert scope.tenant() == ("s1", "a1")
+        assert scope.tenant() == ("s1", "a1", "default")
     finally:
         if previous is None:
             sys.modules.pop(module_key, None)

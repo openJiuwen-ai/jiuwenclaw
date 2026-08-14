@@ -53,6 +53,16 @@ from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, 
 
 logger = logging.getLogger(__name__)
 
+# openjiuwen_runtime ServiceManager._fail 在资源打满时下发 legacy chunk：
+# payload={"error_code": 100001|100002, "message": "..."}，无 event_type / error。
+# 若不规范化，Channel 会按空 chat.final 下发，前端表现为「发消息后直接结束」。
+# 仅企业版 AGENT_RUNTIME 启用。
+_RUNTIME_CAPACITY_ERROR_CODES = frozenset({"100001", "100002"})
+_RUNTIME_CAPACITY_USER_MESSAGES = {
+    "100001": "Request exceeds the maximum connection limit. Please try again later.",
+    "100002": "Service failed to start. Please try again later.",
+}
+
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 # ACP: one in-flight chat replaces any prior work on that channel.
@@ -288,10 +298,13 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
-
-        if isinstance(self.agent_client, WebSocketAgentServerClient):
-            self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+        set_server_push_handler = getattr(
+            self.agent_client,
+            "set_server_push_handler",
+            None,
+        )
+        if callable(set_server_push_handler):
+            set_server_push_handler(self._handle_agent_server_push)
 
     def reload_session_map(self) -> None:
         """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
@@ -2669,6 +2682,61 @@ class MessageHandler(ABC):
         return merged
 
     @staticmethod
+    def _normalize_runtime_failure_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+        """将 runtime 资源拒绝等失败 payload 规范化为 chat.error。
+
+        ServiceManager._fail 常见形态::
+            {"error_code": 100001, "message": "服务并发度超过上限，消息请求失败"}
+
+        返回规范化后的 payload；若不是此类失败则返回 None。
+        """
+        if not isinstance(payload, dict) or not payload:
+            return None
+
+        event_type_str = payload.get("event_type")
+        code_raw = payload.get("code", payload.get("error_code"))
+        code_s = str(code_raw).strip() if code_raw is not None else ""
+        err_text = payload.get("error")
+        if err_text in (None, ""):
+            err_text = payload.get("message")
+        err_s = str(err_text).strip() if err_text not in (None, "") else ""
+
+        is_capacity = code_s in _RUNTIME_CAPACITY_ERROR_CODES
+        already_chat_error = isinstance(event_type_str, str) and event_type_str.strip() == "chat.error"
+        if not is_capacity and not already_chat_error and not err_s:
+            return None
+        if not is_capacity and not already_chat_error and not payload.get("error"):
+            # 仅有 message、无 error/error_code 时不误判为业务错误（避免吞掉普通文本）
+            if code_s == "":
+                return None
+
+        if is_capacity:
+            user_msg = (
+                _RUNTIME_CAPACITY_USER_MESSAGES.get(code_s)
+                or err_s
+                or "Request exceeds the maximum connection limit. Please try again later."
+            )
+        else:
+            user_msg = err_s or "Request failed. Please try again later."
+
+        normalized: dict[str, Any] = {
+            "event_type": "chat.error",
+            "error": user_msg,
+        }
+        if code_s:
+            normalized["code"] = code_s
+            normalized["error_code"] = code_raw if code_raw is not None else code_s
+        if err_s and err_s != user_msg:
+            normalized["message"] = err_s
+        # 保留其余字段（如 detail），但避免覆盖已规范化的关键字段
+        for key, value in payload.items():
+            if key in ("event_type", "error", "code", "error_code", "message"):
+                continue
+            if key not in normalized:
+                normalized[key] = value
+        return normalized
+
+    @staticmethod
     def _response_to_message(
         resp: "AgentResponse | AgentResponseChunk",
         session_id: str | None,
@@ -2701,6 +2769,12 @@ class MessageHandler(ABC):
                 dict(raw_payload),
                 channel_id=channel_id,
             )
+            # 企业版：runtime 资源拒绝需规范化为 chat.error
+            if os.getenv("AGENT_RUNTIME", "").strip():
+                normalized = MessageHandler._normalize_runtime_failure_payload(payload)
+                if normalized is not None:
+                    payload = normalized
+                    ok = False
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
@@ -2713,7 +2787,7 @@ class MessageHandler(ABC):
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
-                        ok=True,
+                        ok=False if event_type == EventType.CHAT_ERROR else True,
                         payload=payload,
                         event_type=event_type,
                         metadata=metadata,
@@ -2988,7 +3062,7 @@ class MessageHandler(ABC):
 
         chunk_agent_ref = getattr(chunk, "agent_ref", None)
 
-        # 从 payload 中提取 event_type（如果存在）
+        # 从 payload 中提取 event_type（如果存在）；企业版 runtime 资源拒绝需规范化为 chat.error
         event_type = None
         payload = chunk.payload
         if chunk.payload and isinstance(chunk.payload, dict):
@@ -2996,6 +3070,10 @@ class MessageHandler(ABC):
                 dict(chunk.payload),
                 channel_id=chunk.channel_id,
             )
+            if os.getenv("AGENT_RUNTIME", "").strip():
+                normalized = MessageHandler._normalize_runtime_failure_payload(payload)
+                if normalized is not None:
+                    payload = normalized
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
@@ -3010,7 +3088,7 @@ class MessageHandler(ABC):
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=True,
+            ok=False if event_type == EventType.CHAT_ERROR else True,
             payload=payload,
             event_type=event_type,
             metadata=merged_metadata,
@@ -3035,6 +3113,13 @@ class MessageHandler(ABC):
         if payload.get("content") not in (None, ""):
             return False
         if payload.get("error") not in (None, ""):
+            return False
+        # runtime 资源拒绝：error_code/message 必须下发，不能当哨兵吞掉
+        if payload.get("error_code") not in (None, ""):
+            return False
+        if payload.get("code") not in (None, ""):
+            return False
+        if payload.get("message") not in (None, ""):
             return False
         return payload.get("is_complete") is True and set(payload.keys()) <= {"is_complete"}
 
@@ -3626,6 +3711,14 @@ class MessageHandler(ABC):
 
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> Any:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
+        from jiuwenswarm.telemetry.gateway import (
+            close_gateway_request,
+            open_gateway_request,
+        )
+
+        request_handle = open_gateway_request(env)
+        request_error: BaseException | None = None
+        cancelled = False
         try:
             resp = await self._send_non_stream_agent_request(env)
             out = self._response_to_message(
@@ -3651,7 +3744,11 @@ class MessageHandler(ABC):
                     str(answer_request_id or ""),
                 )
             return resp
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception as e:
+            request_error = e
             logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
             err_msg = self._build_error_out_message(msg, e)
             await self.publish_robot_messages(err_msg)
@@ -3661,6 +3758,15 @@ class MessageHandler(ABC):
                 msg.channel_id,
             )
             return None
+        except BaseException as error:
+            request_error = error
+            raise
+        finally:
+            close_gateway_request(
+                request_handle,
+                error=request_error,
+                cancelled=cancelled,
+            )
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -3819,7 +3925,6 @@ class MessageHandler(ABC):
                         )
 
                         # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
-                        #    用 await 确保 agent 侧先完成取消再启动新任务
                         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 
                         agent_msg = await self._prepare_agent_dispatch_message(msg)
@@ -3860,15 +3965,6 @@ class MessageHandler(ABC):
                             metadata=msg.metadata,
                             user_id=getattr(msg, "user_id", None),
                         )
-                        try:
-                            resp = await self._send_non_stream_agent_request(supplement_env)
-                            # 发送被中断工具的 tool_result 给前端
-                            payload = resp.payload if isinstance(resp.payload, dict) else {}
-                            await self._send_cancelled_tool_results(
-                                msg.channel_id, msg.session_id, payload, msg.metadata
-                            )
-                        except Exception:
-                            pass  # 即使失败也继续启动新任务
 
                         # 4. 入队新任务（单一任务，不并发）
                         from jiuwenswarm.common.schema.message import Message
@@ -3912,11 +4008,46 @@ class MessageHandler(ABC):
                             bot_id=msg.bot_id,
                             metadata=sup_meta,
                         )
-                        self._user_messages.put_nowait(new_msg)
-                        logger.info(
-                            "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
-                            new_msg.id, msg.session_id,
+
+                        async def _send_supplement_interrupt() -> None:
+                            try:
+                                resp = await self._send_non_stream_agent_request(supplement_env)
+                                payload = resp.payload if isinstance(resp.payload, dict) else {}
+                                await self._send_cancelled_tool_results(
+                                    msg.channel_id, msg.session_id, payload, msg.metadata
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "[MessageHandler] supplement 中断处理失败,仍入队新流: error=%s",
+                                    exc,
+                                )
+
+                        def _enqueue_supplement_after_interrupt(
+                            _t: asyncio.Task,
+                            *,
+                            _new_msg=new_msg,
+                            _sid=msg.session_id,
+                        ) -> None:
+                            try:
+                                _t.result()
+                            except Exception as exc:
+                                logger.warning(
+                                    "[MessageHandler] supplement 中断处理失败,仍入队新流: error=%s",
+                                    exc,
+                                )
+                            self._user_messages.put_nowait(_new_msg)
+                            logger.info(
+                                "[MessageHandler] supplement: 中断已处理，新任务已入队: id=%s session_id=%s",
+                                _new_msg.id,
+                                _sid,
+                            )
+
+                        # 不能 await，否则会阻塞 forward_loop，拖累所有 session
+                        _supp_task = asyncio.create_task(
+                            _send_supplement_interrupt(),
+                            name=f"gw-agent-supplement-{(supplement_env.session_id or 'x')[:24]}",
                         )
+                        _supp_task.add_done_callback(_enqueue_supplement_after_interrupt)
 
                     elif intent == "cancel":
                         # fire_and_forget：避免慢 cancel 阻塞 _forward_loop，
@@ -4182,11 +4313,54 @@ class MessageHandler(ABC):
         *,
         emit_processing_status: bool = True,
     ) -> None:
-        """处理流式请求，逐个 chunk 写入 robot_messages.
+        """处理流式请求，并保证 Gateway 遥测覆盖完整清理阶段。"""
+        from jiuwenswarm.telemetry.gateway import (
+            close_gateway_request,
+            open_gateway_request,
+        )
 
-        这个方法被包装为 Task，在后台运行，可以被随时取消。
-        遥测可通过替换类上的 ``process_stream`` 进行打点。
-        """
+        request_handle = open_gateway_request(env)
+        telemetry_outcome: dict[str, Any] = {
+            "error": None,
+            "cancelled": False,
+        }
+        try:
+            await self._process_stream_impl(
+                env,
+                session_id,
+                request_metadata,
+                emit_processing_status=emit_processing_status,
+                telemetry_outcome=telemetry_outcome,
+            )
+        except asyncio.CancelledError:
+            telemetry_outcome["cancelled"] = True
+            raise
+        except BaseException as error:
+            telemetry_outcome["error"] = error
+            raise
+        finally:
+            request_error = telemetry_outcome["error"]
+            close_gateway_request(
+                request_handle,
+                error=(
+                    request_error
+                    if isinstance(request_error, BaseException)
+                    else None
+                ),
+                cancelled=bool(telemetry_outcome["cancelled"]),
+            )
+
+    async def _process_stream_impl(
+        self,
+        env: "E2AEnvelope",
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None,
+        *,
+        emit_processing_status: bool,
+        telemetry_outcome: dict[str, Any],
+    ) -> None:
+        """逐个发布流式 chunk，并共享被内部消费的终止状态。"""
+        request_error: BaseException | None = None
         rid = env.request_id or ""
         channel_id = env.channel or ""
         stream_app_id = self._stream_app_ids.get(rid, "")  # 提前捕获，_pop_stream_tracking 后会清除
@@ -4247,11 +4421,14 @@ class MessageHandler(ABC):
             )
         except asyncio.CancelledError:
             cancelled = True
+            telemetry_outcome["cancelled"] = True
             logger.info(
                 "[MessageHandler] Stream 被取消: request_id=%s total_chunks=%s",
                 rid, _proc_count,
             )
         except RuntimeError as exc:
+            request_error = exc
+            telemetry_outcome["error"] = exc
             if "AgentServer WebSocket connection closed" not in str(exc):
                 raise
             await self._publish_stream_connection_error(
@@ -4262,6 +4439,8 @@ class MessageHandler(ABC):
                 str(exc),
             )
         except Exception as exc:
+            request_error = exc
+            telemetry_outcome["error"] = exc
             logger.exception(
                 "[MessageHandler] Stream 异常: request_id=%s total_chunks=%s error=%s",
                 rid, _proc_count, exc,
@@ -4271,6 +4450,8 @@ class MessageHandler(ABC):
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:
+            telemetry_outcome["error"] = request_error
+            telemetry_outcome["cancelled"] = cancelled
             if (
                 not cancelled
                 and self._is_interrupt_evolution_approval_answer_payload(env.params)

@@ -407,15 +407,18 @@ class TestHardcodedPathsPhase2:
 
     @staticmethod
     def test_cron_tools_path_equivalence():
-        """Test cron_tools.py path matches expected structure (cross-platform)."""
+        """Test cron_tools.py path matches expected multi-tenant structure."""
         from jiuwenswarm.common.utils import get_agent_home_dir, get_user_workspace_dir
 
-        # Original hardcoded: get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
-        # New: get_agent_home_dir() / "cron_jobs.json"
-        # get_agent_home_dir() = get_user_workspace_dir() / "agent" / "home"
-
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "home" / "cron_jobs.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "home"
+            / "cron_jobs.json"
+        )
         actual_path = get_agent_home_dir() / "cron_jobs.json"
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -435,7 +438,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "task-data.json"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "task-data.json"
+        )
         actual_path = Path(_get_task_data_path())
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -454,7 +464,14 @@ class TestHardcodedPathsPhase2:
         from jiuwenswarm.common.utils import get_deepagent_user_md_path, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "USER.md"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "USER.md"
+        )
         actual_path = get_deepagent_user_md_path()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -475,14 +492,20 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.server.runtime.runtime_scope import RuntimeScopeKey
 
         scope = RuntimeScopeKey.from_ids()
-        workspace = get_multi_tenant_user_workspace_dir(scope.service_id, scope.agent_id)
-        assert workspace is not None
+        workspace = get_multi_tenant_user_workspace_dir(
+            scope.service_id, scope.agent_id
+        )
         expected_path = workspace / "agent" / "workspace" / "extensions"
-        rail_manager = get_rail_manager(scope)
+        import os
+        os.environ["AGENT_RUNTIME"] = "1"
+        try:
+            rail_manager = get_rail_manager(scope)
 
-        extensions_dir = rail_manager.extensions_dir
-        assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
-            f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+            extensions_dir = rail_manager.extensions_dir
+            assert str(extensions_dir.resolve()) == str(expected_path.resolve()), \
+                f"Expected: {expected_path.resolve()}, Got: {extensions_dir.resolve()}"
+        finally:
+            os.environ.pop("AGENT_RUNTIME", None)
 
     @staticmethod
     def test_config_module_dir_structure(tmp_path):
@@ -510,7 +533,14 @@ class TestAdditionalHardcodedPaths:
         from jiuwenswarm.common.utils import get_interactions_dir, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "workspace" / "interactions"
+        expected_path = (
+            workspace
+            / "service_default"
+            / "agent_default"
+            / "agent"
+            / "workspace"
+            / "interactions"
+        )
         actual_path = get_interactions_dir()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \

@@ -33,16 +33,19 @@ from jiuwenswarm.common.utils import (
 logger = logging.getLogger(__name__)
 
 
-def resolve_cron_jobs_path(service_id: str, agent_id: str) -> Path:
+def resolve_cron_jobs_path(
+    service_id: str,
+    agent_id: str,
+    workspace_key: str | None = None,
+) -> Path:
     """Per-tenant cron_jobs.json under ``service_{sid}/agent_{aid}/agent/home/``."""
+    del workspace_key  # legacy kw; disk isolation is service_id + agent_id
     sid = normalize_tenant_scope_id(service_id)
     aid = normalize_tenant_scope_id(agent_id)
     base = get_multi_tenant_user_workspace_dir(sid, aid)
     if base is None:
-        base = get_multi_tenant_user_workspace_dir("default", "default")
-    if base is None:
-        raise RuntimeError(
-            f"failed to resolve cron jobs path (service_id={sid!r}, agent_id={aid!r})"
+        raise TypeError(
+            f"invalid tenant for cron jobs path: service_id={sid!r}, agent_id={aid!r}"
         )
     return base / "agent" / "home" / "cron_jobs.json"
 

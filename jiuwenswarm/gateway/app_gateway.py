@@ -45,9 +45,7 @@ from jiuwenswarm.extensions.extension_config_sync import decrypt_extensions_sens
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "workspace"
-_old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+if not _config_file.exists():
     prepare_workspace(overwrite=False)
 
 # Pin openjiuwen log dir before any openjiuwen-heavy imports
@@ -124,6 +122,8 @@ def _normalize_gateway_message(msg):
         stream_id=msg.stream_id,
         metadata=msg.metadata,
         user_id=getattr(msg, "user_id", None),
+        app_id=getattr(msg, "app_id", None),
+        agent_ref=getattr(msg, "agent_ref", None),
     )
 
 
@@ -306,6 +306,39 @@ async def _connect_with_retry(
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, interval)
+
+
+async def _connect_wrap_and_create_message_handler(
+    client,
+    *,
+    agent_server_url: str,
+    max_retries: int,
+    retry_interval: float,
+    message_handler_factory,
+):
+    """Connect the selected raw client before installing its telemetry proxy."""
+    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.telemetry.gateway_client import wrap_gateway_agent_client
+
+    telemetry_target_uri = (
+        agent_server_url
+        if isinstance(client, WebSocketAgentServerClient)
+        else None
+    )
+    if isinstance(client, WebSocketAgentServerClient):
+        await _connect_with_retry(
+            client,
+            agent_server_url,
+            max_retries=max_retries,
+            interval=retry_interval,
+        )
+    else:
+        await client.connect("")
+    client = wrap_gateway_agent_client(
+        client,
+        target_uri=telemetry_target_uri,
+    )
+    return client, message_handler_factory(client)
 
 
 def _exec_gateway_restart() -> None:
@@ -1417,11 +1450,40 @@ def _build_route_config_map(bindings: list[GatewayRouteBinding]) -> dict[str, Ro
 
 
 async def _run(
-        agent_server_url: str,
-        web_host: str,
-        web_port: int,
-        web_path: str,
+    agent_server_url: str,
+    web_host: str,
+    web_port: int,
+    web_path: str,
 ) -> None:
+    from jiuwenswarm.telemetry.runtime import ProcessTelemetryLifecycle
+
+    telemetry_lifecycle = ProcessTelemetryLifecycle(
+        logger=logger,
+        process_name="Gateway",
+    )
+    restart_requested = False
+    try:
+        restart_requested = await _run_with_telemetry(
+            agent_server_url,
+            web_host,
+            web_port,
+            web_path,
+            telemetry_lifecycle,
+        )
+    finally:
+        await telemetry_lifecycle.stop()
+
+    if restart_requested:
+        _exec_gateway_restart()
+
+
+async def _run_with_telemetry(
+    agent_server_url: str,
+    web_host: str,
+    web_port: int,
+    web_path: str,
+    telemetry_lifecycle,
+) -> bool:
     from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
         DingTalkConfig
@@ -1487,8 +1549,14 @@ async def _run(
         logger=logger,
     )
     extension_manager = ExtensionManager(registry=extension_registry)
+    telemetry_lifecycle.bind_extension_manager(extension_manager)
     await extension_manager.load_all_extensions()
     logger.info("[App] extensions loaded: %d", len(extension_manager.list_extensions()))
+    await telemetry_lifecycle.start(
+        process_role="gateway",
+        registry=extension_registry,
+        extension_manager=extension_manager,
+    )
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
@@ -1510,19 +1578,13 @@ async def _run(
     else:
         third_agent = get_unsupported_third_agent()
 
-    # 如果是 WebSocket 客户端，需要连接；如果是 YuanrongFrontendAgentClient，无需连接
-    if isinstance(client, WebSocketAgentServerClient):
-        await _connect_with_retry(
-            client,
-            agent_server_url,
-            max_retries=max_retries,
-            interval=retry_interval,
-        )
-    else:
-        # YuanrongFrontendAgentClient 是 HTTP 客户端，无需连接
-        await client.connect("")
-
-    message_handler = MessageHandler(client)
+    client, message_handler = await _connect_wrap_and_create_message_handler(
+        client,
+        agent_server_url=agent_server_url,
+        max_retries=max_retries,
+        retry_interval=retry_interval,
+        message_handler_factory=MessageHandler,
+    )
     await message_handler.start_forwarding()
 
     # IM Pipeline 初始化（数字分身）
@@ -2783,8 +2845,7 @@ async def _run(
 
         logger.info("[App] Gateway stopped")
 
-    if restart_requested:
-        _exec_gateway_restart()
+    return restart_requested
 
 
 def main() -> None:

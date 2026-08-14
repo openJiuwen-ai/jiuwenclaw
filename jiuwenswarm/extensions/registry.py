@@ -7,6 +7,7 @@ from jiuwenswarm.extensions.extension_tool_entry import ExtensionLocalToolEntry
 from jiuwenswarm.gateway import AgentServerClient
 from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
+from jiuwenswarm.extensions.sdk.telemetry_provider import TelemetryProviderExtension
 from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
@@ -25,6 +26,7 @@ class ExtensionRegistry:
         self._agent_server_client: AgentServerClientExtension | None = None
         self._crypto_tool: CryptoUtility | None = None
         self._third_agent: ThirdAgentExtension | None = None
+        self._telemetry_provider: TelemetryProviderExtension | None = None
         self._rpc_handlers: dict[str, Callable] = {}
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
@@ -69,6 +71,11 @@ class ExtensionRegistry:
     def register_third_agent(self, extension: ThirdAgentExtension) -> None:
         self._third_agent = extension
 
+    def register_telemetry_provider(
+        self, extension: TelemetryProviderExtension
+    ) -> None:
+        self._telemetry_provider = extension
+
     def register_rpc_handler(self, method: str, handler: Callable) -> None:
         method_name = str(method or "").strip()
         if not method_name:
@@ -99,6 +106,11 @@ class ExtensionRegistry:
 
     def get_third_agent_extension(self) -> ThirdAgentExtension | None:
         return self._third_agent
+
+    def get_telemetry_provider_extension(
+        self,
+    ) -> TelemetryProviderExtension | None:
+        return self._telemetry_provider
 
     def get_third_agent(self) -> ThirdAgent | None:
         """Return registered ThirdAgent, or None when no extension registered."""

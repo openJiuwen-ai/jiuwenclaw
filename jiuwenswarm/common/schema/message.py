@@ -125,6 +125,12 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+    SKILLS_EVOLUTION_ARCHIVES = "skills.evolution.archives"
+    SKILLS_EVOLUTION_ROLLBACK = "skills.evolution.rollback"
+    SKILLS_EVOLUTION_REBUILD = "skills.evolution.rebuild"
+    SKILLS_ENTERPRISE_LIST = "skills.enterprise.list"
+    SKILLS_ENTERPRISE_INSTALL = "skills.enterprise.install"
+    SKILLS_ENTERPRISE_UNINSTALL = "skills.enterprise.uninstall"
 
     SYMPHONY_BUILD_SCORE = "symphony.build_score"
     SYMPHONY_PAUSE_BUILD = "symphony.pause_build"
@@ -151,6 +157,8 @@ class ReqMethod(Enum):
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
 
     # 安全防护 permissions（与 Web ``register_method`` 同名，经 E2A → AgentServer 处理；owner_scopes 仅走 Web 直连）
+    PERMISSIONS_ENABLED_GET = "permissions.enabled.get"
+    PERMISSIONS_ENABLED_SET = "permissions.enabled.set"
     PERMISSIONS_TOOLS_GET = "permissions.tools.get"
     PERMISSIONS_TOOLS_LIST = "permissions.tools.list"
     PERMISSIONS_TOOLS_SET = "permissions.tools.set"
@@ -162,6 +170,8 @@ class ReqMethod(Enum):
     PERMISSIONS_RULES_DELETE = "permissions.rules.delete"
     PERMISSIONS_APPROVAL_OVERRIDES_GET = "permissions.approval_overrides.get"
     PERMISSIONS_APPROVAL_OVERRIDES_DELETE = "permissions.approval_overrides.delete"
+    PERMISSIONS_WORKSPACE_ENABLE_GET = "permissions.file_guard.workspace.rw_enabled.get"
+    PERMISSIONS_WORKSPACE_ENABLE_SET = "permissions.file_guard.workspace.rw_enabled.set"
 
     CHANNEL_FEISHU_GET_CONF = "channel.feishu.get_conf"
     CHANNEL_FEISHU_SET_CONF = "channel.feishu.set_conf"
