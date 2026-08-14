@@ -1,20 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""权限引擎 - 核心权限控制模块。
+"""权限引擎 - 核心权限控制模块。"""
 
-Phase-1 编排：
-
-1. 加载 / 热更新 ``permissions`` 配置。
-2. ``check_permission`` 按设计文档第 2 节的 Guard 管线评估：
-   - 工具档位（``allow`` / ``deny`` / ``guard``）短路 DENY/ALLOW；``guard`` 进入 Guard 管线。
-   - 子线 A：``evaluate_tiered_policy_detailed``（命令 / 参数规则）。**已注册的「路径类」读写工具**
-     （非 shell）在管线 A **仅解析整工具 DENY**；非 DENY 时不产出 allow/guard 等档位，
-     **跳过**管线 A 的其余档位与 ``rules`` / subcommand，实质判定完全由管线 B（``file_guard``）承担。
-   - 子线 B：``FileGuardChecker.evaluate_accesses`` + ``evaluate_command_intents``
-     （三轴文件路径判定）。
-   - 通过 ``strictest`` 合并档位与 ``file_guard`` 结果（路径类工具在非 DENY 时仅由 B 侧抬升降）。
-   - ``file_operations`` 透传到 ``PermissionResult`` 供审批卡渲染。
-"""
 from __future__ import annotations
 
 import logging
@@ -146,14 +133,76 @@ class PermissionEngine:
         self,
         session_id: str | None = None,
         config: dict[str, Any] | None = None,
+        *,
+        apply_skill_overlay: bool = True,
     ) -> dict[str, Any]:
         if config is not None:
-            return config
-        from jiuwenclaw.agentserver.permissions.config_loader import (
-            merge_session_permissions_overlay,
-        )
+            resolved = config
+        else:
+            from jiuwenclaw.agentserver.permissions.config_loader import (
+                merge_session_permissions_overlay,
+            )
 
-        return merge_session_permissions_overlay(self.config, session_id=session_id)
+            resolved = merge_session_permissions_overlay(self.config, session_id=session_id)
+        return self._apply_active_skill_overlay(resolved) if apply_skill_overlay else resolved
+
+    @staticmethod
+    def _apply_active_skill_overlay(
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """按需应用当前作用域的 ``ACTIVE`` Skill overlay（fail-closed）。
+
+        Skill 动态授权有效开关关闭、授权 Context
+        缺失、GrantStore 查询失败或合成异常时，一律返回原配置（仅按原权限流程裁决）。
+        """
+        if not isinstance(config, dict):
+            return config
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization.schema import (
+                is_skill_authorization_enabled,
+            )
+
+            if not is_skill_authorization_enabled(config):
+                return config
+            from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
+                compose_skill_permissions,
+                get_skill_authorization_context,
+            )
+            from jiuwenclaw.agentserver.permissions.skill_authorization.grant_store import (
+                get_skill_grant_store,
+            )
+
+            authz = get_skill_authorization_context()
+            if authz is None or not authz.session_id or not authz.agent_scope_id:
+                logger.debug(
+                    "[PermissionEngine] skill_authorization.overlay_skip "
+                    "reason=missing_context authz=%s",
+                    authz,
+                )
+                return config
+            grant = get_skill_grant_store().get_active(authz.session_id, authz.agent_scope_id)
+            if grant is None:
+                logger.debug(
+                    "[PermissionEngine] skill_authorization.overlay_skip "
+                    "reason=no_active_grant session=%s scope=%s",
+                    authz.session_id,
+                    authz.agent_scope_id,
+                )
+                return config
+            logger.info(
+                "[PermissionEngine] skill_authorization.overlay_applied "
+                "session=%s scope=%s skill=%s",
+                authz.session_id,
+                authz.agent_scope_id,
+                grant.skill_name,
+            )
+            return compose_skill_permissions(config, grant.overlay_snapshot)
+        except Exception:  # noqa: BLE001 — 任何异常仅使用原有权限
+            logger.warning(
+                "[PermissionEngine] skill_authorization.overlay_apply_failed fallback=base",
+                exc_info=True,
+            )
+            return config
 
     def _evaluation_file_guard(
         self,
@@ -192,6 +241,7 @@ class PermissionEngine:
         session_id: str | None = None,
         config: dict[str, Any] | None = None,
         file_guard: FileGuardChecker | None = None,
+        apply_skill_overlay: bool = True,
     ) -> tuple[
         PermissionLevel | None,
         str | None,
@@ -211,7 +261,11 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        cfg = self._evaluation_config(session_id=session_id, config=config)
+        cfg = self._evaluation_config(
+            session_id=session_id,
+            config=config,
+            apply_skill_overlay=apply_skill_overlay,
+        )
         fg_checker = self._evaluation_file_guard(cfg, file_guard)
 
         tier_perm, tier_rule, raw_subs = self._evaluate_tier_for_tool(

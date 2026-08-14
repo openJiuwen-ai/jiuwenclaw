@@ -697,6 +697,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendUserAnswer = useCallback(
     async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
+        const agentScopeId = useChatStore.getState().pendingQuestion?.agent_scope_id;
         // 如果是工具权限确认，发送 chat.send
         if (source === 'permission_interrupt') {
           await request('chat.send', {
@@ -704,7 +705,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             query: '',
             request_id: requestId,
             answers: answers,
+            ...(source ? { source } : {}),
             ...extSettingsToRoutingParams(useExtSettingsStore.getState()),
+            ...(agentScopeId ? { agent_scope_id: agentScopeId } : {}),
           });
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -712,6 +715,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             request_id: requestId,
             answers,
+            ...(source ? { source } : {}),
+            ...(agentScopeId ? { agent_scope_id: agentScopeId } : {}),
           });
         }
         setPendingQuestion(null);
@@ -1371,7 +1376,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.ask_user_question', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
-        setPendingQuestion(payload as unknown as AskUserQuestionPayload);
+        // Skill 加载审批卡：透传结构化数据（payload_schema["x-skill-approval-card"]，
+        // 若后端通道已携带）；缺失时由卡片组件回退渲染 message markdown。
+        const rawCard = payload['x-skill-approval-card'] ?? payload['skill_approval_card'];
+        const questionPayload = payload as unknown as AskUserQuestionPayload;
+        if (rawCard && typeof rawCard === 'object') {
+          questionPayload.skill_approval_card =
+            rawCard as AskUserQuestionPayload['skill_approval_card'];
+        }
+        setPendingQuestion(questionPayload);
         setProcessing(true);
         setThinking(false);
       }),

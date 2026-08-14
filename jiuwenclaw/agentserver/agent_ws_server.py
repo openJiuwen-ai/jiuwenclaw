@@ -1998,6 +1998,21 @@ class AgentWebSocketServer:
                         payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
                     )
                 else:
+                    # 合法的永久删除请求首先回收进程内授权。即使会话目录已被外部删除
+                    # 或随后文件删除失败，也不能让 ACTIVE/PENDING Grant 继续存活。
+                    try:
+                        from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+                            clear_deleted_session,
+                        )
+
+                        clear_deleted_session(safe_sid)
+                    except Exception:  # noqa: BLE001 — Grant 回收失败不掩盖原删除结果
+                        logger.warning(
+                            "[AgentServer] session.delete skill grant cleanup failed: "
+                            "session_id=%s",
+                            safe_sid,
+                            exc_info=True,
+                        )
                     workspace_session_dir = get_agent_sessions_dir()
                     session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
                     if session_dir is None:

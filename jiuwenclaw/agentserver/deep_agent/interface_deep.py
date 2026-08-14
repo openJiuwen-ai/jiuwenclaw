@@ -860,6 +860,7 @@ class JiuWenClawDeepAdapter:
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
         self._skill_compliance_rail: SkillComplianceRail | None = None
+        self._skill_authorization_rail: Any = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -900,6 +901,7 @@ class JiuWenClawDeepAdapter:
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
         self._enabled_skills: list[str] | None = None
+        self._prebuilt_skills: set[str] = set()
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -913,6 +915,22 @@ class JiuWenClawDeepAdapter:
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
         return skills_dirs
+
+    def _resolve_skill_trust(self, skill_dir: Path):
+        """按企业安装账本识别预置 Skill；非企业场景保留包内置目录规则。"""
+        from jiuwenclaw.agentserver.permissions.skill_authorization import SkillTrustLevel
+
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return (
+                SkillTrustLevel.BUILTIN
+                if Path(skill_dir).name in self._prebuilt_skills
+                else SkillTrustLevel.OTHER
+            )
+        from jiuwenclaw.agentserver.deep_agent.rails.skill_authorization_rail import (
+            _default_trust_resolver,
+        )
+
+        return _default_trust_resolver(skill_dir)
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -1720,21 +1738,34 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        from jiuwenclaw.agentserver.installed_skill import list_enabled_skill_names
+        from jiuwenclaw.agentserver.installed_skill import (
+            SOURCE_PREBUILT,
+            list_installed_skills,
+        )
 
         try:
-            names = await list_enabled_skill_names(
+            rows = await list_installed_skills(
                 service_id=str(self._service_id or ""),
                 agent_id=str(self._agent_id or ""),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[JiuWenClawDeepAdapter] list_enabled_skill_names failed: %s",
+                "[JiuWenClawDeepAdapter] list_installed_skills failed: %s",
                 exc,
             )
             return
 
-        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+        enabled_skills: list[str] = []
+        prebuilt_skills: set[str] = set()
+        for row in rows:
+            skill_name = str(row.get("skill_name") or "").strip()
+            if not skill_name:
+                continue
+            enabled_skills.append(skill_name)
+            if str(row.get("source_type") or "").strip() == SOURCE_PREBUILT:
+                prebuilt_skills.add(skill_name)
+        self._enabled_skills = enabled_skills
+        self._prebuilt_skills = prebuilt_skills
 
         extra_skill_dir: str | None = None
         try:
@@ -2065,6 +2096,37 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
+    def _build_skill_authorization_rail(self):
+        """Build SkillAuthorizationRail；rail 内部按实时 feature flag 惰性启停。"""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.skill_authorization_rail import (
+                SkillAuthorizationRail,
+                build_skill_registry_resolver,
+            )
+
+            rail = SkillAuthorizationRail(
+                engine=self._permission_rail.engine
+                if self._permission_rail is not None else None,
+                skill_resolver=build_skill_registry_resolver(
+                    # 延迟到调用时取最新实例：热更新/重建会替换 self._skill_rail，
+                    # 若绑定构建期实例，可能拿到未扫盘的旧实例导致 manifest_unresolved
+                    lambda: (
+                        self._skill_rail.get_skills_meta()
+                        if self._skill_rail is not None
+                        else []
+                    ),
+                    skill_dirs_provider=lambda: self._resolve_skill_dirs(),
+                ),
+                trust_resolver=self._resolve_skill_trust,
+            )
+            logger.info("[JiuWenClawDeepAdapter] SkillAuthorizationRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillAuthorizationRail create failed: %s", exc
+            )
+            return None
+
     def _build_runtime_prompt_rail(
         self,
         custom_home_dir: str | None = None,
@@ -2157,6 +2219,7 @@ class JiuWenClawDeepAdapter:
                                                                            "default", {}).get("model_client_config",
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
+            _RailBuildInfo("_skill_authorization_rail", self._build_skill_authorization_rail),
             # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
         ]
@@ -2761,6 +2824,9 @@ class JiuWenClawDeepAdapter:
                 )
             if sync_result.enabled_skill_dirs is not None:
                 self._enabled_skills = [str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()]
+            self._prebuilt_skills = {
+                str(name) for name in sync_result.prebuilt_skill_dirs if str(name).strip()
+            }
 
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
@@ -2881,6 +2947,8 @@ class JiuWenClawDeepAdapter:
                 self._instance,
                 model=self._model,  # Pass the model instance
                 default_role_prompts=None,  # Can be customized later
+                skill_dirs_provider=lambda: self._resolve_skill_dirs(),
+                enabled_skills_provider=lambda: self._enabled_skills,
             )
 
             # Register fork_agent tool (ignore if already exists)
@@ -3516,6 +3584,24 @@ class JiuWenClawDeepAdapter:
                 selected_names.append(name)
         return selected_names
 
+    @staticmethod
+    def _revoke_main_skill_authorization(
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+                revoke_main_scope,
+            )
+
+            revoke_main_scope(session_id, reason=reason)
+        except Exception:  # noqa: BLE001 — 不影响原取消/异常流程
+            logger.warning(
+                "[JiuWenClawDeepAdapter] dynamic authorization cleanup failed",
+                exc_info=True,
+            )
+
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -3569,6 +3655,10 @@ class JiuWenClawDeepAdapter:
                 await self._instance.abort()
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_supplemented",
+            )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 标记未完成的 todo 为 cancelled 并清空 todo.json（与 cancel 一致）
             if request.session_id:
@@ -3598,6 +3688,10 @@ class JiuWenClawDeepAdapter:
             await self._cancel_session_toolkits(
                 request.session_id,
                 f"interrupt(cancel) request_id={request.request_id}: ",
+            )
+            self._revoke_main_skill_authorization(
+                request.session_id,
+                reason="task_cancelled",
             )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 标记未完成的 todo 为 cancelled（通知前端），并清空 todo.json
@@ -3919,6 +4013,10 @@ class JiuWenClawDeepAdapter:
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request with explicit source-based routing."""
+        from jiuwenclaw.agentserver.permissions.skill_authorization.runtime import (
+            resolve_subagent_approval,
+        )
+
         params = request.params if isinstance(request.params, dict) else {}
         request_id = params.get("request_id", "")
         answers = params.get("answers", [])
@@ -3930,6 +4028,17 @@ class JiuWenClawDeepAdapter:
             resolved = await self._handle_skill_create_approval(request_id, answers)
         elif source == "ask_tool":
             resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+        elif source in {
+            "subagent_skill_load",
+            "subagent_tool_permission",
+        }:
+            resolved = resolve_subagent_approval(
+                request_id=request_id,
+                session_id=str(request.session_id or params.get("session_id") or ""),
+                source=source,
+                answers=answers,
+                agent_scope_id=str(params.get("agent_scope_id") or ""),
+            )
         else:
             # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
             if request_id.startswith("skill_evolve_"):
@@ -3938,6 +4047,17 @@ class JiuWenClawDeepAdapter:
                 resolved = await self._handle_skill_create_approval(request_id, answers)
             elif isinstance(request_id, str) and request_id.startswith(ASK_REQUEST_PREFIX):
                 resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+            elif isinstance(request_id, str) and (
+                request_id.startswith("subagent_skill_load_")
+                or request_id.startswith("subagent_tool_permission_")
+            ):
+                resolved = resolve_subagent_approval(
+                    request_id=request_id,
+                    session_id=str(request.session_id or params.get("session_id") or ""),
+                    source="",
+                    answers=answers,
+                    agent_scope_id=str(params.get("agent_scope_id") or ""),
+                )
 
         return AgentResponse(
             request_id=request.request_id,
@@ -4540,9 +4660,17 @@ class JiuWenClawDeepAdapter:
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
                         session_id)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             raise
         finally:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
@@ -4973,9 +5101,17 @@ class JiuWenClawDeepAdapter:
                 evolution_status_ended = True
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_cancelled",
+            )
             raise
         except Exception as exc:
             logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
+            self._revoke_main_skill_authorization(
+                session_id,
+                reason="task_error",
+            )
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(
                     request_id=rid,

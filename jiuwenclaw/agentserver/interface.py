@@ -488,7 +488,11 @@ class JiuWenClaw:
             answers = request.params.get("answers", [])
             if answers:
                 request_id = request.params.get("request_id", "")
-                interactive_input = self._build_interactive_input_from_answers(request_id, answers)
+                interactive_input = self._build_interactive_input_from_answers(
+                    request_id,
+                    answers,
+                    request.params.get("source"),
+                )
                 final_query = interactive_input if interactive_input is not None else build_user_prompt(
                     query,
                     files=request.params.get("files", {}),
@@ -550,7 +554,10 @@ class JiuWenClaw:
         return inputs, memory_mode, query
 
     def _build_interactive_input_from_answers(
-            self, request_id: str, answers: list[dict]
+            self,
+            request_id: str,
+            answers: list[dict],
+            source: str | None = None,
     ) -> Any:
         """从用户答案构建 InteractiveInput.
 
@@ -568,8 +575,44 @@ class JiuWenClaw:
         answer = answers[0] if answers else {}
         selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
         custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
-
-        if "本次允许" in selected_options:
+        is_permission_interrupt = source == "permission_interrupt"
+        explicit_action = answer.get("action") if isinstance(answer, dict) else None
+        if is_permission_interrupt and explicit_action == "approve_session":
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and explicit_action == "continue_without_overlay":
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif is_permission_interrupt and explicit_action == "approve_once":
+            confirm_payload = {
+                "action": "approve_once",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "会话内允许" in selected_options:
+            confirm_payload = {
+                "action": "approve_session",
+                "approved": True,
+                "auto_confirm": False,
+                "feedback": "",
+            }
+        elif is_permission_interrupt and "仅加载不授权" in selected_options:
+            confirm_payload = {
+                "action": "continue_without_overlay",
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户选择仅加载不授权",
+            }
+        elif "本次允许" in selected_options:
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
         elif "总是允许" in selected_options:
             confirm_payload = {

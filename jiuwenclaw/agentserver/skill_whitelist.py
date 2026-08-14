@@ -67,6 +67,7 @@ class AgentSkillWhitelistConfig:
 @dataclass
 class SkillWhitelistSyncResult:
     enabled_skill_dirs: list[str] = field(default_factory=list)
+    prebuilt_skill_dirs: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     succeeded: list[str] = field(default_factory=list)
     failed: list[dict[str, str]] = field(default_factory=list)
@@ -246,6 +247,11 @@ class SkillWhitelistSynchronizer:
         )
         # 启用集 = 当前内存账本（含未改动的 user 行）；避免再查一次 DB
         result.enabled_skill_dirs = list(installed_skills_map.keys())
+        result.prebuilt_skill_dirs = [
+            name
+            for name, row in installed_skills_map.items()
+            if str(row.get("source_type") or "").strip() == SOURCE_PREBUILT
+        ]
         return result
 
     async def _fetch_installed_skills_map(

@@ -8,7 +8,8 @@ Core executor for fork_agent and spawn_subagent execution.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, TYPE_CHECKING
+import json
+from typing import Any, Callable
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
@@ -55,6 +56,62 @@ from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent impo
 
 # Default timeout for subagent execution
 _DEFAULT_TIMEOUT_SECONDS = 600.0
+_APPROVAL_PREVIEW_MAX_CHARS = 2000
+
+
+def _format_tool_args_preview(tool_name: str, tool_args: Any) -> str:
+    """Render the concrete approval target without allowing an unbounded card."""
+    args = tool_args if isinstance(tool_args, dict) else {}
+    preview = ""
+    if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
+        for key in ("command", "cmd", "script", "input"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                preview = value.strip()
+                break
+    if not preview:
+        try:
+            preview = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            preview = str(args)
+    if len(preview) > _APPROVAL_PREVIEW_MAX_CHARS:
+        preview = preview[:_APPROVAL_PREVIEW_MAX_CHARS] + "…"
+    return "\n".join(f"    {line}" for line in (preview or "{}").splitlines())
+
+
+async def _emit_subagent_approval(
+    approval_session: Session,
+    request: Any,
+    *,
+    header: str,
+    question: str,
+    options: list[dict[str, str]],
+    card: dict[str, Any] | None = None,
+) -> None:
+    """子 Agent 委托审批统一通过 chat.ask_user_question 下发到主会话。"""
+    event_payload = {
+        "event_type": "chat.ask_user_question",
+        "request_id": request.approval_id,
+        "source": f"subagent_{request.kind.value}",
+        "session_id": request.session_id,
+        "agent_scope_id": request.agent_scope_id,
+        "questions": [{
+            "header": header,
+            "question": question,
+            "options": options,
+            "multi_select": False,
+        }],
+    }
+    if isinstance(card, dict):
+        from jiuwenclaw.agentserver.permissions.skill_authorization import (
+            SKILL_APPROVAL_CARD_EXTENSION_KEY,
+        )
+        event_payload[SKILL_APPROVAL_CARD_EXTENSION_KEY] = card
+    await approval_session.write_stream({
+        "type": "chat.ask_user_question",
+        "payload": event_payload,
+    })
+
 
 # Default excluded tools for spawn/fork agents
 EXCLUDED_TOOLS_SPAWN = {
@@ -109,6 +166,8 @@ class ForkAgentExecutor:
         parent_agent: DeepAgent,
         model: Model,
         default_role_prompts: dict[str, str] | None = None,
+        skill_dirs_provider: Callable[[], list[str] | None] | None = None,
+        enabled_skills_provider: Callable[[], list[str] | None] | None = None,
     ) -> None:
         """Initialize the subagent executor.
 
@@ -116,11 +175,95 @@ class ForkAgentExecutor:
             parent_agent: Parent DeepAgent instance (for inheriting tools)
             model: Model instance for creating subagents
             default_role_prompts: Default role prompts (used when role_id not found)
+            skill_dirs_provider: Provider for the parent's effective Skill roots
+            enabled_skills_provider: Provider for the parent's enabled Skill names
         """
         self._parent_agent = parent_agent
         self._model = model
         self._default_role_prompts = default_role_prompts or {}
+        self._skill_dirs_provider = skill_dirs_provider
+        self._enabled_skills_provider = enabled_skills_provider
         self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
+
+    def _resolve_child_skill_configuration(self) -> tuple[list[str], list[str] | None]:
+        """复用主 Agent 已解析的 Skill 根目录/白名单，缺失时保持社区版回退。"""
+        provided_dirs: list[str] | None = None
+        if self._skill_dirs_provider is not None:
+            try:
+                provided_dirs = self._skill_dirs_provider()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Subagent] parent skill dirs provider failed: %s", exc)
+        raw_dirs = provided_dirs or [str(path) for path in get_agent_registered_skill_dirs()]
+        skill_dirs: list[str] = []
+        seen_dirs: set[str] = set()
+        for raw_dir in raw_dirs:
+            normalized = str(raw_dir or "").strip()
+            if normalized and normalized not in seen_dirs:
+                seen_dirs.add(normalized)
+                skill_dirs.append(normalized)
+
+        enabled_skills: list[str] | None = None
+        if self._enabled_skills_provider is not None:
+            try:
+                provided_enabled = self._enabled_skills_provider()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Subagent] parent enabled skills provider failed: %s", exc)
+            else:
+                if provided_enabled is not None:
+                    enabled_skills = []
+                    seen_names: set[str] = set()
+                    for raw_name in provided_enabled:
+                        name = str(raw_name or "").strip()
+                        if name and name not in seen_names:
+                            seen_names.add(name)
+                            enabled_skills.append(name)
+        return skill_dirs, enabled_skills
+
+    @staticmethod
+    def _skill_authorization_enabled() -> bool:
+        try:
+            from jiuwenclaw.agentserver.permissions.config_loader import (
+                get_effective_permissions_config,
+            )
+            from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                is_skill_authorization_enabled,
+            )
+
+            return is_skill_authorization_enabled(
+                get_effective_permissions_config(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Subagent] skill authorization flag read failed; "
+                "preserve legacy path: %s",
+                exc,
+            )
+            return False
+
+    def _resolve_child_authorization_session(self) -> str | None:
+        """Return the main authorization session only for the enabled v1 path."""
+        if not self._skill_authorization_enabled():
+            return None
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                get_skill_authorization_context,
+            )
+
+            parent_authz = get_skill_authorization_context()
+        except Exception as exc:
+            logger.warning(
+                "[Subagent] authorization parent context read failed; "
+                "preserve legacy path: %s",
+                exc,
+            )
+            return None
+        if (
+            parent_authz is None
+            or not parent_authz.session_id
+            or parent_authz.agent_scope_id != "main"
+        ):
+            return None
+        return parent_authz.session_id
 
     def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
@@ -285,6 +428,163 @@ Act with expertise and professionalism in this domain. Your responsibilities inc
 Approach each task methodically and deliver high-quality results.
 """
 
+    @staticmethod
+    def _build_skill_authorization_rail(
+        agent_scope_id: str,
+        skill_use_rail: Any,
+        approval_session: Session | None = None,
+        session_id: str | None = None,
+    ) -> Any | None:
+        """构建子 Agent 委托式 Skill 门禁；开关关闭时内部零操作。"""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.skill_authorization_rail import (
+                build_skill_registry_resolver,
+            )
+            from jiuwenclaw.agentserver.deep_agent.rails.subagent_skill_authorization_rail import (
+                SubagentSkillAuthorizationRail,
+            )
+
+            async def send_approval(request: Any) -> None:
+                if approval_session is None:
+                    raise RuntimeError("subagent approval session unavailable")
+                payload = request.payload
+                await _emit_subagent_approval(
+                    approval_session, request,
+                    header="子 Agent 授权",
+                    question=payload.get("message") or "子 Agent 请求加载 Skill",
+                    options=payload.get("options") or [],
+                    card=payload.get("card"),
+                )
+
+            return SubagentSkillAuthorizationRail(
+                agent_scope_id=agent_scope_id,
+                session_id=session_id,
+                approval_sender=send_approval if approval_session is not None else None,
+                skill_resolver=build_skill_registry_resolver(
+                    skill_use_rail.get_skills_meta,
+                    skill_dirs_provider=lambda: skill_use_rail.skills_dir,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("[Subagent] SkillAuthorizationRail create failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _build_subagent_permission_rail(
+        agent_scope_id: str,
+        approval_session: Session | None,
+        session_id: str | None = None,
+    ) -> Any | None:
+        """构建 Skill 执行窗口内的子 Agent 工具权限裁决 Rail。"""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.subagent_permission_rail import (
+                SubagentPermissionRail,
+            )
+            from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                get_subagent_approval_registry,
+            )
+
+            async def send_approval(request: Any) -> None:
+                if approval_session is None:
+                    raise RuntimeError("subagent approval session unavailable")
+                payload = request.payload
+                risk = payload.get("risk") or {}
+                risk_level = str(risk.get("level") or "").strip()
+                tool_name = str(payload.get("tool_name") or "").strip()
+                tool_args = payload.get("tool_args")
+                skill_name = str(payload.get("skill_name") or "").strip()
+                reason = str(payload.get("reason") or "").strip()
+                question_parts = [
+                    f"**工具 `{tool_name}` 需要授权才能执行**\n\n",
+                    f"> 发起方：子 Agent `{request.agent_scope_id}`"
+                    f"（当前 Skill：`{skill_name}`）",
+                    "\n\n**关键参数或命令：**\n\n",
+                    _format_tool_args_preview(tool_name, tool_args),
+                ]
+                if reason:
+                    question_parts.append(f"\n\n**权限原因：** {reason}")
+                if risk_level:
+                    question_parts.append(f"\n\n**风险等级：{risk_level}风险**")
+                await _emit_subagent_approval(
+                    approval_session, request,
+                    header=f"权限审批: {tool_name}",
+                    question="".join(question_parts),
+                    options=[
+                        {"label": "本次允许", "description": "仅本次授权执行"},
+                        {"label": "拒绝", "description": "拒绝本次工具调用"},
+                    ],
+                )
+
+            return SubagentPermissionRail(
+                agent_scope_id=agent_scope_id,
+                session_id=session_id,
+                approval_registry=get_subagent_approval_registry(),
+                approval_sender=send_approval if approval_session is not None else None,
+            )
+        except Exception as exc:
+            logger.warning("[Subagent] SubagentPermissionRail create failed: %s", exc)
+            return None
+
+    def _build_direct_subagent_authorization_rails(
+        self,
+        agent_scope_id: str,
+        skill_use_rail: Any,
+        approval_session: Session | None,
+    ) -> tuple[Any, ...]:
+        """只为 main 创建的直属子 Agent装配 v1 动态 Skill 授权链。"""
+        main_session_id = self._resolve_child_authorization_session()
+        if not main_session_id:
+            logger.info(
+                "[Subagent] dynamic skill authorization skipped scope=%s "
+                "reason=disabled_or_unsupported_parent",
+                agent_scope_id,
+            )
+            return ()
+
+        skill_gate_rail = self._build_skill_authorization_rail(
+            agent_scope_id,
+            skill_use_rail,
+            approval_session=approval_session,
+            session_id=main_session_id,
+        )
+        permission_rail = self._build_subagent_permission_rail(
+            agent_scope_id,
+            approval_session,
+            session_id=main_session_id,
+        )
+        if skill_gate_rail is None or permission_rail is None:
+            logger.warning(
+                "[Subagent] dynamic skill authorization rail pair incomplete; "
+                "preserve legacy path scope=%s skill_gate=%s permission=%s",
+                agent_scope_id,
+                skill_gate_rail is not None,
+                permission_rail is not None,
+            )
+            return ()
+        return skill_gate_rail, permission_rail
+
+    @staticmethod
+    def _cleanup_skill_authorization_scope(
+        agent_scope_id: str,
+        session_id: str | None,
+    ) -> None:
+        """子 Agent 销毁 / 完成：清理其 ``agent_scope_id`` 下全部 Grant（best-effort）。"""
+        try:
+            from jiuwenclaw.agentserver.permissions.skill_authorization import (
+                get_skill_grant_store,
+                get_subagent_approval_registry,
+            )
+
+            store = get_skill_grant_store()
+            if session_id:
+                store.clear_scope(session_id, agent_scope_id)
+                get_subagent_approval_registry().cancel_scope(session_id, agent_scope_id)
+        except Exception as exc:
+            logger.warning(
+                "[Subagent] skill grant cleanup failed scope=%s: %s",
+                agent_scope_id, exc,
+            )
+
     async def execute_fork(
         self,
         task: ForkAgentTaskSpec,
@@ -345,6 +645,10 @@ Approach each task methodically and deliver high-quality results.
             # and don't share idx space / locks / op_result bus.
             token_subscope = push_subscope(task.task_id)
 
+            # SkillAuthorizationRail owns the child ContextVar lifecycle.  The
+            # executor only keeps the main session id for scoped cleanup.
+            authz_session_id = self._resolve_child_authorization_session()
+
             # 6. Execute fork agent
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
@@ -359,6 +663,8 @@ Approach each task methodically and deliver high-quality results.
                 self._active_fork_agents.pop(task.task_id, None)
                 pop_subscope(token_subscope)
                 llm_trace_var.reset(token_trace_sid)
+                if authz_session_id:
+                    self._cleanup_skill_authorization_scope(task.task_id, authz_session_id)
 
             logger.info(f"[ForkAgent] Execution completed, task_id={task.task_id}")
 
@@ -475,6 +781,10 @@ Approach each task methodically and deliver high-quality results.
             # own skill_step__{...}.md instead of clashing with the parent's.
             token_subscope = push_subscope(task.task_id)
 
+            # SkillAuthorizationRail owns the child ContextVar lifecycle.  The
+            # executor only keeps the main session id for scoped cleanup.
+            authz_session_id = self._resolve_child_authorization_session()
+
             # 8. Execute with isolated context
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
@@ -489,6 +799,8 @@ Approach each task methodically and deliver high-quality results.
                 self._active_fork_agents.pop(task.task_id, None)
                 pop_subscope(token_subscope)
                 llm_trace_var.reset(token_trace_sid)
+                if authz_session_id:
+                    self._cleanup_skill_authorization_scope(task.task_id, authz_session_id)
 
             logger.info(f"[SpawnAgent] Execution completed, task_id={task.task_id}")
 
@@ -597,19 +909,28 @@ Approach each task methodically and deliver high-quality results.
                 mode="agent.plan",
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
+        skill_dirs, enabled_skills = self._resolve_child_skill_configuration()
+        child_skill_kwargs: dict[str, Any] = {
+            "skills_dir": skill_dirs,
+            "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+            "include_tools": False,
+            "include_skill_body_tools": False,
+        }
+        if enabled_skills is not None:
+            child_skill_kwargs["enabled_skills"] = enabled_skills
         rails = [
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
             # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
             # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
-            SubagentSkillUseRail(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
-                skill_mode=SkillUseRail.SKILL_MODE_ALL,
-                include_tools=False,
-                include_skill_body_tools=False,
-            ),
+            SubagentSkillUseRail(**child_skill_kwargs),
         ]
+        rails.extend(self._build_direct_subagent_authorization_rails(
+            task.task_id,
+            rails[-1],
+            parent_session,
+        ))
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
         if ce_rail is not None:
@@ -745,18 +1066,27 @@ Execute the given task using inherited context and available tools.
                 mode="agent.plan",
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
+        skill_dirs, enabled_skills = self._resolve_child_skill_configuration()
+        child_skill_kwargs: dict[str, Any] = {
+            "skills_dir": skill_dirs,
+            "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+            "include_tools": False,
+            "include_skill_body_tools": False,
+        }
+        if enabled_skills is not None:
+            child_skill_kwargs["enabled_skills"] = enabled_skills
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # 与 spawn 路径同样的 active-skill body lift/pin 接入；
             # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
-            SubagentSkillUseRail(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
-                skill_mode=SkillUseRail.SKILL_MODE_ALL,
-                include_tools=False,
-                include_skill_body_tools=False,
-            ),
+            SubagentSkillUseRail(**child_skill_kwargs),
         ]
+        rails.extend(self._build_direct_subagent_authorization_rails(
+            task.task_id,
+            rails[-1],
+            parent_session,
+        ))
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
         if ce_rail is not None:
