@@ -1,10 +1,26 @@
-; WorkSwarm Inno Setup Installer Script
-; 用法: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\installer.iss
+; Inno Setup installer script
+; 仅由 scripts\build-exe.ps1 调用；wrapper 从 pyproject.toml 读取并传入构建配置。
 
-#define MyAppName "WorkSwarm"
-#define MyAppVersion "0.2.5.beta1"
+#ifndef BuildDisplayName
+  #error BuildDisplayName is required; run scripts\build-exe.ps1
+#endif
+#ifndef BuildVersion
+  #error BuildVersion is required; run scripts\build-exe.ps1
+#endif
+#ifndef BuildExecutableNameWindows
+  #error BuildExecutableNameWindows is required; run scripts\build-exe.ps1
+#endif
+#ifndef BuildDistDirName
+  #error BuildDistDirName is required; run scripts\build-exe.ps1
+#endif
+#ifndef BuildSetupBaseName
+  #error BuildSetupBaseName is required; run scripts\build-exe.ps1
+#endif
+
+#define MyAppName BuildDisplayName
+#define MyAppVersion BuildVersion
 #define MyAppPublisher "openJiuwen"
-#define MyAppExeName "workswarm.exe"
+#define MyAppExeName BuildExecutableNameWindows
 #define MyAppURL "https://openjiuwen.com"
 
 [Setup]
@@ -17,9 +33,9 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=WorkSwarm-setup-{#MyAppVersion}
+OutputBaseFilename={#BuildSetupBaseName}
 SetupIconFile=..\jiuwenswarm\channels\web\frontend\public\logo.ico
-UninstallDisplayIcon={app}\workswarm.exe
+UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
@@ -36,7 +52,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\dist\workswarm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\{#BuildDistDirName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -45,5 +61,5 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 ; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
-; postinstall 在安装向导最后一页显示"运行 WorkSwarm"复选框，由用户决定是否启动
+; postinstall 在安装向导最后一页显示运行应用复选框，由用户决定是否启动
 Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
