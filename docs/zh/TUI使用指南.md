@@ -148,6 +148,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rollback` | - | 回滚到归档 SemVer 版本 | `/evolve_rollback myskill latest` | `agent.plan` / `team` |
 | `/evolve_simplify` | - | 整理、合并某技能的演进经验 | `/evolve_simplify myskill 合并重复经验` | `agent.plan` / `team` |
+| `/evolve_rebuild` | - | 采纳经验并生成 Skill 新版本 | `/evolve_rebuild myskill 加强示例` | `agent.plan` / `team` |
 | `/init` | - | 在 **Code 模式** 下初始化 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` | `/init` | **仅 `code.*`** |
 | `/mcp` | - | 管理 MCP 服务 | `/mcp list`、`/mcp add ...` | 全部 |
 | `/mode` | - | 切换或查看模式 | `/mode`、`/mode code`、`/mode team` | 全部 |
@@ -356,13 +357,13 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/evolve <skill_name> [user_query]` | 为单个 Skill 生成演进记录 | `agent.plan` 下会先扫描当前会话中的工具失败和用户纠错信号；若没有信号且未给 `user_query`，返回“未发现明确演进信号”。Team 模式必须提供 `<user_query>`。 |
 | `/evolve_list <skill_name> [--sort score]` | 查看某 Skill 的经验库 | 展示记录数、平均分、使用/反馈统计、目标 section 与内容预览；当前实现按 score 获取记录。 |
 | `/evolve_simplify <skill_name> [user_intent]` | 智能整理经验库 | 生成可审批的整理方案，用于合并、拆分或清理演进经验。尾随文本会作为整理意图传给后端，不是独立 CLI flag。 |
+| `/evolve_rebuild <skill_name> [user_intent]` | 重建 Skill 版本 | 与控制面 `skills.evolution.rebuild` 同源：采纳经验并生成新版本（prepare → 改写 → finalize）。
 | `/evolve_rollback <skill_name> [version\|latest]` | 回滚归档版本 | 省略 version 时列出可用成对归档；回滚后清空 live `evolutions.json`。 |
-| ~~`/evolve_rebuild`~~ | 已移除 | 请改用 `skills.evolution.rebuild`；`auto_save=true` 时经验落盘后自动生成版本。 |
 
 适用条件：
 
 - `agent.plan`：用于单 Agent Skill 自演进；其它 Agent / Code 子模式不处理这组命令。
-- `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rollback` 可用。
+- `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rebuild`、`/evolve_rollback` 可用。
 - 无参数 `/evolve` 仅在 `agent.plan` 下返回待处理演进记录摘要；Team 模式会要求补充 Skill 名称和演进意图。
 
 审批与状态：
