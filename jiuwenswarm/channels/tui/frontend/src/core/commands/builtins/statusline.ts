@@ -78,11 +78,12 @@ function showHelp(ctx: CommandContext): void {
     "StatusLine — runs a shell command every 2s and displays the output at the bottom of the screen. Supports multi-line output.",
     "",
     "How data is passed:",
-    "  JSON is piped via stdin. On Windows, you can also use the file at $JIUWENSWARM_SL_FILE.",
+    "  JSON is piped via stdin to the configured command.",
+    "  Windows uses Git Bash when installed and falls back to PowerShell.",
     "",
     "Subcommands:",
-    "  /statusline                 — show current configuration",
-    "  /statusline get             — show current configuration",
+    "  /statusline                 — launch the setup agent to create, review, modify, or remove the statusline",
+    "  /statusline get             — always show current configuration (never launches setup)",
     "  /statusline set <command>   — set the shell command to run",
     "  /statusline padding <n>     — set left & right padding (0 or positive)",
     "  /statusline clear           — remove statusline configuration",
@@ -92,7 +93,7 @@ function showHelp(ctx: CommandContext): void {
     "Agent-generated mode :",
     "  /statusline <prompt>        — describe what you want the statusline to show,",
     "                                and the agent will automatically generate the",
-    "                                appropriate shell command and configure it for you.",
+    "                                appropriate platform script and configure it for you.",
     "                                Example: /statusline show my shell PS1 configuration",
     "",
     "How to write a command:",
@@ -101,6 +102,7 @@ function showHelp(ctx: CommandContext): void {
     "  Multi-line output: printf \"line1\\nline2\"",
     "",
     "Examples:",
+    "  Windows: /statusline set 'powershell.exe -NoProfile -File C:/Users/me/.jiuwenswarm-tui/statusline.ps1'",
     "  /statusline set 'jq -r \".mode + \" | \" + .model\"'",
     "  /statusline set 'input=$(cat); echo \"$(echo \"$input\" | jq -r .mode) | $(echo \"$input\" | jq -r .model)\"'",
     "  /statusline set 'basename \"$PWD\" && git branch --show-current 2>/dev/null || echo \"\"'",
@@ -136,13 +138,12 @@ function showActualJsonData(ctx: CommandContext): void {
 }
 
 /**
- * Agent-generated mode: send a prompt to the agent to automatically write a statusline script.
+ * Agent-generated mode: ask the backend to launch the built-in statusline-setup subagent.
  *
- * 
  * - User types: /statusline <description of what they want>
- * - TUI sends it as a chat message with skills_to_use=["script-creator"] metadata
- * - SkillUseRail loads script-creator SKILL.md
- * - Agent writes the script and configures the statusline
+ * - TUI sends it as a prompt-type slash command
+ * - The parent invokes statusline-setup through task_tool
+ * - The subagent reviews or updates the statusline configuration
  */
 function agentGenerate(ctx: CommandContext, prompt: string): void {
   if (!prompt.trim()) {
@@ -151,8 +152,8 @@ function agentGenerate(ctx: CommandContext, prompt: string): void {
     return;
   }
 
-  // Send the prompt as a chat message. The backend build_user_prompt will
-  // detect "/statusline" prefix and inject skills_to_use=["script-creator"].
+  // The backend rewrites this prompt-type command into a task_tool dispatch
+  // for the dedicated built-in statusline-setup subagent.
   const fullPrompt = `/statusline ${prompt.trim()}`;
   const requestId = ctx.sendMessage(fullPrompt);
   if (!requestId) {
@@ -160,6 +161,34 @@ function agentGenerate(ctx: CommandContext, prompt: string): void {
       makeItem(ctx.sessionId, "error", "offline: waiting for reconnect before sending statusline request"),
     );
   }
+}
+
+const DEFAULT_SETUP_DESCRIPTIONS: Record<"zh" | "en", string> = {
+  zh: "配置一个实用的默认状态栏，显示当前模式、模型和上下文占用百分比",
+  en: "configure a practical default status line showing the current mode, model, and context usage percentage",
+};
+
+const EXISTING_SETUP_DESCRIPTIONS: Record<"zh" | "en", string> = {
+  zh: "检查当前状态栏配置，说明现有设置，并帮助我查看、修改或删除状态栏；如果我没有提出具体变更，先询问我想怎么调整",
+  en: "review the current status line configuration and help me inspect, modify, or remove it; if I did not request a specific change, ask what I want to adjust",
+};
+
+function getDefaultSetupDescription(ctx: CommandContext): string {
+  return ctx.preferredLanguage === "zh"
+    ? DEFAULT_SETUP_DESCRIPTIONS.zh
+    : DEFAULT_SETUP_DESCRIPTIONS.en;
+}
+
+function isStatusLineConfigured(): boolean {
+  const sl = getStatusLineConfig();
+  return !!sl && sl.type === "command" && !!sl.command;
+}
+
+function getSetupDescription(ctx: CommandContext): string {
+  if (!isStatusLineConfigured()) return getDefaultSetupDescription(ctx);
+  return ctx.preferredLanguage === "zh"
+    ? EXISTING_SETUP_DESCRIPTIONS.zh
+    : EXISTING_SETUP_DESCRIPTIONS.en;
 }
 
 // Known subcommands that are handled locally (not sent to agent)
@@ -170,7 +199,7 @@ export function createStatusLineCommand(): SlashCommand {
     name: "statusline",
     altNames: ["sl"],
     description: "Configure custom status line footer",
-    usage: "/statusline <set|padding|clear|help|json> | /statusline <prompt>",
+    usage: "/statusline [get|set|padding|clear|help|json|<prompt>]",
     example: "/statusline set 'echo $mode | $model'  OR  /statusline show my PS1 config",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
@@ -233,8 +262,7 @@ export function createStatusLineCommand(): SlashCommand {
     action: (ctx, args) => {
       const trimmedArgs = args.trim();
       if (!trimmedArgs) {
-        // No args — show current config (per docs: "/statusline" shows current config)
-        showCurrentConfig(ctx);
+        agentGenerate(ctx, getSetupDescription(ctx));
         return;
       }
 

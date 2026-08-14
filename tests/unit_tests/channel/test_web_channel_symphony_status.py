@@ -44,7 +44,13 @@ def test_web_channel_preserves_goal_structured_payloads():
                 payload={"event_type": "goal.snapshot", "action": "get", "goal": goal},
                 event_type=EventType.GOAL_SNAPSHOT,
             ),
-            {"event_type": "goal.snapshot", "action": "get", "goal": goal, "session_id": "sess-goal"},
+            {
+                "event_type": "goal.snapshot",
+                "action": "get",
+                "goal": goal,
+                "session_id": "sess-goal",
+                "request_id": "req-goal-get",
+            },
         ),
         (
             "goal.updated",
@@ -59,7 +65,12 @@ def test_web_channel_preserves_goal_structured_payloads():
                 payload={"event_type": "goal.updated", "goal": goal},
                 event_type=EventType.GOAL_UPDATED,
             ),
-            {"event_type": "goal.updated", "goal": goal, "session_id": "sess-goal"},
+            {
+                "event_type": "goal.updated",
+                "goal": goal,
+                "session_id": "sess-goal",
+                "request_id": "req-goal-run",
+            },
         ),
         (
             "runtime.accepted",
@@ -100,6 +111,7 @@ def test_web_channel_preserves_goal_structured_payloads():
                 "message": "round failed",
                 "goal": None,
                 "session_id": "sess-goal",
+                "request_id": "req-goal-run",
             },
         ),
     ]

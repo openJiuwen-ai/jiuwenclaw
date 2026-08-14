@@ -76,10 +76,11 @@ test('classifies streaming, valid, and malformed SVG markup with browser DOM par
   try {
     const unclosedPreview = getSvgPreview('<svg><g>');
     assert.equal(getSvgMarkupStatus(unclosedPreview, false, true), 'streaming');
-    assert.equal(getSvgMarkupStatus(unclosedPreview, false, false), 'previewable');
+    assert.equal(getSvgMarkupStatus(unclosedPreview, false, false), 'invalid');
     assert.equal(getSvgMarkupStatus(getSvgPreview(`<svg xmlns="${SVG_NAMESPACE}"><rect /></svg>`), false, false), 'ready');
     assert.equal(getSvgMarkupStatus(getSvgPreview(`<svg xmlns="${SVG_NAMESPACE}"><rect /></svg>`), true, false), 'ready');
-    assert.equal(getSvgMarkupStatus(getSvgPreview(`<svg xmlns="${SVG_NAMESPACE}"><g></svg>`), true, false), 'previewable');
+    assert.equal(getSvgMarkupStatus(getSvgPreview('<svg viewBox="0 0 950 580"><rect /></svg>'), true, false), 'ready');
+    assert.equal(getSvgMarkupStatus(getSvgPreview(`<svg xmlns="${SVG_NAMESPACE}"><g></svg>`), true, false), 'invalid');
     assert.equal(getSvgMarkupStatus(getSvgPreview('<div />'), true, false), 'invalid');
 
     const normalized = new dom.window.DOMParser().parseFromString(unclosedPreview.markup, 'image/svg+xml');
@@ -201,6 +202,8 @@ test('renders SVG markup only inside a sandboxed iframe and falls back to code f
     assert.ok(container.querySelector('[data-svg-status="invalid"] .svg-diagram__code-view'));
     assert.ok(container.querySelector('[data-svg-status="invalid"] .diagram-toolbar-status--warning'));
     assert.equal(container.querySelector('[data-svg-status="invalid"] .diagram-toolbar-status--error'), null);
+    assert.match(container.textContent, /SVG code contains errors/);
+    assert.equal(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Image')?.disabled, true);
     assert.equal(container.querySelector('[data-svg-status="invalid"] iframe'), null);
   } finally {
     if (root) await act(async () => root.unmount());
@@ -305,7 +308,7 @@ test('ignores a stale Mermaid render after the source changes', async () => {
   }
 });
 
-test('keeps the image tab selected when a response ends with browser-renderable unclosed SVG', async () => {
+test('keeps a browser-renderable incomplete SVG visible with an invalid status', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
   const restore = installGlobals({
     DOMParser: dom.window.DOMParser,
@@ -335,9 +338,43 @@ test('keeps the image tab selected when a response ends with browser-renderable 
     });
     assert.doesNotMatch(container.textContent, /Drawing/);
     assert.match(container.textContent, /SVG code contains errors/);
-    assert.ok(container.querySelector('[data-svg-status="previewable"] iframe'));
-    assert.ok(container.querySelector('[data-svg-status="previewable"] .diagram-toolbar-status--warning'));
-    assert.equal(container.querySelector('[data-svg-status="previewable"] [aria-pressed="true"]')?.textContent, 'Image');
+    const diagram = container.querySelector('[data-svg-status="invalid"]');
+    assert.ok(diagram?.querySelector('iframe'));
+    assert.equal(diagram.querySelector('[aria-pressed="true"]')?.textContent, 'Image');
+    assert.equal(Array.from(diagram.querySelectorAll('button')).find(button => button.textContent === 'Image')?.disabled, false);
+  } finally {
+    if (root) await act(async () => root.unmount());
+    restore();
+    dom.window.close();
+  }
+});
+
+test('keeps the browser-renderable portion of multiple SVG roots visible with an invalid status', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>');
+  const restore = installGlobals({
+    DOMParser: dom.window.DOMParser,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+    Node: dom.window.Node,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    window: dom.window,
+  });
+  const container = dom.window.document.querySelector('#root');
+  const i18n = createI18n();
+  const markdown = ['```svg', '<svg viewBox="0 0 10 10" />', '<svg viewBox="0 0 20 20" />', '<svg viewBox="0 0 30 30" />', '```'].join('\n');
+  let root;
+  try {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(I18nextProvider, { i18n }, createElement(MarkdownRenderer, { content: markdown })));
+    });
+
+    const diagram = container.querySelector('[data-svg-status="invalid"]');
+    assert.ok(diagram?.querySelector('iframe'));
+    assert.equal(diagram.querySelector('[aria-pressed="true"]')?.textContent, 'Image');
+    assert.equal(Array.from(diagram.querySelectorAll('button')).find(button => button.textContent === 'Image')?.disabled, false);
+    assert.match(container.textContent, /SVG code contains errors/);
   } finally {
     if (root) await act(async () => root.unmount());
     restore();
@@ -371,6 +408,14 @@ test('keeps Markdown behavior compatible while dispatching supported fenced bloc
     `<svg xmlns="${SVG_NAMESPACE}" viewBox="0 0 10 10"><rect width="10" height="10" /></svg>`,
     '```',
     '',
+    '```xml',
+    `<svg xmlns="${SVG_NAMESPACE}" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" /></svg>`,
+    '```',
+    '',
+    '```html',
+    `<div class="icon"><svg viewBox="0 0 10 10"><path d="M0 0h10v10z" /></svg></div>`,
+    '```',
+    '',
     '```mermaid',
     'graph TD; A-->B',
     '',
@@ -389,6 +434,8 @@ test('keeps Markdown behavior compatible while dispatching supported fenced bloc
     assert.equal(links.find(link => link.textContent === '片段').hasAttribute('target'), false);
     assert.ok(container.querySelector('.chat-markdown-table-wrap table'));
     assert.ok(container.querySelector('[data-svg-status="ready"] iframe'));
+    assert.ok(container.querySelector('pre code.language-xml'));
+    assert.ok(container.querySelector('pre code.language-html'));
     assert.ok(container.querySelector('pre code.language-mermaid'));
     assert.equal(container.querySelector('[data-host-injection="blocked"]'), null);
     assert.match(container.textContent, /<section data-host-injection="blocked">raw html<\/section>/);

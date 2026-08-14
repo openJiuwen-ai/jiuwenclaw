@@ -92,7 +92,13 @@ def build_mcp_server_config(
         params: dict[str, Any] = {}
         headers = entry.get("headers")
         if isinstance(headers, dict):
-            params["headers"] = {str(k): str(v) for k, v in headers.items()}
+            normalized_headers = {str(k): str(v) for k, v in headers.items()}
+            params["headers"] = normalized_headers
+            # StreamableHttpClient sends auth via ``auth_headers`` (routed
+            # through ``_auth_provider``), not ``params.headers``. Mirror so
+            # both the probe and real connect carry Authorization (otherwise
+            # 401 → anyio task-group corruption).
+            payload["auth_headers"] = dict(normalized_headers)
         timeout_s = entry.get("timeout_s")
         if isinstance(timeout_s, (int, float)) and int(timeout_s) > 0:
             params["timeout_s"] = int(timeout_s)
@@ -120,52 +126,104 @@ def build_enabled_mcp_server_configs(
 
 
 async def preflight_mcp_server_reachable(
-    cfg: McpServerConfig, *, timeout: float = 3.0
+    cfg: McpServerConfig, *, timeout: float | None = None
 ) -> tuple[bool, str]:
-    """Cheap reachability probe for HTTP-based MCP servers.
+    """Reachability + auth probe for HTTP-based MCP servers.
 
-    Why this exists: when an HTTP MCP server is unreachable, openjiuwen still
-    enters the mcp ``streamablehttp_client`` async context (which spins up an
-    anyio task group with background request tasks) before failing on
-    ``session.initialize()``. Tearing that context back down leaks orphaned
-    background tasks and raises noisy ``aclose(): asynchronous generator is
-    already running`` / ``Attempted to exit cancel scope in a different task``
-    errors. Probing the host:port first lets us skip registration cleanly.
+    Uses a plain ``httpx.AsyncClient`` POST (never ``client.connect()``, which
+    enters the mcp SDK's anyio task group and leaks ghost tasks on 401/timeout
+    — the "restart then can't chat" symptom). Catches: 401/403 (auth rejected),
+    timeout (server not responding), connect error (unreachable). Other status
+    codes defer to the real connect path; this probe only guards reachability
+    and auth, not protocol correctness.
 
-    Returns ``(reachable, reason)``. Non-HTTP transports (stdio/playwright/…)
-    report reachable — they are spawned locally and have no cheap probe.
+    Non-HTTP transports report reachable (no cheap probe). Shared by the
+    config-time ``_pre_check_mcp_http_auth`` and cold-start
+    ``_register_mcp_server`` so both gates stay identical.
     """
     transport = (getattr(cfg, "client_type", "") or "").strip().lower()
     if transport not in _HTTP_MCP_TRANSPORTS:
         return True, ""
 
+    import httpx
+
     url = (getattr(cfg, "server_path", "") or "").strip()
-    parsed = urlparse(url)
-    host = parsed.hostname
-    if not host:
-        return False, f"invalid url: {url!r}"
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not url:
+        return False, "invalid url: empty"
+
+    # Per-server timeout_s wins; else 10s default.
+    raw_timeout = (getattr(cfg, "params", None) or {}).get("timeout_s")
+    if isinstance(raw_timeout, (int, float)) and int(raw_timeout) > 0:
+        read_t = float(int(raw_timeout))
+    elif timeout is not None and timeout > 0:
+        read_t = float(timeout)
+    else:
+        read_t = 10.0
+    # Short connect (unreachable host fails fast); read catches no-response.
+    http_timeout = httpx.Timeout(connect=min(read_t, 5.0), read=read_t, write=5.0, pool=5.0)
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    # Caller headers live in params.headers and/or auth_headers. 
+    params = getattr(cfg, "params", None) or {}
+    cfg_headers = params.get("headers") if isinstance(params, dict) else None
+    if isinstance(cfg_headers, dict):
+        headers.update({str(k): str(v) for k, v in cfg_headers.items()})
+    auth_headers = getattr(cfg, "auth_headers", None)
+    if isinstance(auth_headers, dict):
+        headers.update({str(k): str(v) for k, v in auth_headers.items()})
+    # auth_query_params goes to the URL query string, matching the real connect.
+    query_params = getattr(cfg, "auth_query_params", None)
+    if isinstance(query_params, dict):
+        query_params = {str(k): str(v) for k, v in query_params.items()}
+    else:
+        query_params = None
+
+    # Body must mirror the mcp SDK's initialize exactly: some gateways (e.g.
+    # GitHub Copilot) return a body-format 400 before auth, masking a real 401.
+    protocol_version = ""
+    try:
+        from mcp.types import LATEST_PROTOCOL_VERSION
+        protocol_version = LATEST_PROTOCOL_VERSION
+    except Exception:  # noqa: BLE001
+        protocol_version = "2025-06-18"
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "mcp", "version": "0.1.0"},
+            },
+        }
+    )
 
     try:
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
-        )
-    except asyncio.TimeoutError:
-        return False, f"tcp connect to {host}:{port} timed out after {timeout}s"
-    except Exception as exc:
-        # Connection refused / DNS failure / etc. — also defensive: the probe
-        # itself must never break startup with an unexpected exception type.
-        return False, f"tcp connect to {host}:{port} failed: {type(exc).__name__}: {exc}"
+        async with httpx.AsyncClient(timeout=http_timeout, follow_redirects=False) as http:
+            resp = await http.post(url, headers=headers, params=query_params, content=body)
+    except httpx.TimeoutException as exc:
+        return False, f"http probe timed out after {read_t}s (server not responding): {type(exc).__name__}"
+    except (httpx.ConnectError, httpx.NetworkError, httpx.UnsupportedProtocol) as exc:
+        return False, f"unreachable: {type(exc).__name__}: {exc}"
+    except httpx.InvalidURL as exc:
+        return False, f"invalid url: {exc}"
+    except Exception as exc:  # noqa: BLE001 — probe must never raise
+        return False, f"probe failed: {type(exc).__name__}: {exc}"
 
-    writer.close()
-    try:
-        await writer.wait_closed()
-    except Exception as exc:
-        logger.debug(
-            "[mcp-preflight] reachability probe socket close failed for %s:%s: %r",
-            host, port, exc,
-        )
-    return True, ""
+    if resp.status_code in (401, 403):
+        return False, f"auth rejected (HTTP {resp.status_code})"
+    # Other 4xx/5xx (e.g. malformed-auth 400) is just as fatal at cold-start
+    # as 401: raise_for_status() corrupts the anyio task group either way.
+    # Gate strictly — a healthy server answers 2xx/3xx to a well-formed probe.
+    if resp.status_code >= 400:
+        snippet = ""
+        try:
+            snippet = (resp.text or "")[:120].replace("\n", " ")
+        except Exception:  # noqa: BLE001
+            pass
+        return False, f"http {resp.status_code} from server{(': ' + snippet) if snippet else ''}"
+    return True, f"ok (http {resp.status_code})"
 
 
 def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:

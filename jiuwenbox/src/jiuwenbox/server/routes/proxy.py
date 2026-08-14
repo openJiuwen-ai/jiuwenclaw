@@ -17,9 +17,9 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from jiuwenbox.logging_config import configure_logging
-from jiuwenbox.models.policy import ProxyRouteEntry
-from jiuwenbox.proxy.inference_privacy_proxy import InferencePrivacyProxyConfig, ProxyRoute
-from jiuwenbox.proxy.inference_privacy_proxy_manager import get_proxy_manager
+from jiuwenbox.models.policy import ProxyBasicAuth, ProxyRouteEntry
+from jiuwenbox.proxy.inference_privacy_proxy import InferencePrivacyProxyConfig
+from jiuwenbox.proxy.inference_privacy_proxy_manager import build_proxy_route, get_proxy_manager
 
 router = APIRouter(tags=["proxies"])
 configure_logging()
@@ -58,6 +58,7 @@ class RouteRequest(BaseModel):
     path_prefix: str = Field(..., description="Path prefix to match (e.g., /openai)")
     target_endpoint: str = Field(..., description="Target endpoint URL (e.g., https://api.openai.com)")
     api_key: str = Field(default="", description="API key to inject")
+    basic_auth: ProxyBasicAuth | None = Field(default=None, description="HTTP Basic credentials to inject")
     skip_cert_verify: bool = Field(default=False, description="Skip TLS cert verification")
 
 
@@ -74,25 +75,26 @@ async def create_proxy(route: RouteRequest):
             path_prefix=route.path_prefix,
             target_endpoint=route.target_endpoint,
             api_key=route.api_key,
+            basic_auth=route.basic_auth,
             skip_cert_verify=route.skip_cert_verify,
         )
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    
+
     proxy_name = validated_entry.path_prefix.lstrip("/").replace("/", "-") or "default"
-    
+
     existing = await _mgr().get_proxy(proxy_name)
     if existing is not None:
         raise HTTPException(status_code=400, detail=f"Route '{validated_entry.path_prefix}' already exists")
-    
-    proxy_route = ProxyRoute(
-        path_prefix=validated_entry.path_prefix,
-        target_endpoint=validated_entry.target_endpoint,
-        api_key=validated_entry.api_key,
-        skip_cert_verify=validated_entry.skip_cert_verify,
-    )
+
+    try:
+        proxy_route = build_proxy_route(validated_entry)
+    except ValueError as e:
+        # Unreadable password_file or invalid password content (generic message, no secret).
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     config = InferencePrivacyProxyConfig(routes=[proxy_route])
-    
+
     try:
         result = await _mgr().create_proxy(proxy_name, config)
         return result
@@ -163,21 +165,21 @@ async def update_proxy(proxy_name: str, route: RouteRequest):
             path_prefix=route.path_prefix,
             target_endpoint=route.target_endpoint,
             api_key=route.api_key,
+            basic_auth=route.basic_auth,
             skip_cert_verify=route.skip_cert_verify,
         )
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    
+
     existing = await _mgr().get_proxy(validated_name)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Proxy '{validated_name}' not found")
 
-    proxy_route = ProxyRoute(
-        path_prefix=validated_entry.path_prefix,
-        target_endpoint=validated_entry.target_endpoint,
-        api_key=validated_entry.api_key,
-        skip_cert_verify=validated_entry.skip_cert_verify,
-    )
+    try:
+        proxy_route = build_proxy_route(validated_entry)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     config = InferencePrivacyProxyConfig(
         listen_port=existing["listen_port"],
         listen_host=existing.get("listen_host", "127.0.0.1"),

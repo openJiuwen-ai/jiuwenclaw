@@ -740,7 +740,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     setBuildMode(null);
     setLoading(false);
     if (status === 'error') {
-      setError(data.detail || data.build_progress?.label || '技能总谱刷新失败');
+      setError(data.detail || data.build_progress?.label || t('skills.graph.errors.refreshFailed'));
     }
     return true;
   }, []);
@@ -1100,7 +1100,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           }
         }
       } catch {
-        // 被动轮询只用于同步对话侧触发的总谱进度，不影响当前总谱交互。
+        // 被动轮询只用于同步对话侧触发的图谱进度，不影响当前图谱交互。
       }
       if (!stopped) {
         timer = window.setTimeout(() => {
@@ -1395,23 +1395,24 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   }, [onReadingChange]);
 
   return (
-    <div className="skill-graph-panel">
-      <aside className="skill-graph-panel__sidebar">
-        <div className="skill-graph-panel__stats skill-graph-panel__stats--compact">
-          <span><strong>{visibleSkillNodes.length}</strong>{t('skills.graph.stats.skillsSuffix')}</span>
-          <span><strong>{visible.edges.length}</strong>{t('skills.graph.stats.edgesSuffix')}</span>
+    <div data-testid="skill-graph-panel" className="skill-graph-panel">
+      <aside data-testid="skill-graph-panel-sidebar" className="skill-graph-panel__sidebar">
+        <div data-testid="skill-graph-panel-stats" className="skill-graph-panel__stats skill-graph-panel__stats--compact">
+          <span data-testid="skill-graph-panel-stats-skill-count"><strong>{visibleSkillNodes.length}</strong>{t('skills.graph.stats.skillsSuffix')}</span>
+          <span data-testid="skill-graph-panel-stats-edge-count"><strong>{visible.edges.length}</strong>{t('skills.graph.stats.edgesSuffix')}</span>
         </div>
 
-        <label className="skill-graph-panel__search">
+        <label data-testid="skill-graph-panel-search" className="skill-graph-panel__search">
           <Search size={16} aria-hidden="true" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            data-testid="skill-graph-panel-search-input"
             placeholder={t('skills.graph.searchPlaceholder')}
           />
         </label>
 
-        <div className="skill-graph-panel__filters">
+        <div data-testid="skill-graph-panel-filters" className="skill-graph-panel__filters">
           <label>
             <span>{t('skills.graph.minConfidence', { percent: Math.round(minConfidence * 100) })}</span>
             <input
@@ -1420,6 +1421,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
               max={1}
               step={0.05}
               value={minConfidence}
+              data-testid="skill-graph-panel-min-confidence-slider"
               onChange={(event) => {
                 minConfidenceTouchedRef.current = true;
                 setMinConfidence(Number(event.target.value));
@@ -1428,14 +1430,15 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           </label>
         </div>
 
-        <div className="skill-graph-panel__actions">
-          <button type="button" onClick={loadGraph} disabled={isBusy} title={t('skills.graph.actions.read')}>
+        <div data-testid="skill-graph-panel-actions" className="skill-graph-panel__actions">
+          <button type="button" onClick={loadGraph} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
             {loading ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
           </button>
           <button
             type="button"
             onClick={() => void rebuildGraph('incremental')}
             disabled={isBusy}
+            data-testid="skill-graph-panel-action-incremental-build"
             title={t('skills.graph.actions.incrementalBuild')}
           >
             {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <GitBranch size={16} aria-hidden="true" />}
@@ -1444,6 +1447,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             type="button"
             onClick={cancelBuild}
             disabled={!canCancelBuild}
+            data-testid="skill-graph-panel-action-cancel-build"
             title={t('skills.graph.actions.cancelBuild')}
           >
             {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <X size={16} aria-hidden="true" />}
@@ -1452,35 +1456,36 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             type="button"
             onClick={() => void rebuildGraph('full')}
             disabled={isBusy}
+            data-testid="skill-graph-panel-action-full-rebuild"
             title={t('skills.graph.actions.fullRebuild')}
           >
             {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RotateCcw size={16} aria-hidden="true" />}
           </button>
-          <button type="button" onClick={fitView} disabled={!visible.nodes.length} title={t('skills.graph.actions.fitView')}>
+          <button type="button" onClick={fitView} disabled={!visible.nodes.length} data-testid="skill-graph-panel-action-fit-view" title={t('skills.graph.actions.fitView')}>
             <Focus size={16} aria-hidden="true" />
           </button>
         </div>
 
         {(updating || showBuildLogPanel) ? (
-          <div className="skill-graph-panel__build-log">
-            <div className="skill-graph-panel__progress-head">
-              <span>{progressTitle}</span>
-              <strong>{currentProgressPercent}%</strong>
+          <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
+            <div data-testid="skill-graph-panel-progress-head" className="skill-graph-panel__progress-head">
+              <span data-testid="skill-graph-panel-progress-title">{progressTitle}</span>
+              <strong data-testid="skill-graph-panel-progress-percent">{currentProgressPercent}%</strong>
             </div>
-            <div className="skill-graph-panel__progress-track" aria-hidden="true">
+            <div data-testid="skill-graph-panel-progress-track" className="skill-graph-panel__progress-track" aria-hidden="true">
               <span style={{ width: `${currentProgressPercent}%` }} />
             </div>
             {buildMetricsText ? (
-              <div className="skill-graph-panel__build-metrics">
+              <div data-testid="skill-graph-panel-build-metrics" className="skill-graph-panel__build-metrics">
                 <span>{buildMetricsText}</span>
               </div>
             ) : null}
-            <div className="skill-graph-panel__log-list">
+            <div data-testid="skill-graph-panel-log-list" className="skill-graph-panel__log-list">
               {recentBuildLog.length === 0 ? (
-                <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.status.waitingBuildLogs')}</div>
+                <div data-testid="skill-graph-panel-log-list-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.status.waitingBuildLogs')}</div>
               ) : (
                 recentBuildLog.map((entry, index) => (
-                  <div className="skill-graph-panel__log-row" key={`${entry.ts || 'log'}-${entry.stage || index}-${index}`}>
+                  <div data-testid="skill-graph-panel-log-row" data-variant={entry.ts} className="skill-graph-panel__log-row" key={`${entry.ts || 'log'}-${entry.stage || index}-${index}`}>
                     <span>{buildLogTime(entry)}</span>
                     <strong>{buildLogSummary(entry, t)}</strong>
                   </div>
@@ -1491,16 +1496,16 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         ) : null}
 
         {error && !isGraphBuildRunning ? (
-          <div className="skill-graph-panel__error">
+          <div data-testid="skill-graph-panel-error" className="skill-graph-panel__error">
             <AlertTriangle size={16} aria-hidden="true" />
-            <span>{error}</span>
+            <span data-testid="skill-graph-panel-error-text">{error}</span>
           </div>
         ) : null}
 
-        <section className="skill-graph-panel__node-list">
-          <h3>{t('skills.graph.skillList')}</h3>
+        <section data-testid="skill-graph-panel-node-list" className="skill-graph-panel__node-list">
+          <h3 data-testid="skill-graph-panel-node-list-title">{t('skills.graph.skillList')}</h3>
           {visibleSkillNodes.length === 0 ? (
-            <div className="skill-graph-panel__empty">{t('skills.graph.noVisibleSkills')}</div>
+            <div data-testid="skill-graph-panel-node-list-empty" className="skill-graph-panel__empty">{t('skills.graph.noVisibleSkills')}</div>
           ) : (
             [...visibleSkillNodes]
               .sort((a, b) => b.degree - a.degree)
@@ -1509,6 +1514,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 <button
                   type="button"
                   key={node.id}
+                  data-testid="skill-graph-panel-node" data-variant={node.id}
                   className={selectedNode?.id === node.id ? 'is-active' : ''}
                   onClick={() => selectNode(node)}
                 >
@@ -1520,14 +1526,15 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         </section>
       </aside>
 
-      <section className="skill-graph-panel__canvas-wrap">
+      <section data-testid="skill-graph-panel-canvas-wrap" className="skill-graph-panel__canvas-wrap">
         {graphUpdatedAt ? (
-          <div className="skill-graph-panel__graph-meta">
+          <div data-testid="skill-graph-panel-graph-meta" className="skill-graph-panel__graph-meta">
             {t('skills.graph.updatedAt', { time: graphUpdatedAt })}
           </div>
         ) : null}
         <canvas
           ref={canvasRef}
+          data-testid="skill-graph-panel-canvas"
           onPointerDown={(event) => {
             dragRef.current = { active: true, moved: false, x: event.clientX, y: event.clientY };
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -1563,38 +1570,38 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           }}
         />
         {isBusy ? (
-          <div className={`skill-graph-panel__loading${graphUpdatedAt ? ' skill-graph-panel__loading--below-meta' : ''}`}>
+          <div data-testid="skill-graph-panel-loading" className={`skill-graph-panel__loading${graphUpdatedAt ? ' skill-graph-panel__loading--below-meta' : ''}`}>
             <Loader2 size={18} className="skill-graph-panel__spin" aria-hidden="true" />
-            <span>{isGraphBuildRunning ? `${progressTitle} · ${currentProgressPercent}%` : t('skills.graph.status.reading')}</span>
+            <span data-testid="skill-graph-panel-loading-text">{isGraphBuildRunning ? `${progressTitle} · ${currentProgressPercent}%` : t('skills.graph.status.reading')}</span>
           </div>
         ) : null}
       </section>
 
-      <aside className="skill-graph-panel__detail">
+      <aside data-testid="skill-graph-panel-detail" className="skill-graph-panel__detail">
         {selectedNode ? (
           <>
-            <div>
-              <h3>{selectedNode.label}</h3>
-              <p>{selectedNode.id}</p>
+            <div data-testid="skill-graph-panel-detail-head">
+              <h3 data-testid="skill-graph-panel-detail-title">{selectedNode.label}</h3>
+              <p data-testid="skill-graph-panel-detail-id">{selectedNode.id}</p>
             </div>
-            <div className="skill-graph-panel__detail-grid">
-              <span>{t('skills.graph.inDegree')}<strong>{selectedNode.inDegree}</strong></span>
-              <span>{t('skills.graph.outDegree')}<strong>{selectedNode.outDegree}</strong></span>
+            <div data-testid="skill-graph-panel-detail-grid" className="skill-graph-panel__detail-grid">
+              <span data-testid="skill-graph-panel-detail-in-degree">{t('skills.graph.inDegree')}<strong>{selectedNode.inDegree}</strong></span>
+              <span data-testid="skill-graph-panel-detail-out-degree">{t('skills.graph.outDegree')}<strong>{selectedNode.outDegree}</strong></span>
             </div>
             {asString(selectedNode.properties.description) ? (
-              <p className="skill-graph-panel__description">
+              <p data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
                 {asString(selectedNode.properties.description)}
               </p>
             ) : null}
-            <div className="skill-graph-panel__io-sections">
-              <section className="skill-graph-panel__io-section skill-graph-panel__io-section--input">
-                <h4>{t('skills.graph.inputs')}</h4>
+            <div data-testid="skill-graph-panel-io-sections" className="skill-graph-panel__io-sections">
+              <section data-testid="skill-graph-panel-io-section-input" className="skill-graph-panel__io-section skill-graph-panel__io-section--input">
+                <h4 data-testid="skill-graph-panel-io-section-input-title">{t('skills.graph.inputs')}</h4>
                 {detailInputs.length === 0 ? (
-                  <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noInputs')}</div>
+                  <div data-testid="skill-graph-panel-io-section-input-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noInputs')}</div>
                 ) : (
-                  <div className="skill-graph-panel__tags">
+                  <div data-testid="skill-graph-panel-io-section-input-tags" className="skill-graph-panel__tags">
                     {detailInputs.slice(0, 18).map((item) => (
-                      <span key={item.key} title={item.meta || item.label}>
+                      <span key={item.key} data-testid="skill-graph-panel-io-section-input-tag" data-variant={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1602,14 +1609,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                   </div>
                 )}
               </section>
-              <section className="skill-graph-panel__io-section skill-graph-panel__io-section--output">
-                <h4>{t('skills.graph.outputs')}</h4>
+              <section data-testid="skill-graph-panel-io-section-output" className="skill-graph-panel__io-section skill-graph-panel__io-section--output">
+                <h4 data-testid="skill-graph-panel-io-section-output-title">{t('skills.graph.outputs')}</h4>
                 {detailOutputs.length === 0 ? (
-                  <div className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noOutputs')}</div>
+                  <div data-testid="skill-graph-panel-io-section-output-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noOutputs')}</div>
                 ) : (
-                  <div className="skill-graph-panel__tags">
+                  <div data-testid="skill-graph-panel-io-section-output-tags" className="skill-graph-panel__tags">
                     {detailOutputs.slice(0, 18).map((item) => (
-                      <span key={item.key} title={item.meta || item.label}>
+                      <span key={item.key} data-testid="skill-graph-panel-io-section-output-tag" data-variant={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1618,11 +1625,11 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 )}
               </section>
               {detailTasks.length > 0 ? (
-                <section className="skill-graph-panel__io-section skill-graph-panel__io-section--task">
-                  <h4>{t('skills.graph.tasks')}</h4>
-                  <div className="skill-graph-panel__tags">
+                <section data-testid="skill-graph-panel-io-section-task" className="skill-graph-panel__io-section skill-graph-panel__io-section--task">
+                  <h4 data-testid="skill-graph-panel-io-section-task-title">{t('skills.graph.tasks')}</h4>
+                  <div data-testid="skill-graph-panel-io-section-task-tags" className="skill-graph-panel__tags">
                     {detailTasks.slice(0, 18).map((item) => (
-                      <span key={item.key} title={item.meta || item.label}>
+                      <span key={item.key} data-testid="skill-graph-panel-io-section-task-tag" data-variant={item.key} title={item.meta || item.label}>
                         {item.label}
                         {item.meta ? <small>{item.meta}</small> : null}
                       </span>
@@ -1631,10 +1638,10 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 </section>
               ) : null}
             </div>
-            <div className="skill-graph-panel__related">
-              <h4>{t('skills.graph.relatedEdges')}</h4>
+            <div data-testid="skill-graph-panel-related" className="skill-graph-panel__related">
+              <h4 data-testid="skill-graph-panel-related-title">{t('skills.graph.relatedEdges')}</h4>
               {relatedEdges.length === 0 ? (
-                <div className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
+                <div data-testid="skill-graph-panel-related-empty" className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
               ) : (
                 relatedEdges.slice(0, 80).map((edge, index) => {
                   const otherId = edge.source === selectedNode.id ? edge.target : edge.source;
@@ -1643,6 +1650,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                     <button
                       type="button"
                       key={`${edge.source}-${edge.target}-${index}`}
+                      data-testid="skill-graph-panel-related-edge" data-variant={`${edge.source}-${edge.target}`}
                       onClick={() => {
                         if (other) selectNode(other);
                       }}
@@ -1662,7 +1670,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             </div>
           </>
         ) : (
-          <div className="skill-graph-panel__empty skill-graph-panel__detail-empty">{t('skills.graph.selectSkillHint')}</div>
+          <div data-testid="skill-graph-panel-detail-empty" className="skill-graph-panel__empty skill-graph-panel__detail-empty">{t('skills.graph.selectSkillHint')}</div>
         )}
       </aside>
     </div>

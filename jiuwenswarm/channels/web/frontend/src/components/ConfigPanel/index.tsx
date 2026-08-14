@@ -394,6 +394,7 @@ const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
   "proactive_recommendation_tick_interval_minutes",
   "kv_cache_release_enabled",
   "kv_cache_affinity_enabled",
+  "symphony_enabled",
   "symphony_dynamic_graph_enabled",
 ]);
 
@@ -4458,7 +4459,7 @@ export function ConfigPanel({
               <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
             <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
-              {(["model", "agent", "security", "other"] as const).map((tab) => (
+              {(["model", "security", "other"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"

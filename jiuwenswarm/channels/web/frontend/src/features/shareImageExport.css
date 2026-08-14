@@ -184,7 +184,19 @@
   display: none;
 }
 
-/* Keep the full Mermaid diagram visible in share image */
+/* Export only the rendered diagram, without the interactive viewer chrome. */
+.share-image-document .diagram-container {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.share-image-document .diagram-container__toolbar {
+  display: none;
+}
+
+/* Keep the full diagram visible without an inner scrollbar in share images. */
 .share-image-document .mermaid-canvas {
   overflow: visible !important;
 }
@@ -216,13 +228,26 @@
 .share-image-document .tool-tree-item__detail-pre,
 .share-image-document .beam-tree__body,
 .share-image-document .skill-path-tree__canvas,
-.share-image-document .svg-diagram__canvas,
-.share-image-document .svg-diagram__code-view,
 .share-image-document .a2ui-message-content .a2ui-card > section {
   height: auto !important;
   max-height: none !important;
   overflow-y: visible !important;
   scrollbar-gutter: auto !important;
+}
+
+.share-image-document .svg-diagram__canvas {
+  height: auto !important;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  scrollbar-gutter: auto;
+  background: transparent;
+}
+
+.share-image-document .svg-diagram__code-view {
+  height: auto !important;
+  max-height: none;
+  overflow: visible;
 }
 
 .share-image-document .chat-bubble,

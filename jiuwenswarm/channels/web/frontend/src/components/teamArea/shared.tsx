@@ -263,6 +263,11 @@ export const getBoardTaskTitle = (task: SessionTeamTask): string => {
 export const getBoardTaskContent = (task: SessionTeamTask): string => {
   const content = task.content?.trim();
   if (!content) return '';
+  // System-generated hints arrive as an i18n key prefixed with "i18n:"; translate
+  // it per the current UI language. Plain user/agent text is never prefixed.
+  if (content.startsWith('i18n:')) {
+    return i18n.t(content.slice(5));
+  }
   return content === getBoardTaskTitle(task) ? '' : content;
 };
 

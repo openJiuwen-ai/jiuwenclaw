@@ -25,7 +25,11 @@ from jiuwenswarm.server.runtime.session.work_mode import (
 logger = logging.getLogger(__name__)
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
-_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool]] = queue.Queue(maxsize=5000)
+# 队列项: (session_id, metadata, preserve_pin_fields, rebind_gen_at_enqueue)
+# rebind_gen_at_enqueue 用于检测"入队后发生过 rebind"的陈旧快照:
+# worker 处理时若发现该值 < 当前 rebind_gen, 说明此快照早于一次 project 重绑,
+# 需从磁盘保留 rebind 写入的 project 字段, 防止陈旧快照覆盖重绑结果。
+_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], bool, int]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 # Reentrant: the read path now holds this lock too (see _read_metadata).
@@ -36,6 +40,27 @@ _FILE_LOCK = threading.RLock()
 # 内存缓存: 解决异步写入时读取到陈旧磁盘数据的竞态条件
 _METADATA_CACHE: dict[str, dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
+
+# 会话级 project 重绑版本号: 每次 rebind_session_project 自增。
+# _enqueue_write 入队时捕获当前值; worker 处理时若发现入队值 < 当前值,
+# 说明该快照早于一次重绑, 需从磁盘保留 rebind 写入的 project 字段
+# (project_id/project_dir/work_mode/channel_metadata), 防止陈旧异步快照
+# 在 worker 写回时覆盖刚完成的 rebind。
+_SESSION_REBIND_GEN: dict[str, int] = {}
+_REBIND_GEN_LOCK = threading.Lock()
+
+
+def _get_rebind_gen(session_id: str) -> int:
+    """读取会话当前的重绑版本号（无重绑时为 0）。"""
+    with _REBIND_GEN_LOCK:
+        return _SESSION_REBIND_GEN.get(session_id, 0)
+
+
+def _bump_rebind_gen(session_id: str) -> None:
+    """自增会话的重绑版本号, 使此前已入队但尚未处理的陈旧快照失效。"""
+    with _REBIND_GEN_LOCK:
+        _SESSION_REBIND_GEN[session_id] = _SESSION_REBIND_GEN.get(session_id, 0) + 1
+
 
 # 会话标题自动生成的截取长度
 _TITLE_MAX_LEN = 50
@@ -361,12 +386,22 @@ def _write_metadata_sync(
     session_id: str,
     metadata: dict[str, Any],
     preserve_pin_fields: bool = False,
+    preserve_rebound_fields: bool = False,
+    rebind_gen_at_enqueue: int | None = None,
 ) -> dict[str, Any]:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
     注意: 不更新 _METADATA_CACHE。缓存仅由 _enqueue_write 维护,
     避免 gateway 进程的 init_session_metadata 污染缓存导致后续
     读取不到 agentserver 进程写入的最新数据。
+
+    rebind 版本检查: 调用方可传入快照入队/捕获时记录的 ``rebind_gen_at_enqueue``。
+    本函数持 ``_FILE_LOCK`` 后重比 ``_get_rebind_gen(session_id)``, 使"gen 比较"与
+    "文件读写"在同一临界区内完成, 消除 worker 队列路径(P3)的 TOCTOU 窗口:
+    即使调用方在持锁前比 gen 为"非陈旧", 持锁后又发生了 rebind, 此处也能发现
+    并从磁盘当前值保留 rebind 写入的 project 字段。``rebind_session_project``
+    自身传入的 gen 已被 bump, 等于当前 gen, 不触发合并。``preserve_rebound_fields``
+    作为无 gen 追踪路径(外部直写/测试)的回退开关保留。
     """
     fpath = _metadata_file(session_id)
     to_write = metadata
@@ -397,6 +432,15 @@ def _write_metadata_sync(
 
         if preserve_pin_fields and current is not None:
             to_write = _merge_pin_fields(current, to_write)
+        # 权威 rebind 版本检查: 持锁后重比 gen, 判定调用方传入的快照是否已陈旧。
+        # 比调用方持锁前的 pre-check 更可靠 —— 消除"gen 比较与文件写入"之间的
+        # TOCTOU 窗口(P3)。rebind 自身传入的 gen 已 bump, 等于当前 gen, 不触发合并。
+        effective_preserve_rebound = preserve_rebound_fields
+        if rebind_gen_at_enqueue is not None and current is not None:
+            if rebind_gen_at_enqueue < _get_rebind_gen(session_id):
+                effective_preserve_rebound = True
+        if effective_preserve_rebound and current is not None:
+            to_write = _merge_rebound_fields(current, to_write)
 
         # Atomic write: write a temp file then rename, so that truncation by
         # write_text can never expose empty content to a concurrent reader
@@ -418,6 +462,20 @@ def _merge_pin_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict
         merged["pinned"] = bool(current.get("pinned"))
     if "pin_order" in current:
         merged["pin_order"] = int(current.get("pin_order") or 0)
+    return merged
+
+
+def _merge_rebound_fields(current: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """从磁盘当前值保留 rebind 写入的 project 字段, 防止陈旧快照覆盖重绑结果。
+
+    用于 worker 处理"入队早于 rebind"的陈旧快照: 该快照的 project_id/
+    project_dir/work_mode/channel_metadata 是重绑前的旧值, 直接写回会覆盖
+    rebind。这里以磁盘当前值为准覆盖这几个字段, 其余字段仍用快照值。
+    """
+    merged = metadata.copy()
+    for field in ("project_id", "project_dir", "work_mode", "channel_metadata"):
+        if field in current:
+            merged[field] = current[field]
     return merged
 
 
@@ -448,14 +506,19 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, metadata, preserve_pin_fields = _METADATA_QUEUE.get()
+                sid, metadata, preserve_pin_fields, rebind_gen_at_enqueue = _METADATA_QUEUE.get()
                 try:
+                    # rebind 版本检查已下沉到 _write_metadata_sync 内部, 持
+                    # _FILE_LOCK 后重比 gen, 消除"gen 比较与文件写入"的 TOCTOU 窗口(P3)。
                     written = _write_metadata_sync(
                         sid,
                         metadata,
                         preserve_pin_fields=preserve_pin_fields,
+                        rebind_gen_at_enqueue=rebind_gen_at_enqueue,
                     )
-                    if preserve_pin_fields:
+                    # gen 追踪启用时, _write_metadata_sync 可能在持锁后才发现陈旧
+                    # 并合并 rebound 字段, 故只要启用了 gen 追踪就刷新缓存为落盘结果。
+                    if preserve_pin_fields or rebind_gen_at_enqueue is not None:
                         with _CACHE_LOCK:
                             _METADATA_CACHE[sid] = written.copy()
                 except Exception as exc:  # noqa: BLE001
@@ -484,34 +547,45 @@ def _enqueue_write(
     顶部完成,与异步路径行为一致,避免 ``init_session_metadata`` 污染缓存。
     """
     # 立即更新缓存,确保后续读取能看到最新状态
+    # 入队前捕获 rebind 版本号: worker 处理时据此判断本快照是否早于一次重绑
+    rebind_gen_at_enqueue = _get_rebind_gen(session_id)
     if preserve_pin_fields:
         metadata = _merge_pin_fields_from_disk(session_id, metadata)
     with _CACHE_LOCK:
         _METADATA_CACHE[session_id] = metadata.copy()
     if sync_write:
+        # P2: sync_write 路径同样需要 rebind 版本检查 —— set_session_pinned 等
+        # sync_write=True 调用方读取磁盘早于一次 rebind 时, 其快照含旧 project
+        # 字段, 回写会覆盖 rebind。版本检查下沉到 _write_metadata_sync 持锁后执行,
+        # 与 queue.Full 退化路径、worker 异步路径保持同一保护级别。
         written = _write_metadata_sync(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
+            rebind_gen_at_enqueue=rebind_gen_at_enqueue,
         )
-        if preserve_pin_fields:
+        if preserve_pin_fields or rebind_gen_at_enqueue is not None:
             with _CACHE_LOCK:
                 _METADATA_CACHE[session_id] = written.copy()
         return
     _ensure_worker_started()
     try:
-        _METADATA_QUEUE.put_nowait((session_id, metadata, preserve_pin_fields))
+        _METADATA_QUEUE.put_nowait(
+            (session_id, metadata, preserve_pin_fields, rebind_gen_at_enqueue)
+        )
     except queue.Full:
         if preserve_pin_fields:
             metadata = _merge_pin_fields_from_disk(session_id, metadata)
             with _CACHE_LOCK:
                 _METADATA_CACHE[session_id] = metadata.copy()
+        # 队列满退化为同步写: 版本检查同样下沉到 _write_metadata_sync 持锁后执行
         written = _write_metadata_sync(
             session_id,
             metadata,
             preserve_pin_fields=preserve_pin_fields,
+            rebind_gen_at_enqueue=rebind_gen_at_enqueue,
         )
-        if preserve_pin_fields:
+        if preserve_pin_fields or rebind_gen_at_enqueue is not None:
             with _CACHE_LOCK:
                 _METADATA_CACHE[session_id] = written.copy()
 
@@ -1033,10 +1107,84 @@ def increment_session_round_count(session_id: str) -> int:
     return new_round
 
 
+def rebind_session_project(
+    *,
+    session_id: str,
+    project_id: str,
+    project_dir: str,
+    work_mode: str,
+) -> dict[str, Any] | None:
+    """强制重绑 session 的 ``project_id`` / ``project_dir`` / ``work_mode``。
+
+    打破 ``sync_session_request_metadata`` / ``update_session_metadata`` 的
+    "首次锁定不可改"约束，专供 TUI ``/workspace set`` 切换工作目录时同步迁移
+    当前会话的 project 归属使用。其他场景不应调用本函数。
+
+    语义：
+      - 三字段全部**覆盖式**写入（非首次锁定）；
+      - ``pinned`` / ``pin_order`` 等 Gateway 拥有的字段通过
+        ``preserve_pin_fields=True`` 合并保留，不被整份回写覆盖；
+      - ``last_message_at`` 不刷新（重绑不是消息，避免腐蚀排序时间）。
+
+    Args:
+        session_id: 目标会话 ID。
+        project_id: 新绑定的项目 ID（须为真实 ``proj_<hex>``）。
+        project_dir: 新绑定的项目目录绝对路径。
+        work_mode: 新工作模式（``"code"`` / ``"work"``）。
+
+    Returns:
+        更新后的完整 metadata；会话不存在（metadata 缺失）时返回 ``None``。
+    """
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return None
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata:
+        return None
+    clean_dir = (project_dir or "").strip()
+    metadata["project_id"] = (project_id or "").strip()
+    metadata["project_dir"] = clean_dir
+    metadata["work_mode"] = normalize_work_mode(work_mode)
+    # 同步 channel_metadata.project_dir / cwd：/resume 的 current-dir 过滤
+    # 优先读 channel_metadata（见 resolve_tui_session_project_path），只改顶层
+    # project_dir 会导致会话仍被归到旧目录。
+    if clean_dir:
+        ch_meta = metadata.get("channel_metadata")
+        if not isinstance(ch_meta, dict):
+            ch_meta = {}
+        ch_meta["project_dir"] = clean_dir
+        ch_meta["cwd"] = clean_dir
+        try:
+            from jiuwenswarm.common.utils import resolve_git_branch
+
+            ch_meta["git_branch"] = resolve_git_branch(clean_dir)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "rebind_session_project: resolve_git_branch failed for %s",
+                clean_dir, exc_info=True,
+            )
+        metadata["channel_metadata"] = ch_meta
+    # 自增 rebind 版本号, 使此前已入队但尚未处理的陈旧异步快照失效:
+    # worker 处理它们时会发现 gen_at_enqueue < 当前 gen, 从而从磁盘保留
+    # rebind 写入的 project 字段, 避免陈旧快照写回覆盖刚完成的重绑。
+    # 必须在 sync_write 之前 bump, 否则在 sync 写盘窗口内被 worker 处理的
+    # 陈旧快照无法被识别。
+    _bump_rebind_gen(session_id)
+    _enqueue_write(
+        session_id,
+        metadata,
+        sync_write=True,
+        preserve_pin_fields=True,
+    )
+    return metadata
+
+
 def remove_session_metadata_cache(session_id: str) -> None:
     """Remove cached session metadata after the session directory is deleted."""
     with _CACHE_LOCK:
         _METADATA_CACHE.pop(session_id, None)
+    with _REBIND_GEN_LOCK:
+        _SESSION_REBIND_GEN.pop(session_id, None)
 
 
 def set_session_delivery_context(

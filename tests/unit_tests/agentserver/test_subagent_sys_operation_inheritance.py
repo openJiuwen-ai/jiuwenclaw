@@ -62,11 +62,15 @@ def test_code_subagents_inherit_parent_sys_operation(tmp_path):
         subagents, _ = adapter._build_configured_subagents(MagicMock(), config, {})
 
     assert subagents is not None
+    statusline_spec = _spec_by_name(subagents, "statusline-setup")
     plan_spec = _spec_by_name(subagents, "plan_agent")
     code_spec = _spec_by_name(subagents, "code_agent")
+    assert statusline_spec is not None
     assert plan_spec is not None
     assert code_spec is not None
     # create_subagent only honours spec.sys_operation when spec.workspace is set too.
+    assert statusline_spec.sys_operation is sys_operation
+    assert statusline_spec.workspace == str(tmp_path)
     assert plan_spec.sys_operation is sys_operation
     assert plan_spec.workspace == str(tmp_path)
     assert code_spec.sys_operation is sys_operation
