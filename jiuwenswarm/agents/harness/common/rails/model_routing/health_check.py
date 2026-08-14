@@ -79,6 +79,11 @@ class ModelHealthChecker:
         self._config = config
         self._status_map: dict[str, HealthStatus] = {}
 
+    @property
+    def interval_seconds(self) -> float:
+        """健康检查间隔（秒），供外部读取配置，避免直接访问 _config。"""
+        return self._config.interval_seconds
+
     async def update_health(self, caps: list[ModelCapability]) -> None:
         """更新所有 TTL 过期模型的健康状态。"""
         if not self._config.enabled:

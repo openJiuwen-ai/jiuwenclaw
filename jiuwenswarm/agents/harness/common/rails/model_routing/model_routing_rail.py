@@ -112,7 +112,7 @@ class ModelRoutingRail(DeepAgentRail):
         按 interval_seconds 间隔调用 update_health 刷新 _status_map 缓存。
         路由决策读取缓存即可，不会被阻塞。
         """
-        interval = self._health_checker._config.interval_seconds
+        interval = self._health_checker.interval_seconds
         while True:
             try:
                 await self._health_checker.update_health(self._capability_table)
