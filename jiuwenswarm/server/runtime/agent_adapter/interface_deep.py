@@ -318,6 +318,7 @@ from jiuwenswarm.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.common.mcp_param_coerce_patch import apply_mcp_param_coerce_patch
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -1098,6 +1099,13 @@ class JiuWenSwarmDeepAdapter:
         # killed remote MCP server fails fast instead of hanging on the MCP
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
+        # Coerce LLM-stringified array/object params back to list/dict before
+        # MCP schema validation — otherwise MCP tools like mcp_memory_create_entities
+        # fail with "Input should be a valid list [input_type=str]" and the LLM
+        # falls back to bash. Patches MCPTool.invoke only (MCP scope); the shared
+        # SchemaUtils.format_with_schema is NOT touched (6 call sites across
+        # function/restful/llm/workflow paths). Idempotent (_PATCHED guard).
+        apply_mcp_param_coerce_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())

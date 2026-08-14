@@ -220,6 +220,7 @@ from jiuwenswarm.extensions.dolores.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.extensions.dolores.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.common.mcp_param_coerce_patch import apply_mcp_param_coerce_patch
 from jiuwenswarm.extensions.dolores.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.extensions.dolores.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -563,6 +564,10 @@ class JiuWenSwarmDeepAdapter:
         # killed remote MCP server fails fast instead of hanging on the MCP
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
+        # Coerce LLM-stringified array/object params back to list/dict before
+        # MCP schema validation (mirrors the main-line patch). See
+        # jiuwenswarm.common.mcp_param_coerce_patch for rationale.
+        apply_mcp_param_coerce_patch()
         self._instance: DeepAgent | None = None
         self._root_instance_lock: asyncio.Lock | None = None
         self._root_instance_requested: bool = False

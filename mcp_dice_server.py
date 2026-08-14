@@ -34,17 +34,17 @@ def _save_history(h: list) -> None:
 
 @mcp.tool()
 def roll_dice(sides: int = 6, count: int = 1) -> str:
-    """掷骰子。掷一个 sides 面的骰子 count 次，返回每次点数，并记录到历史。
+    """Roll a die with N sides K times. Returns each roll result and persists to history.
 
-    用于随机决策、游戏、抽样选择。和 bash 的 RANDOM 不同：本工具持久化每次结果到历史，
-    后续可用 get_roll_history 回看。
+    For random decisions, games, sampling. Unlike bash RANDOM: this tool persists
+    every result to history, viewable later via get_roll_history.
 
     Args:
-        sides: 骰子面数（如 6 面、20 面），默认 6。
-        count: 掷几次，默认 1。
+        sides: number of die faces (e.g. 6, 20), default 6.
+        count: how many times to roll, default 1.
 
     Returns:
-        每次点数 + 总和的字符串。
+        a string of each result plus the total.
     """
     if sides < 2:
         return "sides 必须 >= 2"
@@ -61,15 +61,16 @@ def roll_dice(sides: int = 6, count: int = 1) -> str:
 
 @mcp.tool()
 def get_roll_history(limit: int = 10) -> str:
-    """查看掷骰历史记录。返回最近 limit 次的掷骰结果。
+    """View the roll history. Returns the most recent `limit` roll results.
 
-    用于回看之前 roll_dice 的记录。历史持久化在本地文件，跨会话保留。
+    For reviewing past roll_dice records. History is persisted to a local file,
+    preserved across sessions.
 
     Args:
-        limit: 返回最近多少条，默认 10。
+        limit: how many recent entries to return, default 10.
 
     Returns:
-        历史记录的字符串。
+        a string of the history records.
     """
     history = _load_history()
     if not history:
