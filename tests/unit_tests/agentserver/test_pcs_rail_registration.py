@@ -121,7 +121,7 @@ async def test_pcs_rail_registration_and_cleanup_failure_is_fail_open(
 
 
 @pytest.mark.asyncio
-async def test_pcs_rail_unregister_failure_is_fail_open() -> None:
+async def test_pcs_rail_unregister_failure_keeps_reference_and_does_not_reregister() -> None:
     rail = _FakeRail(Path("pcs"))
     agent = _FakeAgent(fail_unregister=True)
     agent.registered.append(rail)
@@ -131,8 +131,15 @@ async def test_pcs_rail_unregister_failure_is_fail_open() -> None:
     await adapter._sync_proactive_context_rail("code.normal")  # pylint: disable=protected-access
 
     assert agent.unregister_attempts == [rail]
-    assert adapter._proactive_context_rail is None  # pylint: disable=protected-access
+    assert adapter._proactive_context_rail is rail  # pylint: disable=protected-access
     assert await agent.normal_request() == "ok"
+
+    agent.fail_unregister = False
+    await adapter._sync_proactive_context_rail("agent")  # pylint: disable=protected-access
+
+    assert adapter._proactive_context_rail is rail  # pylint: disable=protected-access
+    assert agent.registered == [rail]
+    assert agent.register_attempts == []
 
 
 @pytest.mark.asyncio

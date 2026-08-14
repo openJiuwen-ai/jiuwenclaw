@@ -5827,8 +5827,8 @@ class JiuWenSwarmDeepAdapter:
                         "unregister failed: %s",
                         type(exc).__name__,
                     )
-                finally:
-                    self._proactive_context_rail = None
+                    return
+                self._proactive_context_rail = None
                 rail = None
 
             if not enabled:
