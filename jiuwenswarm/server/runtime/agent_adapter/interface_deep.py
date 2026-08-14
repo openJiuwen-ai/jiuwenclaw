@@ -311,6 +311,7 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_save_enabled,
+    get_progressive_tool_enabled,
     get_skill_evolution_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
@@ -5083,6 +5084,7 @@ class JiuWenSwarmDeepAdapter:
             language=resolved_language,
             prompt_mode=None,
             rails=rails,
+            progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -5590,6 +5592,9 @@ class JiuWenSwarmDeepAdapter:
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
+            # Expose only tool_search initially; ordinary tools are marked
+            # deferred and indexed by ProgressiveToolRail at startup.
+            progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),
@@ -5620,8 +5625,6 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
-        await asyncio.sleep(0)
-        await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
@@ -5645,6 +5648,11 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+        # All host-level startup providers have now registered their tools.
+        # Initialize the DeepAgent only after that point; its normal startup
+        # path builds the initial BM25 snapshot after all pending rails.
+        await self._instance.ensure_initialized()
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
