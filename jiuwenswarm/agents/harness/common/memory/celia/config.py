@@ -17,6 +17,13 @@ from ..config import get_embed_config
 
 logger = logging.getLogger(__name__)
 
+_EXTENSION_PACKAGE_PATH = Path("extensions") / "celia_memory" / "package"
+_EXTENSION_BINARY_NAMES = (
+    "gspd_memory_mcp_server",
+    "celia_memory_mcp_server",
+)
+_LEGACY_BINARY_NAME = "gspd_memory_mcp_server"
+
 
 def _text(value: Any, default: str = "") -> str:
     if value is None:
@@ -61,6 +68,29 @@ def _first(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _find_extension_binary(data_dir: Path) -> Path | None:
+    """按兼容优先级扫描外置 Celia extension package 中的 MCP 二进制。"""
+
+    package_dir = data_dir / _EXTENSION_PACKAGE_PATH
+    if not package_dir.is_dir():
+        return None
+    for binary_name in _EXTENSION_BINARY_NAMES:
+        matches = sorted(
+            path for path in package_dir.rglob(binary_name) if path.is_file()
+        )
+        if matches:
+            return matches[0]
+    return None
+
+
+def _default_binary_path(data_dir: Path) -> Path:
+    """优先使用外置扩展二进制，缺失时返回历史兼容路径。"""
+
+    return _find_extension_binary(data_dir) or (
+        data_dir / "celia" / "bin" / _LEGACY_BINARY_NAME
+    )
 
 
 @dataclass(frozen=True)
@@ -371,7 +401,7 @@ def build_celia_config(
 
     resolved_workspace = Path(workspace_dir).expanduser() if workspace_dir else get_agent_workspace_dir()
     data_dir = get_user_workspace_dir()
-    default_binary = data_dir / "celia" / "bin" / "gspd_memory_mcp_server"
+    default_binary = _default_binary_path(data_dir)
     default_db = resolved_workspace / "memory" / "celia_memory" / "celia_memory.db"
     default_log = Path.home() / ".openclaw" / "logs" / "Celia_memory.log"
     default_runtime = Path.home() / ".openclaw" / ".xiaoyiruntime"
