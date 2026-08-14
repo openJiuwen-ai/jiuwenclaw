@@ -290,6 +290,16 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
+  search:                           # SearchAgent 专用搜索模型（独立于主模型；react.subagents.search_agent.enabled=true 时生效）
+      model_client_config:
+        api_base: ${SEARCH_API_BASE}
+        api_key: ${SEARCH_API_KEY}
+        model_name: ${SEARCH_MODEL_NAME}   # 含 "qwen" 走 QwenClient，否则 OpenAIClient；未设则为空串→_search_agent_tool_params / build_search_agent_config_from_jiuwenswarm 判定 enabled=False，不挂载（安静跳过）
+        client_provider: ${SEARCH_PROVIDER}
+        verify_ssl: false
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.3
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
@@ -483,9 +493,18 @@ react:
       enabled: false
       # max_iterations: 15
     browser_agent:
-      enabled: true
+      enabled: false
       # Browser Agent 独立轮次预算；未配置时默认 100。
       # max_iterations: 100
+    search_agent:                   # 独立搜索子 agent（自有 ReAct loop + web_search/web_fetch_and_summary + 独立搜索模型 models.search）；默认开，但未配 models.search.model_name 时安静跳过（不挂载）；配好 SEARCH_MODEL_NAME 后即自动生效
+      enabled: true
+      max_iterations: 6
+      compact_threshold: 48000
+      llm_call_timeout: 45
+      max_completion_tokens: 4096
+      # system_prompt_name: SYSTEM_TEMPLATE_XIAOHAN0319
+      # query_prompt_name: QUERY_TEMPLATE
+      # tool_names: [web_search, web_fetch_and_summary, check_confidence_gate]
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
@@ -1146,12 +1165,13 @@ modes:
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置
     # coding_memory_read/write/edit 由 CodingMemoryRail 在 subagent 内部注册，不在此配置
     tools:
-      - web_free_search
-      - web_fetch_webpage
-      - web_paid_search
+#      - web_free_search
+#      - web_fetch_webpage
+#      - web_paid_search
       - user_todos
       - skill_toolkit
       - skill_retrieval
+      - search_agent_run
 
     embedding_config:
       model_name: null
