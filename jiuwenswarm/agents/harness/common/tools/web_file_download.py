@@ -172,8 +172,11 @@ class WebFileDownloadManager:
             if not isinstance(payload, dict):
                 return None
             if check_expiry:
+                # 兼容历史令牌：无 exp 字段时不强制过期；有 exp 则严格校验
                 exp = payload.get("exp")
-                if not isinstance(exp, (int, float)) or int(exp) < int(time.time()):
+                if exp is not None and (
+                    not isinstance(exp, (int, float)) or int(exp) < int(time.time())
+                ):
                     logger.warning("[WebFileDownload] 令牌已过期")
                     return None
             if session_id is not None and str(session_id).strip():
