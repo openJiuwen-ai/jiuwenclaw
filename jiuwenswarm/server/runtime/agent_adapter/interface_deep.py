@@ -784,12 +784,14 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     # token 上限"语义、会发往厂商。``reasoning_injector._build_model_request_kwargs``
     # 已在公共出口处对 agentos 统一 pop 了 max_tokens（防它进输出侧字段，覆盖
     # build_model_from_entry / config.validate_model 等所有路径），故此处 kwargs
-    # 里的 max_tokens 已被清掉。这里从原始 mco 重新取该值，写入 extra 键
-    # ``_agentos_ctx_window`` 存进 ``ModelRequestConfig``——extra="allow" 会收下它，
-    # 作为"随选中 Model 带入缓存"的载体，供 ``_deep_agent_context_engine_config``
-    # 直接从选中条目读值（同名多条目时能精确"选中哪个用哪个的 max_tokens"）。
-    # 该 extra 不经厂商请求：reasoning_injector 在下次走 _build_model_request_kwargs
-    # 时会 pop 它，且它只在缓存构建路径写入、不经 invoke 直发 SDK。
+    # 里的 max_tokens 已被清掉。这里从原始 mco 重新取该值，作为**普通属性**
+    # ``_agentos_ctx_window`` 挂到 ``Model`` 实例上（不是 ModelRequestConfig 的
+    # extra！）。之所以不能用 ModelRequestConfig 的 extra：core 的 base_model_client
+    # 在发起请求时用 ``model_config.model_dump(exclude={...})`` 把 extra 一并透传
+    # 给 SDK（base_model_client.py:_build_request_params），extra 里的内部键会被
+    # SDK 当成未知 kwarg 抛错。Model 是普通 Python 类（非 pydantic），挂普通属性
+    # 不会进 model_dump，故不流到厂商。``_deep_agent_context_engine_config`` 路径 A
+    # 从该 Model 普通属性读值，供同名多条目精确"选中哪个用哪个的 max_tokens"。
     # defaults 无此标记，行为完全不变。
     is_agentos = isinstance(mco, dict) and mco.get("_source") == "agentos"
     request_kwargs = build_reasoning_model_request_kwargs(
@@ -797,13 +799,14 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         model_config_obj=mco,
         model_name=name,
     )
+    m_config = ModelRequestConfig(**request_kwargs)
+    model = Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
     if is_agentos:
         ctx_win = parse_int(mco.get("max_tokens"), None) if isinstance(mco, dict) else None
         if ctx_win is not None:
-            request_kwargs["_agentos_ctx_window"] = ctx_win
-
-    m_config = ModelRequestConfig(**request_kwargs)
-    return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
+            # 挂到 Model 普通属性，绝不进 ModelRequestConfig 的 extra（防 model_dump 泄漏到 SDK）。
+            model._agentos_ctx_window = ctx_win
+    return model
 
 
 def parse_int(value: Any, default: int) -> int:
@@ -830,15 +833,21 @@ def _deep_agent_context_engine_config(
     AgentOS per-model 覆盖——"选中哪个模型配置就用哪个的 max_tokens"：
 
     路径 A（首选，精确）：传入 ``model``（当前选中的 ``Model`` 对象）时，直接从其
-    ``model_config._agentos_ctx_window`` extra 读 agentos 输入侧上下文窗口值。
-    该 extra 由 ``build_model_from_entry`` 在构造 agentos 的 ``ModelRequestConfig``
-    时写入（把 ``max_tokens`` 从输出侧 kwargs 挪过来）。每个 agentos 条目各造各的
-    Model 对象、各带自己的 extra，故同名多条目也能精确区分"选中哪个用哪个的值"。
+    普通属性 ``_agentos_ctx_window`` 读 agentos 输入侧上下文窗口值。该属性由
+    ``build_model_from_entry`` 在构造完 agentos 的 ``Model`` 后挂到 Model 实例上
+    （从原始 mco 取 max_tokens 值——该值已在 reasoning_injector 公共出口被 pop、
+    不在 ModelRequestConfig 里）。**该属性不进 ModelRequestConfig 的 extra**，
+    故不经 ``model_dump`` 流到厂商 SDK；Model 是普通 Python 类，挂普通属性即可。
+    每个 agentos 条目各造各的 Model 对象、各带自己的属性，故同名多条目也能精确
+    区分"选中哪个用哪个的值"。
 
-    路径 B（回退，兼容）：``model`` 不可用时，从 ``full_config["models"]["agentos"]``
-    按 ``model_name`` 反查。agentos 为列表，取首个 model_name 匹配的条目。此路径
-    在同名多条目时无法区分，仅供未传 model 的调用方兜底。
-    defaults 不受影响（不会传匹配 agentos 的 model_name 或带 agentos extra 的 model）。
+    路径 B（回退，兼容）：仅在**未传 ``model``**（调用方拿不到选中 Model 变量，
+    如 usage 回调 L10215）时，从 ``full_config["models"]["agentos"]`` 按
+    ``model_name`` 反查，取首个匹配条目。此路径在同名多条目时无法区分，仅供兜底；
+    且**不**在"传了 model 但路径 A 读不到值"时启用——否则本条目未配 max_tokens、
+    却存在同名带 max_tokens 条目时，会取到别人的值错误覆盖。
+    defaults 不受影响（不带 _agentos_ctx_window 属性，路径 A 读到 None；defaults 的
+    model_name 也不匹配 agentos 列表，路径 B 不会命中）。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
@@ -846,14 +855,17 @@ def _deep_agent_context_engine_config(
     cw_tokens = parse_int(cec.get("context_window_tokens"), None)
 
     # AgentOS per-model 覆盖。
-    # 路径 A：从选中 Model 的 extra 直接读（精确，同名可区分）。
+    # 路径 A：传了 model 时，从选中 Model 的普通属性直接读（精确，同名可区分；
+    # 不进 model_dump，不流到 SDK）。若该 Model 无此属性（如 defaults，或 agentos
+    # 未配 max_tokens）-> agentos_cw 为 None，保持全局基础值，**不**回退路径 B：
+    # 否则当本条目未配 max_tokens、却存在同名带 max_tokens 的 agentos 条目时，
+    # 路径 B 会取到别人的值错误覆盖。
     agentos_cw: int | None = None
     if model is not None:
-        m_cfg = getattr(model, "model_config", None)
-        if m_cfg is not None:
-            agentos_cw = parse_int(getattr(m_cfg, "_agentos_ctx_window", None), None)
-    # 路径 B：model 不可用时，从 config 的 agentos 列表按 model_name 反查（兜底）。
-    if agentos_cw is None and full_config and model_name:
+        agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
+    # 路径 B：仅在**未传 model**（如 usage 回调拿不到选中 Model 变量）时，
+    # 从 config 的 agentos 列表按 model_name 反查取首个匹配（兜底，同名无法区分）。
+    if model is None and full_config and model_name:
         agentos_raw = (full_config.get("models") or {}).get("agentos")
         agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
         for blk in agentos_list:

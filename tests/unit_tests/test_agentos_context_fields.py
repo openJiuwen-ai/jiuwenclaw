@@ -9,14 +9,16 @@
    agentos 只认 list 格式。
 2. 输入侧 max_tokens 别名（用户可读的上下文窗口上限）：
    - 不进 core 的 ModelRequestConfig.max_tokens（绝不作为输出 token 上限发往厂商）：
-     build_model_from_entry 的 agentos 分支把它的值挪到 extra 键 _agentos_ctx_window
-     （随选中 Model 带入缓存），并从输出侧 kwargs 里 pop 掉 max_tokens。
+     reasoning_injector._build_model_request_kwargs 在公共出口对 agentos 统一 pop 掉
+     max_tokens，覆盖 build_model_from_entry / config.validate_model / warmup 等所有路径。
+   - 不进 ModelRequestConfig 的 extra（防 base_model_client 经 model_dump 透传给 SDK
+     抛 unexpected keyword argument）：build_model_from_entry 把该值挂到 **Model 普通属性**
+     _agentos_ctx_window（Model 是普通 Python 类，普通属性不进 model_dump）。
    - 只进 core 的 ContextEngineConfig.context_window_tokens（压缩阈值，不发厂商）：
-     _deep_agent_context_engine_config 的 per-model 覆盖，优先从选中 Model 的 extra 读
-     （路径 A，精确，同名多条目可区分"选中哪个用哪个的值"）；model 不可用时回退
-     从 config agentos 列表按 model_name 反查（路径 B，兼容）。
-   - _agentos_ctx_window 不流到厂商 SDK：reasoning_injector._build_model_request_kwargs
-     统一 pop 它（与 _source 同理）。
+     _deep_agent_context_engine_config 的 per-model 覆盖——传了 model 时从选中 Model 的
+     普通属性 _agentos_ctx_window 读（路径 A，精确，同名多条目可区分"选中哪个用哪个的值"）；
+     仅在未传 model 时才从 config agentos 列表按 model_name 反查取首个（路径 B，兜底）。
+     路径 B 不在"传了 model 但读不到值"时启用，防本条目无 max_tokens 时取到同名别的值。
 
 注意：不再有 max_output_tokens（输出侧用户自定义已移除）。输出 token 上限完全由
 core 默认行为决定，agentos 不参与。
@@ -152,10 +154,10 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
         agentos = next(e for e in entries
                        if e.get("model_config_obj", {}).get("_source") == "agentos")
         model = build_model_from_entry(agentos["model_client_config"], agentos["model_config_obj"])
-        # 输出侧字段 max_tokens 必须为 None（输入侧值已挪走）
+        # 输出侧字段 max_tokens 必须为 None（输入侧值已挪走，不进 ModelRequestConfig）
         assert model.model_config.max_tokens is None
-        # 输入侧值随 extra 带入
-        assert getattr(model.model_config, "_agentos_ctx_window", None) == 131072
+        # 输入侧值挂到 Model 普通属性（不进 ModelRequestConfig 的 extra）
+        assert getattr(model, "_agentos_ctx_window", None) == 131072
 
     @staticmethod
     def test_agentos_max_tokens_not_in_model_dump():
@@ -168,6 +170,12 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
         assert dump.get("max_tokens") is None
         # _source 是 extra，不应残留
         assert "_source" not in dump
+        # _agentos_ctx_window 挂在 Model 普通属性上，绝不进 ModelRequestConfig 的
+        # extra——否则 base_model_client._build_request_params 会经 model_dump
+        # 透传给 SDK，导致 agentos 推理抛 unexpected keyword argument（P1 回归点）。
+        assert "_agentos_ctx_window" not in dump
+        # 双保险：Model 普通属性上有值（输入侧窗口仍可被路径 A 读取）
+        assert getattr(model, "_agentos_ctx_window", None) == 131072
 
     @staticmethod
     def test_defaults_max_tokens_remains_none():
@@ -176,8 +184,8 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
                         if e.get("model_config_obj", {}).get("_source") != "agentos")
         model = build_model_from_entry(defaults["model_client_config"], defaults["model_config_obj"])
         assert model.model_config.max_tokens is None
-        # defaults 不带 agentos extra
-        assert getattr(model.model_config, "_agentos_ctx_window", None) is None
+        # defaults 不带 agentos 普通属性
+        assert getattr(model, "_agentos_ctx_window", None) is None
 
     @staticmethod
     def test_source_marker_stripped_by_reasoning_injector():
@@ -189,14 +197,14 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
             model_config_obj=agentos["model_config_obj"],
             model_name="agentos-pro",
         )
-        # _source 和 _agentos_ctx_window 都不应流到 SDK kwargs
+        # _source 不应流到 SDK kwargs（_agentos_ctx_window 本就不进 kwargs，改挂 Model 属性）
         assert "_source" not in kwargs
         assert "_agentos_ctx_window" not in kwargs
 
     @staticmethod
     def test_agentos_ctx_window_not_in_model_request_config_dump():
-        # _agentos_ctx_window 作为 extra 进了 ModelRequestConfig，但 model_dump 后
-        # 它是否存在取决于 core 序列化；关键是 max_tokens 仍为 None、_source 不残留。
+        # _agentos_ctx_window 不进 ModelRequestConfig（改挂 Model 普通属性），
+        # 故 model_dump 不含它；关键是 max_tokens 仍为 None、_source 不残留。
         entries = get_default_models(_config(agentos=[_agentos_block()]))
         agentos = next(e for e in entries
                        if e.get("model_config_obj", {}).get("_source") == "agentos")
@@ -215,8 +223,8 @@ class TestAgentosMaxTokensNotInModelRequestConfig:
 class TestContextWindowTokensOverride:
     """_deep_agent_context_engine_config 的 per-model context_window_tokens 覆盖（仅 agentos）。
 
-    路径 A（首选）：从选中 Model 的 extra _agentos_ctx_window 读——精确，同名可区分。
-    路径 B（回退）：model 不可用时从 config agentos 列表按 model_name 反查（兼容）。
+    路径 A（首选）：传了 model 时，从选中 Model 的普通属性 _agentos_ctx_window 读——精确，同名可区分。
+    路径 B（回退）：仅在未传 model 时，从 config agentos 列表按 model_name 反查（兜底）。
     """
 
     @staticmethod
@@ -227,7 +235,7 @@ class TestContextWindowTokensOverride:
 
     @staticmethod
     def test_agentos_match_overrides_context_window_via_model():
-        # 路径 A：传入选中 Model，直接从 extra 读
+        # 路径 A：传入选中 Model，直接从其普通属性读
         cfg = _config(agentos=[_agentos_block()], react_cw=65536)
         entries = get_default_models(cfg)
         agentos = next(e for e in entries
@@ -280,7 +288,7 @@ class TestContextWindowTokensOverride:
 
     @staticmethod
     def test_agentos_without_max_tokens_not_overriding():
-        # agentos 块没配 max_tokens -> extra 不写 -> 不覆盖，回退基础值
+        # agentos 块没配 max_tokens -> Model 不带 _agentos_ctx_window 属性 -> 不覆盖，回退基础值
         cfg = _config(agentos=[_agentos_block(with_max_tokens=False)], react_cw=65536)
         entries = get_default_models(cfg)
         agentos = next(e for e in entries
@@ -331,3 +339,27 @@ class TestContextWindowTokensOverride:
         )
         # 首个匹配是 131072
         assert cec.context_window_tokens == 131072
+
+    @staticmethod
+    def test_model_without_attr_does_not_fallback_to_pathb():
+        # P2 回归：传了 model，但该 Model 无 _agentos_ctx_window 属性（agentos
+        # 未配 max_tokens），且 config 里存在同名带 max_tokens 的 agentos 条目——
+        # 路径 B 不应启用，否则会用别人的值错误覆盖，应保持全局基础值。
+        cfg = _config(agentos=[
+            # 本条目标同名、但没配 max_tokens -> Model 不带 _agentos_ctx_window
+            _agentos_block("dup", with_max_tokens=False, api_key="sk-1"),
+            # 另一条同名、配了 max_tokens=131072（路径 B 若启用会命中它）
+            _agentos_block("dup", max_tokens=131072, api_key="sk-2"),
+        ], react_cw=32768)
+        entries = get_default_models(cfg)
+        agentos_entries = [e for e in entries
+                           if e.get("model_config_obj", {}).get("_source") == "agentos"]
+        # 选中第一条（无 max_tokens）
+        m0 = build_model_from_entry(agentos_entries[0]["model_client_config"],
+                                    agentos_entries[0]["model_config_obj"])
+        assert getattr(m0, "_agentos_ctx_window", None) is None  # 确无属性
+        cec = _deep_agent_context_engine_config(
+            cfg["react"], full_config=cfg, model_name="dup", model=m0
+        )
+        # 路径 B 未启用 -> 不被第二条的 131072 覆盖，保持全局基础值 32768
+        assert cec.context_window_tokens == 32768
