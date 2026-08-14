@@ -374,6 +374,7 @@ def _build_structural_template_fill_prompt(
         f"style_id=`{style_id}`，模板=`{template_page_type}-template.html`。"
         "你是模板填充师，不是自由排版设计师。\n\n"
         f"{fill_rules}\n"
+        f"{_VISIBLE_PAGE_NUMBER_RULE}"
         "## 风格文件（配色/字体权威；不得把风格元数据写成观众可见装饰）\n"
         f"{style_text}\n\n"
         f"### 大纲 — 本页规划（{page_type_label}）\n"
@@ -509,8 +510,6 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     if _has_placeholder_slop(footer_text):
         return False, "footer_invalid"
 
-    if not _validate_slide_dom(filled_html):
-        return False, "invalid_dom"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
     return True, ""
@@ -645,12 +644,15 @@ def _relocate_orphan_main_into_custom_slide(html: str) -> str:
 
 
 def _validate_custom_content_slide_dom(html: str) -> str:
-    """custom 内容页 DOM：不复用结构页/预设的 main 位置硬门禁。"""
-    if _MALFORMED_HTML_RE.search(html or ""):
-        return "invalid_dom"
-    if _ppt_slide_bounds(html or "") is None:
-        return "invalid_dom"
-    if not _custom_slide_has_page_content(html):
+    """custom 内容页：只拦官方「PAGE_CONTENT 为空」。
+
+    畸形 token / `.ppt-slide` 边界解析失败不是 Stage 6 硬门禁；
+    解析不到边界时不得误判为空，交给 P8.2 `cli.js fix`。
+    """
+    bounds = _ppt_slide_bounds(html or "")
+    if bounds is None:
+        return ""
+    if not _custom_slide_inner_markup(html[bounds[0]:bounds[1]]):
         return "empty_slide_content"
     return ""
 
@@ -846,6 +848,7 @@ def _build_custom_content_template_fill_prompt(
         f"{research_page}\n"
         f"{_build_image_section(image_map_page)}\n"
         f"{designer_section}"
+        f"{_VISIBLE_PAGE_NUMBER_RULE}"
         "## 预铺模板 HTML（主题槽已按风格文件填入，只填 PAGE_TITLE / PAGE_CONTENT）\n"
         f"{seed_html}\n"
     )
@@ -854,7 +857,7 @@ def _build_custom_content_template_fill_prompt(
 _VISIBLE_PAGE_NUMBER_RULE = (
     "- 禁止页脚出现页码（所有页型）：所有页面（content / cover / agenda / section / "
     "chapter / ending）的页脚一律禁止「第 N 页」「Page N」「N / M」「P N」等任何页码表述；"
-    "唯一允许的是数据来源/备注/日期。用户要求“生成 N 页”只表示页数，不等于要求显示页码；"
+    "唯一允许的是数据来源/备注/日期。"
     "agenda 正文中的章节目标页码属于导航内容，可以保留。\n"
 )
 
@@ -1035,7 +1038,7 @@ _DESIGN_RULES_DIGEST = (
     "`.text-grayDeep`、`.border-gray3`、`.bg-gray4` 等），色值从风格规范文件中取；"
     "缺少这些类定义会导致品牌色和灰度色全部失效，页面退化为白底黑字\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
-    "禁止在页脚追加任何运行页码；页数只用于任务定位和文件完整性校验\n"
+    "禁止在页脚追加任何运行页码\n"
     "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
     "纯文字卡片按内容自适应高度，禁止为了等高而制造大片空白；"
     "禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等）\n"
@@ -1348,7 +1351,7 @@ _MALFORMED_HTML_RE = re.compile(
     re.IGNORECASE,
 )
 _PPT_SLIDE_OPEN_RE = re.compile(
-    r'<div\b[^>]*\bclass="[^"]*\bppt-slide\b',
+    r"<div\b[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
     re.IGNORECASE,
 )
 
@@ -1394,10 +1397,25 @@ def _main_inside_ppt_slide(html: str) -> bool:
 
 
 def _validate_slide_dom(html: str) -> bool:
-    """P8.1 写盘前校验：拦截 LLM 畸形片段与 main 滑出 slide。"""
-    if _MALFORMED_HTML_RE.search(html):
+    """诊断 LLM 畸形 token / main 是否滑出 slide。
+
+    官方 Stage 6 §5 不含此项；P8.1 不得据此拒写。P8.2 仍用
+    `_is_slide_exportable` 防止 fix 破坏导出结构后覆盖已有页。
+    """
+    if _MALFORMED_HTML_RE.search(html or ""):
         return False
     return _main_inside_ppt_slide(html)
+
+
+def _slide_dom_soft_issue(html: str) -> str:
+    """返回 Stage 6 不作为写盘硬拒的 DOM 问题，供日志与 P8.2 fix。"""
+    if _MALFORMED_HTML_RE.search(html or ""):
+        return "malformed_tokens"
+    if _ppt_slide_bounds(html or "") is None:
+        return "ppt_slide_unparsed"
+    if not _main_inside_ppt_slide(html or ""):
+        return "main_outside_slide"
+    return ""
 
 
 def _is_slide_exportable(html: str) -> bool:
@@ -1484,7 +1502,14 @@ _VISIBLE_TEXT_LEAF_RE = re.compile(
     r"(?P<text>[^<>]*)</(?P=tag)>",
     re.IGNORECASE,
 )
-_MAIN_BLOCK_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+_FOOTER_OPEN_RE = re.compile(
+    r"<(?P<tag>footer|div|section|p|span)\b(?P<attrs>[^>]*)>",
+    re.IGNORECASE,
+)
+_FOOTER_ROLE_ATTR_RE = re.compile(
+    r"\bdata-pptx-role\s*=\s*['\"]footer['\"]",
+    re.IGNORECASE,
+)
 _PAGE_MARKER_SPACE_ENTITY_RE = re.compile(
     r"&(?:nbsp|#0*(?:32|160)|#x0*(?:20|a0));",
     re.IGNORECASE,
@@ -1502,20 +1527,60 @@ def _normalize_page_marker_text(text: str) -> str:
     return normalized.replace("\xa0", " ").strip()
 
 
+def _find_matching_close(html_text: str, inner_start: int, tag: str) -> int | None:
+    """从 inner_start 起按标签名做括号匹配，返回闭合标签之后的下标。"""
+    open_re = re.compile(rf"<{re.escape(tag)}\b[^>]*>", re.IGNORECASE)
+    close_re = re.compile(rf"</{re.escape(tag)}\s*>", re.IGNORECASE)
+    depth = 1
+    pos = inner_start
+    while pos < len(html_text):
+        open_match = open_re.search(html_text, pos)
+        close_match = close_re.search(html_text, pos)
+        if close_match is None:
+            return None
+        if open_match is not None and open_match.start() < close_match.start():
+            depth += 1
+            pos = open_match.end()
+            continue
+        depth -= 1
+        pos = close_match.end()
+        if depth == 0:
+            return pos
+    return None
+
+
+def _footer_ranges(html_text: str) -> tuple[tuple[int, int], ...]:
+    """官方页脚范围：`<footer>` 或 `data-pptx-role="footer"`。"""
+    ranges: list[tuple[int, int]] = []
+    for match in _FOOTER_OPEN_RE.finditer(html_text):
+        tag = match.group("tag")
+        attrs = match.group("attrs") or ""
+        is_footer_tag = tag.lower() == "footer"
+        is_footer_role = bool(_FOOTER_ROLE_ATTR_RE.search(attrs))
+        if not (is_footer_tag or is_footer_role):
+            continue
+        if any(start <= match.start() < end for start, end in ranges):
+            continue
+        end = _find_matching_close(html_text, match.end(), tag)
+        if end is None:
+            continue
+        ranges.append((match.start(), end))
+    return tuple(ranges)
+
+
 def _strip_visible_page_markers(html_text: str) -> str:
-    """移除 Page Chrome 中的可见运行页码，保留 main 内的导航/业务内容。"""
+    """仅移除页脚内的运行页码，对齐 designer.md；header / 角标页码不删。"""
     if not html_text:
         return html_text
 
-    main_ranges = tuple(
-        (match.start(), match.end())
-        for match in _MAIN_BLOCK_RE.finditer(html_text)
-    )
+    footer_ranges = _footer_ranges(html_text)
+    if not footer_ranges:
+        return html_text
+
     removed_markers: list[str] = []
 
     def _replace_marker(match: re.Match[str]) -> str:
-        # agenda 章节目标页码和可能的业务型号位于 main，不能按运行页码误删。
-        if any(start <= match.start() < end for start, end in main_ranges):
+        if not any(start <= match.start() < end for start, end in footer_ranges):
             return match.group(0)
         marker = _normalize_page_marker_text(match.group("text"))
         if not _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
@@ -1525,7 +1590,7 @@ def _strip_visible_page_markers(html_text: str) -> str:
 
     normalized = _VISIBLE_TEXT_LEAF_RE.sub(_replace_marker, html_text)
     if removed_markers:
-        logger.info("[P8.1] 已移除可见运行页码 markers=%s", removed_markers)
+        logger.info("[P8.1] 已移除页脚运行页码 markers=%s", removed_markers)
     return normalized
 
 
@@ -3272,6 +3337,7 @@ class PageWorkerNode(PlanNode):
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
                 "- agenda 模板缺失或填槽后残留 `{{...}}`：进 missing_pages\n"
+                "- 畸形 token / main 滑出 slide：软警告并仍落盘，交 P8.2 fix，不进 missing_pages\n"
                 "- 首次落盘 write_file 异常：进 missing_pages\n"
                 "- 重试后仍缺失：透传给根节点\n"
             ),
@@ -3529,13 +3595,14 @@ class PageWorkerNode(PlanNode):
             return ""
 
         html = _strip_visible_page_markers(html)
-        if not _validate_slide_dom(html):
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
             logger.warning(
-                "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
+                "[P8.1] 结构页 DOM 软警告 page=%d type=%s issue=%s，仍落盘交 P8.2 fix",
                 ctx.page_num,
                 page_type,
+                dom_issue,
             )
-            return ""
         logger.info(
             "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
             ctx.page_num,
@@ -3638,6 +3705,14 @@ class PageWorkerNode(PlanNode):
                 reason,
             )
             return ""
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
+            logger.warning(
+                "[P8.1] 内容页 DOM 软警告 page=%d style=%s issue=%s，仍落盘交 P8.2 fix",
+                ctx.page_num,
+                ctx.style_id,
+                dom_issue,
+            )
         logger.info(
             "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
             ctx.page_num,
@@ -3687,9 +3762,13 @@ class PageWorkerNode(PlanNode):
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
-        if not _validate_slide_dom(html):
-            logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
-            return ""
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
+            logger.warning(
+                "[P8.1] 页面 %d DOM 软警告 issue=%s，仍落盘交 P8.2 fix",
+                ctx.page_num,
+                dom_issue,
+            )
         if not _validate_chart_height_chain(html):
             logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
             return ""

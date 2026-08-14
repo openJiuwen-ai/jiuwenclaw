@@ -143,7 +143,7 @@ def test_page_prompt_forbids_visible_page_numbers_for_all_page_types() -> None:
         )
 
         assert "禁止页脚出现页码" in prompt
-        assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" in prompt
+        assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" not in prompt
         assert "agenda 正文中的章节目标页码" in prompt
 
 
@@ -219,22 +219,50 @@ def test_page_prompt_preserves_chapter_label_supplied_by_outline() -> None:
 
 
 @pytest.mark.unit
-def test_visible_page_marker_normalization_preserves_main_content_and_metadata() -> None:
+def test_visible_page_marker_normalization_strips_footer_only() -> None:
     html = """<!DOCTYPE html>
 <html><body><div class="ppt-slide">
 <header><h1>标题</h1><span>P02 / 08</span></header>
+<div class="absolute top-6 right-10">03 / 12</div>
 <main><span>P3</span><p>产品 P3 型号</p></main>
 <footer><span>第 10 页 / 共 10 页</span><span>v1.0</span><span>2026Q1</span></footer>
+<div data-pptx-role="footer"><span>04 / 12</span><span>数据来源：公开资料</span></div>
 </div></body></html>"""
 
     normalized = ppg._strip_visible_page_markers(html)
 
-    assert "P02 / 08" not in normalized
+    assert "P02 / 08" in normalized
+    assert "03 / 12" in normalized
     assert "第 10 页 / 共 10 页" not in normalized
+    assert "04 / 12" not in normalized
     assert "<span>P3</span>" in normalized
     assert "产品 P3 型号" in normalized
     assert "v1.0" in normalized
     assert "2026Q1" in normalized
+    assert "数据来源：公开资料" in normalized
+
+
+@pytest.mark.unit
+def test_visible_page_marker_keeps_header_when_no_footer() -> None:
+    html = """<div class="ppt-slide">
+<!-- 页码 -->
+<div class="absolute top-6 right-10">03 / 12</div>
+<header><h1>标题</h1></header>
+<main>正文</main>
+</div>"""
+
+    assert ppg._strip_visible_page_markers(html) == html
+
+
+@pytest.mark.unit
+def test_visible_page_marker_strips_nested_footer_role() -> None:
+    html = """<div class="ppt-slide">
+<div data-pptx-role="footer"><div><span>05 / 12</span><span>来源：公开</span></div></div>
+</div>"""
+
+    normalized = ppg._strip_visible_page_markers(html)
+    assert "05 / 12" not in normalized
+    assert "来源：公开" in normalized
 
 
 @pytest.mark.unit
@@ -323,10 +351,13 @@ def test_strip_unsupported_fullpage_overlay_skips_overlay_div_with_content() -> 
 
 
 @pytest.mark.unit
-def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
+def test_page_worker_strips_footer_page_marker_without_extra_llm_call() -> None:
     marked_html = _VALID_HTML.replace(
         "<h1>历史文化介绍</h1>",
         "<header><h1>历史文化介绍</h1><span>P01 / 10</span></header>",
+    ).replace(
+        "</div>\n</body>",
+        "<footer><span>第 1 页 / 共 10 页</span><span>数据来源：公开资料</span></footer>\n</div>\n</body>",
     )
     llm_calls: list[str] = []
     written_contents: list[str] = []
@@ -342,7 +373,9 @@ def test_page_worker_removes_page_marker_without_extra_llm_call() -> None:
     assert llm_calls == ["p8_1_page_1"]
     assert result["missing_pages"] == []
     assert len(written_contents) == 1
-    assert "P01 / 10" not in written_contents[0]
+    assert "P01 / 10" in written_contents[0]
+    assert "第 1 页 / 共 10 页" not in written_contents[0]
+    assert "数据来源：公开资料" in written_contents[0]
 
 
 @pytest.mark.unit
@@ -966,6 +999,7 @@ def test_agenda_fill_prompt_is_seed_fill_not_freeform(style_id: str) -> None:
     assert "agenda-stage" in prompt
     assert "推荐布局（agenda 类型" not in prompt
     assert "禁止" in prompt
+    assert "禁止页脚出现页码" in prompt
     if style_id == "custom":
         assert "Stage 6 §3.6" in prompt
         assert "{{PAGE_CONTENT}}" in prompt
@@ -1159,6 +1193,7 @@ def test_ending_fill_prompt_forbids_content_page_layout() -> None:
     assert "禁止内容页元素" in prompt
     assert "感谢聆听" in prompt
     assert "推荐布局（ending 类型" not in prompt
+    assert "禁止页脚出现页码" in prompt
 
 
 @pytest.mark.unit
@@ -1241,6 +1276,51 @@ def test_is_slide_exportable_ignores_malformed_tokens_when_structure_ok() -> Non
     )
     assert not ppg._validate_slide_dom(html)
     assert ppg._is_slide_exportable(html)
+
+
+def test_slide_dom_soft_issue_does_not_block_official_fill_gates() -> None:
+    malformed = _CONTENT_FILLED_HTML.replace(
+        '<div class="text-[18px]">正文内容</div>',
+        '<div class="text-[18px] border@none" style=".>正文内容</.></div>',
+        1,
+    )
+    ok, reason = ppg._validate_content_template_fill_output(
+        _CONTENT_SEED_HTML,
+        malformed,
+    )
+    assert ok, reason
+    assert reason == ""
+    assert ppg._slide_dom_soft_issue(malformed) == "malformed_tokens"
+
+
+def test_ppt_slide_bounds_accepts_single_quoted_class() -> None:
+    html = _GOOD_CONTENT_HTML.replace('class="ppt-slide"', "class='ppt-slide'")
+    assert ppg._ppt_slide_bounds(html) is not None
+    assert ppg._main_inside_ppt_slide(html)
+
+
+def test_page_worker_writes_free_gen_page_despite_malformed_dom_tokens() -> None:
+    llm_calls: list[str] = []
+    tool_calls: list[str] = []
+    written_contents: list[str] = []
+    malformed = _VALID_HTML.replace(
+        "<h1>历史文化介绍</h1>",
+        '<h1 class="border@none" style=".>历史文化介绍</.></h1>',
+    )
+    node = _configure_worker(
+        [malformed],
+        llm_calls=llm_calls,
+        tool_calls=tool_calls,
+        written_contents=written_contents,
+    )
+
+    result = asyncio.run(node._execute(_worker_inputs()))
+
+    assert llm_calls == ["p8_1_page_1"]
+    assert tool_calls == ["write_file"]
+    assert result["missing_pages"] == []
+    assert result["page_files"] == ["page-1.pptx.html"]
+    assert written_contents and "border@none" in written_contents[0]
 
 
 def test_extract_backup_timestamp() -> None:
@@ -1506,6 +1586,8 @@ def test_custom_content_fill_prompt_follows_official_scaffold_not_freeform() -> 
     assert "div.flex.flex-col" in prompt
     assert "div.flex-1.min-h-0" in prompt
     assert "页面内容预算契约" in prompt
+    assert "禁止页脚出现页码" in prompt
+    assert "用户要求“生成 N 页”只表示页数，不等于要求显示页码" not in prompt
 
 
 @pytest.mark.unit
@@ -1522,6 +1604,8 @@ def test_preset_content_fill_prompt_still_locks_chrome() -> None:
     assert "Stage 6 §3.5" in prompt
     assert "禁止改标题栏" in prompt
     assert "只允许替换 3 类占位符" in prompt
+    assert "禁止页脚出现页码" in prompt
+    assert "不得追加运行页码" in prompt
 
 
 @pytest.mark.unit
@@ -1641,6 +1725,21 @@ def test_validate_custom_content_template_fill_allows_main_outside_when_slide_ha
         '</div>\n<main><p>页外说明</p></main>\n<!-- CHART_SCAFFOLD_BEGIN',
         1,
     )
+    ok, reason = ppg._validate_custom_content_template_fill_output(
+        _custom_themed_seed(),
+        filled,
+    )
+    assert ok
+    assert reason == ""
+
+
+@pytest.mark.unit
+def test_validate_custom_content_fill_accepts_malformed_tokens_when_slots_filled() -> None:
+    filled = _custom_filled_html().replace(
+        "<h1>",
+        '<h1 class="border@none" style=".>',
+        1,
+    ).replace("</h1>", "</.></h1>", 1)
     ok, reason = ppg._validate_custom_content_template_fill_output(
         _custom_themed_seed(),
         filled,

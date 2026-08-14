@@ -25,6 +25,7 @@ _MIN_COMPARE_DIMS = 2
 
 _WORD_COUNT_MAP = {"L1": 1200, "L2": 2000, "L3": 3500}
 _WORD_COUNT_NO_SEARCH_MAP = {"L1": 800, "L2": 1200, "L3": 2000}
+_MIN_WORDS_PER_PAGE_FLOOR = 350
 
 _PAGE_HEADER_RE = re.compile(r"^###\s*P(\d+)\s*[:：]", re.MULTILINE)
 _TITLE_FIELD_RE = re.compile(r"\*\*标题\*\*[：:]\s*(.+)", re.IGNORECASE)
@@ -35,6 +36,73 @@ _LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.+)$", re.MULTILINE)
 _NEXT_FIELD_RE = re.compile(r"\*\*[^*]+\*\*[：:]")
 _SEARCHED_SOURCES_RE = re.compile(r"^##\s*已搜索来源", re.MULTILINE)
 _URL_RE = re.compile(r"https?://[^\s\])>\"']+")
+
+
+def _compute_min_words_per_page(
+    research_depth: str, search_mode: str, page_count: int,
+) -> int:
+    total_min_words = _WORD_COUNT_MAP.get(research_depth, 2000)
+    if search_mode == "no_search":
+        total_min_words = _WORD_COUNT_NO_SEARCH_MAP.get(research_depth, 1200)
+    return max(_MIN_WORDS_PER_PAGE_FLOOR, total_min_words // max(page_count, 1))
+
+
+def _as_page_number(value: Any) -> int | None:
+    try:
+        page_num = int(value)
+    except (TypeError, ValueError):
+        return None
+    return page_num if page_num > 0 else None
+
+
+def _cli_researched_page_numbers(payload: dict[str, Any]) -> list[int]:
+    raw = payload.get("researchedPages")
+    if raw is None:
+        raw = payload.get("researched_pages")
+    nums: list[int] = []
+    if isinstance(raw, list):
+        for item in raw:
+            page_num = _as_page_number(item)
+            if page_num is not None:
+                nums.append(page_num)
+        if nums:
+            return nums
+    pages = payload.get("pages")
+    if not isinstance(pages, list):
+        return []
+    for item in pages:
+        if not isinstance(item, dict) or item.get("isContent") is not True:
+            continue
+        page_num = _as_page_number(item.get("page") or item.get("page_number"))
+        if page_num is not None:
+            nums.append(page_num)
+    return nums
+
+
+def _is_placeholder_text(value: str) -> bool:
+    return not value or value in {"-", "—", "无"}
+
+
+def _normalize_query_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if not _is_placeholder_text(str(item).strip())]
+    if not isinstance(value, str):
+        return []
+    text = value.strip()
+    if _is_placeholder_text(text):
+        return []
+    return [text]
+
+
+def _normalize_need_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if not _is_placeholder_text(str(item).strip())]
+    if not isinstance(value, str):
+        return []
+    text = value.strip()
+    if _is_placeholder_text(text):
+        return []
+    return [part.strip() for part in re.split(r"[、,，]", text) if not _is_placeholder_text(part.strip())]
 
 
 @dataclass
@@ -57,7 +125,7 @@ class PrepareNode(PlanNode):
                 "\n"
                 "### 职责\n"
                 "1. 读取 `{output_dir}/outline.md`\n"
-                "2. LLM 解析需要研究的页面（page_number / title / page_type / research_queries / data_needs），失败时正则回退\n"
+                "2. 调用官方 `parse-outline` CLI 解析大纲，消费 `researched_pages` / `structural_pages`；结构页不派研究。CLI 未给出 research_queries / data_needs 时从 outline.md 正则补齐；CLI 失败再正则回退（不走 LLM）\n"
                 "3. 提取 outline 中已搜索的 URL（`searched_urls`，跳过重复搜索）\n"
                 "4. 判断是否执行搜索（`_should_search`）：\n"
                 "\n"
@@ -69,7 +137,7 @@ class PrepareNode(PlanNode):
                 "| auto | 素材不足或为空 | 完整流程 搜索 → 抓取 → 撰写 |\n"
                 "\n"
                 "5. 素材覆盖度评估（有素材且 need_search 时）：用 LLM 逐页评估素材对各页数据需求的覆盖程度（covered/partial/uncovered），并输出未覆盖的数据需求列表\n"
-                "6. 计算每页最低字数 `min_words_per_page`（总最低字数 ÷ 页数，下限 200）\n"
+                "6. 计算每页最低字数 `min_words_per_page`（总最低字数 ÷ 页数，下限 350）\n"
                 "\n"
                 "### 输出\n"
                 "- `prepare_status`: ok / failed\n"
@@ -84,7 +152,7 @@ class PrepareNode(PlanNode):
                 "### 失败兜底\n"
                 "- outline.md 为空/不存在：返回 prepare_status=failed\n"
                 "- 解析不到 ✅ 页面：返回 prepare_status=failed\n"
-                "- LLM 解析页面失败：正则回退\n"
+                "- parse-outline CLI 失败或未得到 researched_pages：正则回退（不走 LLM）\n"
                 "- 素材充足性评估失败：默认需要搜索\n"
                 "- 素材覆盖度评估失败：按无素材处理（所有页面 uncovered）\n"
                 "- need_search=False 且 source_material 为空/<200字：设置 no_data_fallback=True\n"
@@ -100,7 +168,10 @@ class PrepareNode(PlanNode):
             logger.warning("[P6.0] outline.md 为空或不存在")
             return {"prepare_status": "failed"}
 
-        pages = await self._parse_outline_pages(outline_text)
+        pptx_root = str(inputs.get("pptx_root") or "").strip()
+        pages = await self._parse_outline_pages(
+            outline_text, outline_path=outline_path, pptx_root=pptx_root,
+        )
         if not pages:
             logger.warning("[P6.0] 未从 outline.md 中解析到需要研究的页面")
             return {"prepare_status": "failed"}
@@ -126,10 +197,9 @@ class PrepareNode(PlanNode):
         if need_search and source_material:
             page_coverage = await self._evaluate_page_coverage(pages, source_material)
 
-        total_min_words = _WORD_COUNT_MAP.get(research_depth, 2000)
-        if search_mode == "no_search":
-            total_min_words = _WORD_COUNT_NO_SEARCH_MAP.get(research_depth, 1200)
-        min_words_per_page = max(200, total_min_words // max(len(pages), 1))
+        min_words_per_page = _compute_min_words_per_page(
+            research_depth, search_mode, len(pages),
+        )
 
         logger.info(
             "[P6.0] 预处理完成 pages=%d need_search=%s no_data_fallback=%s min_words_per_page=%d",
@@ -166,45 +236,101 @@ class PrepareNode(PlanNode):
             logger.warning("[P6.0] 读取文件失败 %s: %s", path, e)
             return ""
 
-    async def _parse_outline_pages(self, outline_text: str) -> list[dict[str, Any]]:
-        base_prompt = (
-            "你是一个大纲解析助手。请从以下 PPT 大纲中提取所有研究需求为 ✅ 的页面信息。\n"
-            "对每个页面，提取：\n"
-            "- page_number: 页码（整数）\n"
-            "- title: 页面标题\n"
-            "- page_type: 页面类型（如 trend/data/case/comparison/technology 等）\n"
-            "- research_queries: 研究查询列表（字符串数组）\n"
-            "- data_needs: 数据需求列表（字符串数组）\n\n"
-            "以 JSON 数组格式输出，不要输出其他内容。如果没有需要研究的页面，输出空数组 []。\n"
-            "重要：JSON 字符串值中如果包含双引号，必须用 \\\" 转义。\n\n"
-            f"大纲内容：\n{outline_text}"
-        )
-        max_attempts = 3
-        last_error: str | None = None
-        for attempt in range(max_attempts):
-            prompt = base_prompt
-            if attempt > 0 and last_error:
-                prompt = (
-                    f"{base_prompt}\n\n"
-                    f"上次输出的 JSON 存在格式错误：\n{last_error}\n"
-                    "请修正格式后重新输出完整的 JSON 数组。"
-                )
-            result = await self.stream_llm_collect(
-                prompt=prompt,
-                system_prompt="只输出 JSON 数组，不要输出其他内容",
-            )
-            try:
-                pages = self.extract_json(result, expected_type=list)
-                if isinstance(pages, list) and pages:
-                    return pages
-                if isinstance(pages, list) and not pages:
-                    logger.warning("[P6.0] LLM 返回空列表（第%d次）", attempt + 1)
-                    last_error = "返回了空数组，但大纲中存在 ✅ 页面"
-            except (ValueError, TypeError) as e:
-                last_error = str(e)
-                logger.warning("[P6.0] LLM 解析大纲页面失败（第%d次）：%s", attempt + 1, last_error)
-        logger.warning("[P6.0] LLM 解析大纲页面失败（%d次重试均失败），尝试正则回退", max_attempts)
+    async def _parse_outline_pages(
+        self,
+        outline_text: str,
+        *,
+        outline_path: str = "",
+        pptx_root: str = "",
+    ) -> list[dict[str, Any]]:
+        payload = await self._run_parse_outline_cli(outline_path, pptx_root)
+        if payload:
+            pages = self._pages_from_parse_outline_payload(payload, outline_text)
+            if pages:
+                logger.info("[P6.0] parse-outline CLI 解析到 researched_pages=%d", len(pages))
+                return pages
+            logger.warning("[P6.0] parse-outline CLI 未得到 researched_pages，正则回退")
+        else:
+            logger.warning("[P6.0] parse-outline CLI 不可用或失败，正则回退")
         return self._parse_outline_pages_fallback(outline_text)
+
+    async def _run_parse_outline_cli(
+        self, outline_path: str, pptx_root: str,
+    ) -> dict[str, Any] | None:
+        """调用官方 parse-outline CLI；失败返回 None，由调用方正则回退。"""
+        if not outline_path or not pptx_root:
+            logger.warning("[P6.0] 缺少 outline_path/pptx_root，跳过 parse-outline CLI")
+            return None
+        try:
+            from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import (
+                cli_path, quote_path, run_bash,
+            )
+            cmd = f"{cli_path('parse-outline', pptx_root)} {quote_path(outline_path)}"
+            result = await run_bash(
+                self, cmd,
+                timeout_seconds=60, required=False, workdir=pptx_root,
+            )
+            if result.exit_code != 0:
+                detail = result.stderr or result.stdout or ""
+                logger.warning("[P6.0] parse-outline 返回 exit=%d: %s", result.exit_code, detail[:500])
+                return None
+            payload = PptCommon.parse_json_payload(result.stdout or result.raw)
+            if not isinstance(payload, dict):
+                logger.warning("[P6.0] parse-outline 输出不是 JSON 对象")
+                return None
+            return payload
+        except Exception as e:
+            if isinstance(e, AbortError):
+                raise
+            logger.warning("[P6.0] parse-outline CLI 不可用: %s", e)
+            return None
+
+    def _pages_from_parse_outline_payload(
+        self, payload: dict[str, Any], outline_text: str,
+    ) -> list[dict[str, Any]]:
+        """把官方 parse-outline JSON 转成下游 pages；缺 queries/needs 时用正则补齐。"""
+        researched_nums = _cli_researched_page_numbers(payload)
+        if not researched_nums:
+            return []
+
+        cli_by_num: dict[int, dict[str, Any]] = {}
+        raw_pages = payload.get("pages")
+        if isinstance(raw_pages, list):
+            for item in raw_pages:
+                if not isinstance(item, dict):
+                    continue
+                page_num = _as_page_number(item.get("page") or item.get("page_number"))
+                if page_num is not None:
+                    cli_by_num[page_num] = item
+
+        fallback_by_num = {
+            p["page_number"]: p for p in self._parse_outline_pages_fallback(outline_text)
+        }
+
+        pages: list[dict[str, Any]] = []
+        for page_num in researched_nums:
+            cli_page = cli_by_num.get(page_num, {})
+            fallback = fallback_by_num.get(page_num, {})
+            queries = _normalize_query_list(
+                cli_page.get("researchQueries") or cli_page.get("research_queries"),
+            )
+            if not queries:
+                queries = list(fallback.get("research_queries") or [])
+            data_needs = _normalize_need_list(
+                cli_page.get("dataNeeds") or cli_page.get("data_needs"),
+            )
+            if not data_needs:
+                data_needs = list(fallback.get("data_needs") or [])
+            pages.append({
+                "page_number": page_num,
+                "title": str(cli_page.get("title") or fallback.get("title") or "").strip(),
+                "page_type": str(
+                    cli_page.get("type") or cli_page.get("page_type") or fallback.get("page_type") or "data"
+                ).strip() or "data",
+                "research_queries": queries,
+                "data_needs": data_needs,
+            })
+        return pages
 
     def _parse_outline_pages_fallback(self, outline_text: str) -> list[dict[str, Any]]:
         pages = []

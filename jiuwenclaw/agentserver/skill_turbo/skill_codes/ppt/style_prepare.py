@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 _PRESET_STYLES = {"business-classic", "tech-minimal", "elegant-narrative", "industrial-tech"}
 
+_CUSTOM_STYLE_RUNNING_PAGE_NUMBER_RULE = (
+    "运行页码约束（遵守即可，不要把本段元说明写进风格文件）："
+    "运行页码不是配色/字体/间距之外的风格锚点；禁止在「排版与组件规范」或「设计禁忌」中"
+    "规定页码位置、字号或颜色（例如「页码统一置于右上角」）；"
+    "页脚禁止「第 N 页」「Page N」「N / M」「P N」；"
+    "用户若提到页码位置，不要把它提升为强制风格条款。\n"
+)
+
 
 class StylePrepareNode(PlanNode):
     def __init__(self) -> None:
@@ -60,7 +68,8 @@ class StylePrepareNode(PlanNode):
                 "     - 字体（标题字体 + 正文字体）\n"
                 "     - 排版与组件规范（页面尺寸 1280×720px、字号、卡片风格）\n"
                 "     - CSS 主题变量和图表约束\n"
-                "     - 设计禁忌（禁止未定义颜色/字体、禁止动画）\n"
+                "     - 设计禁忌（禁止未定义颜色/字体、禁止动画；"
+                "运行页码不是风格锚点，页脚禁止页码）\n"
                 "   - 自由发挥时仅靠 `topic` 推断；有用户描述时参考 `style_description`\n"
                 "5. **统一落盘**：调用 `write_file(file_path={output_dir}/style-{style_id}.md, content=...)`\n"
                 "6. **返回**：`style_file_path` = `{output_dir}/style-{style_id}.md`\n"
@@ -277,8 +286,10 @@ class StylePrepareNode(PlanNode):
             "## 设计禁忌\n"
             "- 禁止使用本文件未定义的颜色或字体\n"
             "- 禁止动画\n"
+            "- 页脚禁止出现运行页码\n"
             "- 其他禁忌（如有）\n"
             "\n"
+            f"{_CUSTOM_STYLE_RUNNING_PAGE_NUMBER_RULE}"
             "直接输出 Markdown 内容，不要输出解释或代码块包裹。"
         )
         try:

@@ -3,13 +3,42 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError
 
 _JSON_FENCE_PATTERN = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _CAT_N_PREFIX_RE = re.compile(r"^[ \t]*\d+[ \t]", re.MULTILINE)
 _OUTLINE_PAGE_HEADING_RE = re.compile(r"^### P(\d+):", re.MULTILINE)
+_STRUCTURAL_REQUEST_SPLIT_RE = re.compile(r"[+,|/]+")
+
+# 与 pptx-craft outline-planner「中间结构页触发与默认数量规则」对齐。
+# P1 / P2 抽取 prompt 必须使用同一段文案，避免各写一套。
+STRUCTURAL_PAGE_SLOT_PROMPT = """\
+- structural_page_request: 默认 "none"。仅当用户明确要求独立结构页时提取。
+  取值：none / agenda / section / chapter / agenda+section / agenda+chapter。
+  类型选择（可叠加）："目录页/议程页"→agenda；"章节页/章节分隔页/分节页"→section；"PART/章首页/Chapter"→chapter。
+  触发示例："加章节页""每章一个章节页""加 3 页章节分隔""需要目录页""保留我大纲里的章节页""加 PART 页""加章首页"。
+  普通章节结构、素材中的标题层级、模型自己觉得需要分节，都不构成触发条件 -> "none"。
+- structural_page_count: 用户指定的数量（整数；未指定或"每章一个"为 null）。
+  同时要求目录和章节页时，此字段只记录章节页的指定数量。"""
+
+PAGE_COUNT_STRUCTURAL_HINT = """\
+  page_count 不含封面、结束页和用户明确要求的中间结构页。
+  用户列出「封面、目录、内容主题、结束页」时，page_count 只计内容主题。
+  「生成 N 页 PPT」表示总页数，默认 page_count = max(N - 2, 1)；用户明确要求目录/章节页时，再扣除这些结构页。"""
+
+
+class StructuralPagePlan(NamedTuple):
+    """大纲阶段使用的中间结构页计划（封面/结束页除外）。"""
+
+    request: str
+    need_agenda: bool
+    agenda_count: int
+    divider_type: str
+    divider_count: int
+    divider_count_mode: str
+    total_middle: int
 
 # ──────────────────────── 节点显示名映射 ────────────────────────
 # 将内部 plan_name（如 p0_pipeline_init）映射为界面上展示的中文名称。
@@ -211,6 +240,137 @@ class PptCommon:
                 raise
             raise error_type(f"写入 {label} 失败: {path}: {exc}") from exc
         return path
+
+    @staticmethod
+    def parse_positive_int(value: Any) -> int | None:
+        """解析正整数；bool 与非数字一律视为未指定。"""
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, int) and value > 0:
+            return value
+        if isinstance(value, float) and value.is_integer() and value > 0:
+            return int(value)
+        if isinstance(value, str) and value.strip().isdigit():
+            parsed = int(value.strip())
+            return parsed if parsed > 0 else None
+        return None
+
+    @staticmethod
+    def normalize_structural_page_request(raw: Any) -> str:
+        """将抽取结果归一为官方类型：none / agenda / section / chapter / agenda+section / agenda+chapter。
+
+        auto 按官方「章节页 → section」处理，不保留为独立类型。
+        """
+        if not isinstance(raw, str) or not raw.strip():
+            return "none"
+        parts = _STRUCTURAL_REQUEST_SPLIT_RE.split(raw.strip().lower().replace(" ", ""))
+        tokens: list[str] = []
+        for part in parts:
+            token = part.strip()
+            if not token or token == "none":
+                continue
+            if token == "auto":
+                token = "section"
+            if token in {"agenda", "section", "chapter"} and token not in tokens:
+                tokens.append(token)
+        if not tokens:
+            return "none"
+        need_agenda = "agenda" in tokens
+        divider = "chapter" if "chapter" in tokens else ("section" if "section" in tokens else "")
+        if need_agenda and divider:
+            return f"agenda+{divider}"
+        if need_agenda:
+            return "agenda"
+        return divider
+
+    @staticmethod
+    def default_section_page_count(page_count: Any) -> int:
+        """官方：只说需要章节页且未指定数量时，≤5 为 1 页，≥6 为 ceil(page_count/4)。"""
+        try:
+            count = int(page_count)
+        except (TypeError, ValueError):
+            return 1
+        if count <= 5:
+            return 1
+        return (count + 3) // 4
+
+    @classmethod
+    def resolve_structural_page_plan(
+        cls,
+        structural_page_request: Any = "none",
+        structural_page_count: Any = None,
+        page_count: Any = None,
+    ) -> StructuralPagePlan:
+        """按 pptx-craft 规则把抽取槽位编译为目录/章节页计划。
+
+        目录与章节页分开计数：只要目录且未指定数量 → 1 张总目录，不套用章节页 ceil 公式。
+        """
+        request = cls.normalize_structural_page_request(structural_page_request)
+        specified = cls.parse_positive_int(structural_page_count)
+        need_agenda = request.startswith("agenda")
+        if request in {"section", "agenda+section"}:
+            divider_type = "section"
+        elif request in {"chapter", "agenda+chapter"}:
+            divider_type = "chapter"
+        else:
+            divider_type = ""
+
+        if need_agenda and not divider_type:
+            agenda_count = specified if specified is not None else 1
+            return StructuralPagePlan(
+                request=request,
+                need_agenda=True,
+                agenda_count=agenda_count,
+                divider_type="",
+                divider_count=0,
+                divider_count_mode="none",
+                total_middle=agenda_count,
+            )
+
+        if divider_type and not need_agenda:
+            if specified is not None:
+                divider_count = specified
+                divider_mode = "specified"
+            else:
+                divider_count = cls.default_section_page_count(page_count)
+                divider_mode = "default"
+            return StructuralPagePlan(
+                request=request,
+                need_agenda=False,
+                agenda_count=0,
+                divider_type=divider_type,
+                divider_count=divider_count,
+                divider_count_mode=divider_mode,
+                total_middle=divider_count,
+            )
+
+        if need_agenda and divider_type:
+            agenda_count = 1
+            if specified is not None:
+                divider_count = specified
+                divider_mode = "specified"
+            else:
+                divider_count = cls.default_section_page_count(page_count)
+                divider_mode = "default"
+            return StructuralPagePlan(
+                request=request,
+                need_agenda=True,
+                agenda_count=agenda_count,
+                divider_type=divider_type,
+                divider_count=divider_count,
+                divider_count_mode=divider_mode,
+                total_middle=agenda_count + divider_count,
+            )
+
+        return StructuralPagePlan(
+            request="none",
+            need_agenda=False,
+            agenda_count=0,
+            divider_type="",
+            divider_count=0,
+            divider_count_mode="none",
+            total_middle=0,
+        )
 
     @staticmethod
     def resolve_total_pages(

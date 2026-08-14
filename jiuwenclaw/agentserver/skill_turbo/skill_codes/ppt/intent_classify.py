@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import PlanNode
-from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
+from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import (
+    PAGE_COUNT_STRUCTURAL_HINT,
+    STRUCTURAL_PAGE_SLOT_PROMPT,
+    PptCommon,
+)
 
 _collect_user_text = PptCommon.collect_user_text
 
@@ -38,7 +42,8 @@ _LLM_PATH_ONLY_SYSTEM_PROMPT = """你是文件路径提取助手。从用户消�
 必须只输出 JSON，格式：
 {"doc_paths": ["路径1", "路径2"]}"""
 
-_LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户消息中按优先级完成以下任务：
+_LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = (
+    """你是 PPT 任务分析助手。从用户消息中按优先级完成以下任务：
 
 第一步：文件路径提取（优先级最高）
 - 只提取用户明确给出的本地文件路径或 @文件引用
@@ -49,10 +54,13 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 第二步：PPT 需求信息提取（仅当没有找到任何文件路径时执行）
 - 只提取用户**明确提到**的信息，不要推断或补充
 - 未提及的字段留空字符串或 null
-- page_count 必须是正整数（内容页数，不含封面/结束页；总页数 = page_count + 2）。
+- page_count 必须是正整数（内容页数，不含封面/结束页/目录页/章节页；默认总页数 = page_count + 2）。
   判断规则：①用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"等未特指内容页的表达 → N 表示总页数 → page_count = max(N - 2, 1)；
   ②用户明确说"N个内容页"/"N页正文"，或正在回答"需要多少页内容页"时 → page_count = N。
   示例："10页以内"→8, "总页数8页"→6, "8页"→6, "做8页PPT"→6
+"""
+    + PAGE_COUNT_STRUCTURAL_HINT
+    + """
 - style_id 可选值：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom / 其他风格名
   用户要求“自由发挥”时填写 custom
   “华为风格/华为/华为红/华为风/华为商务”统一填写 business-classic，不得填 custom
@@ -62,16 +70,9 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
   路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
   仅提取用户明确给出的路径，不要编造。
-- structural_page_request: 用户是否要求中间结构页（目录页/章节页/分隔页）。字符串，取值：
-  "none"（默认，未要求任何中间结构页）；
-  "agenda"（用户要求目录页/议程页）；
-  "section"（用户要求章节页/章节分隔页/分节页）；
-  "chapter"（用户要求 PART 页/章首页/Chapter）；
-  "auto"（用户要求章节页但未指定类型，由大纲规划阶段自动选择 section 或 chapter）。
-  提取规则：仅当用户明确表达时才提取，例如"加章节页""每章一个章节页""需要目录页""加 PART 页""加章首页"。
-  普通章节结构、素材中的标题层级、模型自己觉得需要分节，都不构成触发条件 -> "none"。
-  用户指定数量时（如"加 2 页章节页"），数量信息保留在 structural_page_count 中。
-- structural_page_count: 用户指定的中间结构页数量（整数；未指定或"每章一个"等需自动计算时为 null）。
+"""
+    + STRUCTURAL_PAGE_SLOT_PROMPT
+    + """
 
 重要：如果找到了文件路径，slots 各字段留空，不需要提取需求信息；
       如果没有找到任何文件路径，则必须提取 slots 信息。
@@ -81,6 +82,7 @@ _LLM_PATH_AND_SLOTS_SYSTEM_PROMPT = """你是 PPT 任务分析助手。从用户
 "presentation_purpose": "", "style_id": "", "pack_dir": "",
 "structural_page_request": "none", "structural_page_count": null}}
 （page_count 为正整数或 null，禁止字符串）"""
+)
 
 
 def _normalize_doc_path(raw: str) -> str | None:
@@ -181,7 +183,16 @@ def _collect_files_paths(inputs: dict[str, Any]) -> list[str]:
     return _collect_paths_from_file_entries(inputs.get("files"))
 
 
-_SLOT_NAMES = ("topic", "page_count", "audience", "presentation_purpose", "style_id", "pack_dir")
+_SLOT_NAMES = (
+    "topic",
+    "page_count",
+    "audience",
+    "presentation_purpose",
+    "style_id",
+    "pack_dir",
+    "structural_page_request",
+    "structural_page_count",
+)
 
 
 def _build_llm_path_prompt(text: str) -> str:
@@ -267,18 +278,25 @@ def _parse_slots_from_llm_response(raw: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in _SLOT_NAMES:
         value = slots_raw.get(name)
-        if value is None and name == "page_count":
-            result[name] = None
-        elif name == "page_count" and isinstance(value, str) and value.strip():
-            raise IntentClassifyError(
-                f"page_count 必须是正整数或 null，LLM 返回了字符串: {value!r}"
-            )
+        if name == "page_count":
+            if value is None:
+                result[name] = None
+            elif isinstance(value, str) and value.strip():
+                raise IntentClassifyError(
+                    f"page_count 必须是正整数或 null，LLM 返回了字符串: {value!r}"
+                )
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                result[name] = value
+            else:
+                result[name] = None
+        elif name == "structural_page_count":
+            result[name] = PptCommon.parse_positive_int(value)
+        elif name == "structural_page_request":
+            result[name] = PptCommon.normalize_structural_page_request(value)
         elif isinstance(value, str) and value.strip():
             result[name] = value.strip()
-        elif isinstance(value, (int, float)) and name == "page_count":
-            result[name] = value
         else:
-            result[name] = "" if name != "page_count" else None
+            result[name] = ""
     return result
 
 
