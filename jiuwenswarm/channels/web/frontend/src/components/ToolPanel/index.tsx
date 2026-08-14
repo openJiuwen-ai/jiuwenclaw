@@ -234,7 +234,7 @@ export function ToolPanel({
     enabled: canReviewCode,
   });
   const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} />
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} isProcessing={isProcessing} />
     : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
   const todoCompletedTasks = useMemo(

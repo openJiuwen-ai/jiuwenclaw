@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
@@ -80,8 +81,9 @@ def test_code_adapter_builds_coding_memory_rail_without_embedding_config(monkeyp
     )
 
     assert isinstance(rail, _FakeCodingMemoryRail)
-    assert created["coding_memory_dir"] == str(
-        tmp_path / "agent_workspace" / "coding_memory" / "project"
+    assert created["coding_memory_dir"] == resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=project_dir,
     )
     assert created["embedding_config"].model_name == "text-embedding-v3"
     assert created["embedding_config"].base_url == ""

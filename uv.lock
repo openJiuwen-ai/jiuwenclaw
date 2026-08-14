@@ -694,20 +694,20 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.128"
+version = "0.2.115"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/e8/3a9622b31f9ee22274e13a620e5e75ac38454d14538391b2fe3bc7eb76dc/claude_agent_sdk-0.2.128.tar.gz", hash = "sha256:2ac7b2b3bc56ae9037fd284c8690d3dafab9493ecd28d8974bba79a418e1b800", size = 309369, upload-time = "2026-07-25T01:48:25.884Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/b8/c1898153ffb0c75cfc5504c18d892d3c57a080073c9ede3df7addb8fc4a0/claude_agent_sdk-0.2.115.tar.gz", hash = "sha256:230017fbba74fb3aa1a1d86b2986277c7fe26dd2e33eea865c90553d93f4e26d", size = 268644, upload-time = "2026-07-09T23:46:43.739Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/ff/03613a38a84285cd85f114fc26d4431f545d2b3b344eb8f69f9b0f18f3c6/claude_agent_sdk-0.2.128-py3-none-macosx_11_0_arm64.whl", hash = "sha256:2e47ee95be68cb07612fd5288a40f3307763da5a5adf66d6e03ea49dc0495c9c", size = 75183825, upload-time = "2026-07-25T01:48:30.45Z" },
-    { url = "https://files.pythonhosted.org/packages/a3/df/2adbd3077f1a1cada39cd1508990d4008a8ac9ec74c801b24b1b302348b0/claude_agent_sdk-0.2.128-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:55e8fa28918af5620f391692efe80527ad9f2294cec14dadeea93c5161dbefc4", size = 80305667, upload-time = "2026-07-25T01:48:35.091Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/56/776a41af67a53d794b420dcd2f1075b585ed3725faa9827164f4a2e945dd/claude_agent_sdk-0.2.128-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:6c10cc1c5403b2b0b3d8deb79ad5271a8e49b9db6460193599b91f49f16b4cf7", size = 84617823, upload-time = "2026-07-25T01:48:39.297Z" },
-    { url = "https://files.pythonhosted.org/packages/17/1c/37044abbddf2141c4eeb6cc8e15a486491549a27283029d73db2c4f3c3b7/claude_agent_sdk-0.2.128-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:cc4a0f20337e227fe16f00edf7cbe109349707adb440fe51ca6c44f9f8d7d21a", size = 85663462, upload-time = "2026-07-25T01:48:43.982Z" },
-    { url = "https://files.pythonhosted.org/packages/a3/c9/ffbd8113080f87a4cd7bbfc8b00a974ea7189e3f666b5d7a2903dec7b74f/claude_agent_sdk-0.2.128-py3-none-win_amd64.whl", hash = "sha256:37b87c8e75daa2a6dc74da6d788e0981a2e5e3a6be80cfa4c287abce2bf70e0b", size = 85566882, upload-time = "2026-07-25T01:48:48.635Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/43/609755e7ec7c8031c05f89442154d86f55856a64d234f90845b8035c7ffb/claude_agent_sdk-0.2.115-py3-none-macosx_11_0_arm64.whl", hash = "sha256:8ca9eea21ed6b1b7d6b35c5bac368210214b36028c68046231ca4ea545854e80", size = 71306972, upload-time = "2026-07-09T23:46:49.581Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/e7/8a3b68f30fdebb0fa59dd96be142443a5fffbed2f2a16a6fbd7259b49b9b/claude_agent_sdk-0.2.115-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:23fc46eadafbf9315c63a6959a7677c4e2325339e09f6caf820e81ef905b51da", size = 74824573, upload-time = "2026-07-09T23:46:55.73Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/92/0cb1e45004a2f3738c77bb33281ad919beb203e1f49353c120ae75f79e55/claude_agent_sdk-0.2.115-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:c662fe2f618aa19e9ea1c161b490b2f67ec0c8e15a75d96b5b14cbb8a7301e86", size = 79850093, upload-time = "2026-07-09T23:47:02.72Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/2c/63c9545875abb4ed1563fcf7bd52277b3556fc894816d42bb2e723f17b6b/claude_agent_sdk-0.2.115-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:946f8b3240e9c0e79a7f87bab14eb079d283ab564a0503923aa81648351b8c6f", size = 80878895, upload-time = "2026-07-09T23:47:11.93Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/64/efe0f2ad2e1ae39690c7345d6da651be6af1350ef25bc20209171896a4bf/claude_agent_sdk-0.2.115-py3-none-win_amd64.whl", hash = "sha256:9bff5ef9932747ce41982a7c955fb144220ada80e6931bd5f5ee5da74f454990", size = 80391369, upload-time = "2026-07-09T23:47:19.837Z" },
 ]
 
 [[package]]
@@ -1802,7 +1802,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenswarm"
-version = "0.2.4b3"
+version = "0.2.4b4"
 source = { editable = "." }
 dependencies = [
     { name = "a2ui-agent-sdk" },
@@ -1823,7 +1823,7 @@ dependencies = [
     { name = "lxml" },
     { name = "mutagen" },
     { name = "numpy" },
-    { name = "openjiuwen", extra = ["claude", "codex"] },
+    { name = "openjiuwen", extra = ["claude"] },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -1851,6 +1851,9 @@ dependencies = [
 [package.optional-dependencies]
 a2a = [
     { name = "a2a-sdk", extra = ["http-server"] },
+]
+codex = [
+    { name = "openjiuwen", extra = ["codex"] },
 ]
 desktop = [
     { name = "pywebview" },
@@ -1992,7 +1995,8 @@ requires-dist = [
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["claude", "codex"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["claude"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["codex"], marker = "extra == 'codex'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
     { name = "opentelemetry-api", marker = "extra == 'harmony'", specifier = ">=1.28.0" },
@@ -2042,7 +2046,7 @@ requires-dist = [
     { name = "wecom-aibot-sdk", specifier = ">=1.0.5" },
     { name = "wecom-aibot-sdk", marker = "extra == 'harmony'", specifier = ">=1.0.5" },
 ]
-provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "shell-ast", "test"]
+provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "codex", "shell-ast", "test"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2082,7 +2086,7 @@ test = [
 
 [[package]]
 name = "jiuwenswarm-tui"
-version = "0.2.4b3"
+version = "0.2.4b4"
 source = { directory = "packages/jiuwenswarm-tui" }
 
 [[package]]
@@ -2930,7 +2934,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.16"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#c362db57690a885c52405ab8fc8f786fd1b237ac" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop#ce21a9b7cfcce28923fba6c47758d60c624b69be" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2962,6 +2966,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "python-docx" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "requests" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sqlmodel" },

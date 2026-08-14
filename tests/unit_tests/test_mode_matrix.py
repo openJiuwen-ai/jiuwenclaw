@@ -2,17 +2,32 @@
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.mode_matrix import (
     base_mode_without_plan,
     is_plan_mode,
     is_team_mode,
     resolve_request_mode,
 )
-from jiuwenswarm.server.agent_ws_server import resolve_agent_request_mode
+from jiuwenswarm.server.agent_ws_server import (
+    _apply_resolved_mode_to_request,
+    resolve_agent_request_mode,
+)
 
 
 def _resolve(params):
     return resolve_request_mode(params, resolve_agent_request_mode)
+
+
+def test_request_preserves_original_mode_when_web_composition_rewrites_it():
+    request = AgentRequest(
+        request_id="req-1",
+        params={"mode": "agent.plan", "work_mode": "code"},
+    )
+
+    assert _apply_resolved_mode_to_request(request, work_mode="code") == ("code", "plan")
+    assert request.params["mode"] == "code.plan"
+    assert getattr(request, "_original_mode") == "agent.plan"
 
 
 # ── Web 组合：只覆盖单 agent，work_mode 决定 profile，mode 决定是否 plan ─────
@@ -81,15 +96,16 @@ def test_plan_exit_mode_is_profile_aware(mode, work_mode, expected_normal):
 
 @pytest.mark.parametrize("work_mode", ["work", "code"])
 def test_web_team_plan_is_not_composable(work_mode):
-    """集群不支持 Plan：``team.plan`` 不再是 Web 组合值，落回历史解析。"""
+    """Team Plan 不参与 Web 组合，正式别名始终选择 normal profile。"""
     resolved = _resolve({"mode": "team.plan", "work_mode": work_mode})
 
     assert resolved.from_web_composition is False
     assert (resolved.manager_mode, resolved.sub_mode, resolved.canonical_mode) == (
-        "code",
         "team",
-        "team.plan",
+        "plan",
+        "team.plan.normal",
     )
+    assert resolved.profile == "normal"
 
 
 # ── TUI / CLI / cron：不带 work_mode 时必须完全走历史解析 ───────────────────
@@ -106,7 +122,9 @@ def test_web_team_plan_is_not_composable(work_mode):
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
         ("team", ("team", None, "team")),
-        ("team.plan", ("code", "team", "team.plan")),
+        ("team.plan", ("team", "plan", "team.plan.normal")),
+        ("team.plan.normal", ("team", "plan", "team.plan.normal")),
+        ("team.plan.code", ("code", "team", "team.plan.code")),
     ],
 )
 def test_legacy_modes_are_untouched_without_work_mode(raw_mode, expected):
@@ -116,7 +134,9 @@ def test_legacy_modes_are_untouched_without_work_mode(raw_mode, expected):
     assert resolved.from_web_composition is False
 
 
-@pytest.mark.parametrize("raw_mode", ["code.plan", "code.team", "agent.fast"])
+@pytest.mark.parametrize(
+    "raw_mode", ["code.plan", "code.team", "team.plan.normal", "team.plan.code", "agent.fast"]
+)
 def test_legacy_full_modes_ignore_work_mode(raw_mode):
     """即便某个客户端同时带了 work_mode，完整模式串仍按历史语义解析。
 
@@ -174,6 +194,8 @@ def test_missing_mode_defaults_to_agent():
         ("agent.plan", True),
         ("code.plan", True),
         ("team.plan", True),
+        ("team.plan.normal", True),
+        ("team.plan.code", True),
         ("agent", False),
         ("team", False),
         ("code.normal", False),
@@ -189,6 +211,8 @@ def test_is_plan_mode(mode, expected):
     [
         ("team", True),
         ("team.plan", True),
+        ("team.plan.normal", True),
+        ("team.plan.code", True),
         ("code.team", True),
         ("agent", False),
         ("agent.plan", False),
@@ -204,7 +228,9 @@ def test_base_mode_without_plan_is_identity_for_normal_modes():
     assert base_mode_without_plan("code.team") == "code.team"
 
 
-@pytest.mark.parametrize("mode", ["team", "team.plan", "code.team"])
+@pytest.mark.parametrize(
+    "mode", ["team", "team.plan", "team.plan.normal", "team.plan.code", "code.team"]
+)
 def test_team_modes_are_team_params(mode):
     from jiuwenswarm.server.utils.utils import is_team_params
 

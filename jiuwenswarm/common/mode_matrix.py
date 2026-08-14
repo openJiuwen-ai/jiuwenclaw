@@ -12,9 +12,9 @@ Web 前端只表达 ``agent`` / ``team`` / ``agent.plan`` 三个值。其中单 
 组合成后端既有的 manager mode / sub_mode / canonical mode。Plan 只在单 agent 上
 开放，``team`` 不参与组合、走历史解析，集群行为保持原样。
 
-TUI、CLI、IM、cron 等历史客户端不发送 ``work_mode``，它们继续发送
-``code.normal`` / ``code.plan`` / ``code.team`` / ``team.plan`` 等完整模式串，
-本模块对这类请求原样委派给 ``legacy_resolver``，不改变任何既有解析结果。
+TUI、CLI、IM、cron 等客户端可以直接发送完整模式串。本模块同时负责将正式别名
+``team.plan`` 归一为 ``team.plan.normal``，并把两个 Team Plan profile 分别路由到
+DeepAdapter（normal）和 CodeAdapter（code）。
 """
 
 from __future__ import annotations
@@ -36,21 +36,29 @@ WEB_COMPOSABLE_MODES: frozenset[str] = frozenset(
     {WEB_BASE_AGENT, WEB_PLAN_AGENT}
 )
 
-# 所有表示"集群"的 canonical 模式。``team.plan`` 是 TUI 的 code 集群 plan。
+# Team plan 的规范模式与兼容别名。
+TEAM_PLAN_NORMAL_MODE: str = "team.plan.normal"
+TEAM_PLAN_CODE_MODE: str = "team.plan.code"
+MODE_ALIASES: dict[str, str] = {
+    "team.plan": TEAM_PLAN_NORMAL_MODE,
+}
+
+# 所有表示"集群"的 canonical 模式。
 TEAM_CANONICAL_MODES: frozenset[str] = frozenset(
-    {"team", "team.plan", "code.team"}
+    {"team", TEAM_PLAN_NORMAL_MODE, "code.team", TEAM_PLAN_CODE_MODE}
 )
 
 # 所有表示"正处于 plan"的 canonical 模式。
 PLAN_CANONICAL_MODES: frozenset[str] = frozenset(
-    {"agent.plan", "code.plan", "team.plan"}
+    {"agent.plan", "code.plan", TEAM_PLAN_NORMAL_MODE, TEAM_PLAN_CODE_MODE}
 )
 
 # canonical plan 模式退出 plan 后应回到的普通模式。
 _PLAN_EXIT_MODES: dict[str, str] = {
     "agent.plan": "agent",
     "code.plan": "code.normal",
-    "team.plan": "code.team",
+    TEAM_PLAN_NORMAL_MODE: "team",
+    TEAM_PLAN_CODE_MODE: "code.team",
 }
 
 # (mode, work_mode) -> (manager_mode, sub_mode, canonical_mode)
@@ -74,6 +82,7 @@ class ResolvedMode:
         is_plan: 本次请求是否要求处于 plan。
         is_team: 本次请求是否集群模式。
         is_code_profile: 是否使用 CodeAdapter / code 团队 profile。
+        profile: 本次请求使用的 profile（``normal`` / ``code``）。
         normal_mode: 退出 plan 后应回到的 canonical 模式。
         from_web_composition: 是否由 Web 的 mode + work_mode 组合而来。
     """
@@ -85,6 +94,7 @@ class ResolvedMode:
     is_plan: bool
     is_team: bool
     is_code_profile: bool
+    profile: str
     normal_mode: str
     from_web_composition: bool
 
@@ -94,6 +104,12 @@ def normalize_mode_text(raw_mode: Any) -> str:
     raw_value = getattr(raw_mode, "value", raw_mode)
     text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
     return text or "agent"
+
+
+def canonicalize_mode_text(raw_mode: Any) -> str:
+    """归一化 mode 文本并解析正式别名。"""
+    text = normalize_mode_text(raw_mode)
+    return MODE_ALIASES.get(text, text)
 
 
 def normalize_work_mode(raw: Any) -> str | None:
@@ -122,17 +138,35 @@ def is_web_composable_mode(mode_text: str) -> bool:
 
 def is_plan_mode(canonical_mode: Any) -> bool:
     """canonical 模式是否处于 plan。"""
-    return normalize_mode_text(canonical_mode) in PLAN_CANONICAL_MODES
+    return canonicalize_mode_text(canonical_mode) in PLAN_CANONICAL_MODES
 
 
 def is_team_mode(canonical_mode: Any) -> bool:
     """canonical 模式是否为集群。"""
-    return normalize_mode_text(canonical_mode) in TEAM_CANONICAL_MODES
+    return canonicalize_mode_text(canonical_mode) in TEAM_CANONICAL_MODES
+
+
+def is_team_plan_mode(mode: Any) -> bool:
+    """Return whether *mode* is either normal or code Team Plan."""
+    return canonicalize_mode_text(mode) in {
+        TEAM_PLAN_NORMAL_MODE,
+        TEAM_PLAN_CODE_MODE,
+    }
+
+
+def is_code_profile_mode(mode: Any) -> bool:
+    """Return whether *mode* selects the code profile."""
+    return canonicalize_mode_text(mode) in {
+        "code.normal",
+        "code.plan",
+        "code.team",
+        TEAM_PLAN_CODE_MODE,
+    }
 
 
 def base_mode_without_plan(canonical_mode: Any) -> str:
     """canonical plan 模式退出后应回到的普通模式。非 plan 模式原样返回。"""
-    text = normalize_mode_text(canonical_mode)
+    text = canonicalize_mode_text(canonical_mode)
     return _PLAN_EXIT_MODES.get(text, text)
 
 
@@ -140,7 +174,7 @@ def compose_web_mode(mode_text: str, work_mode: str) -> tuple[str, str | None, s
     """把 Web 的 ``mode`` + ``work_mode`` 组合成后端三元组。
 
     Args:
-        mode_text: 归一化后的 Web mode（agent / team / agent.plan / team.plan）。
+        mode_text: 归一化后的 Web mode（agent / agent.plan）。
         work_mode: 归一化后的 work / code。
 
     Returns:
@@ -159,8 +193,8 @@ def resolve_request_mode(
 
     优先走 Web 组合分支；只有当请求同时满足"存在合法 ``work_mode``"和
     "mode 是 ``agent`` / ``agent.plan``"时才生效。其余取值（``team`` 以及
-    ``code.plan`` / ``code.team`` / ``agent.fast`` 等历史完整模式串）都交给
-    *legacy_resolver*，保证集群、TUI、CLI、IM 与 cron 的既有行为完全不变。
+    ``code.plan`` / ``code.team`` / ``team.plan.*`` / ``agent.fast`` 等完整模式串）
+    都交给 *legacy_resolver*。
 
     Args:
         params: 请求 params。
@@ -172,7 +206,7 @@ def resolve_request_mode(
         解析后的 :class:`ResolvedMode`。
     """
     raw_mode = params.get("mode") if isinstance(params, Mapping) else None
-    mode_text = normalize_mode_text(raw_mode)
+    mode_text = canonicalize_mode_text(raw_mode)
     work_mode = normalize_work_mode(work_mode) or read_request_work_mode(params)
 
     if work_mode is not None and is_web_composable_mode(mode_text):
@@ -187,12 +221,13 @@ def resolve_request_mode(
                 is_plan=canonical_mode in PLAN_CANONICAL_MODES,
                 is_team=canonical_mode in TEAM_CANONICAL_MODES,
                 is_code_profile=work_mode == "code",
+                profile="code" if work_mode == "code" else "normal",
                 normal_mode=base_mode_without_plan(canonical_mode),
                 from_web_composition=True,
             )
 
     manager_mode, sub_mode, canonical_mode = legacy_resolver(
-        raw_mode, work_mode=work_mode
+        mode_text, work_mode=work_mode
     )
     return ResolvedMode(
         manager_mode=manager_mode,
@@ -202,6 +237,7 @@ def resolve_request_mode(
         is_plan=canonical_mode in PLAN_CANONICAL_MODES,
         is_team=canonical_mode in TEAM_CANONICAL_MODES,
         is_code_profile=manager_mode == "code",
+        profile="code" if manager_mode == "code" else "normal",
         normal_mode=base_mode_without_plan(canonical_mode),
         from_web_composition=False,
     )
@@ -209,12 +245,18 @@ def resolve_request_mode(
 
 __all__ = [
     "PLAN_CANONICAL_MODES",
+    "MODE_ALIASES",
     "ResolvedMode",
+    "TEAM_PLAN_CODE_MODE",
+    "TEAM_PLAN_NORMAL_MODE",
     "TEAM_CANONICAL_MODES",
     "WEB_COMPOSABLE_MODES",
     "base_mode_without_plan",
+    "canonicalize_mode_text",
     "compose_web_mode",
     "is_plan_mode",
+    "is_code_profile_mode",
+    "is_team_plan_mode",
     "is_team_mode",
     "is_web_composable_mode",
     "normalize_mode_text",

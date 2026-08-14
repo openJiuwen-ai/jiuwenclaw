@@ -9,8 +9,10 @@ import {
   WsResponse,
 } from '../types';
 import { getWsBase } from '../utils/env';
+import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
+import { createSessionEventGate } from './sessionEventGate';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -86,6 +88,9 @@ class WebClient {
   private connectPromise: Promise<void> | null = null;
   private lastConnectOptions: WebConnectOptions = {};
   private requestSeq = 0;
+  private readonly sessionEventGate = createSessionEventGate((event) => {
+    this.dispatchEventNow(event);
+  });
 
   getState(): WebConnectionState {
     return this.state;
@@ -121,6 +126,10 @@ class WebClient {
         this.handlers.delete(eventName);
       }
     };
+  }
+
+  suspendSessionEvents(sessionId: string): () => void {
+    return this.sessionEventGate.suspend(sessionId);
   }
 
   async connect(options: WebConnectOptions = {}): Promise<void> {
@@ -458,6 +467,10 @@ class WebClient {
   }
 
   private dispatchEvent(event: WsEvent): void {
+    this.sessionEventGate.dispatch(event);
+  }
+
+  private dispatchEventNow(event: WsEvent): void {
     const handlers = this.handlers.get(event.event);
     if (!handlers || handlers.size === 0) {
       return;
@@ -517,6 +530,11 @@ class WebClient {
     if (options.apiBase) params.set('api_base', options.apiBase);
     if (options.model) params.set('model', options.model);
     if (options.projectDir) params.set('project_dir', options.projectDir);
+    // user_id 来自 URL ?user_id= 或 localStorage（见 utils/userId.ts），
+    // 供 gateway 为 faas 注入 X-Session-Context（CreateSandbox 绑定用户标识）。
+    // 浏览器 new WebSocket 无法设置自定义 header，只能走 query string。
+    const userId = resolveUserId();
+    if (userId) params.set('user_id', userId);
     const query = params.toString();
     const target = `${base}${path}`;
     return query ? `${target}?${query}` : target;

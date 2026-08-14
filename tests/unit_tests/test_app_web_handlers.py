@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
-import os
+import importlib
+import json
 import threading
 import time
 from pathlib import Path
@@ -12,8 +13,12 @@ import pytest
 from jiuwenswarm.gateway.channel_manager.web import app_web_handlers
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     WebHandlersBindParams,
+    _build_external_cli_publish_url,
+    _detect_external_cli_agent,
+    _flatten_external_cli_agents_for_config_panel,
     _flatten_modes_team_for_config_panel,
     _flatten_symphony_for_config_panel,
+    _inject_external_cli_publish_url,
     _normalize_feishu_conf,
     _normalize_xiaoyi_conf,
     _register_web_handlers,
@@ -23,15 +28,20 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
 
 class FakeWebChannel:
     def __init__(self):
+        self.channel_id = "web"
         self.methods: dict[str, object] = {}
         self.responses: list[dict] = []
         self.connect_handler = None
+        self.disconnect_handler = None
 
     def register_method(self, name, handler):
         self.methods[name] = handler
 
     def on_connect(self, handler):
         self.connect_handler = handler
+
+    def on_disconnect(self, handler):
+        self.disconnect_handler = handler
 
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append(
@@ -60,6 +70,29 @@ class FakeAgentClient:
             self.reload_finished.set()
 
 
+class FakeMessageHandler:
+    def __init__(self):
+        self.disconnected_websockets: list[tuple[str, str]] = []
+
+    async def unregister_ws_subscriptions(self, channel_id: str, ws_id: str) -> int:
+        self.disconnected_websockets.append((channel_id, ws_id))
+        return 1
+
+
+@pytest.mark.asyncio
+async def test_web_disconnect_unregisters_physical_subscriptions() -> None:
+    channel = FakeWebChannel()
+    message_handler = FakeMessageHandler()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, message_handler=message_handler)
+    )
+    ws = SimpleNamespace(_jiuwen_ws_id="web-ws-dead")
+
+    await channel.disconnect_handler(ws, {"sess-web"})
+
+    assert message_handler.disconnected_websockets == [("web", "web-ws-dead")]
+
+
 class FakeChannelManager:
     def __init__(self):
         self.configs: dict[str, dict] = {}
@@ -85,6 +118,66 @@ class FakeHeartbeatService:
 
     def get_heartbeat_conf(self):
         return dict(self.config)
+
+
+@pytest.mark.asyncio
+async def test_path_select_file_returns_selected_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    channel = FakeWebChannel()
+    captured: dict[str, str | None] = {}
+    selected_path = str(tmp_path / "claude")
+
+    def fake_select_file_native(*, initial_dir: str | None = None, title: str | None = None) -> str:
+        captured["initial_dir"] = initial_dir
+        captured["title"] = title
+        return selected_path
+
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.web.directory_picker.select_file_native",
+        fake_select_file_native,
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["path.select_file"](
+        object(),
+        "req-file",
+        {
+            "initial_path": str(tmp_path / "old-claude"),
+            "title": "Choose Claude",
+        },
+        "sess-1",
+    )
+
+    assert captured == {"initial_dir": str(tmp_path), "title": "Choose Claude"}
+    assert channel.responses[-1] == {
+        "id": "req-file",
+        "ok": True,
+        "payload": {"path": selected_path, "cancelled": False},
+        "error": None,
+        "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_path_select_file_returns_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    channel = FakeWebChannel()
+    monkeypatch.setattr(
+        "jiuwenswarm.channels.web.directory_picker.select_file_native",
+        lambda **_: None,
+    )
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["path.select_file"](
+        object(),
+        "req-file-cancel",
+        {},
+        "sess-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"] == {"path": None, "cancelled": True}
 
 
 @pytest.mark.asyncio
@@ -698,14 +791,527 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_config_set_installs_codex_dependency_before_team_save(monkeypatch):
+    channel = FakeWebChannel()
+    dependency_checks: list[None] = []
+    recorded: list[dict] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+                        lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+                        lambda: {"modes": {"team": {}}})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: dependency_checks.append(None) or None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: recorded.append(payload),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-codex",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{
+                "team_name": "alpha_team",
+                "external_cli_agents": [{"cli_agent": "codex"}],
+                "leader": {"agent_key": "agent_1"},
+            }],
+        },
+        "sess-codex",
+    )
+
+    assert dependency_checks == [None]
+    assert recorded and recorded[0]["team"][0]["external_cli_agents"] == [{"cli_agent": "codex"}]
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_does_not_install_codex_for_claude_only(monkeypatch):
+    channel = FakeWebChannel()
+    dependency_checks: list[None] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+                        lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+                        lambda: {"modes": {"team": {}}})
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: dependency_checks.append(None) or None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: None,
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-claude",
+        {
+            "agents": {"agent_1": {"model": {"provider": "OpenAI"}}},
+            "team": [{
+                "team_name": "alpha_team",
+                "external_cli_agents": [{"cli_agent": "claude"}],
+                "leader": {"agent_key": "agent_1"},
+            }],
+        },
+        "sess-claude",
+    )
+
+    assert dependency_checks == []
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_updates_external_cli_switches_without_team_save(monkeypatch):
+    channel = FakeWebChannel()
+    dependency_checks: list[None] = []
+    updates: list[tuple[list[str], str | None]] = []
+
+    monkeypatch.setenv("WEB_PORT", "19000")
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: dependency_checks.append(None) or None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        lambda payload: pytest.fail("external CLI switches must not save full team payload"),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-external-cli",
+        {
+            "external_cli_agent_codex_enabled": "true",
+            "external_cli_agent_codex_use_builtin": "true",
+        },
+        "sess-external-cli",
+    )
+
+    assert dependency_checks == [None]
+    assert updates == [([{"cli_agent": "codex"}], "ws://127.0.0.1:19000/ws")]
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_saves_external_cli_path_after_detection(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[dict[str, str]], str | None]] = []
+
+    monkeypatch.setenv("WEB_PORT", "19000")
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._detect_external_cli_agent",
+        lambda cli_agent, cli_path="": {
+            "cli_agent": cli_agent,
+            "status": "ok",
+            "path": f"/resolved/{cli_agent}",
+            "version": "1.2.3",
+            "reference_version": "1.2.3",
+            "message": "",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-external-cli-path",
+        {
+            "external_cli_agent_claude_enabled": "true",
+            "external_cli_agent_claude_cli_path": "/custom/claude",
+        },
+        "sess-external-cli-path",
+    )
+
+    assert updates == [([{"cli_agent": "claude", "cli_path": "/resolved/claude"}], "ws://127.0.0.1:19000/ws")]
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_uses_builtin_codex_without_validating_stale_windows_script(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[dict[str, str]], str | None]] = []
+
+    monkeypatch.setenv("WEB_PORT", "19000")
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {
+            "preferred_language": "zh",
+            "modes": {
+                "team": {
+                    "jiuwen_team": {
+                        "external_cli_agents": [
+                            {"cli_agent": "codex", "cli_path": "C:/Users/admin/AppData/Roaming/npm/codex.cmd"},
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._detect_external_cli_agent",
+        lambda cli_agent, cli_path="": pytest.fail("built-in mode must not validate cli_path"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-codex-builtin-stale-script",
+        {
+            "external_cli_agent_codex_enabled": "true",
+            "external_cli_agent_codex_use_builtin": "true",
+        },
+        "sess-codex-builtin-stale-script",
+    )
+
+    assert updates == [([{"cli_agent": "codex"}], "ws://127.0.0.1:19000/ws")]
+    assert channel.responses[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_set_rejects_codex_windows_script_when_manual_path(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[dict[str, str]], str | None]] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._detect_external_cli_agent",
+        lambda cli_agent, cli_path="": {
+            "cli_agent": cli_agent,
+            "status": "unsupported",
+            "path": cli_path,
+            "reason": "windows_script",
+            "message": "windows_script",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-codex-manual-script",
+        {
+            "external_cli_agent_codex_enabled": "true",
+            "external_cli_agent_codex_use_builtin": "false",
+            "external_cli_agent_codex_cli_path": "C:/Users/admin/AppData/Roaming/npm/codex.cmd",
+        },
+        "sess-codex-manual-script",
+    )
+
+    assert updates == []
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "codex cli_path is not available" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_set_rejects_unavailable_external_cli_path(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[dict[str, str]], str | None]] = []
+
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._detect_external_cli_agent",
+        lambda cli_agent, cli_path="": {
+            "cli_agent": cli_agent,
+            "status": "missing",
+            "path": "",
+            "message": "not found",
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-external-cli-path-missing",
+        {
+            "external_cli_agent_claude_enabled": "true",
+            "external_cli_agent_claude_cli_path": "/missing/claude",
+        },
+        "sess-external-cli-path-missing",
+    )
+
+    assert updates == []
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "claude cli_path is not available" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_config_set_starts_codex_dependency_install_without_saving_codex(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[str], str | None]] = []
+
+    monkeypatch.setenv("WEB_PORT", "19000")
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-codex-installing",
+        {
+            "external_cli_agent_codex_enabled": "true",
+            "external_cli_agent_codex_use_builtin": "true",
+        },
+        "sess-codex-installing",
+    )
+
+    assert updates == [([], "ws://127.0.0.1:19000/ws")]
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["codex_dependency_install"]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_config_set_saves_claude_while_codex_dependency_is_installing(monkeypatch):
+    channel = FakeWebChannel()
+    updates: list[tuple[list[str], str | None]] = []
+
+    monkeypatch.setenv("WEB_PORT", "19000")
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"preferred_language": "zh", "modes": {"team": {"jiuwen_team": {}}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"modes": {"team": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
+        lambda: {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
+        lambda agents, publish_url=None: updates.append((agents, publish_url)),
+    )
+
+    await channel.methods["config.set"](
+        object(),
+        "req-claude-codex-installing",
+        {
+            "external_cli_agent_claude_enabled": "true",
+            "external_cli_agent_claude_use_builtin": "true",
+            "external_cli_agent_codex_enabled": "true",
+            "external_cli_agent_codex_use_builtin": "true",
+        },
+        "sess-claude-codex-installing",
+    )
+
+    assert updates == [([{"cli_agent": "claude"}], "ws://127.0.0.1:19000/ws")]
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["codex_dependency_install"]["status"] == "running"
+
+
+def test_build_external_cli_publish_url_uses_web_channel_env(monkeypatch):
+    monkeypatch.setenv("WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("WEB_PORT", "29100")
+
+    assert _build_external_cli_publish_url() == "ws://127.0.0.1:29100/ws"
+
+
+def test_inject_external_cli_publish_url_only_for_codex_team(monkeypatch):
+    monkeypatch.setenv("WEB_PORT", "29100")
+    payload = {
+        "team": [
+            {"team_name": "alpha", "external_cli_agents": [{"cli_agent": "claude"}]},
+            {"team_name": "beta", "external_cli_agents": [{"cli_agent": "codex"}]},
+        ],
+    }
+
+    injected = _inject_external_cli_publish_url(payload)
+
+    assert "external_cli_publish_url" not in injected["team"][0]
+    assert injected["team"][1]["external_cli_publish_url"] == "ws://127.0.0.1:29100/ws"
+    assert "external_cli_publish_url" not in payload["team"][1]
+
+
+def test_codex_dependency_install_is_not_started_twice(monkeypatch):
+    install_started = threading.Event()
+    release_install = threading.Event()
+    install_calls: list[None] = []
+
+    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
+        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+            "status": "idle",
+            "error": "",
+            "started_at": 0.0,
+            "finished_at": 0.0,
+        })
+
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.importlib.util.find_spec",
+        lambda name: None if name == "openai_codex" else original_find_spec(name),
+    )
+
+    def install_once() -> None:
+        install_calls.append(None)
+        install_started.set()
+        release_install.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._install_codex_dependency",
+        install_once,
+    )
+
+    first = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+    assert install_started.wait(timeout=5)
+    second = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+    release_install.set()
+
+    assert first and first["status"] == "running"
+    assert second and second["status"] == "running"
+    assert len(install_calls) == 1
+
+
+def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
+    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
+        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+            "status": "idle",
+            "phase": "idle",
+            "error": "",
+            "last_log": "",
+            "log_tail": [],
+            "started_at": 0.0,
+            "finished_at": 0.0,
+        })
+
+    original_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.importlib.util.find_spec",
+        lambda name: None if name == "openai_codex" else original_find_spec(name),
+    )
+    monkeypatch.setattr(app_web_handlers.sys, "frozen", True, raising=False)
+
+    def fail_thread_start(*args: object, **kwargs: object) -> None:
+        raise AssertionError("frozen desktop must not start a pip install thread")
+
+    monkeypatch.setattr(app_web_handlers.threading, "Thread", fail_thread_start)
+
+    snapshot = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+
+    assert snapshot and snapshot["status"] == "failed"
+    assert snapshot["phase"] == "failed"
+    assert "desktop package does not include Codex support" in snapshot["error"]
+    assert snapshot["log_tail"] == []
+
+
+@pytest.mark.asyncio
+async def test_external_cli_codex_install_status_returns_snapshot():
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
+        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+            "status": "running",
+            "phase": "installing",
+            "error": "",
+            "last_log": "Collecting openjiuwen",
+            "log_tail": ["Collecting openjiuwen"],
+            "started_at": 1.0,
+            "finished_at": 0.0,
+            "updated_at": 2.0,
+        })
+
+    await channel.methods["external_cli.codex_install_status"](
+        object(),
+        "req-codex-install-status",
+        {},
+        "sess-codex-install-status",
+    )
+
+    payload = channel.responses[-1]["payload"]
+    assert channel.responses[-1]["ok"] is True
+    assert payload["status"] == "running"
+    assert payload["phase"] == "installing"
+    assert payload["log_tail"] == ["Collecting openjiuwen"]
+    assert payload["log_tail"] is not app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS["log_tail"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false"])
-async def test_config_set_syncs_auto_scan_to_review_trigger_only(
+async def test_config_set_updates_canonical_skill_evolution(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     value: str,
 ) -> None:
     channel = FakeWebChannel()
-    saved_updates: list[dict[str, str]] = []
+    saved_updates: list[dict] = []
+    evolution_updates: list[bool] = []
 
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ENV_FILE",
@@ -717,17 +1323,18 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
-        lambda: {"evolution": {}},
+        lambda: {"react": {"evolution": {"skill_evolution": value == "true"}}},
     )
-    monkeypatch.setenv("EVOLUTION_AUTO_SCAN", "")
-    monkeypatch.setenv("EVOLUTION_REVIEW_TRIGGER", "")
-    monkeypatch.setenv("EVOLUTION_SIGNAL_TRIGGER", "manual")
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_skill_evolution_enabled_in_config",
+        lambda enabled: evolution_updates.append(enabled),
+    )
 
     _register_web_handlers(
         WebHandlersBindParams(
             channel=channel,
-            on_config_saved=lambda _, **kwargs: saved_updates.append(
-                kwargs["env_updates"]
+            on_config_saved=lambda _, **kwargs: (
+                saved_updates.append(kwargs) or True
             ),
         )
     )
@@ -735,23 +1342,16 @@ async def test_config_set_syncs_auto_scan_to_review_trigger_only(
     await channel.methods["config.set"](
         object(),
         "req-evolution",
-        {"evolution_auto_scan": value},
+        {"skill_evolution": value},
         "sess-evolution",
     )
 
-    expected = {
-        "EVOLUTION_AUTO_SCAN": value,
-        "EVOLUTION_REVIEW_TRIGGER": value,
-    }
-    assert saved_updates == [expected]
-    assert {key: os.environ[key] for key in expected} == expected
-    assert os.environ["EVOLUTION_SIGNAL_TRIGGER"] == "manual"
-    assert set((tmp_path / ".env").read_text(encoding="utf-8").splitlines()) == {
-        f'{key}="{env_value}"' for key, env_value in expected.items()
-    }
+    assert evolution_updates == [value == "true"]
+    assert saved_updates and saved_updates[0]["env_updates"] == {}
+    assert saved_updates[0]["config_payload"]["react"]["evolution"]["skill_evolution"] is (value == "true")
     assert channel.responses[-1]["payload"] == {
-        "updated": ["evolution_auto_scan"],
-        "applied_without_restart": False,
+        "updated": ["skill_evolution"],
+        "applied_without_restart": True,
     }
 
 
@@ -906,6 +1506,89 @@ def test_config_panel_flatten_reads_team_enable_permissions(enabled: bool, expec
     assert flat["team_0_enable_permissions"] == expected
 
 
+def test_config_panel_flatten_reads_external_cli_agents() -> None:
+    raw = {
+        "modes": {
+            "team": {
+                "alpha_team": {
+                    "team_name": "alpha_team",
+                    "external_cli_agents": [
+                        {"cli_agent": "claude"},
+                        {"cli_agent": "codex"},
+                    ],
+                },
+            },
+        },
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert json.loads(flat["team_0_external_cli_agents"]) == [
+        {"cli_agent": "claude"},
+        {"cli_agent": "codex"},
+    ]
+
+
+def test_config_panel_flatten_reads_default_team_external_cli_switches() -> None:
+    raw = {
+        "modes": {
+            "team": {
+                "jiuwen_team": {
+                    "external_cli_agents": [
+                        {"cli_agent": "claude"},
+                        {"cli_agent": "codex"},
+                    ],
+                },
+            },
+        },
+    }
+
+    flat = _flatten_external_cli_agents_for_config_panel(raw)
+
+    assert flat["external_cli_agent_claude_enabled"] == "true"
+    assert flat["external_cli_agent_claude_use_builtin"] == "true"
+    assert flat["external_cli_agent_claude_cli_path"] == ""
+    assert flat["external_cli_agent_codex_enabled"] == "true"
+    assert flat["external_cli_agent_codex_use_builtin"] == "true"
+    assert flat["external_cli_agent_codex_cli_path"] == ""
+
+
+def test_config_panel_flatten_reads_external_cli_paths() -> None:
+    raw = {
+        "modes": {
+            "team": {
+                "jiuwen_team": {
+                    "external_cli_agents": [
+                        {"cli_agent": "claude", "cli_path": "/opt/claude"},
+                        {"cli_agent": "codex", "cli_path": "/opt/codex"},
+                    ],
+                },
+            },
+        },
+    }
+
+    flat = _flatten_external_cli_agents_for_config_panel(raw)
+
+    assert flat["external_cli_agent_claude_enabled"] == "true"
+    assert flat["external_cli_agent_claude_use_builtin"] == "false"
+    assert flat["external_cli_agent_claude_cli_path"] == "/opt/claude"
+    assert flat["external_cli_agent_codex_enabled"] == "true"
+    assert flat["external_cli_agent_codex_use_builtin"] == "false"
+    assert flat["external_cli_agent_codex_cli_path"] == "/opt/codex"
+
+
+def test_detect_external_cli_agent_rejects_windows_script_path(monkeypatch, tmp_path) -> None:
+    script_path = tmp_path / "claude.cmd"
+    script_path.write_text("@echo off\n", encoding="utf-8")
+
+    monkeypatch.setattr(app_web_handlers, "_is_windows_platform", lambda: True)
+
+    result = _detect_external_cli_agent("claude", str(script_path))
+
+    assert result["status"] == "unsupported"
+    assert result["path"] == str(script_path)
+
+
 def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     raw = {
         "symphony": {
@@ -923,7 +1606,7 @@ def test_config_panel_flatten_reads_symphony_enabled_and_skill_retrieval():
     flat = _flatten_symphony_for_config_panel(raw)
 
     assert flat["symphony_enabled"] == "true"
-    assert flat["symphony_dynamic_graph_enabled"] == "false"
+    assert "symphony_dynamic_graph_enabled" not in flat
     assert "symphony_orchestration_mode" not in flat
     assert flat["skill_retrieval_enabled"] == "true"
     assert flat["skill_retrieval_build_branching_factor"] == "64"
@@ -968,7 +1651,7 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "sess-3",
     )
 
-    assert recorded_symphony == [{"enabled": True, "evolution": {"enabled": False}}]
+    assert recorded_symphony == [{"enabled": True}]
     assert recorded_skill_retrieval == [{"enabled": False, "retrieve": {"flatten_tree": True}}]
     assert channel.responses[-1] == {
         "id": "req-3",
@@ -976,7 +1659,6 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
         "payload": {
             "updated": [
                 "symphony_enabled",
-                "symphony_dynamic_graph_enabled",
                 "skill_retrieval_enabled",
                 "skill_retrieval_retrieve_flatten_tree",
             ],
@@ -987,10 +1669,26 @@ async def test_config_set_routes_symphony_payload_to_config_helper(monkeypatch):
     }
 
 
-def test_web_does_not_expose_symphony_evolution_rpc_methods():
-    assert "symphony.evolution_status" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_record_outcome" not in app_web_handlers._FORWARD_REQ_METHODS
-    assert "symphony.evolution_rebuild" not in app_web_handlers._FORWARD_REQ_METHODS
+def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
+    skill_graph_methods = {
+        "skills.graph.build",
+        "skills.graph.status",
+        "skills.graph.get",
+        "skills.graph.cancel",
+    }
+    assert skill_graph_methods.issubset(app_web_handlers._FORWARD_REQ_METHODS)
+
+    legacy_symphony_methods = {
+        "symphony.build_score",
+        "symphony.pause_build",
+        "symphony.score_status",
+        "symphony.graph",
+        "symphony.plan",
+        "symphony.evolution_status",
+        "symphony.evolution_record_outcome",
+        "symphony.evolution_rebuild",
+    }
+    assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
 # =====================================================================

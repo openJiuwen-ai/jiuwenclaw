@@ -13,6 +13,16 @@ import {
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
 
+/**
+ * 历史加载兜底超时（毫秒）。
+ * faas 侧 history.get 流若因旧 session runtime 过 TTL 被回收而 init 超时
+ * （60s timed out），后端不会发 done/batch_end 结束帧，也不会发匹配的
+ * chat.error；前端若无限等待会让 isLoadingHistory 永久卡 true，进而吞掉
+ * 后续所有 chat.processing_status(is_processing=false)，表现为「一直加载中」。
+ * 到期强制 finalize，让调用方 setLoadingHistory(false) 恢复可交互。
+ */
+const HISTORY_RESTORE_TIMEOUT_MS = 30_000;
+
 /** 助手侧仅恢复这些事件；用户消息无 event_type，单独保留 */
 const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.final',
@@ -42,6 +52,8 @@ export interface HistoryToolReplayItem {
 export interface HistoryReasoningReplayItem {
   at: string;
   text: string;
+  /** 末帧时刻（epoch ms）；异常结束时即使无收尾事件，耗时终点也能落在最后一个真实帧。 */
+  updatedAt?: number;
 }
 
 export interface HistoryHarnessReplayItem {
@@ -76,7 +88,7 @@ type HistoryTimelineEntry =
   | { kind: 'harness_message'; at: string; content: string; stage?: string }
   | { kind: 'harness_stage_result'; at: string; stage: string; status: string; error: string; messages: string[]; metrics: Record<string, unknown> }
   | { kind: 'compaction'; at: string; summary: string }
-  | { kind: 'reasoning'; at: string; text: string };
+  | { kind: 'reasoning'; at: string; text: string; updatedAt?: number };
 
 /** 历史回放出的压缩汇总：boundary 记录计数，metadata 拼 tooltip 明细行 */
 export interface HistoryCompactionReplay {
@@ -141,6 +153,28 @@ function extractHistoryReasoningText(record: Record<string, unknown>): string {
     }
   }
   return '';
+}
+
+/** 提取 reasoning 末帧时刻（reasoning_updated_at 可能在顶层或 payload 内），非有效时刻返回 undefined。 */
+function extractHistoryReasoningUpdatedAt(record: Record<string, unknown>): number | undefined {
+  const direct = record.reasoning_updated_at;
+  const raw = typeof direct === 'number' || (typeof direct === 'string' && direct.trim())
+    ? direct
+    : (() => {
+        const payload = record.payload;
+        if (!isRecord(payload)) {
+          return undefined;
+        }
+        const nested = payload.reasoning_updated_at;
+        return typeof nested === 'number' || (typeof nested === 'string' && nested.trim())
+          ? nested
+          : undefined;
+      })();
+  if (raw === undefined) {
+    return undefined;
+  }
+  const ms = parseTimestampToMs(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
 
 function pickFirstString(input: Record<string, unknown>, keys: string[]): string | undefined {
@@ -839,7 +873,7 @@ function materializeHistoryTimeline(
       continue;
     }
     if (e.kind === 'reasoning') {
-      reasoningReplay.push({ at: e.at, text: e.text });
+      reasoningReplay.push({ at: e.at, text: e.text, updatedAt: e.updatedAt });
       continue;
     }
     if (e.kind === 'compaction') {
@@ -866,7 +900,7 @@ export function parseHistoryJsonFileToPreviewMessages(
 export interface HistoryTimelinePreview {
   messages: Message[];
   executions: ToolExecution[];
-  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; closedAt?: number }[];
+  reasoningSegments: { id: string; text: string; startedAt: number; closed: true; updatedAt?: number; closedAt?: number }[];
   mode: 'team' | null;
 }
 
@@ -897,7 +931,12 @@ export function parseHistoryJsonFileToTimelinePreview(
     }
     const reasoningText = extractHistoryReasoningText(item);
     if (reasoningText) {
-      entries.push({ kind: 'reasoning', at: recordTimestampIso(item) ?? '', text: reasoningText });
+      entries.push({
+        kind: 'reasoning',
+        at: recordTimestampIso(item) ?? '',
+        text: reasoningText,
+        updatedAt: extractHistoryReasoningUpdatedAt(item),
+      });
     }
   }
 
@@ -938,12 +977,20 @@ function buildReasoningSegmentsFromReplay(
       return;
     }
     const startedAt = parsed - 1;
+    // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt
+    // （老历史无该字段，保持原有保守终点）。
+    const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
+    const updatedAt =
+      Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
+        ? replayUpdatedAt
+        : startedAt;
     segments.push({
       id: `hist-preview-rsn-${sessionId}-${index}`,
       text,
       startedAt,
       closed: true,
       closedAt: startedAt,
+      updatedAt,
     });
   });
   segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -1106,6 +1153,7 @@ function shouldProcessHistoryPayload(
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
   const requestKey = makeHistoryRestoreKey(options.sessionId);
+  const releaseLiveEvents = webClient.suspendSessionEvents(options.sessionId);
   replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
@@ -1114,6 +1162,8 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1143,7 +1193,12 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
+        entries.unshift({
+          kind: 'reasoning',
+          at: recordTimestampIso(record) ?? '',
+          text: reasoningText,
+          updatedAt: extractHistoryReasoningUpdatedAt(record),
+        });
       }
     }
 
@@ -1152,51 +1207,72 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
   });
 
-  function dispose(): void {
+  function stopListening(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
     }
   }
 
+  function dispose(): void {
+    stopListening();
+    releaseLiveEvents();
+  }
+
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
 
-    dispose();
+    stopListening();
 
-    if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
-      options.onEmpty?.(totalPages);
-      return;
-    }
-    options.onReady(messages, totalPages);
-    if (toolReplay.length > 0) {
-      options.onToolReplay?.(toolReplay);
-    }
-    if (harnessReplay.length > 0) {
-      options.onHarnessReplay?.(harnessReplay);
-    }
-    if (teamReplay.length > 0) {
-      options.onTeamReplay?.(teamReplay);
-    }
-    if (reasoningReplay.length > 0) {
-      options.onReasoningReplay?.(reasoningReplay);
-    }
-    const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
-    if (compactionCount > 0) {
-      const compactionSummaries = entries.flatMap((e) =>
-        e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
-      );
-      options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
+    try {
+      if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
+        options.onEmpty?.(totalPages);
+        return;
+      }
+      options.onReady(messages, totalPages);
+      if (toolReplay.length > 0) {
+        options.onToolReplay?.(toolReplay);
+      }
+      if (harnessReplay.length > 0) {
+        options.onHarnessReplay?.(harnessReplay);
+      }
+      if (teamReplay.length > 0) {
+        options.onTeamReplay?.(teamReplay);
+      }
+      if (reasoningReplay.length > 0) {
+        options.onReasoningReplay?.(reasoningReplay);
+      }
+      const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
+      if (compactionCount > 0) {
+        const compactionSummaries = entries.flatMap((e) =>
+          e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
+        );
+        options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
+      }
+    } finally {
+      releaseLiveEvents();
     }
   }
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 兜底：后端 history.get 流超时（faas 旧 session runtime 过 TTL 被
+  // 回收、init 60s 超时）时不发结束帧，强制 finalize 恢复 isLoadingHistory，
+  // 避免前端永久转圈、吞掉后续 chat.processing_status(is_processing=false)。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }
 
@@ -1231,6 +1307,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   const entries: HistoryTimelineEntry[] = [];
   let totalPages: number | null = null;
   let disposed = false;
+  let finalized = false;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1260,7 +1338,12 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       }
       const reasoningText = extractHistoryReasoningText(record);
       if (reasoningText) {
-        entries.unshift({ kind: 'reasoning', at: recordTimestampIso(record) ?? '', text: reasoningText });
+        entries.unshift({
+          kind: 'reasoning',
+          at: recordTimestampIso(record) ?? '',
+          text: reasoningText,
+          updatedAt: extractHistoryReasoningUpdatedAt(record),
+        });
       }
     }
 
@@ -1272,6 +1355,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    if (restoreTimer) {
+      clearTimeout(restoreTimer);
+      restoreTimer = null;
+    }
     unsubscribe();
     if (activeHistoryRequests.get(requestKey)?.generation === generation) {
       activeHistoryRequests.delete(requestKey);
@@ -1279,7 +1366,8 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   }
 
   function finalize(): void {
-    if (disposed) return;
+    if (disposed || finalized) return;
+    finalized = true;
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1295,5 +1383,10 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
 
   const handle: HistoryRestoreHandle = { generation, dispose };
   activeHistoryRequests.set(requestKey, handle);
+  // 同 beginHistoryRestore：兜底超时，避免分页 history.get 流卡死。
+  restoreTimer = setTimeout(() => {
+    if (disposed || finalized) return;
+    finalize();
+  }, HISTORY_RESTORE_TIMEOUT_MS);
   return handle;
 }

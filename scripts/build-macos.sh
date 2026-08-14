@@ -24,7 +24,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="JiuwenSwarm.app"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
-VERSION="0.2.4.beta3"
+VERSION="0.2.4.beta4"
 DMG_PATH="$PROJECT_ROOT/dist/JiuwenSwarm-$VERSION.dmg"
 
 # === 签名 + 公证配置 ===
@@ -170,8 +170,8 @@ elif ! security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
   exit 1
 fi
 
-printf '[1/9] Install Python dependencies (uv sync --extra dev)...\n'
-uv sync --extra dev
+printf '[1/9] Install Python dependencies (uv sync --extra dev --extra codex)...\n'
+uv sync --extra dev --extra codex
 
 printf '\n[2/9] Build frontend (jiuwenswarm/channels/web/frontend)...\n'
 rm -rf "$PROJECT_ROOT/jiuwenswarm/web/dist"

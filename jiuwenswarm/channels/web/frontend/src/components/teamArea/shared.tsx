@@ -3,6 +3,8 @@ import i18n from '../../i18n';
 import { ParsedTeamEvent, parseTeamEventMessage } from '../ChatPanel/teamEventUtils';
 import type { Message, TodoItem } from '../../types';
 import type { ReactNode } from 'react';
+import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import type {
   TeamTask as SessionTeamTask,
   TeamMemberExecutionEvent,
@@ -144,11 +146,74 @@ const TASK_STATUS_TO_COLUMN: Record<TeamTaskStatus, TaskColumnKey> = {
   cancelled: 'cancelled',
 };
 
+/**
+ * 成员展示名的唯一出口：一律显示 display name，撞名时才补 member_id 消歧。
+ *
+ * 调用方手上往往只有 member_id（任务 assignee、team.message 的 from/to、分组成员
+ * 列表都是内部 slug），直接渲染 id 会和面板里的展示名对不上，看起来像两个人。
+ * 这里统一按当前会话的成员名册把 id 解析成 display name，查不到才退回 id。
+ *
+ * display name 由 leader 起，同一队里完全可能重复（三个"通用协作专员"），光看名字
+ * 分不出是谁。撞名时补成 `通用协作专员 (generalist-2)`——补的是 member_id 而不是
+ * 序号，因为 @ 时用户要敲的正是它。不撞名的成员保持干净，不受影响。
+ */
 export const getMemberDisplayName = (member: TeamMember | string): string => {
-  if (typeof member === 'string') {
-    return member;
+  const { memberId, displayName } = resolveMemberIdentity(member);
+  if (!displayName) return memberId;
+  if (getAmbiguousDisplayNames(getSessionTeamRoster()).has(displayName.toLowerCase())) {
+    return `${displayName} (${memberId})`;
   }
-  return member.name?.trim() || member.member_id;
+  return displayName;
+};
+
+/**
+ * 纯展示名，不做撞名消歧。
+ *
+ * 只给"旁边已经单独显示了 member_id"的块状 UI 用（成员列表项的第二行就是 id），
+ * 那种地方主行再补一次 `(id)` 是重复噪音。inline 场景（任务负责人、消息 from/to、
+ * 标题句、分组成员名）没有放第二行的位置，一律用 getMemberDisplayName。
+ */
+export const getMemberPlainName = (member: TeamMember | string): string => {
+  const { memberId, displayName } = resolveMemberIdentity(member);
+  return displayName || memberId;
+};
+
+const resolveMemberIdentity = (
+  member: TeamMember | string
+): { memberId: string; displayName: string } => {
+  const memberId = (typeof member === 'string' ? member : member.member_id).trim();
+  const known = typeof member === 'string'
+    ? getSessionTeamRoster().find((item) => item.member_id === memberId)
+    : member;
+  return { memberId, displayName: known?.name?.trim() ?? '' };
+};
+
+const getSessionTeamRoster = (): TeamMember[] => {
+  const activeSessionId = useChatStore.getState().activeSessionId ?? '';
+  return useSessionStore.getState().runtimes[activeSessionId]?.teamMembers ?? [];
+};
+
+// 名册引用没变就复用上次的统计结果：本函数在成员列表里逐行调用，每次重扫是 O(N²)。
+// zustand 在名册未变时返回同一个数组引用，用它当缓存键即可。
+let ambiguousNamesRosterRef: TeamMember[] | null = null;
+let ambiguousNamesCache: Set<string> = new Set();
+
+/** 名册里被一个以上成员共用的展示名（小写归一后比较）。 */
+const getAmbiguousDisplayNames = (roster: TeamMember[]): Set<string> => {
+  if (ambiguousNamesRosterRef === roster) return ambiguousNamesCache;
+  const seen = new Map<string, number>();
+  roster.forEach((item) => {
+    const key = item.name?.trim().toLowerCase();
+    if (!key) return;
+    seen.set(key, (seen.get(key) ?? 0) + 1);
+  });
+  const ambiguous = new Set<string>();
+  seen.forEach((count, key) => {
+    if (count > 1) ambiguous.add(key);
+  });
+  ambiguousNamesRosterRef = roster;
+  ambiguousNamesCache = ambiguous;
+  return ambiguous;
 };
 
 export const normalizeTaskStatus = (status?: string, type?: string): TaskStatus => {
@@ -198,6 +263,11 @@ export const getBoardTaskTitle = (task: SessionTeamTask): string => {
 export const getBoardTaskContent = (task: SessionTeamTask): string => {
   const content = task.content?.trim();
   if (!content) return '';
+  // System-generated hints arrive as an i18n key prefixed with "i18n:"; translate
+  // it per the current UI language. Plain user/agent text is never prefixed.
+  if (content.startsWith('i18n:')) {
+    return i18n.t(content.slice(5));
+  }
   return content === getBoardTaskTitle(task) ? '' : content;
 };
 

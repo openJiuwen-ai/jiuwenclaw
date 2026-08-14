@@ -14,7 +14,7 @@ import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
-import { InputArea } from './InputArea';
+import { InputArea, type InputAreaHandle } from './InputArea';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -30,17 +30,28 @@ import { GoalBar } from '../GoalBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
-import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import welcomeBanner from '../../assets/home-banner.svg';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
+import { turnDiffKey } from '../../features/code-mode/turnChangeState';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
 import {
   canLoadOlderHistory,
   shouldShowHistoryRetry,
 } from '../../features/historyPagination';
+import {
+  DESKTOP_FILE_DRAG_EVENT,
+  DESKTOP_LOCAL_FILES_EVENT,
+  isDesktopShell,
+  normalizePicks,
+  registerDesktopLocalFilesConsumer,
+  type DesktopLocalFilesEventDetail,
+  type LocalFilePick,
+} from '../../features/workspace/localFilePicker';
+import { useDesktopLocalFilePickerReady } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -99,6 +110,10 @@ interface ChatPanelProps {
   /** 目标 active 但当前无处理中任务时，消息入队后主动排空一次，见 InputArea.tsx 对应调用点 */
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
+
+// 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
+// mode === 'human' 闸门），所以这两处直接断言身份，不依赖成员名册是否已到齐。
+const HUMAN_SHARE_IDENTITY: TeamMemberIdentity = { role: 'human_agent' };
 
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
@@ -552,7 +567,11 @@ function HumanSharePanel({
             return (
               <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
                 <div className="human-share-modal__member">
-                  <TeamMemberAvatar member={command.memberName} className="human-share-modal__avatar" />
+                  <TeamMemberAvatar
+                    member={command.memberName}
+                    identity={HUMAN_SHARE_IDENTITY}
+                    className="human-share-modal__avatar"
+                  />
                   <div className="human-share-modal__member-copy">
                     <div className="human-share-modal__member-name">{displayName}</div>
                     {displayName !== command.memberName && (
@@ -632,7 +651,10 @@ function HumanShareCard({
   );
   const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
   const pendingCount = sortedCommands.filter((command) => command.status !== 'joined').length;
-  const previewMembers = sortedCommands.slice(0, 3).map((command) => command.displayName || command.memberName);
+  // 保留整条 command：头像要按 member_id 解析（人类成员才认得出人类头像，
+  // 传展示名会查不到名册、退回哈希插画，还会和弹窗里同一个人对不上），
+  // 名字才用 displayName。
+  const previewCommands = sortedCommands.slice(0, 3);
 
   if (sortedCommands.length === 0) {
     return null;
@@ -653,14 +675,18 @@ function HumanShareCard({
           })}
         </div>
         <div className="human-share-card__members">
-          {previewMembers.map((member) => (
-            <span key={member} className="human-share-card__member-pill">
-              <TeamMemberAvatar member={member} className="human-share-card__avatar" />
-              <span>{member}</span>
+          {previewCommands.map((command) => (
+            <span key={command.memberName} className="human-share-card__member-pill">
+              <TeamMemberAvatar
+                member={command.memberName}
+                identity={HUMAN_SHARE_IDENTITY}
+                className="human-share-card__avatar"
+              />
+              <span>{command.displayName || command.memberName}</span>
             </span>
           ))}
-          {sortedCommands.length > previewMembers.length ? (
-            <span className="human-share-card__more">+{sortedCommands.length - previewMembers.length}</span>
+          {sortedCommands.length > previewCommands.length ? (
+            <span className="human-share-card__more">+{sortedCommands.length - previewCommands.length}</span>
           ) : null}
         </div>
       </div>
@@ -732,6 +758,9 @@ export function ChatPanel({
   ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputAreaRef = useRef<InputAreaHandle>(null);
+  const desktopFileDropAcceptUntilRef = useRef(0);
+  const lastConsumedDesktopDropIdRef = useRef<string | null>(null);
   const historyLayoutSnapshotRef = useRef<{
     sessionId: string;
     loadedPages: number;
@@ -741,6 +770,7 @@ export function ChatPanel({
   const suppressNextScrollToEndRef = useRef(false);
   const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
+  const isDesktopAttachmentDropEnabled = useDesktopLocalFilePickerReady();
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
   const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
   const historyLoadedPages = historyPager?.loadedPages ?? 0;
@@ -782,6 +812,12 @@ export function ChatPanel({
     turnsByMessageId: codeTurnsByMessageId,
     loading: codeTurnHistoryLoading,
     reload: reloadCodeTurnHistory,
+    latestTurnKey: latestCodeTurnKey,
+    turnChangeOperation,
+    turnChangeError,
+    turnChangeNotice,
+    discardLatestTurn,
+    redoLatestTurn,
   } = useCodeTurnDiffHistory({
     project: sessionProject,
     sessionId: activeSessionId,
@@ -791,16 +827,37 @@ export function ChatPanel({
   const renderCodeChangesAfterMessage = useCallback((message: Message) => {
     const turns = codeTurnsByMessageId.get(message.id);
     if (!turns?.length) return null;
-    return turns.map(turn => (
-      <CodeChangesCard
-        key={turn.change_set_id || `turn-${turn.turn_index}`}
-        diff={turn}
-        refreshing={codeTurnHistoryLoading}
-        onRefresh={() => void reloadCodeTurnHistory()}
-        onReview={target => onOpenCodeReview?.(target)}
-      />
-    ));
-  }, [codeTurnHistoryLoading, codeTurnsByMessageId, onOpenCodeReview, reloadCodeTurnHistory]);
+    return turns.map(turn => {
+      const turnKey = turnDiffKey(turn);
+      const isLatest = turnKey === latestCodeTurnKey;
+      return (
+        <CodeChangesCard
+          key={turnKey}
+          diff={turn}
+          refreshing={codeTurnHistoryLoading}
+          isLatest={isLatest}
+          isProcessing={isProcessing}
+          operation={isLatest ? turnChangeOperation?.action ?? null : null}
+          operationError={turnChangeError?.turnKey === turnKey ? turnChangeError.message : null}
+          onRefresh={() => void reloadCodeTurnHistory()}
+          onReview={target => onOpenCodeReview?.(target)}
+          onDiscard={() => void discardLatestTurn()}
+          onRedo={() => void redoLatestTurn()}
+        />
+      );
+    });
+  }, [
+    codeTurnHistoryLoading,
+    codeTurnsByMessageId,
+    discardLatestTurn,
+    isProcessing,
+    latestCodeTurnKey,
+    onOpenCodeReview,
+    redoLatestTurn,
+    reloadCodeTurnHistory,
+    turnChangeError,
+    turnChangeOperation,
+  ]);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -1033,8 +1090,137 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
+
+  const markDesktopFileDropZoneActive = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = Date.now() + 1200;
+  }, []);
+
+  const clearDesktopFileDropZone = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = 0;
+  }, []);
+
+  const canAcceptDesktopFileDrag = useCallback(() => {
+    return isDesktopAttachmentDropEnabled || isDesktopShell();
+  }, [isDesktopAttachmentDropEnabled]);
+
+  const handleDesktopFileDragEnter = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      // OS file drags require copy; move/none show the forbidden cursor in WebView2.
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const handleDesktopFileDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const ingestDesktopLocalFiles = useCallback(
+    (detail: DesktopLocalFilesEventDetail | null | undefined, files: LocalFilePick[]) => {
+      if (detail?.source && detail.source !== 'drop') return;
+      if (!files.length) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const dropId = typeof detail?.dropId === 'string' ? detail.dropId : null;
+      if (dropId && lastConsumedDesktopDropIdRef.current === dropId) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const acceptByTime = Date.now() <= desktopFileDropAcceptUntilRef.current;
+      const clientX = detail?.clientX;
+      const clientY = detail?.clientY;
+      const hasCoords = typeof clientX === 'number' && typeof clientY === 'number';
+      let inZone = false;
+      if (hasCoords) {
+        const hit = document.elementFromPoint(clientX, clientY);
+        inZone = Boolean(
+          hit?.closest('.chat-panel-shell') || hit?.closest('.chat-layout__surface'),
+        );
+      }
+      // Native bridge trusted=true always accepts (coords from WebView2 are often wrong).
+      const trusted = detail?.trusted === true;
+      if (!trusted && !acceptByTime && !inZone) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      if (dropId) lastConsumedDesktopDropIdRef.current = dropId;
+      inputAreaRef.current?.appendLocalFilePicks(files);
+      clearDesktopFileDropZone();
+    },
+    [clearDesktopFileDropZone],
+  );
+
+  const handleDesktopFileDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+      // Files arrive via the durable ingest bridge invoked by desktop_app run_js.
+      // Do NOT call pywebview APIs here: a JS->Python call racing the Python-side
+      // drop handler's run_js deadlocks the UI thread (window freezes).
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  useEffect(() => {
+    // Durable bridge lives in localFilePicker; ChatPanel only registers a consumer.
+    // Never delete window.__JIUWEN_INGEST_LOCAL_FILES__ — Python run_js requires it.
+    const unregister = registerDesktopLocalFilesConsumer((detail, files) => {
+      ingestDesktopLocalFiles(detail, files);
+    });
+
+    const onDesktopLocalFiles = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopLocalFilesEventDetail>).detail;
+      ingestDesktopLocalFiles(detail, normalizePicks(detail?.files));
+    };
+
+    const onDesktopFileDrag = (event: Event) => {
+      const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active);
+      if (active) {
+        markDesktopFileDropZoneActive();
+      }
+    };
+
+    window.addEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+    window.addEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    return () => {
+      unregister();
+      window.removeEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+      window.removeEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    };
+  }, [ingestDesktopLocalFiles, markDesktopFileDropZoneActive]);
+
   return (
-    <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
+    <div
+      className="chat-panel-shell flex flex-col h-full"
+      data-testid="chat-panel"
+      onDragEnter={handleDesktopFileDragEnter}
+      onDragOver={handleDesktopFileDragOver}
+      onDrop={handleDesktopFileDrop}
+    >
+      {turnChangeNotice ? (
+        <div className="code-turn-change-toast" role="status" aria-live="polite">
+          <CheckCircle2 size={17} aria-hidden="true" />
+          <span>{turnChangeNotice}</span>
+        </div>
+      ) : null}
       {shouldShowChatHeader && (
         <div className="chat-panel-header">
           <div className="chat-panel-header__meta">
@@ -1160,6 +1346,7 @@ export function ChatPanel({
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
+                  ref={inputAreaRef}
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
                   onPersistDocuments={onPersistDocuments}
@@ -1201,6 +1388,7 @@ export function ChatPanel({
             />
           )}
           <InputArea
+            ref={inputAreaRef}
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
             onPersistDocuments={onPersistDocuments}

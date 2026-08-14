@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.agents.harness.common import memory_rpc
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 
 
 @pytest.mark.asyncio
@@ -12,7 +13,12 @@ async def test_coding_memory_dir_uses_agent_workspace(tmp_path, monkeypatch):
     agent_workspace = tmp_path / "agent_workspace"
     workspace = tmp_path / "project" / "frontend"
     project_dir = tmp_path / "project"
-    coding_memory_dir = agent_workspace / "coding_memory" / "project"
+    coding_memory_dir = Path(
+        resolve_project_coding_memory_dir(
+            agent_workspace_dir=agent_workspace,
+            project_dir=project_dir,
+        )
+    )
     coding_memory_dir.mkdir(parents=True)
     monkeypatch.setattr(memory_rpc, "get_agent_workspace_dir", lambda: agent_workspace)
 

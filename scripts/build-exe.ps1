@@ -178,8 +178,8 @@ Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
 
 # 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
-uv sync --extra dev
+Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev --extra codex)..." -ForegroundColor Yellow
+uv sync --extra dev --extra codex
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend
@@ -256,7 +256,11 @@ if (-not $Iscc) {
 & $Iscc "$ProjectRoot\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$InstallerPath = (Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" | Select-Object -First 1).FullName
+$InstallerPath = (
+    Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+).FullName
 
 Write-Host "`n=== Build complete ===" -ForegroundColor Green
 Write-Host "Installer: $InstallerPath" -ForegroundColor Green

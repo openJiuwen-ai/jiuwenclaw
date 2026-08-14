@@ -36,7 +36,7 @@ async def test_response_prompt_rail_does_not_inject_a2ui_for_non_web_channel(mon
 
     await rail.before_model_call(SimpleNamespace(inputs={"channel": "feishu"}))
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
 
 
@@ -52,7 +52,7 @@ async def test_response_prompt_rail_keeps_a2ui_for_web_channel(monkeypatch):
 
     await rail.before_model_call(SimpleNamespace(inputs={"channel": "web"}))
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
     content = rail.system_prompt_builder.sections[LocalSectionName.A2UI].content
     assert "browser_preflight_submit" not in content["en"]
@@ -167,7 +167,7 @@ async def test_response_prompt_rail_removes_a2ui_when_request_skips_it(monkeypat
 
     await rail.before_model_call(SimpleNamespace(inputs={"channel": "web", "skip_a2ui": True}))
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
 
 
@@ -207,7 +207,7 @@ async def test_response_prompt_rail_maps_sess_prefix_to_web(monkeypatch):
         SimpleNamespace(inputs=InvokeInputs(query="generate an A2UI form", conversation_id="sess_123"))
     )
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
 
 
@@ -224,7 +224,7 @@ async def test_response_prompt_rail_uses_runtime_channel_for_model_call_inputs(m
 
     await rail.before_model_call(SimpleNamespace(inputs=ModelCallInputs()))
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
 
 
@@ -241,7 +241,7 @@ async def test_response_prompt_rail_keeps_tui_runtime_channel_disabled(monkeypat
 
     await rail.before_model_call(SimpleNamespace(inputs=ModelCallInputs()))
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
 
 
@@ -281,7 +281,7 @@ async def test_response_prompt_rail_does_not_default_missing_channel_to_web(monk
         SimpleNamespace(inputs=InvokeInputs(query="generate a report", conversation_id="session1"))
     )
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
 
 
@@ -299,5 +299,5 @@ async def test_response_prompt_rail_does_not_inject_a2ui_for_tui_session_prefix(
         SimpleNamespace(inputs=InvokeInputs(query="generate a report", conversation_id="tui_session_1"))
     )
 
-    assert "response" in rail.system_prompt_builder.sections
+    assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections

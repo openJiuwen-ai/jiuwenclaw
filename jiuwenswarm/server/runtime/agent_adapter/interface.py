@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-import inspect
 import json
 import logging
 import re
@@ -20,7 +19,6 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
-from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
@@ -32,6 +30,12 @@ from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
+    collapse_file_content_blocks,
+)
+from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
+from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
+    STATUSLINE_SETUP_SYSTEM_PROMPT,
+    build_statusline_setup_dispatch,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -40,10 +44,15 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_EXECUTE_OPTION_VALUES,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_REVISE_OPTION_VALUES,
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
 from jiuwenswarm.common.mode_matrix import (
+    canonicalize_mode_text,
+    is_code_profile_mode,
+    is_team_mode as is_team_runtime_mode,
+    is_team_plan_mode,
     is_web_composable_mode,
     read_request_work_mode,
 )
@@ -54,9 +63,11 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
+    migrate_team_skill_views,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
@@ -77,7 +88,12 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
-def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> None:
+def _schedule_symphony_session_feedback(
+    session_id: str,
+    request_id: str,
+    *,
+    terminal_status: str = "success",
+) -> None:
     """Submit session-based Symphony learning without delaying the response."""
 
     try:
@@ -85,7 +101,11 @@ def _schedule_symphony_session_feedback(session_id: str, request_id: str) -> Non
             schedule_session_evolution_consume,
         )
 
-        schedule_session_evolution_consume(session_id, request_id)
+        schedule_session_evolution_consume(
+            session_id,
+            request_id,
+            terminal_status=terminal_status,
+        )
     except Exception as exc:  # noqa: BLE001
         logging.getLogger(__name__).debug(
             "Failed to schedule Symphony session feedback: %s",
@@ -101,17 +121,26 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
     要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
+
+    Gateway 可能已把 ``@path`` 展开成 ``<file-content>`` 正文；历史只保留 ``@path``，
+    避免 transcript 膨胀，也不影响当轮已发给模型的内联内容。
     """
+    content: Any
     if not isinstance(params, dict):
-        return query
-    if params.get("is_supplement"):
+        content = query
+    elif params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
-            return supplement_input
-    original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
-    if isinstance(original_query, str):
-        return original_query
-    return query
+            content = supplement_input
+        else:
+            content = query
+    else:
+        original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+        content = original_query if isinstance(original_query, str) else query
+
+    if isinstance(content, str):
+        return collapse_file_content_blocks(content)
+    return content
 
 
 def _should_record_user_history(params: Any) -> bool:
@@ -486,14 +515,24 @@ def _trigger_auto_memory_extraction(
     if messages is None or len(messages) == 0:
         return
 
+    # Chat requests run on a session-scoped child adapter.  The root adapter
+    # deliberately has no ``_instance``, while auto-memory needs the live
+    # session adapter for its model, tools, and rails.
     # Launch auto memory extraction task
     try:
+        parent_agent = adapter
+        get_session_adapter = getattr(adapter, "_get_cached_session_adapter", None)
+        if callable(get_session_adapter):
+            session_adapter = get_session_adapter(session_id)
+            if session_adapter is not None:
+                parent_agent = session_adapter
+
         asyncio.create_task(
             _execute_auto_memory_extraction(
                 session_id=session_id,
                 project_dir=project_dir,
                 messages=messages,
-                parent_agent=adapter,  # Pass adapter for cache sharing
+                parent_agent=parent_agent,  # Pass live adapter for cache sharing
             )
         )
         mode = request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown"
@@ -544,10 +583,27 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_RETRIEVAL_INDEX_CANCEL: "handle_skills_retrieval_index_cancel",
     ReqMethod.SKILLS_RETRIEVAL_SEARCH: "handle_skills_retrieval_search",
     ReqMethod.SKILLS_RETRIEVAL_TREE: "handle_skills_retrieval_tree",
+    ReqMethod.SKILLS_GRAPH_BUILD: "handle_skills_graph_build",
+    ReqMethod.SKILLS_GRAPH_STATUS: "handle_skills_graph_status",
+    ReqMethod.SKILLS_GRAPH_GET: "handle_skills_graph_get",
+    ReqMethod.SKILLS_GRAPH_CANCEL: "handle_skills_graph_cancel",
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_VISIBILITY_GET: "handle_skills_visibility_get",
+    ReqMethod.SKILLS_VISIBILITY_SET: "handle_skills_visibility_set",
+    ReqMethod.SKILLS_VISIBILITY_UPDATE: "handle_skills_visibility_update",
 }
+
+# Handlers that persist a Skill visibility document; every one of them must
+# trigger a rail refresh so a grant or a revocation takes effect on the next
+# turn. The read-only ``get`` deliberately stays out.
+_SKILL_VISIBILITY_WRITE_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_visibility_set",
+        "handle_skills_visibility_update",
+    }
+)
 
 _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_LIST: "handle_plugins_list",
@@ -558,22 +614,12 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_RELOAD: "handle_plugins_reload",
 }
 
-_SYMPHONY_METHODS: frozenset[ReqMethod] = frozenset(
-    {
-        ReqMethod.SYMPHONY_BUILD_SCORE,
-        ReqMethod.SYMPHONY_PAUSE_BUILD,
-        ReqMethod.SYMPHONY_SCORE_STATUS,
-        ReqMethod.SYMPHONY_GRAPH,
-        ReqMethod.SYMPHONY_PLAN,
-    }
-)
-
 _SKILL_COMMAND_REGEX = re.compile(
     r"^/skills use\s+(?P<skill_names>[^,]+)\s*,\s*(?P<query>.*)$"
 )
 
 # /statusline prompt-type 模式：
-# 用户输入 "/statusline <描述>" → 直接注入 statusline-setup 指令到 prompt
+# 用户输入 "/statusline <描述>" → 让父代理调用内置 statusline-setup 子代理
 # 排除已知子命令（set, padding, clear, help, json）——这些由 TUI 前端本地处理，
 # 但如果消息经过 Gateway 传到 AgentServer，后端也需要区分。
 _STATUSLINE_KNOWN_SUBCOMMANDS = {"set", "padding", "clear", "help", "json", "get"}
@@ -581,133 +627,10 @@ _STATUSLINE_PROMPT_REGEX = re.compile(
     r"^/statusline\s+(?P<description>.+)$"
 )
 
-# 不调用 /skills，直接把指令文本嵌入 prompt
-_STATUSLINE_SETUP_PROMPT = """\
-You are a status line setup agent. Your job is to configure the user's TUI status line \
-by generating a shell command and writing it to the config file so the bottom bar \
-updates immediately.
-
-This is NOT about writing Python scripts or creating files — it's about writing a \
-**shell command** that runs every 2 seconds and whose stdout becomes the status bar text.
-
-## How the Status Line Works
-
-1. The TUI runs the configured shell command every 2 seconds
-2. Each time, it pipes a JSON object with session info as stdin to the command
-3. The command's stdout is displayed at the bottom of the TUI screen
-4. Config is stored in ~/.jiuwenswarm-tui/config.json under the "statusLine" field
-
-The shell command can do anything a normal shell command can — read JSON fields, \
-run git, check files, call system utilities, etc. The JSON input is just one \
-convenient data source, not a constraint.
-
-## Three Command Styles
-
-**Style A: Pure JSON fields** — for session info (model, tokens, mode, etc.)
-```
-input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); \
-echo "label:$field1"
-```
-
-**Style B: Pure shell utilities** — for system info (git branch, disk, \
-time, etc.) — no `input=$(cat)` needed
-```
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-time=$(date +%H:%M:%S); echo "$branch | $time"
-```
-
-**Style C: Mixed** — JSON fields + shell utilities (most common)
-```
-input=$(cat); model=$(echo "$input" | jq -r '.model // "?"'); \
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-echo "$model | git:$branch"
-```
-
-## JSON Input Field Reference
-
-The command receives this JSON via stdin every 2 seconds:
-
-| Field | Description |
-|-------|-------------|
-| session_id | Current session ID |
-| session_name | Session title (set via /rename) |
-| cwd | Current working directory |
-| mode | Current mode (agent / code.normal / code.team / team) |
-| model | Current model name |
-| provider | Model provider |
-| version | jiuwenswarm version |
-| connection | Connection state (idle / connecting / connected / reconnecting / auth_failed) |
-| is_processing | Is agent currently processing |
-| last_error | Most recent error message or null |
-| evolution_status | Evolution state (idle / running) |
-| active_subtask_count | Number of active subtasks |
-| todo_count | Number of todo items |
-| trusted_dirs | Trusted directory paths (array) |
-| usage.total_input_tokens | Session total input tokens |
-| usage.total_output_tokens | Session total output tokens |
-| usage.total_tokens | Session total tokens |
-| context_window.context_window_size | Max context window tokens |
-| context_window.used_percentage | Context used percentage (0-100) |
-| context_window.remaining_percentage | Context remaining percentage (0-100) |
-
-Common non-JSON shell approaches: git branch --show-current, \
-df -h, date, hostname -s, whoami, etc.
-
-## How to Apply the Config
-
-DO NOT use `python -c "..."` one-liners — they break on Windows due \
-to quoting and escaping issues. Instead, write a Python script file \
-and then execute it. This is the ONLY reliable way on Windows.
-
-Step 1: Write a Python script file (e.g. /tmp/update_statusline.py) \
-that merges the new statusLine into the config:
-```python
-import json, os
-d = os.path.expanduser('~/.jiuwenswarm-tui')
-os.makedirs(d, exist_ok=True)
-p = os.path.join(d, 'config.json')
-if not os.path.exists(p):
-    with open(p, 'w') as f:
-        f.write('{}\\n')
-with open(p) as f:
-    c = json.load(f)
-c['statusLine'] = {
-    'type': 'command',
-    'command': 'YOUR_COMMAND_HERE',
-    'padding': 0
-}
-with open(p, 'w') as f:
-    json.dump(c, f, indent=2)
-    f.write('\\n')
-print('StatusLine configured')
-```
-
-Step 2: Execute the script:
-```bash
-python /tmp/update_statusline.py
-```
-
-IMPORTANT: The TUI polls config.json every 2 seconds, so the status \
-bar updates automatically within 2 seconds after you write the config. \
-No restart needed.
-
-Guidelines:
-- Only write to ~/.jiuwenswarm-tui/config.json — never overwrite \
-  system files
-- Always merge with existing config — preserve trustedDirs, theme, etc.
-- Never hardcode secrets or API keys in the command
-- The statusLine command runs in bash (sh -c) context, NOT in \
-  PowerShell — so `$(cat)`, `$var`, `jq`, `echo` etc. are all \
-  standard bash/sh syntax
-- Commands should handle failures gracefully: use 2>/dev/null, \
-  || echo "fallback"
-- On Windows, $(cat) is automatically patched to read from a temp \
-  file by the TUI
-- DO NOT use `python -c` one-liners for config updates — they \
-  break on Windows. Always write a .py script file and execute it.
-- DO NOT read config.json with `cat` — use Python os.path.expanduser \
-  instead, as `~` may not resolve correctly in some shell environments
-"""
+# Backward-compatible alias for tests and callers that imported the old name.
+# The text is now the dedicated subagent's system prompt, not a suffix appended
+# to every parent-agent user turn.
+_STATUSLINE_SETUP_PROMPT = STATUSLINE_SETUP_SYSTEM_PROMPT
 
 
 def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
@@ -730,17 +653,14 @@ def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
 def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     """处理 /statusline <prompt>
 
-    不调用 /skills 命令，不依赖 SkillUseRail，
-    直接把 statusline-setup 指令文本嵌入 user prompt。
-
-    _handle_statusline_prompt_command() → 返回 (statusline_prompt, description)
-    build_user_prompt() 把 statusline_prompt 嵌入到 user prompt 后面
+    不调用 /skills 命令。返回一条让父代理通过 ``task_tool`` 调用内置
+    ``statusline-setup`` 子代理的调度指令。
 
     Args:
         query: 用户原始输入（含 "/statusline" 前缀）
 
     Returns:
-        (statusline_prompt, description) — 注入的 prompt 文本和提取的描述
+        (dispatch_prompt, description) — 子代理调度指令和提取的描述
         如果不是 /statusline prompt 模式，返回 ("", query)
     """
     stripped = query.strip()
@@ -756,7 +676,7 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
             return "", query
         if description:
             # 把用户的描述转化为让 Agent 自动配置状态栏的 prompt
-            return _STATUSLINE_SETUP_PROMPT, description
+            return build_statusline_setup_dispatch(description), description
 
     # /statusline 无参数 → 不是 prompt 模式（TUI 应已拦截处理 help）
     return "", query
@@ -765,110 +685,37 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
 def build_user_prompt(content: str | dict, files: dict, channel: str, language: str, *,
     trusted_dirs: list[str] | None = None, metadata: dict[str, Any] | None = None,
     skills: list[str] | None = None) -> str:
-    """Build user prompt for the agent.
+    """Build the user prompt for an agent.
+
+    Thin wrapper over :meth:`UserTurn.render` — the single renderer shared by
+    single-agent and team runs. Kept for callers that hold loose arguments
+    rather than a ``UserTurn``.
 
     Args:
+        content: The user's message text, or an A2UI client-event dict.
+        files: ``chat.send`` files mapping carrying uploaded attachments.
+        channel: Originating channel id.
+        language: Preferred response language.
+        trusted_dirs: Directories the client declared as trusted.
+        metadata: Request metadata (sender / chat_type / interaction context).
         skills: 显式传入的 skill 名列表（来自 params.skills，前端从 content 提取）。
             若提供，直接作为 skills_to_use，且 **不再对 content 做 /skills use 剥离**
             （content 原样保留，如 "帮我用 /doc写文档"）。
             若为 None，回退到从 content 文本解析 /skills use（兼容 IM/CLI 老路径），
             同样不剥离 content，仅提取 skill 名。
+
+    Returns:
+        The rendered prompt.
     """
-    from jiuwenswarm.server.runtime.a2ui.integration import build_user_prompt_if_a2ui_event
-
-    a2ui_prompt = build_user_prompt_if_a2ui_event(content, channel=channel, language=language)
-    if a2ui_prompt is not None:
-        return a2ui_prompt
-
-    interaction_prefix = ""
-    if metadata:
-        interaction_ctx = str(metadata.get("interaction_context") or "").strip()
-        if interaction_ctx:
-            interaction_prefix = f"\n{interaction_ctx}\n\n"
-
-    # skills 来源：优先显式参数（params.skills），否则回退从 content 文本解析（兼容老路径）。
-    # 两条路径都 **不剥离 content**——skill 名单独进 skills_to_use，content 原样保留语义通顺。
-    skills_to_use: list[str]
-    if skills:
-        skills_to_use = skills
-    elif isinstance(content, str):
-        parsed_skills, _stripped = _handle_skills_use_slash_command(content)
-        skills_to_use = parsed_skills  # 仅取 skill 名，忽略 _stripped（content 不剥离）
-    else:
-        skills_to_use = []
-
-    if isinstance(content, str):
-        # /statusline <prompt> prompt-type 命令（仿 Claude Code，不调用 /skills）
-        statusline_prompt, statusline_content = _handle_statusline_prompt_command(content)
-        if statusline_prompt:
-            content = statusline_content
-    else:
-        statusline_prompt = ""
-
-    if language == "zh":
-        prompt = "你收到一条消息：\n"
-        if channel == "cron":
-            prompt = "你收到一条消息，对于查询类任务必须输出查询到的内容，不要只回复确认，不要记录到memory：\n"
-    else:
-        prompt = "You receive a new message:\n"
-        if channel == "cron":
-            prompt = ("You receive a new message. For query tasks, you must output the queried content"
-                      "—don't just reply with confirmation, don't record to memory:\n")
-    msg_data: dict[str, Any] = {
-        "source": channel,
-        "preferred_response_language": language,
-        "content": content,
-        "type": "user input",
-    }
-    if channel in ["cron", "heartbeat"]:
-        msg_data["source"] = "system"
-        msg_data["type"] = channel
-    if metadata:
-        chat_type = str(metadata.get("chat_type") or metadata.get("im_chat_type") or "").strip()
-        if chat_type:
-            msg_data["chat_type"] = chat_type
-        sender_name = str(metadata.get("sender_name") or "").strip()
-        if sender_name:
-            msg_data["sender"] = sender_name
-    if channel not in ["cron", "heartbeat"]:
-        msg_data["files_updated_by_user"] = json.dumps(files, ensure_ascii=False)
-    final_prompt = interaction_prefix + prompt + json.dumps(msg_data, ensure_ascii=False)
-    if interaction_prefix:
-        logger.info(
-            "[build_user_prompt][DEBUG] interaction_context 存在，最终 prompt=\n%s",
-            final_prompt,
-        )
-
-    now = datetime.now(timezone(timedelta(hours=8)))
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-
-    user_message_context = {
-        "source": channel,
-        "timezone": "Asia/Shanghai",
-        "timestamp": now_str,
-        "preferred_response_language": language,
-        "content": content,
-        "files_updated_by_user": json.dumps(files, ensure_ascii=False),
-        "type": "user input",
-    }
-    if skills_to_use:
-        user_message_context["skills_to_use"] = skills_to_use
-    if trusted_dirs:
-        user_message_context["trusted_dirs"] = json.dumps(trusted_dirs, ensure_ascii=False)
-
-    # 仿 Claude Code statusline-setup: 把指令文本直接嵌入 prompt
-    base_prompt = interaction_prefix + prompt + json.dumps(user_message_context, ensure_ascii=False)
-    if statusline_prompt:
-        if language == "zh":
-            return base_prompt + "\n\n你必须按照以下指令配置状态栏：\n" + statusline_prompt
-        else:
-            return (
-                base_prompt
-                + "\n\nYou must follow these instructions "
-                + "to configure the status line:\n"
-                + statusline_prompt
-            )
-    return base_prompt
+    return UserTurn(
+        text=content,
+        channel=channel,
+        language=language,
+        files=files or {},
+        trusted_dirs=trusted_dirs,
+        skills=skills,
+        metadata=metadata,
+    ).render()
 
 
 
@@ -888,12 +735,37 @@ class JiuWenSwarm:
     STREAM_QUEUE_MAXSIZE = 64
 
     def __init__(self) -> None:
+        self._prepare_skill_library()
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    @staticmethod
+    def _prepare_skill_library() -> None:
+        """Pin the single Skill library and retire legacy per-workspace views.
+
+        Runs before any adapter, team or rail is built so legacy view directories
+        are gone by the time anything reads a team workspace. Correctness no
+        longer depends on that ordering: the migration seeds its allow lists at
+        ``AUTHORITY_MIGRATION``, which outranks the config seeds written during
+        assembly whichever one lands first. The agent-teams home still has to be
+        pinned before the scan, otherwise it would look under openJiuWen's own
+        default root instead of this instance's workspace.
+
+        Single-agent mode is untouched by all of this: it reads the same library
+        directory it always did and owns no visibility document.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+
+            configure_agent_teams_home()
+            configure_skill_library()
+            migrate_team_skill_views()
+        except Exception as exc:
+            logger.warning("[JiuWenSwarm] skill library preparation failed: %s", exc)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -953,12 +825,10 @@ class JiuWenSwarm:
         params = request.params if isinstance(request.params, dict) else {}
         work_mode = read_request_work_mode(params)
         raw_mode = params.get("mode", "")
-        mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else ""
+        mode = canonicalize_mode_text(raw_mode)
         if work_mode is not None and is_web_composable_mode(mode or "agent"):
             return "code" if work_mode == "code" else "agent"
-        if mode == "team.plan":
-            return "code"
-        if mode == "code" or mode.startswith("code."):
+        if is_code_profile_mode(mode) or mode == "code":
             return "code"
         return "agent"
 
@@ -984,19 +854,28 @@ class JiuWenSwarm:
                 busy_checker=lambda: sm.has_active_tasks(),))
 
     async def _on_skillnet_install_complete(self) -> None:
-        """Reload the agent and refresh active team shared skill links after async install."""
+        """Reload the agent and refresh live team skill rails after async install."""
         await self.create_instance()
-        self._refresh_team_shared_skill_links()
+        await self._reload_team_skill_rails()
 
     @staticmethod
-    def _refresh_team_shared_skill_links(session_id: str | None = None) -> None:
-        """Refresh team shared skill links after the global skill root changes."""
-        try:
-            from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+    async def _reload_team_skill_rails(session_id: str | None = None) -> None:
+        """Re-scan the shared Skill library for live team members.
 
-            refresh_team_shared_skill_links_across_managers(session_id)
+        Replaces the old shared-link refresh: teams no longer own a mirrored
+        ``skills/`` directory, so nothing has to be re-linked. What still needs
+        a nudge is each running member's in-memory Skill rail, which otherwise
+        keeps serving the library listing from before the change.
+
+        Args:
+            session_id: Restrict the reload to one session; None reloads all.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team import reload_team_skill_views_across_managers
+
+            await reload_team_skill_views_across_managers(session_id)
         except Exception as exc:
-            logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+            logger.warning("[JiuWenSwarm] team skill view reload failed: %s", exc)
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1057,12 +936,17 @@ class JiuWenSwarm:
             project_dir=project_dir,
         )
 
-    def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
+    def build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
         """构建 adapter 所需的 inputs 字典（公共接口）."""
         return self._build_inputs(request)
 
-    def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
-        """构建 adapter 所需的 inputs 字典."""
+    def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, UserTurn]:
+        """构建 adapter 所需的 inputs 字典.
+
+        Returns:
+            ``(inputs, memory_mode, turn)`` — ``turn`` is the rendered user turn;
+            ``turn.text`` keeps the user's own words for callers that parse them.
+        """
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
         from jiuwenswarm.common.schema.chat_send import ChatSendParams
 
@@ -1072,13 +956,12 @@ class JiuWenSwarm:
         query = params.get("query")
         if query is None or query == "":
             query = params.get("content", "")
-        # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从原始
-        # query 解析 /debug（process_message_stream 用 raw_query 覆写
-        # inputs["query"]），故此处对 team 不剥离。
+        # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
+        # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
         _dbg_mode = params.get("mode")
         _dbg_mode_s = _dbg_mode.strip().lower() if isinstance(_dbg_mode, str) else ""
-        if not (params.get("team") or _dbg_mode_s in {"team", "team.plan", "code.team"}):
+        if not (params.get("team") or is_team_runtime_mode(_dbg_mode_s)):
             if isinstance(query, str):
                 from jiuwenswarm.server.runtime.debug_trace.directives import strip_debug_directive
                 query, _request_debug = strip_debug_directive(query)
@@ -1125,6 +1008,19 @@ class JiuWenSwarm:
                 query[:2000] if isinstance(query, str) else str(query)[:2000],
             )
 
+        # One turn, one renderer: single-agent and team both deliver
+        # ``turn.render()``. The team path additionally keeps ``turn.text`` to
+        # parse directives / ``$member`` routing before it renders.
+        turn = UserTurn(
+            text=query,
+            channel=channel,
+            language=language,
+            files=params.get("files", {}) or {},
+            trusted_dirs=trusted_dirs,
+            skills=skills,
+            metadata=request.metadata,
+        )
+
         if isinstance(query, InteractiveInput):
             final_query = query
         else:
@@ -1142,34 +1038,19 @@ class JiuWenSwarm:
                 )
                 if interactive_input is not None:
                     final_query = interactive_input
+                    turn = turn.with_text(interactive_input)
                 else:
-                    final_query = build_user_prompt(
-                        query,
-                        files=params.get("files", {}),
-                        channel=channel,
-                        language=language,
-                        trusted_dirs=trusted_dirs,
-                        metadata=request.metadata,
-                        skills=skills,
-                    )
+                    final_query = turn.render()
             else:
-                final_query = build_user_prompt(
-                    query,
-                    files=params.get("files", {}),
-                    channel=channel,
-                    language=language,
-                    trusted_dirs=trusted_dirs,
-                    metadata=request.metadata,
-                    skills=skills,
-                )
-                # 调试日志：确认 /statusline prompt 注入是否生效
+                final_query = turn.render()
+                # 调试日志：确认 /statusline 是否已改写为内置子代理调度
                 if isinstance(query, str) and "/statusline" in query:
                     logger.info(
                         "[_build_inputs][STATUSLINE] 原始 query=%s, 最终 prompt 长度=%d, "
-                        "包含 statusline-setup 指令=%s",
+                        "包含 statusline-setup 调度=%s",
                         query[:200],
                         len(final_query) if isinstance(final_query, str) else 0,
-                        "status line setup agent" in final_query if isinstance(final_query, str) else False,
+                        "statusline-setup" in final_query if isinstance(final_query, str) else False,
                     )
 
         inputs: dict[str, Any] = {
@@ -1235,9 +1116,10 @@ class JiuWenSwarm:
                 inputs["cwd"] = str(expanded)
                 inputs["workspace_dir"] = str(expanded)
 
-        # 返回原始 query（未经 build_user_prompt 包装）
-        # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
-        return inputs, memory_mode, query
+        # The turn carries both the user's own words (``turn.text``, needed by
+        # the team path for directive / ``$member`` / slash parsing) and the
+        # single renderer that produced ``inputs["query"]``.
+        return inputs, memory_mode, turn
 
     def _make_retry_without_a2ui_call(
             self,
@@ -1286,7 +1168,7 @@ class JiuWenSwarm:
     @classmethod
     def _is_malformed_team_plan_approval_payload(cls, params: dict[str, Any]) -> bool:
         return (
-            str(params.get("mode") or "").strip().lower() == "team.plan"
+            is_team_plan_mode(params.get("mode"))
             and str(params.get("source") or "").strip() == "confirm_interrupt"
             and isinstance(params.get("answers"), list)
             and bool(params.get("answers"))
@@ -1503,6 +1385,16 @@ class JiuWenSwarm:
                 or plan_skip_feedback(get_config().get("preferred_language")),
                 "plan_skip": True,
             }
+        elif value in PLAN_REVISE_OPTION_VALUES:
+            # Web 的"下一步"：不退出 plan，按修改意见续跑。``plan_revise`` 是额外键，
+            # ConfirmPayload 会忽略它；rail 只在看到它时才给假回执包修订前缀。
+            # TUI 仍发 ``reject``，不会进这个分支。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户希望继续规划",
+                "plan_revise": True,
+            }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
                 "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
@@ -1571,13 +1463,18 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
                 # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
                 # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
                 # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
+            elif handler_name in _SKILL_VISIBILITY_WRITE_HANDLERS and payload.get("success"):
+                # 可见性只改 metadata，库内容没变：agent 无需重建，只要让各
+                # skill rail 重新读一次 metadata，授权/撤权即刻生效。
+                await self._refresh_skill_rails_after_change()
+                await self._reload_team_skill_rails(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             return AgentResponse(
@@ -1627,111 +1524,6 @@ class JiuWenSwarm:
             ok=True,
             payload=payload,
             metadata=request.metadata,
-        )
-
-    async def _handle_symphony_request(self, request: AgentRequest) -> AgentResponse | None:
-        """处理 Symphony extension RPC 请求."""
-        if request.req_method not in _SYMPHONY_METHODS:
-            return None
-
-        method = request.req_method.value
-        try:
-            handler = ExtensionRegistry.get_instance().get_rpc_handler(method)
-            if handler is None:
-                payload = {
-                    "success": False,
-                    "detail": f"Symphony extension RPC unavailable: {method}: handler not registered",
-                }
-            else:
-                result = handler(request.params or {}, request=request)
-                payload = await result if inspect.isawaitable(result) else result
-                if not isinstance(payload, dict):
-                    payload = {"success": True, "result": payload}
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[JiuWenSwarm] Symphony RPC failed: %s", method)
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"success": False, "detail": f"{method}: {exc}"},
-                metadata=request.metadata,
-            )
-
-        return AgentResponse(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            ok=True,
-            payload=payload,
-            metadata=request.metadata,
-        )
-
-    async def _handle_symphony_request_stream(
-        self,
-        request: AgentRequest,
-    ) -> AsyncIterator[AgentResponseChunk]:
-        """Stream Symphony RPC progress events, then the final RPC payload."""
-        if request.req_method not in _SYMPHONY_METHODS:
-            return
-
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-        async def progress_callback(event: dict[str, Any]) -> None:
-            await queue.put(event)
-
-        metadata = dict(request.metadata or {})
-        metadata["symphony_progress_callback"] = progress_callback
-        stream_request = replace(request, metadata=metadata)
-        task = asyncio.create_task(self._handle_symphony_request(stream_request))
-
-        try:
-            while not task.done() or not queue.empty():
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={
-                        "event_type": event.get("type")
-                        or "symphony.beam_search.update",
-                        "beam_search_event": event,
-                    },
-                    is_complete=False,
-                )
-            response = await task
-        except Exception as exc:
-            logger.exception("[JiuWenSwarm] Symphony stream failed: %s", exc)
-            yield AgentResponseChunk(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload={"event_type": "chat.error", "error": str(exc)},
-                is_complete=False,
-            )
-            yield AgentResponseChunk(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload=None,
-                is_complete=True,
-            )
-            return
-
-        payload = dict(response.payload or {}) if response is not None else {}
-        payload.setdefault(
-            "event_type",
-            f"{request.req_method.value if request.req_method else 'symphony'}.result",
-        )
-        yield AgentResponseChunk(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            payload=payload,
-            is_complete=False,
-        )
-        yield AgentResponseChunk(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            payload=None,
-            is_complete=True,
         )
 
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
@@ -2029,7 +1821,7 @@ class JiuWenSwarm:
                     metadata=request.metadata,
                 )
 
-        # 无状态请求（skills / skilldev / plugins / symphony）不需要 adapter，
+        # 无状态请求（skills / skilldev / plugins / Skill Graph）不需要 adapter，
         # 在 _ensure_adapter 之前检查，避免触发 adapter 懒初始化。
         # COMMAND_GOAL 已在上方单独处理（其内部按需 ensure），不影响本顺序。
         skilldev_response = await self._handle_skilldev_request(request)
@@ -2044,10 +1836,6 @@ class JiuWenSwarm:
         if plugins_response is not None:
             return plugins_response
 
-        symphony_response = await self._handle_symphony_request(request)
-        if symphony_response is not None:
-            return symphony_response
-
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         heartbeat_response = await adapter.handle_heartbeat(request)
@@ -2056,6 +1844,18 @@ class JiuWenSwarm:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
+        feedback_scheduled = False
+
+        def _schedule_feedback_once(terminal_status: str) -> None:
+            nonlocal feedback_scheduled
+            if feedback_scheduled:
+                return
+            _schedule_symphony_session_feedback(
+                session_id,
+                request.request_id,
+                terminal_status=terminal_status,
+            )
+            feedback_scheduled = True
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
         if _should_record_user_history(request.params):
@@ -2077,8 +1877,12 @@ class JiuWenSwarm:
         )
 
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
+            inputs, memory_mode, user_turn = self._build_inputs(request)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
         except _TeamPlanApprovalPayloadError as exc:
+            _schedule_feedback_once("error")
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2086,6 +1890,9 @@ class JiuWenSwarm:
                 payload={"error": str(exc)},
                 metadata=request.metadata,
             )
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -2097,14 +1904,28 @@ class JiuWenSwarm:
                 workspace_dir=str(get_agent_home_dir()),
                 extra=request.params,
             )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            try:
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
         async def run_agent_task():
             return await adapter.process_message_impl(request, inputs)
 
-        result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        try:
+            result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
@@ -2114,14 +1935,21 @@ class JiuWenSwarm:
                 adapter=adapter,
                 request=request,
             )
-            content_str = await finalize_assistant_response_if_a2ui(
-                content_str,
-                channel=request.channel_id,
-                user_query=raw_query,
-                request_id=request.request_id or "",
-                repair_call=repair_call,
-                retry_without_a2ui_call=retry_without_a2ui_call,
-            )
+            try:
+                content_str = await finalize_assistant_response_if_a2ui(
+                    content_str,
+                    channel=request.channel_id,
+                    user_query=user_turn.text,
+                    request_id=request.request_id or "",
+                    repair_call=repair_call,
+                    retry_without_a2ui_call=retry_without_a2ui_call,
+                )
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             if isinstance(content, str):
                 result.payload["content"] = content_str
             append_history_record(
@@ -2134,6 +1962,7 @@ class JiuWenSwarm:
                 timestamp=time.time(),
                 mode=request.params.get("mode", "unknown"),
             )
+            _schedule_feedback_once("success")
 
             # cloud memory: after chat hook
             if memory_mode == "cloud":
@@ -2155,7 +1984,8 @@ class JiuWenSwarm:
             if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
                 _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=False)
 
-        _schedule_symphony_session_feedback(session_id, request.request_id)
+        if not feedback_scheduled:
+            _schedule_feedback_once("success" if result.ok else "error")
         return result
 
     async def process_message_stream(
@@ -2240,18 +2070,12 @@ class JiuWenSwarm:
             )
             return
 
-        if request.req_method in _SYMPHONY_METHODS:
-            async for chunk in self._handle_symphony_request_stream(request):
-                yield chunk
-            return
-
-        # 无状态 RPC（skills / plugins / symphony）不需要 adapter，
+        # 无状态 RPC（skills / plugins / Skill Graph）不需要 adapter，
         # 委托给非流式 handler 并包装为单个 chunk，避免触发 adapter 懒初始化。
         # skilldev 已由上面的流式分支处理，这里不会再命中。
         for stateless_handler in (
             self._handle_skills_request,
             self._handle_plugins_request,
-            self._handle_symphony_request,
         ):
             stateless_response = await stateless_handler(request)
             if stateless_response is not None:
@@ -2282,9 +2106,7 @@ class JiuWenSwarm:
 
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
-        is_team_mode = team_flag or (
-            isinstance(mode, str) and mode.strip().lower() in {"team", "team.plan", "code.team"}
-        )
+        is_team_mode = team_flag or is_team_runtime_mode(mode)
         is_auto_harness_resume = (
             isinstance(mode, str)
             and mode.strip().lower() == "auto_harness"
@@ -2319,9 +2141,26 @@ class JiuWenSwarm:
 
         rid = request.request_id
         cid = request.channel_id
+        feedback_scheduled = False
+
+        def _schedule_feedback_once(terminal_status: str) -> None:
+            nonlocal feedback_scheduled
+            if feedback_scheduled:
+                return
+            _schedule_symphony_session_feedback(
+                session_id,
+                rid,
+                terminal_status=terminal_status,
+            )
+            feedback_scheduled = True
+
         try:
-            inputs, memory_mode, raw_query = self._build_inputs(request)
+            inputs, memory_mode, user_turn = self._build_inputs(request)
+        except asyncio.CancelledError:
+            _schedule_feedback_once("cancelled")
+            raise
         except _TeamPlanApprovalPayloadError as exc:
+            _schedule_feedback_once("error")
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -2335,18 +2174,23 @@ class JiuWenSwarm:
                 is_complete=True,
             )
             return
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
 
-        # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
+        # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
+        # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
+        # leader 收到的信封与单 agent 逐字段一致。
         team_query_is_interactive_input = False
         if is_team_mode:
             from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
             team_query_is_interactive_input = isinstance(inputs.get("query"), InteractiveInput)
-            if not team_query_is_interactive_input:
-                inputs["query"] = raw_query
+            inputs[TEAM_USER_TURN_KEY] = user_turn
             logger.info(
-                "[JiuWenSwarm] Team模式使用原始query: %s",
-                raw_query[:100] if isinstance(raw_query, str) and raw_query else type(inputs.get("query")).__name__,
+                "[JiuWenSwarm] Team模式 user turn: interactive_input=%s text=%s",
+                team_query_is_interactive_input,
+                str(user_turn.text)[:100],
             )
 
         # cloud memory: before chat hook
@@ -2359,7 +2203,14 @@ class JiuWenSwarm:
                 workspace_dir=str(get_agent_home_dir()),
                 extra=request.params,
             )
-            await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            try:
+                await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            except asyncio.CancelledError:
+                _schedule_feedback_once("cancelled")
+                raise
+            except Exception:
+                _schedule_feedback_once("error")
+                raise
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
@@ -2376,9 +2227,16 @@ class JiuWenSwarm:
                 # or recover a paused runtime before calling interact().
                 is_team_first_request = False
             else:
-                is_team_first_request = not await _team_session_has_runtime(
-                    team_manager, session_id
-                )
+                try:
+                    is_team_first_request = not await _team_session_has_runtime(
+                        team_manager, session_id
+                    )
+                except asyncio.CancelledError:
+                    _schedule_feedback_once("cancelled")
+                    raise
+                except Exception:
+                    _schedule_feedback_once("error")
+                    raise
             logger.info(
                 "[JiuWenSwarm] Team模式: session_id=%s is_first=%s interactive_input=%s",
                 session_id,
@@ -2394,25 +2252,71 @@ class JiuWenSwarm:
         durable_pending_final_chunks: list[str] = []
         durable_pending_final_started_at: float | None = None
         durable_pending_reasoning_chunks: list[str] = []
+        # reasoning 首/末帧时刻（epoch ms）：随 reasoning_content 一起落盘，供刷新后
+        # 恢复耗时终点；即使 final/closeReasoning 丢失，末帧也是真实事件时刻。
+        durable_pending_reasoning_started_at: float | None = None
+        durable_pending_reasoning_updated_at: float | None = None
         durable_final_content = ""
         # 这条流是否带过 Goal 事件。Goal 仍 active 时流结束是不发 chat.final 的
         # （见 interface_deep._should_emit_stream_end_chat_final），气泡里的正文
         # 就没人落盘；收尾时按这个标记补一次，只影响 Goal 流。
         saw_goal_stream_output = False
 
-        def _consume_durable_reasoning_content() -> str:
-            nonlocal durable_pending_reasoning_chunks
+        def _note_durable_reasoning_delta() -> None:
+            nonlocal durable_pending_reasoning_started_at, durable_pending_reasoning_updated_at
+            now_ms = time.time() * 1000
+            if durable_pending_reasoning_started_at is None:
+                durable_pending_reasoning_started_at = now_ms
+            durable_pending_reasoning_updated_at = now_ms
+
+        def _consume_durable_reasoning_content() -> tuple[str, float | None, float | None]:
+            nonlocal \
+                durable_pending_reasoning_chunks, \
+                durable_pending_reasoning_started_at, \
+                durable_pending_reasoning_updated_at
             reasoning_text = "".join(durable_pending_reasoning_chunks)
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
             durable_pending_reasoning_chunks = []
-            return reasoning_text if reasoning_text.strip() else ""
+            durable_pending_reasoning_started_at = None
+            durable_pending_reasoning_updated_at = None
+            return reasoning_text, started_at, updated_at
 
         def _attach_reasoning_content(extra_fields: dict[str, Any] | None = None) -> dict[str, Any] | None:
-            reasoning_text = _consume_durable_reasoning_content()
-            if not reasoning_text:
+            reasoning_text, started_at, updated_at = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
                 return extra_fields
             merged = dict(extra_fields) if isinstance(extra_fields, dict) else {}
             merged["reasoning_content"] = reasoning_text
+            merged["reasoning_updated_at"] = updated_at or started_at or (time.time() * 1000)
             return merged
+
+        def _persist_pending_reasoning() -> None:
+            """异常/非 Goal 结束兜底：把未随 tool_call/final 落盘的思考补落一条记录。
+
+            正常完成时 reasoning 已被最后一条 tool_call/final 附走、缓冲为空，这里 no-op。
+            单独落成 chat.reasoning 记录（不带正文 final），前端按 reasoning_content 提取。
+            """
+            started_at = durable_pending_reasoning_started_at
+            updated_at = durable_pending_reasoning_updated_at
+            reasoning_text, _, _ = _consume_durable_reasoning_content()
+            if not reasoning_text.strip():
+                return
+            now_ms = time.time() * 1000
+            append_history_record(
+                session_id=session_id,
+                request_id=rid,
+                channel_id=cid,
+                role="assistant",
+                event_type="chat.reasoning",
+                content="",
+                timestamp=(started_at or now_ms) / 1000,
+                extra={
+                    "reasoning_content": reasoning_text,
+                    "reasoning_updated_at": updated_at or started_at or now_ms,
+                },
+                mode=request.params.get("mode", "unknown"),
+            )
 
         def _reset_durable_pending_final() -> None:
             nonlocal durable_pending_final_chunks, durable_pending_final_started_at
@@ -2560,7 +2464,7 @@ class JiuWenSwarm:
                 finalized = await finalize_assistant_response_if_a2ui(
                     decision.raw_block,
                     channel=cid,
-                    user_query=raw_query,
+                    user_query=user_turn.text,
                     request_id=f"{rid}:{decision.key[0]}:{decision.key[1]}",
                     repair_call=repair_call,
                     retry_without_a2ui_call=retry_without_a2ui_call,
@@ -2622,6 +2526,11 @@ class JiuWenSwarm:
             "[JiuWenSwarm] consumer loop starting: request_id=%s is_team=%s is_first=%s",
             rid, is_team_mode, is_team_first_request,
         )
+        stream_aborted = False
+        abort_terminal_status = "cancelled"
+        completion_status = "success"
+        terminal_final_persisted = False
+
         try:
             while (
                     not stream_done.is_set()
@@ -2718,6 +2627,7 @@ class JiuWenSwarm:
                         mode=request.params.get("mode", "unknown"),
                         extra={"error_type": error_type} if error_type else None,
                     )
+                    completion_status = "error"
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -2732,6 +2642,9 @@ class JiuWenSwarm:
                                 continue
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
+                            if et == "chat.error":
+                                completion_status = "error"
+                                abort_terminal_status = "error"
                             _note_goal_stream_payload(et, data.payload)
                             should_record = et.startswith("chat.")
                             final_segment_started_at: float | None = None
@@ -2815,6 +2728,7 @@ class JiuWenSwarm:
                                 _note_durable_pending_final_delta(payload_content)
                                 should_record = False
                             elif et == "chat.reasoning":
+                                _note_durable_reasoning_delta()
                                 durable_pending_reasoning_chunks.append(payload_content)
                                 should_record = False
                             elif et == "chat.tool_call":
@@ -2888,6 +2802,8 @@ class JiuWenSwarm:
                                 )
                                 if et == "chat.final":
                                     durable_final_content = str(data.payload.get("content", ""))
+                                    if not is_team_mode or data.payload.get("role") != "teammate":
+                                        terminal_final_persisted = True
                             if et == "chat.final":
                                 next_final_content = str(data.payload.get("content", ""))
                                 if next_final_content:
@@ -2896,6 +2812,9 @@ class JiuWenSwarm:
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
+                        if et == "chat.error":
+                            completion_status = "error"
+                            abort_terminal_status = "error"
                         _note_goal_stream_payload(et, data)
                         should_record = et.startswith("chat.")
                         final_segment_started_at = None
@@ -2981,6 +2900,7 @@ class JiuWenSwarm:
                             _note_durable_pending_final_delta(payload_content)
                             should_record = False
                         elif et == "chat.reasoning":
+                            _note_durable_reasoning_delta()
                             durable_pending_reasoning_chunks.append(payload_content)
                             should_record = False
                         elif et == "chat.tool_call":
@@ -3047,6 +2967,8 @@ class JiuWenSwarm:
                             )
                             if et == "chat.final":
                                 durable_final_content = str(data.get("content", ""))
+                                if not is_team_mode or data.get("role") != "teammate":
+                                    terminal_final_persisted = True
                         if et == "chat.final":
                             next_final_content = str(data.get("content", ""))
                             if next_final_content:
@@ -3060,6 +2982,15 @@ class JiuWenSwarm:
                         )
         except asyncio.CancelledError:
             logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
+            stream_aborted = True
+            raise
+        except GeneratorExit:
+            logger.info("[JiuWenSwarm] 流式连接已关闭: request_id=%s", rid)
+            stream_aborted = True
+            raise
+        except Exception:
+            stream_aborted = True
+            abort_terminal_status = "error"
             raise
         finally:
             # Goal 还在跑时这条流不会收到收尾的 chat.final，气泡里已经展示的正文
@@ -3067,6 +2998,12 @@ class JiuWenSwarm:
             # 消失，和实时看到的不是一回事。非 Goal 流不进这里。
             if saw_goal_stream_output:
                 _persist_pending_final_text()
+            else:
+                # 非 Goal 异常结束（LLM 错误/断连，或流结束无收尾事件）时，pending
+                # reasoning 不会随 tool_call/final 落盘；补落一条，刷新后思考内容
+                # 与耗时终点（末帧时刻）都能恢复。正文 final 故意不落——半截回答
+                # 不该当 chat.final 写进历史。
+                _persist_pending_reasoning()
             # The adapter producer owns RuntimeOutputStream.  Cancelling and
             # awaiting it releases the runtime output lease and aborts the
             # in-flight round when the outer WebSocket consumer disappears.
@@ -3075,10 +3012,15 @@ class JiuWenSwarm:
             ]
             for task in unfinished_a2ui_tasks:
                 task.cancel()
-            if unfinished_a2ui_tasks:
-                await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
             if not stream_task.done():
                 stream_task.cancel()
+            if stream_aborted:
+                terminal_status = abort_terminal_status
+                if terminal_status == "cancelled" and terminal_final_persisted:
+                    terminal_status = "success"
+                _schedule_feedback_once(terminal_status)
+            if unfinished_a2ui_tasks:
+                await asyncio.gather(*unfinished_a2ui_tasks, return_exceptions=True)
             try:
                 await stream_task
             except asyncio.CancelledError:
@@ -3097,17 +3039,29 @@ class JiuWenSwarm:
         # (which may be full after a disconnect), but preserve the public
         # cancellation contract once all already-produced chunks are drained.
         if producer_cancellation is not None:
+            _schedule_feedback_once(
+                "success" if terminal_final_persisted else "cancelled"
+            )
             raise producer_cancellation
 
         assistant_message = final_answer_content or "".join(final_answer_chunks)
-        finalized_assistant_message = await finalize_assistant_response_if_a2ui(
-            assistant_message,
-            channel=cid,
-            user_query=raw_query,
-            request_id=rid or "",
-            repair_call=repair_call,
-            retry_without_a2ui_call=retry_without_a2ui_call,
-        )
+        try:
+            finalized_assistant_message = await finalize_assistant_response_if_a2ui(
+                assistant_message,
+                channel=cid,
+                user_query=user_turn.text,
+                request_id=rid or "",
+                repair_call=repair_call,
+                retry_without_a2ui_call=retry_without_a2ui_call,
+            )
+        except asyncio.CancelledError:
+            _schedule_feedback_once(
+                "success" if terminal_final_persisted else "cancelled"
+            )
+            raise
+        except Exception:
+            _schedule_feedback_once("error")
+            raise
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
@@ -3127,12 +3081,15 @@ class JiuWenSwarm:
             )
             final_answer_content = finalized_assistant_message
             final_answer_chunks = []
+            _schedule_feedback_once(completion_status)
             yield _make_a2ui_final_chunk(
                 request_id=rid,
                 channel_id=cid,
                 session_id=session_id,
                 content=finalized_assistant_message,
             )
+
+        _schedule_feedback_once(completion_status)
 
         # cloud memory: after chat hook
         if memory_mode == "cloud":
@@ -3155,7 +3112,6 @@ class JiuWenSwarm:
         if is_auto_memory_enabled(mode, config) and is_memory_enabled(mode, config):
             _trigger_auto_memory_extraction(adapter, request, session_id, is_stream=True)
 
-        _schedule_symphony_session_feedback(session_id, rid)
         yield AgentResponseChunk(
             request_id=rid,
             channel_id=cid,

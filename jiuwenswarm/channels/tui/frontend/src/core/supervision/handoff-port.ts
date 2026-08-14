@@ -79,7 +79,7 @@ export class HandoffPortImpl implements HandoffPort {
         throw new Error("Switch exit code unexpectedly null after checkHandoff");
       }
       // 构造 handoff JSON，供 launcher 从 stdout 读取后发起 3rdagent.switch RPC。
-      // content 是完整命令文本（如 "switch claude"），parsed 是目标名（如 "claude"）。
+      // content 是完整命令文本（如 "switch <agent_type>"），parsed 是目标名（如 "<agent_type>"）。
       const parsed = switchContent.replace(/^switch\s+/i, "").trim();
       const handoffMessage = JSON.stringify({
         action: "switch",

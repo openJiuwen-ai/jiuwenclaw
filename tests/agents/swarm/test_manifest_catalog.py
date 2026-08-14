@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.harness.schema import deep_agent_spec as das
+from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm import register_swarm_providers, registry
@@ -61,6 +62,17 @@ def _swarm_catalog() -> dict[str, HarnessElementDescriptor]:
         name: descriptor
         for name, descriptor in get_catalog().items()
         if name.startswith("swarm.")
+    }
+
+
+def _skill_evolution_config(*, enabled: bool = True, auto_save: bool = False) -> dict:
+    return {
+        "react": {
+            "evolution": {
+                "skill_evolution": enabled,
+                "auto_save": auto_save,
+            }
+        }
     }
 
 
@@ -118,14 +130,12 @@ def test_factory_ref_resolves_for_every_descriptor() -> None:
             {"tool_names": ["switch_mode"]},
             {"tool_names": 123},
         ),
-        (registry.MEMBER_SKILL_TOOLKIT, {"skills": ["alpha"]}, {"skills": 7}),
         (registry.EXPLORE_AGENT, {"max_iterations": 20}, {"max_iterations": "many"}),
         (
             registry.PERMISSION_INTERRUPT,
             {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
             {"model_name": 123},
         ),
-        (registry.CODE_SKILL_USE, {"skill_mode": "all"}, {"skill_mode": 5}),
     ],
 )
 def test_input_schema_validates(name: str, good: dict, bad: dict) -> None:
@@ -183,7 +193,6 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
     """Config-derived attributes are params; per-request runtime values are context."""
     catalog = get_catalog()
     expected = {
-        registry.CODE_SKILL_USE: {"skill_mode": "params"},
         registry.PERMISSION_INTERRUPT: {
             "permissions_config": "params",
             "model_name": "params",
@@ -200,11 +209,19 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
         },
         registry.TEAM_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
-            "review_trigger": "params",
-            "team_skills_dir": "context",
-            "trajectory_registry": "context",
+            "auto_save": "params",
+            "global_skills_dir": "context",
+            "trajectory_span_processor": "context",
         },
-        registry.TEAM_SKILL_CREATE: {"skill_create": "params"},
+        registry.TEAM_SKILL_CREATE: {
+            "global_skills_dir": "context",
+            "team_skill_visibility_path": "context",
+        },
+        registry.MEMBER_SKILL_EVOLUTION: {
+            "evolution_model_config": "params",
+            "global_skills_dir": "context",
+            "trajectory_span_processor": "context",
+        },
     }
     for name, fields in expected.items():
         props = catalog[name].input_schema["properties"]
@@ -219,7 +236,10 @@ def test_config_specs_bakes_attribute_params() -> None:
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
     config = {
-        "react": {"skill_mode": SkillUseRail.SKILL_MODE_AUTO_LIST},
+        "react": {
+            "skill_mode": SkillUseRail.SKILL_MODE_AUTO_LIST,
+            "evolution": {"skill_evolution": True, "auto_save": False},
+        },
         "permissions": {"enabled": True},
         "models": {"default": {"model_client_config": {"model_name": "gpt-4o"}}},
     }
@@ -233,7 +253,7 @@ def test_config_specs_bakes_attribute_params() -> None:
     by_type = {spec.type: spec.params for spec in rails}
 
     assert (
-        by_type[registry.CODE_SKILL_USE]["skill_mode"]
+        by_type[TEAM_SKILL_USE]["skill_mode"]
         == SkillUseRail.SKILL_MODE_AUTO_LIST
     )
     assert registry.PERMISSION_INTERRUPT not in by_type
@@ -246,52 +266,42 @@ def test_config_specs_bakes_attribute_params() -> None:
     )
 
 
-def test_config_specs_maps_auto_scan_by_swarm_role(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Leader reviews softly while teammates use deterministic signals."""
+def test_config_specs_maps_canonical_evolution_by_swarm_role() -> None:
+    """The product switch mounts role-specific rails and only leader auto-save."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
-    config = {"evolution": {"auto_scan": True}}
+    config = _skill_evolution_config(auto_save=True)
     leader_rails, _ = build_member_capability_specs(config, "team", "leader")
     member_rails, _ = build_member_capability_specs(config, "team", "teammate")
     leader_params = {spec.type: spec.params for spec in leader_rails}
     member_params = {spec.type: spec.params for spec in member_rails}
 
-    assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is True
-    assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is True
-    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
+    assert leader_params[registry.TEAM_SKILL_EVOLUTION]["auto_save"] is True
+    assert "review_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
+    assert set(member_params[registry.MEMBER_SKILL_EVOLUTION]) == {
+        "evolution_model_config"
+    }
+    assert (
+        member_params[registry.MEMBER_SKILL_EVOLUTION]["evolution_model_config"]
+        == leader_params[registry.TEAM_SKILL_EVOLUTION]["evolution_model_config"]
+    )
 
 
-def test_config_specs_keeps_supported_explicit_swarm_trigger_overrides(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the trigger supported by each swarm role is configurable."""
+def test_config_specs_ignores_legacy_evolution_trigger_fields() -> None:
+    """Legacy trigger fields do not mount evolution rails without the switch."""
     from jiuwenswarm.agents.swarm.config_specs import build_member_capability_specs
 
-    monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-    monkeypatch.delenv("EVOLUTION_SIGNAL_TRIGGER", raising=False)
-    monkeypatch.delenv("EVOLUTION_REVIEW_TRIGGER", raising=False)
     config = {
-        "evolution": {
+        "react": {"evolution": {
             "auto_scan": True,
             "signal_trigger": False,
             "review_trigger": False,
-        }
+        }}
     }
     leader_rails, _ = build_member_capability_specs(config, "team", "leader")
     member_rails, _ = build_member_capability_specs(config, "team", "teammate")
-    leader_params = {spec.type: spec.params for spec in leader_rails}
-    member_params = {spec.type: spec.params for spec in member_rails}
-
-    assert leader_params[registry.TEAM_SKILL_EVOLUTION]["review_trigger"] is False
-    assert "signal_trigger" not in leader_params[registry.TEAM_SKILL_EVOLUTION]
-    assert member_params[registry.MEMBER_SKILL_EVOLUTION]["signal_trigger"] is False
-    assert "review_trigger" not in member_params[registry.MEMBER_SKILL_EVOLUTION]
+    assert registry.TEAM_SKILL_EVOLUTION not in {spec.type for spec in leader_rails}
+    assert registry.MEMBER_SKILL_EVOLUTION not in {spec.type for spec in member_rails}
 
 
 def test_descriptor_json_round_trip() -> None:

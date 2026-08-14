@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, parse, relative } from "node:path";
 import { addError, addInfo, makeItem } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
-import { getEditorInfo } from "../../utils/editor.js";
+import { getEditorEnvironmentHint } from "../../utils/editor.js";
 import {
   findGitRoot,
   formatMemoryPathForDisplay,
@@ -477,18 +477,18 @@ async function editMemoryByPath(
         return;
       }
       if (ctx.openInEditor) {
-        const { source, value } = getEditorInfo();
-        const editorHint = source !== "default"
-          ? `(${source}="${value}")`
-          : "(default: vi)";
+        const editorEnvironmentHint = getEditorEnvironmentHint();
         // openInEditor blocks until the editor window closes (TUI frozen in
-        // the meantime). Emit the "Opened…" line in onDone, i.e. AFTER the
-        // editor exits — matches CC's editFileInEditor → onDone("Opened…").
-        ctx.openInEditor(path, () => {
+        // the meantime). Report the result only after the editor exits.
+        await ctx.openInEditor(path, (success) => {
+          if (success === false) {
+            ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+            return;
+          }
           ctx.addItem(
             addInfo(
               ctx.sessionId,
-              `Opened memory file at ${displayPath} ${editorHint}`,
+              `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
               "m",
             ),
           );
@@ -520,19 +520,18 @@ async function editMemoryByPath(
     if (ctx.openInEditor) {
       const projectDir = ctx.getCurrentProjectDir();
       const displayPath = getDisplayPath(payload.path, projectDir);
-      const { source, value } = getEditorInfo();
-      const editorHint = source !== "default"
-        ? `(${source}="${value}")`
-        : "(default: vi)";
-
+      const editorEnvironmentHint = getEditorEnvironmentHint();
       // openInEditor blocks until the editor window closes (TUI frozen in
-      // the meantime). Emit the "Opened…" line in onDone, AFTER the editor
-      // exits — matches CC's editFileInEditor → onDone("Opened…").
-      ctx.openInEditor(payload.path, () => {
+      // the meantime). Report the result only after the editor exits.
+      await ctx.openInEditor(payload.path, (success) => {
+        if (success === false) {
+          ctx.addItem(addError(ctx.sessionId, `Failed to open editor for memory file: ${displayPath}`));
+          return;
+        }
         ctx.addItem(
           addInfo(
             ctx.sessionId,
-            `Opened memory file at ${displayPath} ${editorHint}`,
+            `Memory file edited successfully: ${displayPath}\n\n> ${editorEnvironmentHint}`,
             "m",
           ),
         );

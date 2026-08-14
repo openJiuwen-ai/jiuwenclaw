@@ -5,6 +5,9 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
+)
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -56,7 +59,7 @@ async def test_evolve_slash_reports_current_mode_when_unsupported(
 @pytest.mark.anyio
 async def test_evolve_slash_checks_enabled_without_lazy_registering(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"evolution": {"enabled": False}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": False}}}  # pylint: disable=protected-access
 
     async def _unexpected_register():
         raise AssertionError("slash enabled check must not register active evolution rails")
@@ -85,7 +88,7 @@ async def test_evolve_slash_checks_enabled_without_lazy_registering(monkeypatch)
 @pytest.mark.anyio
 async def test_evolve_slash_allows_team_without_lazy_registering(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}  # pylint: disable=protected-access
 
     async def _unexpected_register():
         raise AssertionError("team slash availability check must not register single-agent evolution rails")
@@ -142,11 +145,11 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = _FakeInstance()  # pylint: disable=protected-access
     adapter._config_cache = {  # pylint: disable=protected-access
-        "evolution": {
-            "enabled": True,
-            "signal_trigger": False,
-            "review_trigger": False,
-            "auto_save": auto_save,
+        "react": {
+            "evolution": {
+                "skill_evolution": True,
+                "auto_save": auto_save,
+            },
         },
         "model_name": "configured-model",
     }
@@ -186,10 +189,11 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "llm": adapter._model,  # pylint: disable=protected-access
             "model": "default-model",
             "signal_trigger": False,
-            "review_trigger": False,
+            "review_trigger": True,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],
             "language": "en",
+            "trajectory_span_processor": get_trajectory_span_processor(),
         }
     ]
 
@@ -222,7 +226,7 @@ def test_sync_active_evolution_review_agent_after_reload_restores_retained_rail(
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = instance  # pylint: disable=protected-access
     adapter._skill_evolution_rail = rail  # pylint: disable=protected-access
-    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}  # pylint: disable=protected-access
 
     monkeypatch.setattr(interface_deep_module, "SkillEvolutionRail", _FakeSkillEvolutionRail)
     monkeypatch.setattr(interface_deep_module, "EvolutionInterruptRail", _FakeEvolutionInterruptRail)
@@ -245,7 +249,7 @@ def test_sync_active_evolution_review_agent_after_reload_skips_when_disabled():
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = object()  # pylint: disable=protected-access
     adapter._skill_evolution_rail = _FakeSkillEvolutionRail()  # pylint: disable=protected-access
-    adapter._config_cache = {"evolution": {"enabled": False}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": False}}}  # pylint: disable=protected-access
 
     adapter._sync_active_evolution_review_agent_after_reload()  # pylint: disable=protected-access
 
@@ -253,7 +257,7 @@ def test_sync_active_evolution_review_agent_after_reload_skips_when_disabled():
 @pytest.mark.anyio
 async def test_agent_evolve_simplify_routes_to_slash_handler(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}  # pylint: disable=protected-access
 
     async def _fake_handler(_query, context):
         assert context.mode == "agent.plan"
@@ -346,7 +350,7 @@ async def test_handle_user_answer_does_not_route_call_interrupt_approval_to_regu
 @pytest.mark.anyio
 async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}  # pylint: disable=protected-access
 
     async def _fake_handler(query, _context):
         assert query == "/evolve_rebuild demo-skill"
@@ -375,7 +379,7 @@ async def test_agent_evolve_rebuild_routes_to_slash_adapter(monkeypatch):
 @pytest.mark.anyio
 async def test_agent_evolve_rollback_routes_to_slash_without_rail(monkeypatch):
     adapter = JiuWenSwarmDeepAdapter()
-    adapter._config_cache = {"evolution": {"enabled": True}}  # pylint: disable=protected-access
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}  # pylint: disable=protected-access
     adapter._skill_evolution_rail = None  # pylint: disable=protected-access
 
     async def _unexpected_ensure_rail(_mode: str):
@@ -471,6 +475,53 @@ def _install_interaction_followup_agent(
     adapter._instance.send_input = AsyncMock(  # pylint: disable=protected-access
         side_effect=_send_input
     )
+
+
+@pytest.mark.anyio
+async def test_stream_error_answer_aborts_active_round_without_debug_logger(monkeypatch):
+    adapter = _adapter_ready_for_followup_execution(monkeypatch)
+    closed_with: list[bool] = []
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield SimpleNamespace(
+                type="answer",
+                payload={
+                    "output": "任务循环单轮执行超过 10 秒，已终止本轮任务。",
+                    "result_type": "error",
+                },
+            )
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            closed_with.append(abort_active_round)
+
+    adapter._instance.attach_output = AsyncMock(return_value=_FakeInteractionStream())
+    adapter._instance.send_input = AsyncMock()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_message_stream_impl(
+            AgentRequest(
+                request_id="req-timeout",
+                channel_id="web",
+                session_id="sess-timeout",
+                params={"query": "run benchmark", "mode": "agent.plan"},
+                is_stream=True,
+            ),
+            {"query": "run benchmark"},
+        )
+    ]
+
+    payloads = [chunk.payload for chunk in chunks if isinstance(chunk.payload, dict)]
+    assert {
+        "event_type": "chat.error",
+        "error": "任务循环单轮执行超过 10 秒，已终止本轮任务。",
+    } in payloads
+    assert not any(payload.get("event_type") == "chat.final" for payload in payloads)
+    assert closed_with == [True]
 
 
 @pytest.mark.anyio

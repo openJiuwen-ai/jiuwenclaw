@@ -8,6 +8,7 @@ import queue
 import re
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -16,16 +17,47 @@ from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
-_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=20000)
+_WRITE_QUEUE: queue.Queue[
+    tuple[str, dict[str, Any], Future[None] | None]
+] = queue.Queue(maxsize=20000)
+_QUEUE_ENQUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+SESSION_REQUEST_COMPLETED_EVENT = "chat.request_completed"
 _VALID_SESSION_ID = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
+    r"^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9_])?$"
 )
+# Gateway may inline @path as <file-content>...</file-content> before chat.send.
+# History should keep the short @path form so jsonl rows stay one physical line
+# and refresh UI does not load megabytes of file body.
+_FILE_CONTENT_BLOCK_RE = re.compile(
+    r"\n?<file-content\s+path=\"([^\"]*)\">.*?</file-content>\n?",
+    re.DOTALL,
+)
+
+
+def collapse_file_content_blocks(content: str) -> str:
+    """Replace inlined ``<file-content>`` bodies with ``@path`` references.
+
+    Used when persisting / serving user history so the agent-facing inline
+    expansion is not stored as the user-visible transcript.
+    """
+    if not content or "<file-content" not in content:
+        return content
+
+    def _replacer(match: re.Match[str]) -> str:
+        path = match.group(1) or ""
+        if not path:
+            return "\n"
+        ref = f'@"{path}"' if any(ch.isspace() for ch in path) else f"@{path}"
+        return f"\n{ref}\n"
+
+    collapsed = _FILE_CONTENT_BLOCK_RE.sub(_replacer, content)
+    return re.sub(r"\n{3,}", "\n\n", collapsed).strip()
 
 
 def is_valid_session_id(session_id: str) -> bool:
@@ -124,7 +156,8 @@ def resolve_session_dir(
     """安全解析 session 目录路径（防路径遍历）。
 
     采用严格白名单判据：session id 只能包含 ASCII 字母、数字、点、横线和下划线，
-    长度不超过 80，且首尾必须是字母或数字。不合法输入直接拒绝，根本不拼路径。
+    长度不超过 80；首尾允许下划线，以兼容 ``__cron__`` 等内部会话 ID，
+    但点和横线仍只允许出现在中间。不合法输入直接拒绝，根本不拼路径。
 
     再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
 
@@ -230,8 +263,13 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw_line.strip()
+        # JSONL records are delimited by "\n" only. Do NOT use str.splitlines():
+        # inlined file bodies may contain Unicode line separators (U+2028 etc.)
+        # that splitlines() treats as breaks, corrupting a single JSON object
+        # into fragments and dropping the user turn on refresh.
+        text = path.read_text(encoding="utf-8")
+        for lineno, raw_line in enumerate(text.split("\n"), start=1):
+            line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
             try:
@@ -240,6 +278,14 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
                 logger.warning("读取 history.jsonl 第 %d 行失败，已跳过: %s", lineno, exc)
                 continue
             if isinstance(item, dict):
+                content = item.get("content")
+                if (
+                    item.get("role") in {"user", "human"}
+                    and isinstance(content, str)
+                    and "<file-content" in content
+                ):
+                    item = dict(item)
+                    item["content"] = collapse_file_content_blocks(content)
                 records.append(item)
             else:
                 logger.warning(
@@ -495,17 +541,40 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item = _WRITE_QUEUE.get()
+                sid, item, receipt = _WRITE_QUEUE.get()
                 try:
                     _write_item(sid, item)
                 except Exception as exc:  # noqa: BLE001
+                    if receipt is not None:
+                        receipt.set_exception(exc)
                     logger.warning("history 异步写入失败: %s", exc)
+                else:
+                    if receipt is not None:
+                        receipt.set_result(None)
                 finally:
                     _WRITE_QUEUE.task_done()
 
         t = threading.Thread(target=_worker, name="session-history-writer", daemon=True)
         t.start()
         _WORKER_STARTED = True
+
+
+def _enqueue_history_item(
+    session_id: str,
+    item: dict[str, Any],
+    *,
+    receipt: Future[None] | None = None,
+) -> None:
+    """Keep all history records on one FIFO path, including under pressure."""
+
+    _ensure_worker_started()
+    with _QUEUE_ENQUEUE_LOCK:
+        try:
+            _WRITE_QUEUE.put_nowait((session_id, item, receipt))
+        except queue.Full:
+            # A synchronous disk-write fallback can overtake queued records.
+            # Block only under backpressure so request boundaries remain FIFO.
+            _WRITE_QUEUE.put((session_id, item, receipt))
 
 
 def append_history_record(
@@ -567,12 +636,7 @@ def append_history_record(
     if mode:
         item["mode"] = str(mode)
 
-    _ensure_worker_started()
-    try:
-        _WRITE_QUEUE.put_nowait((sid, item))
-    except queue.Full:
-        # 队列满时退化为同步写，避免丢历史记录。
-        _write_item(sid, item)
+    _enqueue_history_item(sid, item)
 
     # 更新会话元数据
     try:
@@ -602,6 +666,38 @@ def append_history_record(
             )
     except Exception as exc:
         logger.warning("更新会话元数据失败: %s", exc)
+
+
+def enqueue_history_request_completion(
+    session_id: str,
+    request_id: str,
+    *,
+    terminal_status: str = "success",
+) -> Future[None] | None:
+    """Persist a request boundary after its previously enqueued history."""
+
+    sid = (session_id or "default").strip() or "default"
+    rid = str(request_id or "").strip()
+    if not rid or _is_ephemeral_heartbeat_session(sid):
+        return None
+    status = str(terminal_status or "success").strip().lower() or "success"
+    receipt: Future[None] = Future()
+    _enqueue_history_item(
+        sid,
+        {
+            "id": f"{rid}:request_completed",
+            "role": "assistant",
+            "request_id": rid,
+            "channel_id": "",
+            "timestamp": time.time(),
+            "content": "",
+            "event_type": SESSION_REQUEST_COMPLETED_EVENT,
+            "feedback_only": True,
+            "status": status,
+        },
+        receipt=receipt,
+    )
+    return receipt
 
 
 def append_compact_history_records(
