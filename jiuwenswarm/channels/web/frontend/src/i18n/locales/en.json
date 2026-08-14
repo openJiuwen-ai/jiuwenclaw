@@ -13,7 +13,8 @@
     "ok": "OK",
     "and": "and",
     "modify": "Modify",
-    "delete": "Delete"
+    "delete": "Delete",
+    "clear": "Clear"
   },
   "a2ui": {
     "generating": "Generating A2UI interface...",

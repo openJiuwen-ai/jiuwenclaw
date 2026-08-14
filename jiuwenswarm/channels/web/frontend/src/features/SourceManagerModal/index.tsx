@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
+import { resolveClawhubTokenAction } from "./clawhubTokenAction";
 
 type SourceType = "skillnet" | "clawhub";
 
@@ -69,24 +70,28 @@ export function SourceManagerModal({
     };
   }, [open, onClose]);
 
+  const tokenAction = resolveClawhubTokenAction(clawhubToken, hasToken);
+  const tokenActionDisabled = tokenLoading || tokenSaving || !tokenAction.canSubmit;
+
   const handleSaveToken = useCallback(async () => {
-    const token = clawhubToken.trim();
+    const action = resolveClawhubTokenAction(clawhubToken, hasToken);
+    if (!action.canSubmit) return;
     setTokenSaving(true);
     try {
       const data = await webRequest<{ success: boolean; detail?: string }>(
         "skills.clawhub.set_token",
-        withSession({ token })
+        withSession({ token: action.token })
       );
       if (!data.success) {
         throw new Error(data.detail || t("skills.clawhub.errors.saveFailed"));
       }
-      setHasToken(!!token);
+      setHasToken(!!action.token);
     } catch (error) {
       console.error("Failed to save ClawHub token:", error);
     } finally {
       setTokenSaving(false);
     }
-  }, [clawhubToken, t, withSession]);
+  }, [clawhubToken, hasToken, t, withSession]);
 
   if (!open) {
     return null;
@@ -190,14 +195,18 @@ export function SourceManagerModal({
                       <button
                         type="button"
                         onClick={() => void handleSaveToken()}
-                        disabled={tokenSaving || (!hasToken && !clawhubToken.trim())}
+                        disabled={tokenActionDisabled}
                         className={`ml-auto w-[76px] h-[28px] rounded-[24px] text-sm  ${
-                          tokenSaving || (!hasToken && !clawhubToken.trim())
+                          tokenActionDisabled
                             ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                             : "bg-control-emphasis text-control-emphasis-foreground hover:bg-control-emphasis-hover"
                         }`}
                       >
-                        {tokenSaving ? t("common.saving") : t("common.save")}
+                        {tokenSaving
+                          ? t("common.saving")
+                          : tokenAction.intent === "clear"
+                            ? t("common.clear")
+                            : t("common.save")}
                       </button>
                     </div>
                   </div>
