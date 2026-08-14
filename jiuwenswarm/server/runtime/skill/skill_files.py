@@ -148,12 +148,19 @@ def list_skill_workspace_files(skill_root: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def _is_absolute_skill_relative_path(raw: str) -> bool:
+    """相对路径字段是否实际为绝对路径（POSIX/Windows）."""
+    if raw.startswith("/") or raw.startswith("\\"):
+        return True
+    return len(raw) >= 2 and raw[1] == ":"
+
+
 def resolve_skill_relative_file(skill_root: Path, relative_path: str) -> tuple[Path, str]:
     """将相对路径安全解析为 workspace 内普通文件."""
     raw = str(relative_path or "").strip()
     if not raw:
         raise SkillFilesError(ERROR_UNSAFE_PATH, "文件路径不能为空")
-    if raw.startswith("/") or raw.startswith("\\") or (len(raw) >= 2 and raw[1] == ":"):
+    if _is_absolute_skill_relative_path(raw):
         raise SkillFilesError(ERROR_UNSAFE_PATH, "不允许绝对路径")
     # 统一分隔符并拒绝 ..
     posix = PurePosixPath(raw.replace("\\", "/"))
@@ -186,13 +193,12 @@ def resolve_skill_relative_file(skill_root: Path, relative_path: str) -> tuple[P
     if not candidate.is_file():
         raise SkillFilesError(ERROR_UNSAFE_PATH, "目标不是普通文件")
     try:
-        # 拒绝硬链接
-        if int(candidate.stat().st_nlink) > 1:
-            raise SkillFilesError(ERROR_UNSAFE_PATH, "不允许通过硬链接访问文件")
-    except SkillFilesError:
-        raise
+        nlink = int(candidate.stat().st_nlink)
     except OSError as exc:
         raise SkillFilesError(ERROR_UNSAFE_PATH, f"无法校验文件属性: {posix.as_posix()}") from exc
+    # 拒绝硬链接
+    if nlink > 1:
+        raise SkillFilesError(ERROR_UNSAFE_PATH, "不允许通过硬链接访问文件")
 
     return candidate, posix.as_posix()
 

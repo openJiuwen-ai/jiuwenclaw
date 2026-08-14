@@ -3331,7 +3331,9 @@ class SkillManager:
         except Exception as exc:
             msg = str(exc)
             lower = msg.lower()
-            if "zip" in lower or "路径" in msg or "path" in lower or "symlink" in lower:
+            path_related = "路径" in msg or "path" in lower
+            zip_or_link = "zip" in lower or "symlink" in lower
+            if path_related or zip_or_link:
                 raise SkillRpcError(ERROR_SKILL_UNSAFE_PATH, msg) from exc
             raise
 
@@ -3409,8 +3411,8 @@ class SkillManager:
                 preserved_version = None
             try:
                 self._overwrite_skill_workspace_preserving_archive(dest, src)
-            except (OSError, shutil.Error) as exc:
-                # 覆盖失败时绝不能删除原 Skill
+            except OSError as exc:
+                # 覆盖失败时绝不能删除原 Skill；shutil.Error 继承 OSError
                 return _handle_copy_error(
                     exc,
                     dest,
@@ -3425,7 +3427,7 @@ class SkillManager:
                     dest,
                     ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
                 )
-            except (OSError, shutil.Error) as exc:
+            except OSError as exc:
                 return _handle_copy_error(exc, dest, "local import dir", src)
 
         # 新建时不把包内 version 当作产品版本；覆盖时保留原 current_version
@@ -3516,7 +3518,7 @@ class SkillManager:
                 shutil.copytree(archive_dir, staged / ARCHIVE_DIRNAME)
 
             # 原子替换；内部失败会把 backup 恢复为 dest
-            self._atomic_replace_dir(dest, staged)
+            self.atomic_replace_dir(dest, staged)
         except Exception:
             if staged.exists():
                 _safe_rmtree(staged)
@@ -3528,7 +3530,7 @@ class SkillManager:
             except SkillArchiveError:
                 content_root = None
             if content_root is not None:
-                self._copy_workspace_business_to_version(dest, content_root)
+                self.copy_workspace_business_to_version(dest, content_root)
                 touch_version_metadata(dest, default_version)
 
     def _import_local_from_path(self, src: Path, *, force: bool, origin: str) -> dict[str, Any]:
@@ -3593,7 +3595,11 @@ class SkillManager:
                         exc, dest, "local import file", src, cleanup_dest=False
                     )
                 self._add_local_skill(
-                    {"name": skill_name, "origin": origin, "source": self._resolve_display_source_for_import(skill_name)}
+                    {
+                        "name": skill_name,
+                        "origin": origin,
+                        "source": self._resolve_display_source_for_import(skill_name),
+                    }
                 )
                 self._refresh_agent_data_indexes()
                 return {
@@ -4087,7 +4093,7 @@ class SkillManager:
         else:
             meta["is_builtin_source"] = False
         meta["has_evolutions"] = _has_effective_evolutions(child)
-        self._apply_archive_version_and_type(meta, child)
+        self.apply_archive_version_and_type(meta, child)
         # 不在列表中返回 body
         meta.pop("body", None)
         return meta
@@ -4128,7 +4134,7 @@ class SkillManager:
             meta["installed"] = False
             meta["has_evolutions"] = False
             self._apply_enabled_config(meta, meta.get("name", ""))
-            self._apply_archive_version_and_type(meta, child)
+            self.apply_archive_version_and_type(meta, child)
             # 不在列表中返回 body
             meta.pop("body", None)
             results.append(meta)
@@ -4199,7 +4205,8 @@ class SkillManager:
                 return child
         return None
 
-    def _apply_archive_version_and_type(self, meta: dict, skill_dir: Path | None) -> None:
+    @staticmethod
+    def apply_archive_version_and_type(meta: dict, skill_dir: Path | None) -> None:
         """用 ``.archive`` 当前版本覆盖 YAML version，并写入 skill_type."""
         try:
             meta["version"] = get_current_version(skill_dir)
@@ -4380,10 +4387,10 @@ class SkillManager:
 
             # prepare 后 mid-state 可能仍留空 evolutions.json；写回前去掉，避免 has_evolutions 误判
             _clear_evolutions_file(staged)
-            self._atomic_replace_dir(content_root, staged)
+            self.atomic_replace_dir(content_root, staged)
 
             if is_default:
-                self._sync_workspace_from_version_content(skill_dir, content_root)
+                self.sync_workspace_from_version_content(skill_dir, content_root)
 
         touch_version_metadata(skill_dir, version)
         # workspace 侧经验已用于本次 rebuild，统一清除，列表/详情 has_evolutions=false
@@ -4443,7 +4450,7 @@ class SkillManager:
         kind = "swarm-skill" if skill_type == SKILL_TYPE_SWARM else "skill"
         return {"kind": kind, "name": name}
 
-    def _copy_workspace_business_to_version(self, skill_dir: Path, content_root: Path) -> None:
+    def copy_workspace_business_to_version(self, skill_dir: Path, content_root: Path) -> None:
         """把 workspace 业务内容覆盖到版本副本."""
         content_root.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="skill-ver-sync-", dir=str(content_root.parent)) as tmp:
@@ -4453,9 +4460,10 @@ class SkillManager:
                 staged,
                 ignore=shutil.ignore_patterns(ARCHIVE_DIRNAME),
             )
-            self._atomic_replace_dir(content_root, staged)
+            self.atomic_replace_dir(content_root, staged)
 
-    def _atomic_replace_dir(self, dest: Path, src: Path) -> None:
+    @staticmethod
+    def atomic_replace_dir(dest: Path, src: Path) -> None:
         """用 src 目录内容替换 dest；优先同父目录 rename，失败则 copy+清理."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         backup = dest.with_name(dest.name + ".bak_rebuild")
@@ -4487,7 +4495,8 @@ class SkillManager:
                 _safe_rmtree(staged)
             raise
 
-    def _sync_workspace_from_version_content(self, skill_dir: Path, content_root: Path) -> None:
+    @staticmethod
+    def sync_workspace_from_version_content(skill_dir: Path, content_root: Path) -> None:
         """将版本副本业务内容同步到 workspace，保留根级 ``.archive``."""
         archive_dir = skill_dir / ARCHIVE_DIRNAME
         archive_backup: Path | None = None
@@ -4649,7 +4658,7 @@ class SkillManager:
                 meta["installed"] = False
                 meta["has_evolutions"] = False
                 self._apply_enabled_config(meta, meta.get("name", ""))
-                self._apply_archive_version_and_type(meta, plugin_dir)
+                self.apply_archive_version_and_type(meta, plugin_dir)
                 meta.pop("body", None)
                 results.append(meta)
 

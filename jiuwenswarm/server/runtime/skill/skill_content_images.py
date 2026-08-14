@@ -112,6 +112,13 @@ def build_skill_content_image_url(token: str, session_id: str) -> str:
     return f"{base}&session_id={quote(sid, safe='')}"
 
 
+def _is_invalid_skill_name(skill_name: str) -> bool:
+    """Skill 名是否含空/分隔符/越级段."""
+    if not skill_name:
+        return True
+    return "/" in skill_name or "\\" in skill_name or ".." in skill_name
+
+
 def resolve_skill_content_root(
     *,
     name: str,
@@ -120,7 +127,7 @@ def resolve_skill_content_root(
 ) -> Path:
     """按 name + version 定位内容根（workspace 或版本副本）."""
     skill_name = str(name or "").strip()
-    if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+    if _is_invalid_skill_name(skill_name):
         raise SkillFilesError("SKILL_UNSAFE_PATH", "非法 Skill 名称")
     root_dir = Path(skills_dir) if skills_dir is not None else get_agent_skills_dir()
     skill_dir = (root_dir / skill_name).resolve()
