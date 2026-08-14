@@ -1,178 +1,363 @@
 ---
 name: huawei-cloud-maas-setup
 description: >-
-  引导用户通过浏览器访问华为云，购买并开通 MaaS（Model as a Service）服务，自动获取 API Base、API Key、Model Name 并填入 jiuwenswarm 配置。
+  引导用户完成华为云 MaaS 服务购买和 API 配置。脚本自动完成授权更新、API Key
+  创建、模型开通；用户只需完成登录、选择要开通的模型。整个流程预计 2-3 分钟。
   适用于首次运行配置、华为云 MaaS 服务开通、API 凭证获取、模型服务配置等场景。
-  当用户提到华为云、MaaS、Maas、开通模型服务、配置 API、首次配置、引导配置、一键配置等意图时触发。
+  当用户提到华为云、MaaS、Maas、开通模型服务、配置 API、首次配置、引导配置、
+  一键配置等意图时触发。
 allowed_tools:
-  - browser
-  - write_file
+  - bash
   - ask_user_question
+version: 3.0.0
 ---
 
-# 华为云 MaaS 服务引导配置
+# 华为云 MaaS 一键配置（V2 折中方案）
 
-本技能引导超级小白用户完成华为云 MaaS 服务的购买和 API 配置，实现「零门槛」接入 jiuwenswarm。
+> **设计原则**：脚本做自动化（授权、Key、模型开通），用户做决策（登录、
+> 选哪个模型、最终确认）。整个流程预计 **2-3 分钟**。
+>
+> - **脚本自动**：跳转 URL、自动检测授权、自动创建 Key 并提取、自动开通模型
+> - **用户决策**：登录（涉及账号）、选择要开通的模型（业务决策）、最终确认
+> - **价值**：规避 DOM 选择器脆弱性、避开 LLM ReAct 慢路径、保留用户掌控感
 
-## 核心流程
+## 流程概览
 
-按以下阶段顺序执行，每个阶段通过 `ask_user_question` 与用户交互，通过 `task_tool` 委派 `browser_agent` 执行浏览器操作。
+| 步骤 | Skill 动作 | 用户动作 | 脚本 |
+|------|------------|----------|------|
+| 0 | 确保浏览器已启动 | - | `ensure_browser.py` |
+| 1 | 跳转到控制台首页 | **登录** | `navigate.py` |
+| 1a | 跳转到充值页 | **充值**（建议几元避免欠费） | `navigate.py` |
+| 2 | 跳转 + 自动授权 | - | `navigate.py` + `auto_authorize.py` |
+| 3 | 跳转 + 自动创建 Key | - | `navigate.py` + `auto_create_apikey.py` |
+| 4 | 跳转 + **自动批量开通模型** | - | `navigate.py` + `auto_open_model.py` |
+| 5 | 展示配置 + 最终确认 | **确认** | `ask_user_question` |
+| 6 | 写入配置（追加，不设默认） | - | `config_writer.py add` |
 
-> **关键原则**：委派浏览器任务时，描述「做什么」，不描述「怎么点」。让 browser_agent 自主探测页面元素并决定操作方式。如果自动操作失败，立即降级为 `ask_user_question` 让用户手动完成。
+> 步骤 1a 在登录后主动引导充值，避免后续创建 Key 时欠费失败。
+> 步骤 3 如果仍检测到欠费，复用步骤 1a 的充值引导。
 
-### 阶段 1: 初始化检测
+## 公共说明
 
-读取当前配置，检查是否已有有效的 API 配置：
+### 脚本位置
 
-```bash
-python <skill_dir>/scripts/validate_config.py --check-only
-```
+所有脚本位于 `<skill_dir>/scripts/`：
 
-- 如果已有有效配置：通过 `ask_user_question` 询问用户是否要重新配置
-- 如果无有效配置：继续下一步
+- `navigate.py` - 通用 URL 跳转
+- `ensure_browser.py` - 启动浏览器
+- `auto_authorize.py` - 自动完成委托授权
+- `auto_create_apikey.py` - 自动创建 API Key（含欠费检测）
+- `auto_open_model.py` - 自动批量开通预置模型
+- `config_writer.py` - 写入配置（追加，不设默认）
 
-### 阶段 2: 拉起浏览器
+### 公共参数
 
-1. 确保浏览器以**非 headless** 模式运行（用户需要看到浏览器进行登录操作）
-2. 向用户发送消息：「正在为您打开浏览器，请在弹出的浏览器窗口中操作」
-3. 通过 `task_tool` 委派 `browser_agent`：
+所有脚本支持：
+- `--cdp-url <URL>` — CDP endpoint，留空自动从 profiles.json 解析
+- `--json` — JSON 格式输出
 
-   **任务描述**：「打开浏览器，导航到华为云控制台 https://console.huaweicloud.com/modelarts/#/model-studio/homepage ，等待页面加载完成。返回当前页面 URL 和标题。」
+### 失败处理统一约定
 
-### 阶段 3: 等待用户登录
+- 任意脚本返回 `{"ok": false, "stage": "...", "error": "..."}` 时
+  - 通过 `ask_user_question` 提示用户手动完成该步骤
+  - 用户手动完成后，**单独重试该步骤的脚本**（不重头开始）
+  - 步骤 3（Key）失败时，用户可手动粘贴 Key，仍走步骤 6-7
 
-这是**关键交互点**：用户需要在浏览器中手动登录华为云。
-
-通过 `ask_user_question` 提示用户：
-
-```
-请在弹出的浏览器窗口中登录您的华为云账号
-
-登录前请确认：
-1. 已注册华为账号并开通华为云
-2. 已完成实名认证
-3. 账号未处于欠费或冻结状态
-
-登录完成后请点击「我已登录」
-```
-
-用户确认后，委派 `browser_agent` 验证登录状态：
-
-**任务描述**：「导航到 https://console.huaweicloud.com/modelarts/#/model-studio/homepage ，探测页面元素，判断当前用户是否已登录华为云。检查页面上是否存在用户头像、用户名、或「退出登录」等元素。返回 JSON：{"logged_in": true/false, "evidence": "..."}」
-
-- `logged_in=true` -> 进入阶段 4
-- `logged_in=false` -> 提示用户重新登录，回到阶段 3
-
-### 阶段 4: 检查 MaaS 访问授权
-
-委派 `browser_agent`：
-
-**任务描述**：「探测当前 MaaS 控制台页面内容，判断是否已配置 MaaS 访问授权（委托授权）。检查页面是否有授权提示、权限不足警告、或需要委托授权的引导信息。返回 JSON：{"authorized": true/false, "message": "..."}」
-
-- **已授权**：直接进入阶段 5
-- **需要授权**：
-  - 通过 `ask_user_question` 引导用户：「检测到需要配置 MaaS 访问授权，请在页面中完成委托授权操作。参考文档：https://support.huaweicloud.com/permission-maas/maas-modelarts-0016.html」
-  - 等待用户完成后确认，进入阶段 5
-
-### 阶段 5: 获取 API Key
-
-委派 `browser_agent`：
-
-**任务描述**：「导航到 API Key 管理页面 https://console.huaweicloud.com/modelarts/#/model-studio/authmanage ，探测页面内容：
-1. 检查是否已有 API Key（页面上是否显示已存在的 Key 列表）
-2. 如果没有 API Key，点击「创建API Key」按钮
-3. 等待 API Key 创建完成，提取新创建的 API Key 值
-返回 JSON：{"api_key": "...", "has_existing": true/false}」
-
-> **重要提示**：API Key 仅在创建时显示一次，必须在创建瞬间捕获。如果创建后页面已关闭或刷新，则需要用户重新创建。
-
-- **提取成功**：保存 api_key，进入阶段 6
-- **提取失败**：
-  - 降级为 `ask_user_question`：「未能自动获取 API Key，请在 API Key 管理页面手动创建并复制 API Key，然后粘贴到下方」
-  - 提醒用户：「API Key 创建后可能需要几分钟生效」
-
-### 阶段 6: 开通预置模型服务
-
-委派 `browser_agent`：
-
-**任务描述**：「导航到在线推理页面 https://console.huaweicloud.com/modelarts/#/model-studio/deployment ，执行以下操作：
-1. 确认在「预置服务」页签
-2. 查找名为 openPangu-2.0-Pro 的模型服务
-3. 检查其状态：如果已开通则直接返回；如果未开通则点击操作列的「开通服务」按钮
-4. 在弹出框中勾选「我已阅读并同意上述说明，及《MaaS 模型即服务声明》」
-5. 点击「一键开通」
-6. 等待状态变为「开通」
-返回 JSON：{"model_name": "openpangu-2.0-pro", "status": "opened", "error": null}」
-
-> **注意**：该功能仅支持「西南-贵阳一」区域。
-
-- **开通成功**：进入阶段 7
-- **开通失败**：
-  - 降级为 `ask_user_question`：「未能自动开通模型服务，请在浏览器中手动完成开通操作。确认区域为「西南-贵阳一」，在「预置服务」页签找到 openPangu-2.0-Pro 并点击「开通服务」」
-  - 等待用户完成后确认
-
-### 阶段 7: 确认凭证完整性
-
-汇总已获取的凭证信息：
-
-- `api_key`：从阶段 5 获取
-- `api_base`：`https://api.modelarts-maas.com/openai/v1`（OpenAI 兼容接口，固定值）
-- `model_name`：`openpangu-2.0-pro`（默认推荐模型）
-- `model_provider`：`openai`（华为云 MaaS 兼容 OpenAI 接口）
-
-向用户展示配置摘要（API Key 仅显示前后 4 位），通过 `ask_user_question` 确认：
-
-```
-已获取以下配置：
-- API 地址: https://api.modelarts-maas.com/openai/v1
-- API Key:  ****-****-abcd
-- 模型名称:  openpangu-2.0-pro
-- 接入方式:  OpenAI 兼容
-确认后将自动写入 jiuwenswarm 配置
-```
-
-### 阶段 8: 写入配置
-
-执行配置写入脚本：
+## 步骤 0：确保浏览器已启动
 
 ```bash
-python <skill_dir>/scripts/update_jiuwenswarm_config.py --api-base "https://api.modelarts-maas.com/openai/v1" --api-key "<api_key>" --model-name "openpangu-2.0-pro" --model-provider "openai"
+python <skill_dir>/scripts/ensure_browser.py --json
 ```
 
-脚本会更新 `~/.jiuwenswarm/config/.env` 和 `~/.jiuwenswarm/config/config.yaml`。
+期望输出：
+```json
+{"ok": true, "stage": "browser_started" | "browser_ready",
+ "cdp_url": "http://127.0.0.1:9333", "browser_family": "edge", "started_now": true}
+```
 
-### 阶段 9: 验证配置
+若 `ok=false, stage=no_browser` → 提示用户安装 Edge/Chrome/Chromium 后重试。
 
-执行验证脚本（注意 API Key 可能需要几分钟生效）：
+## 步骤 1：跳转到控制台首页 + 等待登录
 
 ```bash
-python <skill_dir>/scripts/validate_config.py
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/homepage"
 ```
 
-- **验证通过**：进入阶段 10
-- **验证失败**：
-  - 提醒用户：「API Key 刚创建可能需要几分钟生效，请稍后重试」
-  - 通过 `ask_user_question` 提供选项：「稍后重试」或「先跳过验证」
+`ask_user_question`：
 
-### 阶段 10: 完成
+```
+华为云控制台已在浏览器中打开。请完成以下操作后点击「我已登录」：
 
-1. 关闭浏览器
-2. 向用户发送欢迎消息：「配置完成！您现在可以使用 jiuwenswarm 了」
-3. 引导完成
+1. 【登录】用您的华为云账号登录
+   - 首次使用需先注册：https://reg.huaweicloud.com/
+   - 注册后需完成实名认证
+2. 【充值】如提示余额不足，请先充值
+   （MaaS 按调用量计费，建议 ≥ 10 元）
+3. 完成后页面应显示控制台首页，右上角能看到您的账号
 
-## 降级策略
+请选择：
+  ○ 我已登录，准备好继续
+  ○ 遇到欠费/未实名，我先去处理
+  ○ 取消配置
+```
 
-任何阶段如果自动操作失败：
-1. 先尝试通过 `ask_user_question` 引导用户手动完成当前步骤
-2. 如果用户也无法完成，引导用户跳转到 jiuwenswarm 配置面板手动填写：
-   - API 地址: `https://api.modelarts-maas.com/openai/v1`
-   - API Key: 用户手动输入
-   - 模型名称: `openpangu-2.0-pro`
-   - 接入方式: OpenAI 兼容
+**关键设计**：让用户自己判断是否欠费/未实名，避免脚本去检测脆弱的 DOM。
 
-## 参考文档
+## 步骤 1a：跳转到充值页 + 引导充值
 
-详细信息请参阅以下参考文件：
-- `references/huawei-cloud-purchase-flow.md` - 华为云购买流程详细步骤
-- `references/credential-extraction.md` - API 凭证提取策略
-- `references/config-mapping.md` - 凭证到 jiuwenswarm 配置的映射
+用户确认登录后，**主动**跳转到充值页面，提醒用户充值几块钱避免后续欠费：
+
+```bash
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://account.huaweicloud.com/usercenter/#/accountindex/balance"
+```
+
+`ask_user_question`：
+
+```
+华为云充值页面已在浏览器中打开。
+
+为了避免后续创建 API Key 和开通模型时因余额不足而失败，
+建议您现在充值几块钱（MaaS 按调用量计费，不使用不产生费用）。
+
+充值方式：微信 / 支付宝 / 银行转账
+建议金额：≥ 5 元即可
+
+请选择：
+  ○ 我已完成充值（或已有余额），继续
+  ○ 跳过充值，稍后再说
+  ○ 取消配置
+```
+
+> **设计目的**： proactive 充值引导，避免步骤 3 创建 Key 时才发现欠费。
+> 步骤 3 如果仍检测到 `stage=insufficient_balance`，复用此步骤的充值引导。
+
+## 步骤 2：自动完成委托授权
+
+```bash
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/homepage"
+
+python <skill_dir>/scripts/auto_authorize.py --json --cdp-url "<CDP_URL>"
+```
+
+**期望输出**（无警告，已授权）：
+```json
+{"ok": true, "stage": "authorize", "auth_done": false, "skipped_reason": "no_warning"}
+```
+
+**期望输出**（成功更新）：
+```json
+{"ok": true, "stage": "authorize", "auth_done": true, "skipped_reason": null}
+```
+
+**失败降级**（如选择器失效）：`ok=false` → 提示用户手动完成委托授权（参考
+[华为云 MaaS 访问授权文档](https://support.huaweicloud.com/permission-maas/maas-modelarts-0016.html)），
+然后重试 `auto_authorize.py`。
+
+## 步骤 3：自动创建 API Key（含欠费检测）
+
+```bash
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/authmanage"
+
+python <skill_dir>/scripts/auto_create_apikey.py --json --cdp-url "<CDP_URL>" \
+  --tag "jiuwenswarm" \
+  --description "jiuwenswarm-config"
+```
+
+脚本内部流程：
+1. 导航到 API Key 管理页
+2. 点击"创建 API Key"按钮
+3. **填写标签**（`jiuwenswarm`，1-100 字符，支持大小写字母/数字/下划线/中划线）
+4. **填写描述**（`jiuwenswarm-config`）
+5. **权限设置保持默认**（不主动操作）
+6. 点击"确定"提交
+7. **欠费检测**：如出现"欠费"/"余额不足"提示 -> 返回 `stage=insufficient_balance`
+8. 等待 Key 展示弹窗 -> 三级策略提取完整 Key
+
+**期望输出**（成功）：
+```json
+{
+  "ok": true,
+  "stage": "apikey",
+  "api_key": "ABh8zqX4...完整Key...rQfg",
+  "tag": "jiuwenswarm",
+  "description": "jiuwenswarm-config"
+}
+```
+
+**欠费时输出**：
+```json
+{
+  "ok": false,
+  "stage": "insufficient_balance",
+  "error": "账户余额不足，请先充值后再创建 API Key",
+  "recharge_url": "https://account.huaweicloud.com/usercenter/#/accountindex/balance"
+}
+```
+
+### 步骤 3 欠费处理（复用步骤 1a）
+
+当 `auto_create_apikey.py` 返回 `stage=insufficient_balance` 时：
+
+1. 跳转到充值页面（同步骤 1a）：
+
+```bash
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://account.huaweicloud.com/usercenter/#/accountindex/balance"
+```
+
+2. 通过 `ask_user_question` 提醒用户充值（同步骤 1a 文案）
+
+3. 用户确认充值完成后，重新执行步骤 3（`auto_create_apikey.py`）
+
+**Key 提取三级策略**（脚本内部）：
+1. `input[readonly]` / `textarea[readonly]`
+2. `.el-dialog code` / `.el-dialog pre` 元素
+3. 正则匹配弹窗内文本（`[A-Za-z0-9_\-]{30,}`）
+
+**其他失败降级**（提取失败）：`ok=false, stage=extract_failed` -> 提示用户
+手动在浏览器中创建 API Key 并通过 ask_user_question 粘贴完整值（用户提供
+Key 后仍走步骤 5-6）。
+
+## 步骤 4：自动批量开通热门模型
+
+```bash
+python <skill_dir>/scripts/navigate.py --json --cdp-url "<CDP_URL>" \
+  --url "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/deployment"
+
+python <skill_dir>/scripts/auto_open_model.py --json --cdp-url "<CDP_URL>" \
+  --model "openPangu-2.0-Pro=openpangu-2.0-pro" \
+  --model "GLM-5.2=glm-5.2" \
+  --model "DeepSeek-V4-Flash=deepseek-v4-flash" \
+  --timeout 60
+```
+
+**期望输出**：
+```json
+{
+  "ok": true,
+  "stage": "open_models",
+  "opened": ["openpangu-2.0-pro", "glm-5.2", "deepseek-v4-flash"],
+  "already_opened": [],
+  "failed": [],
+  "all_done": true
+}
+```
+
+脚本行为：
+- 导航到预置服务页
+- 对每个模型：检查状态 -> 未开通则自动开通 -> 等待状态变"开通"
+- 已开通的自动跳过
+- 单个模型失败不影响其他模型
+
+**失败降级**：`failed` 列表不为空时，提示用户哪些模型开通失败，
+用户可手动在浏览器中开通，或跳过失败的模型继续后续步骤。
+
+## 步骤 5：展示配置 + 最终确认
+
+`ask_user_question`：
+
+```
+即将为您添加以下模型（仅追加，不修改当前默认模型）：
+
+  API 地址：https://api.modelarts-maas.com/openai/v1
+  API Key： ABh8****rQfg（前 4 后 4，中间已隐藏）
+  新增模型：
+    • openPangu-2.0-Pro（别名：huawei-pangu）
+    • GLM-5.2（别名：huawei-glm）
+    • DeepSeek-V4-Flash（别名：huawei-deepseek）
+
+原有模型配置和默认模型保持不变。
+您可在「设置 -> 模型」中随时切换默认模型。
+
+请选择：
+  ○ 确认写入
+  ○ 取消（保留云端资源，不写入配置）
+```
+
+> **设计变更**：不再将新模型设为默认，仅追加到配置列表。
+> 用户原有默认模型不受影响。
+
+请选择：
+  ○ 确认写入
+  ○ 取消（保留云端资源，不写入配置）
+```
+
+## 步骤 6：写入配置
+
+```bash
+python <skill_dir>/scripts/config_writer.py add --json \
+  --api-base "https://api.modelarts-maas.com/openai/v1" \
+  --api-key "<步骤 3 提取的完整 API Key>" \
+  --model "name=openpangu-2.0-pro,alias=huawei-pangu" \
+  --model "name=glm-5.2,alias=huawei-glm" \
+  --model "name=deepseek-v4-flash,alias=huawei-deepseek"
+```
+
+**期望输出**：
+```json
+{
+  "env_path": "C:\\Users\\xxx\\.jiuwenswarm\\config\\.env",
+  "written_aliases": ["huawei-pangu", "huawei-glm", "huawei-deepseek"],
+  "api_base": "https://api.modelarts-maas.com/openai/v1",
+  "models": ["openpangu-2.0-pro", "glm-5.2", "deepseek-v4-flash"]
+}
+```
+
+`config_writer.py` 内部：
+- `.env` 用 `HUAWEI_MAAS_API_BASE` / `HUAWEI_MAAS_API_KEY` 前缀（不覆盖用户已有 `API_BASE` / `API_KEY`）
+- `config.yaml` 按 alias 追加/更新条目，**不修改任何 `is_default`**
+- 旧模型条目和默认模型保持不变，用户可在「设置 -> 模型」中手动切换
+
+> 写入后需重启 jiuwenswarm 或在「设置 -> 模型」中手动刷新配置生效。
+
+## 步骤 7：完成
+
+向用户发送（用自然语言，不要用代码块包裹）：
+
+```
+✅ 华为云 MaaS 配置完成！
+
+已为您完成：
+  • 已开通模型：openPangu-2.0-Pro、GLM-5.2、DeepSeek-V4-Flash
+  • 已将以上模型追加到您的模型列表（未修改默认模型）
+  • 原有模型配置和默认模型保持不变
+
+如需切换默认模型，可前往「设置 -> 模型」。
+配置写入后需重启 jiuwenswarm 生效。
+```
+
+## 降级策略（任意步骤失败时）
+
+1. 通过 `ask_user_question` 提示用户在浏览器中手动完成对应步骤
+2. 用户手动完成后，**单独重试该步骤的脚本**（不重头开始）
+3. 步骤 3（Key）欠费时 -> 复用步骤 1a 充值引导 -> 重新执行步骤 3
+4. 步骤 3（Key）提取失败时，用户可手动粘贴 Key，仍走步骤 5-6
+5. 步骤 4（模型开通）部分失败时，跳过失败模型，仅写入成功的模型
+6. 任意步骤可让用户"完全手动配置"，引导至「设置 -> 模型」手动填入
+
+## 浏览器零配置
+
+`ensure_browser.py` 内部自动检测浏览器（按 OS 优先级）：
+
+- **Windows**: Edge（系统自带）> Chrome > Chromium
+- **macOS**: Chrome > Edge > Chromium
+- **Linux**: Chrome > Chromium > Edge
+
+首次启动自动写入 `~/.jiuwenswarm/.browser/profiles.json`，
+后续启动直接复用。
+
+## 关键设计取舍
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 授权做不做 | **脚本自动** | DOM 固定，确定性高，5-10s 可完成 |
+| Key 怎么拿 | **脚本自动提取** | 三级策略保证可靠；欠费时复用充值引导 |
+| 充值引导 | **登录后主动提醒** | proactive 避免后续欠费失败 |
+| 开通哪些模型 | **脚本自动批量开通** | 固定热门列表（openPangu/GLM/DeepSeek） |
+| 设不设默认 | **不设默认** | 仅追加到列表，用户原有默认不变 |
+| 登录 | **用户做** | 涉及账号、验证码、反爬 |
+| 最终确认 | **用户做** | 写入不可逆 + 脱敏 Key 展示 |

@@ -281,3 +281,35 @@
   line-height: 1.5;
   opacity: 0.8;
 }
+
+.model-setup-guide__quick-steps {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.model-setup-guide__agreement {
+  margin: 12px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.model-setup-guide__agreement-link {
+  color: var(--color-action-primary);
+  text-decoration: none;
+}
+
+.model-setup-guide__agreement-link:hover {
+  text-decoration: underline;
+}
+
+.model-setup-guide__billing-note {
+  margin: 6px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.85;
+}

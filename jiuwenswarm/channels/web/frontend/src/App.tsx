@@ -2185,8 +2185,7 @@ function AppContent() {
     // 显式指定使用 huawei-cloud-maas-setup skill，避免 agent 自行上网搜索
     void handleSendMessage(
       '请使用 huawei-cloud-maas-setup 技能帮我配置华为云 MaaS 服务。'
-      + '先读取该技能的 SKILL.md（位于 skills/huawei-cloud-maas-setup/SKILL.md），'
-      + '严格按照其中的步骤引导我完成购买、获取 API Key 和配置写入，不要自行联网搜索。'
+      + '严格按照其中的步骤引导我完成购买、获取 API Key 和配置写入。'
     );
   }, [handleSendMessage]);
 

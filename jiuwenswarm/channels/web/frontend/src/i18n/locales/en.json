@@ -784,7 +784,19 @@
     },
     "quickSetup": {
       "title": "Auto-setup Huawei Cloud MaaS",
-      "description": "Guided Huawei Cloud purchase and API configuration"
+      "description": "Guided Huawei Cloud purchase and API configuration",
+      "steps": {
+        "openConsole": "Open Huawei Cloud MaaS console",
+        "updateAuth": "Update service authorization automatically",
+        "createApiKey": "Create an API key for JiuwenSwarm model calls",
+        "enableModels": "Enable preset models (pay-as-you-go)"
+      },
+      "agreementPrefix": "By clicking \"Auto-setup\" you agree to the ",
+      "agreementMaas": "MaaS Model-as-a-Service Statement",
+      "agreementAnd": " and the ",
+      "agreementCloud": "Huawei Cloud Service Agreement",
+      "agreementSuffix": ".",
+      "billingNote": "Enabling models is free; you only pay for actual usage."
     },
     "manualSetup": {
       "title": "Manual setup",

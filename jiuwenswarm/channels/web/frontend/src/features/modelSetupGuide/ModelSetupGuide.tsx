@@ -221,6 +221,36 @@ export function ModelSetupGuide({
                 {t('modelSetupGuide.quickSetup.description')}
               </span>
             </button>
+            <ol className="model-setup-guide__quick-steps">
+              <li>{t('modelSetupGuide.quickSetup.steps.openConsole')}</li>
+              <li>{t('modelSetupGuide.quickSetup.steps.updateAuth')}</li>
+              <li>{t('modelSetupGuide.quickSetup.steps.createApiKey')}</li>
+              <li>{t('modelSetupGuide.quickSetup.steps.enableModels')}</li>
+            </ol>
+            <p className="model-setup-guide__agreement">
+              {t('modelSetupGuide.quickSetup.agreementPrefix')}
+              <a
+                href="https://www.huaweicloud.com/declaration/maas.html"
+                target="_blank"
+                rel="noreferrer"
+                className="model-setup-guide__agreement-link"
+              >
+                {t('modelSetupGuide.quickSetup.agreementMaas')}
+              </a>
+              {t('modelSetupGuide.quickSetup.agreementAnd')}
+              <a
+                href="https://www.huaweicloud.com/declaration/sa_declaration.html"
+                target="_blank"
+                rel="noreferrer"
+                className="model-setup-guide__agreement-link"
+              >
+                {t('modelSetupGuide.quickSetup.agreementCloud')}
+              </a>
+              {t('modelSetupGuide.quickSetup.agreementSuffix')}
+            </p>
+            <p className="model-setup-guide__billing-note">
+              {t('modelSetupGuide.quickSetup.billingNote')}
+            </p>
             <button
               type="button"
               className="model-setup-guide__choice"
