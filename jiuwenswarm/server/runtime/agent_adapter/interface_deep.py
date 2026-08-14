@@ -133,6 +133,15 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.agents.harness.common.ask_user_question_registry import (
+    ASK_REQUEST_PREFIX,
+    AskUserQuestionRegistry,
+    ask_user_question_request_scope,
+)
+from jiuwenswarm.common.runtime_scope import RuntimeScopeKey
+from jiuwenswarm.agents.harness.common.tools.ask_user_question_tool import (
+    get_ask_user_question_tool,
+)
 from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
@@ -6988,6 +6997,11 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
 
+        # ask_user_question is registered per-agent after create_deep_agent (see
+        # _register_ask_user_question_tool) so the tool closure can recover the
+        # request context from the active-request store inside the background
+        # single-agent runner; it is NOT registered here as a shared tool.
+
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
@@ -7210,6 +7224,29 @@ class JiuWenSwarmDeepAdapter:
 
             await asyncio.sleep(0)
             await self._instance.ensure_initialized()
+            try:
+                from jiuwenswarm.agents.harness.common.rails.ask_user_question_context_rail import (
+                    AskUserQuestionContextRail,
+                )
+
+                await self._instance.register_rail(AskUserQuestionContextRail())
+            except Exception:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] AskUserQuestionContextRail registration failed",
+                    exc_info=True,
+                )
+            try:
+                ask_tool = get_ask_user_question_tool(agent=self._instance)
+                self._register_agent_owned_tool(ask_tool, self._tool_owner_id())
+                self._instance.ability_manager.add(ask_tool.card)
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] ask_user_question tool registered (per-agent)"
+                )
+            except Exception:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] ask_user_question per-agent registration failed",
+                    exc_info=True,
+                )
             initial_runtime_workspace = self._project_dir or str(
                 get_default_project_session_workspace_dir()
             )
@@ -9607,6 +9644,18 @@ class JiuWenSwarmDeepAdapter:
             )
         elif self._is_regular_skill_evolution_approval_params(request.params):
             resolved = await self._handle_evolution_approval(request_id, answers)
+        elif request_id.startswith(ASK_REQUEST_PREFIX):
+            try:
+                norm_session = request.session_id or "default"
+                scope = RuntimeScopeKey.from_adapter(self, session_id=norm_session)
+                resolved = AskUserQuestionRegistry.get_instance().resolve(
+                    scope, request_id, answers,
+                )
+            except Exception:
+                logger.exception(
+                    "[JiuWenSwarmDeepAdapter] ask_user_question resolve failed: %s",
+                    request_id,
+                )
 
         return AgentResponse(
             request_id=request.request_id,
@@ -11112,6 +11161,15 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
         )
         perf_summary_status = "ok"
+        _ask_scope_cm = ask_user_question_request_scope(
+            interactive_ask=bool(request.params.get("supports_user_interaction", True)),
+            session_id=session_id,
+            stream_request_id=request.request_id or "",
+            channel_id=request.channel_id or "",
+            scope=RuntimeScopeKey.from_adapter(self, session_id=session_id),
+            agent=self._instance,
+        )
+        await _ask_scope_cm.__aenter__()
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -11257,6 +11315,7 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            await _ask_scope_cm.__aexit__(None, None, None)
             close_agent_run_span(_run_span, session_id=session_id)
             if image_files_token is not None:
                 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
@@ -11770,6 +11829,15 @@ class JiuWenSwarmDeepAdapter:
             mode=mode,
         )
         perf_summary_status = "ok"
+        _ask_scope_cm = ask_user_question_request_scope(
+            interactive_ask=bool(request.params.get("supports_user_interaction", True)),
+            session_id=session_id,
+            stream_request_id=rid or "",
+            channel_id=cid or "",
+            scope=RuntimeScopeKey.from_adapter(self, session_id=session_id),
+            agent=self._instance,
+        )
+        await _ask_scope_cm.__aenter__()
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -12427,6 +12495,7 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
+            await _ask_scope_cm.__aexit__(None, None, None)
             close_agent_run_span(_run_span, session_id=session_id)
             if _debug_logger is not None:
                 _debug_logger.flush()

@@ -1913,6 +1913,20 @@ class AgentWebSocketServer:
             # locks are weakly cached and disappear automatically after their
             # last active/waiting user releases them.
             _plan_exited_sessions.discard(session_id)
+            try:
+                from jiuwenswarm.agents.harness.common.ask_user_question_registry import (
+                    AskUserQuestionRegistry,
+                )
+                from jiuwenswarm.common.runtime_scope import RuntimeScopeKey as _CommonRuntimeScopeKey
+
+                AskUserQuestionRegistry.get_instance().cancel_for_session(
+                    _CommonRuntimeScopeKey.from_request(request, include_session=True)
+                )
+            except Exception:
+                logger.exception(
+                    "[AgentWebSocketServer] ask_user_question cancel_for_session failed: session_id=%s",
+                    session_id,
+                )
 
     async def _trigger_before_chat_request_hook(self, request: AgentRequest) -> None:
         if not self._should_trigger_before_chat_request_hook(request):
