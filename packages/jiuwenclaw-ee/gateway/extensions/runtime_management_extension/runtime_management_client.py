@@ -469,6 +469,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         agent_readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY", "10"))
         agent_readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD", "5"))
         agent_custom_envs = os.getenv("AGENT_SERVER_CUSTOM_ENVS")
+        skill_authorization_enabled = os.getenv("SKILL_AUTHORIZATION_ENABLED")
         agent_server_home = os.getenv("AGENT_SERVER_HOME")
 
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME", "agentserver")
@@ -658,6 +659,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         e,
                         agent_custom_envs,
                     )
+            # .env.custom 的直配项优先于兼容入口 AGENT_SERVER_CUSTOM_ENVS；
+            # 留空则不覆盖兼容入口或 AgentServer 内现有配置。
+            if skill_authorization_enabled and skill_authorization_enabled.strip():
+                base["SKILL_AUTHORIZATION_ENABLED"] = skill_authorization_enabled.strip()
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用

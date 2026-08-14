@@ -18,6 +18,7 @@ _RAISABLE_TOOL_LEVELS = frozenset({"ask", "guard"})
 _TOOL_LEVELS = frozenset({"allow", "ask", "deny"})
 _FILE_GUARD_AXES = frozenset({"read", "write", "exec"})
 _RULE_ACTIONS = frozenset({"allow", "deny"})
+_RULE_SCOPES = frozenset({"exact", "head", "regex", "wildcard"})
 
 
 # ---------- tools ----------
@@ -78,22 +79,67 @@ def _compose_tools(merged: dict[str, Any], base: dict[str, Any], overlay_tools: 
 # ---------- rules ----------
 
 
+def command_rule_fingerprint(rule: Any) -> tuple[str, str, str] | None:
+    """返回命令规则的有效身份，忽略 ``id`` / ``description`` 等展示元数据。
+
+    ``scope`` 缺失时使用 tiered policy 的同一推导口径，使 ``echo *`` 与显式
+    ``scope=wildcard`` 被视为同一规则，同时保留真正的 scope 语义差异。
+    """
+    if not isinstance(rule, dict):
+        return None
+    pattern = rule.get("pattern")
+    action = _normalize_level(rule.get("action"))
+    if not isinstance(pattern, str) or not pattern.strip() or action not in _RULE_ACTIONS:
+        return None
+    normalized_pattern = pattern.strip()
+    raw_scope = str(rule.get("scope") or "").strip().lower()
+    if raw_scope in _RULE_SCOPES:
+        scope = raw_scope
+    elif normalized_pattern.lower().startswith("re:"):
+        scope = "regex"
+    elif normalized_pattern.endswith(" *"):
+        scope = "wildcard"
+    else:
+        scope = "exact"
+    # “总是允许”持久化会把单命令头模式写成 scope=head；
+    # tiered policy 对同一形态的 wildcard 规则也会回退到命令头匹配。
+    # 因此 `echo *` 的 head/wildcard 在实际裁决上等价，统一指纹避免重复授权。
+    head_pattern = normalized_pattern[:-2].strip() if normalized_pattern.endswith(" *") else ""
+    if scope in {"head", "wildcard"} and head_pattern and not any(
+        char.isspace() for char in head_pattern
+    ):
+        scope = "head"
+    return normalized_pattern, action, scope
+
+
 def _compose_rules(merged: dict[str, Any], overlay_rules: list[Any]) -> None:
     base_rules = merged.get("rules")
     if not isinstance(base_rules, list):
         base_rules = []
         merged["rules"] = base_rules
-    for rule in overlay_rules:
-        if not isinstance(rule, dict):
-            logger.warning("[skill_authorization] compose.rules.skip non-dict rule: %r", rule)
+    existing: set[tuple[str, str, str]] = set()
+    for section_name in ("rules", "approval_overrides"):
+        section = merged.get(section_name)
+        if not isinstance(section, list):
             continue
-        action = _normalize_level(rule.get("action"))
-        pattern = rule.get("pattern")
-        if action not in _RULE_ACTIONS or not isinstance(pattern, str) or not pattern.strip():
+        for existing_rule in section:
+            fingerprint = command_rule_fingerprint(existing_rule)
+            if fingerprint is not None:
+                existing.add(fingerprint)
+    for rule in overlay_rules:
+        fingerprint = command_rule_fingerprint(rule)
+        if fingerprint is None:
             logger.warning("[skill_authorization] compose.rules.skip malformed rule: %r", rule)
+            continue
+        if fingerprint in existing:
+            logger.info(
+                "[skill_authorization] compose.rules.skip_duplicate pattern=%s action=%s scope=%s",
+                *fingerprint,
+            )
             continue
         # allow / deny 均只追加；deny 不改变既有 deny、只能新增。
         base_rules.append(copy.deepcopy(rule))
+        existing.add(fingerprint)
 
 
 # ---------- file_guard.global ----------

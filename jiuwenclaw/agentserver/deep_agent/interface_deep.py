@@ -901,6 +901,7 @@ class JiuWenClawDeepAdapter:
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
         self._enabled_skills: list[str] | None = None
+        self._prebuilt_skills: set[str] = set()
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -914,6 +915,22 @@ class JiuWenClawDeepAdapter:
         if extra_skill_dir:
             skills_dirs.append(extra_skill_dir)
         return skills_dirs
+
+    def _resolve_skill_trust(self, skill_dir: Path):
+        """按企业安装账本识别预置 Skill；非企业场景保留包内置目录规则。"""
+        from jiuwenclaw.agentserver.permissions.skill_authorization import SkillTrustLevel
+
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return (
+                SkillTrustLevel.BUILTIN
+                if Path(skill_dir).name in self._prebuilt_skills
+                else SkillTrustLevel.OTHER
+            )
+        from jiuwenclaw.agentserver.deep_agent.rails.skill_authorization_rail import (
+            _default_trust_resolver,
+        )
+
+        return _default_trust_resolver(skill_dir)
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -1721,21 +1738,34 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        from jiuwenclaw.agentserver.installed_skill import list_enabled_skill_names
+        from jiuwenclaw.agentserver.installed_skill import (
+            SOURCE_PREBUILT,
+            list_installed_skills,
+        )
 
         try:
-            names = await list_enabled_skill_names(
+            rows = await list_installed_skills(
                 service_id=str(self._service_id or ""),
                 agent_id=str(self._agent_id or ""),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[JiuWenClawDeepAdapter] list_enabled_skill_names failed: %s",
+                "[JiuWenClawDeepAdapter] list_installed_skills failed: %s",
                 exc,
             )
             return
 
-        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+        enabled_skills: list[str] = []
+        prebuilt_skills: set[str] = set()
+        for row in rows:
+            skill_name = str(row.get("skill_name") or "").strip()
+            if not skill_name:
+                continue
+            enabled_skills.append(skill_name)
+            if str(row.get("source_type") or "").strip() == SOURCE_PREBUILT:
+                prebuilt_skills.add(skill_name)
+        self._enabled_skills = enabled_skills
+        self._prebuilt_skills = prebuilt_skills
 
         extra_skill_dir: str | None = None
         try:
@@ -2087,6 +2117,7 @@ class JiuWenClawDeepAdapter:
                     ),
                     skill_dirs_provider=lambda: self._resolve_skill_dirs(),
                 ),
+                trust_resolver=self._resolve_skill_trust,
             )
             logger.info("[JiuWenClawDeepAdapter] SkillAuthorizationRail create success")
             return rail
@@ -2793,6 +2824,9 @@ class JiuWenClawDeepAdapter:
                 )
             if sync_result.enabled_skill_dirs is not None:
                 self._enabled_skills = [str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()]
+            self._prebuilt_skills = {
+                str(name) for name in sync_result.prebuilt_skill_dirs if str(name).strip()
+            }
 
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
@@ -2913,6 +2947,8 @@ class JiuWenClawDeepAdapter:
                 self._instance,
                 model=self._model,  # Pass the model instance
                 default_role_prompts=None,  # Can be customized later
+                skill_dirs_provider=lambda: self._resolve_skill_dirs(),
+                enabled_skills_provider=lambda: self._enabled_skills,
             )
 
             # Register fork_agent tool (ignore if already exists)

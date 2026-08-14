@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
@@ -166,6 +166,8 @@ class ForkAgentExecutor:
         parent_agent: DeepAgent,
         model: Model,
         default_role_prompts: dict[str, str] | None = None,
+        skill_dirs_provider: Callable[[], list[str] | None] | None = None,
+        enabled_skills_provider: Callable[[], list[str] | None] | None = None,
     ) -> None:
         """Initialize the subagent executor.
 
@@ -173,11 +175,49 @@ class ForkAgentExecutor:
             parent_agent: Parent DeepAgent instance (for inheriting tools)
             model: Model instance for creating subagents
             default_role_prompts: Default role prompts (used when role_id not found)
+            skill_dirs_provider: Provider for the parent's effective Skill roots
+            enabled_skills_provider: Provider for the parent's enabled Skill names
         """
         self._parent_agent = parent_agent
         self._model = model
         self._default_role_prompts = default_role_prompts or {}
+        self._skill_dirs_provider = skill_dirs_provider
+        self._enabled_skills_provider = enabled_skills_provider
         self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
+
+    def _resolve_child_skill_configuration(self) -> tuple[list[str], list[str] | None]:
+        """复用主 Agent 已解析的 Skill 根目录/白名单，缺失时保持社区版回退。"""
+        provided_dirs: list[str] | None = None
+        if self._skill_dirs_provider is not None:
+            try:
+                provided_dirs = self._skill_dirs_provider()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Subagent] parent skill dirs provider failed: %s", exc)
+        raw_dirs = provided_dirs or [str(path) for path in get_agent_registered_skill_dirs()]
+        skill_dirs: list[str] = []
+        seen_dirs: set[str] = set()
+        for raw_dir in raw_dirs:
+            normalized = str(raw_dir or "").strip()
+            if normalized and normalized not in seen_dirs:
+                seen_dirs.add(normalized)
+                skill_dirs.append(normalized)
+
+        enabled_skills: list[str] | None = None
+        if self._enabled_skills_provider is not None:
+            try:
+                provided_enabled = self._enabled_skills_provider()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Subagent] parent enabled skills provider failed: %s", exc)
+            else:
+                if provided_enabled is not None:
+                    enabled_skills = []
+                    seen_names: set[str] = set()
+                    for raw_name in provided_enabled:
+                        name = str(raw_name or "").strip()
+                        if name and name not in seen_names:
+                            seen_names.add(name)
+                            enabled_skills.append(name)
+        return skill_dirs, enabled_skills
 
     @staticmethod
     def _skill_authorization_enabled() -> bool:
@@ -869,18 +909,22 @@ Approach each task methodically and deliver high-quality results.
                 mode="agent.plan",
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
+        skill_dirs, enabled_skills = self._resolve_child_skill_configuration()
+        child_skill_kwargs: dict[str, Any] = {
+            "skills_dir": skill_dirs,
+            "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+            "include_tools": False,
+            "include_skill_body_tools": False,
+        }
+        if enabled_skills is not None:
+            child_skill_kwargs["enabled_skills"] = enabled_skills
         rails = [
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
             # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
             # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
-            SubagentSkillUseRail(
-                skills_dir=[str(path) for path in get_agent_registered_skill_dirs()],
-                skill_mode=SkillUseRail.SKILL_MODE_ALL,
-                include_tools=False,
-                include_skill_body_tools=False,
-            ),
+            SubagentSkillUseRail(**child_skill_kwargs),
         ]
         rails.extend(self._build_direct_subagent_authorization_rails(
             task.task_id,
@@ -1022,17 +1066,21 @@ Execute the given task using inherited context and available tools.
                 mode="agent.plan",
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
+        skill_dirs, enabled_skills = self._resolve_child_skill_configuration()
+        child_skill_kwargs: dict[str, Any] = {
+            "skills_dir": skill_dirs,
+            "skill_mode": SkillUseRail.SKILL_MODE_ALL,
+            "include_tools": False,
+            "include_skill_body_tools": False,
+        }
+        if enabled_skills is not None:
+            child_skill_kwargs["enabled_skills"] = enabled_skills
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # 与 spawn 路径同样的 active-skill body lift/pin 接入；
             # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
-            SubagentSkillUseRail(
-                skills_dir=[str(path) for path in get_agent_registered_skill_dirs()],
-                skill_mode=SkillUseRail.SKILL_MODE_ALL,
-                include_tools=False,
-                include_skill_body_tools=False,
-            ),
+            SubagentSkillUseRail(**child_skill_kwargs),
         ]
         rails.extend(self._build_direct_subagent_authorization_rails(
             task.task_id,

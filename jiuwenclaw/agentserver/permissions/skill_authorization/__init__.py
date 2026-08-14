@@ -4,6 +4,7 @@
 
 from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
     SkillAuthorizationContext,
+    command_rule_fingerprint,
     compose_skill_permissions,
     effective_file_guard_axis_level,
     get_skill_authorization_context,
@@ -35,6 +36,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.models import (
 from jiuwenclaw.agentserver.permissions.skill_authorization.schema import (
     SKILL_APPROVAL_CARD_EXTENSION_KEY,
     SKILL_APPROVAL_PAYLOAD_SCHEMA,
+    SKILL_AUTHORIZATION_ENABLED_ENV,
     SKILL_PERMISSION_FILENAME,
     SkillPermissionValidationError,
     canonical_skill_permission_json,
@@ -67,6 +69,7 @@ __all__ = [
     "SkillPermissionDiff",
     # Schema
     "SKILL_PERMISSION_FILENAME",
+    "SKILL_AUTHORIZATION_ENABLED_ENV",
     "SkillPermissionValidationError",
     "canonical_skill_permission_json",
     "compute_permissions_hash",
@@ -93,6 +96,7 @@ __all__ = [
     "sync_grants_on_permissions_reload",
     # Composer + request context
     "SkillAuthorizationContext",
+    "command_rule_fingerprint",
     "compose_skill_permissions",
     "effective_file_guard_axis_level",
     "get_skill_authorization_context",

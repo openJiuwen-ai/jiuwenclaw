@@ -152,14 +152,17 @@ class PermissionEngine:
     ) -> dict[str, Any]:
         """按需应用当前作用域的 ``ACTIVE`` Skill overlay（fail-closed）。
 
-        功能开关（``permissions.skill_authorization.enabled``）关闭、授权 Context
+        Skill 动态授权有效开关关闭、授权 Context
         缺失、GrantStore 查询失败或合成异常时，一律返回原配置（仅按原权限流程裁决）。
         """
         if not isinstance(config, dict):
             return config
         try:
-            section = config.get("skill_authorization")
-            if not (isinstance(section, dict) and section.get("enabled")):
+            from jiuwenclaw.agentserver.permissions.skill_authorization.schema import (
+                is_skill_authorization_enabled,
+            )
+
+            if not is_skill_authorization_enabled(config):
                 return config
             from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
                 compose_skill_permissions,

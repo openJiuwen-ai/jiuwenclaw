@@ -36,6 +36,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization import (
     SkillManifest,
     SkillPermissionDiff,
     SkillTrustLevel,
+    command_rule_fingerprint,
     compose_skill_permissions,
     effective_file_guard_axis_level,
     get_skill_authorization_context,
@@ -529,14 +530,22 @@ class SkillAuthorizationRail(BaseInterruptRail):
             else:
                 tightened.append(f"工具 `{tool_name}`：{before} → {after}")
 
+        base_rule_fingerprints: set[tuple[str, str, str]] = set()
+        for section_name in ("rules", "approval_overrides"):
+            section = base.get(section_name)
+            if not isinstance(section, list):
+                continue
+            for base_rule in section:
+                fingerprint = command_rule_fingerprint(base_rule)
+                if fingerprint is not None:
+                    base_rule_fingerprints.add(fingerprint)
+
         overlay_rules = overlay.get("rules") if isinstance(overlay.get("rules"), list) else []
         for rule in overlay_rules:
-            if not isinstance(rule, dict):
+            fingerprint = command_rule_fingerprint(rule)
+            if fingerprint is None or fingerprint in base_rule_fingerprints:
                 continue
-            pattern = str(rule.get("pattern") or "").strip()
-            action = str(rule.get("action") or "").strip().lower()
-            if not pattern:
-                continue
+            pattern, action, _scope = fingerprint
             if action == "allow":
                 widened.append(f"新增命令允许规则：`{pattern}`")
             elif action == "deny":

@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 from typing import Any
 
 from jiuwenclaw.agentserver.permissions.shell_tools import SHELL_PERMISSION_TOOLS
 
 SKILL_PERMISSION_FILENAME = "skill_permissions.json"
+SKILL_AUTHORIZATION_ENABLED_ENV = "SKILL_AUTHORIZATION_ENABLED"
+
+logger = logging.getLogger(__name__)
 
 _LEVEL_VALUES = frozenset({"allow", "ask", "deny"})
 _RISK_LEVEL_VALUES = frozenset({"low", "medium", "high"})
@@ -284,7 +289,20 @@ def compute_skill_md_hash(content: str | bytes) -> str:
 
 
 def is_skill_authorization_enabled(permissions_config: Any) -> bool:
-    """功能开关:``permissions.skill_authorization.enabled``(默认关闭)。"""
+    """读取动态授权开关；显式环境变量优先，未设置时回退现有配置。"""
+    raw_override = os.getenv(SKILL_AUTHORIZATION_ENABLED_ENV)
+    if raw_override is not None and raw_override.strip():
+        normalized = raw_override.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        logger.warning(
+            "[skill_authorization] invalid %s=%r; fail closed",
+            SKILL_AUTHORIZATION_ENABLED_ENV,
+            raw_override,
+        )
+        return False
     if not isinstance(permissions_config, dict):
         return False
     section = permissions_config.get("skill_authorization")

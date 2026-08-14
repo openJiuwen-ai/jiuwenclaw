@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.harness import DeepAgent
 
@@ -24,6 +26,8 @@ def init_subagent_executor(
     parent_agent: DeepAgent,
     model: Model,
     default_role_prompts: dict[str, str] | None = None,
+    skill_dirs_provider: Callable[[], list[str] | None] | None = None,
+    enabled_skills_provider: Callable[[], list[str] | None] | None = None,
 ) -> None:
     """Initialize the subagent executor with parent agent and model.
 
@@ -31,11 +35,15 @@ def init_subagent_executor(
         parent_agent: Parent DeepAgent instance
         model: Model instance for creating subagents
         default_role_prompts: Default role prompts (used when role_id not found)
+        skill_dirs_provider: Provider for the parent's effective Skill roots
+        enabled_skills_provider: Provider for the parent's enabled Skill names
     """
     global _executor
     _executor = ForkAgentExecutor(
         parent_agent,
         model=model,
         default_role_prompts=default_role_prompts,
+        skill_dirs_provider=skill_dirs_provider,
+        enabled_skills_provider=enabled_skills_provider,
     )
     logger.info("[Subagent] Initialized subagent executor")
