@@ -5,10 +5,14 @@ import type { A2UIClientEventMessage } from '@a2ui/react';
 import { injectStyles } from '@a2ui/react/styles';
 import App from './App.tsx'
 import { dispatchA2UIAction } from './features/a2ui/actionBridge';
+import { installDesktopLocalFilesBridge } from './features/workspace/localFilePicker';
 import './styles/foundation.css'
 import './styles/themes/default/light.css'
 import './index.css'
 import './features/a2ui/a2ui.css'
+
+// Durable desktop drop bridge — must exist before ChatPanel mounts / effect cleanup.
+installDesktopLocalFilesBridge();
 
 function flagA2UIIconFontAvailability() {
   if (typeof document === 'undefined' || !('fonts' in document)) {

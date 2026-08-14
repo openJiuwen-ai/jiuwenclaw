@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { AlertCircle, Download, FileText, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { AlertCircle, Download, Info, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useChatStore } from '../../stores';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { FileIcon } from '../FileIcon';
 import { FilePreview } from './FilePreview';
 import { buildArtifacts, type ArtifactItem } from './artifactCollection';
 import { artifactDownloadUrl } from './filePreviewModel';
@@ -155,7 +156,7 @@ export function ArtifactsPanel({
                           onSelectArtifact?.(artifact.id);
                         }}
                       >
-                        <FileText size={16} className="shrink-0 text-text-muted" />
+                        <FileIcon fileName={artifact.name} size={16} className="shrink-0" />
                         <span className="truncate">{artifact.name}</span>
                       </button>
                     );

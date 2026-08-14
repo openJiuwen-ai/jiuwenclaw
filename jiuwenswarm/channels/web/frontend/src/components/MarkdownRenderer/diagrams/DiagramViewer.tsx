@@ -24,6 +24,7 @@ interface DiagramMenuItem {
 interface DiagramViewerProps extends Omit<HTMLAttributes<HTMLDivElement>, 'children'> {
   viewMode: DiagramViewMode;
   onViewModeChange: (mode: DiagramViewMode) => void;
+  imageViewDisabled?: boolean;
   exportConfig: DiagramExportConfig;
   toolbarActions?: DiagramToolbarAction[];
   statusText?: string;
@@ -58,13 +59,20 @@ function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded }:
 
 interface TogglePillProps {
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   children: ReactNode;
 }
 
-function TogglePill({ active, onClick, children }: TogglePillProps): JSX.Element {
+function TogglePill({ active, disabled = false, onClick, children }: TogglePillProps): JSX.Element {
   return (
-    <button type="button" aria-pressed={active} onClick={onClick} className={clsx('markdown-toggle-pill', active && 'markdown-toggle-pill--active')}>
+    <button
+      type="button"
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx('markdown-toggle-pill', active && 'markdown-toggle-pill--active')}
+    >
       {children}
     </button>
   );
@@ -127,6 +135,7 @@ function DiagramMoreMenu({ title, items }: DiagramMoreMenuProps): JSX.Element {
 export function DiagramViewer({
   viewMode,
   onViewModeChange,
+  imageViewDisabled = false,
   exportConfig,
   toolbarActions = [],
   statusText,
@@ -173,7 +182,7 @@ export function DiagramViewer({
       <div className="diagram-container__toolbar">
         <div className="diagram-toolbar-start">
           <div className="diagram-view-toggle">
-            <TogglePill active={viewMode === 'image'} onClick={() => onViewModeChange('image')}>
+            <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} onClick={() => onViewModeChange('image')}>
               {t('diagram.image')}
             </TogglePill>
             <TogglePill active={viewMode === 'code'} onClick={() => onViewModeChange('code')}>
@@ -182,6 +191,8 @@ export function DiagramViewer({
           </div>
           {statusText && (
             <span
+              role="status"
+              aria-live="polite"
               className={clsx('diagram-toolbar-status', {
                 'diagram-toolbar-status--error': statusTone === 'danger',
                 'diagram-toolbar-status--warning': statusTone === 'warning',

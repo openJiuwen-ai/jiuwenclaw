@@ -32,9 +32,6 @@ JiuwenSwarm session data is stored in the local workspace with the following str
         ├── sess_19ddd5cc729_09bb02/   # Another session
         │   ├── metadata.json
         │   └── history.json
-        ├── heartbeat_19de6f526fb_224694/  # Heartbeat session directory
-        │   ├── metadata.json
-        │   └── history.json
         └── ...
 ```
 
@@ -43,7 +40,6 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 | Directory Prefix | Type | Description |
 |------------------|------|-------------|
 | `sess_` | Regular Session | Conversation sessions initiated via Web, Feishu, etc. |
-| `heartbeat_` | Heartbeat Session | System heartbeat task sessions |
 | `cron_` | Cron Session | Scheduled task sessions (`cron_id` is non-empty in `metadata.json`) |
 
 **Session type distinction:**
@@ -59,7 +55,7 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 | Field | Description | Example |
 |-------|-------------|---------|
 | `session_id` | Unique session identifier | `sess_19ddd41cbc0_fd1e4d` |
-| `channel_id` | Session source channel | `web`, `feishu`, `__heartbeat__` |
+| `channel_id` | Session source channel | `web`, `feishu` |
 | `user_id` | User identifier | Empty or user ID |
 | `created_at` | Session creation time (Unix timestamp) | `1716249600.732591` |
 | `last_message_at` | Last message time | `1716253200.865117` |

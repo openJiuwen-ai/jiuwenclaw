@@ -41,6 +41,7 @@ import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { FileIcon } from '../FileIcon';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -109,7 +110,7 @@ function TeamLeaderPlainTextMessage({
       {fileItems && fileItems.length > 0 && (
         <FileDownloadList
           files={fileItems}
-          className="w-full md:w-1/2"
+          className="chat-message-file-list"
           onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
         />
       )}
@@ -580,7 +581,12 @@ export const MessageItem = memo(function MessageItem({
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>
       )}
-      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
+      <div
+        className={clsx(
+          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
+        )}
+      >
         {!isUser && (
           <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
         )}
@@ -635,6 +641,7 @@ export const MessageItem = memo(function MessageItem({
                 {visibleFileItems && (
                   <FileDownloadList
                     files={visibleFileItems}
+                    className="chat-message-file-list"
                     onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}
@@ -741,41 +748,6 @@ function getFileExtension(name: string): string {
   return parts[parts.length - 1].toUpperCase();
 }
 
-function getFileTypeConfig(mimeType: string | undefined, name: string) {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  const mt = mimeType || '';
-  if (mt.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext))
-    return { label: 'IMG', bg: 'bg-[#3370ff]', icon: '🖼' };
-  if (mt.startsWith('audio/') || ['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext))
-    return { label: 'AUDIO', bg: 'bg-[#7b67ee]', icon: '🎵' };
-  if (mt.startsWith('video/') || ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext))
-    return { label: 'VIDEO', bg: 'bg-[#f77234]', icon: '🎬' };
-  if (mt.includes('pdf') || ext === 'pdf')
-    return { label: 'PDF', bg: 'bg-[#f54a45]', icon: '📄' };
-  if (mt.includes('presentation') || mt.includes('ppt') || ['ppt', 'pptx'].includes(ext))
-    return { label: 'PPT', bg: '#FFFFFF', icon: (
-      <svg viewBox="0 0 1024 1024" className="w-7 h-7">
-        <path d="M145.6 0C100.8 0 64 36.8 64 81.6v860.8C64 987.2 100.8 1024 145.6 1024h732.8c44.8 0 81.6-36.8 81.6-81.6V324.8L657.6 0h-512z" fill="#E34221" />
-        <path d="M960 326.4v16H755.2s-100.8-20.8-99.2-108.8c0 0 4.8 92.8 97.6 92.8H960z" fill="#DC3119" />
-        <path d="M657.6 0v233.6c0 25.6 17.6 92.8 97.6 92.8H960L657.6 0z" fill="#FFFFFF" opacity=".5" />
-        <path d="M304 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V686.4c0-9.6 8-17.6 17.6-17.6H304c38.4 0 59.2 25.6 59.2 57.6S340.8 784 304 784z m-3.2-94.4h-51.2v73.6h51.2c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8zM480 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-11.2-4.8-11.2-11.2V686.4c0-9.6 6.4-17.6 16-17.6H480c38.4 0 59.2 25.6 59.2 57.6S518.4 784 480 784z m-3.2-94.4h-49.6v73.6h49.6c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8z m225.6 0h-52.8v161.6c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V689.6h-51.2c-6.4 0-11.2-4.8-11.2-11.2 0-4.8 4.8-9.6 11.2-9.6h128c6.4 0 11.2 4.8 11.2 11.2 0 4.8-4.8 9.6-11.2 9.6z" fill="#FFFFFF" />
-      </svg>
-    ) };
-  if (mt.includes('spreadsheet') || mt.includes('excel') || mt.includes('xlsx') || ['xls', 'xlsx', 'csv'].includes(ext))
-    return { label: 'XLS', bg: 'bg-[#2b9348]', icon: '📗' };
-  if (mt.includes('word') || mt.includes('document') || mt.includes('docx') || ['doc', 'docx'].includes(ext))
-    return { label: 'DOC', bg: 'bg-[#3370ff]', icon: '📝' };
-  if (mt.includes('zip') || mt.includes('compressed') || mt.includes('archive') || ['zip', 'rar', '7z', 'tar', 'gz'].includes(ext))
-    return { label: 'ZIP', bg: 'bg-[#8b5cf6]', icon: '📦' };
-  if (['txt', 'md', 'log'].includes(ext))
-    return { label: 'TXT', bg: 'bg-[#6b7280]', icon: '📃' };
-  if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg'].includes(ext))
-    return { label: 'CFG', bg: 'bg-[#6b7280]', icon: '⚙' };
-  if (['py', 'js', 'ts', 'java', 'go', 'rs', 'cpp', 'c', 'h'].includes(ext))
-    return { label: 'CODE', bg: 'bg-[#6b7280]', icon: '�' };
-  return { label: 'FILE', bg: 'bg-[#6b7280]', icon: '��' };
-}
-
 function FileDownloadList({
   files,
   className,
@@ -833,7 +805,6 @@ function FileDownloadList({
   return (
     <div className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
-        const typeConfig = getFileTypeConfig(file.mime_type, file.name);
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
         return (
@@ -863,18 +834,12 @@ function FileDownloadList({
               title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
               aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
             >
-              <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
-                {typeof typeConfig.icon === 'string' ? (
-                  <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
-                ) : (
-                  typeConfig.icon
-                )}
-              </div>
+              <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
               <div className="flex-1 min-w-0">
                 <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                    {ext || typeConfig.label}
+                    {ext || 'FILE'}
                   </span>
                   <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
                   {expired && (

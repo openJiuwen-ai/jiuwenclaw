@@ -42,7 +42,7 @@ def test_request_trusted_dirs_without_params_returns_empty():
 
 def test_build_context_seed_round_trips_trusted_dirs():
     seed = _context().to_seed()
-    restored = SwarmBuildContext.from_seed(seed, config=None, trajectory_registry=None)
+    restored = SwarmBuildContext.from_seed(seed, config=None, trajectory_span_processor=None)
 
     assert seed["trusted_dirs"] == ["/work/project", "/data/shared"]
     assert restored.trusted_dirs == ["/work/project", "/data/shared"]
@@ -50,7 +50,7 @@ def test_build_context_seed_round_trips_trusted_dirs():
 
 def test_build_context_seed_keeps_none_when_unset():
     seed = _context(trusted_dirs=None).to_seed()
-    restored = SwarmBuildContext.from_seed(seed, config=None, trajectory_registry=None)
+    restored = SwarmBuildContext.from_seed(seed, config=None, trajectory_span_processor=None)
 
     assert seed["trusted_dirs"] is None
     assert restored.trusted_dirs is None

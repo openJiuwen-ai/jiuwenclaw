@@ -41,7 +41,7 @@ function ApprovalQuestionContent({ question }: { question: Question }) {
  * - 执行：`plan_execute`，批准并退出计划模式，本轮到此结束；随后由前端补发的
  *   普通消息开启新一轮真正执行。
  * - 修改框留空 + 跳过：`plan_skip`，留在计划模式并结束本轮。
- * - 修改框有内容 + 下一步：`reject` + `custom_input`，继续完善同一份计划。
+ * - 修改框有内容 + 下一步：`plan_revise` + `custom_input`，继续完善同一份计划。
  */
 function PlanApprovalActions({
   disabled,
@@ -92,7 +92,7 @@ function PlanApprovalActions({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && hasRevision) {
               e.preventDefault();
-              onAct('reject', revision.trim());
+              onAct('plan_revise', revision.trim());
             }
           }}
         />
@@ -100,7 +100,7 @@ function PlanApprovalActions({
           type="button"
           disabled={disabled}
           onClick={() =>
-            hasRevision ? onAct('reject', revision.trim()) : onAct('plan_skip', '')
+            hasRevision ? onAct('plan_revise', revision.trim()) : onAct('plan_skip', '')
           }
           className="px-4 py-2 text-sm font-medium rounded-lg whitespace-nowrap"
           style={{

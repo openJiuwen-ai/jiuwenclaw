@@ -66,6 +66,8 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
+import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
 import {
@@ -76,11 +78,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import {
-  isDesktopSaveCancelled,
-  isDesktopSaveOk,
-} from './utils/desktopSave';
-import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
@@ -117,6 +115,15 @@ function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
 }
 
+function normalizeConfigBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(
+    String(value ?? '').trim().toLowerCase(),
+  );
+}
+
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
 
 type LoadedHistoryPage = {
@@ -147,17 +154,6 @@ type ConfigSaveAllPayload = {
   models?: ModelEntry[];
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
-};
-
-type WindowWithPyWebview = Window & {
-  pywebview?: {
-    api?: {
-      save_data_url?: (
-        dataUrl: string,
-        filename: string,
-      ) => DesktopSaveApiResult;
-    };
-  };
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -251,29 +247,12 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function downloadDataUrl(dataUrl: string, filename: string): void {
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
-  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
-  if (pywebviewApi?.save_data_url) {
-    const result = await pywebviewApi.save_data_url(dataUrl, filename);
-    if (isDesktopSaveCancelled(result)) {
-      return false;
-    }
-    if (!isDesktopSaveOk(result)) {
-      throw new Error('share_desktop_save_failed');
-    }
-    return true;
+async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
+  const outcome = await saveBlob(blob, filename);
+  if (outcome === 'failed') {
+    throw new Error('share_desktop_save_failed');
   }
-  downloadDataUrl(dataUrl, filename);
-  return true;
+  return outcome === 'saved';
 }
 
 function AppContent() {
@@ -460,7 +439,8 @@ function AppContent() {
     const session = currentSession?.session_id === sessionId
       ? currentSession
       : sessions.find((s) => s.session_id === sessionId);
-    return session?.title?.trim() ?? '';
+    const raw = session?.title?.trim() ?? '';
+    return toDisplaySessionTitle(raw);
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
     const session = currentSession?.session_id === sessionId
@@ -676,6 +656,20 @@ function AppContent() {
     onConfigChanged: () => {
       handleConfigChanged();
     },
+    onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
+      // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
+      // - 多个任务同时返回结果时，不会互相跳转覆盖
+      // - 用户已手动切走时不打扰
+      // - 定时调度（非"立即执行"）不自动跳转
+      // lastRunSessionId[jobId] 是点击"立即执行"时存入的会话 ID，
+      // sessionIdRef.current 是当前会话，两者一致说明用户还在等这个任务的结果。
+      if (cronJobId) {
+        const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
+        if (lastSid && sessionIdRef.current === lastSid) {
+          void handleRestoreSession(cronSessionId);
+        }
+      }
+    },
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
@@ -764,6 +758,8 @@ function AppContent() {
       const currentItems = current.map((segment) => ({
         at: new Date(segment.startedAt + 1).toISOString(),
         text: segment.text,
+        // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
+        updatedAt: segment.updatedAt,
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
@@ -1140,6 +1136,19 @@ function AppContent() {
       }, 5000);
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal]);
+
+  const saveSymphonyEnabled = useCallback(async (enabled: boolean) => {
+    const updates = { symphony_enabled: enabled ? 'true' : 'false' };
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.set',
+      updates,
+    );
+    setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
+    setConfigError(null);
+    if (result?.applied_without_restart !== true) {
+      applyConfigSaveUiState(false);
+    }
+  }, [applyConfigSaveUiState, request]);
 
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
@@ -1620,7 +1629,11 @@ function AppContent() {
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
+    const projectDir = resolveNewConversationProjectDir(
+      options.preserveProject,
+      options.project?.project_dir,
+      selectedProject?.project_dir,
+    );
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
@@ -2087,7 +2100,10 @@ function AppContent() {
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
-    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
+    if (runtime?.isProcessing || runtime?.pendingQuestion) {
+      setDialogError(t('multiSession.deleteRunningDisabled'));
+      return;
+    }
     setDialogBusy(true); setDialogError(null);
     try {
       const deletedSession = deleteTarget;
@@ -2191,8 +2207,7 @@ function AppContent() {
       setShareExportSnapshot(payload.snapshot);
     } catch (error) {
       console.error('Failed to export share image:', error);
-      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-      window.alert(`${t('share.exportFailed')}${detail}`);
+      window.alert(t('share.exportFailed'));
       setIsExportingShare(false);
       setShareExportSnapshot(null);
     }
@@ -2211,18 +2226,17 @@ function AppContent() {
         if (!node) {
           throw new Error('share_image_node_missing');
         }
-        const dataUrl = await exportShareImageNode(node);
+        const imageBlob = await exportShareImageNode(node);
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
         if (saved) {
           showSaveToast();
         }
       } catch (error) {
         console.error('Failed to render share image:', error);
-        const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-        window.alert(`${t('share.exportFailed')}${detail}`);
+        window.alert(t('share.exportFailed'));
       } finally {
         if (shareExportTokenRef.current === token) {
           setIsExportingShare(false);
@@ -2487,7 +2501,10 @@ function AppContent() {
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
               sessionId={sessionId}
+              isConnected={isConnected}
               isActive={activeNav === 'skills'}
+              symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
+              onSymphonyEnabledChange={saveSymphonyEnabled}
               onNavigateToConfig={() => {
                 setConfigInitialExpandGroup('third_party_api');
                 setActiveNav('configpanel');

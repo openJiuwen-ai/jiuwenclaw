@@ -111,6 +111,9 @@ class WebChannelConfig:
     port: int = 19000
     path: str = "/ws"
     allow_from: list[str] = field(default_factory=list)
+    # True: uvicorn+FastAPI on the same port (WS now; HTTP routes can be added later).
+    # False: legacy websockets.serve only (rollback).
+    dual_protocol: bool = True
 
 
 class WebChannel(BaseWsChannel):
@@ -131,6 +134,7 @@ class WebChannel(BaseWsChannel):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
         self._server: Any = None
+        self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
@@ -534,6 +538,41 @@ class WebChannel(BaseWsChannel):
             logger.warning("WebChannel 未启用（enabled=False）")
             return
 
+        if self.config.dual_protocol:
+            await self._start_dual_protocol()
+            return
+        await self._start_websockets_legacy()
+
+    async def _start_dual_protocol(self) -> None:
+        """Same port: FastAPI/uvicorn (WS today; HTTP routes can be mounted later)."""
+        import uvicorn
+
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
+        from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+
+        app = build_web_channel_app(self)
+        uv_cfg = uvicorn.Config(
+            app,
+            host=self.config.host,
+            port=self.config.port,
+            log_level="info",
+            access_log=False,
+            ws_max_size=WEB_WS_MAX_MESSAGE_BYTES,
+            ws_ping_interval=20.0,
+            ws_ping_timeout=60.0,
+        )
+        self._uvicorn_server = uvicorn.Server(uv_cfg)
+        self._running = True
+        logger.info(
+            "WebChannel 已启动(dual_protocol): ws://%s:%s%s (HTTP-ready same port)",
+            self.config.host,
+            self.config.port,
+            self.config.path,
+        )
+        await self._uvicorn_server.serve()
+
+    async def _start_websockets_legacy(self) -> None:
+        """Rollback path: pure websockets.serve (no HTTP on this port)."""
         try:
             from websockets.legacy.server import serve as ws_serve
         except Exception:  # pragma: no cover
@@ -544,7 +583,7 @@ class WebChannel(BaseWsChannel):
         from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
-            self._connection_handler,
+            self.handle_connection,
             self.config.host,
             self.config.port,
             process_request=self._process_request,
@@ -554,7 +593,10 @@ class WebChannel(BaseWsChannel):
         )
         self._running = True
         logger.info(
-            f"WebChannel 已启动: ws://{self.config.host}:{self.config.port}{self.config.path}"
+            "WebChannel 已启动(legacy): ws://%s:%s%s",
+            self.config.host,
+            self.config.port,
+            self.config.path,
         )
         await self._server.wait_closed()
 
@@ -568,6 +610,9 @@ class WebChannel(BaseWsChannel):
             await asyncio.gather(*close_tasks, return_exceptions=True)
         self._clients_by_key.clear()
 
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
+            self._uvicorn_server = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -625,6 +670,17 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
         )
 
+    @staticmethod
+    def _should_backfill_request_id(event_name: str) -> bool:
+        # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
+        # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
+        # 内容碰巧相同"（bug001：同一 session 短时间内被 resume 两次，第二次自己的
+        # goal.snapshot 因为跟第一次内容相同被误判为重复丢弃，导致编辑/暂停按钮卡死）。
+        # runtime.accepted 的 payload 本身已经带了 request_id（见
+        # interface_deep.py `_yield_runtime_accepted`），调用处的 "request_id" not in
+        # payload 判断会自动跳过它，不会重复赋值。
+        return event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error"
+
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
         """Build the Web event payload without dropping structured control fields."""
@@ -633,7 +689,8 @@ class WebChannel(BaseWsChannel):
                 payload = {**msg.payload}
                 if "session_id" not in payload and msg.session_id:
                     payload["session_id"] = msg.session_id
-                if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
+                needs_request_id = "request_id" not in payload and msg.id
+                if cls._should_backfill_request_id(event_name) and needs_request_id:
                     payload["request_id"] = msg.id
                 return payload
 
@@ -950,6 +1007,10 @@ class WebChannel(BaseWsChannel):
         )
 
     # ── 内部实现 ──────────────────────────────────────────
+
+    async def handle_connection(self, ws: Any, path: str | None = None) -> None:
+        """Public entry for serving one accepted WebSocket (dual-protocol / adapters)."""
+        await self._connection_handler(ws, path=path)
 
     async def _connection_handler(self, ws: Any, path: str | None = None) -> None:
         raw_path = path if path is not None else getattr(ws, "path", "")

@@ -12,35 +12,34 @@ interface SvgDiagramProps {
 
 function getStatusText(status: SvgMarkupStatus, translate: (key: string) => string): string | undefined {
   if (status === 'streaming') return translate('svg.streaming');
-  if (status === 'previewable' || status === 'invalid') return translate('svg.invalid');
+  if (status === 'invalid') return translate('svg.invalid');
   return undefined;
 }
 
 export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JSX.Element {
   const { t } = useTranslation();
   const previewRef = useRef<HTMLIFrameElement>(null);
-  const [viewMode, setViewMode] = useState<DiagramViewMode>('image');
+  const [requestedViewMode, setRequestedViewMode] = useState<DiagramViewMode>('image');
   const preview = useMemo(() => getSvgPreview(code), [code]);
   const status = useMemo(() => getSvgMarkupStatus(preview, complete, isStreaming), [complete, isStreaming, preview]);
-  const canExport = status === 'ready' || status === 'previewable';
+  const imageViewDisabled = preview === null;
+  const viewMode: DiagramViewMode = imageViewDisabled ? 'code' : requestedViewMode;
+  const canExport = status === 'ready';
   const previewMarkup = preview?.markup ?? code;
 
   useEffect(() => {
     if (viewMode === 'image') updateSvgPreview(previewRef.current, previewMarkup);
   }, [previewMarkup, viewMode]);
 
-  useEffect(() => {
-    if (status === 'invalid') setViewMode('code');
-  }, [status]);
-
   return (
     <DiagramViewer
       className="svg-diagram"
       data-svg-status={status}
       viewMode={viewMode}
-      onViewModeChange={setViewMode}
+      onViewModeChange={setRequestedViewMode}
+      imageViewDisabled={imageViewDisabled}
       statusText={getStatusText(status, t)}
-      statusTone={status === 'previewable' || status === 'invalid' ? 'warning' : 'default'}
+      statusTone={status === 'invalid' ? 'warning' : 'default'}
       feedbackPosition="start"
       exportConfig={{
         sourceCode: code,

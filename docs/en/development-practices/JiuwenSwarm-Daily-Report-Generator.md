@@ -50,16 +50,15 @@ the sections below may help.
 | **Git repo** | `D:\Download\jiuwenswarm` (this project) |
 | **Email** | `zxworkem@163.com` (NetEase 163 Email) |
 | **Delivery** | Feishu (`cli_a92035b1823a9cd2`) |
-| **Heartbeat window** | Daily 18:00–18:30 |
+| **Scheduled task window** | Daily 18:00–18:30 |
 
 ### Key paths
 
 ```plain
 D:\Download\jiuwenswarm\
 ├── .env
-├── config/config.yaml                # App config (heartbeat, Feishu)
+├── config/config.yaml                # App config (scheduled tasks, Feishu)
 ├── workspace/
-│   ├── HEARTBEAT.md                  # Heartbeat tasks
 │   └── agent/skills/daily-report/    # Skill module
 │       ├── SKILL.md                  # Skill definition v2.0.0
 │       ├── collectors/
@@ -107,7 +106,7 @@ With the advanced skill, Git, email stats, memory, and todos feed an engine that
 | --- | --- |
 | **Modular skills** | Multiple Python modules per skill |
 | **Tools** | `allowed_tools` for system integration |
-| **Heartbeat** | Periodic skill execution |
+| **Scheduled Tasks** | Periodic skill execution |
 | **Channels** | Feishu, Web, etc. |
 
 The payoff is **extensibility**: collection, analysis, and reporting stay separated.
@@ -148,7 +147,7 @@ The advanced daily report skill sits in the application layer (see diagram in th
 | Email | IMAP | Supported by NetEase |
 | Tokenization | jieba (optional) | Good for Chinese; can degrade gracefully |
 | Reports | Markdown | Portable; Feishu renders |
-| Trigger | Heartbeat + manual | Scheduled + on demand |
+| Trigger | Scheduled task + manual | Scheduled + on demand |
 
 ## Chapter 3 — Skills system engineering
 
@@ -312,14 +311,13 @@ cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_rep
 
 ### Scheduled trigger
 
-Configure periodic runs in `HEARTBEAT.md`:
+Configure periodic runs via Scheduled Tasks (Cron):
 
-```markdown
-## Active tasks
-- Generate today’s work report    # daily
-- Generate weekly report          # every Friday
-- Generate monthly report         # month end
-```
+| Task | Cron expression | Description |
+|------|-----------------|-------------|
+| Generate today's work report | `0 18 * * *` | Every day at 18:00 |
+| Generate weekly report | `0 18 * * 5` | Every Friday at 18:00 |
+| Generate monthly report | `0 18 L * *` | Last day of month at 18:00 |
 
 ## Daily report template
 
@@ -339,7 +337,7 @@ Configure periodic runs in `HEARTBEAT.md`:
 ## ✅ Done
 - Finished daily-report skill
 - Configured Feishu channel
-- Tested heartbeat
+- Tested scheduled task
 
 ## 🔄 In progress
 - Write documentation
@@ -397,16 +395,9 @@ EMAIL_PROVIDER=163
 
 **Note:** `EMAIL_TOKEN` is the mailbox **authorization code**, not the login password. In 163: Settings → POP3/SMTP/IMAP → enable IMAP → generate auth code.
 
-### Heartbeat
+### Scheduled Task
 
-```yaml
-heartbeat:
-  every: 3600
-  target: feishu
-  active_hours:
-    start: 18:00
-    end: 18:30
-```
+Configure a Cron scheduled task to trigger daily report generation at 18:00, with Feishu as the push target.
 
 ## API reference
 
@@ -461,7 +452,7 @@ monthly = generator.generate_monthly(2026, 3)
 
 1. **Git**: ensure the repo path is correct and readable.
 2. **Mail**: use the authorization code, not the login password.
-3. **Heartbeat**: restart services after changes.
+3. **Scheduled task**: restart services after changes.
 4. **Storage**: reports are saved under `workspace/agent/reports/`.
 
 ## Changelog
@@ -2291,65 +2282,31 @@ PERPLEXITY_API_KEY=
 + `EMAIL_TOKEN`：email authorization code (not login password); it needs to be obtained after enabling IMAP service in the mailbox settings
 + `EMAIL_PROVIDER`：email provider; currently supports three NetEase mailboxes: `163`、`126`、`yeah`
 
-### 6.2 Heartbeat Configuration (HEARTBEAT.md)
-```markdown
-# Heartbeat tasks
+### 6.2 Scheduled Task Configuration
 
-In this file, configure tasks that JiuwenSwarm needs to execute periodically.
+Create scheduled tasks via the Web interface to automatically trigger daily report generation using Cron expressions:
 
----
+| Config item | Value | Description |
+|-------------|-------|-------------|
+| **Task name** | `daily_report` | Daily report generation task |
+| **Cron expression** | `0 18 * * *` | Trigger at 18:00 every day |
+| **Push channel** | `feishu` | Feishu push |
+| **Execution mode** | `agent.plan` | Agent planning execution |
 
-## Active task items
-
-<!-- After this line, add tasks to be executed, one per line, starting with "- " -->
-
-- Generate today's work daily report
-
-<!-- Weekly report tasks (triggered every Friday) -->
-<!-- - Generate this week's work weekly report -->
-
-<!-- Monthly report tasks (triggered at the end of every month) -->
-<!-- - Generate this month's work monthly report -->
-
----
-
-## Completed task items
-
-<!-- Move completed tasks to this section or delete -->
-
----
-
-## Task description
-
-### Daily report task
-- **Trigger time**: Every day 18:00 - 18:30 (configured according to config.yaml)
+#### Daily report task
+- **Trigger time**: Every day at 18:00 (configured via Cron expression)
 - **Push target**: Feishu
 - **Content**: Today's Git commits, task completion status, email statistics, work efficiency analysis
 
-### Weekly report task
-- **Trigger time**: Every Friday 18:00 - 18:30
+#### Weekly report task
+- **Trigger time**: Every Friday at 18:00 (`0 18 * * 5`)
 - **Push target**: Feishu
 - **Content**: This week's data aggregation, trend analysis, next week's plan
 
-### Monthly report task
-- **Trigger time**: The last day of every month 18:00 - 18:30
+#### Monthly report task
+- **Trigger time**: Last day of every month at 18:00
 - **Push target**: Feishu
 - **Content**: This month's data aggregation, achievements summary, next month's plan
-
----
-
-## Configuration method
-
-Modify the `heartbeat` configuration in `config/config.yaml`：
-
-```yaml
-heartbeat:
-  every: 3600              # Heartbeat interval (seconds)
-  target: feishu           # Push target
-  active_hours:
-    start: 18:00           # Effective start time
-    end: 18:30             # Effective end time
-```
 
 **After modification, restart the service for it to take effect.**
 
@@ -2393,17 +2350,6 @@ git_repos:
 The Feishu configuration actually used by this project in `config.yaml`：
 
 ```yaml
-heartbeat:
-  # Heartbeat interval (seconds), default 3600 (1 hour)
-  every: 3600
-  # The channel for returning heartbeat results
-  target: feishu
-  # Heartbeat effective time window (local time)
-  # Daily report generation will be triggered during 18:00-18:30
-  active_hours:
-    start: 18:00
-    end: 18:30
-
 channels:
   feishu:
     # Feishu application configuration
@@ -2453,11 +2399,11 @@ Help me create a to-do list:
 2. Implement the Git commit data collection module
 3. Implement the email statistics data collection module
 4. Configure Feishu channel push
-5. Test the heartbeat trigger function
+5. Test the scheduled task trigger function
 6. Write the development documentation
 ```
 
-<!-- This is an image. The OCR content is: Help me create a to-do list: 1.Complete daily report generator skill development 2.Implement GIT commit data collection module 3.Implement email statistics data collection module 4.Configure Feishu channel push 5.Test heartbeat trigger function 6.Write development documentation JIUWENCLAW daily report sending It has successfully added 6 new tasks requested by the user to the to-do list, and recorded them in today's memory file. The current to-do list has been updated, including: 1.Complete daily report generator skill development 2.Implement GIT commit data collection module 3.Implement email statistics data collection module 4.Configure Feishu channel push 5.Test heartbeat trigger function 6.Write development documentation The previously completed tasks are kept at the bottom of the list as historical records. The new task list is ready and can be started. -->
+<!-- This is an image. The OCR content is: Help me create a to-do list: 1.Complete daily report generator skill development 2.Implement GIT commit data collection module 3.Implement email statistics data collection module 4.Configure Feishu channel push 5.Test scheduled task trigger function 6.Write development documentation JIUWENCLAW daily report sending It has successfully added 6 new tasks requested by the user to the to-do list, and recorded them in today's memory file. The current to-do list has been updated, including: 1.Complete daily report generator skill development 2.Implement GIT commit data collection module 3.Implement email statistics data collection module 4.Configure Feishu channel push 5.Test scheduled task trigger function 6.Write development documentation The previously completed tasks are kept at the bottom of the list as historical records. The new task list is ready and can be started. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862423989-5bdc4508-5cfe-4465-86c1-ba696f0246f8.png)
 
 #### Step 2：Simulate Work Records (test memory data collection)
@@ -2470,11 +2416,11 @@ Help me record today's work:
 - Created the to-do items collector todo_collector.py
 - In the afternoon, completed the work analysis engine work_analyzer.py
 - Implemented the report generator report_generator.py
-- Configured heartbeat and Feishu push
+- Configured scheduled task and Feishu push
 - Conducted functional testing and debugging
 ```
 
-<!-- This is an image. The OCR content is: Help me record today's work: In the morning, completed the writing of the SKILL.MD skill definition file Created the GIT commit collector GIT_COLLECTOR.PY Created the email statistics collector EMAIL_COLLECTOR.PY Created the memory data collector MEMORY_COLLECTOR.PY Created the to-do items collector TODO_COLLECTOR.PY In the afternoon, completed the work analysis engine WORK_ANALYZER.PY -Implemented the report generator REPORT_GENERATOR.PY Configured heartbeat and Feishu push Conducted functional testing and debugging JIUWENCLAW daily report sending It has successfully recorded today's work content to "MEMORY/2026-03-07.MD", including in the morning the completion of writing the SKILL.MD compiler and the creation of multiple collectors (GIT, COLLECTOR.PY, EMAIL_COLLECTOR.PY, MEMORY_COLLECTOR.PY, TODO_COLLECTOR.PY), as well as completing in the afternoon the work analysis engine and report generator development, and the configuration and functional testing. The record is completed. -->
+<!-- This is an image. The OCR content is: Help me record today's work: In the morning, completed the writing of the SKILL.MD skill definition file Created the GIT commit collector GIT_COLLECTOR.PY Created the email statistics collector EMAIL_COLLECTOR.PY Created the memory data collector MEMORY_COLLECTOR.PY Created the to-do items collector TODO_COLLECTOR.PY In the afternoon, completed the work analysis engine WORK_ANALYZER.PY -Implemented the report generator REPORT_GENERATOR.PY Configured scheduled task and Feishu push Conducted functional testing and debugging JIUWENCLAW daily report sending It has successfully recorded today's work content to "MEMORY/2026-03-07.MD", including in the morning the completion of writing the SKILL.MD compiler and the creation of multiple collectors (GIT, COLLECTOR.PY, EMAIL_COLLECTOR.PY, MEMORY_COLLECTOR.PY, TODO_COLLECTOR.PY), as well as completing in the afternoon the work analysis engine and report generator development, and the configuration and functional testing. The record is completed. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862487637-8206f051-3e56-42b9-acc5-fa6a9d2ae819.png)
 
 <!-- This is an image. The OCR content is: 中口口口 终谈() 编码(日) 转到(G) 远泽(S) 文件() 运行() 直谷(M) 12026-03-07MD U X 发行说明:1.110.0 WORKSPACE>AGENL>MEMORY>因26-03-07MD>-07M 当施行办状态 两户请农创连设为适息,包容区项目标任务:1,充效白招生成员以期开发,2.配置飞手原油铁道, Q 上午完成了SKTLLIND滨与 创建了辅助原本 配出了心跳和飞书 .下午进行了功能测试开差执行 DAILY-REPORT 技能生成今日日报,2826-03-07 节#操作记录 用户请求创建新的消办清单,包含6项任务: REPORTS WORKSPACE ,实现GIT提交数据采集模块 实现邮箱统计数据采集模块 MEMORY 配置飞书频道推送 测试心既触发功能 2026-03-07MD 6.缩与开发文档新增任务 用户创建新的待办清单,包含以下6项任务: 完成日报生威器技能开发 MEMORY.OB SHM 实现GIT提交数据采集楼块 MEMORY.DB-WAL 实现由难统计数据采集模块 CA MEMORYMD 配置飞书须道推送 测试心跳触发功能 编写开发文档 当前待办状态 口 KILLS 插入新任务列表,原任务保留历史记录:工作日志 DAILY-REPORT 上午完成了 SKILL,MD 技能定义文件编与 ANALYZERS 创建了 GIT 提交采集器 GIT COLLECTOR.PY 理了邮件统计采货器EMAIL_COLLECTOR.PY 创建了记亿数据采集器 MENORY COLLECTOR.PY 创建了待办,事项采集器TODO COLLECTOR.PY REPERT_HELPER PY 下午完成了工作分析引引草WORK ANALYZER.PY RUN REPORT.PY 实现了报告生成器 REPORT.GENERATOR.PY SKILL.MD 配置了心跳和飞书推送 LINANCAL-DOCUMENI-PARSER 进行了功能测试和调试 INBNOAL PARSEC.OW SOULMD GIBGNORE BUILDPS1 >大男 行2.列10 空标2 UIF8 CRIF () MSTDOWN BFNITH >* GA MAIN' & ( 0 LICK TO UPDATE IS READY,CLICK TO REST 0乡 FINISH SETUP -->
@@ -2489,10 +2435,10 @@ git commit -m "feat: Add complete daily report generator function
 - Implement multi-data source collection (Git/email/memory/todo)
 - Add work analysis engine
 - Support daily/weekly/monthly report generation
-- Configure Feishu push and heartbeat trigger"
+- Configure Feishu push and scheduled task trigger"
 ```
 
-<!-- This is an image. The OCR content is: JIUWENCLAW daily report sending JIUWENCLAW daily report sending Bot #Submit some code in the project to test GIT collection GIT ADD. GIT COMMIT -M "FEAT:Add complete daily report generator function Implement multi-data source collection (GIT/email/memory/todo) Add work analysis engine Support daily/weekly/monthly report generation Configure Feishu push and heartbeat trigger" JIUWENCLAW daily report sending It has successfully executed the GIT commit operation: 1. Disabled the prompt information for ignored files 2. Used the -F parameter to forcibly add files ignored by `GITIGNORE" 3. Successfully committed the code, the commit message is: 1 FEAT:Add complete daily report generator function 2 3 -Implement multi-data source collection (GIT/email/memory/todo) 4-Add work analysis engine 5 Support daily/weekly/monthly report generation 6-Configure Feishu push and heartbeat trigger The code submission is completed. -->
+<!-- This is an image. The OCR content is: JIUWENCLAW daily report sending JIUWENCLAW daily report sending Bot #Submit some code in the project to test GIT collection GIT ADD. GIT COMMIT -M "FEAT:Add complete daily report generator function Implement multi-data source collection (GIT/email/memory/todo) Add work analysis engine Support daily/weekly/monthly report generation Configure Feishu push and scheduled task trigger" JIUWENCLAW daily report sending It has successfully executed the GIT commit operation: 1. Disabled the prompt information for ignored files 2. Used the -F parameter to forcibly add files ignored by `GITIGNORE" 3. Successfully committed the code, the commit message is: 1 FEAT:Add complete daily report generator function 2 3 -Implement multi-data source collection (GIT/email/memory/todo) 4-Add work analysis engine 5 Support daily/weekly/monthly report generation 6-Configure Feishu push and scheduled task trigger The code submission is completed. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862545512-3cf0d5fd-ab1e-4d4a-bea2-520a843302f4.png)
 
 <!-- This is an image. The OCR content is: Historical records: Current project's GIT history Commit hash Date Commit message FEAT:Add complete daily report generator function 60ED98E 2026-03-07 FEAT:Optimize Feishu CHANNEL 8DBELCF 2026-03-06 FIX HEARTBEAT C1FE22D 2026-03-05 1D7CBDA 2026-03-05 SOME BUG FIX F21649A 2026-03-03 UPDATE:Update file README.MD 6C0F844 UPDATE:Update file README.MD 2026-03-03 INITIAL COMMIT 2026-03-03 C08E67E Total of 7 commits; the project started from March 3. Today's (March 7) latest commit is FEAT:Add complete daily report generator function. -->
