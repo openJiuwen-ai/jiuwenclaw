@@ -1879,9 +1879,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 )
             )
 
-        # ── 固定挂载：explore_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "explore_agent"):
-            explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
+        # ── explore_agent（Code 模式核心子代理，默认启用，可显式关闭）──
+        explore_agent_cfg = subagents_cfg.get("explore_agent") if isinstance(subagents_cfg, dict) else None
+        if self._is_subagent_default_enabled(explore_agent_cfg) and not self._subagent_list_has_name(
+            subagents, "explore_agent"
+        ):
             explore_spec = build_explore_agent_config(
                 model=model,
                 workspace=workspace,
@@ -1895,9 +1897,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             explore_spec.factory_kwargs = {"auto_create_workspace": False}
             subagents.append(explore_spec)
 
-        # ── 固定挂载：plan_agent（Code 模式核心子代理，始终启用）──
-        if not self._subagent_list_has_name(subagents, "plan_agent"):
-            plan_agent_cfg = subagents_cfg.get("plan_agent") if isinstance(subagents_cfg, dict) else None
+        # ── plan_agent（Code 模式核心子代理，默认启用，可显式关闭）──
+        plan_agent_cfg = subagents_cfg.get("plan_agent") if isinstance(subagents_cfg, dict) else None
+        if self._is_subagent_default_enabled(plan_agent_cfg) and not self._subagent_list_has_name(
+            subagents, "plan_agent"
+        ):
             plan_spec = build_plan_agent_config(
                 model=model,
                 workspace=workspace,

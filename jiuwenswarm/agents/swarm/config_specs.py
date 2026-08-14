@@ -775,8 +775,10 @@ def build_member_subagent_specs(
     """Build declarative member subagent specs.
 
     The status-line setup agent is available in every mode when enabled.
-    Code modes additionally include explore / plan, while code / browser are
-    config-gated via ``react.subagents.<name>.enabled``.
+    Code modes additionally include explore / plan. Every sub-agent is gated by
+    ``react.subagents.<name>.enabled``; status-line setup, explore and plan
+    default to on (only an explicit ``false`` drops them), while code / browser
+    require an explicit ``true``.
 
     Args:
         config: The resolved ``config.yaml`` mapping.
@@ -810,14 +812,16 @@ def build_member_subagent_specs(
     if not _is_code_mode(mode):
         return specs
 
-    specs.extend(
-        [
-            _code_subagent_spec(
-                "explore_agent", registry.EXPLORE_AGENT, react, language
-            ),
-            _code_subagent_spec("plan_agent", registry.PLAN_AGENT, react, language),
-        ]
-    )
+# Explore / plan are the code profile's core sub-agents and stay mounted
+    # unless a config entry turns them off explicitly, so an absent entry keeps
+    # the long-standing behaviour.
+    for name, factory_name in (
+        ("explore_agent", registry.EXPLORE_AGENT),
+        ("plan_agent", registry.PLAN_AGENT),
+    ):
+        sub_cfg = subagents_cfg.get(name) if isinstance(subagents_cfg, dict) else None
+        if _is_subagent_default_enabled(sub_cfg):
+            specs.append(_code_subagent_spec(name, factory_name, react, language))
     if isinstance(subagents_cfg, dict):
         if _is_subagent_enabled(subagents_cfg.get("code_agent")):
             specs.append(
