@@ -1529,6 +1529,41 @@ class JiuWenSwarmDeepAdapter:
 
         return subagents or None, should_add_general_purpose
 
+    def _inject_dolores_general_purpose_subagent(
+        self,
+        subagents: list[Any] | None,
+        *,
+        enabled: bool,
+        model: Model,
+        rails: list[Any],
+        system_prompt: str | None,
+        tools: list[Any],
+        workspace: Workspace,
+        sys_operation: Any,
+    ) -> list[Any]:
+        """Materialize the general-purpose spec skipped by the Dolores path.
+
+        ``create_deep_agent`` normally performs this injection while resolving
+        its construction parts.  Dolores builds ``DeepAgentConfig`` directly,
+        so it must invoke the same helper explicitly or the boolean returned by
+        ``_build_configured_subagents`` is otherwise lost.
+        """
+        from openjiuwen.harness.factory import _inject_general_purpose_subagent
+
+        return _inject_general_purpose_subagent(
+            subagents,
+            add_general_purpose_agent=enabled,
+            resolved_language=self._resolve_runtime_language(),
+            rails=rails,
+            system_prompt=system_prompt,
+            tools=tools,
+            mcps=None,
+            model=model,
+            skills=None,
+            workspace=workspace,
+            sys_operation=sys_operation,
+        )
+
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
         return build_mcp_server_config(entry)
@@ -3992,6 +4027,16 @@ class JiuWenSwarmDeepAdapter:
         # env-gate: dolores → AgentLoop, else → DeepAgent
         if os.getenv("JIUWENSWARM_AGENT_KIND", "").strip().lower() == "dolores":
             from jiuwenswarm.extensions.dolores.server.runtime.agent_adapter.agent_loop import AgentLoop
+            _dolores_subagents = self._inject_dolores_general_purpose_subagent(
+                configured_subagents,
+                enabled=should_enable_general_agent,
+                model=common_kwargs["model"],
+                rails=common_kwargs["rails"],
+                system_prompt=common_kwargs["system_prompt"],
+                tools=common_kwargs["tools"],
+                workspace=common_kwargs["workspace"],
+                sys_operation=sys_operation,
+            )
             # 构造最小 DeepAgentConfig：让 AgentLoop 拿到 max_iterations / workspace / language
             # （model_name 从 Model 实例自身取，deep_config 不含 model_name 字段）
             _dolores_deep_cfg = DeepAgentConfig(
@@ -4004,7 +4049,8 @@ class JiuWenSwarmDeepAdapter:
                 language=self._resolve_runtime_language(),
                 enable_task_loop=common_kwargs.get("enable_task_loop", False),
                 tools=tool_cards if tool_cards else [],
-                subagents=configured_subagents,
+                subagents=_dolores_subagents or None,
+                add_general_purpose_agent=False,
                 # 路径 5 (task 5.5)：completion_timeout 墙钟。stock 默认 600s 假设已快（压缩+工具暴露做好）；
                 # fork 现在慢（pptx-craft ~753s），设 1800s 容纳+余量，速度修好后降回 600。
                 completion_timeout=1800.0,
