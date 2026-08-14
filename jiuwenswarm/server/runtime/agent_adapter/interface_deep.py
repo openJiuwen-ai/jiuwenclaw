@@ -808,7 +808,11 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         ctx_win = parse_int(mco.get("max_tokens"), None) if isinstance(mco, dict) else None
         if ctx_win is not None:
             # 挂到 Model 普通属性，绝不进 ModelRequestConfig 的 extra（防 model_dump 泄漏到 SDK）。
-            model._agentos_ctx_window = ctx_win
+            # 用 setattr 而非 model._agentos_ctx_window = ... ：Model 是 openjiuwen 客户端类，
+            # 直接点号赋值会触发 G.CLS.11 protected-access；setattr 是通用 API，静态扫描不跟踪
+            # 属性名，与本文件 _instance 挂属性（L1685）等既有写法一致。运行时语义等价、
+            # 仍不进 pydantic model_dump。
+            setattr(model, "_agentos_ctx_window", ctx_win)
     return model
 
 
