@@ -8,7 +8,6 @@ export type ModelSetupGuideStep = 1 | 2;
 
 interface ModelSetupGuideProps {
   step: ModelSetupGuideStep;
-  manual: boolean;
   onAcknowledge: () => void;
   onSkip: () => void;
 }
@@ -66,7 +65,6 @@ function findVerticalScrollContainer(target: Element): HTMLElement | null {
 
 export function ModelSetupGuide({
   step,
-  manual,
   onAcknowledge,
   onSkip,
 }: ModelSetupGuideProps) {
@@ -227,25 +225,23 @@ export function ModelSetupGuide({
       />
       <section
         key={step}
-        className={`model-setup-guide__callout${manual ? ' model-setup-guide__callout--manual' : ''}`}
+        className="model-setup-guide__callout"
         style={calloutStyle}
         aria-labelledby={`model-setup-guide-title-${step}`}
         aria-describedby={`model-setup-guide-description-${step}`}
         data-testid="model-setup-guide-callout"
         data-variant={step}
       >
-        {manual ? (
-          <button
-            type="button"
-            className="model-setup-guide__skip"
-            onClick={onSkip}
-            aria-label={t('modelSetupGuide.skip')}
-            title={t('modelSetupGuide.skip')}
-            data-testid="model-setup-guide-skip"
-          >
-            {t('modelSetupGuide.skip')}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className="model-setup-guide__skip"
+          onClick={onSkip}
+          aria-label={t('modelSetupGuide.skip')}
+          title={t('modelSetupGuide.skip')}
+          data-testid="model-setup-guide-skip"
+        >
+          {t('modelSetupGuide.skip')}
+        </button>
         <div className="model-setup-guide__content" data-testid="model-setup-guide-content">
           <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" />
           <div className="model-setup-guide__copy" data-testid="model-setup-guide-copy">
