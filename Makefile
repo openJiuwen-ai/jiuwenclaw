@@ -26,7 +26,7 @@ endif
 # Target that is not a file -> always considered out of date.
 .PHONY: help install sync lock update-deps update-openjiuwen test test-unit test-integration \
 		test-cov lint lint-fix format typecheck clean build \
-		init start-debug start-debug-rebuild
+		init start-debug start-debug-rebuild stop
 
 # ----------------------------------------------------------------------
 # Setup
@@ -76,6 +76,10 @@ start-debug: ## Start services in debug mode, reusing the existing frontend buil
 start-debug-rebuild: ## Start services in debug mode, rebuilding the frontend first
 	@printf "$(C_INFO)Starting services in debug mode (full build)...$(C_RESET)\n"
 	$(UV) run jiuwenswarm-start debug
+
+stop: ## Stop the background debug service started by start-debug
+	@printf "$(C_INFO)Stopping debug service...$(C_RESET)\n"
+	$(UV) run jiuwenswarm-stop
 
 # ----------------------------------------------------------------------
 # Testing — wraps the run_tests.sh helper for richer flags
