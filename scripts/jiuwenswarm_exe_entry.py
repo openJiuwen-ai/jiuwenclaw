@@ -10,6 +10,8 @@ import subprocess
 import traceback
 from pathlib import Path
 
+from jiuwenswarm.common._build_config import DISPLAY_NAME, ERROR_LOG_NAME
+
 # frozen（PyInstaller 打包）模式下，macOS 双击 .app 启动时 cwd 为 "/"，
 # 导致 openjiuwen 的默认日志路径 "./logs/" 解析为 "/logs/"（只读）。
 # 在任何业务 import 之前，将 cwd 切换到用户数据目录 ~/.jiuwenswarm，
@@ -157,8 +159,8 @@ def _release_single_instance_lock() -> None:
 
 
 def _show_already_running_message() -> None:
-    msg = "WorkSwarm is already running. Please use the existing window."
-    title = "WorkSwarm"
+    msg = f"{DISPLAY_NAME} is already running. Please use the existing window."
+    title = DISPLAY_NAME
     try:
         if os.name == "nt":
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
@@ -179,7 +181,7 @@ def _write_child_error(exc: BaseException) -> None:
     try:
         log_dir = Path(os.environ.get("JIUWENSARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "workswarm_exe_error.log"
+        log_file = log_dir / ERROR_LOG_NAME
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{'=' * 60}\n")
             f.write(f"argv: {sys.argv}\n")
