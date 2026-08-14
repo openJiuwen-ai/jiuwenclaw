@@ -781,10 +781,15 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     # （上下文压缩阈值，由 ``_deep_agent_context_engine_config`` 的 per-model
     # 覆盖路径喂入，不发往厂商）。
     # 但 core 的 ``ModelRequestConfig`` 也有同名字段 ``max_tokens``，那是"输出
-    # token 上限"语义、会发往厂商。``_source`` 标记已由
-    # ``reasoning_injector._build_model_request_kwargs`` 统一 pop（不进 kwargs），
-    # 故这里从原始 mco 取标记作门控：若是 agentos，把 kwargs 里的 max_tokens
-    # pop 掉，否则 agentos 配的输入窗口值会被误当成输出上限发往厂商。
+    # token 上限"语义、会发往厂商。``reasoning_injector._build_model_request_kwargs``
+    # 已在公共出口处对 agentos 统一 pop 了 max_tokens（防它进输出侧字段，覆盖
+    # build_model_from_entry / config.validate_model 等所有路径），故此处 kwargs
+    # 里的 max_tokens 已被清掉。这里从原始 mco 重新取该值，写入 extra 键
+    # ``_agentos_ctx_window`` 存进 ``ModelRequestConfig``——extra="allow" 会收下它，
+    # 作为"随选中 Model 带入缓存"的载体，供 ``_deep_agent_context_engine_config``
+    # 直接从选中条目读值（同名多条目时能精确"选中哪个用哪个的 max_tokens"）。
+    # 该 extra 不经厂商请求：reasoning_injector 在下次走 _build_model_request_kwargs
+    # 时会 pop 它，且它只在缓存构建路径写入、不经 invoke 直发 SDK。
     # defaults 无此标记，行为完全不变。
     is_agentos = isinstance(mco, dict) and mco.get("_source") == "agentos"
     request_kwargs = build_reasoning_model_request_kwargs(
@@ -793,7 +798,9 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
         model_name=name,
     )
     if is_agentos:
-        request_kwargs.pop("max_tokens", None)
+        ctx_win = parse_int(mco.get("max_tokens"), None) if isinstance(mco, dict) else None
+        if ctx_win is not None:
+            request_kwargs["_agentos_ctx_window"] = ctx_win
 
     m_config = ModelRequestConfig(**request_kwargs)
     return Model(model_client_config=ModelClientConfig(**mcc_fields), model_config=m_config)
@@ -813,35 +820,56 @@ def _deep_agent_context_engine_config(
     react_cfg: dict[str, Any] | None,
     full_config: dict[str, Any] | None = None,
     model_name: str | None = None,
+    model: Any = None,
 ) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
     仅承接 ContextEngine 自身配置；KV cache affinity 由独立
     ``react.kv_cache_affinity_config`` 管理。
 
-    AgentOS per-model 覆盖（路径 B）：当 ``full_config`` 与 ``model_name`` 同时提供，
-    且 ``models.agentos`` 的 ``model_name`` 与之匹配时，用 agentos 块的
-    ``max_tokens``（用户可读的输入侧上下文窗口别名）覆盖基础值，写入 core 的
-    ``ContextEngineConfig.context_window_tokens``（压缩阈值，不发往厂商）。
-    这使输入侧上下文窗口配置仅作用于 agentos，defaults 不受影响（defaults 不会
-    传匹配的 model_name）。注意：agentos mco 的 ``max_tokens`` 在
-    ``build_model_from_entry`` 处已被 pop，不进 ``ModelRequestConfig``。
+    AgentOS per-model 覆盖——"选中哪个模型配置就用哪个的 max_tokens"：
+
+    路径 A（首选，精确）：传入 ``model``（当前选中的 ``Model`` 对象）时，直接从其
+    ``model_config._agentos_ctx_window`` extra 读 agentos 输入侧上下文窗口值。
+    该 extra 由 ``build_model_from_entry`` 在构造 agentos 的 ``ModelRequestConfig``
+    时写入（把 ``max_tokens`` 从输出侧 kwargs 挪过来）。每个 agentos 条目各造各的
+    Model 对象、各带自己的 extra，故同名多条目也能精确区分"选中哪个用哪个的值"。
+
+    路径 B（回退，兼容）：``model`` 不可用时，从 ``full_config["models"]["agentos"]``
+    按 ``model_name`` 反查。agentos 现为列表（兼容旧单块 dict），取首个 model_name
+    匹配的条目。此路径在同名多条目时无法区分，仅供旧调用方/未传 model 时兜底。
+    defaults 不受影响（不会传匹配 agentos 的 model_name 或带 agentos extra 的 model）。
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
     cw_tokens = parse_int(cec.get("context_window_tokens"), None)
 
-    # AgentOS per-model 覆盖：仅当当前请求模型名与 agentos 配置的模型名一致时生效。
-    if full_config and model_name:
-        agentos_block = (full_config.get("models") or {}).get("agentos")
-        if isinstance(agentos_block, dict):
-            agentos_mcc = agentos_block.get("model_client_config") or {}
-            if agentos_mcc.get("model_name") == model_name:
-                agentos_mco = agentos_block.get("model_config_obj") or {}
-                agentos_cw = parse_int(agentos_mco.get("max_tokens"), None)
-                if agentos_cw is not None:
-                    cw_tokens = agentos_cw
+    # AgentOS per-model 覆盖。
+    # 路径 A：从选中 Model 的 extra 直接读（精确，同名可区分）。
+    agentos_cw: int | None = None
+    if model is not None:
+        m_cfg = getattr(model, "model_config", None)
+        if m_cfg is not None:
+            agentos_cw = parse_int(getattr(m_cfg, "_agentos_ctx_window", None), None)
+    # 路径 B：model 不可用时，从 config 的 agentos 列表按 model_name 反查（兼容旧调用）。
+    if agentos_cw is None and full_config and model_name:
+        agentos_raw = (full_config.get("models") or {}).get("agentos")
+        if isinstance(agentos_raw, dict):
+            agentos_list = [agentos_raw]
+        elif isinstance(agentos_raw, list):
+            agentos_list = agentos_raw
+        else:
+            agentos_list = []
+        for blk in agentos_list:
+            if not isinstance(blk, dict):
+                continue
+            blk_mcc = blk.get("model_client_config") or {}
+            if isinstance(blk_mcc, dict) and blk_mcc.get("model_name") == model_name:
+                agentos_cw = parse_int((blk.get("model_config_obj") or {}).get("max_tokens"), None)
+                break
+    if agentos_cw is not None:
+        cw_tokens = agentos_cw
 
     recall = cec.get("compression_recall_config")
     recall = recall if isinstance(recall, dict) else {}
@@ -5026,6 +5054,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 full_config=config_base,
                 model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+                model=model,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
@@ -5565,6 +5594,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 full_config=config_base,
                 model_name=getattr(getattr(model, "model_config", None), "model_name", ""),
+                model=model,
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             vision_model_config=self._vision_model_config,

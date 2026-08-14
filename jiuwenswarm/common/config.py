@@ -1164,21 +1164,34 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
         # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
         # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
         # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
-        agentos_block = models.get("agentos")
-        if isinstance(agentos_block, dict) and agentos_block.get("model_client_config"):
-            mcc = agentos_block["model_client_config"]
-            if isinstance(mcc, dict) and mcc.get("model_name"):
-                agentos_entry = deepcopy(agentos_block)
-                agentos_entry["is_default"] = False
-                # _source 注入到 model_config_obj 内部，使其经
-                # build_reasoning_model_request_kwargs -> _model_config_to_dict
-                # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
-                # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的 kwargs 里
-                # pop 掉（用后即弃，不进 core，也不作为输出上限发往厂商）。
-                agentos_mco = agentos_entry.setdefault("model_config_obj", {})
-                if isinstance(agentos_mco, dict):
-                    agentos_mco["_source"] = "agentos"
-                entries.append(agentos_entry)
+        # 列表语义：models.agentos 可配多个备份模型（同名/异名皆可，填写约束为
+        # (model_name, api_base, api_key) 三元组唯一）；兼容旧的单块 dict（包成单元素列表处理）。
+        agentos_raw = models.get("agentos")
+        if isinstance(agentos_raw, dict):
+            agentos_list = [agentos_raw]
+        elif isinstance(agentos_raw, list):
+            agentos_list = agentos_raw
+        else:
+            agentos_list = []
+        for agentos_block in agentos_list:
+            if not isinstance(agentos_block, dict):
+                continue
+            mcc = agentos_block.get("model_client_config")
+            if not (isinstance(mcc, dict) and mcc.get("model_name")):
+                continue
+            agentos_entry = deepcopy(agentos_block)
+            agentos_entry["is_default"] = False
+            # _source 注入到 model_config_obj 内部，使其经
+            # build_reasoning_model_request_kwargs -> _model_config_to_dict
+            # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
+            # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的输出侧
+            # kwargs 里挪到 extra 键 _agentos_ctx_window（随选中 Model 带入缓存，
+            # 供 _deep_agent_context_engine_config 从选中条目精确取值），绝不作为
+            # 输出上限发往厂商。
+            agentos_mco = agentos_entry.setdefault("model_config_obj", {})
+            if isinstance(agentos_mco, dict):
+                agentos_mco["_source"] = "agentos"
+            entries.append(agentos_entry)
         return entries
 
     # 旧格式：单个 default 对象 → 包装为列表

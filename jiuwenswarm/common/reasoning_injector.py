@@ -123,7 +123,22 @@ def _build_model_request_kwargs(
     # AsyncCompletions.create(**params) 时不认该 kwarg 会抛 "unexpected keyword
     # argument"。统一在此清理，覆盖 build_model_from_entry / config.validate_model
     # / image_modality_warmup 等所有走本函数的路径。
+    is_agentos = request_kwargs.get("_source") == "agentos"
     request_kwargs.pop("_source", None)
+    # _agentos_ctx_window 是内部标记（agentos 输入侧上下文窗口别名，由
+    # build_model_from_entry 从原始 mco 取值、作为 extra 写进 ModelRequestConfig，
+    # 供 _deep_agent_context_engine_config 从选中 Model 读取）。它绝不可流到厂商
+    # 请求，统一在此清理（build_model_from_entry 会自己从 mco 重新写入 extra，
+    # 不依赖此处的值；web validate 等不进缓存的路径则需清理掉）。
+    request_kwargs.pop("_agentos_ctx_window", None)
+    # agentos 的 max_tokens 是"输入侧上下文窗口"别名（-> ContextEngineConfig，
+    # 不发厂商），绝不能进 core 的 ModelRequestConfig.max_tokens（那是"输出
+    # token 上限"语义、会发厂商）。此处是所有路径的公共出口，统一在此 pop，
+    # 保证 web validate 等绕过 build_model_from_entry 的路径也不会把它误当成
+    # 输出上限。build_model_from_entry 会从原始 mco 取该值写入 _agentos_ctx_window
+    # extra（随 Model 带入缓存），不依赖此处的 pop。
+    if is_agentos:
+        request_kwargs.pop("max_tokens", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 

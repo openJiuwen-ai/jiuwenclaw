@@ -291,15 +291,21 @@ models:
       model_config_obj:
         temperature: 0.95
   # ---- AgentOS 模型（备份切换用，不参与主对话）----
-  # 单块结构（同 video/audio），凭证直接填在 YAML，无环境变量。
-  # model_name 为空 = 未配置；填入后通过 models.list 可见、可按名切换，
-  # 但不带 is_default，绝不抢主对话，仅在被显式选中时使用。
+  # 列表结构，可配多个备份模型，凭证直接填在 YAML，无环境变量。
+  # 每个元素一个模型；model_name 为空 = 该条未配置，跳过不入缓存。
+  # 填入后通过 models.list 可见、可按名切换，但不带 is_default，
+  # 绝不抢主对话，仅在被显式选中时使用。
+  # 可配多条备份模型。填写约束：(model_name, api_base, api_key) 三元组唯一，
+  # 即不存在完全相同的两条；同名（base 或 key 不同）可共存，靠缓存
+  # {model_name}#{index} 区分。
   # max_tokens：输入侧上下文窗口上限，映射到 core 的 ContextEngineConfig.context_window_tokens
-  #   （上下文压缩阈值，不发往厂商）。仅作用于 agentos，不影响 defaults。
-  #   注意：此处 max_tokens 仅是用户可读别名，build_model_from_entry 会把它从
-  #   ModelRequestConfig 的 kwargs 里 pop 掉，绝不作为输出 token 上限发往厂商。
+  #   （上下文压缩阈值，不发往厂商）。仅作用于选中的 agentos 条目，不影响 defaults：
+  #   build_model_from_entry 会把它的值挪到 ModelRequestConfig 的 extra 键
+  #   _agentos_ctx_window（随选中 Model 带入缓存），并从输出侧 kwargs 里 pop 掉，
+  #   绝不作为输出 token 上限发往厂商。_deep_agent_context_engine_config 从选中
+  #   Model 读该 extra 做覆盖，因此同名条目也能精确"选中哪个用哪个的 max_tokens"。
   agentos:
-      model_client_config:
+    - model_client_config:
         api_base: ""
         api_key: ""
         model_name: ""
