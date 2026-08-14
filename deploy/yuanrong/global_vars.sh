@@ -49,12 +49,16 @@ declare -A DEPLOY_VARS=(
     ["MASTER_NODE_IP"]=""
     ["REGISTRY_PORT"]=""
     ["SSH_PORT"]=""
-    # TUI GatewayServer bind host; empty → default to MASTER_NODE_IP at deploy check time
+    # TUI GatewayServer bind host; empty → default to 0.0.0.0 at deploy check time
     ["GATEWAY_HOST"]=""
     ["GATEWAY_PORT"]=""
-    # WebChannel bind host; empty → default to MASTER_NODE_IP at deploy check time
+    # WebChannel bind host; empty → default to 0.0.0.0 at deploy check time
     ["WEB_HOST"]=""
     ["WEB_PORT"]=""
+    # jiuwenswarm web 静态服务器 (jiuwenswarm-web, serve frontend/dist)
+    # /ws 代理到 gateway 的 WEB_PORT; 独立变量, 不复用 FRONTEND_PORT(后者指 yuanrong frontend 8888)
+    ["WEB_STATIC_HOST"]=""
+    ["WEB_STATIC_PORT"]=""
     ["SANDBOX_IDLE_TIMEOUT_SECONDS"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
