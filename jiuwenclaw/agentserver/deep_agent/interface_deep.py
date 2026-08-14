@@ -2671,7 +2671,13 @@ class JiuWenClawDeepAdapter:
 
         react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
         因此需要同时替换 _llm 和 _config 中的模型相关字段。
+        同时同步 self._model_request_config / self._model_client_config，使
+        _resolve_model_name() 与 _update_tools_for_mode() 反映当前生效模型，
+        否则 RuntimePromptRail 注入的"模型：xxx"及 agent.fast 多会话子 agent
+        会停留在旧值。
         """
+        self._model_request_config = model.model_config
+        self._model_client_config = model.model_client_config
         react_agent = getattr(self._instance, '_react_agent', None)
         if react_agent is None:
             return
