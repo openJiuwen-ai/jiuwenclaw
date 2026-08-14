@@ -405,7 +405,11 @@ def test_celia_binary_prefers_extension_package_then_legacy_fallback(tmp_path, m
     celia_binary.touch()
     gspd_binary.touch()
 
-    resolved = build_celia_config({}, {"celia": {}}, workspace_dir=str(workspace))
+    resolved = build_celia_config(
+        {},
+        {"celia": {"server_binary_path": "/configured/legacy-binary"}},
+        workspace_dir=str(workspace),
+    )
     assert Path(resolved.server_binary_path) == gspd_binary
 
     gspd_binary.unlink()
