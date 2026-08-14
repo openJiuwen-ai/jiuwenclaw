@@ -17,6 +17,16 @@ from ..config import get_embed_config
 
 logger = logging.getLogger(__name__)
 
+_EXTENSION_BINARY_PATH = (
+    Path("extensions")
+    / "celia_memory"
+    / "package"
+    / "openclaw"
+    / "bin"
+    / "gspd_memory_mcp_server"
+)
+_LEGACY_BINARY_NAME = "gspd_memory_mcp_server"
+
 
 def _text(value: Any, default: str = "") -> str:
     if value is None:
@@ -61,6 +71,21 @@ def _first(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _find_extension_binary(data_dir: Path) -> Path | None:
+    """仅检查外置 extension package 中约定的 OpenClaw MCP 二进制路径。"""
+
+    binary = data_dir / _EXTENSION_BINARY_PATH
+    return binary if binary.is_file() else None
+
+
+def _default_binary_path(data_dir: Path) -> Path:
+    """优先使用外置 extension 二进制，缺失时返回历史兼容路径。"""
+
+    return _find_extension_binary(data_dir) or (
+        data_dir / "celia" / "bin" / _LEGACY_BINARY_NAME
+    )
 
 
 @dataclass(frozen=True)
@@ -371,7 +396,7 @@ def build_celia_config(
 
     resolved_workspace = Path(workspace_dir).expanduser() if workspace_dir else get_agent_workspace_dir()
     data_dir = get_user_workspace_dir()
-    default_binary = data_dir / "celia" / "bin" / "gspd_memory_mcp_server"
+    default_binary = _default_binary_path(data_dir)
     default_db = resolved_workspace / "memory" / "celia_memory" / "celia_memory.db"
     default_log = Path.home() / ".openclaw" / "logs" / "Celia_memory.log"
     default_runtime = Path.home() / ".openclaw" / ".xiaoyiruntime"
@@ -412,12 +437,7 @@ def build_celia_config(
         )
 
     return CeliaConfig(
-        server_binary_path=_first(
-            section.get("server_binary_path"),
-            section.get("binary_path"),
-            os.getenv("CELIA_MEMORY_BINARY_PATH"),
-            default_binary,
-        ),
+        server_binary_path=str(default_binary),
         db_path=_first(section.get("db_path"), os.getenv("CELIA_MEMORY_DB_PATH"), default_db),
         log_path=_first(section.get("log_path"), os.getenv("CELIA_MEMORY_LOG_PATH"), default_log),
         tenant_id=_first(
