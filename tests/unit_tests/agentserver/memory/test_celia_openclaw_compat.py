@@ -413,7 +413,11 @@ def test_celia_binary_uses_fixed_extension_path_then_legacy_fallback(tmp_path, m
     assert Path(resolved.server_binary_path) == gspd_binary
 
     gspd_binary.unlink()
-    resolved = build_celia_config({}, {"celia": {}}, workspace_dir=str(workspace))
+    resolved = build_celia_config(
+        {},
+        {"celia": {"server_binary_path": "/configured/legacy-binary"}},
+        workspace_dir=str(workspace),
+    )
     assert Path(resolved.server_binary_path) == (
         data_dir / "celia" / "bin" / "gspd_memory_mcp_server"
     )

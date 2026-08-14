@@ -396,7 +396,6 @@ def build_celia_config(
 
     resolved_workspace = Path(workspace_dir).expanduser() if workspace_dir else get_agent_workspace_dir()
     data_dir = get_user_workspace_dir()
-    extension_binary = _find_extension_binary(data_dir)
     default_binary = _default_binary_path(data_dir)
     default_db = resolved_workspace / "memory" / "celia_memory" / "celia_memory.db"
     default_log = Path.home() / ".openclaw" / "logs" / "Celia_memory.log"
@@ -438,13 +437,7 @@ def build_celia_config(
         )
 
     return CeliaConfig(
-        server_binary_path=_first(
-            extension_binary,
-            section.get("server_binary_path"),
-            section.get("binary_path"),
-            os.getenv("CELIA_MEMORY_BINARY_PATH"),
-            default_binary,
-        ),
+        server_binary_path=str(default_binary),
         db_path=_first(section.get("db_path"), os.getenv("CELIA_MEMORY_DB_PATH"), default_db),
         log_path=_first(section.get("log_path"), os.getenv("CELIA_MEMORY_LOG_PATH"), default_log),
         tenant_id=_first(
