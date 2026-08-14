@@ -39,9 +39,11 @@ interface ToolbarButtonProps {
   children: ReactNode;
   ariaHasPopup?: 'menu';
   ariaExpanded?: boolean;
+  testId?: string;
+  variant?: string;
 }
 
-function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded }: ToolbarButtonProps): JSX.Element {
+function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded, testId, variant }: ToolbarButtonProps): JSX.Element {
   return (
     <button
       type="button"
@@ -49,6 +51,8 @@ function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded }:
       aria-label={title}
       aria-haspopup={ariaHasPopup}
       aria-expanded={ariaExpanded}
+      data-testid={testId}
+      data-variant={variant}
       onClick={onClick}
       className="markdown-toolbar-btn"
     >
@@ -62,14 +66,18 @@ interface TogglePillProps {
   disabled?: boolean;
   onClick: () => void;
   children: ReactNode;
+  testId?: string;
+  variant?: string;
 }
 
-function TogglePill({ active, disabled = false, onClick, children }: TogglePillProps): JSX.Element {
+function TogglePill({ active, disabled = false, onClick, children, testId, variant }: TogglePillProps): JSX.Element {
   return (
     <button
       type="button"
       aria-pressed={active}
       disabled={disabled}
+      data-testid={testId}
+      data-variant={variant}
       onClick={onClick}
       className={clsx('markdown-toggle-pill', active && 'markdown-toggle-pill--active')}
     >
@@ -104,18 +112,20 @@ function DiagramMoreMenu({ title, items }: DiagramMoreMenuProps): JSX.Element {
   }, [open]);
 
   return (
-    <div className="diagram-more" ref={rootRef}>
-      <ToolbarButton title={title} ariaHasPopup="menu" ariaExpanded={open} onClick={() => setOpen(current => !current)}>
+    <div className="diagram-more" ref={rootRef} data-testid="markdown-diagram-more">
+      <ToolbarButton title={title} ariaHasPopup="menu" ariaExpanded={open} testId="markdown-diagram-more-toggle" onClick={() => setOpen(current => !current)}>
         <Ellipsis size={17} />
       </ToolbarButton>
       {open && (
-        <div className="diagram-menu" role="menu">
+        <div className="diagram-menu" role="menu" data-testid="markdown-diagram-menu">
           {items.map(item => (
             <button
               key={item.id}
               type="button"
               className="diagram-menu__item"
               role="menuitem"
+              data-testid="markdown-diagram-menu-item"
+              data-variant={item.id}
               disabled={item.disabled}
               onClick={() => {
                 setOpen(false);
@@ -172,20 +182,20 @@ export function DiagramViewer({
   ];
 
   const feedbackStatus = feedback && (
-    <span className="diagram-toolbar-status" role="status" aria-live="polite">
+    <span className="diagram-toolbar-status" role="status" aria-live="polite" data-testid="markdown-diagram-feedback">
       {feedback}
     </span>
   );
 
   return (
-    <div {...rootProps} className={clsx('diagram-container', className)} data-markdown-block="wide">
-      <div className="diagram-container__toolbar">
-        <div className="diagram-toolbar-start">
-          <div className="diagram-view-toggle">
-            <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} onClick={() => onViewModeChange('image')}>
+    <div {...rootProps} className={clsx('diagram-container', className)} data-markdown-block="wide" data-testid="markdown-diagram">
+      <div className="diagram-container__toolbar" data-testid="markdown-diagram-toolbar">
+        <div className="diagram-toolbar-start" data-testid="markdown-diagram-toolbar-start">
+          <div className="diagram-view-toggle" data-testid="markdown-diagram-view-toggle">
+            <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} testId="markdown-diagram-view-image" onClick={() => onViewModeChange('image')}>
               {t('diagram.image')}
             </TogglePill>
-            <TogglePill active={viewMode === 'code'} onClick={() => onViewModeChange('code')}>
+            <TogglePill active={viewMode === 'code'} testId="markdown-diagram-view-code" onClick={() => onViewModeChange('code')}>
               {t('diagram.code')}
             </TogglePill>
           </div>
@@ -193,6 +203,7 @@ export function DiagramViewer({
             <span
               role="status"
               aria-live="polite"
+              data-testid="markdown-diagram-status"
               className={clsx('diagram-toolbar-status', {
                 'diagram-toolbar-status--error': statusTone === 'danger',
                 'diagram-toolbar-status--warning': statusTone === 'warning',
@@ -203,10 +214,10 @@ export function DiagramViewer({
           )}
           {feedbackPosition === 'start' && feedbackStatus}
         </div>
-        <div className="diagram-toolbar-actions">
+        <div className="diagram-toolbar-actions" data-testid="markdown-diagram-toolbar-actions">
           {feedbackPosition === 'end' && feedbackStatus}
           {toolbarActions.map(action => (
-            <ToolbarButton key={action.id} title={action.title} onClick={action.onClick}>
+            <ToolbarButton key={action.id} title={action.title} testId="markdown-diagram-toolbar-action" variant={action.id} onClick={action.onClick}>
               {action.icon}
             </ToolbarButton>
           ))}

@@ -116,6 +116,8 @@ export function ModelProviderIcon({ model, className }: ModelProviderIconProps) 
         src={iconUrl}
         alt=""
         aria-hidden="true"
+        data-testid="model-provider-icon"
+        data-variant="image"
       />
     );
   }
@@ -124,6 +126,8 @@ export function ModelProviderIcon({ model, className }: ModelProviderIconProps) 
     <span
       className={`model-provider-icon model-provider-icon--fallback${className ? ` ${className}` : ''}`}
       aria-hidden="true"
+      data-testid="model-provider-icon"
+      data-variant="fallback"
     >
       {letter}
     </span>

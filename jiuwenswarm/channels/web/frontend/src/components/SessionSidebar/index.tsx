@@ -108,10 +108,10 @@ function AdvancedConfigPanel({
   if (!isOpen) return null;
 
   return (
-    <div ref={panelRef} className="advanced-config-panel">
-      <div className="config-row">
-        <span className="config-row__label">{t('sessionSidebar.connectionStatus')}</span>
-        <div className={`connection-status ${isConnected ? 'connection-status--connected' : 'connection-status--disconnected'}`}>
+    <div ref={panelRef} className="advanced-config-panel" data-testid="session-sidebar-advanced-config-panel">
+      <div className="config-row" data-testid="session-sidebar-config-row-connection">
+        <span className="config-row__label" data-testid="session-sidebar-config-row-connection-label">{t('sessionSidebar.connectionStatus')}</span>
+        <div className={`connection-status ${isConnected ? 'connection-status--connected' : 'connection-status--disconnected'}`} data-testid="session-sidebar-connection-status" data-variant={isConnected ? 'connected' : 'disconnected'}>
           <span className="connection-status__dot" />
           <span className="connection-status__text">
             {isConnected ? t('connection.connected') : t('connection.disconnected')}
@@ -120,24 +120,28 @@ function AdvancedConfigPanel({
       </div>
 
       {appVersion && (
-        <div className="config-row">
+        <div className="config-row" data-testid="session-sidebar-config-row-version">
           <span className="config-row__label">{t('sessionSidebar.version')}</span>
           <span className="config-row__value">{appVersion}</span>
         </div>
       )}
 
-      <div className="config-row">
+      <div className="config-row" data-testid="session-sidebar-config-row-language">
         <span className="config-row__label">{t('sessionSidebar.language')}</span>
-        <div className="segmented-control">
+        <div className="segmented-control" data-testid="session-sidebar-language-segmented">
           <button
             className={`segmented-control__btn ${isZh ? 'segmented-control__btn--active' : ''}`}
             onClick={() => handleLanguageChange('zh')}
+            aria-pressed={isZh}
+            data-testid="session-sidebar-language-zh"
           >
             中
           </button>
           <button
             className={`segmented-control__btn ${!isZh ? 'segmented-control__btn--active' : ''}`}
             onClick={() => handleLanguageChange('en')}
+            aria-pressed={!isZh}
+            data-testid="session-sidebar-language-en"
           >
             En
           </button>
@@ -206,8 +210,8 @@ export function SessionSidebar({
   }, [isMoreActive, onMorePanelOpenChange]);
 
   return (
-    <aside className="sidebar sidebar--icon-rail">
-      <div className="icon-rail-logo">
+    <aside className="sidebar sidebar--icon-rail" data-testid="session-sidebar-rail">
+      <div className="icon-rail-logo" data-testid="session-sidebar-logo">
         <img src={logoIcon} alt="Logo" width="28" height="28" />
       </div>
 
@@ -215,6 +219,7 @@ export function SessionSidebar({
         <button
           className="icon-rail-nav-item"
           onClick={handleNewSession}
+          data-testid="session-sidebar-new-session-button"
         >
           <span className="icon-rail-nav-item__icon">
             <PlusIcon aria-hidden width="16" height="16" />
@@ -228,6 +233,8 @@ export function SessionSidebar({
           key={item.key}
           className={`icon-rail-nav-item${isNavItemActive(item) ? ' icon-rail-nav-item--active' : ''}`}
           onClick={() => handleNavClick(item.key)}
+          data-testid="session-sidebar-nav-item"
+          data-variant={item.key}
         >
           <span className="icon-rail-nav-item__icon">{item.icon}</span>
           <span className="icon-rail-nav-item__label">{getNavItemLabel(item)}</span>
@@ -241,6 +248,7 @@ export function SessionSidebar({
             onClick={handleMoreClick}
             aria-expanded={isMoreActive}
             data-model-setup-guide-target="more"
+            data-testid="session-sidebar-more-trigger"
           >
             <span className="icon-rail-nav-item__icon">
               <MoreDesignIcon aria-hidden />
@@ -248,14 +256,16 @@ export function SessionSidebar({
             <span className="icon-rail-nav-item__label">{t('nav.more')}</span>
           </button>
           {isMoreActive && (
-            <div className="icon-rail-more-panel">
-              <div className="icon-rail-more-panel__title">{t('sessionSidebar.moreSettings')}</div>
-              <nav className="icon-rail-more-panel__list" aria-label={t('sessionSidebar.moreSettings')}>
+            <div className="icon-rail-more-panel" data-testid="session-sidebar-more-panel">
+              <div className="icon-rail-more-panel__title" data-testid="session-sidebar-more-panel-title">{t('sessionSidebar.moreSettings')}</div>
+              <nav className="icon-rail-more-panel__list" aria-label={t('sessionSidebar.moreSettings')} data-testid="session-sidebar-more-nav">
                 {visibleMoreNavItems.map((item) => (
                   <button
                     key={item.key}
                     className={`icon-rail-more-panel__item${activeNav === item.key ? ' icon-rail-more-panel__item--active' : ''}`}
                     onClick={() => handleMoreNavClick(item.key)}
+                    data-testid="session-sidebar-more-nav-item"
+                    data-variant={item.key}
                   >
                     <span className="icon-rail-more-panel__icon">{item.icon}</span>
                     <span className="icon-rail-more-panel__text">{getNavItemLabel(item)}</span>
@@ -275,6 +285,7 @@ export function SessionSidebar({
         onClick={onSetupGuideRequest}
         aria-label={t('modelSetupGuide.open')}
         title={t('modelSetupGuide.open')}
+        data-testid="session-sidebar-setup-guide-button"
       >
         <span className="icon-rail-nav-item__icon">
           <svg viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -295,6 +306,7 @@ export function SessionSidebar({
         className="icon-rail-nav-item"
         onClick={toggleAdvancedConfig}
         aria-label={t('sessionSidebar.moreSettings')}
+        data-testid="session-sidebar-advanced-config-trigger"
       >
         <span className="icon-rail-nav-item__icon">
           <AdvancedConfigIcon aria-hidden width="16" height="16" />

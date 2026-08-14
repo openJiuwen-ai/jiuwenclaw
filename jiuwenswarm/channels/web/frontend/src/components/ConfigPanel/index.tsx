@@ -24,12 +24,14 @@ function MultiSelectDropdown({
   onChange,
   placeholder,
   emptyMessage,
+  testId,
 }: {
   options: string[];
   selected: string[];
   onChange: (selected: string[]) => void;
   placeholder?: string;
   emptyMessage?: string;
+  testId?: string;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -73,23 +75,30 @@ function MultiSelectDropdown({
     onChange(selected.filter((s) => s !== option));
   };
 
+  const tid = (suffix?: string) => testId ? { "data-testid": suffix ? `${testId}-${suffix}` : testId } : {};
+
   return (
-    <div ref={containerRef} className="relative flex-1">
+    <div ref={containerRef} {...tid()} className="relative flex-1">
       <div
+        {...tid("trigger")}
         onClick={() => setIsOpen(!isOpen)}
         className="min-h-[28px] rounded border border-border bg-bg px-2 py-1 cursor-pointer flex flex-wrap gap-1 items-center text-xs"
       >
         {selected.length === 0 ? (
-          <span className="text-text-muted">{placeholder || "Select..."}</span>
+          <span {...tid("placeholder")} className="text-text-muted">{placeholder || "Select..."}</span>
         ) : (
           selected.map((s) => (
             <span
               key={s}
+              {...tid("selected")}
+              data-variant={s}
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-accent/30 bg-accent/10 text-accent text-[10px]"
             >
               {s}
               <button
                 type="button"
+                {...tid("selected-remove")}
+                data-variant={s}
                 onClick={(e) => removeOption(e, s)}
                 className="hover:text-danger ml-1"
               >
@@ -102,6 +111,7 @@ function MultiSelectDropdown({
       {isOpen && createPortal(
         <div
           ref={dropdownRef}
+          {...tid("dropdown")}
           className="fixed z-[9999] max-h-60 overflow-auto rounded border border-border bg-card shadow-lg"
           style={{
             top: dropdownPosition.top,
@@ -110,17 +120,21 @@ function MultiSelectDropdown({
           }}
         >
           {options.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-text-muted">
+            <div {...tid("empty")} className="px-2 py-1.5 text-xs text-text-muted">
               {emptyMessage || "No options available"}
             </div>
           ) : (
             options.map((option) => (
               <label
                 key={option}
+                {...tid("option")}
+                data-variant={option}
                 className="flex items-center gap-2 px-2 py-1.5 hover:bg-secondary/50 cursor-pointer text-xs"
               >
                 <input
                   type="checkbox"
+                  {...tid("option-input")}
+                  data-variant={option}
                   checked={selected.includes(option)}
                   onChange={() => toggleOption(option)}
                   className="rounded border-border"
@@ -908,7 +922,7 @@ function GroupSection({
         </span>
       </span>
       <span className={`flex items-center gap-2 text-text-muted ${showNestedChrome ? "ml-2" : "ml-3"}`}>
-        <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60">
+        <span data-testid="config-panel-group-section-count" className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60">
           {t('config.itemsCount', { count: group.keys.length })}
         </span>
         {!alwaysExpanded ? (
@@ -926,6 +940,8 @@ function GroupSection({
   return (
     <div
       id={`config-group-${group.tag}`}
+      data-testid="config-panel-group-section"
+      data-variant={group.tag}
       className={
         showNestedChrome
           ? "rounded-r-md overflow-hidden border border-border/50"
@@ -933,31 +949,31 @@ function GroupSection({
       }
     >
       {alwaysExpanded ? (
-        <div className={headerClass} role="presentation">
+        <div data-testid="config-panel-group-section-header" className={headerClass} role="presentation">
           {headerInner}
         </div>
       ) : (
-        <button type="button" onClick={() => setOpen(!open)} className={headerClass}>
+        <button type="button" data-testid="config-panel-group-section-header-toggle" onClick={() => setOpen(!open)} className={headerClass}>
           {headerInner}
         </button>
       )}
       {isOpen && (
         <>
-          <table className="w-full text-sm border-t border-border">
+          <table data-testid="config-panel-group-section-fields" className="w-full text-sm border-t border-border">
             <tbody>
               {group.keys.map(([key, value]) => (
-                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 ">
+                <tr key={key} data-testid="config-panel-group-section-field" data-variant={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 ">
                   <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]">
                     <ConfigFieldHintLabel
                       mono
                       label={getKeyDisplayLabel(key, t)}
                       help={shouldShowKeyHelpInline(key) ? undefined : getKeyLabelHintText(key, t) || undefined}
                     />
-                    {shouldShowKeyHelpInline(key) ? <div className="mt-1 text-[11px] leading-4 text-text-muted">{getKeyLabelHintText(key, t)}</div> : null}
+                    {shouldShowKeyHelpInline(key) ? <div data-testid="config-panel-group-section-field-inline-help" data-variant={key} className="mt-1 text-[11px] leading-4 text-text-muted">{getKeyLabelHintText(key, t)}</div> : null}
                     {PROACTIVE_INT_SPECS[key] ? (() => {
                       const e = validateProactiveInt(key, draftValues[key] ?? "", t);
                       return e ? (
-                        <div className="mt-1 text-[11px] leading-4 text-danger">{e}</div>
+                        <div data-testid="config-panel-group-section-field-error" data-variant={key} className="mt-1 text-[11px] leading-4 text-danger">{e}</div>
                       ) : null;
                     })() : null}
                   </td>
@@ -976,6 +992,8 @@ function GroupSection({
                             type="button"
                             role="switch"
                             aria-checked={parseBoolValue(draftValues[key] ?? value)}
+                            data-testid="config-panel-group-section-field-toggle"
+                            data-variant={key}
                             onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
                             title={getBooleanKeyLabel(key, t) ?? key}
                             className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
@@ -999,6 +1017,8 @@ function GroupSection({
                         </span>
                         <div className="flex-1">
                           <select
+                            data-testid="config-panel-group-section-field-provider-select"
+                            data-variant={key}
                             value={draftValues[key] ?? value}
                             onChange={(e) => onChange(key, e.target.value)}
                             className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
@@ -1028,6 +1048,8 @@ function GroupSection({
                         </span>
                         <div className="relative flex-1">
                           <textarea
+                            data-testid="config-panel-group-section-field-textarea"
+                            data-variant={key}
                             value={draftValues[key] ?? value}
                             onChange={(e) => onChange(key, e.target.value)}
                             placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
@@ -1048,6 +1070,8 @@ function GroupSection({
                         <div className="relative flex-1">
                           <input
                             type={isSensitiveKey(key) && !visibleFields[key] ? "password" : "text"}
+                            data-testid="config-panel-group-section-field-input"
+                            data-variant={key}
                             value={draftValues[key] ?? value}
                             onChange={(e) => onChange(key, e.target.value)}
                             placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
@@ -1056,6 +1080,8 @@ function GroupSection({
                           {isSensitiveKey(key) ? (
                             <button
                               type="button"
+                              data-testid="config-panel-group-section-field-visibility-toggle"
+                              data-variant={key}
                               onClick={() => toggleFieldVisible(key)}
                               className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text "
                               aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
@@ -1677,19 +1703,19 @@ function OpenAIAccountAuthPanel({
       : "border-border bg-bg text-text-muted";
 
   return (
-    <div className="rounded-md border border-accent/20 bg-accent/5 px-3 py-2">
+    <div data-testid="config-panel-openai-account-auth" className="rounded-md border border-accent/20 bg-accent/5 px-3 py-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <OpenAIAccountMark />
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-semibold text-text">{t("config.openaiAccount.title")}</span>
-              <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${statusClass}`}>
+              <span data-testid="config-panel-openai-account-title" className="text-xs font-semibold text-text">{t("config.openaiAccount.title")}</span>
+              <span data-testid="config-panel-openai-account-status-badge" data-variant={authenticated ? "connected" : status?.needs_refresh ? "refresh" : "not-connected"} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${statusClass}`}>
                 {authenticated ? <CheckCircle2 className="h-3 w-3" /> : <KeyRound className="h-3 w-3" />}
                 {statusLabel}
               </span>
             </div>
-            <div className="mt-0.5 truncate text-[11px] text-text-muted">
+            <div data-testid="config-panel-openai-account-status-hint" className="mt-0.5 truncate text-[11px] text-text-muted">
               {autoSaveState === "saving"
                 ? t("config.openaiAccount.autoSaving")
                 : autoSaveState === "saved"
@@ -1707,6 +1733,7 @@ function OpenAIAccountAuthPanel({
         <div className="flex items-center gap-1.5">
           <button
             type="button"
+            data-testid="config-panel-openai-account-refresh-btn"
             onClick={() => void handleRefreshAuth()}
             disabled={!isConnected || (login ? pollingLogin : loadingStatus) || refreshCoolingDown}
             className="rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
@@ -1717,6 +1744,8 @@ function OpenAIAccountAuthPanel({
           {authenticated ? (
             <button
               type="button"
+              data-testid="config-panel-openai-account-logout-btn"
+              data-variant="logout"
               onClick={() => void handleLogout()}
               disabled={!isConnected || loggingOut}
               className="inline-flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 text-[11px] text-text hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
@@ -1727,6 +1756,8 @@ function OpenAIAccountAuthPanel({
           ) : (
             <button
               type="button"
+              data-testid="config-panel-openai-account-connect-btn"
+              data-variant="connect"
               onClick={() => void handleStartLogin()}
               disabled={!isConnected || startingLogin || Boolean(login)}
               className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-medium text-white shadow-sm hover:bg-accent-hover disabled:opacity-40"
@@ -1742,11 +1773,11 @@ function OpenAIAccountAuthPanel({
         </div>
       </div>
 
-      <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+      <div data-testid="config-panel-openai-account-model-select" className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <div className="text-[11px] font-medium text-text">{t("config.openaiAccount.modelSelectLabel")}</div>
-            <div className="mt-0.5 text-[10px] text-text-muted">
+            <div data-testid="config-panel-openai-account-model-select-label" className="text-[11px] font-medium text-text">{t("config.openaiAccount.modelSelectLabel")}</div>
+            <div data-testid="config-panel-openai-account-model-select-hint" className="mt-0.5 text-[10px] text-text-muted">
               {loadingModels
                 ? t("config.openaiAccount.loadingModels")
                 : t("config.openaiAccount.modelsLoaded", { count: visibleModelOptions.length })}
@@ -1754,6 +1785,7 @@ function OpenAIAccountAuthPanel({
           </div>
           <button
             type="button"
+            data-testid="config-panel-openai-account-refresh-models-btn"
             onClick={() => void refreshModelDefaults(status?.base_url)}
             disabled={!isConnected || !hasStoredAuth || loadingModels}
             className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60 disabled:opacity-40"
@@ -1763,6 +1795,7 @@ function OpenAIAccountAuthPanel({
           </button>
         </div>
         <select
+          data-testid="config-panel-openai-account-model-select-input"
           value={selectedModelName}
           onChange={(event) => handleModelSelectChange(event.target.value)}
           disabled={!hasStoredAuth || loadingModels || visibleModelOptions.length === 0}
@@ -1776,29 +1809,30 @@ function OpenAIAccountAuthPanel({
           ))}
         </select>
         {needsLoginForConfiguredModel ? (
-          <div className="mt-1 text-[11px] text-warn">
+          <div data-testid="config-panel-openai-account-need-login-hint" className="mt-1 text-[11px] text-warn">
             {t("config.openaiAccount.needLoginForModel")}
           </div>
         ) : hasUnavailableConfiguredModel ? (
-          <div className="mt-1 text-[11px] text-warn">
+          <div data-testid="config-panel-openai-account-model-unavailable-hint" className="mt-1 text-[11px] text-warn">
             {t("config.openaiAccount.configuredModelUnavailable", { model: currentModelName })}
           </div>
         ) : null}
         {modelsError ? (
-          <div className="mt-1 text-[11px] text-danger">{modelsError}</div>
+          <div data-testid="config-panel-openai-account-models-error" className="mt-1 text-[11px] text-danger">{modelsError}</div>
         ) : null}
       </div>
 
       {login ? (
-        <div className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
+        <div data-testid="config-panel-openai-account-login-code" className="mt-2 rounded-md border border-border bg-bg px-3 py-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <div className="text-[11px] text-text-muted">{t("config.openaiAccount.authCodeLabel")}</div>
-              <div className="mt-1 font-mono text-lg font-semibold tracking-wide text-text">{login.user_code}</div>
+              <div data-testid="config-panel-openai-account-auth-code-label" className="text-[11px] text-text-muted">{t("config.openaiAccount.authCodeLabel")}</div>
+              <div data-testid="config-panel-openai-account-auth-code-value" className="mt-1 font-mono text-lg font-semibold tracking-wide text-text">{login.user_code}</div>
             </div>
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
+                data-testid="config-panel-openai-account-open-auth-page-btn"
                 onClick={() => window.open(login.verification_uri, "_blank", "noopener,noreferrer")}
                 className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
               >
@@ -1807,6 +1841,7 @@ function OpenAIAccountAuthPanel({
               </button>
               <button
                 type="button"
+                data-testid="config-panel-openai-account-copy-code-btn"
                 onClick={() => void handleCopyCode()}
                 className="inline-flex items-center gap-1 rounded border border-border bg-card px-2 py-1 text-[11px] text-text hover:bg-secondary/60"
               >
@@ -1815,16 +1850,16 @@ function OpenAIAccountAuthPanel({
               </button>
             </div>
           </div>
-          <div className="mt-1 text-[11px] text-text-muted">{t("config.openaiAccount.waiting")}</div>
-          <div className="mt-0.5 text-[11px] text-text-muted">{t("config.openaiAccount.loginTimeHint")}</div>
+          <div data-testid="config-panel-openai-account-waiting-hint" className="mt-1 text-[11px] text-text-muted">{t("config.openaiAccount.waiting")}</div>
+          <div data-testid="config-panel-openai-account-login-time-hint" className="mt-0.5 text-[11px] text-text-muted">{t("config.openaiAccount.loginTimeHint")}</div>
           {copyError ? (
-            <div className="mt-1 text-[11px] text-danger">{copyError}</div>
+            <div data-testid="config-panel-openai-account-copy-error" className="mt-1 text-[11px] text-danger">{copyError}</div>
           ) : null}
         </div>
       ) : null}
 
       {authError ? (
-        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
+        <div data-testid="config-panel-openai-account-auth-error" className="mt-2 flex items-start gap-1.5 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-2 py-1.5 text-[11px] text-danger">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{authError}</span>
         </div>
@@ -2158,14 +2193,16 @@ function MultiModelSection({
 
   return (
     <>
-      <div className="space-y-2">
+      <div data-testid="config-panel-model-list" className="space-y-2">
         {localError && (
-          <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
+          <div data-testid="config-panel-model-list-error" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
             {localError}
           </div>
         )}
         {validateToast.show && (
           <div
+            data-testid="config-panel-model-validate-toast"
+            data-variant={validateToast.success ? "success" : "err"}
             className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in ${validateToast.success ? "bg-ok-subtle border border-ok text-ok" : "bg-danger-subtle border border-danger text-danger"
               }`}
           >
@@ -2197,10 +2234,11 @@ function MultiModelSection({
             ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
             : model.model_name;
           return (
-            <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+            <div key={idx} data-testid="config-panel-model-item" data-variant={model.model_name ?? `model-${idx}`} className="rounded-lg border border-border bg-secondary/20">
               <div className="flex items-center justify-between px-3 py-2 gap-2">
                 <button
                   type="button"
+                  data-testid="config-panel-model-item-toggle"
                   className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                   onClick={() => setExpandedIdx(isExpanded ? null : idx)}
                 >
@@ -2208,22 +2246,22 @@ function MultiModelSection({
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                   </svg>
                   <ModelProviderIcon model={model} className="shrink-0" />
-                  <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
+                  <span data-testid="config-panel-model-item-name" className="truncate">{displayName || t("config.modelList.untitled")}</span>
                   {isPrimaryDefault && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
+                    <span data-testid="config-panel-model-item-primary-default-badge" className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
                   )}
                   {!isPrimaryDefault && isDefault && sameNameCount > 1 && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">{t("config.modelList.groupDefault")}</span>
+                    <span data-testid="config-panel-model-item-group-default-badge" className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">{t("config.modelList.groupDefault")}</span>
                   )}
                   {vr === "ok" && (
-                    <span className="w-5 h-5 rounded-full bg-ok-subtle text-ok flex items-center justify-center">
+                    <span data-testid="config-panel-model-item-validate-ok-badge" data-variant="ok" className="w-5 h-5 rounded-full bg-ok-subtle text-ok flex items-center justify-center">
                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                       </svg>
                     </span>
                   )}
                   {vr === "err" && (
-                    <span className="w-5 h-5 rounded-full bg-danger-subtle text-danger flex items-center justify-center">
+                    <span data-testid="config-panel-model-item-validate-err-badge" data-variant="err" className="w-5 h-5 rounded-full bg-danger-subtle text-danger flex items-center justify-center">
                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                       </svg>
@@ -2234,6 +2272,7 @@ function MultiModelSection({
                   {!isPrimaryDefault && (
                     <button
                       type="button"
+                      data-testid="config-panel-model-item-set-primary"
                       onClick={() => handleSetActive(idx)}
                       className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60"
                     >
@@ -2242,6 +2281,7 @@ function MultiModelSection({
                   )}
                   <button
                     type="button"
+                    data-testid="config-panel-model-item-validate-btn"
                     onClick={() => handleValidate(model, idx)}
                     disabled={!isConnected || validatingModel === idx}
                     className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60 disabled:opacity-40"
@@ -2250,6 +2290,7 @@ function MultiModelSection({
                   </button>
                   <button
                     type="button"
+                    data-testid="config-panel-model-item-remove-btn"
                     onClick={() => removeModel(idx)}
                     disabled={models.length <= 1}
                     className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
@@ -2259,10 +2300,10 @@ function MultiModelSection({
                 </div>
               </div>
               {isExpanded && (
-                <div className="border-t border-border px-3 py-2 space-y-2">
+                <div data-testid="config-panel-model-item-detail" className="border-t border-border px-3 py-2 space-y-2">
                   {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
-                    <div key={field} className="flex items-center gap-2 text-xs">
-                      <label className="w-28 text-text-muted shrink-0">
+                    <div key={field} data-testid="config-panel-model-item-field" data-variant={field} className="flex items-center gap-2 text-xs">
+                      <label data-testid="config-panel-model-item-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
                         <ConfigFieldHintLabel
                           label={
                             <>
@@ -2275,6 +2316,8 @@ function MultiModelSection({
                       </label>
                       {field === "model_provider" ? (
                         <select
+                          data-testid="config-panel-model-item-field-provider-select"
+                          data-variant="model_provider"
                           value={models[idx]?.[field] ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -2284,6 +2327,8 @@ function MultiModelSection({
                         </select>
                       ) : field === "reasoning_level" ? (
                         <select
+                          data-testid="config-panel-model-item-field-reasoning-select"
+                          data-variant="reasoning_level"
                           value={models[idx]?.reasoning_level ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
                           className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -2294,6 +2339,8 @@ function MultiModelSection({
                       ) : (
                         <input
                           type={field === "api_key" ? "password" : "text"}
+                          data-testid="config-panel-model-item-field-input"
+                          data-variant={field}
                           value={field === "model_name" && modelIsOpenAIAccount ? "" : models[idx]?.[field] ?? ""}
                           onChange={(e) => updateModel(idx, field, e.target.value)}
                           disabled={(field === "api_key" || field === "api_base" || field === "model_name") && modelIsOpenAIAccount}
@@ -2325,17 +2372,18 @@ function MultiModelSection({
                     />
                   ) : null}
                   {/* is_default 勾选框 */}
-                  <div className="flex items-center gap-2 text-xs">
+                  <div data-testid="config-panel-model-item-field-is-default" className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
                     <input
                       type="checkbox"
+                      data-testid="config-panel-model-item-field-is-default-input"
                       checked={isDefault}
                       onChange={() => handleToggleDefault(idx)}
                       disabled={sameNameCount <= 1}
                       className="rounded border-border"
                     />
                     {sameNameCount <= 1 && (
-                      <span className="text-text-muted text-[10px]">{t("config.modelList.onlyOneInGroup")}</span>
+                      <span data-testid="config-panel-model-item-field-is-default-hint" className="text-text-muted text-[10px]">{t("config.modelList.onlyOneInGroup")}</span>
                     )}
                   </div>
                 </div>
@@ -2345,9 +2393,9 @@ function MultiModelSection({
         })}
 
         {addingNew ? (
-          <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
+          <div data-testid="config-panel-model-add" className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
             {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
-              <div key={field} className="flex items-center gap-2 text-xs">
+              <div key={field} data-testid="config-panel-model-add-field" data-variant={field} className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
                   <ConfigFieldHintLabel
                     label={
@@ -2361,6 +2409,7 @@ function MultiModelSection({
                 </label>
                 {field === "model_provider" ? (
                   <select
+                    data-testid="config-panel-model-add-field-provider-select"
                     value={newModel[field]}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -2370,6 +2419,7 @@ function MultiModelSection({
                   </select>
                 ) : field === "reasoning_level" ? (
                   <select
+                    data-testid="config-panel-model-add-field-reasoning-select"
                     value={newModel.reasoning_level ?? ""}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -2380,6 +2430,7 @@ function MultiModelSection({
                 ) : (
                   <input
                     type={field === "api_key" ? "password" : "text"}
+                    data-testid="config-panel-model-add-field-input"
                     value={field === "model_name" && newModelIsOpenAIAccount ? "" : newModel[field] ?? ""}
                     onChange={(e) => handleNewModelChange(field, e.target.value)}
                     disabled={(field === "api_key" || field === "api_base" || field === "model_name") && newModelIsOpenAIAccount}
@@ -2414,9 +2465,10 @@ function MultiModelSection({
               />
             ) : null}
             <div className="flex justify-end gap-2 pt-1">
-              <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+              <button type="button" data-testid="config-panel-model-add-cancel-btn" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
               <button
                 type="button"
+                data-testid="config-panel-model-add-confirm-btn"
                 onClick={handleAddNew}
                 disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || (!newModelIsOpenAIAccount && !newModel.api_key.trim()) || !newModel.model_provider.trim()}
                 className="btn primary !px-3 !py-1 text-xs"
@@ -2428,6 +2480,7 @@ function MultiModelSection({
         ) : (
           <button
             type="button"
+            data-testid="config-panel-model-add-trigger"
             onClick={handleStartAddNew}
             className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
           >
@@ -2596,25 +2649,27 @@ function MultiAgentSection({
   };
 
   return (
-    <div className="space-y-2">
+    <div data-testid="config-panel-agent-list" className="space-y-2">
       {agents.map((agent, idx) => {
         const isExpanded = expandedIdx === idx;
         return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+          <div key={idx} data-testid="config-panel-agent-item" data-variant={agent.name ?? `agent-${idx}`} className="rounded-lg border border-border bg-secondary/20">
             <div className="flex items-center justify-between px-3 py-2">
               <button
                 type="button"
+                data-testid="config-panel-agent-item-toggle"
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
                 <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
-                <span className="truncate">{agent.name || t("config.agentList.untitled")}</span>
+                <span data-testid="config-panel-agent-item-name" className="truncate">{agent.name || t("config.agentList.untitled")}</span>
               </button>
               <div className="flex items-center gap-1 ml-2">
                 <button
                   type="button"
+                  data-testid="config-panel-agent-item-remove-btn"
                   onClick={() => handleRemoveAgentClick(idx)}
                   className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
                 >
@@ -2623,10 +2678,11 @@ function MultiAgentSection({
               </div>
             </div>
             {isExpanded && (
-              <div className="border-t border-border px-3 py-2 space-y-2">
-                <div className="flex items-center gap-2 text-xs">
-                  <label className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
+              <div data-testid="config-panel-agent-item-detail" className="border-t border-border px-3 py-2 space-y-2">
+                <div data-testid="config-panel-agent-item-field-model" className="flex items-center gap-2 text-xs">
+                  <label data-testid="config-panel-agent-item-field-model-label" className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
                   <select
+                    data-testid="config-panel-agent-item-field-model-select"
                     value={(() => {
                       // 根据 agent 当前 model 配置反查 availableModels 中的 index
                       const matchIdx = availableModels.findIndex(
@@ -2656,8 +2712,8 @@ function MultiAgentSection({
                   </select>
                 </div>
                 {agentFields.map((field) => (
-                  <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0">
+                  <div key={field} data-testid="config-panel-agent-item-field" data-variant={field} className="flex items-center gap-2 text-xs">
+                    <label data-testid="config-panel-agent-item-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
                       <ConfigFieldHintLabel
                         label={
                           <>
@@ -2670,6 +2726,7 @@ function MultiAgentSection({
                     </label>
                     {field === "skills" ? (
                       <MultiSelectDropdown
+                        testId="config-panel-agent-item-field-skills-1"
                         options={(installedSkills || []).map((s) => s.name)}
                         selected={agent.skills || []}
                         onChange={(selected) => {
@@ -2683,6 +2740,7 @@ function MultiAgentSection({
                     ) : (
                       <input
                         type="text"
+                        data-testid="config-panel-agent-item-field-name-input"
                         value={(agent[field] as string) ?? ""}
                         onChange={(e) => updateAgentField(idx, field, e.target.value)}
                         maxLength={field === "name" ? 64 : undefined}
@@ -2698,10 +2756,11 @@ function MultiAgentSection({
       })}
 
       {addingNew ? (
-        <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
-          <div className="flex items-center gap-2 text-xs">
-            <label className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
+        <div data-testid="config-panel-agent-add" className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
+          <div data-testid="config-panel-agent-add-field-model" className="flex items-center gap-2 text-xs">
+            <label data-testid="config-panel-agent-add-field-model-label" className="w-28 text-text-muted shrink-0">{t("config.keys.agentModel")}</label>
             <select
+              data-testid="config-panel-agent-add-field-model-select"
               value={(() => {
                 const matchIdx = availableModels.findIndex(
                   (m) => m.model_name === newAgent.model.model
@@ -2754,8 +2813,8 @@ function MultiAgentSection({
             </select>
           </div>
           {agentFields.map((field) => (
-            <div key={field} className="flex items-center gap-2 text-xs">
-              <label className="w-28 text-text-muted shrink-0">
+            <div key={field} data-testid="config-panel-agent-add-field" data-variant={field} className="flex items-center gap-2 text-xs">
+              <label data-testid="config-panel-agent-add-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
                 <ConfigFieldHintLabel
                   label={
                     <>
@@ -2768,6 +2827,7 @@ function MultiAgentSection({
               </label>
               {field === "skills" ? (
                 <MultiSelectDropdown
+                  testId="config-panel-agent-add-field-skills-1"
                   options={(installedSkills || []).map((s) => s.name)}
                   selected={newAgent.skills || []}
                   onChange={(selected) => setNewAgent((p) => ({ ...p, skills: selected }))}
@@ -2777,6 +2837,7 @@ function MultiAgentSection({
               ) : (
                 <input
                   type="text"
+                  data-testid="config-panel-agent-add-field-name-input"
                   value={newAgent[field] as string}
                   onChange={(e) => {
                     setNewAgent((p) => ({ ...p, [field]: e.target.value }));
@@ -2789,14 +2850,15 @@ function MultiAgentSection({
             </div>
           ))}
           <div className="flex justify-end gap-2 pt-1">
-            {newAgentError && <span className="text-danger text-xs self-center">{newAgentError}</span>}
-            <button type="button" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button type="button" onClick={handleAddNew} disabled={!newAgent.name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+            {newAgentError && <span data-testid="config-panel-agent-add-error" className="text-danger text-xs self-center">{newAgentError}</span>}
+            <button type="button" data-testid="config-panel-agent-add-cancel-btn" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+            <button type="button" data-testid="config-panel-agent-add-confirm-btn" onClick={handleAddNew} disabled={!newAgent.name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
           </div>
         </div>
       ) : (
         <button
           type="button"
+          data-testid="config-panel-agent-add-trigger"
           onClick={() => setAddingNew(true)}
           className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
         >
@@ -3029,12 +3091,12 @@ function TeamItemSection({
   };
 
   return (
-    <div className="space-y-3">
+    <div data-testid="config-panel-team-item" data-variant={team.team_name ?? `team-${teamIdx}`} className="space-y-3">
       {/* 基础配置 */}
-      <div className="space-y-2">
+      <div data-testid="config-panel-team-item-base" className="space-y-2">
         {teamStringFields.map((field) => (
-          <div key={field} className="flex items-center gap-2 text-xs">
-            <label className="w-28 text-text-muted shrink-0">
+          <div key={field} data-testid="config-panel-team-item-base-field" data-variant={field} className="flex items-center gap-2 text-xs">
+            <label data-testid="config-panel-team-item-base-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
               <ConfigFieldHintLabel
                 label={
                   <>
@@ -3047,6 +3109,7 @@ function TeamItemSection({
             </label>
             {field === "lifecycle" ? (
               <select
+                data-testid="config-panel-team-item-base-field-lifecycle-select"
                 value={team[field] ?? ""}
                 onChange={(e) => updateTeamField(field, e.target.value)}
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3056,6 +3119,7 @@ function TeamItemSection({
               </select>
             ) : field === "teammate_mode" ? (
               <select
+                data-testid="config-panel-team-item-base-field-teammate-mode-select"
                 value={team[field] ?? ""}
                 onChange={(e) => updateTeamField(field, e.target.value)}
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3066,6 +3130,7 @@ function TeamItemSection({
             ) : field === "spawn_mode" ? (
               <input
                 type="text"
+                data-testid="config-panel-team-item-base-field-spawn-mode-input"
                 value="inprocess"
                 readOnly
                 className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs opacity-60"
@@ -3073,6 +3138,8 @@ function TeamItemSection({
             ) : (
               <input
                 type="text"
+                data-testid="config-panel-team-item-base-field-input"
+                data-variant={field}
                 value={(team[field] as string) ?? ""}
                 onChange={(e) => updateTeamField(field, e.target.value)}
                 maxLength={field === "team_name" ? 32 : undefined}
@@ -3081,7 +3148,7 @@ function TeamItemSection({
             )}
           </div>
         ))}
-        <div className="flex items-center gap-2 text-xs">
+        <div data-testid="config-panel-team-item-base-field-enable-permissions" className="flex items-center gap-2 text-xs">
           <label className="w-28 text-text-muted shrink-0">
             <ConfigFieldHintLabel
               label={t("config.keys.teamEnablePermissions")}
@@ -3092,6 +3159,7 @@ function TeamItemSection({
             type="button"
             role="switch"
             aria-checked={team.enable_permissions}
+            data-testid="config-panel-team-item-base-field-enable-permissions-toggle"
             onClick={updateTeamPermissions}
             title={t("config.keyHelp.teamEnablePermissions")}
             className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   focus:outline-none ${team.enable_permissions ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"
@@ -3106,13 +3174,14 @@ function TeamItemSection({
       </div>
 
       {/* Leader配置 */}
-      <div className="rounded-lg border border-border bg-secondary/20">
+      <div data-testid="config-panel-team-item-leader" className="rounded-lg border border-border bg-secondary/20">
         <button
           type="button"
+          data-testid="config-panel-team-item-leader-toggle"
           onClick={() => setOpenLeader(!openLeader)}
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
-          <span>{t("config.team.leader")}</span>
+          <span data-testid="config-panel-team-item-leader-title">{t("config.team.leader")}</span>
           <svg className={`w-3 h-3  ${openLeader ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
@@ -3120,8 +3189,8 @@ function TeamItemSection({
         {openLeader && (
           <div className="border-t border-border px-3 py-2 space-y-2">
             {leaderFields.map((field) => (
-              <div key={field} className="flex items-center gap-2 text-xs">
-                <label className="w-28 text-text-muted shrink-0">
+              <div key={field} data-testid="config-panel-team-item-leader-field" data-variant={field} className="flex items-center gap-2 text-xs">
+                <label data-testid="config-panel-team-item-leader-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
                   <ConfigFieldHintLabel
                     label={
                       <>
@@ -3134,6 +3203,7 @@ function TeamItemSection({
                 </label>
                 {field === "agent_key" ? (
                   <select
+                    data-testid="config-panel-team-item-leader-field-agent-key-select"
                     value={team.leader[field] ?? ""}
                     onChange={(e) => updateLeader(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3154,13 +3224,15 @@ function TeamItemSection({
                   <div className="flex-1">
                     <input
                       type="text"
+                      data-testid="config-panel-team-item-leader-field-input"
+                      data-variant={field}
                       value={getLeaderInputDisplayValue(field, team.leader[field] ?? "")}
                       onChange={(e) => updateLeader(field, e.target.value)}
                       maxLength={field === "persona" ? 2048 : 64}
                       className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === 'leader' ? "border-danger" : "border-border"}`}
                     />
                     {field === "member_name" && memberNameError?.field === 'leader' && (
-                      <p className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
+                      <p data-testid="config-panel-team-item-leader-field-error" className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
                     )}
                   </div>
                 )}
@@ -3171,13 +3243,14 @@ function TeamItemSection({
       </div>
 
       {/* Teammate配置 */}
-      <div className="rounded-lg border border-border bg-secondary/20">
+      <div data-testid="config-panel-team-item-teammate" className="rounded-lg border border-border bg-secondary/20">
         <button
           type="button"
+          data-testid="config-panel-team-item-teammate-toggle"
           onClick={() => setOpenTeammate(!openTeammate)}
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
-          <span>{t("config.team.teammate")}</span>
+          <span data-testid="config-panel-team-item-teammate-title">{t("config.team.teammate")}</span>
           <svg className={`w-3 h-3  ${openTeammate ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
@@ -3185,7 +3258,7 @@ function TeamItemSection({
         {openTeammate && (
           <div className="border-t border-border px-3 py-2 space-y-2">
             {teammateFields.map((field) => (
-              <div key={field} className="flex items-center gap-2 text-xs">
+              <div key={field} data-testid="config-panel-team-item-teammate-field" className="flex items-center gap-2 text-xs">
                 <label className="w-28 text-text-muted shrink-0">
                   <ConfigFieldHintLabel
                     label={
@@ -3199,6 +3272,7 @@ function TeamItemSection({
                 </label>
                 {field === "agent_key" ? (
                   <select
+                    data-testid="config-panel-team-item-teammate-field-agent-key-select"
                     value={team.teammate[field] ?? ""}
                     onChange={(e) => updateTeammate(field, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3218,6 +3292,7 @@ function TeamItemSection({
                 ) : (
                   <input
                     type="text"
+                    data-testid="config-panel-team-item-teammate-field-input"
                     value={team.teammate[field] ?? ""}
                     onChange={(e) => updateTeammate(field, e.target.value)}
                     maxLength={field === "persona" ? 2048 : 64}
@@ -3231,13 +3306,14 @@ function TeamItemSection({
       </div>
 
       {/* Predefined Members配置 */}
-      <div className="rounded-lg border border-border bg-secondary/20">
+      <div data-testid="config-panel-team-item-members" className="rounded-lg border border-border bg-secondary/20">
         <button
           type="button"
+          data-testid="config-panel-team-item-members-toggle"
           onClick={() => setOpenMembers(!openMembers)}
           className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-text"
         >
-          <span>{t("config.team.predefinedMembers")} ({team.predefined_members.length})</span>
+          <span data-testid="config-panel-team-item-members-title">{t("config.team.predefinedMembers")} ({team.predefined_members.length})</span>
           <svg className={`w-3 h-3  ${openMembers ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
@@ -3247,21 +3323,23 @@ function TeamItemSection({
             {team.predefined_members.map((member, idx) => {
               const isExpanded = expandedMemberIdx === idx;
               return (
-                <div key={idx} className="rounded border border-border bg-secondary/20">
+                <div key={idx} data-testid="config-panel-team-item-member" data-variant={member.member_name ?? `member-${idx}`} className="rounded border border-border bg-secondary/20">
                   <div className="flex items-center justify-between px-3 py-2">
                     <button
                       type="button"
+                      data-testid="config-panel-team-item-member-toggle"
                       className="flex items-center gap-2 text-xs font-medium text-text truncate flex-1 text-left"
                       onClick={() => setExpandedMemberIdx(isExpanded ? null : idx)}
                     >
                       <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                       </svg>
-                      <span className="truncate">{member.member_name || t("config.agentList.untitled")}</span>
+                      <span data-testid="config-panel-team-item-member-name" className="truncate">{member.member_name || t("config.agentList.untitled")}</span>
                     </button>
                     <div className="flex items-center gap-1 ml-2">
                       <button
                         type="button"
+                        data-testid="config-panel-team-item-member-remove-btn"
                         onClick={() => removeMember(idx)}
                         className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
                       >
@@ -3270,10 +3348,10 @@ function TeamItemSection({
                     </div>
                   </div>
                   {isExpanded && (
-                    <div className="border-t border-border px-3 py-2 space-y-2">
+                    <div data-testid="config-panel-team-item-member-detail" className="border-t border-border px-3 py-2 space-y-2">
                       {memberFields.map((field) => (
-                        <div key={field} className="flex items-center gap-2 text-xs">
-                          <label className="w-28 text-text-muted shrink-0">
+                        <div key={field} data-testid="config-panel-team-item-member-field" data-variant={field} className="flex items-center gap-2 text-xs">
+                          <label data-testid="config-panel-team-item-member-field-label" data-variant={field} className="w-28 text-text-muted shrink-0">
                             <ConfigFieldHintLabel
                               label={
                                 <>
@@ -3286,6 +3364,7 @@ function TeamItemSection({
                           </label>
                           {field === "agent_key" ? (
                             <select
+                              data-testid="config-panel-team-item-member-field-agent-key-select"
                               value={member[field] ?? ""}
                               onChange={(e) => updateMember(idx, field, e.target.value)}
                               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3306,13 +3385,15 @@ function TeamItemSection({
                             <div className="flex-1">
                               <input
                                 type="text"
+                                data-testid="config-panel-team-item-member-field-input"
+                                data-variant={field}
                                 value={member[field] ?? ""}
                                 onChange={(e) => updateMember(idx, field, e.target.value)}
                                 maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
                                 className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError?.field === idx ? "border-danger" : "border-border"}`}
                               />
                               {field === "member_name" && memberNameError?.field === idx && (
-                                <p className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
+                                <p data-testid="config-panel-team-item-member-field-error" className="text-[10px] text-danger mt-1">{memberNameError.error}</p>
                               )}
                             </div>
                           )}
@@ -3324,10 +3405,10 @@ function TeamItemSection({
               );
             })}
             {addingNewMember ? (
-              <div className="rounded border border-accent/40 bg-accent/5 p-2 space-y-2">
+              <div data-testid="config-panel-team-item-member-add" className="rounded border border-accent/40 bg-accent/5 p-2 space-y-2">
                 {memberFields.map((field) => (
-                  <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0">
+                  <div key={field} data-testid="config-panel-team-item-member-add-field" data-variant={field} className="flex items-center gap-2 text-xs">
+                    <label data-testid="config-panel-team-item-member-add-field-label" className="w-28 text-text-muted shrink-0">
                       <ConfigFieldHintLabel
                         label={
                           <>
@@ -3340,6 +3421,7 @@ function TeamItemSection({
                     </label>
                     {field === "agent_key" ? (
                       <select
+                        data-testid="config-panel-team-item-member-add-field-agent-key-select"
                         value={newMember[field] ?? ""}
                         onChange={(e) => updateNewMember(field, e.target.value)}
                         className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
@@ -3360,26 +3442,28 @@ function TeamItemSection({
                       <div className="flex-1">
                         <input
                           type="text"
+                          data-testid="config-panel-team-item-member-add-field-input"
                           value={newMember[field] ?? ""}
                           onChange={(e) => updateNewMember(field, e.target.value)}
                           maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
                           className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && newMemberNameError ? "border-danger" : "border-border"}`}
                         />
                         {field === "member_name" && newMemberNameError && (
-                          <p className="text-[10px] text-danger mt-1">{newMemberNameError}</p>
+                          <p data-testid="config-panel-team-item-member-add-field-error" className="text-[10px] text-danger mt-1">{newMemberNameError}</p>
                         )}
                       </div>
                     )}
                   </div>
                 ))}
                 <div className="flex justify-end gap-2 pt-1">
-                  <button type="button" onClick={cancelAddNewMember} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-                  <button type="button" onClick={handleAddNewMember} disabled={!newMember.member_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+                  <button type="button" data-testid="config-panel-team-item-member-add-cancel-btn" onClick={cancelAddNewMember} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+                  <button type="button" data-testid="config-panel-team-item-member-add-confirm-btn" onClick={handleAddNewMember} disabled={!newMember.member_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
                 </div>
               </div>
             ) : (
               <button
                 type="button"
+                data-testid="config-panel-team-item-member-add-trigger"
                 onClick={() => setAddingNewMember(true)}
                 className="w-full rounded border border-dashed border-border py-1 text-xs text-text-muted hover:bg-secondary/40"
               >
@@ -3463,25 +3547,27 @@ function TeamsSection({
   };
 
   return (
-    <div className="space-y-2">
+    <div data-testid="config-panel-team-list" className="space-y-2">
       {teams.map((team, idx) => {
         const isExpanded = expandedIdx === idx;
         return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+          <div key={idx} data-testid="config-panel-team-entry" data-variant={team.team_name ?? `team-${idx}`} className="rounded-lg border border-border bg-secondary/20">
             <div className="flex items-center justify-between px-3 py-2">
               <button
                 type="button"
+                data-testid="config-panel-team-entry-toggle"
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
                 onClick={() => setExpandedIdx(isExpanded ? null : idx)}
               >
                 <svg className={`w-3 h-3  ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
-                <span className="truncate">{team.team_name || t("config.agentList.untitled")}</span>
+                <span data-testid="config-panel-team-entry-name" className="truncate">{team.team_name || t("config.agentList.untitled")}</span>
               </button>
               <div className="flex items-center gap-1 ml-2">
                 <button
                   type="button"
+                  data-testid="config-panel-team-entry-remove-btn"
                   onClick={() => removeTeam(idx)}
                   className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger"
                 >
@@ -3507,24 +3593,26 @@ function TeamsSection({
       })}
 
       {addingNew ? (
-        <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
+        <div data-testid="config-panel-team-add" className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
           <div className="flex items-center gap-2 text-xs">
             <label className="w-28 text-text-muted shrink-0">{t("config.keys.teamName")}</label>
             <input
               type="text"
+              data-testid="config-panel-team-add-field-team-name-input"
               value={newTeam.team_name}
               onChange={(e) => setNewTeam((p) => ({ ...p, team_name: e.target.value }))}
               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
             />
           </div>
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button type="button" onClick={handleAddNew} disabled={!newTeam.team_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+            <button type="button" data-testid="config-panel-team-add-cancel-btn" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+            <button type="button" data-testid="config-panel-team-add-confirm-btn" onClick={handleAddNew} disabled={!newTeam.team_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
           </div>
         </div>
       ) : teams.length > 0 ? null : (
         <button
           type="button"
+          data-testid="config-panel-team-add-trigger"
           onClick={() => setAddingNew(true)}
           className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
         >
@@ -4383,21 +4471,22 @@ export function ConfigPanel({
   };
 
   return (
-    <div className="flex-1 min-h-0">
+    <div data-testid="config-panel" className="flex-1 min-h-0">
       <div className="card main-panel-card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('config.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">
+            <h2 data-testid="config-panel-title" className="text-lg font-semibold">{t('config.title')}</h2>
+            <p data-testid="config-panel-subtitle" className="text-sm text-text-muted mt-1">
               {t('config.subtitle')}
             </p>
           </div>
           <div className="flex items-center gap-2">
             {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
-              <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
+              <span data-testid="config-panel-processing-hint" className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
               type="button"
+              data-testid="config-panel-cancel-btn"
               onClick={handleCancel}
               disabled={!hasChanges || saving}
               className="btn !px-3 !py-1.5 disabled:cursor-not-allowed"
@@ -4406,6 +4495,7 @@ export function ConfigPanel({
             </button>
             <button
               type="button"
+              data-testid="config-panel-save-btn"
               onClick={() => void handleSaveAndRestart()}
               disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -4415,55 +4505,57 @@ export function ConfigPanel({
           </div>
         </div>
         {error ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div data-testid="config-panel-error" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {error}
           </div>
         ) : null}
         {!error && configTab !== "model" && hasMissingRequiredModelFields ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div data-testid="config-panel-required-incomplete" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
         {!error && configTab !== "model" && hasMissingModelApiBase ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div data-testid="config-panel-missing-api-base" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
         {!error && configTab !== "model" && hasMissingModelName ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div data-testid="config-panel-missing-model-name" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.modelList.modelNameRequired')}
           </div>
         ) : null}
         {!error && hasDuplicateAgentNames ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div data-testid="config-panel-duplicate-agent-name" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentList.duplicateName')}
           </div>
         ) : null
         }
         {
           !error && agentsTeamsValidationError ? (
-            <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            <div data-testid="config-panel-agents-teams-error" className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
               {agentsTeamsValidationError}
             </div>
           ) : null
         }
 
         {!groups.length ? (
-          <div className="text-sm text-text-muted flex-1 min-h-0">
+          <div data-testid="config-panel-empty" className="text-sm text-text-muted flex-1 min-h-0">
             {t('config.empty')}
           </div>
         ) : (
           <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
-            <div className="flex items-center justify-between text-xs text-text-muted px-1 shrink-0 mb-1">
-              <span>{t('config.groupsCount', { count: topLevelGroupCount })}</span>
-              <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
+            <div data-testid="config-panel-stats" className="flex items-center justify-between text-xs text-text-muted px-1 shrink-0 mb-1">
+              <span data-testid="config-panel-groups-count">{t('config.groupsCount', { count: topLevelGroupCount })}</span>
+              <span data-testid="config-panel-params-count" className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
-            <div className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
+            <div data-testid="config-panel-tabs" className="app-subtabs shrink-0" role="tablist" aria-label={t('config.tabsAriaLabel')}>
               {(["model", "security", "other"] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
                   role="tab"
+                  data-testid="config-panel-tab"
+                  data-variant={tab}
                   id={`config-tab-${tab}`}
                   aria-selected={configTab === tab}
                   tabIndex={configTab === tab ? 0 : -1}
@@ -4476,39 +4568,40 @@ export function ConfigPanel({
             </div>
             <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-3 pt-1">
               {configTab === "model" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
+                <div role="tabpanel" data-testid="config-panel-tabpanel-model" data-variant="model" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
                   {modelError ? (
-                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div data-testid="config-panel-model-error" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {modelError}
                     </div>
                   ) : null}
                   {!modelError && hasMissingRequiredModelFields ? (
-                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div data-testid="config-panel-model-required-incomplete" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiKey ? (
-                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div data-testid="config-panel-model-missing-api-key" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiKeyRequired')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelApiBase ? (
-                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div data-testid="config-panel-model-missing-api-base" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.apiBaseRequired')}
                     </div>
                   ) : null}
                   {!modelError && hasMissingModelName ? (
-                    <div className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                    <div data-testid="config-panel-model-missing-model-name" className="rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
                       {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}
                   <div
                     id="config-group-model_default"
+                    data-testid="config-panel-group-model_default"
                     className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
                   >
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border">
-                      <span className="block text-sm font-medium text-text-strong">{t("config.groups.modelDefault.label")}</span>
-                      <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.modelDefault.hint")}</span>
+                    <div data-testid="config-panel-group-model_default-header" className="px-4 py-3 bg-secondary/30 border-b border-border">
+                      <span data-testid="config-panel-group-model_default-label" className="block text-sm font-medium text-text-strong">{t("config.groups.modelDefault.label")}</span>
+                      <span data-testid="config-panel-group-model_default-hint" className="block text-xs text-text-muted mt-0.5">{t("config.groups.modelDefault.hint")}</span>
                     </div>
                     <div className="p-3">
                       <MultiModelSection
@@ -4551,18 +4644,18 @@ export function ConfigPanel({
 
               {configTab === "agent" ? (
                 <div role="tabpanel" aria-labelledby="config-tab-agent" className="space-y-3 pb-2">
-                  <div id="config-group-agents" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                  <div id="config-group-agents" data-testid="config-panel-group-agents" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">
                       <span className="flex items-center gap-3 min-w-0">
                         <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-pink-500 bg-pink-500/10 border-pink-500/20">
                           {getGroupIcon("agents")}
                         </span>
                         <span className="min-w-0 text-left">
-                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.agents.label")}</span>
-                          <span className="block text-xs text-text-muted truncate">{t("config.groups.agents.hint")}</span>
+                          <span data-testid="config-panel-group-agents-label" className="block text-sm font-medium text-text-strong">{t("config.groups.agents.label")}</span>
+                          <span data-testid="config-panel-group-agents-hint" className="block text-xs text-text-muted truncate">{t("config.groups.agents.hint")}</span>
                         </span>
                       </span>
-                      <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
+                      <span data-testid="config-panel-group-agents-count" className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
                         {t("config.itemsCount", { count: draftAgents.length })}
                       </span>
                     </div>
@@ -4582,18 +4675,18 @@ export function ConfigPanel({
                       />
                     </div>
                   </div>
-                  <div id="config-group-team" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+                  <div id="config-group-team" data-testid="config-panel-group-team" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
                     <div className="w-full flex items-center justify-between px-4 py-3 bg-secondary/30">
                       <span className="flex items-center gap-3 min-w-0">
                         <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-fuchsia-500 bg-fuchsia-500/10 border-fuchsia-500/20">
                           {getGroupIcon("team")}
                         </span>
                         <span className="min-w-0 text-left">
-                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.team.label")}</span>
-                          <span className="block text-xs text-text-muted truncate">{t("config.groups.team.hint")}</span>
+                          <span data-testid="config-panel-group-team-label" className="block text-sm font-medium text-text-strong">{t("config.groups.team.label")}</span>
+                          <span data-testid="config-panel-group-team-hint" className="block text-xs text-text-muted truncate">{t("config.groups.team.hint")}</span>
                         </span>
                       </span>
-                      <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
+                      <span data-testid="config-panel-group-team-count" className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60 text-text-muted shrink-0">
                         {t("config.itemsCount", { count: draftTeams.length })}
                       </span>
                     </div>
@@ -4616,9 +4709,9 @@ export function ConfigPanel({
               }
 
               {configTab === "security" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-security" className="space-y-3 pb-2">
+                <div role="tabpanel" data-testid="config-panel-tabpanel-security" aria-labelledby="config-tab-security" className="space-y-3 pb-2">
                   {securityGroups.length === 0 ? (
-                    <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.security")}</p>
+                    <p data-testid="config-panel-tab-empty-security" className="text-sm text-text-muted px-1">{t("config.tabEmpty.security")}</p>
                   ) : (
                     securityGroups.map((group) => (
                       <GroupSection
@@ -4641,9 +4734,9 @@ export function ConfigPanel({
               ) : null}
 
               {configTab === "other" ? (
-                <div role="tabpanel" aria-labelledby="config-tab-other" className="space-y-3 pb-2">
+                <div role="tabpanel" data-testid="config-panel-tabpanel-other" aria-labelledby="config-tab-other" className="space-y-3 pb-2">
                   {otherTabGroups.length === 0 ? (
-                    <p className="text-sm text-text-muted px-1">{t("config.tabEmpty.other")}</p>
+                    <p data-testid="config-panel-tab-empty-other" className="text-sm text-text-muted px-1">{t("config.tabEmpty.other")}</p>
                   ) : (
                     otherTabGroups.map((group) => (
                       <GroupSection
@@ -4664,19 +4757,19 @@ export function ConfigPanel({
       </div>
       {
         deleteAgentConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
+          <div data-testid="config-panel-delete-confirm" data-variant="agent" className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+            <div data-testid="config-panel-delete-confirm-overlay" data-variant="agent" className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+            <div data-testid="config-panel-delete-confirm-panel" data-variant="agent" className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                   </svg>
                 </div>
-                <h3 className="text-base font-semibold text-text mb-1">
+                <h3 data-testid="config-panel-delete-confirm-title" data-variant="agent" className="text-base font-semibold text-text mb-1">
                   {t("config.agentList.deleteConfirmTitle")}
                 </h3>
-                <p className="text-sm text-text-muted mb-5">
+                <p data-testid="config-panel-delete-confirm-message" data-variant="agent" className="text-sm text-text-muted mb-5">
                   {deleteAgentConfirm.references.length > 0
                     ? t("config.agentList.deleteConfirmMessageSimple", { agentName: deleteAgentConfirm.agentName })
                     : t("config.agentList.deleteConfirmMessage", { agentName: deleteAgentConfirm.agentName })}
@@ -4684,6 +4777,8 @@ export function ConfigPanel({
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-cancel-btn"
+                    data-variant="agent"
                     onClick={() => setDeleteAgentConfirm(null)}
                     className="btn !px-4 !py-2"
                   >
@@ -4691,6 +4786,8 @@ export function ConfigPanel({
                   </button>
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-delete-btn"
+                    data-variant="agent"
                     onClick={confirmDeleteAgent}
                     className="btn danger !px-4 !py-2"
                   >
@@ -4704,19 +4801,19 @@ export function ConfigPanel({
       }
       {
         deleteModelConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
+          <div data-testid="config-panel-delete-confirm" data-variant="model" className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+            <div data-testid="config-panel-delete-confirm-overlay" data-variant="model" className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+            <div data-testid="config-panel-delete-confirm-panel" data-variant="model" className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                   </svg>
                 </div>
-                <h3 className="text-base font-semibold text-text mb-1">
+                <h3 data-testid="config-panel-delete-confirm-title" data-variant="model" className="text-base font-semibold text-text mb-1">
                   {t("config.model.deleteConfirmTitle")}
                 </h3>
-                <p className="text-sm text-text-muted mb-5">
+                <p data-testid="config-panel-delete-confirm-message" data-variant="model" className="text-sm text-text-muted mb-5">
                   {deleteModelConfirm.references.length > 0
                     ? t("config.model.deleteConfirmMessageSimple", { modelName: deleteModelConfirm.modelName, count: deleteModelConfirm.references.length })
                     : t("config.model.deleteConfirmMessage", { modelName: deleteModelConfirm.modelName })}
@@ -4724,6 +4821,8 @@ export function ConfigPanel({
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-cancel-btn"
+                    data-variant="model"
                     onClick={() => setDeleteModelConfirm(null)}
                     className="btn !px-4 !py-2"
                   >
@@ -4731,6 +4830,8 @@ export function ConfigPanel({
                   </button>
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-delete-btn"
+                    data-variant="model"
                     onClick={confirmDeleteModel}
                     className="btn danger !px-4 !py-2"
                   >
@@ -4744,19 +4845,19 @@ export function ConfigPanel({
       }
       {
         deleteTeamConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
+          <div data-testid="config-panel-delete-confirm" data-variant="team" className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+            <div data-testid="config-panel-delete-confirm-overlay" data-variant="team" className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+            <div data-testid="config-panel-delete-confirm-panel" data-variant="team" className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                   </svg>
                 </div>
-                <h3 className="text-base font-semibold text-text mb-1">
+                <h3 data-testid="config-panel-delete-confirm-title" data-variant="team" className="text-base font-semibold text-text mb-1">
                   {t("config.team.deleteConfirmTitle")}
                 </h3>
-                <p className="text-sm text-text-muted mb-5">
+                <p data-testid="config-panel-delete-confirm-message" data-variant="team" className="text-sm text-text-muted mb-5">
                   {t("config.team.deleteConfirmMessage", {
                     teamName: deleteTeamConfirm.teamName,
                   })}
@@ -4764,6 +4865,8 @@ export function ConfigPanel({
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-cancel-btn"
+                    data-variant="team"
                     onClick={() => setDeleteTeamConfirm(null)}
                     className="btn !px-4 !py-2"
                   >
@@ -4771,6 +4874,8 @@ export function ConfigPanel({
                   </button>
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-delete-btn"
+                    data-variant="team"
                     onClick={confirmDeleteTeam}
                     className="btn danger !px-4 !py-2"
                   >
@@ -4784,19 +4889,19 @@ export function ConfigPanel({
       }
       {
         deleteTeamMemberConfirm && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
-            <div className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
+          <div data-testid="config-panel-delete-confirm" data-variant="member" className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+            <div data-testid="config-panel-delete-confirm-overlay" data-variant="member" className="absolute inset-0 bg-black/35 backdrop-blur-[4px]" />
+            <div data-testid="config-panel-delete-confirm-panel" data-variant="member" className="relative w-full max-w-96 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-surface-card)] shadow-[var(--effect-shadow-xl)] p-6">
               <div className="flex flex-col items-center text-center">
                 <div className="w-12 h-12 rounded-full bg-danger/15 text-danger flex items-center justify-center mb-4">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                   </svg>
                 </div>
-                <h3 className="text-base font-semibold text-text mb-1">
+                <h3 data-testid="config-panel-delete-confirm-title" data-variant="member" className="text-base font-semibold text-text mb-1">
                   {t("config.team.deleteMemberConfirmTitle")}
                 </h3>
-                <p className="text-sm text-text-muted mb-5">
+                <p data-testid="config-panel-delete-confirm-message" data-variant="member" className="text-sm text-text-muted mb-5">
                   {t("config.team.deleteMemberConfirmMessage", {
                     memberName: deleteTeamMemberConfirm.memberName,
                   })}
@@ -4804,6 +4909,8 @@ export function ConfigPanel({
                 <div className="flex gap-2">
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-cancel-btn"
+                    data-variant="member"
                     onClick={() => setDeleteTeamMemberConfirm(null)}
                     className="btn !px-4 !py-2"
                   >
@@ -4811,6 +4918,8 @@ export function ConfigPanel({
                   </button>
                   <button
                     type="button"
+                    data-testid="config-panel-delete-confirm-delete-btn"
+                    data-variant="member"
                     onClick={confirmDeleteTeamMember}
                     className="btn danger !px-4 !py-2"
                   >

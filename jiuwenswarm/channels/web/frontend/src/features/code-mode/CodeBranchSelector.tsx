@@ -191,7 +191,7 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
   if (!project || project.work_mode !== 'code' || project.is_default) return null;
 
   return (
-    <div ref={rootRef} className={`code-branch${compact ? ' code-branch--compact' : ''}${variant === 'environment' ? ' code-branch--environment' : ''}`}>
+    <div ref={rootRef} className={`code-branch${compact ? ' code-branch--compact' : ''}${variant === 'environment' ? ' code-branch--environment' : ''}`} data-testid="code-mode-branch-selector">
       {isNotGit ? (
         <button
           type='button'
@@ -199,6 +199,8 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           onClick={() => void initializeGit()}
           disabled={disabled || operating}
           title='该目录还不是 Git 仓库'
+          data-testid='code-mode-branch-trigger'
+          data-variant='init'
         >
           {operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
           <span>初始化 Git</span>
@@ -212,6 +214,8 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
           aria-haspopup='menu'
           aria-expanded={open}
           title={currentBranch || '加载分支'}
+          data-testid='code-mode-branch-trigger'
+          data-variant='switch'
         >
           {loading || operating ? <LoaderCircle className='code-mode-spin' size={15} /> : <GitBranch size={15} />}
           <span>{currentBranch || '加载分支'}</span>
@@ -220,13 +224,13 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       )}
 
       {open && status ? (
-        <div className='code-branch__menu' role='menu'>
-          <label className='code-branch__search'>
+        <div className='code-branch__menu' role='menu' data-testid='code-mode-branch-menu'>
+          <label className='code-branch__search' data-testid='code-mode-branch-search'>
             <Search size={15} />
-            <input value={search} onChange={event => setSearch(event.target.value)} placeholder='搜索分支' autoFocus />
+            <input value={search} onChange={event => setSearch(event.target.value)} placeholder='搜索分支' autoFocus data-testid='code-mode-branch-search-input' />
           </label>
-          <div className='code-branch__section-label'>分支</div>
-          <div className='code-branch__list'>
+          <div className='code-branch__section-label' data-testid='code-mode-branch-section-label'>分支</div>
+          <div className='code-branch__list' data-testid='code-mode-branch-list'>
             {branches.map(branch => (
               <button
                 type='button'
@@ -236,25 +240,27 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
                 disabled={branchWritesBlocked}
                 role='menuitemradio'
                 aria-checked={branch === currentBranch}
+                data-testid='code-mode-branch-option'
+                data-variant={branch}
               >
                 <GitBranch size={15} />
                 <span>{branch}</span>
                 {branch === currentBranch ? <Check size={16} /> : null}
               </button>
             ))}
-            {branches.length === 0 ? <div className='code-branch__empty'>没有匹配的本地分支</div> : null}
+            {branches.length === 0 ? <div className='code-branch__empty' data-testid='code-mode-branch-list-empty'>没有匹配的本地分支</div> : null}
           </div>
           {branchWritesBlocked ? (
-            <div className='code-branch__menu-error' role='status'>
+            <div className='code-branch__menu-error' role='status' data-testid='code-mode-branch-menu-warning'>
               <AlertCircle size={14} />
               <span>{status.repo.transient ? '仓库正在合并或变基，暂时不能切换分支。' : '当前处于 detached HEAD，暂时不能切换分支。'}</span>
             </div>
           ) : null}
           {error ? (
-            <div className='code-branch__menu-error' role='alert'>
+            <div className='code-branch__menu-error' role='alert' data-testid='code-mode-branch-menu-error'>
               <AlertCircle size={14} />
               <span>{error}</span>
-              <button type='button' onClick={() => setError(null)} aria-label='关闭提示'>
+              <button type='button' onClick={() => setError(null)} aria-label='关闭提示' data-testid='code-mode-branch-menu-error-dismiss'>
                 <X size={13} />
               </button>
             </div>
@@ -263,13 +269,14 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
             className={isUnbornHead ? 'code-branch__create-wrap is-disabled' : 'code-branch__create-wrap'}
             tabIndex={isUnbornHead ? 0 : undefined}
             aria-describedby={isUnbornHead ? unbornHintId : undefined}
+            data-testid='code-mode-branch-create-wrap'
           >
-            <button type='button' className='code-branch__create' onClick={() => setCreateOpen(true)} disabled={branchWritesBlocked || isUnbornHead}>
+            <button type='button' className='code-branch__create' onClick={() => setCreateOpen(true)} disabled={branchWritesBlocked || isUnbornHead} data-testid='code-mode-branch-create-button'>
               <Plus size={16} />
               <span>创建并检出新分支</span>
             </button>
             {isUnbornHead ? (
-              <span id={unbornHintId} className='code-branch__create-hint' role='tooltip'>
+              <span id={unbornHintId} className='code-branch__create-hint' role='tooltip' data-testid='code-mode-branch-create-hint'>
                 空仓库需要完成首次提交后才能创建其他分支
               </span>
             ) : null}
@@ -278,44 +285,45 @@ export function CodeBranchSelector({ project, compact = false, disabled = false,
       ) : null}
 
       {!open && branchWritesBlocked ? (
-        <div className='code-branch__error' role='status'>
+        <div className='code-branch__error' role='status' data-testid='code-mode-branch-status-warning'>
           <AlertCircle size={14} />
           <span>{status?.repo.transient ? '仓库正在合并或变基，暂时不能切换分支。' : '当前处于 detached HEAD，暂时不能切换分支。'}</span>
         </div>
       ) : null}
 
       {!open && error ? (
-        <div className='code-branch__error' role='alert'>
+        <div className='code-branch__error' role='alert' data-testid='code-mode-branch-status-error'>
           <AlertCircle size={14} />
           <span>{error}</span>
-          <button type='button' onClick={() => setError(null)} aria-label='关闭提示'>
+          <button type='button' onClick={() => setError(null)} aria-label='关闭提示' data-testid='code-mode-branch-status-error-dismiss'>
             <X size={13} />
           </button>
         </div>
       ) : null}
 
       {createOpen ? (
-        <div className='code-mode-dialog-backdrop' role='presentation'>
+        <div className='code-mode-dialog-backdrop' role='presentation' data-testid='code-mode-create-branch-dialog-backdrop'>
           <form
             className='code-mode-dialog'
             onSubmit={event => {
               event.preventDefault();
               void createBranch();
             }}
+            data-testid='code-mode-create-branch-dialog'
           >
-            <div className='code-mode-dialog__header'>
-              <h3>创建并检出分支</h3>
-              <button type='button' onClick={() => setCreateOpen(false)} aria-label='关闭'>
+            <div className='code-mode-dialog__header' data-testid='code-mode-create-branch-dialog-header'>
+              <h3 data-testid='code-mode-create-branch-dialog-title'>创建并检出分支</h3>
+              <button type='button' onClick={() => setCreateOpen(false)} aria-label='关闭' data-testid='code-mode-create-branch-dialog-close'>
                 <X size={18} />
               </button>
             </div>
-            <input value={branchDraft} onChange={event => setBranchDraft(event.target.value)} placeholder='请输入分支名称，如：feature/code-mode' autoFocus />
-            {error ? <div className='code-mode-dialog__error'>{error}</div> : null}
-            <div className='code-mode-dialog__actions'>
-              <button type='button' className='code-mode-button' onClick={() => setCreateOpen(false)}>
+            <input value={branchDraft} onChange={event => setBranchDraft(event.target.value)} placeholder='请输入分支名称，如：feature/code-mode' autoFocus data-testid='code-mode-create-branch-dialog-input' />
+            {error ? <div className='code-mode-dialog__error' data-testid='code-mode-create-branch-dialog-error'>{error}</div> : null}
+            <div className='code-mode-dialog__actions' data-testid='code-mode-create-branch-dialog-actions'>
+              <button type='button' className='code-mode-button' onClick={() => setCreateOpen(false)} data-testid='code-mode-create-branch-dialog-cancel'>
                 取消
               </button>
-              <button type='submit' className='code-mode-button code-mode-button--primary' disabled={!branchDraft.trim() || operating}>
+              <button type='submit' className='code-mode-button code-mode-button--primary' disabled={!branchDraft.trim() || operating} data-testid='code-mode-create-branch-dialog-submit'>
                 {operating ? '创建中…' : '确定'}
               </button>
             </div>

@@ -117,7 +117,7 @@ const HUMAN_SHARE_IDENTITY: TeamMemberIdentity = { role: 'human_agent' };
 
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
-    <button className="chat-suggestion-card" onClick={onClick}>
+    <button className="chat-suggestion-card" data-testid="chat-panel-welcome-suggestion" data-variant={text} onClick={onClick}>
       <Sparkles className="chat-suggestion-card__icon" strokeWidth={2} />
       <span className="chat-suggestion-card__text">{text}</span>
       <ArrowRight className="chat-suggestion-card__arrow" strokeWidth={2} />
@@ -138,6 +138,7 @@ function InterruptResultBubble() {
     <div
       className="chat-interrupt-bubble chat-interrupt-bubble--error"
       role="alert"
+      data-testid="chat-panel-interrupt-result"
     >
       {message}
     </div>
@@ -294,18 +295,19 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
   };
 
   return (
-    <div className="chat-active-team-group animate-rise">
+    <div className="chat-active-team-group animate-rise" data-testid="chat-panel-task-queue">
       <div className="team-event-group team-event-group--activity">
         <button
           type="button"
           className="team-event-group-summary"
+          data-testid="chat-panel-task-queue-header"
           onClick={() => setExpanded(prev => !prev)}
           aria-expanded={expanded}
         >
           <span className="team-event-group-summary__main">
             <span className="team-event-group-summary__title">{t('chatUi.messageQueue')}</span>
             {queuePaused && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
+              <span data-testid="chat-panel-task-queue-paused-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
                 <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-chat-paused)', flexShrink: 0 }} />
                 <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>{t('chat.paused')}</span>
               </span>
@@ -316,6 +318,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
               role="button"
               tabIndex={0}
               className="team-event-group-summary__activity"
+              data-testid="chat-panel-task-queue-resume"
               style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginLeft: 'auto', justifyContent: 'end', flexShrink: 0, cursor: 'pointer' }}
               onClick={handleResume}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleResume(e as unknown as React.MouseEvent); } }}
@@ -331,6 +334,8 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
               <div
                 key={task.id}
                 className="team-event-group-row team-event-group-row--activity"
+                data-testid="chat-panel-task-queue-item"
+                data-variant={task.id}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -351,6 +356,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                     draggable
                     onDragStart={() => handleDragStart(index)}
                     className="queue-drag-handle"
+                    data-testid="chat-panel-task-queue-item-drag"
                     title={t('chat.dragTask')}
                   />
                   <div className="team-event-group-row__avatar" style={{ display: 'flex', alignItems: 'center' }}>
@@ -365,6 +371,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                         .map((item) => item.filename)
                         .filter(Boolean)
                         .join('\n')}
+                      data-testid="chat-panel-task-queue-item-attachment-count"
                       style={{
                         flexShrink: 0,
                         fontSize: '12px',
@@ -382,6 +389,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--send"
+                    data-testid="chat-panel-task-queue-item-send"
                     title={t('chat.sendTask')}
                     onClick={(e) => handleSendTask(e, task.id, task.content, task.mediaItems)}
                   >
@@ -390,6 +398,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--edit"
+                    data-testid="chat-panel-task-queue-item-edit"
                     title={t('chat.editTask')}
                     onClick={(e) => handleEditTask(e, task.id, task.content, task.mediaItems?.length ?? 0)}
                   >
@@ -398,6 +407,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--delete"
+                    data-testid="chat-panel-task-queue-item-delete"
                     title={t('chat.removeTask')}
                     onClick={(e) => handleRemoveTask(e, task.id)}
                   >
@@ -537,26 +547,27 @@ function HumanSharePanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby="human-share-title"
+        data-testid="chat-panel-human-share-modal"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="human-share-modal__header">
+        <div className="human-share-modal__header" data-testid="chat-panel-human-share-modal-header">
           <div>
             <div className="human-share-modal__title-row">
-              <h2 id="human-share-title" className="human-share-modal__title">{t('humanShare.title')}</h2>
+              <h2 id="human-share-title" className="human-share-modal__title" data-testid="chat-panel-human-share-modal-title">{t('humanShare.title')}</h2>
             </div>
-            <p className="human-share-modal__summary">
+            <p className="human-share-modal__summary" data-testid="chat-panel-human-share-modal-summary">
               {allJoined
                 ? t('humanShare.allJoined', { count: sortedCommands.length })
                 : t('humanShare.waiting', { joined: joinedCount, total: sortedCommands.length })}
             </p>
           </div>
-          <button type="button" className="human-share-modal__close" onClick={onClose} aria-label={t('common.close')}>
+          <button type="button" className="human-share-modal__close" data-testid="chat-panel-human-share-modal-close" onClick={onClose} aria-label={t('common.close')}>
             <X size={18} />
           </button>
         </div>
 
-        <div className="human-share-modal__body">
-          <div className="human-share-modal__notice" role="note">
+        <div className="human-share-modal__body" data-testid="chat-panel-human-share-modal-member-list">
+          <div className="human-share-modal__notice" role="note" data-testid="chat-panel-human-share-modal-notice">
             <Info size={18} strokeWidth={2.4} />
             <span>{t('humanShare.instructionHint')}</span>
           </div>
@@ -565,8 +576,8 @@ function HumanSharePanel({
             const copied = copiedKey === `join:${command.memberName}`;
             const shouldShowJoinCommand = command.status !== 'joined' && Boolean(command.joinCommand);
             return (
-              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
-                <div className="human-share-modal__member">
+              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item" data-testid="chat-panel-human-share-modal-member" data-variant={command.memberName}>
+                <div className="human-share-modal__member" data-testid="chat-panel-human-share-modal-member-info">
                   <TeamMemberAvatar
                     member={command.memberName}
                     identity={HUMAN_SHARE_IDENTITY}
@@ -578,16 +589,17 @@ function HumanSharePanel({
                       <div className="human-share-modal__member-id">{command.memberName}</div>
                     )}
                   </div>
-                  <span className={getHumanShareStatusClass(command)}>
+                  <span className={getHumanShareStatusClass(command)} data-testid="chat-panel-human-share-modal-member-status" data-variant={command.status}>
                     {getHumanShareStatusLabel(command, t)}
                   </span>
                 </div>
                 {shouldShowJoinCommand ? (
-                  <div className="human-share-modal__command-row">
-                    <code className="human-share-modal__command">{command.joinCommand}</code>
+                  <div className="human-share-modal__command-row" data-testid="chat-panel-human-share-modal-member-join" data-variant="pending">
+                    <code className="human-share-modal__command" data-testid="chat-panel-human-share-modal-member-join-command">{command.joinCommand}</code>
                     <button
                       type="button"
                       className="human-share-modal__copy"
+                      data-testid="chat-panel-human-share-modal-member-copy"
                       onClick={() => void copyText(`join:${command.memberName}`, command.joinCommand)}
                     >
                       {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
@@ -601,6 +613,8 @@ function HumanSharePanel({
                         ? 'human-share-modal__command-note--joined'
                         : 'human-share-modal__command-note--pending'
                     }`}
+                    data-testid="chat-panel-human-share-modal-member-note"
+                    data-variant={command.status === 'joined' ? 'joined' : 'pending'}
                   >
                     {command.status === 'joined' ? <CheckCircle2 size={15} /> : <ClipboardList size={15} />}
                     <span>
@@ -615,13 +629,14 @@ function HumanSharePanel({
           })}
 
           {exitCommand && (
-            <section className="human-share-modal__exit">
-              <div className="human-share-modal__exit-title">{t('humanShare.exitTitle')}</div>
+            <section className="human-share-modal__exit" data-testid="chat-panel-human-share-modal-exit">
+              <div className="human-share-modal__exit-title" data-testid="chat-panel-human-share-modal-exit-title">{t('humanShare.exitTitle')}</div>
               <div className="human-share-modal__command-row">
-                <code className="human-share-modal__command">{exitCommand}</code>
+                <code className="human-share-modal__command" data-testid="chat-panel-human-share-modal-exit-command">{exitCommand}</code>
                 <button
                   type="button"
                   className="human-share-modal__copy"
+                  data-testid="chat-panel-human-share-modal-exit-copy"
                   onClick={() => void copyText('exit', exitCommand)}
                 >
                   {copiedKey === 'exit' ? <CheckCircle2 size={15} /> : <Copy size={15} />}
@@ -661,22 +676,22 @@ function HumanShareCard({
   }
 
   return (
-    <section className="human-share-card" data-testid="human-share-card">
-      <div className="human-share-card__icon" aria-hidden="true">
+    <section className="human-share-card" data-testid="chat-panel-human-share-card">
+      <div className="human-share-card__icon" aria-hidden="true" data-testid="chat-panel-human-share-card-icon">
         <ClipboardList size={18} strokeWidth={2} />
       </div>
-      <div className="human-share-card__content">
-        <div className="human-share-card__title">{t('humanShare.cardTitle')}</div>
-        <div className="human-share-card__summary">
+      <div className="human-share-card__content" data-testid="chat-panel-human-share-card-content">
+        <div className="human-share-card__title" data-testid="chat-panel-human-share-card-title">{t('humanShare.cardTitle')}</div>
+        <div className="human-share-card__summary" data-testid="chat-panel-human-share-card-summary">
           {t('humanShare.cardSummary', {
             pending: pendingCount,
             joined: joinedCount,
             total: sortedCommands.length,
           })}
         </div>
-        <div className="human-share-card__members">
+        <div className="human-share-card__members" data-testid="chat-panel-human-share-card-members">
           {previewCommands.map((command) => (
-            <span key={command.memberName} className="human-share-card__member-pill">
+            <span key={command.memberName} className="human-share-card__member-pill" data-testid="chat-panel-human-share-card-member-pill" data-variant={command.memberName}>
               <TeamMemberAvatar
                 member={command.memberName}
                 identity={HUMAN_SHARE_IDENTITY}
@@ -686,14 +701,14 @@ function HumanShareCard({
             </span>
           ))}
           {sortedCommands.length > previewCommands.length ? (
-            <span className="human-share-card__more">+{sortedCommands.length - previewCommands.length}</span>
+            <span className="human-share-card__more" data-testid="chat-panel-human-share-card-more">+{sortedCommands.length - previewCommands.length}</span>
           ) : null}
         </div>
       </div>
       <button
         type="button"
         className="human-share-card__button"
-        data-testid="human-share-card-trigger"
+        data-testid="chat-panel-human-share-card-trigger"
         onClick={onShare}
       >
         <Share2 size={15} strokeWidth={2} />
@@ -1216,30 +1231,31 @@ export function ChatPanel({
       onDrop={handleDesktopFileDrop}
     >
       {turnChangeNotice ? (
-        <div className="code-turn-change-toast" role="status" aria-live="polite">
+        <div className="code-turn-change-toast" role="status" aria-live="polite" data-testid="chat-panel-code-turn-change-toast">
           <CheckCircle2 size={17} aria-hidden="true" />
           <span>{turnChangeNotice}</span>
         </div>
       ) : null}
       {shouldShowChatHeader && (
-        <div className="chat-panel-header">
-          <div className="chat-panel-header__meta">
-            <div className="chat-panel-header__title" title={sessionTitle}>
+        <div className="chat-panel-header" data-testid="chat-panel-header">
+          <div className="chat-panel-header__meta" data-testid="chat-panel-header-meta">
+            <div className="chat-panel-header__title" title={sessionTitle} data-testid="chat-panel-header-title">
               {sessionTitle}
             </div>
             {sessionProjectName && (
-              <div className="chat-panel-header__project" title={sessionProjectName}>
+              <div className="chat-panel-header__project" title={sessionProjectName} data-testid="chat-panel-header-project">
                 <span className="chat-config-icon chat-config-icon--folder" aria-hidden="true" />
                 <span>{sessionProjectName}</span>
               </div>
             )}
           </div>
-          <div className="chat-panel-header__actions">
+          <div className="chat-panel-header__actions" data-testid="chat-panel-header-actions">
             {shouldShowShareExport && (
               <button
                 type="button"
                 className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
-                data-testid="share-export"
+                data-testid="chat-panel-share-export"
+                data-variant={isExportingShare ? 'exporting' : 'ready'}
                 title={shareExportTitle}
                 aria-label={shareExportTitle}
                 aria-busy={isExportingShare}
@@ -1251,7 +1267,7 @@ export function ChatPanel({
                 {isExportingShare ? (
                   <>
                     <LoaderCircle className="share-export-btn__spinner" size={14} strokeWidth={2} />
-                    <span className="share-export-btn__label">{t('share.generating')}</span>
+                    <span className="share-export-btn__label" data-testid="chat-panel-share-export-loading-label">{t('share.generating')}</span>
                   </>
                 ) : (
                   <Share2 size={14} strokeWidth={2} />
@@ -1262,6 +1278,7 @@ export function ChatPanel({
               <button
                 type="button"
                 className="chat-header-icon-btn"
+                data-testid="chat-panel-human-share-trigger"
                 onClick={() => setHumanShareOpen(true)}
                 title={t('humanShare.title')}
               >
@@ -1271,6 +1288,8 @@ export function ChatPanel({
             <button
               type="button"
               className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              data-testid="chat-panel-header-chat-toggle"
+              data-variant="collapse"
               onClick={() => onToggleTeamArea?.(false)}
             >
               <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
@@ -1278,6 +1297,8 @@ export function ChatPanel({
             <button
               type="button"
               className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              data-testid="chat-panel-header-expand-toggle"
+              data-variant="expand"
               onClick={() => onToggleTeamArea?.(true)}
             >
               <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
@@ -1286,7 +1307,7 @@ export function ChatPanel({
         </div>
       )}
       {hasHarnessProgress && (
-        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm" data-testid="chat-panel-harness-progress-mount">
           <HarnessProgressBar />
         </div>
       )}
@@ -1296,8 +1317,8 @@ export function ChatPanel({
           onClose={() => setHumanShareOpen(false)}
         />
       )}
-      <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
-        <div className={chatContentClassName}>
+      <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" data-testid="chat-panel-scroll" onScroll={handleScroll} onWheel={handleWheel}>
+        <div className={chatContentClassName} data-testid="chat-panel-content">
           {hasConversation ? (
             <>
               {showHistoryRetry && historyOnLoadMore && (
@@ -1305,6 +1326,7 @@ export function ChatPanel({
                   <button
                     type="button"
                     className="btn !px-3 !py-1.5 text-xs"
+                    data-testid="chat-panel-history-retry"
                     onClick={() => void historyOnLoadMore()}
                   >
                     {t('chat.historyLoadMore')}
@@ -1329,7 +1351,7 @@ export function ChatPanel({
                   />
                 </>
               ) : isHistoryRestoring ? (
-                <div className="flex h-32 items-center justify-center" role="status" aria-live="polite">
+                <div className="flex h-32 items-center justify-center" role="status" aria-live="polite" data-testid="chat-panel-history-loading">
                   <div className="text-sm text-text-muted">
                     {t('chat.historyLoading')}
                   </div>
@@ -1337,10 +1359,10 @@ export function ChatPanel({
               ) : null}
             </>
           ) : (
-            <div className="chat-welcome">
-              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} />
-              <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
-              <div className="chat-welcome__composer">
+            <div className="chat-welcome" data-testid="chat-panel-welcome">
+              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
+              <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
+              <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
@@ -1362,7 +1384,7 @@ export function ChatPanel({
                   onClearGoal={onClearGoal}
                 />
               </div>
-              <div className="chat-suggestions">
+              <div className="chat-suggestions" data-testid="chat-panel-welcome-suggestions">
                 {suggestions.map((text) => (
                   <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
                 ))}
@@ -1374,7 +1396,7 @@ export function ChatPanel({
       </div>
 
       {hasConversation && (
-        <div className="chat-compose">
+        <div className="chat-compose" data-testid="chat-panel-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
           <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
           <InterruptResultBubble />
@@ -1406,7 +1428,7 @@ export function ChatPanel({
           />
         </div>
       )}
-      <div className="chat-ai-disclaimer" data-testid="ai-disclaimer">
+      <div className="chat-ai-disclaimer" data-testid="chat-panel-ai-disclaimer">
         {t('share.aiNotice')}
       </div>
     </div>

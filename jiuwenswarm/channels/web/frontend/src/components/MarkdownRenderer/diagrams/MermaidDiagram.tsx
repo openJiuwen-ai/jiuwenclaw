@@ -105,7 +105,7 @@ export function MermaidDiagram({ code, renderSvg = renderMermaidSvg }: MermaidDi
 
   if (renderState.status === 'error') {
     return (
-      <pre className="mermaid-error" data-mermaid-status="error">
+      <pre className="mermaid-error" data-mermaid-status="error" data-testid="markdown-mermaid-error">
         <code>{code}</code>
       </pre>
     );
@@ -175,6 +175,7 @@ export function MermaidDiagram({ code, renderSvg = renderMermaidSvg }: MermaidDi
           className={clsx('mermaid-canvas', isDragging && 'mermaid-canvas--dragging')}
           style={{ height: canvasHeight }}
           aria-busy={!rendered}
+          data-testid="markdown-mermaid-canvas"
           onMouseDown={event => {
             event.preventDefault();
             startDrag(event.clientX, event.clientY);
@@ -192,10 +193,10 @@ export function MermaidDiagram({ code, renderSvg = renderMermaidSvg }: MermaidDi
           }}
           onTouchEnd={endDrag}
         >
-          {rendered && <div className="mermaid-svg-wrapper" style={wrapperStyle} dangerouslySetInnerHTML={{ __html: renderState.svg }} />}
+          {rendered && <div className="mermaid-svg-wrapper" style={wrapperStyle} data-testid="markdown-mermaid-svg" dangerouslySetInnerHTML={{ __html: renderState.svg }} />}
         </div>
       ) : (
-        <div className="mermaid-code-view">
+        <div className="mermaid-code-view" data-testid="markdown-mermaid-code-view">
           <pre>
             <code>{code}</code>
           </pre>
