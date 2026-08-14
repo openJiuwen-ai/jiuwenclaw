@@ -781,6 +781,7 @@
   "config": {
     "title": "配置信息",
     "subtitle": "按顶部标签分类编辑；保存后后端将自动重启以加载最新配置。",
+    "unsavedChanges": "有未保存的更改",
     "tabsAriaLabel": "配置分类",
     "tabs": {
       "model": "模型配置",

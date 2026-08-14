@@ -781,6 +781,7 @@
   "config": {
     "title": "Configuration",
     "subtitle": "Edit by category using the tabs above. The backend will restart after saving to load changes.",
+    "unsavedChanges": "Unsaved changes",
     "tabsAriaLabel": "Configuration categories",
     "tabs": {
       "model": "Model",
