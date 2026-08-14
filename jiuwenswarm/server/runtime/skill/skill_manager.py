@@ -2278,14 +2278,7 @@ class SkillManager:
                 "detail": "参数 limit 必须是整数",
             }
         limit = min(max(limit, 1), 50)
-        calls: list[tuple[str, Awaitable[dict[str, Any]]]] = [
-            (
-                "skillnet",
-                self.handle_skills_skillnet_search(
-                    {"q": query, "limit": limit, "mode": "keyword"}
-                ),
-            )
-        ]
+        calls: list[tuple[str, Awaitable[dict[str, Any]]]] = []
         source_statuses: list[dict[str, Any]] = []
         if self._get_clawhub_token():
             calls.append(
@@ -2334,7 +2327,7 @@ class SkillManager:
         any_success = any(item.get("status") == "success" for item in source_statuses)
         any_error = any(item.get("status") == "error" for item in source_statuses)
         return {
-            "success": any_success,
+            "success": any_success or not any_error,
             "partial": any_success and any_error,
             "query": query,
             "items": self._aggregate_online_search_results(query, source_results, limit),

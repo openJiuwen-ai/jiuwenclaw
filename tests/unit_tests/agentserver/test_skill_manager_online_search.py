@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
@@ -30,60 +28,48 @@ def _clawhub_item(name: str, rank_marker: str, owner_handle: str = "") -> dict:
 
 
 @pytest.mark.asyncio
-async def test_online_search_queries_configured_sources_concurrently(tmp_path, monkeypatch):
+async def test_online_search_queries_clawhub_without_skillnet(tmp_path, monkeypatch):
     manager = SkillManager(workspace_dir=str(tmp_path))
     manager._set_clawhub_token("test-token")
-    started: set[str] = set()
-    both_started = asyncio.Event()
 
-    async def _search(source: str, params: dict) -> dict:
+    async def _clawhub_search(params: dict) -> dict:
         assert params["q"] == "pdf"
         assert params["limit"] == 10
-        started.add(source)
-        if len(started) == 2:
-            both_started.set()
-        await asyncio.wait_for(both_started.wait(), timeout=0.5)
-        if source == "skillnet":
-            assert params["mode"] == "keyword"
-            return {
-                "success": True,
-                "skills": [_skillnet_item("skillnet-pdf", "first")],
-            }
         return {
             "success": True,
             "skills": [_clawhub_item("clawhub-pdf", "first")],
         }
 
+    async def _unexpected_skillnet_search(params: dict) -> dict:
+        raise AssertionError("SkillNet must not participate in Skills online search")
+
     async def _unexpected_team_skills_hub_search(params: dict) -> dict:
         raise AssertionError("TeamSkillsHub must not participate in Skills online search")
 
-    monkeypatch.setattr(manager, "handle_skills_skillnet_search", lambda params: _search("skillnet", params))
-    monkeypatch.setattr(manager, "handle_skills_clawhub_search", lambda params: _search("clawhub", params))
+    monkeypatch.setattr(manager, "handle_skills_skillnet_search", _unexpected_skillnet_search)
+    monkeypatch.setattr(manager, "handle_skills_clawhub_search", _clawhub_search)
     monkeypatch.setattr(manager, "handle_skills_team_skills_hub_search", _unexpected_team_skills_hub_search)
 
     payload = await manager.handle_skills_online_search({"q": "pdf", "limit": 10})
 
     assert payload["success"] is True
     assert payload["partial"] is False
-    assert started == {"skillnet", "clawhub"}
-    assert [item["source"] for item in payload["items"]] == ["skillnet", "clawhub"]
-    assert payload["items"][0]["native_score"] == 12
-    assert payload["items"][0]["category"] == "document"
-    assert payload["items"][1]["updated_at"] == 1_750_000_000_000
-    assert [source["status"] for source in payload["sources"]] == ["success", "success"]
+    assert [item["source"] for item in payload["items"]] == ["clawhub"]
+    assert payload["items"][0]["updated_at"] == 1_750_000_000_000
+    assert payload["sources"] == [{"source": "clawhub", "status": "success", "count": 1}]
 
 
 @pytest.mark.asyncio
 async def test_online_search_skips_clawhub_without_token(tmp_path, monkeypatch):
     manager = SkillManager(workspace_dir=str(tmp_path))
 
-    async def _skillnet_search(params: dict) -> dict:
-        return {"success": True, "skills": [_skillnet_item("pdf", "first")]}
+    async def _unexpected_skillnet_search(params: dict) -> dict:
+        raise AssertionError("SkillNet must not participate in Skills online search")
 
     async def _unexpected_clawhub_search(params: dict) -> dict:
         raise AssertionError("ClawHub must not be queried without a token")
 
-    monkeypatch.setattr(manager, "handle_skills_skillnet_search", _skillnet_search)
+    monkeypatch.setattr(manager, "handle_skills_skillnet_search", _unexpected_skillnet_search)
     monkeypatch.setattr(manager, "handle_skills_clawhub_search", _unexpected_clawhub_search)
 
     payload = await manager.handle_skills_online_search({"q": "pdf"})
@@ -91,7 +77,6 @@ async def test_online_search_skips_clawhub_without_token(tmp_path, monkeypatch):
     assert payload["success"] is True
     assert payload["partial"] is False
     assert payload["sources"] == [
-        {"source": "skillnet", "status": "success", "count": 1},
         {
             "source": "clawhub",
             "status": "skipped",
@@ -102,26 +87,26 @@ async def test_online_search_skips_clawhub_without_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_online_search_returns_partial_results_when_one_source_fails(tmp_path, monkeypatch):
+async def test_online_search_reports_failure_when_clawhub_fails(tmp_path, monkeypatch):
     manager = SkillManager(workspace_dir=str(tmp_path))
     manager._set_clawhub_token("test-token")
 
-    async def _skillnet_search(params: dict) -> dict:
-        return {"success": True, "skills": [_skillnet_item("pdf", "first")]}
+    async def _unexpected_skillnet_search(params: dict) -> dict:
+        raise AssertionError("SkillNet must not participate in Skills online search")
 
     async def _clawhub_search(params: dict) -> dict:
         return {"success": False, "detail": "remote unavailable"}
 
-    monkeypatch.setattr(manager, "handle_skills_skillnet_search", _skillnet_search)
+    monkeypatch.setattr(manager, "handle_skills_skillnet_search", _unexpected_skillnet_search)
     monkeypatch.setattr(manager, "handle_skills_clawhub_search", _clawhub_search)
 
     payload = await manager.handle_skills_online_search({"q": "pdf"})
 
-    assert payload["success"] is True
-    assert payload["partial"] is True
-    assert [item["source"] for item in payload["items"]] == ["skillnet"]
-    assert payload["sources"][1]["status"] == "error"
-    assert payload["sources"][1]["detail"] == "remote unavailable"
+    assert payload["success"] is False
+    assert payload["partial"] is False
+    assert payload["items"] == []
+    assert payload["sources"][0]["status"] == "error"
+    assert payload["sources"][0]["detail"] == "remote unavailable"
 
 
 def test_online_search_rrf_is_stable_and_exact_match_wins():

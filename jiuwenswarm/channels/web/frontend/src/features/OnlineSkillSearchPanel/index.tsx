@@ -103,7 +103,7 @@ export function OnlineSkillSearchPanel({
   const [installedKeys, setInstalledKeys] = useState<Set<string>>(() => new Set());
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [enabledSources, setEnabledSources] = useState<Set<OnlineSource>>(
-    () => new Set<OnlineSource>(['skillnet', 'clawhub'])
+    () => new Set<OnlineSource>(['clawhub'])
   );
   const requestSequenceRef = useRef(0);
   const installingKeyRef = useRef<string | null>(null);
