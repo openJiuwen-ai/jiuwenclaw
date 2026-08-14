@@ -3554,7 +3554,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
-  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
+  const configSaveBlocked = isProcessing || globalTaskRunning;
   const storeAvailableModels = availableModels;
   const storeAvailableModelsRef = useRef(storeAvailableModels);
   storeAvailableModelsRef.current = storeAvailableModels;
@@ -4393,7 +4393,7 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
+            {configSaveBlocked ? (
               <span className="text-xs text-warn">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
@@ -4407,7 +4407,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || configSaveBlocked}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
