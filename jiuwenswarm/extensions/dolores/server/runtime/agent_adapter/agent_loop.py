@@ -92,8 +92,10 @@ class AgentLoop:
         sys_operation: Any = None,
         model_request_config: Any = None,
         model_client_config: Any = None,
+        runtime_id: Optional[str] = None,
     ) -> None:
         self._card = card
+        self._runtime_id = runtime_id or card.id
         self._model = model
         self._deep_config = deep_config
         self._system_prompt = system_prompt
@@ -104,9 +106,20 @@ class AgentLoop:
         self._system_prompt_builder = system_prompt_builder or self._make_system_prompt_builder(system_prompt)
 
         # rail 机制
-        self._agent_callback_manager = AgentCallbackManager(agent_id=card.id)
+        self._agent_callback_manager = AgentCallbackManager(
+            agent_id=card.id,
+            event_namespace=self._runtime_id,
+        )
         # 能力/工具
-        self._ability_manager = ability_manager or AbilityManager(owner_id=card.id)
+        self._ability_manager = ability_manager or AbilityManager(owner_id=self._runtime_id)
+        if ability_manager is not None and runtime_id is not None:
+            self._ability_manager.set_owner_id(self._runtime_id)
+        self._initialized = False
+        self._initialization_lock = asyncio.Lock()
+        self._registered_mcp_tags: set[tuple[str, str]] = set()
+        self._pending_resource_rails: list[AgentRail] = []
+        self._registered_resource_rails: list[AgentRail] = []
+        self._task_resources_cleaned = False
         # 上下文引擎：路径 2 —— AgentLoop 自建 vendored context_engine + 直接 set preset processor 链，
         # 不走 ContextProcessorRail（rail.init 要 agent.react_agent._config，AgentLoop 没有）。
         # 2.2 只建 engine + processor 清单存起来；2.4 才在 loop 里 route add_messages/get_context_window。
@@ -475,11 +488,101 @@ class AgentLoop:
         if hasattr(rail, "uninit"):
             rail.uninit(self)
 
+    async def _register_pending_mcps(self) -> None:
+        """Register task-scoped MCP abilities for a lightweight child."""
+        config = self._deep_config
+        if config is None or not config.mcps:
+            return
+
+        from openjiuwen.core.runner import Runner
+
+        for mcp_config in config.mcps:
+            server_id = mcp_config.server_id
+            existing = Runner.resource_mgr.get_mcp_server_config(server_id)
+            if existing is None:
+                result = await Runner.resource_mgr.add_mcp_server(
+                    mcp_config,
+                    tag=self._runtime_id,
+                )
+                if result.is_err():
+                    raise RuntimeError(str(result.msg()))
+            else:
+                if existing.model_dump() != mcp_config.model_dump():
+                    raise RuntimeError(
+                        f"MCP server '{server_id}' is already registered with a different config"
+                    )
+                resource_ids = [server_id, *Runner.resource_mgr.get_mcp_tool_ids(server_id)]
+                for resource_id in resource_ids:
+                    result = Runner.resource_mgr.add_resource_tag(
+                        resource_id,
+                        self._runtime_id,
+                    )
+                    if result.is_err():
+                        raise RuntimeError(str(result.msg()))
+
+            resource_ids = [server_id, *Runner.resource_mgr.get_mcp_tool_ids(server_id)]
+            self._registered_mcp_tags.update(
+                (resource_id, self._runtime_id) for resource_id in resource_ids
+            )
+            self._ability_manager.add(mcp_config)
+
+    async def prepare_task_resources(self) -> None:
+        """TaskTool lifecycle hook: initialize the lightweight child once."""
+        await self.ensure_initialized()
+
+    async def cleanup_task_resources(self) -> None:
+        """TaskTool lifecycle hook: release task-scoped MCP references."""
+        if self._task_resources_cleaned:
+            return
+        self._task_resources_cleaned = True
+
+        await self.stop()
+        for rail in reversed(self._registered_resource_rails):
+            try:
+                await self.unregister_rail(rail)
+            except Exception as exc:
+                logger.warning(
+                    "[AgentLoop] unregister lightweight resource rail failed: "
+                    "rail=%s error=%s",
+                    type(rail).__name__,
+                    exc,
+                )
+        self._registered_resource_rails.clear()
+        if not self._registered_mcp_tags:
+            return
+
+        from openjiuwen.core.runner import Runner
+
+        for resource_id, tag in list(self._registered_mcp_tags):
+            result = Runner.resource_mgr.remove_resource_tag(
+                resource_id,
+                tag,
+                skip_if_tag_not_exists=True,
+            )
+            if result.is_err():
+                logger.warning(
+                    "[AgentLoop] remove MCP tag failed: resource=%s tag=%s error=%s",
+                    resource_id,
+                    tag,
+                    result.msg(),
+                )
+        self._registered_mcp_tags.clear()
+
     # —— 驱动契约方法（照抄 DeepAgent，EventManager → followupQueue）——
 
     async def ensure_initialized(self) -> None:
-        """异步初始化。"""
-        pass
+        """Initialize lightweight-only resources exactly once."""
+        if self._initialized:
+            return
+        async with self._initialization_lock:
+            if self._initialized:
+                return
+            for rail in self._pending_resource_rails:
+                await self.register_rail(rail)
+                self._registered_resource_rails.append(rail)
+            self._pending_resource_rails.clear()
+            await self._register_pending_mcps()
+            self._initialized = True
 
     async def start(self, *, session: Any = None) -> None:
         """绑 session + 启动 forwarder + round worker。"""
@@ -1097,21 +1200,112 @@ class AgentLoop:
         session_id: str,
         browser_capabilities: Optional[list[str]] = None,
     ) -> Any:
-        """Synchronously create a configured subagent by its registered name.
+        """Synchronously create a configured subagent.
 
-        TaskTool's contract is synchronous at creation time. Reuse the stock
-        DeepAgent implementation so factory routing (notably browser_agent),
-        workspace inheritance, and future factory additions stay aligned with
-        the SDK instead of being partially reimplemented here.
+        Regular ``SubAgentConfig`` entries stay on Dolores' lightweight
+        ``AgentLoop`` path. Specialized factory agents keep using the stock
+        implementation because their browser/code/mobile runtimes are part of
+        the factory contract.
         """
         from openjiuwen.harness.deep_agent import DeepAgent
 
-        return DeepAgent.create_subagent(
-            self,
-            subagent_type,
-            session_id,
-            browser_capabilities=browser_capabilities,
+        spec = self._find_subagent_spec(subagent_type)
+        if spec is None or isinstance(spec, DeepAgent) or getattr(spec, "factory_name", None):
+            return DeepAgent.create_subagent(
+                self,
+                subagent_type,
+                session_id,
+                browser_capabilities=browser_capabilities,
+            )
+        return self._create_lightweight_subagent(spec, session_id)
+
+    def _create_lightweight_subagent(self, spec: Any, session_id: str) -> "AgentLoop":
+        """Build an isolated AgentLoop with only its required resource rail."""
+        from pathlib import Path
+
+        from openjiuwen.core.foundation.tool import ToolCard
+        from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+        from openjiuwen.harness.workspace.workspace import Workspace
+
+        parent_config = self._deep_config
+        parent_workspace = getattr(parent_config, "workspace", None)
+        if spec.workspace is not None:
+            workspace = spec.workspace
+        else:
+            parent_root = getattr(parent_workspace, "root_path", parent_workspace) or "."
+            workspace = Workspace(
+                root_path=Path(parent_root) / "sub_agents" / session_id,
+                language=spec.language or getattr(parent_config, "language", None),
+            )
+
+        runtime_id = f"{spec.agent_card.id}.sub.{uuid.uuid5(uuid.NAMESPACE_URL, session_id).hex}"
+        # A fresh SysOperationRail is safe to own per child and is init-only:
+        # it provides read_file/write_file/edit_file/list_dir/etc. without
+        # copying any live parent callbacks or DeepAgent runtime references.
+        filesystem_rail = SysOperationRail()
+        child_config = DeepAgentConfig(
+            model=spec.model or getattr(parent_config, "model", None),
+            card=spec.agent_card,
+            tool_owner_id=runtime_id,
+            system_prompt=spec.system_prompt,
+            max_iterations=(
+                spec.max_iterations
+                if spec.max_iterations is not None
+                else getattr(parent_config, "max_iterations", 15)
+            ),
+            workspace=workspace,
+            sys_operation=spec.sys_operation or getattr(self, "_sys_operation", None),
+            language=spec.language or getattr(parent_config, "language", None),
+            tools=list(spec.tools or []),
+            mcps=list(spec.mcps or []),
+            # Do not copy spec/parent rails. Most carry live DeepAgent runtime
+            # state and some require react_agent internals AgentLoop does not
+            # own. The one fresh init-only rail below is the minimal filesystem
+            # capability required by delegated tasks.
+            rails=[filesystem_rail],
+            skills=spec.skills,
+            backend=(
+                spec.backend
+                if spec.backend is not None
+                else getattr(parent_config, "backend", None)
+            ),
+            enable_task_loop=False,
+            subagents=None,
+            completion_timeout=getattr(parent_config, "completion_timeout", 600.0),
+            restrict_to_work_dir=(
+                spec.restrict_to_work_dir
+                or getattr(parent_config, "restrict_to_work_dir", True)
+            ),
         )
+        child = AgentLoop(
+            card=spec.agent_card,
+            model=child_config.model,
+            sys_operation=child_config.sys_operation,
+            system_prompt=spec.system_prompt,
+            deep_config=child_config,
+            model_request_config=getattr(self, "_model_request_config", None),
+            model_client_config=getattr(self, "_model_client_config", None),
+            runtime_id=runtime_id,
+        )
+        # create_subagent() is intentionally synchronous for TaskTool. Defer
+        # async rail registration to prepare_task_resources()/invoke(), while
+        # retaining the original lightweight SubAgentConfig -> AgentLoop path.
+        child._pending_resource_rails.append(filesystem_rail)
+
+        # General-purpose specs receive the same ToolCards exposed by the
+        # parent. Their concrete resources are already present in Runner's
+        # registry, so adding cards is enough and avoids cloning stateful tools.
+        for tool in spec.tools or []:
+            card = tool if isinstance(tool, ToolCard) else getattr(tool, "card", None)
+            if card is None:
+                logger.warning(
+                    "[AgentLoop] skip unsupported lightweight subagent tool: %s",
+                    type(tool).__name__,
+                )
+                continue
+            child.ability_manager.add(card)
+
+        return self._bind_inherited_artifact_root(child)
 
     def _find_subagent_spec(self, subagent_type: str) -> Any:
         """Find the registered config or DeepAgent matching ``subagent_type``."""
@@ -1142,6 +1336,87 @@ class AgentLoop:
         except (AttributeError, TypeError):
             pass
         return subagent
+
+    async def invoke(self, inputs: Any, session: Any = None) -> dict[str, Any]:
+        """Run one isolated TaskTool invocation and return its final output."""
+        normalized = inputs if isinstance(inputs, dict) else {"query": str(inputs)}
+        query = normalized.get("query", "")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("invoke requires a non-empty query")
+
+        # A fresh asyncio task gives CWD ContextVars their own binding. Without
+        # it, init_cwd() would replace the parent tool-call task's working dir.
+        task = asyncio.create_task(
+            self._invoke_isolated(normalized, session=session),
+            name=f"agentloop_subagent[{self._runtime_id}]",
+        )
+        return await task
+
+    async def _invoke_isolated(self, inputs: dict[str, Any], session: Any = None) -> dict[str, Any]:
+        await self.ensure_initialized()
+        self._initialize_inherited_cwd()
+
+        owns_session = session is None
+        if owns_session:
+            from openjiuwen.core.session.agent import create_agent_session
+
+            session_id = str(
+                inputs.get("conversation_id")
+                or inputs.get("session_id")
+                or f"subagent_{uuid.uuid4().hex[:8]}"
+            )
+            session = create_agent_session(session_id=session_id, card=self._card)
+            await session.pre_run(inputs={})
+
+        stream = None
+        final_output = ""
+        streamed_parts: list[str] = []
+        error_message = ""
+        try:
+            await self.start(session=session)
+            stream = await self.attach_output()
+            if stream is None:
+                raise RuntimeError("lightweight subagent output stream is unavailable")
+            await self.send_input(
+                SendInputRequest(
+                    request_id=uuid.uuid4().hex,
+                    inputs=inputs,
+                )
+            )
+            async for chunk in stream:
+                chunk_type = getattr(chunk, "type", "")
+                payload = getattr(chunk, "payload", None)
+                payload = payload if isinstance(payload, dict) else {}
+                if chunk_type == "answer":
+                    final_output = str(payload.get("output") or "")
+                elif chunk_type == "llm_output":
+                    streamed_parts.append(str(payload.get("content") or ""))
+                elif chunk_type == "error":
+                    error_message = str(payload.get("error") or "subagent execution failed")
+            if error_message and not final_output:
+                raise RuntimeError(error_message)
+            return {"output": final_output or "".join(streamed_parts)}
+        finally:
+            if stream is not None:
+                await stream.close(abort_active_round=False)
+            await self.stop()
+            if owns_session and session is not None:
+                await session.post_run()
+
+    def _initialize_inherited_cwd(self) -> None:
+        artifact_root = getattr(self, "_inherited_artifact_root", None)
+        if not artifact_root:
+            return
+
+        from openjiuwen.core.sys_operation.cwd import init_cwd
+
+        workspace = getattr(self._deep_config, "workspace", None)
+        workspace_root = getattr(workspace, "root_path", workspace)
+        init_cwd(
+            str(artifact_root),
+            project_root=str(artifact_root),
+            workspace=str(workspace_root) if workspace_root else None,
+        )
 
     # —— 热重载 ——
 

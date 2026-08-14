@@ -1535,7 +1535,6 @@ class JiuWenSwarmDeepAdapter:
         *,
         enabled: bool,
         model: Model,
-        rails: list[Any],
         system_prompt: str | None,
         tools: list[Any],
         workspace: Workspace,
@@ -1550,11 +1549,15 @@ class JiuWenSwarmDeepAdapter:
         """
         from openjiuwen.harness.factory import _inject_general_purpose_subagent
 
-        return _inject_general_purpose_subagent(
+        resolved = _inject_general_purpose_subagent(
             subagents,
             add_general_purpose_agent=enabled,
             resolved_language=self._resolve_runtime_language(),
-            rails=rails,
+            # Dolores general-purpose children run on AgentLoop's own context
+            # and interaction core. Parent DeepAgent rails contain live runtime
+            # references and several require react_agent internals, so retaining
+            # them here is both redundant and unsafe for concurrent children.
+            rails=[],
             system_prompt=system_prompt,
             tools=tools,
             mcps=None,
@@ -1563,6 +1566,11 @@ class JiuWenSwarmDeepAdapter:
             workspace=workspace,
             sys_operation=sys_operation,
         )
+        for spec in resolved:
+            card = getattr(spec, "agent_card", None)
+            if getattr(card, "name", None) == "general-purpose":
+                spec.rails = []
+        return resolved
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
@@ -4031,7 +4039,6 @@ class JiuWenSwarmDeepAdapter:
                 configured_subagents,
                 enabled=should_enable_general_agent,
                 model=common_kwargs["model"],
-                rails=common_kwargs["rails"],
                 system_prompt=common_kwargs["system_prompt"],
                 tools=common_kwargs["tools"],
                 workspace=common_kwargs["workspace"],
