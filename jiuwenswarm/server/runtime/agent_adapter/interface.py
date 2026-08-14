@@ -3154,6 +3154,76 @@ class JiuWenSwarm:
             return None
         return getter(session_id)
 
+    # --- Phase-2: targeted single-MCP control (forwarded to the deep adapter) ---
+    async def apply_mcp_change(self, name: str, action: str, *, enabled: bool = True) -> bool:
+        """Apply a single-MCP change without a full config reload.
+
+        action ∈ {"add", "remove", "toggle"}.
+        - add: register the MCP (spawn stdio / connect SSE-HTTP)
+        - remove: unregister (disconnect)
+        - toggle: enable=register / disable=unregister
+
+        Returns True if the adapter applied it. The adapter reads the merged
+        get_mcp_servers() list (config.yaml + state.json), so a state.json
+        write done just before this call is visible.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        if action == "add" or (action == "toggle" and enabled):
+            return bool(await adapter.register_mcp_by_name(name))
+        if action == "remove" or (action == "toggle" and not enabled):
+            return bool(await adapter.unregister_mcp_by_name(name))
+        return False
+
+    def sync_mcp_credentials(self) -> bool:
+        """Sync connected MCPs' tokens into os.environ (skill scripts).
+
+        Forwarded to the deep adapter. os.environ is process-global, so a
+        single live agent's sync covers the whole process; called from the
+        connect/disconnect handlers after a state.json write. Returns False
+        when no adapter is live yet (cold-start race) so the caller can fall
+        through to another live agent.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        sync = getattr(adapter, "_sync_mcp_credentials_environment", None)
+        if sync is None:
+            return False
+        return bool(sync())
+
+    def clear_mcp_credentials(self, name: str) -> bool:
+        """Clear a disconnected MCP's token env vars.
+
+        Returns False when no adapter is live yet so the caller can fall
+        through to another live agent.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return False
+        clear = getattr(adapter, "_clear_mcp_credentials_environment", None)
+        if clear is None:
+            return False
+        clear(name)
+        return True
+
+    async def refresh_skill_rails(self) -> None:
+        """Reload SkillUseRail so newly installed/uninstalled MCP bundled
+        skills surface to the agent without a full reload.
+
+        Called from the connect/disconnect handlers after skill_installer
+        copies/removes skill dirs. Without this the agent's SkillUseRail keeps
+        its cached skill set and the MCP's skills stay invisible even though
+        the files are on disk.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        refresh = getattr(adapter, "refresh_skill_rails", None)
+        if refresh is not None:
+            await refresh()
+
     async def apply_package_change_to_session_adapters(
         self,
         operation: str,

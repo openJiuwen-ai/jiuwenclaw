@@ -88,6 +88,26 @@ def resolve_env_vars(value: Any) -> Any:
 
         return re.sub(pattern, replace_env, value)
     elif isinstance(value, dict):
+        # mcp.servers entries hold ${VAR} placeholders in headers/env that
+        # are meant for the CredentialStore (resolved at McpServerConfig build
+        # time), NOT for the process env. If resolve_env_vars touches them
+        # here, an unset env var collapses ${GITHUB_TOKEN} to "" and the
+        # adapter receives ``Authorization: "Bearer "`` — an empty token that
+        # httpx rejects as ``Illegal header value b'Bearer '``. Preserve these
+        # credential subtrees verbatim on mcp server entries (identified by
+        # the transport + name + url/command shape, or the server_id_scope
+        # stamp the mcp registry adds).
+        mcp_credential_keys = ("headers", "env", "staticHeaders", "static_headers")
+        is_mcp_server_entry = (
+            "transport" in value
+            and "name" in value
+            and ("url" in value or "command" in value)
+        ) or "server_id_scope" in value
+        if is_mcp_server_entry:
+            return {
+                k: (v if k in mcp_credential_keys else resolve_env_vars(v))
+                for k, v in value.items()
+            }
         return {k: resolve_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
         return [resolve_env_vars(item) for item in value]
@@ -1608,15 +1628,47 @@ def update_swarmflow_budget_in_config(budget: str) -> None:
 
 
 def get_mcp_servers() -> list[dict[str, Any]]:
-    """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
+    """合并 config.yaml mcp.servers（command.mcp/TUI 手填）+ mcp/state.json（连接器）。
+
+    两套事实源永久并存（非迁移期重叠）：
+    - config.yaml mcp.servers 是 command.mcp（TUI channel）手动管理 MCP 的
+      事实源；add/remove/enable/disable 经 agent_ws_server 的 command.mcp
+      handler 直接读写 config.yaml。这条链路不动。
+    - mcp/state.json 是MCP（marketplace + custom）的事实源；
+      connect/disconnect/enable/disable 经 mcp handler 写 state.json。
+    """
+    # A. config.yaml — 手填 MCP（raw, no env resolve）.
     data = get_config_raw()
     mcp_cfg = data.get("mcp", {})
     if not isinstance(mcp_cfg, dict):
-        return []
-    servers = mcp_cfg.get("servers", [])
-    if not isinstance(servers, list):
-        return []
-    return [item for item in servers if isinstance(item, dict)]
+        servers_yaml: list[dict[str, Any]] = []
+    else:
+        servers_yaml = [item for item in mcp_cfg.get("servers", [])
+                        if isinstance(item, dict)]
+
+    # B. mcp/state.json — 已连接 MCP（state==connected）.
+    state_mcps: list[dict[str, Any]] = []
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_connected_mcps,
+            record_to_mcp_entry,
+        )
+        for rec in list_connected_mcps():
+            name = rec.get("name", "")
+            if not name:
+                continue
+            entry = record_to_mcp_entry(name, rec)
+            # skill-only MCPs return None
+            if entry is not None:
+                state_mcps.append(entry)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[config] failed to merge mcp state.json: %s", exc)
+
+    # Merge: state.json wins on name conflict (dedup by name, state first).
+    state_names = {s["name"] for s in state_mcps}
+    merged = [s for s in servers_yaml if s.get("name") not in state_names]
+    merged.extend(state_mcps)
+    return merged
 
 
 def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
