@@ -105,6 +105,106 @@ _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
         _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
 
+# Inno Setup checks these named mutexes before install/uninstall. Every
+# frozen Windows process that can keep files under {app} open holds both
+# mutexes for its entire lifetime, so an orphaned desktop child still blocks
+# uninstall. The detached update helper is intentionally exempt: after the
+# desktop process tree exits it must be able to launch the next installer.
+_WINDOWS_APP_MUTEX_NAMES = ("JiuwenSwarm.App", r"Global\JiuwenSwarm.App")
+_WINDOWS_APP_MUTEX_HANDLES: list[int] = []
+
+
+def _should_hold_windows_app_mutex() -> bool:
+    return (
+        os.name == "nt"
+        and getattr(sys, "frozen", False)
+        and _DESKTOP_INSTALL_UPDATE not in sys.argv
+    )
+
+
+def _acquire_windows_app_mutexes() -> None:
+    """Advertise frozen Windows processes to Setup/Uninstall via AppMutex."""
+    if _WINDOWS_APP_MUTEX_HANDLES or not _should_hold_windows_app_mutex():
+        return
+
+    try:
+        from ctypes import wintypes
+
+        class _SecurityAttributes(ctypes.Structure):
+            _fields_ = [
+                ("nLength", wintypes.DWORD),
+                ("lpSecurityDescriptor", wintypes.LPVOID),
+                ("bInheritHandle", wintypes.BOOL),
+            ]
+
+        class _SecurityDescriptor(ctypes.Structure):
+            _fields_ = [
+                ("Revision", wintypes.BYTE),
+                ("Sbz1", wintypes.BYTE),
+                ("Control", wintypes.WORD),
+                ("Owner", wintypes.LPVOID),
+                ("Group", wintypes.LPVOID),
+                ("Sacl", wintypes.LPVOID),
+                ("Dacl", wintypes.LPVOID),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        initialize_security_descriptor = advapi32.InitializeSecurityDescriptor
+        initialize_security_descriptor.argtypes = [wintypes.LPVOID, wintypes.DWORD]
+        initialize_security_descriptor.restype = wintypes.BOOL
+        set_security_descriptor_dacl = advapi32.SetSecurityDescriptorDacl
+        set_security_descriptor_dacl.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPVOID,
+            wintypes.BOOL,
+        ]
+        set_security_descriptor_dacl.restype = wintypes.BOOL
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = [
+            ctypes.POINTER(_SecurityAttributes),
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        create_mutex.restype = wintypes.HANDLE
+
+        # A null DACL lets an elevated uninstaller, or an uninstaller launched
+        # from another user session, open the Global mutex for detection.
+        security_descriptor = _SecurityDescriptor()
+        security_attributes = None
+        if initialize_security_descriptor(ctypes.byref(security_descriptor), 1):
+            if set_security_descriptor_dacl(
+                ctypes.byref(security_descriptor),
+                True,
+                None,
+                False,
+            ):
+                security_attributes = _SecurityAttributes(
+                    ctypes.sizeof(_SecurityAttributes),
+                    ctypes.cast(
+                        ctypes.pointer(security_descriptor),
+                        wintypes.LPVOID,
+                    ),
+                    False,
+                )
+
+        security_attributes_ptr = (
+            ctypes.byref(security_attributes) if security_attributes else None
+        )
+        for mutex_name in _WINDOWS_APP_MUTEX_NAMES:
+            handle = create_mutex(security_attributes_ptr, False, mutex_name)
+            if handle:
+                # Intentionally keep each handle open for the process lifetime.
+                # Windows closes process handles during final process teardown,
+                # so Inno Setup cannot proceed while Python is still unloading
+                # modules or running exit handlers.
+                _WINDOWS_APP_MUTEX_HANDLES.append(int(handle))
+    except (AttributeError, OSError, ValueError):
+        # Mutex registration must never stop the application from starting.
+        # The session-local mutex is attempted first, so it normally remains
+        # available even if creation of the Global mutex is restricted.
+        pass
 # ── 单实例锁（在重量级 import 之前执行） ──────────────────────────
 _SINGLE_INSTANCE_LOCK_FD: int | None = None
 
@@ -201,6 +301,7 @@ def _pop_flag(flag: str) -> bool:
 
 
 def main() -> None:
+    _acquire_windows_app_mutexes()
     try:
         _dispatch()
     except SystemExit:

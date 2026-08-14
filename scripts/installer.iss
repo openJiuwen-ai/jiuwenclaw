@@ -26,7 +26,10 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=force
+; Every frozen JiuwenSwarm process creates both mutexes. Setup and Uninstall
+; must wait until the desktop process tree has exited before touching {app}.
+AppMutex=JiuwenSwarm.App,Global\JiuwenSwarm.App
+CloseApplications=yes
 RestartApplications=no
 
 [Languages]
@@ -42,6 +45,14 @@ Source: "..\dist\jiuwenswarm\*"; DestDir: "{app}"; Flags: ignoreversion recurses
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[UninstallDelete]
+; Remove only application-owned paths that may gain runtime-generated files.
+; User data lives outside {app}, under ~/.jiuwenswarm, and is intentionally kept.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: files; Name: "{app}\{#MyAppExeName}"
+Type: dirifempty; Name: "{app}"
 
 [Run]
 ; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
