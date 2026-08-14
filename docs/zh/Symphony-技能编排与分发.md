@@ -552,3 +552,9 @@ symphony:
 - [配置说明](配置信息.md)
 - [Agent Team 使用指南](AgentTeam.md)
 - [English: Symphony](../en/symphony.md)
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

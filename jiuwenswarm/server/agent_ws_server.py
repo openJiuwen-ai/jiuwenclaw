@@ -676,6 +676,10 @@ def _apply_resolved_mode_to_request(
     *,
     work_mode: Any = None,
 ) -> tuple[str, str | None]:
+    if not hasattr(request, "_original_mode") and isinstance(request.params, dict):
+        raw_mode = request.params.get("mode")
+        if isinstance(raw_mode, str) and raw_mode.strip():
+            setattr(request, "_original_mode", canonicalize_mode_text(raw_mode))
     resolved = resolve_request_runtime_mode(request, work_mode=work_mode)
     if isinstance(request.params, dict):
         request.params["mode"] = resolved.canonical_mode

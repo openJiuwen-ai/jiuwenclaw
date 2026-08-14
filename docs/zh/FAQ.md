@@ -196,3 +196,9 @@ jiuwenswarm-init
 - **文档导航**：[docs/README.md](../README.md)
 - **问题反馈**：[GitCode Issues](https://gitcode.com/openJiuwen/jiuwenswarm/issues)
 - **社区交流**：关注 openJiuwen 社区活动
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

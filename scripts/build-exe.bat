@@ -8,8 +8,8 @@ cd /d "%~dp0\.."
 echo === JiuwenSwarm build-exe ===
 echo.
 
-echo [1/3] Installing Python deps (uv sync --extra dev)...
-call uv sync --extra dev
+echo [1/3] Installing Python deps (uv sync --extra dev --extra codex)...
+call uv sync --extra dev --extra codex
 if errorlevel 1 exit /b 1
 
 echo.
