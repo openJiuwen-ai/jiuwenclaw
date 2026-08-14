@@ -1153,6 +1153,7 @@ function shouldProcessHistoryPayload(
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
   const requestKey = makeHistoryRestoreKey(options.sessionId);
+  const releaseLiveEvents = webClient.suspendSessionEvents(options.sessionId);
   replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
@@ -1206,7 +1207,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
   });
 
-  function dispose(): void {
+  function stopListening(): void {
     if (disposed) return;
     disposed = true;
     if (restoreTimer) {
@@ -1219,6 +1220,11 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
   }
 
+  function dispose(): void {
+    stopListening();
+    releaseLiveEvents();
+  }
+
   function finalize(): void {
     if (disposed || finalized) return;
     finalized = true;
@@ -1226,31 +1232,35 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
 
-    dispose();
+    stopListening();
 
-    if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
-      options.onEmpty?.(totalPages);
-      return;
-    }
-    options.onReady(messages, totalPages);
-    if (toolReplay.length > 0) {
-      options.onToolReplay?.(toolReplay);
-    }
-    if (harnessReplay.length > 0) {
-      options.onHarnessReplay?.(harnessReplay);
-    }
-    if (teamReplay.length > 0) {
-      options.onTeamReplay?.(teamReplay);
-    }
-    if (reasoningReplay.length > 0) {
-      options.onReasoningReplay?.(reasoningReplay);
-    }
-    const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
-    if (compactionCount > 0) {
-      const compactionSummaries = entries.flatMap((e) =>
-        e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
-      );
-      options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
+    try {
+      if (messages.length === 0 && toolReplay.length === 0 && harnessReplay.length === 0 && teamReplay.length === 0) {
+        options.onEmpty?.(totalPages);
+        return;
+      }
+      options.onReady(messages, totalPages);
+      if (toolReplay.length > 0) {
+        options.onToolReplay?.(toolReplay);
+      }
+      if (harnessReplay.length > 0) {
+        options.onHarnessReplay?.(harnessReplay);
+      }
+      if (teamReplay.length > 0) {
+        options.onTeamReplay?.(teamReplay);
+      }
+      if (reasoningReplay.length > 0) {
+        options.onReasoningReplay?.(reasoningReplay);
+      }
+      const compactionCount = entries.reduce((n, e) => (e.kind === 'compaction' ? n + 1 : n), 0);
+      if (compactionCount > 0) {
+        const compactionSummaries = entries.flatMap((e) =>
+          e.kind === 'compaction' && e.summary.trim() ? [e.summary] : []
+        );
+        options.onCompactionReplay?.({ count: compactionCount, summaries: compactionSummaries });
+      }
+    } finally {
+      releaseLiveEvents();
     }
   }
 

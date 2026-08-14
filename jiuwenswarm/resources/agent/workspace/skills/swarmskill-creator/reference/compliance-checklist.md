@@ -199,8 +199,13 @@ Schema shape only proves the container exists; it does not prove the answer is u
 
 For every `workflow(...)` call, verify:
 
+- The final value is an absolute `.py` path. It is derived from the installed
+  parent's `Path(__file__).resolve()` location (or is an explicitly supplied,
+  validated external path), not from cwd, a bare Skill name, a relative path,
+  `~/.jiuwenswarm`, or a machine-specific user directory.
 - The referenced child script already exists and its independent journal namespace is useful.
-- The child does not call another workflow; recursive designs have been flattened.
+- The parent-to-child call is the only composition level; the child does not call
+  another workflow, and deeper designs have been flattened.
 - Ordinary shared code remains a helper function instead of becoming a child workflow.
 - Parallel children either tolerate shared-budget competition or receive explicit per-child limits through args.
 

@@ -603,6 +603,10 @@ body.workspace-resize-active iframe {
     margin-top: 2px;
   }
 
+  .chat-bubble-wrapper--with-files {
+    width: min(82%, 720px);
+  }
+
   /* AI disclaimer — footer note pinned below the composer */
   .chat-ai-disclaimer {
     flex: 0 0 auto;
@@ -1030,6 +1034,11 @@ body.workspace-resize-active iframe {
   .team-member-message__body.is-continued {
     grid-column: 2;
     margin-left: 0;
+  }
+
+  .chat-message-file-list {
+    width: 100%;
+    max-width: min(100%, 720px);
   }
 
   .team-member-message__card {
