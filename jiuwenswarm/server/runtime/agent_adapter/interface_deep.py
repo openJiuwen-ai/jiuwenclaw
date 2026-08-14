@@ -143,12 +143,15 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
     JiuSwarmStreamEventRail,
+    InvocationContextRail,
     MultimodalImageRail,
     ResponsePromptRail,
     RuntimePromptRail,
     StructuredAskUserRail,
     SymphonyOrchestrationRail,
 )
+from jiuwenswarm.common.invocation_context.codec import attach_invocation_context
+from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
@@ -1082,6 +1085,7 @@ class JiuWenSwarmDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._invocation_context_rail: InvocationContextRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -4653,6 +4657,12 @@ class JiuWenSwarmDeepAdapter:
             )
             return None
 
+    @staticmethod
+    def _build_invocation_context_rail() -> InvocationContextRail:
+        """Build the always-on explicit invocation context rail."""
+
+        return InvocationContextRail()
+
     def _instantiate_rails(
         self,
         rail_infos: list["_RailBuildInfo"],
@@ -4767,6 +4777,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
         rail_infos = [
+            _RailBuildInfo(
+                "_invocation_context_rail",
+                self._build_invocation_context_rail,
+            ),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo(
@@ -8790,6 +8804,17 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
+            invocation = build_invocation_context(request)
+            inputs = attach_invocation_context(inputs, invocation)
+            logger.info(
+                "[INVOCATION_CTX] ATTACHED invocation_id=%s request_id=%s "
+                "session_id=%s channel_id=%s asyncio_task_id=%s path=non_stream",
+                invocation.invocation_id,
+                invocation.request_id,
+                invocation.session_id,
+                invocation.channel_id,
+                id(asyncio.current_task()) if asyncio.current_task() else None,
+            )
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -8971,6 +8996,17 @@ class JiuWenSwarmDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        invocation = build_invocation_context(request)
+        inputs = attach_invocation_context(inputs, invocation)
+        logger.info(
+            "[INVOCATION_CTX] ATTACHED invocation_id=%s request_id=%s "
+            "session_id=%s channel_id=%s asyncio_task_id=%s path=stream",
+            invocation.invocation_id,
+            invocation.request_id,
+            invocation.session_id,
+            invocation.channel_id,
+            id(asyncio.current_task()) if asyncio.current_task() else None,
+        )
         request_metadata = request.metadata if isinstance(request.metadata, dict) else {}
         is_xiaoyi_request = (
             str(cid or "").strip().lower() == "xiaoyi"

@@ -31,7 +31,12 @@ def _payload_is_gui_final(payload: dict[str, Any]) -> bool:
 
 
 class XiaoyiGuiExecutor:
-    async def execute(self, request: GuiRpcRequest) -> str:
+    async def execute(
+        self,
+        request: GuiRpcRequest,
+        *,
+        channel: Any | None = None,
+    ) -> str:
         logger.info(
             "[GUI_RPC_TRACE] phase=EXECUTOR_ENTER rpc_id=%s "
             "xiaoyi_session_id=%s xiaoyi_task_id=%s jiuwen_session_id=%s "
@@ -43,7 +48,8 @@ class XiaoyiGuiExecutor:
             request.device_id,
             max(0, int((request.deadline - time.time()) * 1000)),
         )
-        channel = get_xiaoyi_channel()
+        if channel is None:
+            channel = get_xiaoyi_channel()
         if channel is None:
             logger.error(
                 "[GUI_RPC_TRACE] phase=CHANNEL_LOOKUP_FAILED rpc_id=%s "

@@ -138,12 +138,21 @@ class WebSocketAgentServerClient(AgentServerClient):
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._server_push_tasks: set[asyncio.Task[Any]] = set()
+        self._on_disconnect: Callable[[BaseException | None], Awaitable[None]] | None = None
+        self._disconnect_notified = False
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
     ) -> None:
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
+
+    def set_disconnect_handler(
+        self,
+        handler: Callable[[BaseException | None], Awaitable[None]] | None,
+    ) -> None:
+        """Register a process-local transport-disconnect lifecycle callback."""
+        self._on_disconnect = handler
 
     def _diagnostic_state(self, ws: Any | None = None) -> dict[str, Any]:
         target_ws = self._ws if ws is None else ws
@@ -178,6 +187,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
         self._uri = uri
         self._server_ready = False
+        self._disconnect_notified = False
         origin = _build_ws_origin(uri)
         try:
             from websockets.legacy.client import connect as legacy_connect
@@ -337,11 +347,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._queue_lock:
             for queue in self._message_queues.values():
                 queue.put_nowait(failure)
+        await self._notify_disconnect(exc)
         logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
 
     async def disconnect(self) -> None:
         # 停止接收任务
         self._running = False
+        await self._notify_disconnect(None)
         if self._receiver_task and not self._receiver_task.done():
             self._receiver_task.cancel()
             try:
@@ -370,6 +382,20 @@ class WebSocketAgentServerClient(AgentServerClient):
             self._ws = None
             self._uri = None
         logger.info("[WebSocketAgentServerClient] 已断开")
+
+    async def _notify_disconnect(self, exc: BaseException | None) -> None:
+        if self._disconnect_notified:
+            return
+        self._disconnect_notified = True
+        handler = self._on_disconnect
+        if handler is None:
+            return
+        try:
+            await handler(exc)
+        except Exception:
+            logger.exception(
+                "[WebSocketAgentServerClient] disconnect handler failed"
+            )
 
     async def _cancel_server_push_tasks(self) -> None:
         tasks = [
