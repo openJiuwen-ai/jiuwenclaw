@@ -99,3 +99,56 @@ def test_issue_ephemeral_key_registers_fingerprint_for_authenticator():
     result = auth.verify(fingerprint=fingerprint, username="u1")
     assert result.success is True
     assert result.user_id == "u1"
+
+
+def test_issue_container_key_registers_long_lived_fingerprint():
+    asyncssh = pytest.importorskip("asyncssh")
+    registry = KeyRegistry()
+    issuer = AgentOSSshKeyIssuer(registry)
+    first = issuer.issue_container_key(user_id="u1", username="u1")
+    first_fp = asyncssh.import_private_key(first.encode("utf-8")).get_fingerprint()
+    second = issuer.issue_container_key(user_id="u1", username="u1")
+    second_fp = asyncssh.import_private_key(second.encode("utf-8")).get_fingerprint()
+    assert first_fp != second_fp
+    assert registry.lookup(first_fp) is None
+    entry = registry.lookup(second_fp)
+    assert entry is not None
+    assert entry.user_id == "u1"
+    assert entry.username == "u1"
+    assert entry.source == "container"
+    assert entry.session_id is None
+    assert entry.expires_at is None
+    auth = SshPublicKeyAuthenticator(registry)
+    result = auth.verify(fingerprint=second_fp, username="u1")
+    assert result.success is True
+    assert result.extensions["source"] == "container"
+
+
+def test_revoke_by_user_filters_source():
+    now = time.time()
+    registry = KeyRegistry()
+    registry.register(
+        KeyRegistryEntry(
+            fingerprint="SHA256:container",
+            user_id="u1",
+            username="u1",
+            source="container",
+            session_id=None,
+            expires_at=None,
+            created_at=now,
+        )
+    )
+    registry.register(
+        KeyRegistryEntry(
+            fingerprint="SHA256:tui",
+            user_id="u1",
+            username="u1",
+            source="tui_switch",
+            session_id="s1",
+            expires_at=now + 60,
+            created_at=now,
+        )
+    )
+    assert registry.revoke_by_user("u1", source="container") == 1
+    assert registry.lookup("SHA256:container") is None
+    assert registry.lookup("SHA256:tui") is not None

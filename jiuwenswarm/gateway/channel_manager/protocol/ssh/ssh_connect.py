@@ -222,6 +222,18 @@ class SshChannel(BaseChannel):
             ttl_sec=ttl_sec,
         )
 
+    def issue_container_key(
+        self,
+        *,
+        user_id: str,
+        username: str,
+    ) -> str:
+        """Delegate to AgentOS SSH key issuer for a long-lived container key."""
+        return self._key_issuer.issue_container_key(
+            user_id=user_id,
+            username=username,
+        )
+
     async def _cleanup_loop(self) -> None:
         """Periodically drop expired ephemeral key registrations."""
         interval = max(1.0, float(self.config.auth.cleanup_interval_sec))

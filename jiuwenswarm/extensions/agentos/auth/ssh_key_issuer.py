@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class SshKeyIssuer(Protocol):
-    """Issue short-lived SSH key pairs for TUI / launcher handoff."""
+    """Issue SSH key pairs and register public fingerprints."""
 
     def issue_ephemeral_key(
         self,
@@ -27,12 +27,36 @@ class SshKeyIssuer(Protocol):
         session_id: str,
         ttl_sec: float,
     ) -> str:
-        """Generate a key pair, register the public fingerprint, return private key."""
+        """Generate a short-lived key pair, register the fingerprint, return private key."""
+        ...
+
+    def issue_container_key(
+        self,
+        *,
+        user_id: str,
+        username: str,
+    ) -> str:
+        """Generate a long-lived container key pair, register it, return private key."""
         ...
 
 
+def _missing_asyncssh_error() -> RuntimeError:
+    return RuntimeError(
+        "SSH key issuance requires optional dependency "
+        "`asyncssh>=2.14.0,<2.24`. Install with "
+        '`uv sync --extra ssh` / `pip install "jiuwenswarm[ssh]"`.'
+    )
+
+
+def _export_openssh_private_key(key: object) -> str:
+    exported = key.export_private_key("openssh")  # type: ignore[attr-defined]
+    if isinstance(exported, bytes):
+        return exported.decode("utf-8")
+    return str(exported)
+
+
 class AgentOSSshKeyIssuer:
-    """Generate OpenSSH ephemeral keys and register fingerprints in KeyRegistry."""
+    """Generate OpenSSH keys and register fingerprints in KeyRegistry."""
 
     def __init__(
         self,
@@ -55,17 +79,8 @@ class AgentOSSshKeyIssuer:
         session_id: str,
         ttl_sec: float,
     ) -> str:
-        try:
-            import asyncssh
-        except ImportError as exc:
-            raise RuntimeError(
-                "SSH ephemeral key issuance requires optional dependency "
-                "`asyncssh>=2.14.0,<2.24`. Install with "
-                '`uv sync --extra ssh` / `pip install "jiuwenswarm[ssh]"`.'
-            ) from exc
-
-        key = asyncssh.generate_private_key(self._key_type)
-        fingerprint = key.get_fingerprint()
+        key, private_key, fingerprint = self._generate_key()
+        del key
         now = time.time()
         ttl = max(0.0, float(ttl_sec))
         self._registry.register(
@@ -86,7 +101,45 @@ class AgentOSSshKeyIssuer:
             ttl,
             fingerprint,
         )
-        exported = key.export_private_key("openssh")
-        if isinstance(exported, bytes):
-            return exported.decode("utf-8")
-        return str(exported)
+        return private_key
+
+    def issue_container_key(
+        self,
+        *,
+        user_id: str,
+        username: str,
+    ) -> str:
+        """Generate a long-lived key pair for a jiuwenswarm container SSH client."""
+        uid = str(user_id or "").strip()
+        uname = str(username or user_id or "").strip() or "unknown"
+        key, private_key, fingerprint = self._generate_key()
+        del key
+        now = time.time()
+        # Agent rebuilds mint a new pair; drop the previous container key for this user.
+        self._registry.revoke_by_user(uid, source="container")
+        self._registry.register(
+            KeyRegistryEntry(
+                fingerprint=fingerprint,
+                user_id=uid,
+                username=uname,
+                source="container",
+                session_id=None,
+                expires_at=None,
+                created_at=now,
+            )
+        )
+        logger.info(
+            "[AgentOSAuth] issued container SSH key: user_id=%s fp=%s",
+            uid,
+            fingerprint,
+        )
+        return private_key
+
+    def _generate_key(self) -> tuple[object, str, str]:
+        try:
+            import asyncssh
+        except ImportError as exc:
+            raise _missing_asyncssh_error() from exc
+
+        key = asyncssh.generate_private_key(self._key_type)
+        return key, _export_openssh_private_key(key), key.get_fingerprint()

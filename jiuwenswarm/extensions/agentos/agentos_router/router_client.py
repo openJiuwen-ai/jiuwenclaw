@@ -45,9 +45,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     instance_service_id,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
-    DEFAULT_CLIENT_KEYS_DIR,
     YuanrongSshRelay,
-    resolve_client_keys_dir,
 )
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     AgentFileDownloadChunk,
@@ -73,6 +71,10 @@ _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Gateway-side file transfer limits (design: stricter than YuanRong 512MB).
 _AGENT_FILE_PATH_ROOT = "/home/agentos"
 _MAX_AGENT_FILE_UPLOAD_BYTES = 50 * 1024 * 1024
+# In-container identity file for jiuwenswarm -> northbound SSH Channel (scenario B).
+CONTAINER_SSH_PRIVATE_KEY_PATH = f"{_AGENT_FILE_PATH_ROOT}/.ssh/id_ed25519"
+_CONTAINER_SSH_KEY_UPLOAD_ATTEMPTS = 3
+_CONTAINER_SSH_KEY_UPLOAD_RETRY_SECONDS = 1.0
 
 _TEAM_MODES = frozenset({"team", "code.team", "team.plan"})
 
@@ -996,12 +998,13 @@ class AgentOSRouterClient(AgentServerClient):
             )
 
     def _resolve_ssh_key_file(self, user_id: str) -> str:
-        """Resolve the SSH key file path for external_cli_agents."""
-        keys_dir_template = DEFAULT_CLIENT_KEYS_DIR
-        if self._ssh_relay is not None:
-            keys_dir_template = self._ssh_relay.client_keys_dir
-        keys_dir = resolve_client_keys_dir(keys_dir_template, user_id)
-        return str(keys_dir / "id_ed25519")
+        """Return the in-container SSH identity path for ``external_cli_agents``.
+
+        Scenario B injects ``id_ed25519`` into ``/home/agentos/.ssh`` so the
+        builtin jiuwenswarm agent can ``ssh`` with OpenSSH defaults.
+        """
+        del user_id
+        return CONTAINER_SSH_PRIVATE_KEY_PATH
 
     async def thirdagent_list(
         self,
@@ -1511,6 +1514,7 @@ class AgentOSRouterClient(AgentServerClient):
             }
         )
         agent_info.status = AgentStatus.READY
+        await self._inject_container_ssh_key(agent_info)
 
         task = asyncio.create_task(
             self._register_agent(agent_info.copy()),
@@ -1519,6 +1523,106 @@ class AgentOSRouterClient(AgentServerClient):
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return agent_info
+
+    async def _inject_container_ssh_key(self, agent_info: AgentInfo) -> None:
+        """Mint a long-lived SSH key and upload ``id_ed25519`` into the container.
+
+        Scenario B: the builtin jiuwenswarm agent SSHes to the northbound
+        SSH Channel using ``~/.ssh/id_ed25519``. Skip when no issuer is
+        configured (``channels.ssh.auth.enabled=false``).
+        """
+        if agent_info.agent_type != BUILTIN_AGENT_TYPE:
+            return
+        instance_id = str(agent_info.sandbox_id or "").strip()
+        if not instance_id:
+            return
+        issuer = self._key_issuer
+        issue = getattr(issuer, "issue_container_key", None) if issuer is not None else None
+        if not callable(issue):
+            return
+        uid = str(agent_info.user_id or "").strip()
+        try:
+            private_key = issue(user_id=uid, username=uid)
+        except Exception as exc:  # noqa: BLE001 - agent create must not fail on SSH key
+            logger.warning(
+                "[AgentOSRouter] failed to issue container SSH key: user=%s error=%s",
+                uid,
+                exc,
+            )
+            return
+        if not private_key:
+            logger.warning(
+                "[AgentOSRouter] container SSH key issuer returned an empty key: user=%s",
+                uid,
+            )
+            return
+        content = (
+            private_key.encode("utf-8") if isinstance(private_key, str) else bytes(private_key)
+        )
+        try:
+            await self._upload_container_ssh_private_key(instance_id, content)
+        except Exception as exc:  # noqa: BLE001 - agent create must not fail on SSH key
+            logger.warning(
+                "[AgentOSRouter] failed to upload container SSH key: "
+                "user=%s instance=%s path=%s error=%s",
+                uid,
+                instance_id,
+                CONTAINER_SSH_PRIVATE_KEY_PATH,
+                exc,
+            )
+            return
+        logger.info(
+            "[AgentOSRouter] injected container SSH key: user=%s instance=%s path=%s",
+            uid,
+            instance_id,
+            CONTAINER_SSH_PRIVATE_KEY_PATH,
+        )
+
+    async def _upload_container_ssh_private_key(
+        self,
+        instance_id: str,
+        content: bytes,
+    ) -> None:
+        """Upload the private key via YuanRong files API, with a short retry."""
+        attempts = max(1, int(_CONTAINER_SSH_KEY_UPLOAD_ATTEMPTS))
+        for attempt in range(attempts):
+            try:
+                await self._yuanrong.upload_agent_file(
+                    instance_id,
+                    CONTAINER_SSH_PRIVATE_KEY_PATH,
+                    content,
+                )
+                return
+            except Exception:
+                if attempt + 1 >= attempts:
+                    raise
+                await asyncio.sleep(_CONTAINER_SSH_KEY_UPLOAD_RETRY_SECONDS)
+
+    def _revoke_container_ssh_key(self, agent_info: AgentInfo) -> None:
+        """Drop the container public-key registration when the agent is deleted."""
+        if agent_info.agent_type != BUILTIN_AGENT_TYPE:
+            return
+        issuer = self._key_issuer
+        registry = getattr(issuer, "registry", None) if issuer is not None else None
+        revoke = getattr(registry, "revoke_by_user", None)
+        if not callable(revoke):
+            return
+        uid = str(agent_info.user_id or "").strip()
+        try:
+            removed = revoke(uid, source="container")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[AgentOSRouter] failed to revoke container SSH key: user=%s",
+                uid,
+                exc_info=True,
+            )
+            return
+        if removed:
+            logger.info(
+                "[AgentOSRouter] revoked %d container SSH key(s): user=%s",
+                removed,
+                uid,
+            )
 
     async def delete_agent(
         self,
@@ -1556,6 +1660,7 @@ class AgentOSRouterClient(AgentServerClient):
             resolved_key_values["session_id"] = agent_info.metadata.get(
                 "session_id"
             )
+        self._revoke_container_ssh_key(agent_info)
         await self._close_ws_client(agent_info.sandbox_id)
         if agent_info.sandbox_id:
             await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
@@ -1604,6 +1709,7 @@ class AgentOSRouterClient(AgentServerClient):
         best_effort: bool = False,
     ) -> None:
         """Delete YuanRong sandbox and unregister the registry instance."""
+        self._revoke_container_ssh_key(agent_info)
         await self._close_ws_client(agent_info.sandbox_id)
         if agent_info.sandbox_id:
             try:

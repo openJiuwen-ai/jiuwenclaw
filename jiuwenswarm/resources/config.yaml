@@ -875,7 +875,8 @@ channels:
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
     relay_timeout_sec: 3600
     auth:
-      # 公钥认证开关。true 时校验客户端公钥并签发临时密钥；false 为宽松认证。
+      # 公钥认证开关。true 时校验客户端公钥；TUI 签发临时密钥；
+      # 拉起 jiuwenswarm 容器时注入 /home/agentos/.ssh/id_ed25519。false 为宽松认证。
       enabled: true
       # TUI 场景: 临时密钥有效期（秒）
       ephemeral_key_ttl_sec: 300
