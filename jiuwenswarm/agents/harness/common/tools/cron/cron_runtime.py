@@ -67,6 +67,17 @@ class _CronToolsCronBackend(CronToolBackend):
         self._message_handler = message_handler
         self._default_context = default_context
 
+    def with_default_context(
+        self,
+        context: CronToolContext | None,
+    ) -> "_CronToolsCronBackend":
+        """Return a session-scoped view without exposing protected state."""
+        return _CronToolsCronBackend(
+            self._cron_tools,
+            message_handler=self._message_handler,
+            default_context=context,
+        )
+
     @staticmethod
     def _officeclaw_proxy_config(context: CronToolContext | None) -> dict[str, str] | None:
         if context is None:
@@ -101,7 +112,7 @@ class _CronToolsCronBackend(CronToolBackend):
             "ca_cert": str(env.get("NODE_EXTRA_CA_CERTS") or "").strip(),
         }
         required = ("api_url", "invocation_id", "callback_token")
-        missing = [key for key in required if not resolved[key]]
+        missing = [key for key in required if not resolved.get(key)]
         if missing:
             raise RuntimeError(
                 "OfficeClaw cron proxy is missing required callback configuration: "
@@ -738,11 +749,7 @@ class CronRuntimeBridge:
             # per-tool-suite backend so both unified and legacy list calls use
             # the owning session's runtime context without mutating the shared
             # tenant backend.
-            tool_backend = _CronToolsCronBackend(
-                backend._cron_tools,
-                message_handler=backend._message_handler,
-                default_context=context,
-            )
+            tool_backend = backend.with_default_context(context)
         tools = create_cron_tools(
             tool_backend,
             context=context,
