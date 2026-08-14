@@ -4,13 +4,15 @@ r"""JiuwenSwarm PyInstaller 打包配置。
 构建前请先：
 1. 安装依赖: uv sync --extra dev --extra codex
 2. 构建前端: cd jiuwenswarm/channels/web/frontend && npm run build
-3. 执行打包: .\scripts\build-exe.ps1  或  uv run pyinstaller scripts/jiuwenswarm.spec
+3. 执行平台 wrapper: .\scripts\build-exe.ps1 或 bash scripts/build-macos.sh
 """
 
 import glob
 import importlib.util
 import os
+import runpy
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules, copy_metadata
 
@@ -18,6 +20,14 @@ block_cipher = None
 
 SPEC_DIR = os.path.abspath(globals().get("SPECPATH", os.getcwd()))
 project_root = os.path.abspath(os.path.join(SPEC_DIR, os.pardir))
+build_config_module = runpy.run_path(os.path.join(project_root, "scripts", "build_config.py"))
+build_config = build_config_module["load_build_config"](Path(project_root))
+runtime_config_path = Path(project_root, "jiuwenswarm", "common", "_build_config.py")
+expected_runtime_config = build_config_module["render_runtime_python"](build_config)
+if not runtime_config_path.is_file() or runtime_config_path.read_text(encoding="utf-8") != expected_runtime_config:
+    raise SystemExit(
+        "错误: Python 运行时构建配置未同步，请通过 build.sh、build-macos.sh 或 build-exe wrapper 构建"
+    )
 symphony_root = os.path.join(project_root, "jiuwenswarm", "symphony")
 if symphony_root not in sys.path:
     sys.path.insert(0, symphony_root)
@@ -384,7 +394,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    name="jiuwenswarm",
+    name=build_config.executable_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -432,20 +442,20 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="jiuwenswarm",
+    name=build_config.dist_dir_name,
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="JiuwenSwarm.app",
+        name=build_config.app_bundle_name,
         icon=icon_path,
-        bundle_identifier="com.jiuwenswarm.desktop",
+        bundle_identifier=build_config.bundle_identifier,
         info_plist={
-            "CFBundleName": "JiuwenSwarm",
-            "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.4.beta4",
-            "CFBundleVersion": "0.2.4.beta4",
+            "CFBundleName": build_config.display_name,
+            "CFBundleDisplayName": build_config.display_name,
+            "CFBundleShortVersionString": build_config.version,
+            "CFBundleVersion": build_config.version,
             "NSHighResolutionCapable": "True",
         },
     )
