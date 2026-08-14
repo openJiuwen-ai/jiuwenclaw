@@ -664,7 +664,6 @@ def test_build_inputs_preserves_answered_ask_user_envelope_for_opt_in_consumers(
         }
     }
 
-
 def test_build_inputs_maps_explicit_skipped_with_empty_answers_to_interactive_input(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module

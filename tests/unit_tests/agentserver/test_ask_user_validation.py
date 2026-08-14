@@ -223,8 +223,6 @@ async def test_answered_structured_payload_keeps_readable_text_semantics():
 
     assert isinstance(decision, RejectResult)
     assert decision.tool_result == "Which?: A"
-
-
 @pytest.mark.asyncio
 async def test_answered_structured_payload_can_opt_in_to_machine_state():
     rail = StructuredAskUserRail()
