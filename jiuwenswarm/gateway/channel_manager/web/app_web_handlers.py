@@ -4705,7 +4705,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _path_get(ws, req_id, params, session_id):
-        """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
+        """读 browser.chrome_path / browser_type 并返回给前端（会解析环境变量）。"""
         try:
             config_base = get_config()
         except FileNotFoundError:
@@ -4713,7 +4713,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws,
                 req_id,
                 ok=True,
-                payload={"chrome_path": "", "headless": True},
+                payload={"chrome_path": "", "browser_type": "auto", "headless": True},
             )
             return
 
@@ -4723,18 +4723,37 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         config = _resolve_env_vars(config_base)
         browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
         chrome_path = ""
+        browser_type = "auto"
         headless = True
         if isinstance(browser_cfg, dict):
             value = browser_cfg.get("chrome_path", "")
             if isinstance(value, str):
                 chrome_path = value
+            raw_type = browser_cfg.get("browser_type", "auto")
+            if isinstance(raw_type, str) and raw_type.strip():
+                normalized = raw_type.strip().lower()
+                if normalized in {"chrome", "google-chrome", "google_chrome"}:
+                    browser_type = "chrome"
+                elif normalized in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+                    browser_type = "msedge"
+                else:
+                    browser_type = "auto"
             raw_headless = browser_cfg.get("headless", True)
             headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "chrome_path": chrome_path,
+                "browser_type": browser_type,
+                "headless": headless,
+            },
+        )
 
     async def _path_set(ws, req_id, params, session_id):
-        """更新 browser.chrome_path / browser.headless 并写回 config。"""
+        """更新 browser.chrome_path / browser_type / headless 并写回 config。"""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
@@ -4744,6 +4763,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="chrome_path must be string", code="BAD_REQUEST")
             return
         chrome_path = chrome_path.strip()
+
+        raw_browser_type = params.get("browser_type", "auto")
+        if not isinstance(raw_browser_type, str):
+            await channel.send_response(ws, req_id, ok=False, error="browser_type must be string", code="BAD_REQUEST")
+            return
+        normalized_type = raw_browser_type.strip().lower()
+        if normalized_type in {"chrome", "google-chrome", "google_chrome"}:
+            browser_type = "chrome"
+        elif normalized_type in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+            browser_type = "msedge"
+        elif normalized_type in {"", "auto"}:
+            browser_type = "auto"
+        else:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="browser_type must be one of: auto, chrome, msedge",
+                code="BAD_REQUEST",
+            )
+            return
 
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
@@ -4762,7 +4802,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
         try:
-            update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
+            update_browser_in_config(
+                {
+                    "chrome_path": chrome_path,
+                    "browser_type": browser_type,
+                    "headless": headless,
+                }
+            )
             resolved_agent_client = _resolve(agent_client)
             await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
@@ -4782,7 +4828,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 e,
             )
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "chrome_path": chrome_path,
+                "browser_type": browser_type,
+                "headless": headless,
+            },
+        )
 
     async def _path_select_directory(ws, req_id, params, session_id):
         """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。

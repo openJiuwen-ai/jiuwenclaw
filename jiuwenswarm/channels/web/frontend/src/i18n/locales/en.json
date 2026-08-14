@@ -1435,19 +1435,25 @@
   },
   "browser": {
     "title": "Browser",
-    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
-    "refreshPath": "Refresh Path",
-    "savePath": "Save Path",
-    "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
-    "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "subtitle": "Configure browser type, executable path, and display mode for browser agents.",
+    "refreshPath": "Refresh",
+    "savePath": "Save",
+    "pathConfigHelp": "Browser settings (leave path empty to auto-detect; when both are installed, Chrome is preferred over Edge)",
+    "browserType": "Browser type",
+    "browserTypeAuto": "Auto (Chrome > Edge)",
+    "browserTypeChrome": "Chrome",
+    "browserTypeEdge": "Microsoft Edge",
+    "browserTypeHelp": "Pinning a type searches only that browser; an explicit path always wins.",
+    "binaryPath": "Executable path (optional)",
+    "examplePath": "Example: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe or an msedge.exe path",
     "success": {
-      "pathSaved": "Chrome path saved"
+      "pathSaved": "Browser settings saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
-      "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path"
+      "loadPath": "Failed to load browser settings",
+      "savePath": "Failed to save browser settings"
     }
   },
   "logsPanel": {

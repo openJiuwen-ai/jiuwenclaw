@@ -32,7 +32,12 @@ from openjiuwen.core.single_agent.middleware.base import (
 from playwright_runtime import REPO_ROOT
 from playwright_runtime.agents import augment_browser_task_prompt, build_browser_worker_agent
 from playwright_runtime.config import BrowserRunGuardrails, resolve_playwright_mcp_cwd
-from playwright_runtime.drivers.managed_browser import ManagedBrowserDriver, _default_chrome_user_data_dir
+from playwright_runtime.drivers.managed_browser import (
+    ManagedBrowserDriver,
+    _default_user_data_dir,
+    _preferred_browser_kinds,
+    playwright_browser_name_for_binary,
+)
 from playwright_runtime.hooks import BrowserCancellationMiddleware, BrowserRunCancelled
 from playwright_runtime.profiles import BrowserProfile, BrowserProfileStore
 
@@ -358,13 +363,17 @@ class BrowserService:
         kill_existing_raw = (os.getenv("BROWSER_MANAGED_KILL_EXISTING") or "").strip().lower()
         kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
         explicit_user_data_dir = (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "").strip()
+        browser_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+        preferred_kinds = _preferred_browser_kinds()
+        default_kind = preferred_kinds[0] if preferred_kinds else "chrome"
+        if browser_binary:
+            default_kind = playwright_browser_name_for_binary(browser_binary)
         if explicit_user_data_dir:
             user_data_dir = explicit_user_data_dir
         elif kill_existing:
-            user_data_dir = _default_chrome_user_data_dir()
+            user_data_dir = _default_user_data_dir(default_kind)
         else:
             user_data_dir = str(self._runtime_state_root() / ".browser-profiles" / self._profile_name)
-        browser_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
         extra_args = self._parse_env_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
         return BrowserProfile(
@@ -378,12 +387,16 @@ class BrowserService:
             extra_args=extra_args,
         )
 
-    def _inject_cdp_endpoint(self, endpoint: str) -> None:
+    def _inject_cdp_endpoint(self, endpoint: str, browser_name: str | None = None) -> None:
         previous_endpoint = self._configured_cdp_endpoint()
         params = dict(getattr(self.mcp_cfg, "params", {}) or {})
         env_map = dict(params.get("env", {}) or {})
         env_map["PLAYWRIGHT_MCP_CDP_ENDPOINT"] = endpoint
-        env_map.setdefault("PLAYWRIGHT_MCP_BROWSER", "chrome")
+        resolved_name = (browser_name or "").strip().lower()
+        if not resolved_name:
+            configured = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+            resolved_name = playwright_browser_name_for_binary(configured)
+        env_map["PLAYWRIGHT_MCP_BROWSER"] = resolved_name or "chrome"
         env_map.pop("PLAYWRIGHT_MCP_DEVICE", None)
         params["env"] = env_map
         self.mcp_cfg.params = params
@@ -532,13 +545,17 @@ class BrowserService:
         )
         driver = ManagedBrowserDriver(profile=profile)
         endpoint = await asyncio.to_thread(driver.start, 20.0, kill_existing)
-        self._inject_cdp_endpoint(endpoint)
+        self._inject_cdp_endpoint(endpoint, getattr(driver, "playwright_browser_name", None))
         profile.cdp_url = endpoint
+        resolved_binary = getattr(driver, "resolved_binary", "") or ""
+        if resolved_binary:
+            profile.browser_binary = resolved_binary
         self._profile_store.upsert_profile(profile, select=True)
         self._managed_driver = driver
         logger.info(
             "BrowserService: managed browser driver started "
-            f"profile={profile.name}, endpoint={endpoint}"
+            f"profile={profile.name}, endpoint={endpoint}, "
+            f"browser={getattr(driver, 'playwright_browser_name', 'chrome')}"
         )
 
     async def _stop_managed_driver(self) -> None:

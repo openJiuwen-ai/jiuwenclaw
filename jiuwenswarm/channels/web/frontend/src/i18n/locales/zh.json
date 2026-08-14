@@ -1433,19 +1433,25 @@
   },
   "browser": {
     "title": "浏览器",
-    "subtitle": "配置浏览器 Agent 使用的 Chrome 路径和显示模式。",
-    "refreshPath": "刷新路径",
-    "savePath": "保存路径",
-    "pathConfigHelp": "CHROME 路径配置（Chrome地址栏输入：chrome://version查看，复制可执行文件路径）",
-    "examplePath": "例如：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "subtitle": "配置浏览器 Agent 使用的浏览器类型、可执行文件路径和显示模式。",
+    "refreshPath": "刷新配置",
+    "savePath": "保存配置",
+    "pathConfigHelp": "浏览器配置（留空路径时自动探测；同时安装时默认优先 Chrome，其次 Edge）",
+    "browserType": "浏览器类型",
+    "browserTypeAuto": "自动（Chrome > Edge）",
+    "browserTypeChrome": "Chrome",
+    "browserTypeEdge": "Microsoft Edge",
+    "browserTypeHelp": "指定类型时只查找该浏览器；填写路径时以路径为准。",
+    "binaryPath": "可执行文件路径（可选）",
+    "examplePath": "例如：C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe 或 msedge.exe 路径",
     "success": {
-      "pathSaved": "Chrome 路径已保存"
+      "pathSaved": "浏览器配置已保存"
     },
     "showBrowser": "显示浏览器",
     "showBrowserDesc": "执行浏览器任务时打开可见的浏览器窗口。",
     "errors": {
-      "loadPath": "加载 Chrome 路径失败",
-      "savePath": "保存 Chrome 路径失败"
+      "loadPath": "加载浏览器配置失败",
+      "savePath": "保存浏览器配置失败"
     }
   },
   "logsPanel": {
