@@ -19,6 +19,9 @@ from jiuwenswarm.symphony.service import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_SERVICE_TIMEOUT_S = 1800.0
+_COMPOSE_SERVICE_TIMEOUT_S = 3300.0
+
 
 class SymphonyToolkit:
     """Expose the process-local Symphony service as model-callable tools."""
@@ -40,7 +43,12 @@ class SymphonyToolkit:
             "[SymphonyToolkit] calling service: operation=%s",
             operation,
         )
-        timeout_s = self._resolve_timeout_s()
+        default_timeout_s = (
+            _COMPOSE_SERVICE_TIMEOUT_S
+            if operation == "plan"
+            else _DEFAULT_SERVICE_TIMEOUT_S
+        )
+        timeout_s = self._resolve_timeout_s(default_timeout_s)
         try:
             service = self._service or get_swarm_symphony_service()
             handler = getattr(service, operation)
@@ -408,12 +416,18 @@ class SymphonyToolkit:
             description: str,
             input_params: dict[str, Any],
             func: Callable[..., Any],
+            uses_internal_timeout: bool = False,
         ) -> Tool:
             card = ToolCard(
                 id=name,
                 name=name,
                 description=description,
                 input_params=input_params,
+                properties=(
+                    {"resilience": {"timeout_s": None}}
+                    if uses_internal_timeout
+                    else {}
+                ),
             )
             return LocalFunction(card=card, func=func)
 
@@ -429,6 +443,7 @@ class SymphonyToolkit:
                 "Extract installed skill features and refresh the Symphony graph.",
                 {"type": "object", "properties": {}},
                 self.refresh_graph,
+                uses_internal_timeout=True,
             ),
             make_tool(
                 "symphony_compose_graph",
@@ -482,6 +497,7 @@ class SymphonyToolkit:
                     "required": ["query"],
                 },
                 self.plan,
+                uses_internal_timeout=True,
             ),
         ]
 
