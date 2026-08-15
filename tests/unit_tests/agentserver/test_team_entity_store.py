@@ -92,6 +92,28 @@ def test_team_entity_store_rejects_invalid_team_name(tmp_path) -> None:
                 }
             }
         },
+        {
+            "agents": {
+                "leader": {
+                    "model": {
+                        "model_request_config": {
+                            "extra_headers": {"Authorization": "Bearer secret"}
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "agents": {
+                "leader": {
+                    "model": {
+                        "model_request_config": {
+                            "default_headers": {"X-Api-Key": "secret"}
+                        }
+                    }
+                }
+            }
+        },
     ],
 )
 def test_team_entity_store_rejects_sensitive_new_snapshots(tmp_path, sensitive_snapshot) -> None:
@@ -438,7 +460,8 @@ def test_ensure_team_entity_converts_request_only_model_to_stable_ref(tmp_path) 
                         "api_base": "https://maas.test/v1",
                         "api_key": "maas-secret",
                         "client_provider": "OpenAI",
-                    }
+                    },
+                    "model_config_obj": {"temperature": 0.9, "top_p": 0.8},
                 }
             ]
         },
@@ -447,7 +470,14 @@ def test_ensure_team_entity_converts_request_only_model_to_stable_ref(tmp_path) 
                 "research": {
                     "team_name": "template_team",
                     "agents": {
-                        "leader": {"model": {"model_request_config": {"model": "glm-5.2"}}}
+                        "leader": {
+                            "model": {
+                                "model_request_config": {
+                                    "model": "glm-5.2",
+                                    "temperature": 0.2,
+                                }
+                            }
+                        }
                     },
                 }
             }
@@ -459,6 +489,9 @@ def test_ensure_team_entity_converts_request_only_model_to_stable_ref(tmp_path) 
     assert entity is not None
     model_ref = entity.template_snapshot["agents"]["leader"]["model"]["ref"]
     assert model_ref.startswith("model-identity-v1:")
+    assert entity.template_snapshot["agents"]["leader"]["model"]["model_request_config"] == {
+        "temperature": 0.2
+    }
     persisted = store.entity_path("research_team").read_text(encoding="utf-8")
     assert "api_key" not in persisted
     assert "maas-secret" not in persisted
@@ -469,6 +502,8 @@ def test_ensure_team_entity_converts_request_only_model_to_stable_ref(tmp_path) 
     )
     assert spec["agents"]["leader"]["model"]["model_client_config"]["api_key"] == "maas-secret"
     assert spec["agents"]["leader"]["model"]["model_request_config"]["model"] == "glm-5.2"
+    assert spec["agents"]["leader"]["model"]["model_request_config"]["temperature"] == 0.2
+    assert spec["agents"]["leader"]["model"]["model_request_config"]["top_p"] == 0.8
 
 
 def test_ensure_team_entity_rejects_request_only_model_without_owner(tmp_path) -> None:

@@ -422,6 +422,11 @@ def _resolve_agent_model_reference(
     model_client_config = deepcopy(entry.get("model_client_config") or {})
     actual_name = str(model_client_config.get("model_name") or "").strip()
     model_request_config = deepcopy(entry.get("model_config_obj") or {})
+    request_overrides = model_raw.get("model_request_config")
+    if isinstance(request_overrides, dict):
+        request_overrides = deepcopy(request_overrides)
+        request_overrides.pop("model", None)
+        model_request_config.update(request_overrides)
     model_request_config.setdefault("model", actual_name)
     return {
         "model_client_config": model_client_config,

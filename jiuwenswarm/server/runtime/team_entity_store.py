@@ -30,6 +30,7 @@ TEAM_ENTITY_META_DIR = ".team-meta"
 TEAM_ENTITY_FILE = "team.yaml"
 
 _SENSITIVE_SNAPSHOT_KEYS = {"api_key", "api_base"}
+_SENSITIVE_HEADER_CONTAINER_KEYS = {"custom-headers", "extra-headers", "default-headers"}
 
 
 class TeamEntityStoreError(ValueError):
@@ -90,7 +91,7 @@ def _find_sensitive_snapshot_path(
             child_path = (*path, key)
             if normalized_key.replace("-", "_") in _SENSITIVE_SNAPSHOT_KEYS:
                 return child_path
-            if normalized_key == "custom-headers" and child:
+            if normalized_key in _SENSITIVE_HEADER_CONTAINER_KEYS and child:
                 return child_path
             found = _find_sensitive_snapshot_path(child, child_path)
             if found is not None:
@@ -215,6 +216,21 @@ def _resolve_request_only_model_ref(model: dict[str, Any], config_base: dict[str
     return build_model_identity_reference(model_name, matched_client_config)
 
 
+def _build_snapshot_model_reference(model_ref: str, model: dict[str, Any]) -> dict[str, Any]:
+    """Keep non-sensitive per-member request overrides alongside an owner reference."""
+    normalized: dict[str, Any] = {"ref": model_ref}
+    request_config = model.get("model_request_config")
+    if not isinstance(request_config, dict):
+        return normalized
+    request_overrides = deepcopy(request_config)
+    # The referenced owner is authoritative for model identity. Other request options
+    # (temperature, top_p, response format, etc.) remain member-specific snapshot data.
+    request_overrides.pop("model", None)
+    if request_overrides:
+        normalized["model_request_config"] = request_overrides
+    return normalized
+
+
 def normalize_team_entity_snapshot(
     template_snapshot: dict[str, Any],
     config_base: dict[str, Any] | None,
@@ -230,7 +246,7 @@ def normalize_team_entity_snapshot(
                 continue
             model_ref = _resolve_snapshot_model_ref(model, config_base)
             if model_ref:
-                agent_config["model"] = {"ref": model_ref}
+                agent_config["model"] = _build_snapshot_model_reference(model_ref, model)
             elif "ref" in model:
                 raise TeamEntityStoreError(
                     "template_snapshot contains an invalid or unowned model reference",
@@ -245,13 +261,12 @@ def normalize_team_entity_snapshot(
                 # surface as a generic "model_client_config Field required" error.
                 request_ref = _resolve_request_only_model_ref(model, config_base)
                 if request_ref:
-                    agent_config["model"] = {"ref": request_ref}
+                    agent_config["model"] = _build_snapshot_model_reference(request_ref, model)
                     continue
                 model_name = _normalized_text(model.get("model_request_config", {}).get("model"))
                 raise TeamEntityStoreError(
-                    f"team member '{agent_key}' specifies model '{model_name or '<empty>'}' "
-                    "without a credential owner; relay must register it to the tenant "
-                    "effective model owner (models.defaults) before sync",
+                    f"team member '{agent_key}' specifies model '{model_name or '<empty>'}' but "
+                    "does not have a unique credential owner in tenant effective models.defaults",
                     code="BAD_REQUEST",
                 )
     sensitive_path = _find_sensitive_snapshot_path(snapshot)

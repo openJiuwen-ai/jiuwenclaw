@@ -225,6 +225,53 @@ def test_load_team_spec_dict_resolves_member_model_reference_after_defaults_reor
     assert model["model_request_config"]["temperature"] == 0.9
 
 
+def test_load_team_spec_dict_keeps_ref_model_identity_when_merging_request_overrides():
+    owner_ref = _model_identity_ref(
+        model_name="owner-model",
+        provider="OpenAI",
+        api_base="https://owner.example.test/v1",
+    )
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://owner.example.test/v1",
+                        "api_key": "owner-secret",
+                        "model_name": "owner-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.9},
+                }
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "ref": owner_ref,
+                                "model_request_config": {
+                                    "model": "other-model",
+                                    "temperature": 0.2,
+                                },
+                            }
+                        }
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_request_config"]["model"] == "owner-model"
+    assert model["model_request_config"]["temperature"] == 0.2
+
+
 def test_load_team_spec_dict_keeps_legacy_index_reference_readable():
     config = {
         "models": {
