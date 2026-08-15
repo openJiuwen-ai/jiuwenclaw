@@ -8,7 +8,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -61,6 +61,7 @@ SKILL_AUTHORIZATION_CONTEXT_TOKEN_KEY = "jiuwenclaw_skill_authorization_context_
 SkillLocation = tuple[Path, str, str | None]
 SkillResolver = Callable[[str], Optional[SkillLocation]]
 TrustResolver = Callable[[Path], SkillTrustLevel]
+SkillIdentityRefresher = Callable[[str], Awaitable[None]]
 ConfigProvider = Callable[[], dict[str, Any]]
 _POLICY_EVALUATION_FAILED = object()
 
@@ -255,6 +256,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         engine: Any = None,
         skill_resolver: SkillResolver | None = None,
         trust_resolver: TrustResolver | None = None,
+        skill_identity_refresher: SkillIdentityRefresher | None = None,
         grant_store: SkillGrantStore | None = None,
         config_provider: ConfigProvider | None = None,
         agent_scope_id: str = MAIN_AGENT_SCOPE_ID,
@@ -267,13 +269,21 @@ class SkillAuthorizationRail(BaseInterruptRail):
         self._engine = engine
         self._skill_resolver = skill_resolver
         self._trust_resolver = trust_resolver or _default_trust_resolver
+        self._skill_identity_refresher = skill_identity_refresher
         self._grant_store = grant_store
         self._config_provider = config_provider or _default_config_provider
         self._agent_scope_id = agent_scope_id
-        # Skill 目录 -> ((permission 指纹, SKILL.md 指纹), Manifest|None)；任一变化重校验。
+        # Skill 目录 -> ((permission 指纹, SKILL.md 指纹, trust), Manifest|None)；任一变化重校验。
         self._manifest_cache: dict[
             str,
-            tuple[tuple[tuple[int, int] | None, tuple[int, int] | None], SkillManifest | None],
+            tuple[
+                tuple[
+                    tuple[int, int] | None,
+                    tuple[int, int] | None,
+                    SkillTrustLevel,
+                ],
+                SkillManifest | None,
+            ],
         ] = {}
 
     # ---------- 基础设施 ----------
@@ -407,22 +417,37 @@ class SkillAuthorizationRail(BaseInterruptRail):
         permission_file = directory / SKILL_PERMISSION_FILENAME
         skill_md_file = directory / ROOT_SKILL_FILE
         cache_key = str(directory)
+        trust = self._trust_resolver(directory)
         fingerprint = (
             _file_fingerprint(permission_file),
             _file_fingerprint(skill_md_file),
+            trust,
         )
         cached = self._manifest_cache.get(cache_key)
         if cached is not None and cached[0] == fingerprint:
             return cached[1]
         manifest = load_skill_manifest(
             skill_dir,
-            trust=self._trust_resolver(Path(skill_dir)),
+            trust=trust,
             source=source,
             version=version,
             skill_name=skill_name,
         )
         self._manifest_cache[cache_key] = (fingerprint, manifest)
         return manifest
+
+    async def _refresh_skill_identity_for_call(self, skill_name: str) -> None:
+        """Refresh optional external identity without making loading depend on it."""
+        if self._skill_identity_refresher is None:
+            return
+        try:
+            await self._skill_identity_refresher(skill_name)
+        except Exception:  # noqa: BLE001 — identity refresh failure keeps legacy snapshot behavior
+            logger.warning(
+                "[skill_authorization] skill identity refresh failed skill=%s",
+                skill_name,
+                exc_info=True,
+            )
 
     # ---------- 待确认审批上下文 ----------
 
@@ -787,7 +812,10 @@ class SkillAuthorizationRail(BaseInterruptRail):
             ))
             return
 
-        # 2. Manifest（mtime 缓存）。无法解析时按无声明放行，不创建 Grant。
+        # 2. 企业预置身份可能由其它会话刚同步；解析 Manifest 前只校准当前 Skill。
+        await self._refresh_skill_identity_for_call(skill_name)
+
+        # 3. Manifest（mtime + trust 缓存）。无法解析时按无声明放行，不创建 Grant。
         manifest = self._resolve_manifest_for_call(skill_name)
         if manifest is None:
             if not self._claim_gate(ctx, authorization_generation):
@@ -799,7 +827,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             self._proceed_tool_call(ctx, tool_call, tool_name)
             return
 
-        # 3. 作用域缺失 → 无法绑定 Grant，按无声明放行。
+        # 4. 作用域缺失 → 无法绑定 Grant，按无声明放行。
         if scope is None:
             if not self._claim_gate(ctx, authorization_generation):
                 return
@@ -811,7 +839,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             return
         session_id, agent_scope_id = scope
 
-        # 4. 只有实际改变当前权限的声明才触发动态授权，否则不创建 Grant。
+        # 5. 只有实际改变当前权限的声明才触发动态授权，否则不创建 Grant。
         if (
             not manifest.authorizable
             or not manifest.skill_md_hash
@@ -841,7 +869,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             self._proceed_tool_call(ctx, tool_call, tool_name)
             return
 
-        # 5. 基础 DENY 与差分裁决完成，标记由本 rail 专属处理，避免原权限链重复弹卡。
+        # 6. 基础 DENY 与差分裁决完成，标记由本 rail 专属处理，避免原权限链重复弹卡。
         if not self._claim_gate(ctx, authorization_generation):
             return
 
@@ -885,7 +913,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             self._proceed_tool_call(ctx, tool_call, tool_name)
             return
 
-        # 6. 非 low 变更需用户批准。
+        # 7. 非 low 变更需用户批准。
         await self._run_approval_flow(approval_call)
 
     # ---------- 门禁模板钩子（子 Agent 委托版覆盖） ----------
