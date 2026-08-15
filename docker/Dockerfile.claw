@@ -19,7 +19,7 @@ RUN npm run build
 WORKDIR /app/jiuwenswarm
 ENV PATH=$PATH:/home/app/.local/bin
 RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenswarm/jiuwenswarm/channels/web/app_web.py
-RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple . --no-cache-dir
 
 # Start claw app
 EXPOSE 5173
