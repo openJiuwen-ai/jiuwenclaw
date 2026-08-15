@@ -12,7 +12,11 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import get_jiuwenclaw_id, parse_iso_datetime, utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
-from ...schemas.template_schemas import ExtensionConfigTemplateUpdateRequest
+from ...schemas.template_schemas import (
+    ExtensionConfigTemplateUpdateRequest,
+    HookConfig,
+    normalize_hook_schedule,
+)
 
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_COMPONENTS = frozenset({"gateway", "agent_server"})
@@ -47,17 +51,23 @@ def _validate_hook_type(value: str) -> str:
     return normalized
 
 
-def _validate_hook_config(hook_config: dict[str, Any], *, hook_type: str) -> dict[str, Any]:
-    if not isinstance(hook_config, dict):
-        raise ValueError("hook_config must be an object")
-    handler = str(hook_config.get("handler") or "").strip()
-    if not handler:
-        raise ValueError("hook_config.handler is required")
-    if hook_type == "schedule":
-        schedule = str(hook_config.get("schedule") or "").strip()
-        if not schedule:
-            raise ValueError("hook_config.schedule is required when hook_type=schedule")
-    return hook_config
+def _validate_hook_config(
+    hook_config: HookConfig | dict[str, Any], *, hook_type: str
+) -> dict[str, Any]:
+    cfg = (
+        hook_config
+        if isinstance(hook_config, HookConfig)
+        else HookConfig.model_validate(hook_config)
+    )
+    schedule = normalize_hook_schedule(
+        cfg.schedule, required=(hook_type == "schedule")
+    )
+    data = cfg.model_dump(exclude_none=True)
+    if schedule is None:
+        data.pop("schedule", None)
+    else:
+        data["schedule"] = schedule
+    return data
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:
