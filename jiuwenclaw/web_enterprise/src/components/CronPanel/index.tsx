@@ -172,19 +172,6 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
   const [previewRuns, setPreviewRuns] = useState<CronPreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
 
-  const timezoneOptions = [
-    { value: 'Asia/Shanghai', label: 'Asia/Shanghai' },
-    { value: 'Asia/Bangkok', label: 'Asia/Bangkok' },
-    { value: 'Asia/Tokyo', label: 'Asia/Tokyo' },
-    { value: 'Asia/Seoul', label: 'Asia/Seoul' },
-    { value: 'Asia/Singapore', label: 'Asia/Singapore' },
-    { value: 'Europe/London', label: 'Europe/London' },
-    { value: 'Europe/Paris', label: 'Europe/Paris' },
-    { value: 'America/New_York', label: 'America/New_York' },
-    { value: 'America/Los_Angeles', label: 'America/Los_Angeles' },
-    { value: 'America/Chicago', label: 'America/Chicago' },
-  ];
-
   const targetOptions = [
     { value: 'web', label: t('cron.targets.web') },
     { value: 'feishu', label: t('cron.targets.feishu') },
@@ -499,21 +486,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                               placeholder={t('cron.placeholders.wakeOffset')}
                             />
                           </td>
-                          <td className="px-4 py-3">
-                            <select
-                              value={editJob.timezone}
-                              onChange={(e) => setEditingJobs((prev) => ({
-                                ...prev,
-                                [job.id]: { ...prev[job.id], timezone: e.target.value },
-                              }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
-                            >
-                              {timezoneOptions.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            {displayTimezone}
                           </td>
                           <td className="px-4 py-3">
                             <select
