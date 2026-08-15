@@ -419,6 +419,148 @@ def test_ensure_team_entity_rejects_inline_model_without_exact_owner_match(tmp_p
     assert not store.entity_path("research_team").exists()
 
 
+def test_ensure_team_entity_converts_request_only_model_to_stable_ref(tmp_path) -> None:
+    # Relay sent only the model name (model_request_config) without a credential owner.
+    # A unique tenant owner in models.defaults must bind it to a stable ref at normalize time.
+    store = TeamEntityStore(tmp_path / ".agent_teams")
+    binding = SimpleNamespace(
+        team_name="research_team",
+        template_id="research",
+        created_at=42.0,
+        template_snapshot=None,
+    )
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "glm-5.2",
+                        "api_base": "https://maas.test/v1",
+                        "api_key": "maas-secret",
+                        "client_provider": "OpenAI",
+                    }
+                }
+            ]
+        },
+        "modes": {
+            "team": {
+                "research": {
+                    "team_name": "template_team",
+                    "agents": {
+                        "leader": {"model": {"model_request_config": {"model": "glm-5.2"}}}
+                    },
+                }
+            }
+        },
+    }
+
+    entity = ensure_team_entity_for_binding(binding, config_base=config, store=store)
+
+    assert entity is not None
+    model_ref = entity.template_snapshot["agents"]["leader"]["model"]["ref"]
+    assert model_ref.startswith("model-identity-v1:")
+    persisted = store.entity_path("research_team").read_text(encoding="utf-8")
+    assert "api_key" not in persisted
+    assert "maas-secret" not in persisted
+    spec = load_team_spec_dict(
+        config_base=config,
+        template_id=entity.template_id,
+        template_snapshot=entity.template_snapshot,
+    )
+    assert spec["agents"]["leader"]["model"]["model_client_config"]["api_key"] == "maas-secret"
+    assert spec["agents"]["leader"]["model"]["model_request_config"]["model"] == "glm-5.2"
+
+
+def test_ensure_team_entity_rejects_request_only_model_without_owner(tmp_path) -> None:
+    # Request-only model whose name matches no tenant owner: reject at bind, don't pass
+    # it through to TeamAgentSpec creation as a generic "model_client_config Field required".
+    store = TeamEntityStore(tmp_path / ".agent_teams")
+    binding = SimpleNamespace(
+        team_name="research_team",
+        template_id="research",
+        created_at=42.0,
+        template_snapshot=None,
+    )
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "other-model",
+                        "api_base": "https://maas.test/v1",
+                        "api_key": "maas-secret",
+                        "client_provider": "OpenAI",
+                    }
+                }
+            ]
+        },
+        "modes": {
+            "team": {
+                "research": {
+                    "team_name": "template_team",
+                    "agents": {
+                        "leader": {"model": {"model_request_config": {"model": "glm-5.2"}}}
+                    },
+                }
+            }
+        },
+    }
+
+    with pytest.raises(TeamEntityStoreError, match="credential owner"):
+        ensure_team_entity_for_binding(binding, config_base=config, store=store)
+
+    assert not store.entity_path("research_team").exists()
+
+
+def test_ensure_team_entity_rejects_request_only_model_with_ambiguous_owner(tmp_path) -> None:
+    # Request-only model name matches more than one tenant owner (different endpoints):
+    # cannot auto-pick, reject explicitly at bind instead of silently passing through.
+    store = TeamEntityStore(tmp_path / ".agent_teams")
+    binding = SimpleNamespace(
+        team_name="research_team",
+        template_id="research",
+        created_at=42.0,
+        template_snapshot=None,
+    )
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "glm-5.2",
+                        "api_base": "https://first.test/v1",
+                        "api_key": "first-secret",
+                        "client_provider": "OpenAI",
+                    }
+                },
+                {
+                    "model_client_config": {
+                        "model_name": "glm-5.2",
+                        "api_base": "https://second.test/v1",
+                        "api_key": "second-secret",
+                        "client_provider": "OpenAI",
+                    }
+                },
+            ]
+        },
+        "modes": {
+            "team": {
+                "research": {
+                    "team_name": "template_team",
+                    "agents": {
+                        "leader": {"model": {"model_request_config": {"model": "glm-5.2"}}}
+                    },
+                }
+            }
+        },
+    }
+
+    with pytest.raises(TeamEntityStoreError, match="credential owner"):
+        ensure_team_entity_for_binding(binding, config_base=config, store=store)
+
+    assert not store.entity_path("research_team").exists()
+
+
 def test_ensure_team_entity_rejects_stale_model_reference(tmp_path) -> None:
     store = TeamEntityStore(tmp_path / ".agent_teams")
     binding = SimpleNamespace(

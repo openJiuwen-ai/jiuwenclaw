@@ -179,6 +179,42 @@ def _resolve_snapshot_model_ref(model: dict[str, Any], config_base: dict[str, An
     return model_ref if owner_count == 1 else None
 
 
+def _resolve_request_only_model_ref(model: dict[str, Any], config_base: dict[str, Any]) -> str | None:
+    """Bind a request-only model (model name only, no client config / ref) to a tenant owner.
+
+    Relay is expected to register each team member's model against the tenant effective
+    model owner (``models.defaults``) and emit a stable ``ref``. When it only sends the
+    model name (``model_request_config``) without credentials, this resolves it to a
+    stable ref when exactly one owner in ``models.defaults`` carries that ``model_name``;
+    when no owner or more than one owner matches, it returns ``None`` so the caller can
+    reject explicitly at bind time instead of letting the request-only model pass through
+    to ``TeamAgentSpec`` creation and surface as a generic "model_client_config Field required".
+    """
+    request_config = model.get("model_request_config")
+    if not isinstance(request_config, dict):
+        return None
+    model_name = _normalized_text(request_config.get("model"))
+    if not model_name:
+        return None
+    models = config_base.get("models")
+    defaults = models.get("defaults") if isinstance(models, dict) else None
+    if not isinstance(defaults, list):
+        return None
+    matches: list[dict[str, Any]] = []
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        candidate = entry.get("model_client_config")
+        if isinstance(candidate, dict) and _normalized_text(candidate.get("model_name")) == model_name:
+            matches.append(entry)
+    if len(matches) != 1:
+        return None
+    matched_client_config = matches[0].get("model_client_config")
+    if not isinstance(matched_client_config, dict):
+        return None
+    return build_model_identity_reference(model_name, matched_client_config)
+
+
 def normalize_team_entity_snapshot(
     template_snapshot: dict[str, Any],
     config_base: dict[str, Any] | None,
@@ -186,7 +222,7 @@ def normalize_team_entity_snapshot(
     snapshot = deepcopy(template_snapshot)
     agents = snapshot.get("agents")
     if isinstance(config_base, dict) and isinstance(agents, dict):
-        for agent_config in agents.values():
+        for agent_key, agent_config in agents.items():
             if not isinstance(agent_config, dict):
                 continue
             model = agent_config.get("model")
@@ -198,6 +234,24 @@ def normalize_team_entity_snapshot(
             elif "ref" in model:
                 raise TeamEntityStoreError(
                     "template_snapshot contains an invalid or unowned model reference",
+                    code="BAD_REQUEST",
+                )
+            elif isinstance(model.get("model_request_config"), dict) and not isinstance(
+                model.get("model_client_config"), dict
+            ):
+                # Request-only model: relay sent a model name without a credential owner.
+                # Bind-phase: resolve to a unique tenant owner (stable ref), else reject
+                # explicitly — do not let it pass through to TeamAgentSpec creation and
+                # surface as a generic "model_client_config Field required" error.
+                request_ref = _resolve_request_only_model_ref(model, config_base)
+                if request_ref:
+                    agent_config["model"] = {"ref": request_ref}
+                    continue
+                model_name = _normalized_text(model.get("model_request_config", {}).get("model"))
+                raise TeamEntityStoreError(
+                    f"team member '{agent_key}' specifies model '{model_name or '<empty>'}' "
+                    "without a credential owner; relay must register it to the tenant "
+                    "effective model owner (models.defaults) before sync",
                     code="BAD_REQUEST",
                 )
     sensitive_path = _find_sensitive_snapshot_path(snapshot)
