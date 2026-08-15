@@ -6,16 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUSTOM_ENV_FILE="${SCRIPT_DIR}/.env.custom"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
-CLAW_META_PROCESS_TEMPLATE_FILE="${SCRIPT_DIR}/conf/claw_meta_process.template.json"
-CLAW_META_PROCESS_FILE="${SCRIPT_DIR}/conf/claw_meta_process.json"
-
 GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-config-yuanrong.template.yaml"
 GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/gateway-config.yaml"
 GATEWAY_ENV_FILE="${SCRIPT_DIR}/conf/gateway.env"
 
 REG_FUNC_FILE="${SCRIPT_DIR}/../../jiuwenswarm/extensions/clawee.py"
 
-META_PORT=""
 CMD=""
 
 declare -ga MODULES=()
@@ -31,7 +27,6 @@ declare -A DEPLOY_VARS=(
     ["CLUSTER_HOSTS"]=""
     ["YR_PYTHON_VERSION"]="3.11"
     ["YR_FUNC_CODE_DIR"]=""
-    ["YR_SESSION_DIR"]=""
     ["JIUWENSWARM_PACKAGE_URL"]=""
     ["JIUWENSWARM_INSTANCE_NAME"]=""
     ["GATEWAY_CONCURRENCY"]="1"
