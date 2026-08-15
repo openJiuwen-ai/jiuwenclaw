@@ -1,12 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests: phase-2 targeted single-MCP control (no full reload).
+"""Tests: targeted single-MCP control (no full reload).
 
-connect/disconnect/enable/disable handlers now call
-AgentManager.apply_mcp_change → adapter.register_mcp_by_name /
-unregister_mcp_by_name / toggle_mcp_enabled_by_name, which touch ONE MCP
-via _register_mcp_server / _unregister_mcp_server. This must NOT trigger
-reload_agents_config (the heavy full-resync of all mcp.servers).
+disconnect/delete handlers call AgentManager.apply_mcp_change →
+adapter.register_mcp_by_name / unregister_mcp_by_name, which touch ONE MCP
+via _register_mcp_server / _unregister_mcp_server. connect no longer loads
+the MCP into the agent (session-level enable is per chat.send); this must
+NOT trigger reload_agents_config.
 """
 
 from __future__ import annotations
@@ -137,23 +137,11 @@ async def test_adapter_unregister_mcp_by_name_no_reload() -> None:
 
 
 @pytest.mark.anyio
-async def test_adapter_toggle_disable_routes_to_unregister() -> None:
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        JiuWenSwarmDeepAdapter,
-    )
-    adapter = JiuWenSwarmDeepAdapter.__new__(JiuWenSwarmDeepAdapter)
-    adapter._instance = MagicMock()
-    with patch.object(adapter, "register_mcp_by_name", AsyncMock(return_value=True)) as reg, \
-         patch.object(adapter, "unregister_mcp_by_name", AsyncMock(return_value=True)) as unreg:
-        await adapter.toggle_mcp_enabled_by_name("baidu", True)
-        await adapter.toggle_mcp_enabled_by_name("baidu", False)
-    reg.assert_awaited_once()
-    unreg.assert_awaited_once()
-
-
-@pytest.mark.anyio
-async def test_connector_connect_handler_calls_apply_mcp_change_not_reload() -> None:
-    """connect handler must route to apply_mcp_change, not reload_agents_config."""
+async def test_connector_connect_handler_does_not_load_into_agent() -> None:
+    """connect only installs + connects; it must NOT call apply_mcp_change
+    (session-level enable is driven by chat.send's ``mcp`` field) and must
+    NOT reload_agents_config. State flips to connected; the agent sees the
+    MCP's tools only when a chat turn selects it."""
     import asyncio, json
     from jiuwenswarm.common.schema.agent import AgentRequest
     from jiuwenswarm.common.schema.message import ReqMethod
@@ -167,11 +155,15 @@ async def test_connector_connect_handler_calls_apply_mcp_change_not_reload() -> 
         def __init__(self):
             self.reloaded = False
             self.applied = []
+            self.probed = []
         async def reload_agents_config(self, *a, **kw):
             self.reloaded = True
         async def apply_mcp_change(self, name, action, *, enabled=True, target_channel_id=None):
             self.applied.append((name, action, enabled))
             return True
+        async def probe_mcp_live_connection(self, name):
+            self.probed.append(name)
+            return (True, "")
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     am = _AM()
@@ -182,73 +174,16 @@ async def test_connector_connect_handler_calls_apply_mcp_change_not_reload() -> 
                            req_method=ReqMethod.MCP_CONNECT,
                            params={"name": "baidu"})
     with patch("jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
-               return_value={"name": "baidu", "transport": "sse", "url": "https://x"}), \
-         patch("jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-               return_value=(True, "")):
+               return_value={"name": "baidu", "transport": "sse", "url": "https://x"}):
         await server._handle_mcp_connect(ws, request, asyncio.Lock())
 
-    payload = json.loads(ws.sent[0])
-    # drill to payload
-    body = payload.get("body", {})
-    result = body.get("result") or body.get("details") or {}
-    assert result.get("type") == "connected"
-    assert am.applied == [("baidu", "add", True)]  # targeted
-    assert am.reloaded is False  # no full reload
-
-
-@pytest.mark.anyio
-async def test_connect_cold_start_ensures_live_agent_before_apply() -> None:
-    """Cold start (no chat yet → agents empty) must call get_agent before
-    apply, otherwise apply_mcp_change fans out over zero adapters and raises
-    "MCP '<name>' add failed" with no reason (the misleading 45ms failure).
-
-    get_agent is the same on-demand creation path the chat handler uses; on a
-    fresh agent create_instance's init already registers every connecting
-    entry, so the subsequent targeted apply is either an idempotent skip or
-    the real register call. This test pins the guard: get_agent is awaited on
-    the request's channel with mode="agent" BEFORE apply_mcp_change, and
-    apply receives target_channel_id so it stays scoped to that channel.
-    """
-    import asyncio, json
-    from jiuwenswarm.common.schema.agent import AgentRequest
-    from jiuwenswarm.common.schema.message import ReqMethod
-    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-    class _FakeWS:
-        def __init__(self): self.sent = []
-        async def send(self, d): self.sent.append(d)
-
-    class _AM:
-        def __init__(self):
-            self.get_agent_calls = []
-            self.applied = []
-        async def get_agent(self, channel_id="", mode="agent", **kw):
-            self.get_agent_calls.append((channel_id, mode))
-            return object()  # pretend an agent now exists
-        async def apply_mcp_change(self, name, action, *, enabled=True, target_channel_id=None):
-            self.applied.append((name, action, target_channel_id))
-            return True
-
-    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-    am = _AM()
-    server._agent_manager = am
-    server._mask_sensitive_fields = lambda i: i
-    ws = _FakeWS()
-    request = AgentRequest(request_id="r", session_id="s", channel_id="web",
-                           req_method=ReqMethod.MCP_CONNECT,
-                           params={"name": "tyc-mcp"})
-    with patch("jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
-               return_value={"name": "tyc-mcp", "transport": "streamable-http",
-                             "url": "https://mcp.tianyancha.com/v1"}), \
-         patch("jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-               return_value=(True, "")):
-        await server._handle_mcp_connect(ws, request, asyncio.Lock())
-
-    # Guard ran BEFORE apply, on the request's channel, mode=agent.
-    assert am.get_agent_calls == [("web", "agent")]
-    # apply received target_channel_id scoped to the request's channel.
-    assert am.applied == [("tyc-mcp", "add", "web")]
     payload = json.loads(ws.sent[0])
     body = payload.get("body", {})
     result = body.get("result") or body.get("details") or {}
     assert result.get("type") == "connected"
+    # connect probes liveness but must NOT load the MCP into the agent
+    # (session-level enable is per chat.send) and must NOT trigger a full reload.
+    assert am.probed == ["baidu"]
+    assert am.applied == []
+    assert am.reloaded is False
+

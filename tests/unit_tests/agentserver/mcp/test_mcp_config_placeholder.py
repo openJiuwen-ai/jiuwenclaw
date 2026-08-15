@@ -137,6 +137,66 @@ def test_url_placeholder_resolved() -> None:
     assert cfg.server_path == "https://api.gildata.com/mcp?token=tok-xyz"
 
 
+def test_stdio_args_placeholders_resolved_via_resolver() -> None:
+    """${VAR} in args is replaced with real values from the resolver.
+
+    stdio MCPs like ssh-mcp-server pass ``--host ${SSH_HOST}`` in args; the
+    spawned process gets argv literally (no shell expansion), so placeholders
+    must be substituted at build time — same as env below.
+    """
+    entry = {
+        "name": "ssh-mcp-server", "transport": "stdio", "command": "npx",
+        "args": [
+            "-y", "@fangjunjie/ssh-mcp-server",
+            "--host ${SSH_HOST}",
+            "--port ${SSH_PORT}",
+            "--username ${SSH_USER_NAME}",
+            "--password ${SSH_PASSWORD}",
+        ],
+        "env": {"SSH_HOST": "${SSH_HOST}"},  # env already resolved separately
+        "enabled": True, "server_id_scope": "mcp:ssh-mcp-server",
+    }
+    resolver = _make_resolver({
+        "SSH_HOST": "192.168.1.10",
+        "SSH_PORT": "22",
+        "SSH_USER_NAME": "ops",
+        "SSH_PASSWORD": "p@ss",
+    })
+    cfg = build_mcp_server_config(entry, credential_resolver=resolver)
+    assert cfg is not None
+    args = cfg.params["args"]
+    assert args[0] == "-y"
+    assert args[1] == "@fangjunjie/ssh-mcp-server"
+    assert args[2] == "--host 192.168.1.10"
+    assert args[3] == "--port 22"
+    assert args[4] == "--username ops"
+    assert args[5] == "--password p@ss"
+    # env path unaffected (still resolved by its own _resolve_string call)
+    assert cfg.params["env"]["SSH_HOST"] == "192.168.1.10"
+
+
+def test_stdio_args_placeholder_missing_kept_literal(monkeypatch) -> None:
+    """An args placeholder with no resolver hit stays as ${VAR}."""
+    monkeypatch.delenv("SSH_HOST", raising=False)
+    entry = {
+        "name": "ssh-mcp-server", "transport": "stdio", "command": "npx",
+        "args": ["--host ${SSH_HOST}"], "enabled": True,
+    }
+    cfg = build_mcp_server_config(entry, credential_resolver=_make_resolver({}))
+    assert cfg.params["args"] == ["--host ${SSH_HOST}"]
+
+
+def test_stdio_args_resolves_from_os_environ(monkeypatch) -> None:
+    """args placeholders fall back to os.environ when store has no entry."""
+    monkeypatch.setenv("SSH_HOST", "10.0.0.5")
+    entry = {
+        "name": "ssh-mcp-server", "transport": "stdio", "command": "npx",
+        "args": ["--host ${SSH_HOST}"], "enabled": True,
+    }
+    cfg = build_mcp_server_config(entry, credential_resolver=_make_resolver({}))
+    assert cfg.params["args"] == ["--host 10.0.0.5"]
+
+
 def test_stdio_missing_args_defaults_to_empty_list() -> None:
     """A stdio entry with no args field must still produce params.args=[] —
     openjiuwen's StdioServerParameters rejects args=None ("Input should be a

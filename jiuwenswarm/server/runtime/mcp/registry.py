@@ -123,11 +123,6 @@ def _load_meta(pkg_dir: Path) -> dict[str, Any]:
     return meta
 
 
-def _has_skill_file(directory: Path) -> bool:
-    """True if directory has SKILL.md (a stray README.md is NOT a skill)."""
-    return (directory / "SKILL.md").is_file()
-
-
 def _bundled_skill_names(pkg_dir: Path) -> list[str]:
     """Bundled skill runtime names (handles nested + flat marketplace layouts)."""
     skills_dir = pkg_dir / "skills"
@@ -186,8 +181,6 @@ def _build_summary(
     meta: dict[str, Any],
     connected_names: set[str],
     connecting_names: set[str] | None = None,
-    *,
-    enabled: bool = True,
 ) -> dict[str, Any]:
     integration_type = _detect_integration_type(pkg_dir)
     bundled = _bundled_skill_names(pkg_dir)
@@ -222,15 +215,8 @@ def _build_summary(
         # (user-registered, no package). Drives the frontend's "edit"
         # button visibility — only customize MCPs are editable.
         "source": "built_in",
-        # enabled: soft-switch from state.json, but only meaningful when
-        # connected. An MCP that is not connected cannot be "enabled" (it
-        # isn't mounted to the agent), so force false when disconnected —
-        # even if state.json has enabled=true from a prior session. Only
-        # after connect does enabled reflect the real soft-switch.
-        "enabled": enabled if is_connected else False,
-        # connected: bool mirror of connection_state for cheap frontend
-        # checks (avoids string compares on every card render).
-        "connected": is_connected,
+        # 连接状态用 connection_state 单字段表达；会话级启用走 chat.send 的
+        # ``mcp`` 字段（非持久 flag），不在此返回 enabled/connected 冗余字段。
     }
 
 
@@ -299,11 +285,11 @@ def _connecting_server_names() -> set[str]:
     """Names of MCPs in the ``connecting`` state (connect in progress).
 
     Drives the frontend's "connecting" badge. An MCP lands here between
-    ``connect_mcp`` (which writes state=connecting) and the handler's
-    successful apply_mcp_change (which flips it to connected). On a restart
-    while still connecting, the record stays connecting — so the frontend
-    shows "connecting" (not "connected"), while get_mcp_servers still merges
-    it (list_connected_mcps includes connecting) so init re-registers it.
+    ``connect_mcp`` (which writes state=connecting) and the handler's flip to
+    connected. On a restart while still connecting, the record stays
+    connecting — so the frontend shows "connecting" (not "connected"), while
+    get_mcp_servers still merges it (list_connected_mcps includes connecting)
+    so init re-reads it.
     """
     names: set[str] = set()
     try:
@@ -319,24 +305,28 @@ def _connecting_server_names() -> set[str]:
     return names
 
 
-def list_marketplace_mcps() -> list[dict[str, Any]]:
-    """List all MCP packages in the marketplace cache as summaries."""
+_MCP_LIST_FILTERS = ("builtin", "local")
+
+
+def list_marketplace_mcps(filter: str = "builtin") -> list[dict[str, Any]]:
+    """List MCPs as summaries, scoped by ``filter``.
+
+    - ``builtin``: 全部预置（marketplace 包目录）MCP，含各自连接状态徽标。
+      列表页「预置」tab 用它。
+    - ``local``: 所有自定义 MCP（registered+connected，自定义默认已安装）+
+      已连接的预置 MCP。会话页 MCP 选择器用它——会话级启用只对 connected
+      有意义，且自定义 MCP 一旦创建即视为已安装。
+
+    其余值按 ``builtin`` 兜底。
+    """
+    f = str(filter or "builtin").strip().lower() or "builtin"
+    if f not in _MCP_LIST_FILTERS:
+        logger.debug("[mcp.registry] unknown mcp.list filter %r, fallback builtin", filter)
+        f = "builtin"
+
     root = _packages_dir()
     connected = _connected_server_names()
     connecting = _connecting_server_names()
-    # Read all state.json records once so _build_summary can report each
-    # MCP's enabled flag without a per-package get_mcp_record lookup.
-    state_records: dict[str, dict[str, Any]] = {}
-    try:
-        from jiuwenswarm.server.runtime.mcp.state_store import (
-            read_mcp_state,
-        )
-        st = read_mcp_state().get("mcp", {})
-        for k, v in st.items():
-            if isinstance(v, dict):
-                state_records[str(k)] = v
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[mcp.registry] read state for enabled flags failed: %s", exc)
     out: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     if root.is_dir():
@@ -344,53 +334,46 @@ def list_marketplace_mcps() -> list[dict[str, Any]]:
             if not pkg_dir.is_dir():
                 continue
             name = pkg_dir.name
+            # local: 只返回已连接的预置 MCP（会话页只需可启用集合）。
+            if f == "local" and name not in connected:
+                continue
             meta = _load_meta(pkg_dir)
-            rec = state_records.get(name)
-            # enabled defaults True for MCPs never connected (no record);
-            # when a record exists, honor its enabled flag (so a disabled
-            # MCP shows disabled in the list without a separate query).
-            enabled = bool(rec.get("enabled", True)) if rec else True
-            out.append(_build_summary(name, pkg_dir, meta, connected, connecting, enabled=enabled))
+            out.append(_build_summary(name, pkg_dir, meta, connected, connecting))
             seen_names.add(name)
     else:
         logger.debug("[mcp.registry] marketplace packages dir not found: %s", root)
-    # Append custom MCPs (no marketplace package) from state.json so they
-    # surface in mcp.list for connect/disconnect/enable/disable/tools-interact.
-    try:
-        from jiuwenswarm.server.runtime.mcp.state_store import (
-            list_registered_mcps,
-        )
-        for rec in list_registered_mcps():
-            name = str(rec.get("name", "") or "").strip()
-            if not name or name in seen_names:
-                continue
-            itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
-            state_val = str(rec.get("state", "") or "").strip()
-            is_conn = state_val == "connected"
-            is_conn_ing = state_val == "connecting"
-            if is_conn:
-                connection_state = "connected"
-            elif is_conn_ing:
-                connection_state = "connecting"
-            else:
-                connection_state = "disconnected"
-            out.append({
-                "name": name,
-                "display_name": name,
-                "description": "User-defined custom MCP server",
-                "category": "custom",
-                "integration_type": itype,
-                "connection_state": connection_state,
-                "has_bundled_skills": False,
-                "icon": None,
-                "source": "customize",
-                # enabled only meaningful when connected (see _build_summary).
-                "enabled": bool(rec.get("enabled", True)) if is_conn else False,
-                "connected": is_conn,
-            })
-            seen_names.add(name)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[mcp.registry] custom MCP list append failed: %s", exc)
+    # 自定义 MCP（无 marketplace 包）只出现在 local——builtin 是纯预置目录。
+    if f == "local":
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_registered_mcps,
+            )
+            for rec in list_registered_mcps():
+                name = str(rec.get("name", "") or "").strip()
+                if not name or name in seen_names:
+                    continue
+                itype = str(rec.get("integration_type", "") or "remote-mcp").strip() or "remote-mcp"
+                state_val = str(rec.get("state", "") or "").strip()
+                if state_val == "connected":
+                    connection_state = "connected"
+                elif state_val == "connecting":
+                    connection_state = "connecting"
+                else:
+                    connection_state = "disconnected"
+                out.append({
+                    "name": name,
+                    "display_name": name,
+                    "description": "User-defined custom MCP server",
+                    "category": "custom",
+                    "integration_type": itype,
+                    "connection_state": connection_state,
+                    "has_bundled_skills": False,
+                    "icon": None,
+                    "source": "customize",
+                })
+                seen_names.add(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[mcp.registry] custom MCP list append failed: %s", exc)
     return out
 
 
@@ -445,9 +428,6 @@ def get_mcp(name: str) -> dict[str, Any] | None:
         "has_bundled_skills": False,
         "icon": None,
         "source": "customize",
-        # enabled only meaningful when connected (see _build_summary).
-        "enabled": bool(rec.get("enabled", True)) if is_conn else False,
-        "connected": is_conn,
         "description": "User-defined custom MCP server",
         "examples": [],
         "mcp_spec": None,
@@ -636,22 +616,21 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
     if not pkg_dir.is_dir():
         # No marketplace package — this is a custom MCP. Its definition lives
         # in state.json (register_custom_mcp wrote it with state=registered).
-        # Connect means: flip state to connected (the handler then calls
-        # apply_mcp_change to register the MCP server). Raise KeyError if there
+        # Connect means: mark it connected so it is selectable per session
+        # (the handler flips connecting → connected). Raise KeyError if there
         # is no state.json record — that's a genuine "not found".
         from jiuwenswarm.server.runtime.mcp.state_store import get_mcp_record
         rec = get_mcp_record(n)
         if rec is None:
             raise KeyError(f"mcp '{n}' not found")
         # Persist as connecting (NOT connected): the MCP server is not yet
-        # registered with the agent (apply_mcp_change(add) runs in the
-        # handler, after this returns). connecting means "connect in
-        # progress" — get_mcp_servers merges it (so apply/init can register),
-        # the frontend shows "connecting" (not the phantom "connected"), and a
-        # restart re-registers it (like connected) so a crash mid-connect
-        # doesn't silently drop the connection. The handler flips state to
-        # connected once apply_mcp_change succeeds, and rolls back to
-        # registered on failure.
+        # loaded into an agent session. connecting means "connect in
+        # progress" — get_mcp_servers merges it, the frontend shows
+        # "connecting" (not the phantom "connected"), and a restart re-reads
+        # it (like connected) so a crash mid-connect doesn't silently drop
+        # the connection. The handler flips state to connected; session-level
+        # loading is driven later by chat.send's ``mcp`` field
+        # (reconcile_session_mcp), not by connect.
         from jiuwenswarm.server.runtime.mcp.state_store import (
             set_mcp_state,
         )
@@ -682,7 +661,6 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
             CredentialStore,
             detect_credential_kind,
             required_tokens_from_schema,
-            resolve_placeholders,
         )
         kind = detect_credential_kind(n)
         # Form D — skill-only MCP: no cli.json, no usable mcp.json, but a
@@ -713,12 +691,22 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
             # No missing tokens (or a credentialless skill package with no
             # token-schema at all) — install the bundled skills + mark connected.
             skills = _install_bundled_skills_safe(n)
+            # skill-only MCPs have nothing BUT their bundled skills: an install
+            # that produces zero skills (copy failed / swallowed) must NOT be
+            # persisted as connected, or state.json claims "connected" while
+            # the agent sees no skills (and a restart re-reads the same stale
+            # record). Fail the connect instead of writing a phantom entry.
+            if not skills:
+                raise RuntimeError(
+                    f"mcp '{n}' skill install produced no skills; "
+                    f"refusing to mark connected"
+                )
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 upsert_mcp_record,
             )
             upsert_mcp_record(
                 n, {"name": n, "server_id_scope": f"mcp:{n}"},
-                state="connected", enabled=True,
+                state="connected",
                 integration_type=itype, skills=skills,
             )
             return {
@@ -751,19 +739,18 @@ def connect_mcp(name: str, *, install_only: bool = False) -> dict[str, Any]:
         # install_mcp_skills is a no-op for packages without skills/, so form
         # A/B MCPs with skills (e.g. notion's 4 skills) get them too.
         skills = _install_bundled_skills_safe(n)
-        # Write to state.json as connecting (NOT connected): apply_mcp_change
-        # (the actual MCP server registration) runs in the handler after this
-        # returns. connecting means "connect in progress" — get_mcp_servers
-        # merges it (so apply/init can register the entry), the frontend shows
-        # "connecting" until apply succeeds (not the phantom "connected" a
-        # premature write would leave), and a restart re-registers it (like
-        # connected). The handler flips to connected once apply_mcp_change
-        # succeeds, and rolls back on failure.
+        # Write to state.json as connecting (NOT connected): the MCP is not
+        # loaded into an agent session here. connecting means "connect in
+        # progress" — get_mcp_servers merges it, the frontend shows
+        # "connecting" (not the phantom "connected" a premature write would
+        # leave), and a restart re-reads it (like connected). The handler
+        # flips to connected; session-level loading is driven later by
+        # chat.send's ``mcp`` field (reconcile_session_mcp), not by connect.
         from jiuwenswarm.server.runtime.mcp.state_store import (
             upsert_mcp_record,
         )
         upsert_mcp_record(
-            n, entry, state="connecting", enabled=True,
+            n, entry, state="connecting",
             integration_type=itype, skills=skills or None,
         )
         result = dict(entry)
@@ -814,6 +801,16 @@ def rollback_failed_connect(name: str) -> None:
 
     Marketplace MCP (has package dir): remove record + uninstall skills.
     Custom MCP: flip state back to ``registered`` so the user can retry/edit.
+
+    Both branches wipe the local CredentialStore token file. A failed connect
+    means the provisioned tokens did not authenticate (wrong value / expired /
+    service rejected) — keeping them would make the MCP permanently broken:
+    the next ``mcp.connect`` would find the stale tokens, skip the
+    ``credentials_required`` prompt, and re-probe with the same bad tokens
+    forever. Wiping forces ``connect_mcp``'s form-B missing-token check to
+    re-trigger, so the user gets the credentials modal again and can correct
+    the value. No-op for form-A (no tokens stored) and form-C (CLI manages its
+    own OAuth state, CredentialStore is empty).
     """
     n = str(name or "").strip()
     if not n:
@@ -833,6 +830,7 @@ def rollback_failed_connect(name: str) -> None:
                 set_mcp_state,
             )
             set_mcp_state(n, state="registered")
+        _wipe_stored_credentials(n)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[mcp.registry] rollback '%s' failed: %s", n, exc)
 
@@ -944,31 +942,39 @@ def _finalize_cli(name: str, install_result: Any, *, install_only: bool = False)
         entry = build_config_entry(n)
         if entry is not None:
             # Hybrid CLI+MCP also writes the stdio entry to state.json. Write
-            # as connecting, NOT connected: the MCP server is registered with
-            # the agent by _finalize_cli_auth's apply_mcp_change(add), which
-            # runs after this returns (CLI auth already succeeded here).
-            # connecting lets get_mcp_servers merge the entry (so apply can
-            # register it), shows "connecting" on the frontend until apply
-            # succeeds, and re-registers on restart. The handler flips to
-            # connected once apply_mcp_change succeeds; a failed apply rolls
-            # back (remove record / flip to registered) instead of leaving a
-            # phantom "connected" entry.
+            # as connecting, NOT connected: the MCP server is not loaded into
+            # an agent session here. connecting lets get_mcp_servers merge the
+            # entry, shows "connecting" on the frontend, and re-reads on
+            # restart. _finalize_cli_auth flips to connected; session-level
+            # loading is driven later by chat.send's ``mcp`` field
+            # (reconcile_session_mcp), not by connect.
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 upsert_mcp_record,
             )
             upsert_mcp_record(
-                n, entry, state="connecting", enabled=True,
+                n, entry, state="connecting",
                 integration_type="cli", skills=skills_installed or None,
             )
     # Pure CLI (no mcp.json command) still needs a state.json record so
     # disconnect/enable/disable can find it; it carries skills, not an MCP entry.
     if entry is None:
+        # A pure CLI has no MCP server — its bundled skills ARE the payload.
+        # A zero-skill install (copy failed) must not be persisted: the handler
+        # would promote connecting → connected and a restart re-reads a stale
+        # "connected" record with no skills on disk. Fail the connect instead.
+        if not install_only and not skills_installed:
+            pkg_dir = _packages_dir() / n
+            if (pkg_dir / "skills").is_dir():
+                raise RuntimeError(
+                    f"mcp '{n}' skill install produced no skills; "
+                    f"refusing to connect"
+                )
         from jiuwenswarm.server.runtime.mcp.state_store import (
             upsert_mcp_record,
         )
         upsert_mcp_record(
             n, {"name": n, "server_id_scope": f"mcp:{n}"},
-            state="connecting", enabled=True,
+            state="connecting",
             integration_type="cli", skills=skills_installed or None,
         )
     return {
@@ -1026,6 +1032,22 @@ def complete_cli_auth(name: str, step_index: int, *, install_only: bool = False)
     return _connect_cli(n, idx + 1, install_only=install_only)
 
 
+def _wipe_stored_credentials(n: str) -> None:
+    """Delete the local CredentialStore token file for MCP ``n``.
+
+    Called from the disconnect path (both custom and marketplace) so a
+    disconnect severs the auth — the stored ``${VAR}`` tokens must not linger
+    on disk after the user disconnects (reconnect re-prompts). Best-effort:
+    a failure here must not strand the disconnect (state/skill cleanup already
+    ran). Mirrors ``delete_custom_mcp``'s credential wipe.
+    """
+    try:
+        from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
+        CredentialStore().delete_mcp(n)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[mcp.registry] wipe credentials '%s' failed: %s", n, exc)
+
+
 def disconnect_mcp(name: str) -> dict[str, Any]:
     """Remove an MCP. For CLI form: unauth + remove skills first."""
     n = str(name or "").strip()
@@ -1046,6 +1068,7 @@ def disconnect_mcp(name: str) -> dict[str, Any]:
         if rec is None:
             return {"name": n, "removed": False}
         set_mcp_state(n, state="registered")
+        _wipe_stored_credentials(n)
         return {"name": n, "removed": True, "state": "registered"}
     itype = _detect_integration_type(_packages_dir() / n)
     if itype == "cli":
@@ -1068,9 +1091,12 @@ def disconnect_mcp(name: str) -> dict[str, Any]:
         uninstall_mcp_skills(n)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[mcp.registry] skill uninstall '%s' failed: %s", n, exc)
-    # Stored tokens (form B) are intentionally kept so a reconnect reuses them
-    # without re-prompting. CLI unauth above clears the CLI-managed OAuth login
-    # state — a separate credential store from the static tokens.
+    # Disconnect wipes the local CredentialStore token file
+    # (mcp/credentials/<name>.json) — a disconnect severs the auth, so the
+    # stored token must not linger on disk (reconnect re-prompts for it).
+    # CLI unauth above clears the CLI-managed OAuth login state, which is a
+    # separate credential store from these static ${VAR} tokens.
+    _wipe_stored_credentials(n)
     removed = remove_mcp_record(n)
     return removed if removed is not None else {"name": n, "removed": False}
 
@@ -1135,9 +1161,8 @@ def register_custom_mcp(name: str, config: dict[str, Any]) -> dict[str, Any]:
     )
     prior = get_mcp_record(n)
     was_connected = bool(prior and prior.get("state") == "connected")
-    new_enabled = bool(prior.get("enabled", True)) if prior else True
     upsert_mcp_record(
-        n, entry, state="registered", enabled=new_enabled,
+        n, entry, state="registered",
         integration_type="remote-mcp" if transport != "stdio" else "stdio-mcp",
     )
     entry["was_connected"] = was_connected
@@ -1184,64 +1209,6 @@ def delete_custom_mcp(name: str) -> dict[str, Any]:
     return {"name": n, "removed": True, "was_connected": was_connected}
 
 
-def enable_mcp(name: str) -> dict[str, Any]:
-    """Enable an MCP. CLI/skill-only types toggle bundled skills on;
-    remote/stdio types flip the state.json enabled flag (MCP soft-register).
-    """
-    return _set_mcp_enabled(name, True)
-
-
-def disable_mcp(name: str) -> dict[str, Any]:
-    """Disable an MCP. CLI/skill-only types toggle bundled skills off
-    (CLI binary + auth stay installed; tools become invisible to the agent);
-    remote/stdio types flip the state.json enabled flag (MCP soft-unregister).
-    """
-    return _set_mcp_enabled(name, False)
-
-
-def _set_mcp_enabled(name: str, enabled: bool) -> dict[str, Any]:
-    """Dispatch enable/disable by integration type.
-
-    All forms persist ``enabled`` to state.json — it is the single source of
-    truth for MCP enabled state (config.yaml is not touched by the MCP path;
-    command.mcp's config.yaml CRUD is a separate TUI path).
-
-    * cli / skill-only (no mcp.json): ALSO toggle each bundled skill via
-      SkillManager.set_skill_enabled — the MCP's tools surface through skills,
-      so skill visibility must track the MCP's enabled flag. The CLI binary +
-      auth stay installed; only skill visibility changes.
-    * remote-mcp / stdio-mcp: flip state.json enabled + let apply_mcp_change
-      toggle the MCP server on/off.
-    """
-    n = str(name or "").strip()
-    if not n:
-        raise ValueError("mcp name is required")
-    from jiuwenswarm.server.runtime.mcp.state_store import (
-        set_mcp_enabled,
-    )
-    # state.json is authoritative — an MCP not in state.json is not connected,
-    # so enable/disable on it is a KeyError.
-    result = set_mcp_enabled(n, enabled)
-    action = "enabled" if enabled else "disabled"
-    # Toggle bundled skill visibility for ALL forms that have skills — not
-    # just cli/skill-only. remote/stdio MCPs with bundled skills (notion has
-    # 4, canva/baidu/qcc/tyc each have one) must also hide their skills when
-    # disabled, otherwise the agent keeps seeing a disabled MCP's skills
-    # (SkillUseRail filters by skill_configs.enabled).
-    skills = get_mcp_skills(n)
-    if skills:
-        from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-        mgr = SkillManager()
-        for s in skills:
-            try:
-                mgr.set_skill_enabled(s["name"], enabled)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[mcp] set_skill_enabled '%s'=%s failed: %s", s["name"], enabled, exc)
-        result["toggled_skills"] = [s["name"] for s in skills]
-    result.setdefault("type", action)
-    return result
-
-
 def save_mcp_credentials(name: str, tokens: dict[str, Any]) -> dict[str, Any]:
     """Persist user-supplied tokens for a form-B MCP (tianyancha/gildata/...).
 
@@ -1269,8 +1236,6 @@ __all__ = [
     "build_config_entry",
     "connect_mcp",
     "disconnect_mcp",
-    "enable_mcp",
-    "disable_mcp",
     "complete_cli_auth",
     "register_custom_mcp",
     "delete_custom_mcp",

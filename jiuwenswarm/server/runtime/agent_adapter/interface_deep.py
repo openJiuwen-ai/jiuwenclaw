@@ -1268,6 +1268,10 @@ class JiuWenSwarmDeepAdapter:
         self._last_models_config_fingerprint: str | None = None
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
+        # MCP names this session loaded via chat.send's ``mcp`` field
+        # (reconcile_session_mcp). init-registered config.yaml MCPs are NOT in
+        # this set — reconcile only adds/removes its own, never touching init's.
+        self._session_selected_mcp: set[str] = set()
         self._auto_harness_service: Optional[AutoHarnessService] = None
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
@@ -1341,6 +1345,9 @@ class JiuWenSwarmDeepAdapter:
         """Create a child adapter that owns one DeepAgent for a single session."""
         adapter = type(self)()
         adapter.mark_as_session_scoped(session_id)
+        # Inherit the channel id so the child's MCP load strategy matches the
+        # parent's (TUI loads the global set, web loads nothing on init).
+        adapter._channel_id = getattr(self, "_channel_id", "")
         if self._skill_manager is not None:
             adapter.set_skill_manager(self._skill_manager)
         return adapter
@@ -2561,6 +2568,52 @@ class JiuWenSwarmDeepAdapter:
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
         return extract_enabled_mcp_server_entries(config_base)
 
+    @staticmethod
+    def _yaml_enabled_mcp_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
+        """Enabled config.yaml mcp.servers; fallback to config_base on read error."""
+        from jiuwenswarm.common.config import get_config_yaml_mcp_servers
+        try:
+            servers = get_config_yaml_mcp_servers()
+        except Exception:  # noqa: BLE001
+            servers = []
+            if isinstance(config_base, dict):
+                mcp_cfg = config_base.get("mcp", {})
+                if isinstance(mcp_cfg, dict):
+                    servers = mcp_cfg.get("servers", []) or []
+        return [s for s in servers
+                if isinstance(s, dict) and bool(s.get("enabled", True))]
+
+    @staticmethod
+    def _state_enabled_mcp_entries() -> list[dict[str, Any]]:
+        """Enabled state.json MCPs (TUI-created / web-connected, enabled=True).
+
+        TUI channel (root adapter) loads config.yaml ``enabled`` ∪ these —
+        its global default set. Web ignores ``enabled`` (session-level via
+        chat.send's ``mcp`` field), so the root is the only caller. C/D
+        (skill-only / pure-cli) are dropped by ``record_to_mcp_entry``
+        (returns None — no MCP host); they surface via skills, and the root
+        never scans MCP skill dirs.
+        """
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_tui_enabled_mcps, record_to_mcp_entry,
+        )
+        out: list[dict[str, Any]] = []
+        try:
+            for rec in list_tui_enabled_mcps():
+                name = str(rec.get("name", "") or "").strip()
+                if not name:
+                    continue
+                entry = record_to_mcp_entry(name, rec)
+                if entry is None:
+                    continue  # C/D — no MCP host, surface via skills
+                out.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] read state.json enabled mcps failed: %s",
+                exc,
+            )
+        return out
+
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
         if self._instance is None:
             return False
@@ -2809,45 +2862,92 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[JiuWenSwarmDeepAdapter] unregister_mcp_by_name: '%s' not registered", name)
         return removed_any
 
-    async def toggle_mcp_enabled_by_name(self, name: str, enabled: bool) -> bool:
-        """Enable/disable one MCP by name without full reload.
+    async def reconcile_session_mcp(
+        self, session_id: str | None, needed: list[str] | None
+    ) -> None:
+        """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
-        enable → register (spawn/connect); disable → unregister (disconnect).
-        Idempotent: toggling to the current state is a no-op.
-        Fan-out to session children is inherited from register/unregister.
+        ``needed`` is chat.send's ``mcp`` field (MCP server names). Diffs
+        against the session child's self-loaded set (``_session_selected_mcp``)
+        and adds/removes only the delta. ``None`` (field absent) and ``[]``
+        both clear that set; init-registered config.yaml MCPs are never in it,
+        so they survive. MCP-server forms (stdio/remote/hybrid) register/
+        unregister; cli/skill-only forms surface via ``_skill_scan_dirs``
+        (also filtered by ``_session_selected_mcp``), picked up by the
+        refresh_skill_rails on change.
         """
-        if enabled:
-            return await self.register_mcp_by_name(name)
-        return await self.unregister_mcp_by_name(name)
+        needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
+        child = await self._get_or_create_session_adapter(session_id)
+        if child._instance is None:
+            return
+        selected = child._session_selected_mcp
+        changed = False
+        # Add: in needed but not yet self-loaded.
+        for name in needed_set - selected:
+            try:
+                await child.register_mcp_by_name(name)
+                selected.add(name)
+                changed = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reconcile add '%s' failed: %s",
+                    name, exc,
+                )
+        # Remove: self-loaded but not in needed. None (absent) and [] both
+        # land here as needed_set=∅ → unload all self-loaded. init's config.yaml
+        # MCPs are not in `selected`, so they survive.
+        for name in list(selected - needed_set):
+            if not name:
+                selected.discard(name)
+                continue
+            try:
+                await child.unregister_mcp_by_name(name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reconcile remove '%s' failed: %s",
+                    name, exc,
+                )
+            selected.discard(name)
+            changed = True
+        # A cli/skill MCP's bundled skills surface via _skill_scan_dirs (filtered
+        # by _session_selected_mcp), not register_mcp_by_name (no server entry).
+        # Refresh so the rail picks up the new selection.
+        if changed:
+            try:
+                await child.refresh_skill_rails()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] refresh_skill_rails after "
+                    "reconcile failed: %s", exc,
+                )
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
     ) -> None:
-        """Register every live MCP (connected OR connecting) from state.json.
+        """Register the TUI channel's global-default MCP set at init.
 
-        The merged list (get_mcp_servers via list_connected_mcps) includes
-        both ``connected`` (fully registered) and ``connecting`` (connect was
-        in progress when the process last exited — a restart should re-register
-        it). A connecting MCP that registers OK here is promoted to connected;
-        one that fails is degraded to disconnected (no infinite retry on the
-        next restart).
-
-        Per-MCP failure isolation: a single bad MCP (unreachable host, register
-        rejected, SDK cancel-scope error) must NOT abort the whole loop and
-        starve the remaining MCPs of registration. Each entry's register call
-        is wrapped so one failure logs + degrades that MCP's state to
-        ``disconnected`` (so init on the next restart doesn't retry it —
-        disconnected is excluded from list_connected_mcps), then the loop
-        continues to the next MCP. This also fixes the "phantom connected"
-        symptom: previously a failed register left state==connected, so every
-        restart re-tried the same unreachable MCP forever.
-
-        Only the init path degrades to ``disconnected`` (persistent failure).
-        The connect handler rolls back to ``registered`` (a one-shot retry is
-        fine for an interactive connect) — see ``_handle_mcp_connect``.
+        That set is the union of config.yaml ``mcp.servers`` (legacy stock,
+        TUI-managed) and state.json ``enabled=True`` records (TUI-created /
+        web-connected that the user enabled for the TUI). Only called on the
+        root adapter — a session-scoped child skips this (web is session-level:
+        its MCPs load via reconcile_session_mcp from chat.send's ``mcp``
+        field, config.yaml is tui-only). Per-MCP failure isolation: a bad
+        entry logs and continues without starving the rest.
         """
-        enabled_entries = self._extract_enabled_mcp_server_entries(config_base)
+        # state.json first so a name present in BOTH files resolves to the
+        # state.json entry (user's latest via web connect / TUI add) —
+        # config.yaml is legacy stock, state.json is the active source.
+        yaml_entries = self._yaml_enabled_mcp_entries(config_base)
+        state_entries = self._state_enabled_mcp_entries()
+        enabled_entries = state_entries + yaml_entries
+        seen_names: set[str] = set()
         for entry in enabled_entries:
+            nm = str(entry.get("name", "") or "").strip()
+            if nm and nm in seen_names:
+                # state.json already registered this name; skip the config.yaml dup.
+                continue
+            if nm:
+                seen_names.add(nm)
             cfg = self._build_mcp_server_config(entry)
             if cfg is None:
                 logger.warning(
@@ -2909,13 +3009,35 @@ class JiuWenSwarmDeepAdapter:
                         )
                 # continue to next MCP — one failure must not starve the rest
 
-
     async def _sync_mcp_servers_for_runtime(
         self, config_base: dict[str, Any], *, tag: str = "agent.reload"
     ) -> None:
         if self._instance is None:
             return
-        enabled_entries = self._extract_enabled_mcp_server_entries(config_base)
+        # Desired differs by channel (not adapter scope):
+        # - TUI channel (root + session children): loads its global-default set
+        #   (config.yaml ``enabled`` ∪ state.json ``enabled=True``) on every
+        #   reload, so an enable/disable/add/remove re-syncs the live set.
+        # - Web channel: loads NOTHING here — web is session-level, its MCPs
+        #   come solely from reconcile_session_mcp (chat.send's ``mcp``
+        #   field). A reload must not register the global set into a web
+        #   session or it would break the default-False contract.
+        is_web = getattr(self, "_channel_id", "") == "web"
+        if is_web:
+            yaml_entries = []
+            state_entries: list[dict[str, Any]] = []
+        else:
+            yaml_entries = self._yaml_enabled_mcp_entries(config_base)
+            state_entries = self._state_enabled_mcp_entries()
+        # Include session-selected MCPs (reconcile-loaded) so a reload doesn't
+        # drop the user's per-session selection.
+        selected_entries = []
+        for name in getattr(self, "_session_selected_mcp", set()):
+            from jiuwenswarm.common.config import get_mcp_server_config
+            entry = get_mcp_server_config(name)
+            if entry is not None:
+                selected_entries.append(entry)
+        enabled_entries = yaml_entries + state_entries + selected_entries
         desired_by_name: dict[str, McpServerConfig] = {}
         for entry in enabled_entries:
             cfg = self._build_mcp_server_config(entry)
@@ -4568,16 +4690,29 @@ class JiuWenSwarmDeepAdapter:
         return skill_rail
 
     def _skill_scan_dirs(self) -> list[str]:
-        """Skill scan roots: agent skills dir + connected MCP skill dirs.
+        """Skill scan roots: agent skills dir + this session's selected MCP
+        skill dirs.
 
         Centralized so _build_skill_rail (init) and refresh_skill_rails
-        (reload) compute the same roots. MCP skill dirs are derived from
-        state.json's connected records (see state_store); an MCP whose dir
-        doesn't exist (no bundled skills, or not connected) is absent.
+        (reload) compute the same roots. Only a session-scoped child scans MCP
+        skill dirs, filtered to its ``_session_selected_mcp`` set (populated by
+        reconcile_session_mcp from chat.send's ``mcp`` field) — so a cli/
+        skill MCP's bundled skills are invisible to the agent until the user
+        selects it this session. The root adapter never scans MCP skill dirs:
+        cli/skill MCPs are session-level only, and the TUI channel does not
+        support them, so the root's view of them must be empty (previously it
+        scanned ALL connected MCP dirs, leaking cli/skill skills into rewind/
+        cron/admin root runs).
         """
         roots = [str(get_agent_skills_dir())]
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            return roots
         try:
+            selected = getattr(self, "_session_selected_mcp", None)
             for entry in self._skill_manager._mcp_skills_dirs():
+                if selected is not None:
+                    if str(entry.get("name", "")).strip() not in selected:
+                        continue
                 d = str(entry.get("dir", "") or "").strip()
                 if d and d not in roots:
                     roots.append(d)
@@ -5911,6 +6046,15 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
+        # Channel id drives the MCP load strategy (see _register_mcp_servers_
+        # from_config / _sync_mcp_servers_for_runtime): the TUI channel loads
+        # the global-default set (config.yaml ∪ state.json enabled) on init;
+        # the web channel loads nothing on init (session-level via chat.send's
+        # ``mcp`` field). Session children inherit this from the root.
+        self._channel_id = str(
+            (config or {}).get("channel_id") if isinstance(config, dict) else ""
+            or ""
+        ).strip() or getattr(self, "_channel_id", "")
 
         await self.set_checkpoint()
         await asyncio.sleep(0)
@@ -6005,7 +6149,15 @@ class JiuWenSwarmDeepAdapter:
         self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
-        await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
+        # MCP load strategy by channel: the TUI channel loads its global-
+        # default set (config.yaml ∪ state.json ``enabled=True``) on init —
+        # both root and TUI session children register it. The web channel
+        # loads NOTHING on init: web is session-level, its MCPs come solely
+        # from chat.send's ``mcp`` field via reconcile_session_mcp (None and
+        # [] both mean "no MCP this turn"). Skipping init keeps web's
+        # default-False contract.
+        if getattr(self, "_channel_id", "") != "web":
+            await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
         logger.info(
             "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )

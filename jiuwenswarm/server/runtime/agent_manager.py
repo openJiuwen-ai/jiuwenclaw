@@ -366,6 +366,20 @@ class AgentManager:
         target_session_id: str | None,
         reload_scopes: list[str] | None = None,
     ) -> str:
+        # state.json MCP enabled set (TUI global-default switch). config.yaml
+        # changes alone don't cover MCP enable/disable / add / remove written
+        # to state.json — without this in the fingerprint, those ops hit
+        # fingerprint==last and reload is skipped, so the TUI agent never
+        # picks up the change (tools don't load / unload).
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_tui_enabled_mcps,
+            )
+            mcp_enabled = sorted(
+                str(r.get("name", "")) for r in list_tui_enabled_mcps()
+            )
+        except Exception:  # noqa: BLE001
+            mcp_enabled = []
         payload = {
             "config": config,
             "env": env if isinstance(env, dict) else {},
@@ -373,6 +387,7 @@ class AgentManager:
             "target_channel_id": str(target_channel_id or "").strip() or None,
             "target_session_id": str(target_session_id or "").strip() or None,
             "reload_scopes": reload_scopes if reload_scopes is not None else [],
+            "mcp_enabled": mcp_enabled,
         }
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=repr)
 
@@ -665,6 +680,19 @@ class AgentManager:
             raise RuntimeError(first_error or f"MCP '{name}' {action} failed")
         return applied_any
 
+    async def probe_mcp_live_connection(self, name: str) -> tuple[bool, str]:
+        """Live-connect probe for one MCP (connect-time preflight).
+
+        Thin entry point for the connect handler; the probe logic lives in
+        ``mcp_config.probe_mcp_live_connection``. That function talks to the
+        process-level ``Runner.resource_mgr`` directly — no adapter instance
+        needed — so cold-start (no conversation yet) still validates the MCP
+        and caches the spawned stdio subprocess / HTTP connection for the
+        first chat turn's reconcile to reuse (no duplicate spawn).
+        """
+        from jiuwenswarm.common.mcp_config import probe_mcp_live_connection as _probe
+        return await _probe(name)
+
     def sync_mcp_credentials(self) -> None:
         """Sync connected MCPs' tokens into os.environ.
 
@@ -876,6 +904,11 @@ class AgentManager:
             config = {}
             if project_key:
                 config["project_dir"] = project_key
+            # Surface the channel id to the adapter so session-scoped children
+            # can branch their MCP load strategy (TUI = global config.yaml ∪
+            # state.json enabled; web = session-level via chat.send's mcp field,
+            # init loads nothing).
+            config["channel_id"] = channel_key
             if channel_key == "acp":
                 config = {
                     **config,

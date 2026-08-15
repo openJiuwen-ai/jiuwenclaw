@@ -6234,9 +6234,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _mcp_list_local(ws, req_id, params, session_id):
         # 本地处理(不转发 AgentServer)，避免被长连接 connect 阻塞。直接读 marketplace。
+        # filter: builtin(预置目录) | local(已连接预置 + 全部自定义)。兜底 builtin。
         try:
             from jiuwenswarm.server.runtime.mcp.registry import list_marketplace_mcps
-            items = await asyncio.to_thread(list_marketplace_mcps)
+            filter_val = str((params or {}).get("filter") or "builtin").strip().lower() or "builtin"
+            if filter_val not in ("builtin", "local"):
+                filter_val = "builtin"
+            items = await asyncio.to_thread(list_marketplace_mcps, filter_val)
             await channel.send_response(ws, req_id, ok=True, payload={"type": "list", "items": items})
         except Exception as exc:
             logger.exception("[mcp] mcp.list failed: %s", exc)
@@ -6252,8 +6256,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     _register_mcp_agent("mcp.connect", ReqMethod.MCP_CONNECT)
     _register_mcp_agent("mcp.wait_auth", ReqMethod.MCP_WAIT_AUTH)
     _register_mcp_agent("mcp.disconnect", ReqMethod.MCP_DISCONNECT)
-    _register_mcp_agent("mcp.enable", ReqMethod.MCP_ENABLE)
-    _register_mcp_agent("mcp.disable", ReqMethod.MCP_DISABLE)
     _register_mcp_agent("mcp.register_custom", ReqMethod.MCP_REGISTER_CUSTOM)
     _register_mcp_agent("mcp.delete_custom", ReqMethod.MCP_DELETE_CUSTOM)
     _register_mcp_agent("mcp.save_credentials", ReqMethod.MCP_SAVE_CREDENTIALS)

@@ -42,10 +42,6 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_json_parse_error_wire,
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
-from jiuwenswarm.common.mcp_config import (
-    build_mcp_server_config,
-    preflight_mcp_server_reachable,
-)
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
@@ -106,13 +102,16 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
     remove_mcp_server_in_config,
+    remove_mcp_server,
     resolve_preserve_file_sharing_mode_default,
     resolve_sandbox_policy_path,
     remove_subagent_from_config,
     set_mcp_server_enabled_in_config,
+    set_mcp_server_enabled,
     update_sandbox_endpoint,
     update_sandbox_runtime,
     upsert_mcp_server_in_config,
+    upsert_mcp_server,
     upsert_subagent_in_config,
 )
 from jiuwenswarm.server.sandbox.jiuwenbox_runner import JiuwenBoxRunner
@@ -798,44 +797,6 @@ def _canonicalize_sandbox_files_path(path: str) -> str:
         return str(Path(path).expanduser().resolve())
     except (OSError, RuntimeError):
         return path
-
-
-async def _ensure_live_agent(agent_manager: Any, channel_id: str, mcp_name: str) -> None:
-    """Best-effort: create the channel's agent + build its root DeepAgent.
-
-    mcp.connect (a non-chat RPC) may arrive before any chat created an agent,
-    so apply_mcp_change fans out over zero adapters and fails with "add failed".
-    Even after get_agent, the root adapter's _instance stays None by design (it
-    is a router; live DeepAgents live on per-session children built on the chat
-    path) and register_mcp_by_name skips it → "register failed". Building both
-    here lets the targeted apply below register for real; session children
-    created later re-register from state.json (idempotent via stable server_id).
-
-    Failures are swallowed (warn + return) so the apply path still runs and
-    surfaces a real reason if registration genuinely fails. getattr so test
-    fakes without get_agent/ensure_instance keep working.
-    """
-    get_agent = getattr(agent_manager, "get_agent", None)
-    if not callable(get_agent):
-        return
-    try:
-        agent = await get_agent(channel_id, mode="agent")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[mcp][connect] get_agent for '%s' on channel=%s failed: %s",
-            mcp_name, channel_id, exc,
-        )
-        return
-    ensure = getattr(agent, "ensure_instance", None)
-    if not callable(ensure):
-        return
-    try:
-        await ensure()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[mcp][connect] ensure root DeepAgent for '%s' failed: %s",
-            mcp_name, exc,
-        )
 
 
 _SANDBOX_FILES_PARAMS = frozenset(
@@ -1632,12 +1593,6 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.MCP_DISCONNECT:
                 await self._handle_mcp_disconnect(ws, request, send_lock)
-                return
-            if request.req_method == ReqMethod.MCP_ENABLE:
-                await self._handle_mcp_enable(ws, request, send_lock)
-                return
-            if request.req_method == ReqMethod.MCP_DISABLE:
-                await self._handle_mcp_disable(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.MCP_REGISTER_CUSTOM:
                 await self._handle_mcp_register_custom(ws, request, send_lock)
@@ -5768,7 +5723,7 @@ class AgentWebSocketServer:
                     name = server_payload.get("name", "")
                     old_item = get_mcp_server_config(name) if name else None
 
-                    _, created = upsert_mcp_server_in_config(server_payload)
+                    _, created = upsert_mcp_server(server_payload)
                     applied = True
                     error_message = ""
 
@@ -5820,9 +5775,9 @@ class AgentWebSocketServer:
                 except Exception:  # noqa: BLE001
                     old_enabled = None
 
-                # set_mcp_server_enabled_in_config 在 server 不存在时抛 KeyError，
-                # 由外层统一返回 MCP_NOT_FOUND。
-                item = set_mcp_server_enabled_in_config(name, enabled)
+                # set_mcp_server_enabled 双查(state.json 优先，兜底 config.yaml)，
+                # 在 server 不存在时抛 KeyError，由外层统一返回 MCP_NOT_FOUND。
+                item = set_mcp_server_enabled(name, enabled)
 
                 # 只有 enabled 状态真的改变才需要 reload；无法判断旧状态时保守 reload。
                 config_changed = (old_enabled is None) or (old_enabled != enabled)
@@ -5860,9 +5815,10 @@ class AgentWebSocketServer:
                 name = str(params.get("name", "")).strip()
                 if not name:
                     raise ValueError("MCP server name is required")
-                # remove_mcp_server_in_config 在 server 不存在时抛 KeyError，
-                # 由外层统一返回 MCP_NOT_FOUND，且不会触发 reload（删除不存在 = 无变化）。
-                removed = remove_mcp_server_in_config(name)
+                # remove_mcp_server 双查(state.json 优先，兜底 config.yaml)，
+                # 在 server 不存在时抛 KeyError，由外层统一返回 MCP_NOT_FOUND，
+                # 且不会触发 reload（删除不存在 = 无变化）。
+                removed = remove_mcp_server(name)
                 applied = True
                 error_message = ""
                 try:
@@ -5887,7 +5843,7 @@ class AgentWebSocketServer:
                 )
             elif action == "update":
                 normalized = self._normalize_mcp_update_payload(params)
-                _, _created = upsert_mcp_server_in_config(normalized)
+                _, _created = upsert_mcp_server(normalized)
                 applied = True
                 error_message = ""
                 try:
@@ -5994,12 +5950,20 @@ class AgentWebSocketServer:
     async def _handle_mcp_list(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        """Handle ``mcp.list`` RPC: list marketplace MCPs (read-only)."""
+        """Handle ``mcp.list`` RPC: list marketplace MCPs (read-only).
+
+        filter: builtin(预置目录) | local(已连接预置 + 全部自定义)。兜底 builtin。
+        web 不转发此入口（网关本地已处理），保留只为语义对齐。
+        """
         try:
             from jiuwenswarm.server.runtime.mcp.registry import (
                 list_marketplace_mcps,
             )
-            items = await asyncio.to_thread(list_marketplace_mcps)
+            params = request.params or {}
+            filter_val = str(params.get("filter") or "builtin").strip().lower() or "builtin"
+            if filter_val not in ("builtin", "local"):
+                filter_val = "builtin"
+            items = await asyncio.to_thread(list_marketplace_mcps, filter_val)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -6115,175 +6079,81 @@ class AgentWebSocketServer:
                     payload={"type": "credentials_required", **item},
                 )
             else:
-                # Remote-mcp reachability probe before reload. The reload path
-                # also probes, but on failure it only logs + skips registration
-                # while still reporting "connected" to the user. Probing here
-                # lets us roll back the just-upserted entry and report failure
-                # honestly. stdio entries are spawned during reload — no probe.
-                entry = item if isinstance(item, dict) else {}
-                transport = str(entry.get("transport", "") or "").strip().lower()
-                is_remote = transport in {"sse", "http", "streamable-http", "streamable_http"}
-                unreachable_reason = ""
-                if is_remote:
-                    # Resolve ${VAR} placeholders before probing (marketplace
-                    # form B stores them verbatim; unresolved, the probe sends
-                    # the literal string → 400). Custom MCPs use plaintext
-                    # tokens — no placeholders, so resolver is a no-op for them.
-                    probe_resolver = None
+                # Connect-time live-connect probe: not just register the entry,
+                # but confirm the MCP is actually usable before reporting
+                # "connected". For server-bearing types (stdio / remote-mcp /
+                # hybrid-cli's mcp.json subcommand) this spawns the stdio
+                # subprocess + MCP initialize handshake, or does a real HTTP
+                # connect — so npx first-install cost and handshake failures
+                # surface HERE (the user waits on connect) instead of silently
+                # degrading to "no tools" on the first chat message. A
+                # successful probe leaves the connection in the process-global
+                # Runner.resource_mgr cache, which reconcile reuses (no
+                # duplicate spawn on chat.send). skill-only / pure-CLI MCPs have
+                # no server entry — the probe returns (True, "") and they
+                # surface via bundled skills.
+                probe_ok, probe_reason = await self._agent_manager.probe_mcp_live_connection(name)
+                if not probe_ok:
                     try:
-                        from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
-                        stored = CredentialStore().get_all(name)
-                        if stored:
-                            def probe_resolver(key: str) -> str | None:
-                                if key in stored:
-                                    return stored[key]
-                                return os.environ.get(key)
-                    except Exception as resolve_exc:  # noqa: BLE001
-                        logger.debug("[mcp] preflight resolver build failed: %s", resolve_exc)
-                    cfg = build_mcp_server_config(entry, credential_resolver=probe_resolver)
-                    if cfg is not None:
-                        reachable, reason = await preflight_mcp_server_reachable(cfg)
-                        if not reachable:
-                            unreachable_reason = reason
-                            try:
-                                # Roll back: marketplace → remove record+skills;
-                                # custom → flip to registered (keep definition for
-                                # edit/retry, do NOT delete).
-                                from jiuwenswarm.server.runtime.mcp.registry import (
-                                    rollback_failed_connect,
-                                )
-                                rollback_failed_connect(name)
-                            except Exception as rollback_exc:  # noqa: BLE001
-                                logger.warning(
-                                    "[mcp] rollback unreachable entry '%s' failed: %s",
-                                    name, rollback_exc,
-                                )
-                if unreachable_reason:
+                        # Roll back: marketplace → remove record+skills; custom
+                        # → flip to registered (keep definition for edit/retry,
+                        # do NOT delete).
+                        from jiuwenswarm.server.runtime.mcp.registry import (
+                            rollback_failed_connect,
+                        )
+                        rollback_failed_connect(name)
+                    except Exception as rollback_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[mcp] rollback failed-probe entry '%s' failed: %s",
+                            name, rollback_exc,
+                        )
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,
                         ok=False,
                         payload={
                             "type": "connect_failed",
-                            "error": unreachable_reason,
+                            "error": probe_reason or "MCP live-connect probe failed",
                             "code": "MCP_UNREACHABLE",
                             "name": name,
                         },
                     )
                 else:
-                    applied = True
-                    error_message = ""
-                    connect_failed = False
-                    # connect_mcp wrote state=connecting. get_mcp_servers
-                    # merges connecting (and connected), so apply_mcp_change
-                    # can read the entry WITHOUT a pre-flip here.
+                    # Probe succeeded (or no server to probe) — flip
+                    # connecting → connected so the MCP is selectable per
+                    # session, sync token env for skill-only bundled scripts,
+                    # and return. The MCP is NOT loaded into a specific agent
+                    # session here: session-level enable is driven by the
+                    # ``mcp`` field on chat.send (see reconcile_session_mcp).
                     try:
-                        # Cold-start guard: mcp.connect may arrive before any
-                        # chat created an agent, so apply_mcp_change fans out
-                        # over zero adapters → "add failed". 
-                        await _ensure_live_agent(
-                            self._agent_manager, request.channel_id, name
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            set_mcp_state,
                         )
-                        # Phase-2: targeted single-MCP register (no full reload).
-                        # apply_mcp_change raises RuntimeError when NO adapter
-                        # applied the register.
-                        await self._agent_manager.apply_mcp_change(
-                            name, "add", target_channel_id=request.channel_id,
-                        )
-                    except Exception as reload_exc:  # noqa: BLE001
-                        # apply_mcp_change surfaces plain Exceptions only:
-                        # openjiuwen add_tool_server coerces any
-                        # CancelledError/BaseExceptionGroup from the MCP SDK's
-                        # streamable-http teardown into a WorkflowError, and
-                        # register_mcp_by_name wraps the first failure in a
-                        # RuntimeError. 
-                        reload_msg = str(reload_exc) or repr(reload_exc)
-                        applied = False
-                        error_message = reload_msg
-                        connect_failed = True
+                        set_mcp_state(name, state="connected")
+                    except Exception as flip_exc:  # noqa: BLE001
                         logger.warning(
-                            "[mcp][connect] apply_mcp_change(add) failed for '%s', "
-                            "returning connect_failed to frontend: %s",
-                            name, reload_msg,
+                            "[mcp] flip connecting→connected after connect failed for '%s': %s",
+                            name, flip_exc,
                         )
-                        # Roll back the connect so a failed connect doesn't
-                        # leave a phantom "connecting" record (which, like
-                        # connected, would re-trigger on every restart).
-                        # For a custom MCP (no marketplace package) the
-                        # definition was created by register_custom — flip its
-                        # state back to "registered" so the user can retry
-                        # connect or edit it instead of losing the whole
-                        # definition. For a marketplace MCP (connect_mcp
-                        # upserted a fresh "connecting" record) delete the
-                        # record — its entry is rebuildable from the package
-                        # on next connect.
-                        try:
-                            from jiuwenswarm.server.runtime.mcp.registry import (
-                                rollback_failed_connect,
-                            )
-                            rollback_failed_connect(name)
-                        except Exception as rollback_exc:  # noqa: BLE001
-                            logger.warning(
-                                "[mcp] rollback failed connect entry '%s' failed: %s",
-                                name, rollback_exc,
-                            )
-                    if connect_failed:
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=False,
-                            payload={
-                                "type": "connect_failed",
-                                "error": error_message or f"MCP '{name}' register failed",
-                                "code": "MCP_REGISTER_FAILED",
-                                "name": name,
-                            },
-                        )
-                    else:
-                        # apply succeeded — promote connecting → connected.
-                        # Only now (after the live MCP server registered) is
-                        # the MCP truly connected; before this flip the
-                        # frontend showed "connecting".
-                        try:
-                            from jiuwenswarm.server.runtime.mcp.state_store import (
-                                set_mcp_state,
-                            )
-                            set_mcp_state(name, state="connected")
-                        except Exception as flip_exc:  # noqa: BLE001
-                            logger.warning(
-                                "[mcp] flip connecting→connected after apply failed for '%s': %s",
-                                name, flip_exc,
-                            )
-                        # Skill-only connectors' bundled scripts read tokens from
-                        # os.environ; sync the just-provisioned token into the agent
-                        # process env so BashTool inherits it. No-op for MCP-type
-                        # connectors (their tokens resolve via McpServerConfig).
-                        try:
-                            self._agent_manager.sync_mcp_credentials()
-                        except Exception as sync_exc:  # noqa: BLE001
-                            logger.warning("[mcp] sync_mcp_credentials after connect failed: %s", sync_exc)
-                        # CLI / skill-only MCPs expose tools via bundled skills.
-                        # skill_installer copied the dirs, but the agent's SkillUseRail
-                        # caches its skill set — reload it so the MCP's skills surface
-                        # to the agent immediately (not just on the next session/reload).
-                        try:
-                            await self._agent_manager.refresh_skill_rails()
-                        except Exception as skill_exc:  # noqa: BLE001
-                            logger.warning("[mcp] refresh_skill_rails after connect failed: %s", skill_exc)
-                        payload = {
+                    # Skill-only connectors' bundled scripts read tokens from
+                    # os.environ; sync the just-provisioned token into the agent
+                    # process env so BashTool inherits it. No-op for MCP-type
+                    # connectors (their tokens resolve via McpServerConfig).
+                    try:
+                        self._agent_manager.sync_mcp_credentials()
+                    except Exception as sync_exc:  # noqa: BLE001
+                        logger.warning("[mcp] sync_mcp_credentials after connect failed: %s", sync_exc)
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload={
                             "type": "connected",
                             "name": name,
-                            "applied": applied,
+                            "applied": True,
                             "item": self._mask_sensitive_fields(item),
-                        }
-                        if error_message:
-                            payload["error"] = error_message
-                        resp = AgentResponse(
-                            request_id=request.request_id,
-                            channel_id=request.channel_id,
-                            ok=True,
-                            payload=payload,
-                        )
+                        },
+                    )
         except KeyError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -6464,53 +6334,13 @@ class AgentWebSocketServer:
     async def _finalize_cli_auth(self, name: str, item: dict[str, Any]) -> dict[str, Any]:
         """Run the post-auth side-effects for a CLI MCP connect.
 
-        Phase-2 targeted register (hybrid CLI+MCP only; pure CLI connectors
-        return None entry → register_mcp_by_name no-ops). Skills were installed
-        during registry ``_finalize_cli``. Syncs MCP tokens into os.environ so
-        bundled skill scripts (BashTool inherits os.environ) see their token env
-        vars, then reloads the agent's SkillUseRail so the CLI MCP's skills
-        surface immediately. Returns a payload dict for the push signal.
-
-        State handling: ``_finalize_cli`` wrote ``state="connecting`` (NOT
-        connected) — the MCP server is not registered with the agent until
-        apply_mcp_change runs here. connecting lets get_mcp_servers merge the
-        entry (so apply can register it) while the frontend shows "connecting";
-        promote to connected only AFTER apply succeeds. If apply fails, roll
-        back (marketplace → remove record + uninstall skills; custom → flip to
-        registered) instead of leaving a phantom "connecting" record (which,
-        like connected, would re-trigger on every restart), and return
-        ``auth_failed`` so the handler reports failure honestly.
+        Auth is done; skills were installed during registry ``_finalize_cli``.
+        Syncs MCP tokens into os.environ so bundled skill scripts (BashTool
+        inherits os.environ) see their token env vars, then promotes
+        connecting → connected. The MCP is NOT loaded into the agent here —
+        session-level enable is driven by the ``mcp`` field on chat.send (see
+        reconcile_session_mcp). Returns a payload dict for the push signal.
         """
-        applied = True
-        error_message = ""
-        try:
-            await self._agent_manager.apply_mcp_change(name, "add")
-        except Exception as reload_exc:  # noqa: BLE001
-            applied = False
-            error_message = str(reload_exc)
-            logger.warning("[mcp] apply_mcp_change after CLI auth failed: %s", reload_exc)
-            # Roll back the state.json entry so a failed CLI connect doesn't
-            # leave a phantom "connecting" record. Marketplace MCP (has a
-            # package dir) → remove record + uninstall skills (entry is
-            # rebuildable from the package on next connect); custom MCP →
-            # flip back to registered so the user-edited definition survives
-            # for retry / edit.
-            try:
-                from jiuwenswarm.server.runtime.mcp.registry import (
-                    rollback_failed_connect,
-                )
-                rollback_failed_connect(name)
-            except Exception as rollback_exc:  # noqa: BLE001
-                logger.warning(
-                    "[mcp] rollback after CLI auth failure '%s' failed: %s",
-                    name, rollback_exc,
-                )
-            return {
-                "type": "auth_failed",
-                "name": name,
-                "error": error_message or f"MCP '{name}' register failed",
-            }
-        # apply succeeded — promote connecting → connected.
         try:
             from jiuwenswarm.server.runtime.mcp.state_store import (
                 set_mcp_state,
@@ -6525,19 +6355,12 @@ class AgentWebSocketServer:
             self._agent_manager.sync_mcp_credentials()
         except Exception as sync_exc:  # noqa: BLE001
             logger.warning("[mcp] sync_mcp_credentials after CLI auth failed: %s", sync_exc)
-        try:
-            await self._agent_manager.refresh_skill_rails()
-        except Exception as skill_exc:  # noqa: BLE001
-            logger.warning("[mcp] refresh_skill_rails after CLI auth failed: %s", skill_exc)
-        payload: dict[str, Any] = {
+        return {
             "type": "connected",
             "name": name,
-            "applied": applied,
+            "applied": True,
             "item": self._mask_sensitive_fields(item),
         }
-        if error_message:
-            payload["error"] = error_message
-        return payload
 
     async def _await_cli_auth(
         self, name: str, step_index: int,
@@ -6787,109 +6610,6 @@ class AgentWebSocketServer:
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] mcp.save_credentials failed: %s", exc)
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"type": "internal_error", "error": str(exc), "code": "MCP_INTERNAL"},
-            )
-        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await send_wire_payload(ws, wire)
-
-    async def _handle_mcp_enable(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
-    ) -> None:
-        """Handle ``mcp.enable`` RPC: flip enabled=True (soft switch)."""
-        await self._mcp_set_enabled(ws, request, send_lock, enabled=True)
-
-    async def _handle_mcp_disable(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
-    ) -> None:
-        """Handle ``mcp.disable`` RPC: flip enabled=False (soft switch)."""
-        await self._mcp_set_enabled(ws, request, send_lock, enabled=False)
-
-    async def _mcp_set_enabled(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock, *, enabled: bool
-    ) -> None:
-        """Shared handler for mcp.enable / mcp.disable (soft switch)."""
-        action = "enable" if enabled else "disable"
-        try:
-            from jiuwenswarm.server.runtime.mcp.registry import (
-                enable_mcp,
-                disable_mcp,
-            )
-            params = request.params or {}
-            name = str(params.get("name", "")).strip()
-            if not name:
-                raise ValueError("mcp name is required")
-            old_item = get_mcp_server_config(name)
-            old_enabled = bool(old_item.get("enabled", True)) if old_item is not None else None
-            item = enable_mcp(name) if enabled else disable_mcp(name)
-            config_changed = (old_enabled is None) or (old_enabled != enabled)
-            applied = True
-            error_message = ""
-            if config_changed:
-                try:
-                    # Targeted toggle (no full reload).
-                    await self._agent_manager.apply_mcp_change(
-                        name, "toggle", enabled=enabled,
-                    )
-                except Exception as reload_exc:  # noqa: BLE001
-                    applied = False
-                    error_message = str(reload_exc)
-                    logger.warning("[mcp] apply_mcp_change after %s failed: %s", action, reload_exc)
-                # Re-sync MCP token env on enable so a re-enabled skill-only MCP's
-                # token is present again. disable leaves the token in env (harmless;
-                # the skill is hidden by the enabled flag).
-                if enabled:
-                    try:
-                        self._agent_manager.sync_mcp_credentials()
-                    except Exception as sync_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[mcp] sync_mcp_credentials after %s failed: %s",
-                            action, sync_exc,
-                        )
-                # enable/disable flipped the bundled skills' enabled flags via
-                # SkillManager.set_skill_enabled — reload SkillUseRail so the
-                # agent sees the change immediately (disable hides, enable shows).
-                try:
-                    await self._agent_manager.refresh_skill_rails()
-                except Exception as skill_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[mcp] refresh_skill_rails after %s failed: %s",
-                        action, skill_exc,
-                    )
-            payload = {
-                "type": "enabled" if enabled else "disabled",
-                "name": name,
-                "applied": applied,
-                "item": self._mask_sensitive_fields(item),
-            }
-            if error_message:
-                payload["error"] = error_message
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload=payload,
-            )
-        except KeyError as exc:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"type": f"{action}_failed", "error": str(exc), "code": "MCP_NOT_FOUND"},
-            )
-        except ValueError as exc:
-            resp = AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=False,
-                payload={"type": "bad_request", "error": str(exc), "code": "MCP_BAD_REQUEST"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("[AgentWebSocketServer] mcp.%s failed: %s", action, exc)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

@@ -1628,7 +1628,8 @@ async def test_connector_list_is_local_and_does_not_forward() -> None:
 
     # If the marketplace catalog is empty the handler still returns an empty list
     # without touching the agent client; if non-empty, every item carries a name.
-    expected = list_marketplace_mcps()
+    # params={} → handler 兜底 filter=builtin。
+    expected = list_marketplace_mcps(filter="builtin")
     await channel.methods["mcp.list"](
         object(), "req-conn-list", {}, "sess-1",
     )

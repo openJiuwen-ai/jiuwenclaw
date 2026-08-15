@@ -65,8 +65,10 @@ def test_connect_after_save_keeps_placeholder_in_state(tmp_path: Path) -> None:
     assert CredentialStore(workspace_dir=tmp_path).get_token("tyc-mcp", "TIANYANCHA_API_KEY") == "real-key-123"
 
 
-def test_disconnect_keeps_credentials(tmp_path: Path) -> None:
-    """disconnect keeps stored tokens so a reconnect reuses them."""
+def test_disconnect_wipes_credentials(tmp_path: Path) -> None:
+    """disconnect wipes the local CredentialStore token file — a disconnect
+    severs the auth, so the stored ${VAR} token must not linger on disk
+    (reconnect re-prompts for it)."""
     _mk_marketplace(tmp_path, "tyc-mcp", _tyc_mcp())
     from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
     with _ws(tmp_path):
@@ -74,8 +76,8 @@ def test_disconnect_keeps_credentials(tmp_path: Path) -> None:
         assert CredentialStore().get_token("tyc-mcp", "TIANYANCHA_API_KEY") == "k"
         with patch("jiuwenswarm.server.runtime.mcp.state_store.remove_mcp_record", return_value={}):
             registry.disconnect_mcp("tyc-mcp")
-        # Token survives disconnect — next connect reuses it without re-prompt.
-        assert CredentialStore().get_token("tyc-mcp", "TIANYANCHA_API_KEY") == "k"
+        # Token is gone after disconnect — reconnect must re-prompt.
+        assert CredentialStore().get_token("tyc-mcp", "TIANYANCHA_API_KEY") is None
 
 
 def test_connect_no_placeholder_connector_upserts_directly(tmp_path: Path) -> None:

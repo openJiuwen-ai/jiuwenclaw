@@ -138,6 +138,58 @@ class TestHandleMcpList:
         names = {item["name"] for item in payload["items"]}
         assert names == {"github", "lovrabet-cli"}
 
+    @pytest.mark.anyio
+    async def test_list_passes_filter_param(self) -> None:
+        """mcp.list forwards params.filter to list_marketplace_mcps; absent
+        filter defaults to builtin, unknown falls back to builtin."""
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        ws = _FakeWS()
+        send_lock = asyncio.Lock()
+
+        captured: dict[str, Any] = {}
+
+        def _fake(filter: str = "builtin") -> list[dict[str, Any]]:
+            captured["filter"] = filter
+            return [{"name": "github", "connection_state": "disconnected"}]
+
+        # 显式 local → 透传 local
+        with patch(
+            "jiuwenswarm.server.runtime.mcp.registry.list_marketplace_mcps",
+            side_effect=_fake,
+        ):
+            await server._handle_mcp_list(
+                ws,
+                _make_request(req_method=ReqMethod.MCP_LIST, params={"filter": "local"}),
+                send_lock,
+            )
+        assert captured["filter"] == "local"
+
+        # 无 filter → 兜底 builtin
+        with patch(
+            "jiuwenswarm.server.runtime.mcp.registry.list_marketplace_mcps",
+            side_effect=_fake,
+        ):
+            await server._handle_mcp_list(
+                ws,
+                _make_request(req_method=ReqMethod.MCP_LIST, params={}),
+                send_lock,
+            )
+        assert captured["filter"] == "builtin"
+
+        # 非法值 → 兜底 builtin
+        with patch(
+            "jiuwenswarm.server.runtime.mcp.registry.list_marketplace_mcps",
+            side_effect=_fake,
+        ):
+            await server._handle_mcp_list(
+                ws,
+                _make_request(req_method=ReqMethod.MCP_LIST, params={"filter": "bogus"}),
+                send_lock,
+            )
+        assert captured["filter"] == "builtin"
+
 
 class TestHandleMcpShow:
     """mcp.show: return one MCP's detail by params.name."""
@@ -232,26 +284,31 @@ class TestHandleMcpConnect:
     """mcp.connect: install marketplace MCP into state.json."""
 
     @pytest.mark.anyio
-    async def test_connect_installs_and_reloads(self) -> None:
-        """mcp.connect calls connect_mcp + reload, returns type=connected."""
+    async def test_connect_installs_without_loading_into_agent(self) -> None:
+        """mcp.connect installs + connects (state=connected) but does NOT load
+        the MCP into the agent — session-level enable is per chat.send. No
+        apply_mcp_change, no reload; returns type=connected."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
         applied = []
+        probed = []
         class _AM:
             async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
                 applied.append((name, action, enabled))
+            async def probe_mcp_live_connection(self_inner, name):
+                probed.append(name)
+                return (True, "")
+            def sync_mcp_credentials(self_inner):
+                return True
         server._agent_manager = _AM()
         server._mask_sensitive_fields = lambda item: item
         ws = _FakeWS()
         request = _make_request(req_method=ReqMethod.MCP_CONNECT, params={"name": "github"})
         send_lock = asyncio.Lock()
-        fake_entry = {"name": "github", "transport": "http", "url": "https://api.githubcopilot.com/mcp/", "enabled": True}
+        fake_entry = {"name": "github", "transport": "http", "url": "https://api.githubcopilot.com/mcp/"}
         with patch(
             "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
             return_value=fake_entry,
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-            return_value=(True, ""),
         ), patch(
             "jiuwenswarm.server.agent_ws_server.get_config",
             return_value={},
@@ -262,108 +319,8 @@ class TestHandleMcpConnect:
         assert payload["type"] == "connected"
         assert payload["name"] == "github"
         assert payload["applied"] is True
-        assert len(applied) == 1
-
-    @pytest.mark.anyio
-    async def test_connect_register_failure_returns_connect_failed(self) -> None:
-        """When apply_mcp_change raises (no adapter applied the register — e.g.
-        the MCP server returned an error or the SDK raised a cancel-scope
-        error), the connect handler must return type=connect_failed with the
-        reason, NOT a silent 'connected'. Regression for the bug where a
-        failed remote-MCP register only logged and the frontend hung."""
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-
-        class _AM:
-            async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
-                raise RuntimeError("Attempted to exit a cancel scope that isn't current")
-
-            async def sync_mcp_credentials(self_inner):  # not reached on failure
-                pass
-
-            async def refresh_skill_rails(self_inner):  # not reached on failure
-                pass
-
-        server._agent_manager = _AM()
-        server._mask_sensitive_fields = lambda item: item
-        ws = _FakeWS()
-        request = _make_request(req_method=ReqMethod.MCP_CONNECT, params={"name": "weather-mcp"})
-        send_lock = asyncio.Lock()
-        fake_entry = {"name": "weather-mcp", "transport": "streamable-http",
-                      "url": "https://example.com/sse", "enabled": True}
-        with patch(
-            "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
-            return_value=fake_entry,
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-            return_value=(True, ""),
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.get_config",
-            return_value={},
-        ), patch(
-            "jiuwenswarm.server.runtime.mcp.state_store.remove_mcp_record",
-            return_value={"name": "weather-mcp", "removed": True},
-        ):
-            await server._handle_mcp_connect(ws, request, send_lock)
-        assert len(ws.sent) == 1
-        payload = _extract_payload(json.loads(ws.sent[0]))
-        assert payload["type"] == "connect_failed"
-        assert payload["name"] == "weather-mcp"
-        assert "cancel scope" in payload["error"]
-        assert payload["code"] == "MCP_REGISTER_FAILED"
-
-    @pytest.mark.anyio
-    async def test_connect_apply_raises_cancelled_returns_connect_failed(self) -> None:
-        """When apply_mcp_change raises (register failure), the connect handler
-        must return connect_failed with the real reason instead of hanging.
-
-        openjiuwen's add_tool_server now coerces any CancelledError /
-        BaseExceptionGroup from the MCP SDK's streamable-http teardown into a
-        WorkflowError (Exception), so apply_mcp_change surfaces a plain
-        RuntimeError — the connect handler's ``except Exception`` catches it
-        and returns connect_failed. (Previously the cancel-scope error escaped
-        ``except Exception`` and the frontend hung.)"""
-        import asyncio
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-
-        class _AM:
-            async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
-                raise RuntimeError("MCP server 'weather-mcp' register rejected: 403 Forbidden")
-
-            async def sync_mcp_credentials(self_inner):
-                pass
-
-            async def refresh_skill_rails(self_inner):
-                pass
-
-        server._agent_manager = _AM()
-        server._mask_sensitive_fields = lambda item: item
-        ws = _FakeWS()
-        request = _make_request(req_method=ReqMethod.MCP_CONNECT, params={"name": "weather-mcp"})
-        send_lock = asyncio.Lock()
-        fake_entry = {"name": "weather-mcp", "transport": "streamable-http",
-                      "url": "https://example.com/sse", "enabled": True}
-        with patch(
-            "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
-            return_value=fake_entry,
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-            return_value=(True, ""),
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.get_config",
-            return_value={},
-        ), patch(
-            "jiuwenswarm.server.runtime.mcp.state_store.remove_mcp_record",
-            return_value={"name": "weather-mcp", "removed": True},
-        ):
-            await server._handle_mcp_connect(ws, request, send_lock)
-        assert len(ws.sent) == 1
-        payload = _extract_payload(json.loads(ws.sent[0]))
-        assert payload["type"] == "connect_failed"
-        assert payload["name"] == "weather-mcp"
-        assert "register rejected" in payload["error"].lower()
-        assert payload["code"] == "MCP_REGISTER_FAILED"
+        assert probed == ["github"]  # live-connect probe ran
+        assert len(applied) == 0  # not loaded into the agent
 
     @pytest.mark.anyio
     async def test_connect_missing_name_returns_bad_request(self) -> None:
@@ -445,13 +402,15 @@ class TestHandleMcpConnect:
 
     @pytest.mark.anyio
     async def test_connect_remote_unreachable_returns_failed_and_rolls_back(self) -> None:
-        """Remote-mcp host down: type=connect_failed, entry rolled back, no reload."""
+        """Remote-mcp host down: probe fails, type=connect_failed, entry rolled back, no reload."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
         applied = []
         class _AM:
             async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
                 applied.append((name, action, enabled))
+            async def probe_mcp_live_connection(self_inner, name):
+                return (False, "tcp connect timed out")
         server._agent_manager = _AM()
         server._mask_sensitive_fields = lambda item: item
         ws = _FakeWS()
@@ -469,9 +428,6 @@ class TestHandleMcpConnect:
             "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
             return_value=fake_entry,
         ), patch(
-            "jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-            return_value=(False, "tcp connect timed out"),
-        ), patch(
             "jiuwenswarm.server.runtime.mcp.state_store.remove_mcp_record",
             side_effect=lambda n: removed.append(n) or {"name": n, "removed": True},
         ):
@@ -481,17 +437,24 @@ class TestHandleMcpConnect:
         assert payload["code"] == "MCP_UNREACHABLE"
         assert "timed out" in payload["error"]
         assert removed == ["github"]   # entry rolled back
-        assert len(applied) == 0     # unreachable 鈫?no reload
+        assert len(applied) == 0     # unreachable → no reload
 
     @pytest.mark.anyio
-    async def test_connect_remote_reachable_proceeds_to_reload(self) -> None:
-        """Remote-mcp host up: preflight passes, reload fires, type=connected."""
+    async def test_connect_remote_reachable_proceeds_to_connected(self) -> None:
+        """Remote-mcp host up: probe passes, state flips to connected.
+        No apply_mcp_change — the MCP loads into the agent only on chat.send."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
         applied = []
+        probed = []
         class _AM:
             async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
                 applied.append((name, action, enabled))
+            async def probe_mcp_live_connection(self_inner, name):
+                probed.append(name)
+                return (True, "")
+            def sync_mcp_credentials(self_inner):
+                return True
         server._agent_manager = _AM()
         server._mask_sensitive_fields = lambda item: item
         ws = _FakeWS()
@@ -500,15 +463,11 @@ class TestHandleMcpConnect:
             "name": "github",
             "transport": "http",
             "url": "https://api.githubcopilot.com/mcp/",
-            "enabled": True,
             "server_id_scope": "mcp:github",
         }
         with patch(
             "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
             return_value=fake_entry,
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.preflight_mcp_server_reachable",
-            return_value=(True, ""),
         ), patch(
             "jiuwenswarm.server.agent_ws_server.get_config",
             return_value={},
@@ -517,7 +476,52 @@ class TestHandleMcpConnect:
         payload = _extract_payload(json.loads(ws.sent[0]))
         assert payload["type"] == "connected"
         assert payload["applied"] is True
-        assert len(applied) == 1
+        assert probed == ["github"]  # live-connect probe ran
+        assert len(applied) == 0  # not loaded into the agent
+
+    @pytest.mark.anyio
+    async def test_connect_stdio_probe_failure_rolls_back(self) -> None:
+        """stdio MCP: the live-connect probe (spawn + handshake) runs at
+        connect time, not deferred to chat.send. If the probe fails the entry
+        is rolled back and connect_failed is reported — the user never sees a
+        phantom "connected" for an MCP whose subprocess can't start."""
+        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+        applied = []
+        probed = []
+        class _AM:
+            async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
+                applied.append((name, action, enabled))
+            async def probe_mcp_live_connection(self_inner, name):
+                probed.append(name)
+                return (False, "command 'npx' not found on PATH (install it or add to PATH)")
+        server._agent_manager = _AM()
+        server._mask_sensitive_fields = lambda item: item
+        ws = _FakeWS()
+        request = _make_request(req_method=ReqMethod.MCP_CONNECT, params={"name": "context7"})
+        fake_entry = {
+            "name": "context7",
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@upstash/context7-mcp"],
+            "server_id_scope": "mcp:context7",
+        }
+        rolled_back = []
+        with patch(
+            "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
+            return_value=fake_entry,
+        ), patch(
+            "jiuwenswarm.server.runtime.mcp.registry.rollback_failed_connect",
+            side_effect=lambda n: rolled_back.append(n),
+        ):
+            await server._handle_mcp_connect(ws, request, asyncio.Lock())
+        payload = _extract_payload(json.loads(ws.sent[0]))
+        assert payload["type"] == "connect_failed"
+        assert payload["code"] == "MCP_UNREACHABLE"
+        assert "npx" in payload["error"]
+        assert probed == ["context7"]  # stdio was probed at connect time
+        assert rolled_back == ["context7"]  # entry rolled back
+        assert len(applied) == 0
 
 
 class TestHandleMcpDisconnect:
@@ -561,62 +565,6 @@ class TestHandleMcpDisconnect:
         payload = _extract_payload(json.loads(ws.sent[0]))
         assert payload["type"] == "disconnect_failed"
         assert payload["code"] == "MCP_NOT_FOUND"
-
-
-class TestHandleMcpEnableDisable:
-    @pytest.mark.anyio
-    async def test_enable_flips_and_reloads(self) -> None:
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        applied = []
-        class _AM:
-            async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
-                applied.append((name, action, enabled))
-        server._agent_manager = _AM()
-        server._mask_sensitive_fields = lambda item: item
-        ws = _FakeWS()
-        request = _make_request(req_method=ReqMethod.MCP_ENABLE, params={"name": "github"})
-        with patch(
-            "jiuwenswarm.server.runtime.mcp.registry.enable_mcp",
-            return_value={"name": "github", "enabled": True},
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.get_mcp_server_config",
-            return_value={"name": "github", "enabled": False},
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.get_config",
-            return_value={},
-        ):
-            await server._handle_mcp_enable(ws, request, asyncio.Lock())
-        payload = _extract_payload(json.loads(ws.sent[0]))
-        assert payload["type"] == "enabled"
-        assert payload["applied"] is True
-        assert len(applied) == 1
-
-    @pytest.mark.anyio
-    async def test_disable_no_reload_when_unchanged(self) -> None:
-        from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-        server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-        applied = []
-        class _AM:
-            async def apply_mcp_change(self_inner, name, action, *, enabled=True, target_channel_id=None):
-                applied.append((name, action, enabled))
-        server._agent_manager = _AM()
-        server._mask_sensitive_fields = lambda item: item
-        ws = _FakeWS()
-        request = _make_request(req_method=ReqMethod.MCP_DISABLE, params={"name": "github"})
-        # old already disabled=False == requested disabled -> config_changed False -> no reload
-        with patch(
-            "jiuwenswarm.server.runtime.mcp.registry.disable_mcp",
-            return_value={"name": "github", "enabled": False},
-        ), patch(
-            "jiuwenswarm.server.agent_ws_server.get_mcp_server_config",
-            return_value={"name": "github", "enabled": False},
-        ):
-            await server._handle_mcp_disable(ws, request, asyncio.Lock())
-        payload = _extract_payload(json.loads(ws.sent[0]))
-        assert payload["type"] == "disabled"
-        assert payload["applied"] is True
-        assert len(applied) == 0  # unchanged -> skipped
 
 
 class TestHandleMcpDeleteCustom:

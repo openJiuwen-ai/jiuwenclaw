@@ -117,20 +117,26 @@ def test_skill_only_connector_excluded_from_mcp_servers(tmp_path: Path) -> None:
     assert names == {"baidu"}
 
 
-def test_state_disabled_not_enabled_field(tmp_path: Path) -> None:
-    """A connected-but-disabled MCP surfaces but with enabled=False,
-    so extract_enabled_mcp_server_entries skips it."""
+def test_state_connected_no_enabled_field_defaults_registered(tmp_path: Path) -> None:
+    """state.json no longer stores a per-MCP enabled flag (session-level
+    enable is driven by chat.send's ``mcp`` field). A connected MCP has no
+    ``enabled`` key in its merged entry — extract_enabled_mcp_server_entries
+    treats missing as True (default), so connected MCPs register on init."""
     _write_config_yaml(tmp_path, [])
     _write_state_json(tmp_path, {
-        "baidu": {"transport": "sse", "state": "connected", "enabled": False,
-                  "url": "https://x"}
+        "baidu": {"transport": "sse", "state": "connected",
+                  "url": "https://x", "server_id_scope": "mcp:baidu"}
     })
     with patch.object(cfg_mod, "CONFIG_YAML_PATH", tmp_path / "config.yaml"), \
          patch.object(common_utils, "get_workspace_dir", return_value=tmp_path), \
          patch.object(ss, "get_workspace_dir", return_value=tmp_path):
         servers = cfg_mod.get_mcp_servers()
-    baidu = next(s for s in servers if s["name"] == "baidu")
-    assert baidu["enabled"] is False
+        baidu = next(s for s in servers if s["name"] == "baidu")
+        assert "enabled" not in baidu  # state.json MCPs carry no enabled flag
+        # extract treats missing enabled as True (default) → baidu registers.
+        from jiuwenswarm.common.mcp_config import extract_enabled_mcp_server_entries
+        enabled_entries = extract_enabled_mcp_server_entries()
+        assert any(e["name"] == "baidu" for e in enabled_entries)
 
 
 def test_state_overrides_config_yaml_on_name_conflict(tmp_path: Path) -> None:
@@ -181,17 +187,17 @@ def test_no_state_file_returns_config_yaml_only(tmp_path: Path) -> None:
 
 
 def test_disabled_connector_still_connected_in_list(tmp_path: Path) -> None:
-    """A disabled MCP (state=connected, enabled=false) stays "connected"
-    in _connected_server_names — disable is a soft switch that keeps the
-    connection; only disconnect removes it. Regression: switching tabs re-fetched
-    mcp.list, which used to report disabled MCPs as disconnected,
-    so the user couldn't tell "disable then enable" from "disconnect then connect"
-    and re-connect was the only way back."""
+    """A connected MCP stays "connected" in _connected_server_names —
+    enable/disable is now session-level (chat.send ``mcp`` field), so the
+    stored connection state is unaffected by per-session selection; only
+    disconnect removes it. Regression: switching tabs re-fetched mcp.list,
+    which used to report MCPs as disconnected spuriously, so the user
+    couldn't tell selection from connection."""
     from jiuwenswarm.server.runtime.mcp.registry import _connected_server_names
     _write_config_yaml(tmp_path, [])
     _write_state_json(tmp_path, {
         "baidu": {"transport": "sse", "url": "https://x", "state": "connected",
-                  "enabled": False, "server_id_scope": "mcp:baidu"},
+                  "server_id_scope": "mcp:baidu"},
     })
     with patch.object(cfg_mod, "CONFIG_YAML_PATH", tmp_path / "config.yaml"), \
          patch.object(common_utils, "get_workspace_dir", return_value=tmp_path), \

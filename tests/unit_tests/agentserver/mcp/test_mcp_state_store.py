@@ -2,9 +2,11 @@
 
 """Tests: MCP state store.
 
-state.json is the per-MCP connection/enabled store, decoupled from
-config.yaml. These tests cover upsert/remove/toggle/read + BOM tolerance
-+ connector_to_mcp_entry shape + placeholder preservation.
+state.json is the per-MCP connection store, decoupled from config.yaml.
+These tests cover upsert/remove/read + BOM tolerance + connector_to_mcp_entry
+shape + placeholder preservation. The ``enabled`` flag is the TUI/global-
+default switch (web ignores it, loading by chat.send's ``mcp`` field): upsert
+defaults it to False on first insert and carries it through to the entry.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from jiuwenswarm.server.runtime.mcp import state_store as ss
 
 def _mk_entry(name="baidu", *, transport="sse", url="https://x/sse",
               headers=None, command=None, args=None, env=None):
-    e: dict = {"name": name, "transport": transport, "enabled": True,
+    e: dict = {"name": name, "transport": transport,
                "server_id_scope": f"mcp:{name}"}
     if url:
         e["url"] = url
@@ -40,7 +42,6 @@ def test_upsert_then_read_roundtrip(tmp_path: Path) -> None:
         entry = _mk_entry(headers={"Authorization": "Bearer ${T}"})
         rec = ss.upsert_mcp_record("baidu", entry)
         assert rec["state"] == "connected"
-        assert rec["enabled"] is True
         got = ss.get_mcp_record("baidu")
         assert got is not None
         assert got["transport"] == "sse"
@@ -68,22 +69,6 @@ def test_remove(tmp_path: Path) -> None:
         assert ss.remove_mcp_record("baidu") is None
 
 
-def test_set_enabled_flips_flag(tmp_path: Path) -> None:
-    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
-        ss.upsert_mcp_record("baidu", _mk_entry(), enabled=True)
-        rec = ss.set_mcp_enabled("baidu", False)
-        assert rec["enabled"] is False
-        assert ss.get_mcp_record("baidu")["enabled"] is False
-        ss.set_mcp_enabled("baidu", True)
-        assert ss.get_mcp_record("baidu")["enabled"] is True
-
-
-def test_set_enabled_missing_raises(tmp_path: Path) -> None:
-    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
-        with pytest.raises(KeyError):
-            ss.set_mcp_enabled("nope", True)
-
-
 def test_list_connected_includes_connecting(tmp_path: Path) -> None:
     """list_connected_mcps returns connected AND connecting (both are "live":
     registered-with-agent-or-in-progress), but NOT registered/disconnected."""
@@ -105,7 +90,7 @@ def test_list_connected_includes_connecting(tmp_path: Path) -> None:
 
 def test_upsert_merges_fields_preserving_extras(tmp_path: Path) -> None:
     """A second upsert preserves integration_type/skills from prior state if
-    not re-supplied (so enable/disable don't clobber metadata)."""
+    not re-supplied (so a re-connect doesn't clobber metadata)."""
     with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
         ss.upsert_mcp_record("feishu", _mk_entry("feishu", transport="http", url=""),
                                   integration_type="cli", skills=["feishu"])
@@ -123,7 +108,7 @@ def test_read_tolerates_bom(tmp_path: Path) -> None:
         p = ss._state_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         body = json.dumps({"version": 1, "mcp": {
-            "baidu": {"transport": "sse", "state": "connected", "enabled": True}
+            "baidu": {"transport": "sse", "state": "connected"}
         }, "mounts": {}})
         p.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
         rec = ss.get_mcp_record("baidu")
@@ -149,18 +134,21 @@ def test_read_corrupt_returns_empty(tmp_path: Path) -> None:
 
 def test_connector_to_mcp_entry_shape(tmp_path: Path) -> None:
     """record_to_mcp_entry yields a dict the adapter's
-    _build_mcp_server_config can consume identically to a config.yaml entry."""
+    _build_mcp_server_config can consume identically to a config.yaml entry.
+    ``enabled`` is only carried through when the record has it (TUI-managed
+    records); a record without it (web-connected, never TUI-enabled) yields no
+    ``enabled`` key — same as before, web loads by chat.send's mcp field."""
     record = {
         "transport": "sse", "url": "https://x/sse",
         "headers": {"Authorization": "Bearer ${T}"},
-        "server_id_scope": "mcp:baidu", "enabled": True,
+        "server_id_scope": "mcp:baidu",
     }
     entry = ss.record_to_mcp_entry("baidu", record)
     assert entry["name"] == "baidu"
     assert entry["transport"] == "sse"
     assert entry["url"] == "https://x/sse"
     assert entry["headers"] == {"Authorization": "Bearer ${T}"}
-    assert entry["enabled"] is True
+    assert "enabled" not in entry
     assert entry["server_id_scope"] == "mcp:baidu"
 
 
@@ -173,7 +161,6 @@ def test_connector_to_mcp_entry_skill_only_returns_none() -> None:
     # skill-only record: only name + server_id_scope + skills, no MCP host
     record = {
         "server_id_scope": "mcp:ctrip-wendao",
-        "enabled": True,
         "integration_type": "skill-only",
         "skills": ["ctrip-wendao"],
     }
@@ -185,7 +172,6 @@ def test_connector_to_mcp_entry_pure_cli_returns_none() -> None:
     also return None — same as skill-only, they have no MCP server."""
     record = {
         "server_id_scope": "mcp:feishu",
-        "enabled": True,
         "integration_type": "cli",
         "skills": ["lark-doc", "lark-im"],
     }
@@ -201,7 +187,6 @@ def test_connector_to_mcp_entry_stdio_has_host_returns_entry() -> None:
         "args": ["-y", "@modelcontextprotocol/server-jira"],
         "env": {"JIRA_TOKEN": "${JIRA_TOKEN}"},
         "server_id_scope": "mcp:jira",
-        "enabled": True,
     }
     entry = ss.record_to_mcp_entry("jira", record)
     assert entry is not None
@@ -215,3 +200,58 @@ def test_persists_across_instances(tmp_path: Path) -> None:
         ss.upsert_mcp_record("baidu", _mk_entry())
         # Simulate a "new process" by just calling read again (no in-memory cache).
         assert ss.get_mcp_record("baidu") is not None
+
+
+def test_upsert_defaults_enabled_false(tmp_path: Path) -> None:
+    """First insert defaults enabled=False (TUI/global switch off) so a
+    web-connected MCP doesn't pollute the TUI default set. TUI add passes
+    enabled=True explicitly."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        rec = ss.upsert_mcp_record("baidu", _mk_entry())
+        assert rec["enabled"] is False
+        tui_rec = ss.upsert_mcp_record("tui-mcp", _mk_entry("tui-mcp"), enabled=True)
+        assert tui_rec["enabled"] is True
+
+
+def test_upsert_preserves_enabled_when_not_passed(tmp_path: Path) -> None:
+    """A later upsert that omits enabled (e.g. a re-connect flipping state)
+    must keep the previously set value — connect shouldn't reset the switch."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry(), enabled=True)
+        # Re-upsert without enabled — should stay True.
+        rec = ss.upsert_mcp_record("baidu", _mk_entry(), state="connected")
+        assert rec["enabled"] is True
+
+
+def test_set_mcp_enabled_flips_without_touching_state(tmp_path: Path) -> None:
+    """TUI enable/disable flips only enabled; connection state stays. Off keeps
+    the connection alive — it just hides the MCP from the TUI default set."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        ss.upsert_mcp_record("baidu", _mk_entry(), state="connected", enabled=False)
+        ss.set_mcp_enabled("baidu", enabled=True)
+        rec = ss.get_mcp_record("baidu")
+        assert rec["enabled"] is True
+        assert rec["state"] == "connected"  # untouched
+
+
+def test_record_to_mcp_entry_carries_enabled_when_present(tmp_path: Path) -> None:
+    """A record that went through upsert carries its enabled through to the
+    entry so the TUI loader can filter on it; a hand-built record without the
+    key (legacy/web-shape) yields no enabled key — backward compatible."""
+    with patch("jiuwenswarm.server.runtime.mcp.state_store.get_workspace_dir", return_value=tmp_path):
+        # TUI record (enabled=True)
+        ss.upsert_mcp_record("tui-mcp", _mk_entry("tui-mcp"), enabled=True)
+        rec = ss.get_mcp_record("tui-mcp")
+        entry = ss.record_to_mcp_entry("tui-mcp", rec)
+        assert entry["enabled"] is True
+        # web record (upsert default enabled=False) carries False through
+        ss.upsert_mcp_record("web-mcp", _mk_entry("web-mcp"))
+        rec2 = ss.get_mcp_record("web-mcp")
+        entry2 = ss.record_to_mcp_entry("web-mcp", rec2)
+        assert entry2["enabled"] is False
+        # legacy record shape (no enabled key) yields no enabled in entry
+        legacy = {"transport": "sse", "url": "https://x/sse",
+                  "server_id_scope": "mcp:legacy"}
+        entry3 = ss.record_to_mcp_entry("legacy", legacy)
+        assert "enabled" not in entry3
+

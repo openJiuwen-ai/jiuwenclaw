@@ -141,7 +141,7 @@ def test_custom_mcp_appears_in_list_after_register(tmp_path: Path, monkeypatch) 
             "command": "npx", "args": ["-y", "x"],
             "server_id_scope": "mcp:my-custom",
         },
-        state="registered", enabled=True,
+        state="registered",
         integration_type="stdio-mcp",
     )
     # connected — what connect produces after the user clicks connect
@@ -150,23 +150,27 @@ def test_custom_mcp_appears_in_list_after_register(tmp_path: Path, monkeypatch) 
             "name": "live-custom", "transport": "streamable-http",
             "url": "https://x/mcp", "server_id_scope": "mcp:live-custom",
         },
-        state="connected", enabled=True,
+        state="connected",
         integration_type="remote-mcp",
     )
-    summaries = registry.list_marketplace_mcps()
+    summaries = registry.list_marketplace_mcps(filter="local")
     by_name = {s["name"]: s for s in summaries}
     assert "my-custom" in by_name
     assert by_name["my-custom"]["connection_state"] == "disconnected"
     assert by_name["my-custom"]["integration_type"] == "stdio-mcp"
     assert "live-custom" in by_name
     assert by_name["live-custom"]["connection_state"] == "connected"
-    # enabled must be false when not connected (my-custom is registered,
-    # not connected). enabled is only meaningful after connect.
-    assert by_name["my-custom"]["enabled"] is False
-    assert by_name["my-custom"]["connected"] is False
-    # connected custom MCP reflects its state.json enabled flag (default True).
-    assert by_name["live-custom"]["enabled"] is True
-    assert by_name["live-custom"]["connected"] is True
+    # enabled/connected 已从返回字段删除——会话级启用走 chat.send 的 mcp 字段，
+    # 非持久 flag。断言字段不存在，防止残留。
+    assert "enabled" not in by_name["my-custom"]
+    assert "connected" not in by_name["my-custom"]
+    assert "enabled" not in by_name["live-custom"]
+    assert "connected" not in by_name["live-custom"]
+    # builtin filter 只返回预置目录，不含自定义 MCP。
+    builtin_summaries = registry.list_marketplace_mcps(filter="builtin")
+    builtin_names = {s["name"] for s in builtin_summaries}
+    assert "my-custom" not in builtin_names
+    assert "live-custom" not in builtin_names
 
 
 def test_get_connector_returns_detail_for_custom_mcp(tmp_path: Path, monkeypatch) -> None:
@@ -179,44 +183,43 @@ def test_get_connector_returns_detail_for_custom_mcp(tmp_path: Path, monkeypatch
     state_store.upsert_mcp_record(
         "remote-custom", {"name": "remote-custom", "transport": "streamable-http",
                           "url": "https://x/mcp", "server_id_scope": "mcp:remote-custom"},
-        state="connected", enabled=True,
+        state="connected",
         integration_type="remote-mcp",
     )
     detail = registry.get_mcp("remote-custom")
     assert detail is not None
     assert detail["name"] == "remote-custom"
     assert detail["connection_state"] == "connected"
-    # connected custom MCP reflects its enabled flag in show too.
-    assert detail["enabled"] is True
-    assert detail["connected"] is True
+    # enabled/connected 已从返回字段删除。
+    assert "enabled" not in detail
+    assert "connected" not in detail
     # show surfaces skills/tools (empty for a custom MCP with no package).
     assert detail["skills"] == []
     assert detail["tools"] == []
 
 
-def test_list_enabled_false_when_disconnected_even_if_state_enabled_true(tmp_path: Path, monkeypatch) -> None:
-    """An MCP with state.json enabled=true but state=registered (not connected)
-    must still report enabled=false — enabled is only meaningful when
-    connected. Pins the rule that disconnected MCPs are never 'enabled'."""
+def test_list_enabled_false_when_disconnected(tmp_path: Path, monkeypatch) -> None:
+    """A registered (not connected) custom MCP reports enabled=false — enabled
+    mirrors connected, and a disconnected MCP cannot be enabled (session-level
+    enable only applies to connected MCPs)."""
     from jiuwenswarm.server.runtime.mcp import state_store
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
-    # registered but enabled=true in state.json (a stale enabled from a prior
-    # connected session that was later disconnected) — list must still show
-    # enabled=false because it's not connected.
     state_store.upsert_mcp_record(
         "stale-custom", {
             "name": "stale-custom", "transport": "stdio",
             "command": "npx", "args": ["-y", "x"],
             "server_id_scope": "mcp:stale-custom",
         },
-        state="registered", enabled=True,
+        state="registered",
         integration_type="stdio-mcp",
     )
-    summaries = registry.list_marketplace_mcps()
+    summaries = registry.list_marketplace_mcps(filter="local")
     by_name = {s["name"]: s for s in summaries}
-    assert by_name["stale-custom"]["connected"] is False
-    assert by_name["stale-custom"]["enabled"] is False
+    assert by_name["stale-custom"]["connection_state"] == "disconnected"
+    # enabled/connected 已从返回字段删除。
+    assert "connected" not in by_name["stale-custom"]
+    assert "enabled" not in by_name["stale-custom"]
 
 
 def test_connect_custom_mcp_writes_connecting_until_handler_promotes(tmp_path: Path, monkeypatch) -> None:
@@ -245,7 +248,7 @@ def test_connect_custom_mcp_writes_connecting_until_handler_promotes(tmp_path: P
             "command": "npx", "args": ["-y", "x"],
             "server_id_scope": "mcp:my-custom",
         },
-        state="registered", enabled=True,
+        state="registered",
         integration_type="stdio-mcp",
     )
     result = registry.connect_mcp("my-custom")
@@ -267,20 +270,80 @@ def test_connect_custom_mcp_not_in_state_raises_keyerror(tmp_path: Path, monkeyp
 
 def test_disconnect_custom_mcp_back_to_registered(tmp_path: Path, monkeypatch) -> None:
     """disconnect on a connected custom MCP flips state back to registered
-    (keeps the definition so the user can re-connect without re-registering)."""
+    (keeps the definition so the user can re-connect without re-registering),
+    and wipes the stored credential file."""
     from jiuwenswarm.server.runtime.mcp import state_store
+    from jiuwenswarm.server.runtime.mcp import credential as cred_mod
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(cred_mod, "get_workspace_dir", lambda: tmp_path)
     state_store.upsert_mcp_record(
         "my-custom", {"name": "my-custom", "transport": "streamable-http",
                       "url": "https://x", "server_id_scope": "mcp:my-custom"},
-        state="connected", enabled=True,
+        state="connected",
         integration_type="remote-mcp",
     )
+    # Seed a credential so the disconnect wipe has something to delete.
+    cred_mod.CredentialStore(workspace_dir=tmp_path).save_token("my-custom", "TOK", "v")
     result = registry.disconnect_mcp("my-custom")
     assert result["removed"] is True
     rec = state_store.get_mcp_record("my-custom")
     assert rec["state"] == "registered"
+    # Disconnect wiped the stored token file.
+    assert not (tmp_path / "mcp" / "credentials" / "my-custom.json").is_file()
+
+
+def test_rollback_failed_connect_custom_wipes_stored_tokens(tmp_path: Path, monkeypatch) -> None:
+    """rollback_failed_connect on a custom MCP (no package dir) flips state to
+    registered AND wipes the CredentialStore token file — otherwise a bad token
+    lingers and every retry re-probes with the same wrong value (permanent
+    failure, no re-prompt)."""
+    from jiuwenswarm.server.runtime.mcp import state_store
+    from jiuwenswarm.server.runtime.mcp import credential as cred_mod
+    monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(cred_mod, "get_workspace_dir", lambda: tmp_path)
+    state_store.upsert_mcp_record(
+        "bad-custom", {"name": "bad-custom", "transport": "streamable-http",
+                       "url": "https://x", "server_id_scope": "mcp:bad-custom"},
+        state="connecting",
+        integration_type="remote-mcp",
+    )
+    cred_mod.CredentialStore(workspace_dir=tmp_path).save_token("bad-custom", "TOK", "wrong")
+    cred_file = tmp_path / "mcp" / "credentials" / "bad-custom.json"
+    assert cred_file.is_file()  # seeded
+    registry.rollback_failed_connect("bad-custom")
+    rec = state_store.get_mcp_record("bad-custom")
+    assert rec["state"] == "registered"  # definition kept for edit/retry
+    assert not cred_file.is_file()  # bad token wiped so retry re-prompts
+
+
+def test_rollback_failed_connect_marketplace_wipes_stored_tokens(tmp_path: Path, monkeypatch) -> None:
+    """rollback_failed_connect on a marketplace MCP (has package dir) removes
+    the record + uninstalls skills AND wipes the CredentialStore token file.
+    Marketplace MCPs stay in the builtin list after rollback (they're backed by
+    package dirs), so wiping is what lets the next connect re-trigger
+    credentials_required instead of re-probing with the stale token."""
+    from jiuwenswarm.server.runtime.mcp import state_store
+    from jiuwenswarm.server.runtime.mcp import credential as cred_mod
+    monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(cred_mod, "get_workspace_dir", lambda: tmp_path)
+    # Marketplace package dir exists (ssh-mcp-server-like form-B token MCP).
+    pkg_dir = tmp_path / "mcp" / "mcp_builtins" / "ssh-mcp-server"
+    pkg_dir.mkdir(parents=True)
+    state_store.upsert_mcp_record(
+        "ssh-mcp-server", {"name": "ssh-mcp-server", "transport": "stdio",
+                           "command": "npx", "server_id_scope": "mcp:ssh-mcp-server"},
+        state="connecting",
+        integration_type="stdio-mcp",
+    )
+    cred_mod.CredentialStore(workspace_dir=tmp_path).save_token("ssh-mcp-server", "SSH_HOST", "bad")
+    cred_file = tmp_path / "mcp" / "credentials" / "ssh-mcp-server.json"
+    assert cred_file.is_file()  # seeded
+    registry.rollback_failed_connect("ssh-mcp-server")
+    assert state_store.get_mcp_record("ssh-mcp-server") is None  # record removed
+    assert not cred_file.is_file()  # bad token wiped
 
 
 def test_register_custom_preserves_connected_state_on_edit(tmp_path: Path, monkeypatch) -> None:
@@ -295,7 +358,7 @@ def test_register_custom_preserves_connected_state_on_edit(tmp_path: Path, monke
         "live-custom", {"name": "live-custom", "transport": "streamable-http",
                         "url": "https://old.example/mcp",
                         "server_id_scope": "mcp:live-custom"},
-        state="connected", enabled=True,
+        state="connected",
         integration_type="remote-mcp",
     )
     # Re-register with a new URL (the edit path).
@@ -312,31 +375,9 @@ def test_register_custom_preserves_connected_state_on_edit(tmp_path: Path, monke
     assert rec["url"] == "https://new.example/mcp"
 
 
-def test_register_custom_preserves_enabled_on_edit(tmp_path: Path, monkeypatch) -> None:
-    """Editing a disabled connected custom MCP keeps enabled=False — the
-    edit dialog changing fields is not an implicit enable."""
-    from jiuwenswarm.server.runtime.mcp import state_store
-    monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
-    monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
-    state_store.upsert_mcp_record(
-        "disabled-custom", {"name": "disabled-custom", "transport": "stdio",
-                            "command": "npx", "args": ["-y", "x"],
-                            "server_id_scope": "mcp:disabled-custom"},
-        state="connected", enabled=False,
-        integration_type="stdio-mcp",
-    )
-    result = registry.register_custom_mcp("disabled-custom", {
-        "transport": "stdio",
-        "command": "npx -y y",
-    })
-    assert result["was_connected"] is True
-    rec = state_store.get_mcp_record("disabled-custom")
-    assert rec["enabled"] is False
-
-
-def test_register_custom_new_mcp_defaults_registered_and_enabled(tmp_path: Path, monkeypatch) -> None:
+def test_register_custom_new_mcp_defaults_registered(tmp_path: Path, monkeypatch) -> None:
     """A brand-new custom MCP (no prior record) is written as state=registered,
-    enabled=True, was_connected=False — the handler then flips to connected."""
+    was_connected=False — the handler then flips to connected via mcp.connect."""
     from jiuwenswarm.server.runtime.mcp import state_store
     monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
     monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
@@ -347,7 +388,6 @@ def test_register_custom_new_mcp_defaults_registered_and_enabled(tmp_path: Path,
     assert result["was_connected"] is False
     rec = state_store.get_mcp_record("brand-new")
     assert rec["state"] == "registered"
-    assert rec["enabled"] is True
 
 
 def test_get_mcp_custom_returns_config_fields_for_edit_prefill(tmp_path: Path, monkeypatch) -> None:
@@ -364,7 +404,7 @@ def test_get_mcp_custom_returns_config_fields_for_edit_prefill(tmp_path: Path, m
             "env": {"FOO": "bar"},
             "timeout_s": 30,
         },
-        state="connected", enabled=True,
+        state="connected",
         integration_type="remote-mcp",
     )
     detail = registry.get_mcp("remote-custom")

@@ -13,6 +13,9 @@ from typing import Any
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
 
+from jiuwenswarm.common.config import get_mcp_server_config
+from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
+
 _HTTP_MCP_TRANSPORTS = frozenset({"sse", "http", "streamable-http", "streamable_http"})
 
 
@@ -101,7 +104,11 @@ def build_mcp_server_config(
         params: dict[str, Any] = {"command": command}
         args = entry.get("args")
         if isinstance(args, list):
-            params["args"] = [str(item) for item in args]
+            # resolve ${VAR} placeholders via credential_resolver (same as env
+            # below): stdio MCPs like ssh-mcp-server pass --host ${SSH_HOST}
+            # in args, and the spawned process gets argv literally (no shell
+            # expansion), so placeholders must be substituted here.
+            params["args"] = [_resolve_string(str(item), credential_resolver) for item in args]
         else:
             # Default to [] so a bare command (no args) still spawns cleanly.
             params["args"] = []
@@ -380,7 +387,6 @@ async def fill_mcp_tools_fallback(item: dict[str, Any], name: str) -> None:
     if item.get("tools"):
         return
     try:
-        from jiuwenswarm.common.config import get_mcp_server_config
         config_entry = get_mcp_server_config(name)
         if not config_entry or not bool(config_entry.get("enabled", True)):
             return
@@ -395,6 +401,117 @@ async def fill_mcp_tools_fallback(item: dict[str, Any], name: str) -> None:
         logger.debug("[mcp-config] show tools fallback for '%s' failed: %s", name, fetch_exc)
 
 
+async def probe_mcp_live_connection(name: str) -> tuple[bool, str]:
+    """Live-connect probe for one MCP by name (connect-time preflight).
+
+    Not just register the entry — actually confirm the MCP is usable before
+    ``connected`` is reported. For server-bearing types (stdio / remote-mcp /
+    hybrid-cli's mcp.json subcommand) this spawns the stdio subprocess + MCP
+    initialize handshake, or does a real HTTP connect — so npx first-install
+    cost and handshake failures surface HERE (the user waits on connect)
+    instead of silently degrading to "no tools" on the first chat message.
+
+    cfg is built with ``server_id_scope="jiuwenswarm"`` — identical to the
+    adapter's ``_register_mcp_server`` path — so a successful probe leaves the
+    connection in the process-global ``Runner.resource_mgr`` cache and
+    reconcile's later ``add_mcp_server`` hits the existing-entry branch (no
+    duplicate spawn on chat.send).
+
+    skill-only / pure-CLI MCPs have no server entry (``get_mcp_server_config``
+    returns None) — there is no MCP server to connect to; return ``(True, "")``
+    so connect proceeds (they surface via bundled skills).
+
+    Returns ``(ok, reason)``; never raises so callers can decide rollback /
+    response without a try/except fence.
+    """
+    import shutil
+
+    n = str(name or "").strip()
+    if not n:
+        return False, "mcp name is required"
+    # Same-source entry as reconcile: get_mcp_server_config merges state.json's
+    # connecting/connected records (via record_to_mcp_entry, carrying
+    # server_id_scope). After connect writes connecting, this reads it back —
+    # probe and reconcile see the same entry → same server_id.
+    entry = get_mcp_server_config(n)
+    if entry is None:
+        # No MCP server entry (skill-only / pure-CLI) — nothing to connect.
+        return True, ""
+    resolver = None
+    try:
+        stored = CredentialStore().get_all(n)
+        if stored:
+            def resolver(key: str) -> str | None:  # noqa: B023
+                if key in stored:
+                    return stored[key]
+                import os
+                return os.environ.get(key)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[mcp-config] probe resolver build for '%s' failed: %s", n, exc)
+    cfg = build_mcp_server_config(
+        entry, server_id_scope="jiuwenswarm", credential_resolver=resolver)
+    if cfg is None:
+        return False, f"invalid mcp server entry for '{n}'"
+    # stdio: command must be on PATH (npx/uvx/node), else SDK spawn raises
+    # OSError swallowed by connect() into a vague failure. Fail fast here.
+    if str(cfg.client_type).strip().lower() == "stdio":
+        cmd = str((cfg.params or {}).get("command", "")).strip()
+        if cmd and not shutil.which(cmd):
+            return False, (
+                f"command '{cmd}' not found on PATH "
+                f"(install it or add to PATH)"
+            )
+    # remote: HTTP reachability (host down / DNS failure) — stdio skips.
+    try:
+        reachable, reason = await preflight_mcp_server_reachable(cfg)
+        if not reachable:
+            return False, reason
+    except Exception as exc:  # noqa: BLE001
+        # preflight itself failing must not abort connect — degrade to spawn
+        # verification only.
+        logger.debug("[mcp-config] probe preflight for '%s' failed: %s", n, exc)
+    # Real connect: Runner.resource_mgr is a process-level singleton — does
+    # NOT depend on any adapter instance, so cold-start (no conversation / no
+    # live agent) still validates. On success the subprocess/HTTP connection
+    # stays cached for reconcile to reuse.
+    try:
+        from openjiuwen.core.runner import Runner
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Runner unavailable: {exc}"
+    try:
+        result = await Runner.resource_mgr.add_mcp_server(cfg, tag="mcp.probe")
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc) or repr(exc)
+    ok = True
+    if result is not None:
+        is_ok = getattr(result, "is_ok", None)
+        if callable(is_ok):
+            ok = bool(is_ok())
+        elif isinstance(result, bool):
+            ok = result
+    if not ok:
+        runner_reason = ""
+        for getter in ("error", "msg"):
+            fn = getattr(result, getter, None)
+            if callable(fn):
+                try:
+                    val = fn()
+                except Exception:  # noqa: BLE001
+                    val = None
+                if val:
+                    runner_reason = str(val)
+                    break
+        if not runner_reason:
+            val = getattr(result, "_error", None)
+            if val:
+                runner_reason = str(val)
+        return False, (
+            runner_reason
+            or f"MCP server '{n}' connect rejected (no runner reason)"
+        )
+    return True, ""
+
+
 __all__ = [
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
@@ -402,4 +519,5 @@ __all__ = [
     "preflight_mcp_server_reachable",
     "fetch_mcp_tools_via_temp_connection",
     "fill_mcp_tools_fallback",
+    "probe_mcp_live_connection",
 ]

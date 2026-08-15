@@ -1652,6 +1652,15 @@ def get_mcp_servers() -> list[dict[str, Any]]:
     return merged
 
 
+def get_config_yaml_mcp_servers() -> list[dict[str, Any]]:
+    """只读 config.yaml 的 mcp.servers（TUI/command.mcp 手配）。"""
+    data = get_config_raw()
+    mcp_cfg = data.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        return []
+    return [item for item in mcp_cfg.get("servers", []) if isinstance(item, dict)]
+
+
 def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """新增或更新 mcp.servers 条目，返回（条目, 是否创建）。"""
     name = str(server.get("name", "")).strip()
@@ -1736,6 +1745,103 @@ def remove_mcp_server_in_config(name: str) -> dict[str, Any]:
         dump_yaml_round_trip(CONFIG_YAML_PATH, data)
         return removed
     raise KeyError(f"MCP server '{target}' not found")
+
+
+def _mcp_name_in_state(name: str) -> bool:
+    """Whether state.json has a record for ``name`` (any state)."""
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import get_mcp_record
+        return get_mcp_record(name) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mcp_name_in_config_yaml(name: str) -> bool:
+    """Whether config.yaml mcp.servers has an entry for ``name``."""
+    return any(str(s.get("name", "")).strip() == name
+               for s in get_config_yaml_mcp_servers())
+
+
+def upsert_mcp_server(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Upsert a TUI-managed MCP, routing by source: update in place if the
+    name already lives in config.yaml (legacy stock) or state.json (TUI-
+    created / web-connected); otherwise create new in state.json.
+
+    TUI ``add``/``update`` lands here. New MCPs always go to state.json
+    (``enabled`` defaults to the payload's ``enabled``, True for TUI add) —
+    config.yaml is no longer a creation target, only legacy stock edited
+    in place. Returns ``(entry, created)``. Raises ``ValueError`` if no name.
+    """
+    name = str(server.get("name", "")).strip()
+    if not name:
+        raise ValueError("MCP server name is required")
+    # Legacy stock in config.yaml: update in place (keeps its source).
+    if _mcp_name_in_config_yaml(name):
+        return upsert_mcp_server_in_config(server)
+    # Else state.json is the creation/update home for TUI MCPs.
+    from jiuwenswarm.server.runtime.mcp.state_store import upsert_mcp_record
+    prior = _mcp_name_in_state(name)
+    enabled = bool(server.get("enabled", True)) if "enabled" in server else None
+    rec = upsert_mcp_record(name, server, state="connected",
+                            integration_type=_integration_type_for(server),
+                            enabled=enabled)
+    # Shape a config-like entry for the response (carries enabled through).
+    entry = dict(rec)
+    entry["name"] = name
+    if "enabled" not in entry:
+        entry["enabled"] = bool(server.get("enabled", True))
+    return entry, (not prior)
+
+
+def set_mcp_server_enabled(name: str, enabled: bool) -> dict[str, Any]:
+    """Flip a TUI-managed MCP's ``enabled`` flag, routing by source: state.json
+    first (TUI-created / web-connected), then config.yaml (legacy stock).
+
+    Only the TUI channel reads ``enabled``; web ignores it. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            get_mcp_record, set_mcp_enabled,
+        )
+        set_mcp_enabled(target, enabled=enabled)
+        rec = get_mcp_record(target) or {}
+        entry = dict(rec)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return set_mcp_server_enabled_in_config(target, enabled)
+
+
+def remove_mcp_server(name: str) -> dict[str, Any]:
+    """Remove a TUI-managed MCP, routing by source: state.json first, then
+    config.yaml (legacy stock). Returns the removed entry. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import remove_mcp_record
+        removed = remove_mcp_record(target) or {}
+        entry = dict(removed)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return remove_mcp_server_in_config(target)
+
+
+def _integration_type_for(server: dict[str, Any]) -> str:
+    """Derive the state.json integration_type from a TUI payload's transport."""
+    t = str(server.get("transport", "")).strip().lower()
+    if t == "stdio":
+        return "stdio-mcp"
+    if t in {"sse", "http", "streamable-http", "streamable_http"}:
+        return "remote-mcp"
+    return "remote-mcp"
 
 
 # ---------------------------------------------------------------------------

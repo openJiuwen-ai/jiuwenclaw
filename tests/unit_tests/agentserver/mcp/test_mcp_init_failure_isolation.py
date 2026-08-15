@@ -2,18 +2,20 @@
 
 """Tests: init per-MCP failure isolation + connecting→connected promotion.
 
-``_register_mcp_servers_from_config`` (agent init/reload) walks every live
-MCP (state in {connected, connecting}) and registers it. Two guarantees:
+``_register_mcp_servers_from_config`` (root agent init) registers the TUI
+global-default set: config.yaml ``enabled`` mcp.servers ∪ state.json
+``enabled=True`` records. These tests exercise the config.yaml path only, so
+an autouse fixture stubs ``_state_enabled_mcp_entries`` to ``[]`` and isolates
+state.json. Two guarantees:
 
 1. **Failure isolation** — one bad MCP (unreachable / register rejected) must
    not abort the loop and starve the remaining MCPs. The failure is logged,
    the bad MCP's state degrades to ``disconnected`` (so the next restart
    doesn't retry it forever), and the loop continues.
 
-2. **connecting → connected promotion** — a connecting MCP (left over from a
-   connect interrupted by a restart) that registers OK here is promoted to
-   connected. Without this a restart-while-connecting MCP would stay
-   "connecting" forever on the frontend even though its server is live.
+2. **connecting → connected promotion** — a config.yaml MCP whose state.json
+   record is ``connecting`` (left over from a connect interrupted by a restart)
+   that registers OK here is promoted to connected.
 """
 
 from __future__ import annotations
@@ -22,6 +24,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_json(monkeypatch):
+    """These tests exercise the config.yaml path of init; stub the state.json
+    enabled-set reader to [] so a real workspace state.json doesn't inject
+    extra MCPs into the init loop."""
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+    monkeypatch.setattr(
+        JiuWenSwarmDeepAdapter, "_state_enabled_mcp_entries", staticmethod(lambda: [])
+    )
+
 
 
 def _mk_cfg(name: str):
@@ -42,6 +58,7 @@ def _new_adapter():
     adapter._instance = MagicMock()  # truthy so _register_mcp_server proceeds
     adapter._registered_mcp_server_ids = set()
     adapter._registered_mcp_servers = {}
+    adapter._session_selected_mcp = set()
     return adapter
 
 
@@ -52,12 +69,6 @@ async def test_init_one_mcp_failure_does_not_starve_the_rest(tmp_path, monkeypat
 
     calls: list[str] = []
 
-    def fake_extract(self, _config_base):
-        return [
-            {"name": "bad", "transport": "sse", "url": "http://bad/mcp", "enabled": True},
-            {"name": "good", "transport": "sse", "url": "http://good/mcp", "enabled": True},
-        ]
-
     def fake_build(self, entry):
         return _mk_cfg(str(entry.get("name", "")))
 
@@ -67,9 +78,6 @@ async def test_init_one_mcp_failure_does_not_starve_the_rest(tmp_path, monkeypat
             raise RuntimeError("bad host unreachable")
         return True
 
-    monkeypatch.setattr(
-        type(adapter), "_extract_enabled_mcp_server_entries", fake_extract,
-    )
     monkeypatch.setattr(type(adapter), "_build_mcp_server_config", fake_build)
     monkeypatch.setattr(type(adapter), "_register_mcp_server", fake_register)
 
@@ -79,6 +87,12 @@ async def test_init_one_mcp_failure_does_not_starve_the_rest(tmp_path, monkeypat
         degraded.append((name, state))
 
     with patch(
+        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        return_value=[
+            {"name": "bad", "transport": "sse", "url": "http://bad/mcp", "enabled": True},
+            {"name": "good", "transport": "sse", "url": "http://good/mcp", "enabled": True},
+        ],
+    ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
         side_effect=fake_set_state,
     ), patch(
@@ -101,16 +115,12 @@ async def test_init_preflight_false_degrades_to_disconnected(tmp_path, monkeypat
     not a silent skip that leaves state==connected for infinite retry."""
     adapter = _new_adapter()
 
-    def fake_extract(self, _config_base):
-        return [{"name": "down", "transport": "sse", "url": "http://down/mcp", "enabled": True}]
-
     def fake_build(self, entry):
         return _mk_cfg(str(entry.get("name", "")))
 
     async def fake_register(self, cfg, *, tag):
         return False  # preflight unreachable
 
-    monkeypatch.setattr(type(adapter), "_extract_enabled_mcp_server_entries", fake_extract)
     monkeypatch.setattr(type(adapter), "_build_mcp_server_config", fake_build)
     monkeypatch.setattr(type(adapter), "_register_mcp_server", fake_register)
 
@@ -120,6 +130,9 @@ async def test_init_preflight_false_degrades_to_disconnected(tmp_path, monkeypat
         degraded.append((name, state))
 
     with patch(
+        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        return_value=[{"name": "down", "transport": "sse", "url": "http://down/mcp", "enabled": True}],
+    ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
         side_effect=fake_set_state,
     ), patch(
@@ -133,13 +146,10 @@ async def test_init_preflight_false_degrades_to_disconnected(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_init_promotes_connecting_to_connected(tmp_path, monkeypatch) -> None:
-    """A connecting MCP (restart mid-connect) that registers OK is promoted
-    to connected — otherwise the frontend would stay "connecting" forever
-    even though the server is live."""
+    """A config.yaml MCP whose state.json record is ``connecting`` (restart
+    mid-connect) that registers OK is promoted to connected — otherwise the
+    frontend would stay "connecting" forever even though the server is live."""
     adapter = _new_adapter()
-
-    def fake_extract(self, _config_base):
-        return [{"name": "feishu", "transport": "sse", "url": "http://feishu/mcp", "enabled": True}]
 
     def fake_build(self, entry):
         return _mk_cfg(str(entry.get("name", "")))
@@ -147,7 +157,6 @@ async def test_init_promotes_connecting_to_connected(tmp_path, monkeypatch) -> N
     async def fake_register(self, cfg, *, tag):
         return True  # registered OK
 
-    monkeypatch.setattr(type(adapter), "_extract_enabled_mcp_server_entries", fake_extract)
     monkeypatch.setattr(type(adapter), "_build_mcp_server_config", fake_build)
     monkeypatch.setattr(type(adapter), "_register_mcp_server", fake_register)
 
@@ -157,6 +166,9 @@ async def test_init_promotes_connecting_to_connected(tmp_path, monkeypatch) -> N
         promoted.append((name, state))
 
     with patch(
+        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        return_value=[{"name": "feishu", "transport": "sse", "url": "http://feishu/mcp", "enabled": True}],
+    ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
         side_effect=fake_set_state,
     ), patch(
@@ -175,16 +187,12 @@ async def test_init_connected_stays_connected_no_promote(tmp_path, monkeypatch) 
     (The promote path only fires when state==connecting.)"""
     adapter = _new_adapter()
 
-    def fake_extract(self, _config_base):
-        return [{"name": "baidu", "transport": "sse", "url": "http://baidu/mcp", "enabled": True}]
-
     def fake_build(self, entry):
         return _mk_cfg(str(entry.get("name", "")))
 
     async def fake_register(self, cfg, *, tag):
         return True
 
-    monkeypatch.setattr(type(adapter), "_extract_enabled_mcp_server_entries", fake_extract)
     monkeypatch.setattr(type(adapter), "_build_mcp_server_config", fake_build)
     monkeypatch.setattr(type(adapter), "_register_mcp_server", fake_register)
 
@@ -194,6 +202,9 @@ async def test_init_connected_stays_connected_no_promote(tmp_path, monkeypatch) 
         set_state_calls.append((name, state))
 
     with patch(
+        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        return_value=[{"name": "baidu", "transport": "sse", "url": "http://baidu/mcp", "enabled": True}],
+    ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
         side_effect=fake_set_state,
     ), patch(

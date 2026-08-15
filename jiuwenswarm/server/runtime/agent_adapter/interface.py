@@ -1923,6 +1923,14 @@ class JiuWenSwarm:
                 metadata=request.metadata,
             )
 
+        # Session-level MCP enable: reconcile this session's MCP set to the
+        # request's ``mcp`` list before the agent runs. ``None`` (field absent)
+        # and an empty list both clear the selection; a non-empty list does an
+        # idempotent diff add/remove.
+        await self.reconcile_session_mcp(
+            request.session_id, request.params.get("mcp") if isinstance(request.params, dict) else None
+        )
+
         # cloud memory: before chat hook
         if memory_mode == "cloud":
             mem_ctx = MemoryHookContext(
@@ -2163,6 +2171,14 @@ class JiuWenSwarm:
                 is_complete=True,
             )
             return
+
+        # Session-level MCP enable: reconcile this session's MCP set to the
+        # request's ``mcp`` list before the agent runs. ``None`` (field absent)
+        # and an empty list both clear the selection; a non-empty list does an
+        # idempotent diff add/remove.
+        await self.reconcile_session_mcp(
+            request.session_id, request.params.get("mcp") if isinstance(request.params, dict) else None
+        )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
         # 文）解析 /debug、$member 与 slash，再用同一个 render() 投递，因此
@@ -3049,6 +3065,27 @@ class JiuWenSwarm:
         if action == "remove" or (action == "toggle" and not enabled):
             return bool(await adapter.unregister_mcp_by_name(name))
         return False
+
+    async def reconcile_session_mcp(
+        self, session_id: str | None, needed: list[str] | None
+    ) -> None:
+        """Reconcile this session's MCP set to ``needed`` (idempotent diff).
+
+        Session-level enable driven by chat.send's ``mcp`` field. ``None``
+        (field absent) and an empty list both clear the session's selection
+        (default False); a non-empty list does an idempotent add/remove of the
+        delta. See ``JiuWenSwarmDeepAdapter.reconcile_session_mcp`` for the
+        diff logic.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return
+        reconcile = getattr(adapter, "reconcile_session_mcp", None)
+        if reconcile is None:
+            # Adapter doesn't support session-level MCP (e.g. a stub/mock
+            # adapter) — session-level enable is a no-op for it.
+            return
+        await reconcile(session_id, needed)
 
     def sync_mcp_credentials(self) -> bool:
         """Sync connected MCPs' tokens into os.environ (skill scripts).

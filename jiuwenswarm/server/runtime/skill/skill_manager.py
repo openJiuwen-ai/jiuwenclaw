@@ -4348,10 +4348,10 @@ class SkillManager:
         """重新从 skills_state.json 加载状态。
 
         SkillManager 在 __init__ 时加载一次 _state，之后内存缓存。外部流程
-        （如 MCP disable 走 _set_mcp_enabled 新建 SkillManager 实例写入
-        skill_configs）落盘后，本实例的 _state 仍是旧值——list_disabled_skills
-        看不到新 disabled 的 skill。refresh_skill_rails 调用本方法先重载再算
-        disabled_skills，确保磁盘最新值生效。
+        （如 MCP 连接器经独立 SkillManager 实例写 skill_configs）落盘后，本实例
+        的 _state 仍是旧值——list_disabled_skills 看不到新 disabled 的 skill。
+        refresh_skill_rails 调用本方法先重载再算 disabled_skills，确保磁盘最新值
+        生效。
         """
         self._state = self._load_state()
 

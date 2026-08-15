@@ -2,10 +2,12 @@
 
 """MCP connection state store.
 
-MCP connection/enabled state lives in ``<workspace>/mcp/state.json``.
-connect/disconnect/enable/disable mutate this file; ``get_mcp_servers``
-merges it with config.yaml's hand-written ``mcp.servers`` so upper layers
-(adapter / handlers / registry) read one combined list.
+MCP connection state lives in ``<workspace>/mcp/state.json``.
+connect/disconnect mutate this file; ``get_mcp_servers`` merges it with
+config.yaml's hand-written ``mcp.servers`` so upper layers (adapter /
+handlers / registry) read one combined list. The ``enabled`` flag here is
+the TUI/global-default switch only — the web channel ignores it and loads
+by chat.send's ``mcp`` field instead.
 
 Layout::
 
@@ -22,7 +24,7 @@ Layout::
           "timeout_s": 600,
           "integration_type": "remote-mcp|stdio-mcp|cli",
           "state": "connected|disconnected",
-          "enabled": true,
+          "enabled": false,        # TUI-only default switch; web ignores
           "server_id_scope": "mcp:<name>",
           "skills": ["..."]        # cli/skill-only
         }
@@ -100,7 +102,7 @@ def _load() -> dict[str, Any]:
 
 def _save(state: dict[str, Any]) -> None:
     """Atomically write state.json (no BOM, sorted for diff stability)."""
-    root = _ensure_dir()
+    _ensure_dir()  # ensure workspace mcp/ dir exists before writing
     p = _state_path()
     tmp = p.with_suffix(".tmp")
     try:
@@ -133,10 +135,11 @@ def list_connected_mcps() -> list[dict[str, Any]]:
     it should inject / skills it should see":
 
     * ``connected`` — fully registered, tools available.
-    * ``connecting`` — connect in progress (apply_mcp_change(add) not yet
-      done, or CLI OAuth in flight). The entry was persisted so a restart
-      re-registers it (connecting is treated like connected for the reload/
-      init path), but the frontend must show "connecting" until apply succeeds.
+    * ``connecting`` — connect in progress (CLI OAuth in flight, or the
+      handler hasn't flipped it to connected yet). The entry was persisted so
+      a restart re-reads it (connecting is treated like connected for the
+      reload/init path), but the frontend must show "connecting" until the
+      handler flips it.
 
     ``registered`` (custom MCP freshly created, never connected) and
     ``disconnected`` are excluded — they have no live MCP server and no
@@ -197,6 +200,28 @@ def list_connecting_mcps() -> list[dict[str, Any]]:
     return out
 
 
+def list_tui_enabled_mcps() -> list[dict[str, Any]]:
+    """Live state.json MCPs whose TUI/global-default ``enabled`` flag is True.
+
+    The TUI channel (root adapter) loads the union of config.yaml
+    ``enabled`` and these state.json ``enabled=True`` records — its global
+    default set. Web ignores ``enabled`` (it loads by chat.send's ``mcp``
+    field), so a web-connected MCP with ``enabled=False`` stays out of the
+    TUI set until the user enables it there.
+
+    ``state`` in {connected, connecting} means "live entry to register";
+    ``registered``/``disconnected`` are excluded (no live server). C/D
+    (skill-only / pure-cli) have no MCP host and are filtered out by
+    ``record_to_mcp_entry`` at the call site (they surface via skills, and
+    the root adapter never scans MCP skill dirs).
+    """
+    out: list[dict[str, Any]] = []
+    for rec in list_connected_mcps():
+        if rec.get("enabled") is True:
+            out.append(rec)
+    return out
+
+
 def connected_mcp_skill_dirs() -> list[dict[str, str]]:
     """Derive the MCP skill scan dirs from state.json's connected records.
 
@@ -249,13 +274,21 @@ def upsert_mcp_record(
     entry: dict[str, Any],
     *,
     state: str = "connected",
-    enabled: bool = True,
     integration_type: str | None = None,
     skills: list[str] | None = None,
+    enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Insert or update an MCP record. ``entry`` is the build_config_entry
     result (or a custom-mcp dict); its transport/url/headers/command/args/env
     fields are stored verbatim (placeholders preserved for CredentialStore).
+
+    ``enabled`` is the TUI/global-default switch (default False on first
+    insert): only the TUI channel reads it to decide its loaded set; web
+    ignores it entirely (web loads by chat.send's ``mcp`` field). Pass
+    ``enabled=True`` when the TUI creates an MCP (add = immediately on);
+    leave False (default) for web-connected MCPs so they don't pollute the
+    TUI default set. Pass a non-None value on update to flip it; ``None``
+    leaves the existing value untouched.
     """
     n = str(name or "").strip()
     if not n:
@@ -263,18 +296,24 @@ def upsert_mcp_record(
     with _lock:
         st = _load()
         cons = st.setdefault("mcp", {})
-        record = dict(cons.get(n, {}))  # preserve fields from prior state
+        prior = cons.get(n)
+        record = dict(prior) if isinstance(prior, dict) else {}
+        # First insert defaults enabled=False; later upserts preserve it
+        # unless the caller passes an explicit value.
+        if "enabled" not in record and prior is None:
+            record["enabled"] = False
         # Merge the entry's transport/connection fields (placeholders kept).
         for k in ("transport", "url", "headers", "command", "args", "env",
                   "timeout_s", "server_id_scope"):
             if k in entry:
                 record[k] = entry[k]
         record["state"] = state
-        record["enabled"] = bool(enabled)
         if integration_type is not None:
             record["integration_type"] = integration_type
         if skills is not None:
             record["skills"] = list(skills)
+        if enabled is not None:
+            record["enabled"] = bool(enabled)
         cons[n] = record
         _save(st)
         return dict(record)
@@ -292,22 +331,6 @@ def remove_mcp_record(name: str) -> dict[str, Any] | None:
         if removed is not None:
             _save(st)
         return removed
-
-
-def set_mcp_enabled(name: str, enabled: bool) -> dict[str, Any]:
-    """Flip the enabled flag on an MCP record."""
-    n = str(name or "").strip()
-    if not n:
-        raise ValueError("mcp name is required")
-    with _lock:
-        st = _load()
-        cons = st.get("mcp", {})
-        rec = cons.get(n)
-        if not isinstance(rec, dict):
-            raise KeyError(f"mcp '{n}' not found in state")
-        rec["enabled"] = bool(enabled)
-        _save(st)
-        return dict(rec)
 
 
 def set_mcp_state(name: str, *, state: str) -> None:
@@ -358,8 +381,31 @@ def record_to_mcp_entry(name: str, record: dict[str, Any]) -> dict[str, Any] | N
               "timeout_s", "server_id_scope"):
         if k in record and record[k] is not None:
             entry[k] = record[k]
-    entry["enabled"] = bool(record.get("enabled", True))
+    # enabled is TUI-only; carry it through so TUI's loader can filter on it.
+    # Absent (legacy record) reads as False via .get default at the call site.
+    if "enabled" in record:
+        entry["enabled"] = bool(record["enabled"])
     return entry
+
+
+def set_mcp_enabled(name: str, *, enabled: bool) -> None:
+    """Flip an MCP's TUI/global-default ``enabled`` flag (connect state stays).
+
+    TUI-only: the web channel never reads ``enabled`` (it loads by chat.send's
+    ``mcp`` field). Flipping ``enabled`` off keeps the connection alive (config
+    + credentials stay), it only hides the MCP from the TUI default set.
+    """
+    n = str(name or "").strip()
+    if not n:
+        raise ValueError("mcp name is required")
+    with _lock:
+        st = _load()
+        cons = st.get("mcp", {})
+        rec = cons.get(n)
+        if not isinstance(rec, dict):
+            raise KeyError(f"mcp '{n}' not found in state")
+        rec["enabled"] = bool(enabled)
+        _save(st)
 
 
 __all__ = [
@@ -368,11 +414,12 @@ __all__ = [
     "list_connected_mcps",
     "list_truly_connected_mcps",
     "list_connecting_mcps",
+    "list_tui_enabled_mcps",
     "connected_mcp_skill_dirs",
     "list_registered_mcps",
     "upsert_mcp_record",
     "remove_mcp_record",
-    "set_mcp_enabled",
     "set_mcp_state",
+    "set_mcp_enabled",
     "record_to_mcp_entry",
 ]
