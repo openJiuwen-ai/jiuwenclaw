@@ -59,6 +59,7 @@ import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
 import { formatModeForDisplay, isClientMode, isTeamMode } from "../core/modes.js";
+import { resolveActiveInputRoute } from "../core/steering.js";
 import {
   countWaitingForHuman,
   sessionTurnLabelNumber,
@@ -3687,7 +3688,43 @@ export class AppScreen implements Component, Focusable {
 
     // Team 模式持续对话走 chat.send（interact），不通过 supplement 中断当前 stream。
     if ((snapshot.isProcessing || snapshot.isPaused) && !isTeamMode(snapshot.mode)) {
+      // A busy round splits three ways; see resolveActiveInputRoute for why each
+      // exclusion is there. Only genuinely streaming, text-only input is steered
+      // -- paused rounds and attachments keep the legacy supplement path.
+      const route = resolveActiveInputRoute({
+        isProcessing: snapshot.isProcessing,
+        isPaused: snapshot.isPaused,
+        isTeamMode: isTeamMode(snapshot.mode),
+        hasAttachments: !!attachments?.length,
+      });
       this.beginPendingSubmittedInput(text, snapshot);
+      if (route === "steer") {
+        // Clear the composer before awaiting the ACK: the round trip is visible
+        // to the user, and leaving the text in place invites editing or
+        // resending it meanwhile. beginPendingSubmittedInput above keeps it on
+        // screen until the user entry lands.
+        this.editor.addToHistory(text);
+        this.editor.setText("");
+        const extractedSkills = this.extractSkillsFromContent(content);
+        const steerRequestId = await this.state.steer(content, extractedSkills);
+        if (!steerRequestId) {
+          // steer() has already said why -- a rejection, offline note, or an
+          // unconfirmed frame. Do not add a second message on top of it. Put the
+          // text back so the user decides what to do rather than losing it --
+          // but only into a composer that is still empty, and only while they
+          // are still looking at the session they typed it into. The ACK is a
+          // round trip they can type through, and overwriting newer text to
+          // restore a rejected steer loses more than it saves.
+          this.clearPendingSubmittedInput();
+          if (
+            this.state.getSnapshot().sessionId === snapshot.sessionId &&
+            this.editor.getText().trim() === ""
+          ) {
+            this.editor.setText(text);
+          }
+        }
+        return;
+      }
       const requestId = this.state.supplement(content, attachments);
       if (!requestId) {
         this.clearPendingSubmittedInput();

@@ -60,6 +60,15 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "chat.tool_result",
         "chat.processing_status",
         "chat.interrupt_result",
+        # The steering ACK is deliberately absent: it is an RPC reply, not an
+        # event, so it never passes through this allowlist. Listing it here was
+        # harmless but implied the ACK arrives as an event, which is the
+        # misreading that made both clients hang waiting for a reply that had
+        # been converted into an event frame.
+        #
+        # Applied event: the applied / dropped id lists are structured and must
+        # not be flattened.
+        "chat.steer_applied",
         "chat.evolution_status",
         "chat.error",
         "heartbeat.relay",

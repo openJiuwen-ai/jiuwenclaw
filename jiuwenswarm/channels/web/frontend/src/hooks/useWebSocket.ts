@@ -78,10 +78,20 @@ import {
 } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 import {
+  formatSteerRejection,
+  withDraftRestoredNote,
+} from '../features/steerRejection';
+import { formatSteerQueuedNote } from '../features/steerQueued';
+import {
   stripUploadDocumentBlocks,
   toUploadDocumentHints,
   withUploadDocumentBlock,
 } from '../utils/documentMessage';
+import {
+  countDroppedSteers,
+  listDroppedSteerIds,
+  steerUserBubbleId,
+} from '../features/steerApplied';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -558,6 +568,8 @@ interface UseWebSocketReturn {
   persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   persistDocuments: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<boolean>;
+  /** Inject text into the streaming turn. Resolves false when it arrived too late. */
+  sendSteer: (content: string, sessionId: string) => Promise<boolean>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
   interrupt: (
     sessionId: string,
@@ -589,6 +601,23 @@ interface UseWebSocketReturn {
   refreshGoal: (sessionId: string) => Promise<void>;
   drainTaskQueueIfIdle: (sessionId: string) => void;
   getInflightCount: () => number;
+}
+
+/**
+ * Reply to `chat.steer`.
+ *
+ * `accepted` says the text was queued for the round, not that the model has
+ * consumed it. `disposition` distinguishes the two ways an accept can happen:
+ * `steer_queued` reached the round streaming right now, while
+ * `follow_up_queued` means the round ended mid-flight and the text landed on
+ * the next attempt instead — different outcomes for the user, indistinguishable
+ * from `accepted` alone.
+ */
+interface SteerAck extends Record<string, unknown> {
+  accepted?: boolean;
+  disposition?: 'steer_queued' | 'follow_up_queued' | 'turn_queued' | 'resume_queued' | 'rejected';
+  reason?: string;
+  target?: 'agent' | 'team_leader';
 }
 
 interface PersistMediaResponse {
@@ -803,7 +832,7 @@ function stringifyCompact(value: unknown): string {
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const {
     provider,
     apiKey,
@@ -1361,6 +1390,143 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const refreshGoal = useCallback((sessionId: string) => goalAction(sessionId, 'get'), [goalAction]);
 
   // 发送聊天消息
+  /**
+   * Inject text into the turn that is streaming right now.
+   *
+   * `chat.steer` is a one-shot RPC, so the acknowledgement arrives as the
+   * response — no event subscription and no correlation bookkeeping. It must
+   * not touch processing state, replace a stream, clear selected skills, or
+   * participate in the FIFO drain guards: the turn being steered owns all of
+   * that and keeps owning it.
+   *
+   * The user bubble is added **after** the ACK, not optimistically. There is no
+   * failure flag on Message and no way to remove one, so an optimistic bubble
+   * for a steer that arrived too late would leave the transcript claiming the
+   * user said something the agent never received. Waiting costs one RPC
+   * round-trip and keeps the client's transcript agreeing with the server's
+   * history, which also persists only accepted steers.
+   */
+  const sendSteer = useCallback(
+    async (content: string, sessionId: string): Promise<boolean> => {
+      const trimmed = content.trim();
+      if (!trimmed || !sessionId) return false;
+
+      const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
+      const language = i18n.language?.toLowerCase().startsWith('zh') ? 'zh' : 'en';
+      const restoreDraft = (): boolean => {
+        // Give the text back rather than losing it. The input was cleared
+        // optimistically by the caller.
+        //
+        // Only into an input the user has not touched since. Waiting for the ACK
+        // is a round trip they can type through, and overwriting what they wrote
+        // to put back a rejected steer would destroy newer work to restore older
+        // -- the opposite of not losing text.
+        const store = useChatStore.getState();
+        if ((store.getRuntime(sessionId)?.inputValue ?? '').trim() !== '') return false;
+        store.setInputValue(sessionId, trimmed);
+        // The composer is a contenteditable, not a controlled input: it is only
+        // written from `inputValue` on a session switch or on this event. Without
+        // the dispatch the store holds the text while the box looks empty, the
+        // send button enables with nothing visible, and the first keystroke
+        // recomputes `inputValue` from the empty DOM -- losing the draft for
+        // good. ChatPanel/index.tsx pairs these two calls for the same reason.
+        window.dispatchEvent(
+          new CustomEvent('chat-input-sync', { detail: { sessionId, value: trimmed } }),
+        );
+        return true;
+      };
+
+      const selectedSkills =
+        useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
+      const outgoingQuery = trimmed.replace(/\{\{skill:([^}]+)\}\}/g, '$1');
+
+      const expectedRoundId =
+        useChatStore.getState().getRuntime(sessionId)?.activeRoundRequestId ?? undefined;
+
+      let ack: SteerAck | undefined;
+      try {
+        ack = await request<SteerAck>('chat.steer', {
+          session_id: sessionId,
+          query: outgoingQuery,
+          mode: resolveOutgoingMode(sessionId, currentMode),
+          ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
+          ...(expectedRoundId ? { expected_round_id: expectedRoundId } : {}),
+        });
+      } catch (error) {
+        const restored = restoreDraft();
+        const detail =
+          error instanceof Error && error.message
+            ? error.message
+            : t('network.connectionUnavailable');
+        useChatStore.getState().addMessage(sessionId, {
+          id: `steer-error-${Date.now()}`,
+          role: 'system',
+          content: withDraftRestoredNote(
+            language,
+            t('network.errorPrefix', { message: detail }),
+            restored,
+          ),
+          timestamp: new Date().toISOString(),
+        });
+        return false;
+      }
+
+      if (!ack?.accepted) {
+        // The round ended between composing and sending, or the runtime refused.
+        // Nothing was queued server-side, so nothing is recorded as a user turn.
+        const restored = restoreDraft();
+        const reason = typeof ack?.reason === 'string' ? ack.reason : undefined;
+        useChatStore.getState().addMessage(sessionId, {
+          id: `steer-rejected-${Date.now()}`,
+          role: 'system',
+          content: withDraftRestoredNote(
+            language,
+            formatSteerRejection(language, reason),
+            restored,
+          ),
+          timestamp: new Date().toISOString(),
+        });
+        return false;
+      }
+
+      const ackRequestId =
+        typeof ack.request_id === 'string' && ack.request_id.trim()
+          ? ack.request_id.trim()
+          : undefined;
+      const steerBubbleId = ackRequestId
+        ? steerUserBubbleId(ackRequestId)
+        : `user-steer-${Date.now()}`;
+      useChatStore.getState().addMessage(
+        sessionId,
+        {
+          id: steerBubbleId,
+          role: 'user',
+          content: trimmed,
+          timestamp: new Date().toISOString(),
+          ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
+        },
+        { preserveLiveReasoning: true },
+      );
+      const queuedNote = formatSteerQueuedNote(
+        language,
+        typeof ack.disposition === 'string' ? ack.disposition : undefined,
+      );
+      if (queuedNote) {
+        useChatStore.getState().addMessage(sessionId, {
+          id: `steer-queued-note-${Date.now()}`,
+          role: 'system',
+          content: queuedNote,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      if (selectedSkills.length > 0) {
+        useSessionStore.getState().clearSelectedSkills(sessionId);
+      }
+      return true;
+    },
+    [i18n.language, request, t]
+  );
+
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
@@ -1491,18 +1657,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const activeGoal = useGoalStore.getState().getRuntime(sessionId)?.goal;
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
-        await request('chat.send', {
-          session_id: sessionId,
-          content: outgoingContent,
-          ...(outgoingMediaItems ? { media_items: outgoingMediaItems } : {}),
-          ...(outgoingFiles ? { files: outgoingFiles } : {}),
-          mode: outgoingMode,
-          ...(selectedModel ? { model_name: selectedModel } : {}),
-          ...workContext,
-          skills: selectedSkills,
-          ...(inputMode ? { input_mode: inputMode } : {}),
-          ...resolvePlanEntryPayload(sessionId, outgoingMode),
-        });
+        const roundRequestId = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        useChatStore.getState().setActiveRoundRequestId(sessionId, roundRequestId);
+        await request(
+          'chat.send',
+          {
+            session_id: sessionId,
+            content: outgoingContent,
+            ...(outgoingMediaItems ? { media_items: outgoingMediaItems } : {}),
+            ...(outgoingFiles ? { files: outgoingFiles } : {}),
+            mode: outgoingMode,
+            ...(selectedModel ? { model_name: selectedModel } : {}),
+            ...workContext,
+            skills: selectedSkills,
+            ...(inputMode ? { input_mode: inputMode } : {}),
+            ...resolvePlanEntryPayload(sessionId, outgoingMode),
+          },
+          { requestId: roundRequestId },
+        );
         consumePlanEntryMark(sessionId, outgoingMode);
         return true;
       } catch (error) {
@@ -3342,6 +3514,43 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
         useChatStore.getState().clearCurrentTurnData(sessionId, retractRequestId);
       }),
+      webClient.on('chat.steer_applied', ({ payload }) => {
+        // Reports which steers reached model context. The stream is untouched --
+        // steering never interrupted it -- so there is no processing state to
+        // settle here, which is why this handler only ever appends.
+        //
+        // Silent on the happy path: the user's message is already in the
+        // transcript from the ACK, and repeating "it arrived" for every steer
+        // would be noise. Only a drop is news, and it is news the ACK cannot
+        // carry -- `accepted` means queued, and a rail can still remove the text
+        // before the model sees it. Without this the Web shows a message the
+        // agent never read, with no way to tell.
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        const droppedIds = listDroppedSteerIds(payload);
+        const dropped = countDroppedSteers(payload);
+        if (dropped === 0) return;
+        const store = useChatStore.getState();
+        const runtime = store.getRuntime(sessionId);
+        const dropLang = i18n.language?.toLowerCase().startsWith('zh') ? 'zh' : 'en';
+        const dropMarker =
+          dropLang === 'zh' ? '（未送达模型 — 被规则移除）' : ' (not delivered — a rule removed it)';
+        for (const steerId of droppedIds) {
+          const bubbleId = steerUserBubbleId(steerId);
+          const msg = runtime?.messages.find((m) => m.id === bubbleId);
+          if (msg && typeof msg.content === 'string' && !msg.content.includes(dropMarker)) {
+            store.updateMessage(sessionId, bubbleId, {
+              content: `${msg.content}${dropMarker}`,
+            });
+          }
+        }
+        store.addMessage(sessionId, {
+          id: `steer-dropped-${dropped}-${Date.now()}`,
+          role: 'system',
+          content: t('chat.steerDropped', { count: dropped }),
+          timestamp: new Date().toISOString(),
+        });
+      }),
       webClient.on('chat.interrupt_result', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
@@ -4128,6 +4337,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     persistMedia,
     persistDocuments,
     sendMessage,
+    sendSteer,
     sendStructuredChatContent,
     interrupt,
     pause,

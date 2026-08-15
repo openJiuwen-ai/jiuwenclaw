@@ -890,3 +890,240 @@ def test_is_team_chat_send_recognizes_all_team_modes(mode: str, expected: bool) 
     _is_team_chat_send = getattr(MessageHandler, "_is_team_chat_send")
     msg = _chat_send_message(channel_id="web", session_id="sess", mode=mode)
     assert _is_team_chat_send(msg) is expected
+
+
+# ---------------------------------------------------------------- chat.steer
+
+
+def _chat_steer_message(
+    *,
+    channel_id: str = "web",
+    session_id: str = "sess_steer",
+    mode: str = "agent",
+) -> Message:
+    """The canonical steering request."""
+    return Message(
+        id="req-steer",
+        type="req",
+        channel_id=channel_id,
+        session_id=session_id,
+        params={"mode": mode, "query": "prefer the async client"},
+        timestamp=0.0,
+        ok=True,
+        req_method=ReqMethod.CHAT_STEER,
+        is_stream=False,
+    )
+
+
+def _legacy_steer_message(*, field: str = "input_mode", mode: str = "agent") -> Message:
+    """The legacy form: chat.send carrying input_mode/runtime_mode = steer."""
+    return Message(
+        id="req-legacy-steer",
+        type="req",
+        channel_id="web",
+        session_id="sess_steer",
+        params={"mode": mode, "query": "prefer the async client", field: "steer"},
+        timestamp=0.0,
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        is_stream=True,
+    )
+
+
+def test_both_steer_wire_forms_are_recognised() -> None:
+    """chat.steer and the legacy input_mode/runtime_mode form must converge."""
+    assert MessageHandler._is_steer_message(_chat_steer_message())
+    assert MessageHandler._is_steer_message(_legacy_steer_message(field="input_mode"))
+    assert MessageHandler._is_steer_message(_legacy_steer_message(field="runtime_mode"))
+
+    # Ordinary chat is not steering, and neither is a follow-up.
+    assert not MessageHandler._is_steer_message(_chat_send_message())
+    assert not MessageHandler._is_steer_message(
+        _legacy_steer_message(field="input_mode").__class__(
+            id="req-follow",
+            type="req",
+            channel_id="web",
+            session_id="sess_steer",
+            params={"mode": "agent", "query": "x", "input_mode": "follow_up"},
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            is_stream=True,
+        )
+    )
+
+
+def test_steering_never_cancels_the_active_stream() -> None:
+    """Acceptance: a steer is additive input, never a stream replacement."""
+    should_cancel = MessageHandler._should_cancel_existing_stream_before_chat_send
+
+    assert not should_cancel(_chat_steer_message())
+    assert not should_cancel(_legacy_steer_message(field="input_mode"))
+    assert not should_cancel(_legacy_steer_message(field="runtime_mode"))
+
+    # Control: the guard must not have become a blanket "never cancel". An
+    # ordinary chat.send still replaces the stream, which is the legacy flow.
+    assert should_cancel(_chat_send_message())
+
+
+def test_steer_is_chat_ordered_and_never_runs_in_background() -> None:
+    """Steering must queue with chat, not race it.
+
+    ``_non_stream_rpc_may_run_parallel`` lets short RPCs run concurrently so a
+    slow one cannot block the forward loop. Chat methods are excluded because
+    they have to reach the agent in the order they were enqueued. A steer that
+    ran in background could arrive after a later steer, or overtake the
+    interrupt meant to stop the very round it is steering.
+    """
+    from types import SimpleNamespace
+
+    may_parallel = MessageHandler._non_stream_rpc_may_run_parallel
+
+    assert not may_parallel(SimpleNamespace(method=ReqMethod.CHAT_STEER.value))
+    # The chat methods that were already excluded stay excluded.
+    for method in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_CANCEL, ReqMethod.CHAT_ANSWER):
+        assert not may_parallel(SimpleNamespace(method=method.value))
+    # Control: a genuinely unrelated RPC still runs in parallel, so the
+    # exclusion did not silently become "serialise everything".
+    assert may_parallel(SimpleNamespace(method=ReqMethod.SESSION_LIST.value))
+
+
+def test_steer_is_forwarded_by_both_channels_without_a_local_handler() -> None:
+    """A method absent from both sets is dropped *and* answered METHOD_NOT_FOUND.
+
+    The inbound callback returns False when the method is not in the forward
+    set, so the request never reaches the AgentServer; the channel then finds no
+    local handler and replies with an error. Steering is answered entirely
+    agent-side — the ACK is the RPC reply — so it belongs in both sets, exactly
+    like ``command.goal``.
+    """
+    from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+        _FORWARD_NO_LOCAL_HANDLER_METHODS as WEB_NO_LOCAL,
+        _FORWARD_REQ_METHODS as WEB_FORWARD,
+    )
+    from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
+        CLI_FORWARD_NO_LOCAL_HANDLER_METHODS as TUI_NO_LOCAL,
+        CLI_FORWARD_REQ_METHODS as TUI_FORWARD,
+    )
+
+    for forward, no_local in ((WEB_FORWARD, WEB_NO_LOCAL), (TUI_FORWARD, TUI_NO_LOCAL)):
+        assert "chat.steer" in forward
+        assert "chat.steer" in no_local
+        # command.goal is the shape being copied: forwarded, no local handler.
+        assert "command.goal" in forward and "command.goal" in no_local
+        # chat.send is the contrast: forwarded, but it does have a local handler.
+        assert "chat.send" in forward and "chat.send" not in no_local
+
+
+def test_the_steer_ack_reaches_the_client_as_an_rpc_reply() -> None:
+    """The hop every other steer test stops one short of.
+
+    Both clients ``await`` the ACK as an RPC response correlated by frame id.
+    ``_response_to_message`` converts any unary payload whose ``event_type``
+    parses as an ``EventType`` into a ``type="event"`` frame -- and an event
+    frame carries no reply for the awaited id, so the client times out while the
+    steer has in fact already been queued.
+
+    That is exactly what shipped: the ACK declared
+    ``event_type: "chat.steer_ack"``, ``EventType`` had a matching member, and
+    every unit test on both sides passed because none of them crossed this
+    conversion.
+
+    Two independent facts now prevent it -- the payload carries no
+    ``event_type``, and ``EventType`` has no ``CHAT_STEER_ACK`` member -- and
+    either alone is sufficient. That redundancy is why this test injects a
+    member for the duration: without it, re-adding the payload key would not
+    turn this test red, and the assertion would be guarding the enum deletion
+    while its name promises otherwise. With it, the test fails if *the ACK
+    builders* regress, which is the change someone would plausibly make.
+    """
+    from jiuwenswarm.common.schema.agent import AgentResponse
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+    from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import EventType
+
+    request = AgentRequest(
+        request_id="req-steer-1",
+        channel_id="web",
+        session_id="sess-1",
+        req_method=ReqMethod.CHAT_STEER,
+        params={"query": "prefer the async client"},
+    )
+    acks = (
+        JiuWenSwarmDeepAdapter._steer_ack(
+            request, accepted=True, reason=None, disposition="steer_queued"
+        ),
+        JiuWenSwarm._team_steer_ack(request, accepted=True, reason=None),
+    )
+
+    # Make "chat.steer_ack" parseable for the duration, so the conversion this
+    # test guards against is actually reachable. Restored in the finally.
+    original = dict(EventType._value2member_map_)
+    sentinel = EventType.CHAT_STEER_APPLIED  # any member; only the mapping matters
+    EventType._value2member_map_["chat.steer_ack"] = sentinel
+    try:
+        assert EventType("chat.steer_ack") is sentinel, "the injection must actually work"
+        for ack in acks:
+            msg = MessageHandler._response_to_message(ack, session_id="sess-1")
+            assert msg.type == "res", (
+                f"ACK became a {msg.type} frame; payload declares an event_type: {ack.payload}"
+            )
+            # The fields the clients read must survive the conversion.
+            assert msg.payload["accepted"] is True
+            assert msg.payload["request_id"] == "req-steer-1"
+    finally:
+        EventType._value2member_map_.clear()
+        EventType._value2member_map_.update(original)
+
+    # And the injection really is gone, so no later test inherits it.
+    with pytest.raises(ValueError):
+        EventType("chat.steer_ack")
+
+
+def test_the_applied_event_still_becomes_an_event_frame() -> None:
+    """Control for the test above.
+
+    Without it, "no event_type anywhere in steering" would look like a valid
+    simplification -- but chat.steer_applied is a genuine event riding the
+    steered turn's stream, and stripping its name would leave clients with no
+    subscription to match.
+    """
+    from jiuwenswarm.common.schema.agent import AgentResponse
+    from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
+    from jiuwenswarm.server.utils.stream_utils import steer_applied_payload
+
+    applied = AgentResponse(
+        request_id="req-steer-1",
+        channel_id="web",
+        ok=True,
+        payload=steer_applied_payload({"applied": [{"id": "s1", "text": "x"}], "dropped": []}),
+        metadata=None,
+    )
+    msg = MessageHandler._response_to_message(applied, session_id="sess-1")
+
+    assert msg.type == "event"
+    assert msg.event_type is not None
+    assert msg.event_type.value == "chat.steer_applied"
+
+
+def test_the_applied_event_keeps_its_structured_payload_on_web() -> None:
+    """The applied / dropped id lists must not be flattened before the client."""
+    from jiuwenswarm.gateway.channel_manager.web.web_connect import WebChannel
+
+    assert WebChannel._should_preserve_full_payload("chat.steer_applied")
+
+
+def test_chat_steer_is_not_promoted_to_a_stream() -> None:
+    """Review point 5: the ACK is a one-shot reply, not an ACK-only short stream."""
+    from jiuwenswarm.gateway.app_gateway import _normalize_gateway_message
+
+    normalized = _normalize_gateway_message(_chat_steer_message())
+    assert normalized.is_stream is False
+
+    # chat.send is still promoted, so this asserts a difference rather than a
+    # property that happens to hold for every method.
+    assert _normalize_gateway_message(_chat_send_message()).is_stream is True

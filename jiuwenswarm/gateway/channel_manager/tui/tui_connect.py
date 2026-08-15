@@ -250,6 +250,7 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "command.status",
         "command.goal",
         "chat.send",
+        "chat.steer",
         "chat.interrupt",
         "chat.resume",
         "chat.user_answer",
@@ -354,6 +355,9 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "command.workflows",
         "command.status",
         "command.goal",
+        # Answered entirely by the AgentServer; the ACK is the RPC reply, so no
+        # local handler exists or is wanted.
+        "chat.steer",
         "skills.marketplace.list",
         "skills.list",
         "skills.installed",

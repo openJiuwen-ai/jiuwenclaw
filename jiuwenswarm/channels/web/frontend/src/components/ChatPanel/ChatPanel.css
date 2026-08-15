@@ -2909,6 +2909,18 @@ overflow: hidden;
   min-width: 0;
 }
 
+.chat-input-steer-hint {
+  display: inline-block;
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--color-text-tertiary);
+  user-select: none;
+}
+
 .chat-input-btn {
   display: flex;
   align-items: center;

@@ -1298,6 +1298,78 @@ class TeamManager:
             logger.error("[TeamManager] interact failed: session_id=%s, error=%s", session_id, exc)
             return False, "exception"
 
+    async def steer_leader(
+        self, session_id: str, content: str, *, steer_id: str | None = None
+    ) -> tuple[bool, str | None]:
+        """Steer the leader's in-flight round. Session-scoped sibling of interact.
+
+        Kept separate from :meth:`interact` on purpose, and the difference is
+        not cosmetic:
+
+        - ``interact`` starts a leader round when the team is idle. A steer must
+          report that there was nothing to steer instead, so a stale one never
+          becomes work nobody asked for.
+        - ``interact`` restores a paused runtime before delivering. Steering does
+          not: waking a team to hand it a correction for a round that already
+          ended is the same silent-promotion problem in another shape.
+        - Member-addressed and broadcast messages keep using ``interact``.
+          Steering only ever reaches the leader.
+
+        ``steer_id`` is the client's request id. It rides through to
+        ``chat.steer_applied`` so a client can tell which of its steers a rail
+        dropped; without it that event's ``dropped`` list is always empty and a
+        removed steer is reported as applied.
+
+        Returns ``(ok, reason)`` like ``interact``, so the caller reports one
+        shape. Reasons come from the runtime: ``not_active``,
+        ``no_active_round``, ``gate_closed``, ``missing_target``,
+        ``unsupported_runtime``.
+        """
+        try:
+            team_name = self.get_active_team_name(session_id)
+            if not team_name:
+                logger.info(
+                    "[TeamManager] steer ignored for non-active team session: session_id=%s",
+                    session_id,
+                )
+                return False, "not_active"
+
+            result = await Runner.steer_agent_team(
+                content,
+                team_name=team_name,
+                session_id=session_id,
+                steer_id=steer_id,
+            )
+            # `not result` reads DeliverResult.__bool__, which returns `ok`. The
+            # coupling is invisible here, so it is asserted directly in
+            # tests/unit_tests/agentserver/test_team_manager_steer.py -- a result
+            # type with a truthy failure would report every rejection as success.
+            if not result:
+                reason = getattr(result, "reason", None) or "runner_failed"
+                logger.info(
+                    "[TeamManager] steer rejected by runtime: session_id=%s team=%s reason=%s",
+                    session_id,
+                    team_name,
+                    reason,
+                )
+                return False, reason
+            return True, None
+        except AttributeError as exc:
+            # Missing Runner.steer_agent_team (or equivalent) is a permanent
+            # capability gap, not a transient fault. Clients already map
+            # unsupported_runtime to "this member cannot take mid-round messages".
+            logger.error(
+                "[TeamManager] steer unsupported_runtime: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return False, "unsupported_runtime"
+        except Exception as exc:  # noqa: BLE001 - mirrors interact's contract
+            logger.error(
+                "[TeamManager] steer failed: session_id=%s error=%s", session_id, exc
+            )
+            return False, "exception"
+
     # TeamSkillEvolutionRail accessors.
 
     def get_team_skill_rail(self, session_id: str) -> Any | None:

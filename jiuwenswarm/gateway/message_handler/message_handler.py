@@ -624,11 +624,53 @@ class MessageHandler(ABC):
         # 主动推荐消息不取消现有流式任务，避免干扰用户当前对话
         if isinstance(msg.params, dict) and msg.params.get("source") == "proactive_recommendation":
             return False
+        # Steering never cancels: it is additive input to a round that is still
+        # running. ``chat.steer`` already fails ``_is_chat_send_message``, but the
+        # test is stated explicitly so the guarantee survives a refactor of that
+        # helper, and so the legacy ``input_mode="steer"`` form is covered by the
+        # same named predicate rather than only by the broader
+        # ``_is_interaction_managed_chat_send``.
         return (
             cls._is_chat_send_message(msg)
+            and not cls._is_steer_message(msg)
             and not cls._is_team_chat_send(msg)
             and not cls._is_interrupt_resume_chat_send(msg)
             and not cls._is_interaction_managed_chat_send(msg)
+        )
+
+    @staticmethod
+    def _is_steer_message(msg: "Message") -> bool:
+        """Whether this request is steering, in either of its two wire forms.
+
+        ``chat.steer`` is the canonical form. ``chat.send`` carrying
+        ``input_mode``/``runtime_mode`` of ``steer`` is the older one, and it is
+        used today: while a Goal is ACTIVE the Web sends every ordinary input
+        that way so the text lands as a supplement on the running Goal.
+
+        The two deliberately do **not** converge on one handler. They share the
+        steering dispatch mode, but the legacy form must keep claiming the output
+        lease -- that ``attach_output`` is how the Goal supplement becomes the
+        reader when the session is idle, and removing it leaves an ACTIVE Goal's
+        output with no consumer. Only ``chat.steer`` reaches ``handle_steer`` and
+        receives ``chat.steer_ack``; the legacy form keeps the streaming path
+        until the Web is migrated.
+
+        What this predicate *is* for: stream-ownership decisions, which apply
+        equally to both forms. Neither may cancel or replace the active stream.
+        """
+        # Compared as literals, matching ``_is_chat_send_message``: this module
+        # imports ReqMethod only inside the functions that construct requests,
+        # never at module scope.
+        method = getattr(msg, "req_method", None)
+        value = getattr(method, "value", method)
+        if value == "chat.steer" or str(value) == "ReqMethod.CHAT_STEER":
+            return True
+        params = msg.params if isinstance(msg.params, dict) else {}
+        input_mode = str(
+            params.get("input_mode") or params.get("runtime_mode") or ""
+        ).strip().lower()
+        return (
+            MessageHandler._is_chat_send_message(msg) and input_mode == "steer"
         )
 
     @staticmethod
@@ -3153,6 +3195,11 @@ class MessageHandler(ABC):
             ReqMethod.CHAT_RESUME.value,
             ReqMethod.CHAT_CANCEL.value,
             ReqMethod.CHAT_ANSWER.value,
+            # Steering is chat-ordered even though it is a short RPC. Run in
+            # background and two steers can reach the agent out of the order the
+            # user typed them, or a steer can overtake the interrupt meant to
+            # stop the very round it is steering.
+            ReqMethod.CHAT_STEER.value,
         )
 
     @staticmethod

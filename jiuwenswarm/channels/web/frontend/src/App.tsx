@@ -671,6 +671,7 @@ function AppContent() {
     clearGoal,
     refreshGoal,
     drainTaskQueueIfIdle,
+    sendSteer,
   } = useWebSocket({
     activeSessionId: sessionId,
     onConnect: () => console.log('Connected'),
@@ -2441,6 +2442,7 @@ function AppContent() {
                       onResumeGoal={resumeGoal}
                       onClearGoal={handleClearGoal}
                       onDrainTaskQueueIfIdle={drainTaskQueueIfIdle}
+                      onSteer={sendSteer}
                     />
                   </div>
                 </div>
