@@ -2749,14 +2749,21 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 timeout = int(item.get("timeout", 1800))
             except (ValueError, TypeError):
                 timeout = 1800
-            verify_ssl = bool(item.get("verify_ssl", True))
+            verify_ssl = bool(item.get("verify_ssl", False))
             # max_tokens 是输入侧上下文窗口（-> ContextEngineConfig，不发厂商），
             # 由 build_model_from_entry 挪到 Model 普通属性 _agentos_ctx_window。
-            try:
-                max_tokens_raw = item.get("max_tokens")
-                max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
-            except (ValueError, TypeError):
+            # 静默吞成 None 会让前端误判"未配"实为"配错"，故显式拒绝（temperature/
+            # timeout 仍与 _build_models_defaults_from_frontend 一致保持静默回退）。
+            max_tokens_raw = item.get("max_tokens")
+            if max_tokens_raw is None:
                 max_tokens = None
+            else:
+                try:
+                    max_tokens = int(max_tokens_raw)
+                except (ValueError, TypeError):
+                    raise _ConfigBadRequest(
+                        f"agentos[{idx}].max_tokens must be an integer, got: {max_tokens_raw!r}"
+                    )
             parsed.append({
                 "model_name": model_name,
                 "api_base": api_base,
@@ -3015,6 +3022,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
+                    # AgentOS 条目回显原始 max_tokens（输入侧上下文窗口）。
+                    # defaults 不写 max_tokens、无 _source 标记，故该字段仅出现在
+                    # agentos 条目上。前端表单据此回显用户输入而非解析值
+                    # （context_window_tokens 走内置表，与运行时实际生效值不同路径，
+                    # 若按解析值回写会破坏用户配置的覆盖）。
+                    "max_tokens": mco.get("max_tokens") if mco.get("_source") == "agentos" else None,
                 })
                 # active_model 为列表首位的模型（主对话默认）
             active_model = result[0]["model_name"] if result else ""

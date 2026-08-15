@@ -2503,3 +2503,78 @@ async def test_agentos_replace_all_rejects_invalid_provider(monkeypatch):
     assert channel.responses[-1]["ok"] is False
     assert channel.responses[-1]["code"] == "BAD_REQUEST"
     assert "model_provider" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_verify_ssl_defaults_false(monkeypatch):
+    """verify_ssl 省略时默认 False，与 _build_models_defaults_from_frontend 一致。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-ssl",
+        {"agentos": [{"model_name": "M", "api_base": "http://x", "api_key": "k", "model_provider": "OpenAI"}]},
+        "sess",
+    )
+    assert channel.responses[-1]["ok"] is True
+    assert persisted[-1][0]["model_client_config"]["verify_ssl"] is False
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_rejects_non_integer_max_tokens(monkeypatch):
+    """max_tokens 非整数 = 400 BAD_REQUEST（不静默吞成 None）。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-badmt",
+        {"agentos": [{"model_name": "M", "api_key": "k", "model_provider": "OpenAI", "max_tokens": "abc"}]},
+        "sess",
+    )
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "max_tokens" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_models_list_echoes_agentos_max_tokens_not_defaults(monkeypatch):
+    """Finding 2 回归：models.list 对 agentos 条目回显原始 max_tokens，defaults 不带该字段。"""
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    # get_default_models 返回：1 条 default（无 _source）+ 1 条 agentos（带 _source/max_tokens）
+    fake_models = [
+        {
+            "model_client_config": {"model_name": "Def", "api_base": "http://d", "api_key": "dk", "client_provider": "OpenAI"},
+            "model_config_obj": {"temperature": 0.95},
+            "is_default": True,
+        },
+        {
+            "model_client_config": {"model_name": "Agt", "api_base": "http://a", "api_key": "ak", "client_provider": "OpenAI"},
+            "model_config_obj": {"temperature": 0.95, "_source": "agentos", "max_tokens": 50000},
+            "is_default": False,
+        },
+    ]
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
+        lambda: {"react": {"context_engine_config": {}}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_default_models",
+        lambda *a, **k: fake_models,
+    )
+
+    await channel.methods["models.list"](object(), "req-list", {}, "sess")
+    assert channel.responses[-1]["ok"] is True
+    entries = channel.responses[-1]["payload"]["models"]
+    default_entry = next(e for e in entries if e["model_name"] == "Def")
+    agentos_entry = next(e for e in entries if e["model_name"] == "Agt")
+
+    # agentos 条目回显用户配置的原始 max_tokens（50000），而非解析值
+    assert agentos_entry["max_tokens"] == 50000
+    # defaults 条目不带 max_tokens（None），不凭空造字段
+    assert "max_tokens" not in default_entry or default_entry["max_tokens"] is None
