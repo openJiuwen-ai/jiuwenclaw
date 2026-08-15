@@ -1746,7 +1746,14 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+        from jiuwenclaw.agentserver.skill_whitelist import skill_dir_ready
+
+        skills_dir = Path(self._workspace_dir) / "skills"
+        self._enabled_skills = [
+            str(name).strip()
+            for name in names
+            if str(name).strip() and skill_dir_ready(skills_dir, str(name).strip())
+        ]
 
         extra_skill_dir: str | None = None
         try:

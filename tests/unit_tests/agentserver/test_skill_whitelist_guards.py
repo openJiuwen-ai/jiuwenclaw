@@ -272,6 +272,160 @@ def test_db_same_version_with_disk_missing_redownloads(
     assert "cached-skill" in db.rows
 
 
+def test_prebuilt_download_failure_purges_ghost_db_without_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """库有盘无且下载失败时清掉预制幽灵行，不进入启用集。"""
+    from jiuwenclaw.agentserver.installed_skill import SOURCE_PREBUILT
+    from jiuwenclaw.agentserver.skill_whitelist import (
+        AgentSkillWhitelistConfig,
+        SkillWhitelistItem,
+        SkillWhitelistSynchronizer,
+    )
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    skills_dir.mkdir(parents=True)
+    source = "https://example.com/expired.zip"
+    version = "1.0.0"
+    ghost_name = "investment-due-diligence-team"
+    config = AgentSkillWhitelistConfig(
+        agent_id="bot",
+        service_id="svc",
+        skills=[SkillWhitelistItem(id="touzi", version=version, source=source)],
+    )
+    db = _FakeSkillDb()
+    db.rows[ghost_name] = {
+        "skill_name": ghost_name,
+        "source_type": SOURCE_PREBUILT,
+        "skill_source": source,
+        "skill_version": version,
+        "skill_id": "touzi",
+    }
+    _patch_skill_db(monkeypatch, db)
+
+    def _fail_install(_url: str, _force: bool, _mirror: None) -> dict:
+        return {"ok": False, "detail": "403 Client Error: Forbidden"}
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        lambda **kwargs: type(
+            "FakeSkillManager",
+            (),
+            {"install_skill_sync": staticmethod(_fail_install)},
+        )(),
+    )
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(workspace, service_id="svc", agent_id="bot").sync(config)
+    )
+
+    assert ghost_name not in db.rows
+    assert ghost_name not in result.enabled_skill_dirs
+    assert result.ok is False
+
+
+def test_prebuilt_download_failure_keeps_db_when_disk_still_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """版本 bump 下载失败但旧目录仍在时保留预制行。"""
+    from jiuwenclaw.agentserver.installed_skill import SOURCE_PREBUILT
+    from jiuwenclaw.agentserver.skill_whitelist import (
+        AgentSkillWhitelistConfig,
+        SkillWhitelistItem,
+        SkillWhitelistSynchronizer,
+    )
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    skill_dir = skills_dir / "cached-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: cached-skill\n---\n", encoding="utf-8")
+
+    source = "https://example.com/new.zip"
+    config = AgentSkillWhitelistConfig(
+        agent_id="bot",
+        service_id="svc",
+        skills=[SkillWhitelistItem(id="id-a", version="2.0.0", source=source)],
+    )
+    db = _FakeSkillDb()
+    db.rows["cached-skill"] = {
+        "skill_name": "cached-skill",
+        "source_type": SOURCE_PREBUILT,
+        "skill_source": source,
+        "skill_version": "1.0.0",
+        "skill_id": "id-a",
+    }
+    _patch_skill_db(monkeypatch, db)
+
+    def _fail_install(_url: str, _force: bool, _mirror: None) -> dict:
+        return {"ok": False, "detail": "network timeout"}
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        lambda **kwargs: type(
+            "FakeSkillManager",
+            (),
+            {"install_skill_sync": staticmethod(_fail_install)},
+        )(),
+    )
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(workspace, service_id="svc", agent_id="bot").sync(config)
+    )
+
+    assert "cached-skill" in db.rows
+    assert "cached-skill" in result.enabled_skill_dirs
+    assert result.ok is False
+
+
+def test_user_skill_db_without_disk_removed_on_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用户自装库有盘无：sync 时清 DB 幽灵行，仅保留磁盘就绪 skill。"""
+    from jiuwenclaw.agentserver.installed_skill import SOURCE_USER
+    from jiuwenclaw.agentserver.skill_whitelist import (
+        AgentSkillWhitelistConfig,
+        SkillWhitelistSynchronizer,
+    )
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    live_dir = skills_dir / "live-skill"
+    live_dir.mkdir(parents=True)
+    (live_dir / "SKILL.md").write_text("---\nname: live-skill\n---\n", encoding="utf-8")
+
+    db = _FakeSkillDb()
+    db.rows["ghost-skill"] = {
+        "skill_name": "ghost-skill",
+        "source_type": SOURCE_USER,
+        "skill_source": "web:https://example.com/ghost.zip",
+        "skill_version": "0.1",
+        "skill_id": None,
+    }
+    db.rows["live-skill"] = {
+        "skill_name": "live-skill",
+        "source_type": SOURCE_USER,
+        "skill_source": "web:https://example.com/live.zip",
+        "skill_version": "0.1",
+        "skill_id": None,
+    }
+    _patch_skill_db(monkeypatch, db)
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(
+            workspace,
+            service_id="svc",
+            agent_id="bot",
+        ).sync(AgentSkillWhitelistConfig(agent_id="bot", service_id="svc"))
+    )
+
+    assert "ghost-skill" not in db.rows
+    assert "live-skill" in db.rows
+    assert result.enabled_skill_dirs == ["live-skill"]
+    assert "removed_user:ghost-skill" in result.succeeded
+
+
 def test_multi_tenant_skill_dirs_requires_workspace_key_for_tenant_path() -> None:
     with pytest.raises(ValueError, match="workspace_key required"):
         get_tenant_agent_skills_dirs(workspace_key=None)
