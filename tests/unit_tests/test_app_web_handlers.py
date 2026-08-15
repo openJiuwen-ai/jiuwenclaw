@@ -2287,3 +2287,219 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     assert len(saved["channels"]["feishu"]["apps"]) == 1
     assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
     assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"
+
+
+# ============================================================
+# agentos.replace_all RPC（AgentOS 备份模型整体替换，对标 models.replace_all）
+# ============================================================
+
+def _patch_agentos_deps(monkeypatch, persisted: list):
+    """复刻 test_models_replace_all 的 monkeypatch：config 读取/写回/crypto 都替换。"""
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"agentos": []}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_agentos_in_config",
+        lambda agentos_list: persisted.append(list(agentos_list)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: type("Crypto", (), {"encrypt": lambda self, value: value})()},
+        )(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_applies_scoped_reload_before_responding(monkeypatch):
+    """对标 test_models_replace_all：写入触发 model reload scope，响应在 reload 后。"""
+    channel = FakeWebChannel()
+    reload_started = asyncio.Event()
+    release_reload = asyncio.Event()
+    persisted: list[list[dict]] = []
+    reload_options_seen: list[dict] = []
+
+    _patch_agentos_deps(monkeypatch, persisted)
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        reload_options_seen.append(dict(reload_options))
+        reload_started.set()
+        await release_reload.wait()
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, on_config_saved=on_config_saved)
+    )
+
+    task = asyncio.create_task(channel.methods["agentos.replace_all"](
+        object(),
+        "req-agentos",
+        {
+            "agentos": [
+                {
+                    "model_name": "Qwen3.7-Plus",
+                    "api_base": "http://example.com/v1",
+                    "api_key": "secret",
+                    "model_provider": "OpenAI",
+                    "max_tokens": 131072,
+                    "temperature": 0.95,
+                }
+            ]
+        },
+        "sess-1",
+    ))
+
+    await asyncio.wait_for(reload_started.wait(), timeout=1)
+    assert channel.responses == []  # reload 未完成前不响应
+
+    release_reload.set()
+    await task
+
+    assert persisted  # update_agentos_in_config 被调
+    assert reload_options_seen[-1]["reload_scopes"] == ["model"]  # models.agentos 命中 model scope
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["count"] == 1
+    assert channel.responses[-1]["payload"]["applied_without_restart"] is True
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_writes_back_canonical_structure(monkeypatch):
+    """写回的条目结构 = model_client_config + model_config_obj(max_tokens 在输入侧)。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-1",
+        {"agentos": [{
+            "model_name": "M", "api_base": "http://x", "api_key": "sk-y",
+            "model_provider": "OpenAI", "max_tokens": 65536, "temperature": 0.7,
+            "timeout": 900, "verify_ssl": False,
+        }]},
+        "sess",
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    entry = persisted[-1][0]
+    mcc = entry["model_client_config"]
+    mco = entry["model_config_obj"]
+    assert mcc["model_name"] == "M"
+    assert mcc["api_base"] == "http://x"
+    assert mcc["api_key"] == "sk-y"  # crypto encrypt 是恒等（mock）
+    assert mcc["client_provider"] == "OpenAI"
+    assert mcc["timeout"] == 900
+    assert mcc["verify_ssl"] is False
+    # max_tokens 进 model_config_obj（输入侧上下文窗口），不是 mcc
+    assert mco["max_tokens"] == 65536
+    assert mco["temperature"] == 0.7
+    # 无 is_default / alias 字段（agentos 始终 is_default=False、无别名）
+    assert "is_default" not in entry
+    assert "alias" not in entry
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_allows_empty_list(monkeypatch):
+    """空列表 = 清空 agentos，合法（与 defaults 必须非空不同）。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-empty", {"agentos": []}, "sess",
+    )
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["count"] == 0
+    assert persisted[-1] == []
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_allows_missing_agentos_key(monkeypatch):
+    """params 不含 agentos 键 = 视为空列表（清空），不报错。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-missing", {}, "sess",
+    )
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_rejects_empty_model_name(monkeypatch):
+    """model_name 为空 = 400 BAD_REQUEST。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-bad",
+        {"agentos": [{"model_name": "", "api_key": "k", "model_provider": "OpenAI"}]},
+        "sess",
+    )
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "model_name" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_rejects_duplicate_triple(monkeypatch):
+    """(model_name, api_base, api_key) 三元组重复 = 400 BAD_REQUEST。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    entry = {"model_name": "dup", "api_base": "http://x", "api_key": "sk-1", "model_provider": "OpenAI"}
+    await channel.methods["agentos.replace_all"](
+        object(), "req-dup", {"agentos": [entry, dict(entry)]}, "sess",
+    )
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "duplicates" in channel.responses[-1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_allows_same_name_different_triple(monkeypatch):
+    """同名但 api_base/api_key 不同 = 不同三元组，合法（可共存）。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-samename",
+        {"agentos": [
+            {"model_name": "dup", "api_base": "http://a", "api_key": "sk-1", "model_provider": "OpenAI"},
+            {"model_name": "dup", "api_base": "http://b", "api_key": "sk-2", "model_provider": "OpenAI"},
+        ]},
+        "sess",
+    )
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_agentos_replace_all_rejects_invalid_provider(monkeypatch):
+    """model_provider 非 ProviderType = 400 BAD_REQUEST。"""
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+    _patch_agentos_deps(monkeypatch, persisted)
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["agentos.replace_all"](
+        object(), "req-prov",
+        {"agentos": [{"model_name": "M", "api_key": "k", "model_provider": "NoSuchProvider"}]},
+        "sess",
+    )
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "BAD_REQUEST"
+    assert "model_provider" in channel.responses[-1]["error"]

@@ -53,6 +53,7 @@ from jiuwenswarm.common.config import (
     get_config_raw,
     get_default_models,
     replace_teams_in_config,
+    update_agentos_in_config,
     update_default_models_in_config,
     update_heartbeat_in_config,
     update_channel_in_config,
@@ -2700,6 +2701,96 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         from jiuwenswarm.common.config import _infer_is_default
         return _infer_is_default(new_models)
 
+    def _build_agentos_from_frontend(raw_agentos: Any) -> list[dict[str, Any]]:
+        """把前端提交的 agentos 列表解析、校验、标准化为可直接写回 YAML 的条目。
+
+        与 ``_build_models_defaults_from_frontend`` 对称，差异：
+        - 允许空列表（agentos 为可选备份，清空合法；defaults 必须非空）。
+        - 不走 ``_merge_models_for_replace_all`` 占位符保留逻辑：前端传什么就写什么，
+          ``${ENV}`` 占位符会被前端真值覆盖（最小改动；占位符保留后续再加）。
+        - 强制 ``(model_name, api_base, api_key)`` 三元组唯一（与 config.yaml 填写约束一致）。
+        - 无 ``is_default`` / ``alias`` 字段（agentos 始终 ``is_default=False``、无别名）。
+        """
+        if raw_agentos is None:
+            return []
+        if not isinstance(raw_agentos, list):
+            raise _ConfigBadRequest("agentos must be a list")
+
+        available_model_providers = [p.value for p in ProviderType]
+        parsed: list[dict] = []
+        triples_seen: set[tuple[str, str, str]] = set()
+        for idx, item in enumerate(raw_agentos):
+            if not isinstance(item, dict):
+                raise _ConfigBadRequest(f"agentos[{idx}] must be object")
+            model_name = str(item.get("model_name") or "").strip()
+            if not model_name:
+                raise _ConfigBadRequest(f"agentos[{idx}].model_name is required")
+            api_key = str(item.get("api_key") or "").strip()
+            api_base = str(item.get("api_base") or "").strip()
+            model_provider = _normalize_provider_value(str(item.get("model_provider") or ""))
+            if model_provider and model_provider not in available_model_providers:
+                raise _ConfigBadRequest(
+                    f"agentos[{idx}].model_provider must be one of: {available_model_providers}"
+                )
+            if not api_key and not is_openai_account_provider(model_provider):
+                raise _ConfigBadRequest(f"agentos[{idx}].api_key is required")
+            # 三元组唯一校验（与 config.yaml 填写约束一致：不出现重复三元组）
+            triple = (model_name, api_base, api_key)
+            if triple in triples_seen:
+                raise _ConfigBadRequest(
+                    f"agentos[{idx}] duplicates (model_name, api_base, api_key) triple of an earlier entry"
+                )
+            triples_seen.add(triple)
+            try:
+                temperature = float(item.get("temperature", 0.95))
+            except (ValueError, TypeError):
+                temperature = 0.95
+            try:
+                timeout = int(item.get("timeout", 1800))
+            except (ValueError, TypeError):
+                timeout = 1800
+            verify_ssl = bool(item.get("verify_ssl", True))
+            # max_tokens 是输入侧上下文窗口（-> ContextEngineConfig，不发厂商），
+            # 由 build_model_from_entry 挪到 Model 普通属性 _agentos_ctx_window。
+            try:
+                max_tokens_raw = item.get("max_tokens")
+                max_tokens = int(max_tokens_raw) if max_tokens_raw is not None else None
+            except (ValueError, TypeError):
+                max_tokens = None
+            parsed.append({
+                "model_name": model_name,
+                "api_base": api_base,
+                "api_key": api_key,
+                "model_provider": model_provider,
+                "temperature": temperature,
+                "timeout": timeout,
+                "verify_ssl": verify_ssl,
+                "max_tokens": max_tokens,
+            })
+
+        from jiuwenswarm.extensions.registry import ExtensionRegistry
+        crypto = ExtensionRegistry.get_instance().get_crypto_provider()
+
+        out: list[dict[str, Any]] = []
+        for item in parsed:
+            mco: dict[str, Any] = {"temperature": item["temperature"]}
+            if item["max_tokens"] is not None:
+                mco["max_tokens"] = item["max_tokens"]
+            out.append({
+                "model_client_config": {
+                    "api_base": item["api_base"],
+                    "api_key": (
+                        crypto.encrypt(item["api_key"]) if (item["api_key"] and crypto) else item["api_key"]
+                    ),
+                    "model_name": item["model_name"],
+                    "client_provider": item["model_provider"],
+                    "timeout": item["timeout"],
+                    "verify_ssl": item["verify_ssl"],
+                },
+                "model_config_obj": mco,
+            })
+        return out
+
     async def _config_set(ws, req_id, params, session_id):
         """根据前端消息内容更新配置（支持 .env 与 config.yaml 中的键），并写回对应文件。"""
         if not isinstance(params, dict):
@@ -2970,6 +3061,35 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[models.replace_all] %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+
+    async def _agentos_replace_all(ws, req_id, params, session_id):
+        """原子地用提交的列表整体替换 models.agentos（AgentOS 备份模型）。
+
+        与 ``_models_replace_all`` 对称，差异：
+        - 允许空列表（传 ``{"agentos": []}`` 即清空所有备份模型；defaults 必须非空）。
+        - 无 ``origin_index`` / 占位符保留：前端传什么就写什么（api_key 加密后写回）。
+        - 写回触发 ``["models.agentos"]`` reload scope，命中 ``models.`` 前缀 → model reload。
+        """
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        try:
+            new_agentos = _build_agentos_from_frontend(params.get("agentos"))
+            update_agentos_in_config(new_agentos)
+
+            applied_without_restart = await _apply_config_change_set(
+                _ConfigChangeSet({}, ["models.agentos"], force=True)
+            )
+
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "count": len(new_agentos),
+                "applied_without_restart": applied_without_restart,
+            })
+        except _ConfigBadRequest as exc:
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[agentos.replace_all] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
     async def _config_save_all(ws, req_id, params, session_id):
@@ -6659,6 +6779,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)
+    channel.register_method("agentos.replace_all", _agentos_replace_all)
     channel.register_method("channel.get", _channel_get)
     channel.register_method("openai_account.auth.status", _openai_account_auth_status)
     channel.register_method("openai_account.auth.start_login", _openai_account_auth_start_login)

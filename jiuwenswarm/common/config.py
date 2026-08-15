@@ -1230,6 +1230,21 @@ def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
     update_config(_mutate)
 
 
+def update_agentos_in_config(agentos_list: list[dict[str, Any]]) -> None:
+    """整体替换 ``models.agentos`` 列表（AgentOS 备份模型配置）。
+
+    与 :func:`update_default_models_in_config` 对称，走 ``update_config`` 跨进程锁 +
+    原子写 + 保留注释。差异：agentos 无 alias、无旧单块 ``default`` 迁移清理；
+    且允许空列表（agentos 为可选备份，清空合法）。
+    """
+    def _mutate(data):
+        if "models" not in data:
+            data["models"] = {}
+        data["models"]["agentos"] = agentos_list
+        return data
+    update_config(_mutate)
+
+
 def update_default_model_provider_in_config(provider: str) -> bool:
     """Update only the default model provider in config.yaml.
 
