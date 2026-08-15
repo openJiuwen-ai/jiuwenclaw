@@ -369,6 +369,53 @@ async def list_installed_skills_for_gateway(
     return [row_public_view(r) for r in rows]
 
 
+def _default_logical_invoke_ids(
+    group_id: str,
+    bot_id: str,
+    user_id: str,
+) -> tuple[str, str]:
+    """企业策略未命中时的默认逻辑 tenant 键（与 Runtime ``_default_invoke_ids`` 同源）。"""
+    g = str(group_id or "").strip()
+    b = str(bot_id or "").strip()
+    u = str(user_id or "").strip()
+    if not g or not b or not u:
+        return "default_service_id", "default_agent_id"
+    try:
+        from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
+            _default_invoke_ids,
+        )
+
+        return _default_invoke_ids(g, b, u)
+    except Exception:
+        return f"{g}{b}", f"{g}{b}{u}"
+
+
+def _md5_logical_tenant_ids(service_id: str, agent_id: str) -> tuple[str, str]:
+    """逻辑 tenant 键 → MD5 最终 ID（与 RuntimeManagement ``_SessionRequest`` 一致）。"""
+    svc = str(service_id or "").strip()
+    ag = str(agent_id or "").strip()
+    if _HEX32_RE.fullmatch(svc) and _HEX32_RE.fullmatch(ag):
+        return svc, ag
+    return (
+        hashlib.md5(svc.encode("utf-8")).hexdigest(),
+        hashlib.md5(ag.encode("utf-8")).hexdigest(),
+    )
+
+
+def _should_load_enterprise_tenant_ids(
+    *,
+    group_id: str,
+    bot_id: str,
+    user_id: str,
+    service_id: str,
+    agent_id: str,
+) -> bool:
+    """路由三元组完整，且尚未具备可直接使用的最终 hex tenant 键。"""
+    if not group_id or not bot_id or not user_id:
+        return False
+    return not service_id or not agent_id
+
+
 def resolve_final_tenant_ids(
     *,
     group_id: str | None = None,
@@ -377,7 +424,7 @@ def resolve_final_tenant_ids(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> tuple[str, str]:
-    """逻辑 ID → MD5 最终 ID（与 RuntimeManagement ``_SessionRequest`` 一致）。
+    """逻辑 ID → MD5 最终 ID（仅默认拼接；企业策略请用 ``resolve_final_tenant_ids_async``）。
 
     若 ``service_id`` / ``agent_id`` 均已是 32 位 hex 最终 ID，则原样返回（§7）。
     """
@@ -390,24 +437,73 @@ def resolve_final_tenant_ids(
         return svc, ag
     if not svc or not ag:
         if g and b and u:
-            try:
-                from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
-                    _default_invoke_ids,
-                )
-
-                svc, ag = _default_invoke_ids(g, b, u)
-            except Exception:
-                routed = b
-                svc = svc or f"{g}{routed}"
-                ag = ag or f"{g}{routed}{u}"
+            default_svc, default_ag = _default_logical_invoke_ids(g, b, u)
+            svc = svc or default_svc
+            ag = ag or default_ag
         else:
             svc = svc or "default_service_id"
             ag = ag or "default_agent_id"
+    return _md5_logical_tenant_ids(svc, ag)
+
+
+async def resolve_final_tenant_ids_async(
+    *,
+    group_id: str | None = None,
+    bot_id: str | None = None,
+    user_id: str | None = None,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+) -> tuple[str, str]:
+    """与 Agent 安装/卸载同源的 tenant 解析：优先企业策略，再默认拼接，最后 MD5。
+
+    ``skills.enterprise.list`` 必须与 ``RuntimeManagementAgentClient`` +
+    ``_coalesce_loaded_invoke_ids`` 写入账本的键一致，否则会出现「安装成功但列表为空」。
+    """
+    svc = str(service_id or "").strip()
+    ag = str(agent_id or "").strip()
     if _HEX32_RE.fullmatch(svc) and _HEX32_RE.fullmatch(ag):
         return svc, ag
-    return (
-        hashlib.md5(svc.encode("utf-8")).hexdigest(),
-        hashlib.md5(ag.encode("utf-8")).hexdigest(),
+
+    g = str(group_id or "").strip()
+    b = str(bot_id or "").strip()
+    u = str(user_id or "").strip()
+    if _should_load_enterprise_tenant_ids(
+        group_id=g,
+        bot_id=b,
+        user_id=u,
+        service_id=svc,
+        agent_id=ag,
+    ):
+        try:
+            from jiuwenclaw.schema.agent import AgentRequest
+
+            request = AgentRequest(
+                request_id="tenant-resolve",
+                params={"group_id": g, "bot_id": b, "user_id": u},
+            )
+            from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
+                _coalesce_loaded_invoke_ids,
+                load_effective_service_config_for_request,
+            )
+
+            loaded = await load_effective_service_config_for_request(request)
+            logical_svc, logical_ag, _ws = _coalesce_loaded_invoke_ids(request, loaded)
+            return _md5_logical_tenant_ids(
+                svc or logical_svc,
+                ag or logical_ag,
+            )
+        except Exception:
+            logger.debug(
+                "[InstalledSkill] enterprise tenant resolve failed, fallback to default ids",
+                exc_info=True,
+            )
+
+    return resolve_final_tenant_ids(
+        group_id=g or None,
+        bot_id=b or None,
+        user_id=u or None,
+        service_id=svc or None,
+        agent_id=ag or None,
     )
 
 
@@ -431,6 +527,7 @@ __all__ = (
     "list_installed_skills",
     "list_installed_skills_for_gateway",
     "resolve_final_tenant_ids",
+    "resolve_final_tenant_ids_async",
     "row_public_view",
     "skill_versions_equal",
     "upsert_installed_skill",
