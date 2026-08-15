@@ -364,6 +364,7 @@ async def list_installed_skills_for_gateway(
     service_id: str,
     agent_id: str,
 ) -> list[dict[str, Any]]:
+    """Gateway 只读 DB 列出已装技能（不扫 Agent 盘；Gateway 与 Agent 文件系统隔离）。"""
     rows = await list_installed_skills(service_id=service_id, agent_id=agent_id)
     return [row_public_view(r) for r in rows]
 

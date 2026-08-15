@@ -1316,6 +1316,29 @@ class JiuWenClawDeepAdapter:
                 return [], False
         return current_tools, registered
 
+    @staticmethod
+    def _purge_skill_use_rail_owned_tools(rail: SkillUseRail | None) -> None:
+        """Drop SkillUseRail-owned harness tools from global ``Runner.resource_mgr``.
+
+        ``SkillUseRail.uninit`` only removes cards from ``ability_manager``; stale
+        ``SkillTool`` instances remain in ``resource_mgr`` and block hot refresh
+        because ``SkillUseRail.init`` skips ``add_tool`` when the id already exists.
+        """
+        if rail is None:
+            return
+        owned_ids = getattr(rail, "_owned_tool_ids", None)
+        if not owned_ids:
+            return
+        for tool_id in list(owned_ids):
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] purge SkillUseRail tool failed id=%s: %s",
+                    tool_id,
+                    exc,
+                )
+
     def _remove_registered_tools(self, tools: list[Any]) -> None:
         """Remove tool instances from ability manager and resource manager."""
         if not tools:
@@ -1746,7 +1769,14 @@ class JiuWenClawDeepAdapter:
             )
             return
 
-        self._enabled_skills = [str(name) for name in names if str(name).strip()]
+        from jiuwenclaw.agentserver.skill_whitelist import skill_dir_ready
+
+        skills_dir = Path(self._workspace_dir) / "skills"
+        self._enabled_skills = [
+            str(name).strip()
+            for name in names
+            if str(name).strip() and skill_dir_ready(skills_dir, str(name).strip())
+        ]
 
         extra_skill_dir: str | None = None
         try:
@@ -1780,6 +1810,9 @@ class JiuWenClawDeepAdapter:
             return
 
         if old_rail is not None:
+            # Capture before uninit clears _owned_tool_ids; purge resource_mgr so
+            # the replacement rail can register fresh SkillTool instances.
+            self._purge_skill_use_rail_owned_tools(old_rail)
             try:
                 await self._instance.unregister_rail(old_rail)
             except Exception as exc:  # noqa: BLE001
