@@ -54,8 +54,18 @@ class SymphonyToolkit:
             handler = getattr(service, operation)
             payload = await asyncio.wait_for(handler(*args, **kwargs), timeout=timeout_s)
         except asyncio.TimeoutError:
+            if operation not in {"plan", "refresh_graph"}:
+                return {
+                    "success": False,
+                    "detail": f"symphony.{operation}: timeout after {timeout_s}s",
+                }
             return {
                 "success": False,
+                "reason": "graph_build_timeout",
+                "timed_out": True,
+                "retryable": False,
+                "operation": operation,
+                "timeout_s": timeout_s,
                 "detail": f"symphony.{operation}: timeout after {timeout_s}s",
             }
         except Exception as exc:  # noqa: BLE001
@@ -102,6 +112,10 @@ class SymphonyToolkit:
             "direct_display",
             "continue_after_display",
             "followup_action",
+            "timed_out",
+            "retryable",
+            "operation",
+            "timeout_s",
         ):
             if key in payload:
                 compact[key] = payload[key]
@@ -355,6 +369,11 @@ class SymphonyToolkit:
 
     @classmethod
     def _attach_followup_control(cls, payload: dict[str, Any]) -> None:
+        if payload.get("reason") == "graph_build_timeout":
+            payload["continue_after_display"] = False
+            if payload.get("followup_action") == "external_skill_discovery":
+                payload.pop("followup_action")
+            return
         if cls._needs_external_skill_discovery(payload):
             payload["continue_after_display"] = True
             payload["followup_action"] = "external_skill_discovery"
@@ -440,7 +459,11 @@ class SymphonyToolkit:
             ),
             make_tool(
                 "symphony_refresh_graph",
-                "Extract installed skill features and refresh the Symphony graph.",
+                (
+                    "Extract installed skill features and refresh the Symphony graph. "
+                    "If a result reports graph_build_timeout or manual_graph_build, "
+                    "do not call this tool or symphony_compose_graph again in this round."
+                ),
                 {"type": "object", "properties": {}},
                 self.refresh_graph,
                 uses_internal_timeout=True,
@@ -462,6 +485,8 @@ class SymphonyToolkit:
                     "symphony_refresh_graph and retry this tool with the original query. "
                     "After it returns, present its content result directly to the user; "
                     "do not call individual skill tools just to manually recreate the plan. "
+                    "If a result reports graph_build_timeout or manual_graph_build, do not "
+                    "call this tool or symphony_refresh_graph again in this round. "
                     "Skip only clearly ordinary tasks that do not benefit from skill capabilities."
                 ),
                 {
