@@ -106,6 +106,14 @@ type ChatPanelResizeDrag = {
 };
 const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
+const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
+  "external_cli_agent_claude_enabled",
+  "external_cli_agent_claude_use_builtin",
+  "external_cli_agent_claude_cli_path",
+  "external_cli_agent_codex_enabled",
+  "external_cli_agent_codex_use_builtin",
+  "external_cli_agent_codex_cli_path",
+]);
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -143,6 +151,8 @@ type AgentsTeamsSavePayload = {
     teammate_mode: string;
     spawn_mode: string;
     enable_permissions: boolean;
+    external_cli_agents?: Array<{ cli_agent: "claude" | "codex"; cli_path?: string }>;
+    external_cli_publish_url?: string;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -154,6 +164,24 @@ type ConfigSaveAllPayload = {
   models?: ModelEntry[];
   agents?: AgentsTeamsSavePayload["agents"];
   team?: AgentsTeamsSavePayload["team"];
+};
+
+type ConfigSaveResult = {
+  updated?: string[];
+  applied_without_restart?: boolean;
+  models_count?: number | null;
+  codex_dependency_install?: CodexDependencyInstallStatus;
+};
+
+type CodexDependencyInstallStatus = {
+  status?: string;
+  phase?: string;
+  error?: string;
+  last_log?: string;
+  log_tail?: string[];
+  started_at?: number;
+  finished_at?: number;
+  updated_at?: number;
 };
 
 function getWorkContextForSession(sessionId: string): {
@@ -1063,23 +1091,76 @@ function AppContent() {
     }
   }, [request, setAvailableModels]);
 
-  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>) => {
-    const payload = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+  const detectExternalCli = useCallback(async (cliAgent: "claude" | "codex", cliPath?: string) => {
+    return request<{
+      cli_agent: "claude" | "codex";
+      status: "ok" | "warning" | "missing" | "unsupported" | "unavailable";
+      path?: string;
+      version?: string;
+      reference_version?: string;
+      message?: string;
+    }>("external_cli.detect", {
+      cli_agent: cliAgent,
+      cli_path: cliPath || "",
+    });
+  }, [request]);
+
+  const selectExternalCliPath = useCallback(async (cliAgent: "claude" | "codex", initialPath?: string) => {
+    const desktopPicker = window.pywebview?.api?.select_local_file_path;
+    const title = t("config.externalCli.selectFileTitle", { agent: cliAgent });
+    if (typeof desktopPicker === "function") {
+      const selectedPath = await desktopPicker(initialPath || "", title);
+      return selectedPath || null;
+    }
+    const payload = await request<{ path?: string | null; cancelled?: boolean }>(
+      "path.select_file",
+      {
+        cli_agent: cliAgent,
+        initial_path: initialPath || "",
+        title,
+      },
+      { timeoutMs: 10 * 60 * 1000 },
+    );
+    if (payload?.cancelled || !payload?.path) {
+      return null;
+    }
+    return payload.path;
+  }, [request, t]);
+
+  const getCodexDependencyInstallStatus = useCallback(async (): Promise<CodexDependencyInstallStatus> => {
+    return request<CodexDependencyInstallStatus>(
+      "external_cli.codex_install_status",
+      {},
+      { timeoutMs: 10 * 1000 },
+    );
+  }, [request]);
+
+  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
+    const payload = await request<ConfigSaveResult>(
       'config.set',
       updates
     );
+    const codexDependencyInstalling = payload.codex_dependency_install?.status === "running";
+    const effectiveUpdates = codexDependencyInstalling
+      ? Object.fromEntries(
+          Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
+        )
+      : updates;
     setServerConfig((prev) => {
-      if (!prev) return updates;
-      const next: Record<string, unknown> = { ...prev, ...updates };
+      if (!prev) return effectiveUpdates;
+      const next: Record<string, unknown> = { ...prev, ...effectiveUpdates };
       // Keep the bilingual memory_forbidden_description dictionary structure.
       if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
-          && !Array.isArray(prev.memory_forbidden_description) && updates.memory_forbidden_description !== undefined) {
+          && !Array.isArray(prev.memory_forbidden_description) && effectiveUpdates.memory_forbidden_description !== undefined) {
         const prevDict = prev.memory_forbidden_description as Record<string, string>;
         const lang = i18n.language || 'zh';
-        next.memory_forbidden_description = { ...prevDict, [lang]: updates.memory_forbidden_description };
+        next.memory_forbidden_description = { ...prevDict, [lang]: effectiveUpdates.memory_forbidden_description };
       }
       return next;
     });
+    if (codexDependencyInstalling) {
+      return payload;
+    }
     setConfigError(null);
     setRestartModalOpen(true);
     setRestartSuccess(false);
@@ -1103,6 +1184,7 @@ function AppContent() {
         }, 5000);
       }
     }
+    return payload;
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
@@ -1177,6 +1259,9 @@ function AppContent() {
       updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
         ? JSON.stringify(team.predefined_members)
         : "";
+      updates[`team_${idx}_external_cli_agents`] = team.external_cli_agents?.length
+        ? JSON.stringify(team.external_cli_agents)
+        : "";
     });
     for (let i = payload.team.length; i < 10; i++) {
       // 使用与后端一致的键名格式：team_${i}_name
@@ -1191,6 +1276,7 @@ function AppContent() {
       updates[`team_${i}_leader_agent_key`] = "";
       updates[`team_${i}_teammate_agent_key`] = "";
       updates[`team_${i}_predefined_members`] = "";
+      updates[`team_${i}_external_cli_agents`] = "";
     }
     return updates;
   }, []);
@@ -1206,24 +1292,30 @@ function AppContent() {
     applyConfigSaveUiState(result?.applied_without_restart === true);
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
-  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
+  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
     const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+    const result = await request<ConfigSaveResult>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
     );
+    const codexDependencyInstalling = result.codex_dependency_install?.status === "running";
     setServerConfig((prev) => {
       const next: Record<string, unknown> = { ...(prev ?? {}) };
       if (payload.config) {
-        Object.assign(next, payload.config);
+        const effectiveConfig = codexDependencyInstalling
+          ? Object.fromEntries(
+              Object.entries(payload.config).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
+            )
+          : payload.config;
+        Object.assign(next, effectiveConfig);
         if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
             && !Array.isArray(prev.memory_forbidden_description)
-            && payload.config.memory_forbidden_description !== undefined) {
+            && effectiveConfig.memory_forbidden_description !== undefined) {
           const prevDict = prev.memory_forbidden_description as Record<string, string>;
           const lang = i18n.language || 'zh';
           next.memory_forbidden_description = {
             ...prevDict,
-            [lang]: payload.config.memory_forbidden_description,
+            [lang]: effectiveConfig.memory_forbidden_description,
           };
         }
       }
@@ -1237,6 +1329,9 @@ function AppContent() {
       }
       return next;
     });
+    if (codexDependencyInstalling) {
+      return result;
+    }
     if (isA2UIChange) {
       // Show modal then refresh page after 5 seconds
       setConfigError(null);
@@ -1253,6 +1348,7 @@ function AppContent() {
     } else {
       applyConfigSaveUiState(result?.applied_without_restart === true);
     }
+    return result;
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
@@ -2470,6 +2566,9 @@ function AppContent() {
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}
               onHasChangesChange={handleHasChangesChange}
+              onDetectExternalCli={detectExternalCli}
+              onSelectExternalCliPath={selectExternalCliPath}
+              onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
             />
           </div>
         )}
@@ -2518,7 +2617,6 @@ function AppContent() {
           error={dialogError}
           onCancel={() => setDeleteTarget(null)}
           onDelete={() => { void handleDeleteConversation(); }}
-          testId="app-delete-dialog"
         />
       )}
 

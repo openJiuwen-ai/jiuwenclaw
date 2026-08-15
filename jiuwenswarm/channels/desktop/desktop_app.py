@@ -612,6 +612,17 @@ class _WindowApi:
             initial_dir=initial_dir,
         )
 
+    def select_local_file_path(
+        self,
+        initial_path: str | None = None,
+        title: str | None = None,
+    ) -> str | None:
+        """Open a native file picker and return the selected absolute path."""
+        return self._runtime.select_local_file_path(
+            initial_path=initial_path,
+            title=title,
+        )
+
     def describe_local_files(self, paths: list[str] | None = None) -> list[dict[str, Any]]:
         """根据本机绝对路径返回与 select_local_files 同形的附件元数据。"""
         return self._runtime.describe_local_files(paths or [])
@@ -1110,6 +1121,43 @@ class DesktopRuntime:
         if results:
             remember_file_picker_dir(results[0].get("path") or path_list[0])
         return results
+
+    def select_local_file_path(
+        self,
+        initial_path: str | None = None,
+        title: str | None = None,
+    ) -> str | None:
+        """Open a native file picker and return the selected absolute path."""
+        if self.window is None or not hasattr(self.window, "create_file_dialog"):
+            logger.error("[desktop] local file path picker unavailable")
+            return None
+
+        initial_dir = str(Path.home())
+        if isinstance(initial_path, str) and initial_path.strip():
+            candidate = Path(initial_path.strip()).expanduser()
+            parent = candidate.parent if candidate.name else candidate
+            if parent.is_dir():
+                initial_dir = str(parent)
+
+        file_types = ("Executable files (*.exe)", "All files (*.*)") if sys.platform == "win32" else ()
+        try:
+            selected_paths = self.window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                directory=initial_dir,
+                allow_multiple=False,
+                file_types=file_types,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] local file path picker failed: %s", exc)
+            return None
+
+        if not selected_paths:
+            return None
+        selected_path = selected_paths if isinstance(selected_paths, (str, Path)) else selected_paths[0]
+        try:
+            return str(Path(selected_path).expanduser().resolve())
+        except Exception:  # noqa: BLE001
+            return str(Path(selected_path).expanduser())
 
     @staticmethod
     def _describe_local_file(raw_path: str | Path) -> dict[str, Any] | None:

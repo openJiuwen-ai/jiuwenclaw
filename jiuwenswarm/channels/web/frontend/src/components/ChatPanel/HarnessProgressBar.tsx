@@ -68,11 +68,9 @@ interface StageItemProps {
   error?: string;
   children?: React.ReactNode;
   defaultExpanded?: boolean;
-  /** Stable stage key (e.g. assess/plan/build_verify/activate) used only for data-variant. */
-  stageKey?: string;
 }
 
-function StageItem({ stageLabel, status, isCurrent, metrics, messages, error, children, defaultExpanded, stageKey }: StageItemProps) {
+function StageItem({ stageLabel, status, isCurrent, metrics, messages, error, children, defaultExpanded }: StageItemProps) {
   const [expanded, setExpanded] = React.useState(Boolean(defaultExpanded));
   const { t } = useTranslation();
   const visibleMessages = (messages || []).filter((message) => {
@@ -100,7 +98,7 @@ function StageItem({ stageLabel, status, isCurrent, metrics, messages, error, ch
       'harness-stage-success': status === 'success',
       'harness-stage-failed': status === 'failed' || status === 'timeout',
       'harness-stage-running': status === 'running',
-    })} data-testid="chat-panel-harness-stage-item" data-variant={stageKey}>
+    })} data-testid="chat-panel-harness-stage-item">
       <button
         className="harness-stage-header"
         data-testid="chat-panel-harness-stage-header"
@@ -404,7 +402,6 @@ export function HarnessProgressBar() {
                   messages={stageInfo.messages}
                   error={stageInfo.error}
                   defaultExpanded={currentStage === stageInfo.stage || stageInfo.stage === 'assess' || stageInfo.stage === 'plan'}
-                  stageKey={stageInfo.stage}
                 >
                   {stageInfo.stage === 'assess' && (
                     <StageSummaryList

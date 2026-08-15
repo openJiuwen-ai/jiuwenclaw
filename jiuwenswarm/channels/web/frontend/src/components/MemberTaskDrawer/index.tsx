@@ -89,12 +89,11 @@ interface CollapsibleTaskGroupProps {
   expanded: boolean;
   onToggle: () => void;
   children: React.ReactNode;
-  testId?: string;
 }
 
-function CollapsibleTaskGroup({ title, count, expanded, onToggle, children, testId }: CollapsibleTaskGroupProps) {
+function CollapsibleTaskGroup({ title, count, expanded, onToggle, children }: CollapsibleTaskGroupProps) {
   return (
-    <div className="border-b border-border bg-card" data-testid={testId}>
+    <div className="border-b border-border bg-card">
       {/* 标题栏 */}
       <button
         onClick={onToggle}
@@ -245,7 +244,6 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
               count={inProgressTasks.length}
               expanded={inProgressExpanded}
               onToggle={() => setInProgressExpanded(!inProgressExpanded)}
-              testId="member-task-drawer-task-group-in-progress"
             >
               {inProgressTasks.map(renderTaskItem)}
             </CollapsibleTaskGroup>
@@ -258,7 +256,6 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
               count={completedTasks.length}
               expanded={completedExpanded}
               onToggle={() => setCompletedExpanded(!completedExpanded)}
-              testId="member-task-drawer-task-group-completed"
             >
               {completedTasks.map(renderTaskItem)}
             </CollapsibleTaskGroup>
@@ -271,7 +268,6 @@ export function MemberTaskDrawer({ memberId, onClose }: MemberTaskDrawerProps) {
               count={pendingTasks.length}
               expanded={pendingExpanded}
               onToggle={() => setPendingExpanded(!pendingExpanded)}
-              testId="member-task-drawer-task-group-pending"
             >
               {pendingTasks.map(renderTaskItem)}
             </CollapsibleTaskGroup>

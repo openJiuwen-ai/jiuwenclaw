@@ -450,7 +450,7 @@ function BoardTaskCard({
             />
           </div>
         ) : (
-          <UnassignedTeamAvatar className="h-8 w-8 rounded-full" testId="team-area-task-planning-board-task-footer-avatar" testIdVariant="unassigned" />
+          <UnassignedTeamAvatar className="h-8 w-8 rounded-full" />
         )}
       </div>
     </article>
@@ -459,12 +459,8 @@ function BoardTaskCard({
 
 function UnassignedTeamAvatar({
   className,
-  testId,
-  testIdVariant,
 }: {
   className?: string;
-  testId?: string;
-  testIdVariant?: string;
 }) {
   const { t } = useTranslation();
 
@@ -473,8 +469,6 @@ function UnassignedTeamAvatar({
       className={`flex shrink-0 items-center justify-center overflow-hidden border border-border bg-card text-[12px] font-medium text-muted ${className || ''}`}
       aria-label={t('team.planning.unassignedAvatar')}
       title={t('team.planning.unassigned')}
-      data-testid={testId}
-      data-variant={testIdVariant}
     >
       --
     </div>
@@ -516,7 +510,6 @@ function TaskResourcePanel({
             count={skillCount}
             active={resolvedActiveTab === 'skills'}
             onClick={() => setActiveTab('skills')}
-            testId="team-area-task-planning-resources-tab-skills"
           />
         )}
         {hasFiles && (
@@ -525,7 +518,6 @@ function TaskResourcePanel({
             count={fileCount}
             active={resolvedActiveTab === 'files'}
             onClick={() => setActiveTab('files')}
-            testId="team-area-task-planning-resources-tab-files"
           />
         )}
       </div>
@@ -535,8 +527,6 @@ function TaskResourcePanel({
             key={`${resolvedActiveTab}-${item}`}
             icon={resolvedActiveTab === 'skills' ? <Puzzle className="h-4 w-4 shrink-0 text-muted" aria-hidden="true" /> : <File className="h-4 w-4 shrink-0 text-muted" aria-hidden="true" />}
             label={item}
-            testId="team-area-task-planning-resource-line"
-            testIdVariant={item}
           />
         ))}
       </div>
@@ -549,18 +539,15 @@ function ResourceTab({
   count,
   active = false,
   onClick,
-  testId,
 }: {
   label: string;
   count: number;
   active?: boolean;
   onClick: () => void;
-  testId?: string;
 }) {
   return (
     <button
       type="button"
-      data-testid={testId}
       className="relative flex h-6 items-start gap-1 text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       onClick={onClick}
       role="tab"
@@ -580,19 +567,13 @@ function ResourceTab({
 function ResourceLine({
   icon,
   label,
-  testId,
-  testIdVariant,
 }: {
   icon: ReactNode;
   label: string;
-  testId?: string;
-  testIdVariant?: string;
 }) {
   return (
     <div
       className="mb-2 flex items-center gap-1 text-xs text-text last:mb-0"
-      data-testid={testId}
-      data-variant={testIdVariant}
     >
       {icon}
       <span className="truncate">{label}</span>

@@ -38,6 +38,10 @@ interface Window {
         allowMultiple?: boolean,
         initialDir?: string | null,
       ) => Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>;
+      select_local_file_path?: (
+        initialPath?: string | null,
+        title?: string | null,
+      ) => Promise<string | null> | string | null;
       describe_local_files?: (
         paths: string[],
       ) => Promise<Array<Record<string, unknown>>> | Array<Record<string, unknown>>;

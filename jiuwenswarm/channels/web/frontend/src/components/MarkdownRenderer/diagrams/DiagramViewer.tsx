@@ -39,11 +39,9 @@ interface ToolbarButtonProps {
   children: ReactNode;
   ariaHasPopup?: 'menu';
   ariaExpanded?: boolean;
-  testId?: string;
-  variant?: string;
 }
 
-function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded, testId, variant }: ToolbarButtonProps): JSX.Element {
+function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded }: ToolbarButtonProps): JSX.Element {
   return (
     <button
       type="button"
@@ -51,8 +49,6 @@ function ToolbarButton({ title, onClick, children, ariaHasPopup, ariaExpanded, t
       aria-label={title}
       aria-haspopup={ariaHasPopup}
       aria-expanded={ariaExpanded}
-      data-testid={testId}
-      data-variant={variant}
       onClick={onClick}
       className="markdown-toolbar-btn"
     >
@@ -66,18 +62,14 @@ interface TogglePillProps {
   disabled?: boolean;
   onClick: () => void;
   children: ReactNode;
-  testId?: string;
-  variant?: string;
 }
 
-function TogglePill({ active, disabled = false, onClick, children, testId, variant }: TogglePillProps): JSX.Element {
+function TogglePill({ active, disabled = false, onClick, children }: TogglePillProps): JSX.Element {
   return (
     <button
       type="button"
       aria-pressed={active}
       disabled={disabled}
-      data-testid={testId}
-      data-variant={variant}
       onClick={onClick}
       className={clsx('markdown-toggle-pill', active && 'markdown-toggle-pill--active')}
     >
@@ -113,7 +105,7 @@ function DiagramMoreMenu({ title, items }: DiagramMoreMenuProps): JSX.Element {
 
   return (
     <div className="diagram-more" ref={rootRef} data-testid="markdown-diagram-more">
-      <ToolbarButton title={title} ariaHasPopup="menu" ariaExpanded={open} testId="markdown-diagram-more-toggle" onClick={() => setOpen(current => !current)}>
+      <ToolbarButton title={title} ariaHasPopup="menu" ariaExpanded={open} onClick={() => setOpen(current => !current)}>
         <Ellipsis size={17} />
       </ToolbarButton>
       {open && (
@@ -192,10 +184,10 @@ export function DiagramViewer({
       <div className="diagram-container__toolbar" data-testid="markdown-diagram-toolbar">
         <div className="diagram-toolbar-start" data-testid="markdown-diagram-toolbar-start">
           <div className="diagram-view-toggle" data-testid="markdown-diagram-view-toggle">
-            <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} testId="markdown-diagram-view-image" onClick={() => onViewModeChange('image')}>
+            <TogglePill active={viewMode === 'image'} disabled={imageViewDisabled} onClick={() => onViewModeChange('image')}>
               {t('diagram.image')}
             </TogglePill>
-            <TogglePill active={viewMode === 'code'} testId="markdown-diagram-view-code" onClick={() => onViewModeChange('code')}>
+            <TogglePill active={viewMode === 'code'} onClick={() => onViewModeChange('code')}>
               {t('diagram.code')}
             </TogglePill>
           </div>
@@ -217,7 +209,7 @@ export function DiagramViewer({
         <div className="diagram-toolbar-actions" data-testid="markdown-diagram-toolbar-actions">
           {feedbackPosition === 'end' && feedbackStatus}
           {toolbarActions.map(action => (
-            <ToolbarButton key={action.id} title={action.title} testId="markdown-diagram-toolbar-action" variant={action.id} onClick={action.onClick}>
+            <ToolbarButton key={action.id} title={action.title} onClick={action.onClick}>
               {action.icon}
             </ToolbarButton>
           ))}

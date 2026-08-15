@@ -21,7 +21,6 @@ interface A2UIMessageContentProps {
   messageId: string;
   isStreaming?: boolean;
   disableInteraction?: boolean;
-  testId?: string;
 }
 
 type RenderPart =

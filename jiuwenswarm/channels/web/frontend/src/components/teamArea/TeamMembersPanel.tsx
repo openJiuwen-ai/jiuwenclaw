@@ -396,8 +396,6 @@ function GroupChatDetail({
               <GroupChatMessage
                 key={`${message.id}-${event.timestamp ?? index}`}
                 event={event}
-                testId="team-area-group-chat-message"
-                testIdVariant={message.id}
               />
             ))}
           </div>
@@ -430,12 +428,8 @@ function GroupAvatarStack({ memberIds }: { memberIds: string[] }) {
 
 function GroupChatMessage({
   event,
-  testId,
-  testIdVariant,
 }: {
   event: ParsedTeamEvent;
-  testId?: string;
-  testIdVariant?: string;
 }) {
   const { t } = useTranslation();
   const displayName = getMemberDisplayName(event.fromMember);
@@ -444,8 +438,6 @@ function GroupChatMessage({
   return (
     <div
       className={`flex items-start gap-3 ${isUser ? 'justify-end' : ''}`}
-      data-testid={testId}
-      data-variant={testIdVariant}
     >
       {!isUser && <TeamMemberAvatar member={event.fromMember} className="h-8 w-8" />}
       <div className={`min-w-0 ${isUser ? 'max-w-[72%] text-right' : 'flex-1'}`}>

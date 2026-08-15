@@ -120,7 +120,6 @@ function TeamLeaderPlainTextMessage({
           messageId={messageId}
           isStreaming={isStreaming}
           disableInteraction={disableA2UIInteraction}
-          testId="chat-panel-team-leader-message-body"
         />
       </div>
     </TeamMemberMessageFrame>
@@ -631,7 +630,6 @@ export const MessageItem = memo(function MessageItem({
                   messageId={id}
                   isStreaming={true}
                   disableInteraction={disableA2UIInteraction}
-                  testId="chat-panel-thinking-body"
                 />
               )
             ) : (
@@ -648,7 +646,6 @@ export const MessageItem = memo(function MessageItem({
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
-                    testId="chat-panel-thinking-body"
                   />
                 )}
                 {!isUser && visibleMediaItems && (
