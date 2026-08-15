@@ -312,7 +312,12 @@ def list_marketplace_mcps(mcp_filter: str = "builtin") -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen_names: set[str] = set()
     if root.is_dir():
-        for pkg_dir in sorted(root.iterdir()):
+        # 华为系（华为云 / 鸿蒙）置顶，其余按包名字母序——让首屏突出自有生态。
+        priority = {"huaweiyun-mcp": 0, "harmonyos-mcp": 0}
+        for pkg_dir in sorted(
+            root.iterdir(),
+            key=lambda p: (priority.get(p.name, 1), p.name),
+        ):
             if not pkg_dir.is_dir():
                 continue
             name = pkg_dir.name
