@@ -15,7 +15,16 @@ from jiuwenclaw.e2a.acp.protocol import build_acp_initialize_result
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.interface import JiuWenClaw
 
+from jiuwenclaw.schema.message import ReqMethod
+
 logger = logging.getLogger(__name__)
+
+_ENTERPRISE_SKILL_REFRESH_METHODS = frozenset(
+    {
+        ReqMethod.SKILLS_ENTERPRISE_INSTALL,
+        ReqMethod.SKILLS_ENTERPRISE_UNINSTALL,
+    }
+)
 
 
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
@@ -327,6 +336,45 @@ class AgentManager:
                     )
             logger.info(f"channel {channel_id} reload agent config success.")
 
+    async def refresh_all_enabled_skills_from_db(self) -> None:
+        """Refresh enabled skills on every live session agent after DB ledger changes."""
+        refreshed = 0
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for mode_agents in channel_agents.values():
+                if not isinstance(mode_agents, dict):
+                    continue
+                for agent in mode_agents.values():
+                    refresh = getattr(agent, "refresh_enabled_skills_from_db", None)
+                    if not callable(refresh):
+                        continue
+                    try:
+                        await refresh()
+                        refreshed += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentManager] refresh_enabled_skills_from_db failed: %s",
+                            exc,
+                        )
+        if refreshed:
+            logger.info(
+                "[AgentManager] enabled_skills refreshed on %s session agent(s)",
+                refreshed,
+            )
+
+    @staticmethod
+    def _should_refresh_enabled_skills_after_request(request: Any, result: Any) -> bool:
+        req_method = getattr(request, "req_method", None)
+        if req_method not in _ENTERPRISE_SKILL_REFRESH_METHODS:
+            return False
+        if not getattr(result, "ok", False):
+            return False
+        payload = getattr(result, "payload", None)
+        if not isinstance(payload, dict):
+            return False
+        return payload.get("success") is not False
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -369,7 +417,10 @@ class AgentManager:
             session.update_state({"deep_agent_state": state.to_session_dict()})
             await session.post_run()  # 写入 checkpointer
 
-        return await agent.process_message(request)
+        result = await agent.process_message(request)
+        if self._should_refresh_enabled_skills_after_request(request, result):
+            await self.refresh_all_enabled_skills_from_db()
+        return result
 
     async def process_message_stream(self, request: Any):
         """处理流式请求.
