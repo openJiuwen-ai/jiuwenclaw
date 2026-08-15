@@ -152,12 +152,16 @@ web_start_nohup() {
 
     local proxy_target="http://127.0.0.1:${web_port_target}"
     local instance_env=""
+    local pidfile="/tmp/jiuwenswarm-web.pid"
     if [ -n "${instance_name}" ]; then
         instance_env="JIUWENSWARM_DATA_DIR=/root/.jiuwenswarm-instances/${instance_name} "
+        pidfile="/tmp/jiuwenswarm-web-${instance_name}.pid"
     fi
 
-    # 显式传 --host/--port/--proxy-target, 避开 app_web.py 的 FRONTEND_HOST/PORT 默认值
-    local start_cmd="${home_prefix}${instance_env}nohup ${web_bin} --host ${web_host} --port ${web_port} --proxy-target ${proxy_target} </dev/null > /tmp/jiuwenswarm-web.log 2>&1 &"
+    # 显式传 --host/--port/--proxy-target, 避开 app_web.py 的 FRONTEND_HOST/PORT 默认值。
+    # JIUWENSWARM_DATA_DIR 等环境变量前缀只进子进程环境、不会出现在 /proc/PID/cmdline,
+    # pkill -f 匹配不到, 故启动时把 PID 写入 pidfile, 停止时按 PID 精确结束。
+    local start_cmd="${home_prefix}${instance_env}nohup ${web_bin} --host ${web_host} --port ${web_port} --proxy-target ${proxy_target} </dev/null > /tmp/jiuwenswarm-web.log 2>&1 & echo \$! > ${pidfile}"
 
     info "Starting jiuwenswarm-web on ${master_host} (nohup) -> http://${web_host}:${web_port} (proxy /ws -> ${proxy_target})..."
     exec_on_host "${master_host}" "bash -c '${start_cmd}'"
@@ -213,10 +217,19 @@ web_stop_systemd() {
 web_stop_nohup() {
     local master_host="$1"
     local instance_name="${DEPLOY_VARS["JIUWENSWARM_INSTANCE_NAME"]:-}"
+    local pidfile="/tmp/jiuwenswarm-web.pid"
+    local fallback="pkill -f '[j]iuwenswarm-web'"
     if [ -n "${instance_name}" ]; then
-        exec_on_host "${master_host}" "pkill -f 'JIUWENSWARM_DATA_DIR=/root/.jiuwenswarm-instances/${instance_name}.*[j]iuwenswarm-web' || true"
-    else
-        exec_on_host "${master_host}" "pkill -f '[j]iuwenswarm-web' || true"
+        local web_port="${DEPLOY_VARS["WEB_STATIC_PORT"]:-5173}"
+        pidfile="/tmp/jiuwenswarm-web-${instance_name}.pid"
+        # JIUWENSWARM_DATA_DIR=... 只进环境不进 cmdline, 无法用 pkill -f 精确匹配。
+        # 优先按启动时写入的 pidfile 停止; 无 pidfile(遗留进程)时按命令行可见的 --port 匹配。
+        fallback="pkill -f 'jiuwenswarm-web.*--port ${web_port}'"
+    fi
+    # 检测停止结果: 回退 pkill 未匹配到进程(pkill 返回非零)时报错, 而非静默成功。
+    # pidfile 分支中 kill 已死进程由 || true 吞掉, 进程本来就不存在, 视为停止成功。
+    if ! exec_on_host "${master_host}" "if [ -f '${pidfile}' ]; then kill \$(cat '${pidfile}') 2>/dev/null || true; rm -f '${pidfile}'; else ${fallback}; fi"; then
+        error "No running web process found on ${master_host}; nothing was stopped"
     fi
     success "Web server stopped on ${master_host}"
 }
