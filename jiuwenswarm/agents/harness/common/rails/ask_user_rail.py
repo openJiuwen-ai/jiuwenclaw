@@ -34,6 +34,7 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import (
 )
 from jiuwenswarm.common.schema.ask_user import (
     AskUserResponseError,
+    ask_user_response_schema,
     parse_ask_user_response,
 )
 
@@ -401,7 +402,15 @@ class StructuredAskUserRail(AskUserRail):
                 )
             )
 
-        answer_text = response.to_readable_text()
+        if is_structured:
+            answer_text = response.to_readable_text()
+        else:
+            answer_text = str(
+                {
+                    answer.question or "__free_text__": answer.readable_value()
+                    for answer in response.answers
+                }
+            )
         logger.info(
             "[StructuredAskUserRail] Resolved answer: %s",
             answer_text,
@@ -414,7 +423,9 @@ class StructuredAskUserRail(AskUserRail):
         interrupt handler). No need to attach questions to InterruptRequest
         itself since from_tool_call() doesn't copy extra fields."""
         request = super()._build_ask_request(tool_call)
-        return request
+        return request.model_copy(
+            update={"payload_schema": ask_user_response_schema()}
+        )
 
     def extract_questions(
         self, tool_call: Optional[ToolCall]

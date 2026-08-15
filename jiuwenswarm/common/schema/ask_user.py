@@ -10,8 +10,6 @@ from typing import Any, Literal
 
 
 _OTHER_OPTION_LABELS = frozenset({"Other", "其他"})
-_ANSWER_FIELDS = frozenset({"question", "selected_options", "custom_input"})
-_RESPONSE_FIELDS = frozenset({"status", "answers", "original_request"})
 
 
 class AskUserResponseError(ValueError):
@@ -68,13 +66,47 @@ class AskUserResponse:
         return "\n".join(parts)
 
 
+def ask_user_response_schema() -> dict[str, Any]:
+    """Return the public JSON schema for the canonical resume response."""
+
+    return {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["answered", "skipped"],
+            },
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "question": {"type": "string"},
+                        "selected_options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "custom_input": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                    "required": ["selected_options"],
+                },
+            },
+            "original_request": {"type": "string"},
+        },
+        "required": ["status", "answers"],
+    }
+
+
 def _normalize_answer(item: Any, index: int) -> AskUserAnswer | None:
     if not isinstance(item, Mapping):
         raise AskUserResponseError(f"answers[{index}] must be an object")
-    if not set(item).issubset(_ANSWER_FIELDS):
-        raise AskUserResponseError(
-            f"answers[{index}] contains unsupported fields"
-        )
 
     raw_question = item.get("question", "")
     if not isinstance(raw_question, str):
@@ -148,7 +180,7 @@ def normalize_ask_user_response(
         raise AskUserResponseError("skipped response must not contain user input")
 
     effective_status: Literal["answered", "skipped"] = (
-        "answered" if normalized_answers else "skipped"
+        "skipped" if normalized_status == "skipped" else "answered"
     )
     normalized_original_request = (
         original_request.strip() if isinstance(original_request, str) else ""
@@ -166,12 +198,8 @@ def parse_ask_user_response(value: Any) -> AskUserResponse:
     if not isinstance(value, Mapping):
         raise AskUserResponseError("AskUser response must be an object")
     fields = set(value)
-    if not {"status", "answers"}.issubset(fields) or not fields.issubset(
-        _RESPONSE_FIELDS
-    ):
-        raise AskUserResponseError(
-            "AskUser response must contain only status, answers, and original_request"
-        )
+    if not {"status", "answers"}.issubset(fields):
+        raise AskUserResponseError("AskUser response must contain status and answers")
     return normalize_ask_user_response(
         status=value["status"],
         answers=value["answers"],

@@ -41,7 +41,7 @@ def test_normalize_answered_response_preserves_one_structured_representation():
 
 
 @pytest.mark.parametrize("label", ["Other", "其他"])
-def test_normalize_bare_other_as_skipped(label: str):
+def test_explicit_answered_bare_other_preserves_empty_answered_contract(label: str):
     response = normalize_ask_user_response(
         status="answered",
         answers=[
@@ -53,7 +53,7 @@ def test_normalize_bare_other_as_skipped(label: str):
         ],
     )
 
-    assert response.to_dict() == {"status": "skipped", "answers": []}
+    assert response.to_dict() == {"status": "answered", "answers": []}
 
 
 def test_normalize_missing_status_derives_answered_from_current_array_protocol():
@@ -70,6 +70,27 @@ def test_normalize_missing_status_derives_answered_from_current_array_protocol()
 
     assert response.status == "answered"
     assert response.to_readable_text() == "plain answer"
+
+
+def test_normalize_missing_status_defaults_to_answered_for_current_native_clients():
+    response = normalize_ask_user_response(
+        status="",
+        answers=[
+            {
+                "question": "Which?",
+                "selected_options": ["Other"],
+                "custom_input": "  ",
+            }
+        ],
+    )
+
+    assert response.to_dict() == {"status": "answered", "answers": []}
+
+
+def test_explicit_answered_without_user_content_is_preserved():
+    response = normalize_ask_user_response(status="answered", answers=[])
+
+    assert response.to_dict() == {"status": "answered", "answers": []}
 
 
 def test_skipped_with_user_content_is_rejected():
@@ -93,7 +114,6 @@ def test_skipped_with_user_content_is_rejected():
         ["A"],
         [{"question": "Which?", "selected_options": "A"}],
         [{"question": "Which?", "selected_options": [1]}],
-        [{"question": "Which?", "selected_options": ["A"], "answer": "A"}],
     ],
 )
 def test_malformed_or_legacy_answers_are_rejected(answers):
@@ -112,3 +132,31 @@ def test_parse_rejects_legacy_sidecar_and_answer_map():
                 },
             }
         )
+
+
+def test_parse_accepts_and_drops_unknown_extension_fields():
+    response = parse_ask_user_response(
+        {
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "Which?",
+                    "selected_options": ["A"],
+                    "custom_input": None,
+                    "answer_metadata": {"display_order": 1},
+                }
+            ],
+            "client_version": "1.2",
+        }
+    )
+
+    assert response.to_dict() == {
+        "status": "answered",
+        "answers": [
+            {
+                "question": "Which?",
+                "selected_options": ["A"],
+                "custom_input": None,
+            }
+        ],
+    }

@@ -699,7 +699,7 @@ def test_build_inputs_maps_explicit_skipped_with_empty_answers_to_interactive_in
     }
 
 
-def test_build_inputs_normalizes_explicit_empty_answered_to_skipped(monkeypatch):
+def test_build_inputs_preserves_explicit_empty_answered(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
@@ -724,7 +724,7 @@ def test_build_inputs_normalizes_explicit_empty_answered_to_skipped(monkeypatch)
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-empty-answered-1": {
-            "status": "skipped",
+            "status": "answered",
             "answers": [],
         }
     }
@@ -820,7 +820,7 @@ def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-1": {
-            "status": "skipped",
+            "status": "answered",
             "answers": [],
         }
     }

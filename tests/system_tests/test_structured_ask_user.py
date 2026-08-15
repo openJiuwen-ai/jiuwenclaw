@@ -587,6 +587,25 @@ class TestStructuredAskUserRailResolveInterrupt:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_interrupt_advertises_canonical_response_schema():
+        """The public interrupt schema must match the canonical resume contract."""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={"query": "What is your role?"})
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        schema = decision.request.payload_schema
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is True
+        assert schema["required"] == ["status", "answers"]
+        assert schema["properties"]["status"]["enum"] == ["answered", "skipped"]
+        assert schema["properties"]["answers"]["type"] == "array"
+        answer_schema = schema["properties"]["answers"]["items"]
+        assert answer_schema["additionalProperties"] is True
+        assert answer_schema["required"] == ["selected_options"]
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_four_questions_are_allowed():
         """The maximum supported batch should still produce an interrupt."""
         rail = StructuredAskUserRail()
@@ -921,7 +940,7 @@ class TestStructuredAskUserRailResolveInterrupt:
 
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
         assert isinstance(decision, RejectResult)
-        assert "I am a developer" in decision.tool_result
+        assert decision.tool_result == "{'__free_text__': 'I am a developer'}"
 
     @staticmethod
     @pytest.mark.asyncio

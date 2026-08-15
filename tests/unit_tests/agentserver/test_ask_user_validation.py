@@ -71,12 +71,13 @@ async def test_valid_options_still_interrupt():
 
 
 @pytest.mark.asyncio
-async def test_empty_structured_answers_are_rejected():
-    """Issue #2330: an empty answered response is normalized to skipped."""
+async def test_empty_structured_answers_preserve_answered_machine_state():
+    """The shared AskUser contract preserves answered even when answers are empty."""
     rail = StructuredAskUserRail()
     tc = _make_tool_call(
         {
             "query": "Choose",
+            "return_json": True,
             "questions": [
                 {
                     "question": "Which option?",
@@ -97,7 +98,7 @@ async def test_empty_structured_answers_are_rejected():
     )
 
     assert isinstance(decision, RejectResult)
-    assert decision.tool_result == '{"status":"skipped","answers":[]}'
+    assert decision.tool_result == '{"status":"answered","answers":[]}'
 
 
 @pytest.mark.asyncio
@@ -165,7 +166,6 @@ async def test_explicit_skipped_accepts_empty_frontend_answer_shells():
     [
         {"status": "skipped", "answers": {"Which?": "A"}},
         {"status": "skipped", "answers": []},
-        {"status": "skipped", "answers": [], "extra": True},
         {
             "status": "skipped",
             "answers": [

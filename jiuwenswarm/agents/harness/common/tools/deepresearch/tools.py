@@ -783,7 +783,7 @@ def _normalize_feedback_handler_resume_feedback(
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("interaction_result 必须是合法 JSON") from exc
     response = parse_ask_user_response(result)
-    if response.status == "skipped":
+    if response.status == "skipped" or not response.answers:
         return _SKIPPED_FEEDBACK_HANDLER_PAYLOAD
     return feedback
 
