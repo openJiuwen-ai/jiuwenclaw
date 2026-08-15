@@ -9,6 +9,7 @@ import hmac
 
 import pytest
 
+import jiuwenclaw.agentserver.installed_skill as installed_skill_mod
 from jiuwenclaw.agentserver.installed_skill import (
     DECISION_ALREADY_INSTALLED,
     DECISION_BLOCKED,
@@ -128,11 +129,13 @@ async def test_resolve_final_tenant_ids_async_uses_enterprise_policy_ids(
         return "g_demo_sales::bot_main", "g_demo_salesbot_mainbob", "g_demo_sales::bot_main::bob"
 
     monkeypatch.setattr(
-        "openjiuwen_runtime_management_extension.runtime_management_client.load_effective_service_config_for_request",
+        installed_skill_mod,
+        "_load_effective_service_config_for_tenant_resolve",
         _fake_load,
     )
     monkeypatch.setattr(
-        "openjiuwen_runtime_management_extension.runtime_management_client._coalesce_loaded_invoke_ids",
+        installed_skill_mod,
+        "_coalesce_loaded_invoke_ids",
         _fake_coalesce,
     )
 
@@ -150,6 +153,33 @@ async def test_resolve_final_tenant_ids_async_uses_enterprise_policy_ids(
         user_id="bob",
     )
     assert sync_svc != svc
+
+
+def test_routing_bot_id_no_bucket_by_default() -> None:
+    assert installed_skill_mod._routing_bot_id("1") == "1"
+
+
+def test_routing_bot_id_hash_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_BOT_ID_GROUP_NUM", "4")
+    routed = installed_skill_mod._routing_bot_id("1")
+    assert routed.startswith("b")
+    assert routed in {"b0", "b1", "b2", "b3"}
+
+
+def test_resolve_final_tenant_ids_uses_bot_bucket_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分桶开启时，fallback 默认 tenant 须与 Runtime 安装路径一致。"""
+    monkeypatch.setenv("AGENT_BOT_ID_GROUP_NUM", "4")
+    routed_bot = installed_skill_mod._routing_bot_id("1")
+    svc, ag = resolve_final_tenant_ids(
+        group_id="g_demo_sale",
+        bot_id="1",
+        user_id="12",
+    )
+    assert svc == hashlib.md5(f"g_demo_sale{routed_bot}".encode()).hexdigest()
+    assert ag == hashlib.md5(f"g_demo_sale{routed_bot}12".encode()).hexdigest()
+    assert svc != hashlib.md5(b"g_demo_sale1").hexdigest()
 
 
 def test_format_user_skill_source_and_row_public_view() -> None:
