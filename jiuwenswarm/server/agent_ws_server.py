@@ -3740,6 +3740,18 @@ class AgentWebSocketServer:
             get_team_entity_store,
         )
 
+        def delete_team_directory_best_effort(team_name: str) -> None:
+            try:
+                entity_store.delete_team_directory(team_name)
+            except TeamEntityStoreError as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] failed to delete local team directory; "
+                    "continuing team delete: team_name=%s code=%s error=%s",
+                    team_name,
+                    getattr(exc, "code", "DELETE_FAILED"),
+                    exc,
+                )
+
         params = request.params if isinstance(request.params, dict) else {}
         is_team = is_team_params(params)
         team_name = str(params.get("team_name") or "").strip()
@@ -3779,7 +3791,7 @@ class AgentWebSocketServer:
                             metadata=request.metadata,
                         )
                     else:
-                        entity_store.delete_team_directory(team_name)
+                        delete_team_directory_best_effort(team_name)
                         binding_store.delete(team_name)
                         resp = AgentResponse(
                             request_id=request.request_id,
@@ -3861,7 +3873,7 @@ class AgentWebSocketServer:
                             else:
                                 # agent-core normally removes team_home; retry here because it logs and
                                 # suppresses filesystem cleanup failures.
-                                entity_store.delete_team_directory(team_name)
+                                delete_team_directory_best_effort(team_name)
                                 binding_store.delete(team_name)
                                 resp = AgentResponse(
                                     request_id=request.request_id,
