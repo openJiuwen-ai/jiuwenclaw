@@ -82,11 +82,15 @@ def merge_template_with_override(
     return out
 
 
+_yaml_load_lock = threading.Lock()
+
+
 def load_yaml_dict(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    with _yaml_load_lock:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
     return data if isinstance(data, dict) else {}
 
 
