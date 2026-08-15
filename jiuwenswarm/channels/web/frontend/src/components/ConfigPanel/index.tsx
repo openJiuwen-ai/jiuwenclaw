@@ -4049,7 +4049,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
-  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
+  const configSaveBlocked = isProcessing || globalTaskRunning;
   const storeAvailableModels = availableModels;
   const storeAvailableModelsRef = useRef(storeAvailableModels);
   storeAvailableModelsRef.current = storeAvailableModels;
@@ -5026,7 +5026,7 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {(isProcessing || globalTaskRunning) && mode !== 'team' ? (
+            {configSaveBlocked ? (
               <span className="text-xs text-warn" data-testid="config-panel-processing-hint">{t('config.errors.processingDisabled')}</span>
             ) : null}
             <button
@@ -5041,7 +5041,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || ((isProcessing || globalTaskRunning) && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelName || hasMissingModelApiBase || hasDuplicateAgentNames || !!agentsTeamsValidationError || configSaveBlocked}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               data-testid="config-panel-save-btn"
             >
@@ -5073,8 +5073,8 @@ export function ConfigPanel({
             ) : null}
             {codexInstallStatus?.status !== "succeeded" && codexInstallLogs.length > 0 ? (
               <div className="mt-2" data-testid="config-panel-codex-install-status-logs">
-                <div className="mb-1 text-xs opacity-80">{t("config.externalCli.codexInstallRecentOutput")}</div>
-                <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/10 px-2 py-1 text-xs">
+                <div className="mb-1 text-xs opacity-80" data-testid="config-panel-codex-install-status-logs-label">{t("config.externalCli.codexInstallRecentOutput")}</div>
+                <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/10 px-2 py-1 text-xs" data-testid="config-panel-codex-install-status-logs-content">
                   {codexInstallLogs.join("\n")}
                 </pre>
               </div>

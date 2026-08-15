@@ -540,3 +540,9 @@ Esc/← back
 | `stopped` | run/phase 终态或 session 销毁时被 seal |
 
 ---
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)
