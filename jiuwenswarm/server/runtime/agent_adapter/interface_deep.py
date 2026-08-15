@@ -213,6 +213,7 @@ from jiuwenswarm.server.runtime.session.session_history import append_history_re
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
 _pending_goal_objective_history: dict[str, dict[str, Any]] = {}
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.prewarm import PrewarmConfig, PrewarmCoordinator, PrewarmRail
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -318,6 +319,7 @@ from jiuwenswarm.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.common.mcp_param_coerce_patch import apply_mcp_param_coerce_patch
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -1098,6 +1100,13 @@ class JiuWenSwarmDeepAdapter:
         # killed remote MCP server fails fast instead of hanging on the MCP
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
+        # Coerce LLM-stringified array/object params back to list/dict before
+        # MCP schema validation — otherwise MCP tools like mcp_memory_create_entities
+        # fail with "Input should be a valid list [input_type=str]" and the LLM
+        # falls back to bash. Patches MCPTool.invoke only (MCP scope); the shared
+        # SchemaUtils.format_with_schema is NOT touched (6 call sites across
+        # function/restful/llm/workflow paths). Idempotent (_PATCHED guard).
+        apply_mcp_param_coerce_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
         self._workspace_dir: str = str(get_agent_workspace_dir())
@@ -4630,6 +4639,140 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillRetrievalPromptRail create failed: %s", exc)
             return None
 
+    def _build_progressive_tool_rail(self) -> "JiuWenProgressiveToolRail | None":
+        """Build JiuWenProgressiveToolRail (search-based, with always-visible tools).
+
+        search_tools returns full tool definitions (incl. JSON Schema) in the
+        result message. The LLM calls matched tools by name directly — they
+        are resolved by ability_manager regardless of the request tools[] list,
+        so inputs.tools (prefill) stays constant for prompt-cache stability.
+        """
+        try:
+            from types import SimpleNamespace
+
+            react_cfg = (get_config().get("react", {}) or {})
+            tr_cfg = react_cfg.get("tool_retrieval", {}) or {}
+
+            config = SimpleNamespace(
+                progressive_tool_enabled=True,
+                progressive_tool_always_visible_tools=[
+                    "bash", "read_file", "write_file", "edit_file",
+                    "glob", "grep", "fetch_webpage",
+                ],
+                # list_files, code, task_tool, ask_user → 隐藏，有需要时 search
+                # 注意：当前 27 个工具中无独立 web_search，
+                #       如需添加请确认工具已注册到 ability_manager
+                progressive_tool_default_visible_tools=[],
+                language="cn",
+                # 按需检索算法旋钮（react.tool_retrieval.*）—— v3 仅 BM25+CJK，
+                # dense/embedding 已移除（fastembed/bge 太大无法部署）。
+                tool_retrieval_desc_cap=int(tr_cfg.get("desc_cap", 256)),
+                tool_retrieval_top_k_max=int(tr_cfg.get("top_k_max", 3)),
+            )
+
+            # ── JiuWen ProgressiveToolRail（全部 jiuwenswarm 改动在外部文件）──
+            from jiuwenswarm.agents.harness.common.rails.search_tool_rail import (
+                JiuWenProgressiveToolRail,
+            )
+            # ── 结束 ──
+
+            rail = JiuWenProgressiveToolRail(config)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail created | "
+                "always_visible=%d",
+                len(config.progressive_tool_always_visible_tools),
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail create failed: %s", exc
+            )
+            return None
+
+    def _build_prewarm_rail(self) -> PrewarmRail | None:
+        """Build the KV-cache prewarm rail.
+
+        Disabled unless JIUWENSWARM_PREWARM_ENABLED=true. The rail is a
+        no-op for non-InferenceAffinity (non-vLLM) clients — the
+        coordinator checks ``__client_name__`` at fire time.
+        """
+        config = PrewarmConfig.from_env()
+        if not config.enabled:
+            return None
+        try:
+            coordinator = PrewarmCoordinator(config)
+            rail = PrewarmRail(coordinator)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] PrewarmRail built: scenario_b=%s, timeout=%s",
+                config.scenario_b, config.timeout,
+            )
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] PrewarmRail create failed: %s", exc)
+            return None
+
+    def _build_model_routing(self, config: dict[str, Any] | None = None) -> Any | None:
+        """构建 ModelRoutingRail（模型路由）。
+
+        - 使能：config.yaml ``model_routing.enabled`` = true。
+        - ``model_routing.apply=true``：apply_routing=True 真切换（默认 false 只推荐不切）。
+        - ``model_routing.privacy_check=true``：开隐私检查（默认关）。
+        - ``model_routing.classifier``：分类器专用模型（只有 api_base/api_key/model_name/temperature 四个字段）；
+          api_base 非空即生效；不配则用 agent 当前 LLM。
+        - 能力表来自 config.yaml ``models.defaults`` + ``models.vision``（后者作 model_type="vision"
+          候选，仅含图请求参与路由）；model_builder 传 _build_model_from_entry 使能力表带 Model 对象（真切换前置）。
+        """
+        mr_cfg = (config or {}).get("model_routing") or {}
+        if not (mr_cfg.get("enabled") is True):
+            return None
+
+        # （模板拷贝已在 classifier/capability/privacy 模块加载时完成，此处不再重复）
+
+        try:
+            from jiuwenswarm.agents.harness.common.rails.model_routing import (
+                ModelRoutingRail,
+                build_capability_table_from_config,
+                ensure_routing_state_files,
+                load_mapper_config,
+                load_classifier_impl,
+            )
+
+            apply_routing = bool(mr_cfg.get("apply", False))
+            stats_path = str(mr_cfg.get("stats_path") or "").strip() or None
+            caps = build_capability_table_from_config(
+                config,
+                model_builder=JiuWenSwarmDeepAdapter._build_model_from_entry,
+            )
+            # 分类器：从 classifier_mapper.json 加载（exec 注入）
+            ensure_routing_state_files()
+            classifier = None
+            mapper = {}
+            try:
+                mapper = load_mapper_config()
+                classifier, _ = load_classifier_impl(mapper)
+            except Exception as exc:
+                logger.debug("[JiuWenSwarmDeepAdapter] classifier load skipped: %s", exc)
+            rail = ModelRoutingRail(
+                caps,
+                apply_routing=apply_routing,
+                stats_path=stats_path,
+                classifier=classifier,
+                mapper=mapper,
+                privacy_check=bool(mr_cfg.get("privacy_check", False)),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ModelRoutingRail create success, "
+                "%d models, apply_routing=%s, stats_path=%s, classifier=%s",
+                len(caps),
+                apply_routing,
+                stats_path or "(default)",
+                "dedicated" if classifier is not None else "agent-llm",
+            )
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] ModelRoutingRail create failed: %s", exc)
+            return None
+
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
 
@@ -4820,6 +4963,16 @@ class JiuWenSwarmDeepAdapter:
                 {"config": self._config_cache},
             ),
         ]
+
+        # ── ProgressiveToolRail（搜索方案，按需检索）──
+        # 由 config 的 progressive_tool_enabled 控制（默认 true = opt-out）。关闭时不注册，
+        # ContextAssembleRail 的"可用工具"全量列表正常保留（回退 show-all）。
+        if config.get("progressive_tool_enabled", True):
+            rail_infos.append(
+                _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
+            )
+        else:
+            self._progressive_tool_rail = None
 
         # SkillEvolutionRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
         # 智能模式下关闭自演进，plan 模式下按配置启用
