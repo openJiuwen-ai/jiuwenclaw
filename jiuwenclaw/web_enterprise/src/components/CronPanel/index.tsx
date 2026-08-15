@@ -172,15 +172,6 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
   const [previewRuns, setPreviewRuns] = useState<CronPreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
 
-  const targetOptions = [
-    { value: 'web', label: t('cron.targets.web') },
-    { value: 'feishu', label: t('cron.targets.feishu') },
-    { value: 'wecom', label: t('cron.targets.wecom') },
-    { value: 'wechat', label: t('cron.targets.wechat') },
-    { value: 'xiaoyi', label: t('cron.targets.xiaoyi'), disabled: true, style: { color: '#8c8c96ff' } },
-    { value: 'dingtalk', label: t('cron.targets.dingtalk'), disabled: true, style: { color: '#8c8c96ff' } },
-  ];
-
   const loadJobs = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -489,21 +480,8 @@ export default function CronPanel({ sessionId }: CronPanelProps) {
                           <td className="px-4 py-3 text-sm text-text-muted">
                             {displayTimezone}
                           </td>
-                          <td className="px-4 py-3">
-                            <select
-                              value={editJob.targets}
-                              onChange={(e) => setEditingJobs((prev) => ({
-                                ...prev,
-                                [job.id]: { ...prev[job.id], targets: e.target.value },
-                              }))}
-                              className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
-                            >
-                              {targetOptions.map((option) => (
-                                <option key={option.value} value={option.value} disabled={option.disabled} style={option.style}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </select>
+                          <td className="px-4 py-3 text-sm text-text-muted">
+                            {displayTarget || '-'}
                           </td>
                           <td className="px-4 py-3 text-left">
                             <div className="flex items-center gap-2">
