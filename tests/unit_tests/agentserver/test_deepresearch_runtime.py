@@ -23,21 +23,19 @@ def _fake_venv_python(tmp_path: Path, *, executable: bool = True) -> Path:
     return python
 
 
-def test_resolve_python_executable_reads_bound_overlay(tmp_path: Path, monkeypatch):
+def test_resolve_python_executable_ignores_configured_override(monkeypatch):
     from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
         resolve_python_executable,
     )
 
-    python = _fake_venv_python(tmp_path)
     monkeypatch.setenv("DEEPRESEARCH_PYTHON_EXECUTABLE", "/ambient/must-not-win")
-    token = bind_task_env_overlay({"DEEPRESEARCH_PYTHON_EXECUTABLE": str(python)})
-    try:
-        assert resolve_python_executable() == python
-    finally:
-        reset_task_env_overlay(token)
+    assert resolve_python_executable() == Path(os.path.abspath(sys.executable))
 
 
-def test_resolve_python_executable_preserves_symlinked_venv_identity(tmp_path: Path):
+def test_resolve_python_executable_preserves_symlinked_venv_identity(
+    tmp_path: Path,
+    monkeypatch,
+):
     from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
         build_child_env,
         resolve_python_executable,
@@ -49,37 +47,43 @@ def test_resolve_python_executable_preserves_symlinked_venv_identity(tmp_path: P
     (venv_root / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
     python = bin_dir / "python"
     python.symlink_to(sys.executable)
-    token = bind_task_env_overlay({"DEEPRESEARCH_PYTHON_EXECUTABLE": str(python)})
-    try:
-        resolved = resolve_python_executable()
-        child_env = build_child_env(resolved)
-    finally:
-        reset_task_env_overlay(token)
+    monkeypatch.setattr(sys, "executable", str(python))
+    resolved = resolve_python_executable()
+    child_env = build_child_env(resolved)
 
     assert resolved == python
     assert child_env["VIRTUAL_ENV"] == str(venv_root)
     assert child_env["PATH"].split(os.pathsep)[0] == str(bin_dir)
 
 
-def test_resolve_python_executable_missing_never_falls_back(monkeypatch):
+def test_resolve_python_executable_accepts_current_process_runtime_without_virtualenv(
+    tmp_path: Path,
+    monkeypatch,
+):
     from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
-        DeepResearchRuntimeError,
+        build_child_env,
         resolve_python_executable,
     )
 
-    monkeypatch.setenv("DEEPRESEARCH_PYTHON_EXECUTABLE", "/ambient/must-be-sealed")
-    token = bind_task_env_overlay({})
-    try:
-        with pytest.raises(DeepResearchRuntimeError, match="^runtime_python_missing$"):
-            resolve_python_executable()
-    finally:
-        reset_task_env_overlay(token)
+    python = tmp_path / "embedded-runtime" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.delenv("DEEPRESEARCH_PYTHON_EXECUTABLE", raising=False)
+    resolved = resolve_python_executable()
+    child_env = build_child_env(resolved)
+
+    assert resolved == python
+    assert "VIRTUAL_ENV" not in child_env
+    assert child_env["PATH"].split(os.pathsep)[0] == str(python.parent)
 
 
-@pytest.mark.parametrize("invalid_kind", ["relative", "missing", "not_executable", "not_venv"])
-def test_resolve_python_executable_rejects_invalid_runtime(
+@pytest.mark.parametrize("invalid_kind", ["relative", "missing", "not_executable"])
+def test_resolve_python_executable_rejects_invalid_current_runtime(
     tmp_path: Path,
     invalid_kind: str,
+    monkeypatch,
 ):
     from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
         DeepResearchRuntimeError,
@@ -92,17 +96,10 @@ def test_resolve_python_executable_rejects_invalid_runtime(
         configured = str(tmp_path / "missing" / "python")
     elif invalid_kind == "not_executable":
         configured = str(_fake_venv_python(tmp_path, executable=False))
-    else:
-        python = _fake_venv_python(tmp_path)
-        (python.parent.parent / "pyvenv.cfg").unlink()
-        configured = str(python)
 
-    token = bind_task_env_overlay({"DEEPRESEARCH_PYTHON_EXECUTABLE": configured})
-    try:
-        with pytest.raises(DeepResearchRuntimeError, match="^runtime_python_invalid$"):
-            resolve_python_executable()
-    finally:
-        reset_task_env_overlay(token)
+    monkeypatch.setattr(sys, "executable", configured)
+    with pytest.raises(DeepResearchRuntimeError, match="^runtime_python_invalid$"):
+        resolve_python_executable()
 
 
 def test_build_child_env_isolates_python_and_allows_only_http_proxy_family(

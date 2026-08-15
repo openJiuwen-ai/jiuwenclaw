@@ -113,17 +113,11 @@ class TestLocalEnvConfig:
             assert result == "plain_text"
             mock_crypto.encrypt.assert_not_called()
 
-    def test_deepresearch_python_executable_is_overlay_aware_business_config(self):
+    def test_deepresearch_python_executable_is_not_a_runtime_config_source(self):
         key = "DEEPRESEARCH_PYTHON_EXECUTABLE"
-        assert key in BUSINESS_MIRROR_KEYS
+        assert key not in BUSINESS_MIRROR_KEYS
         assert key not in SPAWN_ENV_KEYS
         assert is_sensitive_env_name(key) is False
-
-        token = bind_task_env_overlay({key: "/tenant/venv/bin/python"})
-        try:
-            assert read_env(key) == "/tenant/venv/bin/python"
-        finally:
-            reset_task_env_overlay(token)
 
     def test_export_spawn_environ_keeps_process_path_without_tenant_credentials(self):
         from jiuwenswarm.common.local_env_config import export_spawn_environ

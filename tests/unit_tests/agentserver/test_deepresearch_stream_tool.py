@@ -294,7 +294,6 @@ def test_only_six_standard_proxy_names_are_forwarded(tmp_path: Path, monkeypatch
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
     (venv / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
-    monkeypatch.setenv("DEEPRESEARCH_PYTHON_EXECUTABLE", str(python))
     for key in (
         "HTTP_PROXY",
         "http_proxy",

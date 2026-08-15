@@ -148,8 +148,6 @@ BUSINESS_MIRROR_KEYS: frozenset[str] = frozenset(
         "WEB_SEARCH_URL",
         "EXECUTION_METHOD",
         "TAVILY_API_KEY",
-        # Non-secret per-tenant DeepResearch runtime selection.
-        "DEEPRESEARCH_PYTHON_EXECUTABLE",
         # ACRCloud (audio_tools / read_env)
         "ACR_ACCESS_KEY",
         "ACR_ACCESS_SECRET",
