@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Skill 白名单：按租户同步预制技能到盘 + ``installed_skill``，启用只信 DB."""
+"""Skill 白名单：按租户同步预制技能到盘 + ``installed_skill``，启用只信 DB+盘一致."""
 
 from __future__ import annotations
 
@@ -110,6 +110,16 @@ def parse_agent_skill_whitelist(
     return AgentSkillWhitelistConfig(agent_id=agent_id, service_id=service_id, skills=items)
 
 
+def skill_dir_ready(skills_dir: Path | str, skill_name: str) -> bool:
+    """技能目录可用：存在且含 ``SKILL.md``。"""
+    name = str(skill_name or "").strip()
+    if not name:
+        return False
+    root = Path(skills_dir)
+    path = root / name
+    return path.is_dir() and (path / "SKILL.md").is_file()
+
+
 class SkillWhitelistSynchronizer:
     """将预制技能同步到租户 skills/，并写入 ``installed_skill``（按 skill 原子）."""
 
@@ -145,10 +155,7 @@ class SkillWhitelistSynchronizer:
 
     @staticmethod
     def _skill_dir_ready(skills_dir: Path, skill_name: str) -> bool:
-        if not skill_name:
-            return False
-        path = skills_dir / skill_name
-        return path.is_dir() and (path / "SKILL.md").is_file()
+        return skill_dir_ready(skills_dir, skill_name)
 
     def _should_download_prebuilt(
         self,
@@ -245,8 +252,13 @@ class SkillWhitelistSynchronizer:
         await self._remove_prebuilt_not_in_template(
             installed_skills_map, kept_prebuilt_names, result
         )
-        # 启用集 = 当前内存账本（含未改动的 user 行）；避免再查一次 DB
-        result.enabled_skill_dirs = list(installed_skills_map.keys())
+        await self._reconcile_user_skills_without_disk(installed_skills_map, result)
+        # 启用集 = 账本中与磁盘一致的 skill（库有盘无的不启用）
+        result.enabled_skill_dirs = [
+            name
+            for name in installed_skills_map.keys()
+            if self._skill_dir_ready(self._skills_dir, name)
+        ]
         result.prebuilt_skill_dirs = [
             name
             for name, row in installed_skills_map.items()
@@ -298,14 +310,15 @@ class SkillWhitelistSynchronizer:
                 installed_skills_map[name] = row
             return
 
-        # 失败但仍保有旧预制行时，避免后续误删（如版本 bump 下载失败）
+        # 失败但磁盘仍可用时保留旧预制行，避免版本 bump 下载失败误删（库有盘无则清账）
         keep = str(outcome.get("skill_name") or "").strip()
-        if (
-            keep
-            and keep in installed_skills_map
-            and str(installed_skills_map[keep].get("source_type")) == SOURCE_PREBUILT
-        ):
-            kept_prebuilt_names.add(keep)
+        if keep and keep in installed_skills_map:
+            row = installed_skills_map[keep]
+            if (
+                str(row.get("source_type")) == SOURCE_PREBUILT
+                and self._skill_dir_ready(self._skills_dir, keep)
+            ):
+                kept_prebuilt_names.add(keep)
         self._mark_failed(
             result,
             skill_name=str(outcome.get("skill_name") or ""),
@@ -341,6 +354,43 @@ class SkillWhitelistSynchronizer:
                     result,
                     skill_name=name,
                     error_code="remove_failed",
+                    error_message=msg,
+                )
+
+    async def _reconcile_user_skills_without_disk(
+        self,
+        installed_skills_map: dict[str, dict[str, Any]],
+        result: SkillWhitelistSyncResult,
+    ) -> None:
+        """用户自装：库有盘无则删账本（如 redeploy 后 workspace 磁盘丢失）。"""
+        for name, row in list(installed_skills_map.items()):
+            if str(row.get("source_type") or "").strip() != SOURCE_USER:
+                continue
+            if self._skill_dir_ready(self._skills_dir, name):
+                continue
+            try:
+                await delete_installed_skill(
+                    service_id=self._service_id,
+                    agent_id=self._agent_id,
+                    skill_name=name,
+                )
+                installed_skills_map.pop(name, None)
+                result.succeeded.append(f"removed_user:{name}")
+                logger.warning(
+                    "[SkillWhitelist] user skill DB row removed (disk missing); "
+                    "reinstall via skills.enterprise.install if needed: "
+                    "name=%s agent_id=%s service_id=%s",
+                    name,
+                    self._agent_id,
+                    self._service_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = f"remove user skill without disk failed name={name}: {exc}"
+                logger.warning("[SkillWhitelist] %s", msg)
+                self._mark_failed(
+                    result,
+                    skill_name=name,
+                    error_code="remove_user_without_disk_failed",
                     error_message=msg,
                 )
 

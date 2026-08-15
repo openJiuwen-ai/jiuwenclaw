@@ -1757,9 +1757,14 @@ class JiuWenClawDeepAdapter:
 
         enabled_skills: list[str] = []
         prebuilt_skills: set[str] = set()
+        skills_dir = Path(self._workspace_dir) / "skills"
+        from jiuwenclaw.agentserver.skill_whitelist import skill_dir_ready
+
         for row in rows:
             skill_name = str(row.get("skill_name") or "").strip()
             if not skill_name:
+                continue
+            if not skill_dir_ready(skills_dir, skill_name):
                 continue
             enabled_skills.append(skill_name)
             if str(row.get("source_type") or "").strip() == SOURCE_PREBUILT:
