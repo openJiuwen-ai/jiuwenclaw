@@ -369,6 +369,36 @@ async def list_installed_skills_for_gateway(
     return [row_public_view(r) for r in rows]
 
 
+def _agent_bot_id_group_num() -> int:
+    """与 RuntimeManagement ``_agent_bot_id_group_num`` 一致。"""
+    raw = os.getenv("AGENT_BOT_ID_GROUP_NUM", "0").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "[InstalledSkill] invalid AGENT_BOT_ID_GROUP_NUM=%r, fallback to 0",
+            raw,
+        )
+        return 0
+    return n if n > 0 else 0
+
+
+def _routing_bot_id(bot_id: str, group_num: int | None = None) -> str:
+    """与 RuntimeManagement ``_routing_bot_id`` 一致。"""
+    n = _agent_bot_id_group_num() if group_num is None else group_num
+    if n <= 0:
+        return bot_id
+    digest = hashlib.sha256(bot_id.encode("utf-8")).hexdigest()
+    bucket = int(digest, 16) % n
+    return f"b{bucket}"
+
+
+def _default_invoke_ids(group_id: str, bot_id: str, user_id: str) -> tuple[str, str]:
+    """企业策略未配置 service_id/agent_id 时的默认拼接（与 RuntimeManagement 同源）。"""
+    routed_bot = _routing_bot_id(bot_id)
+    return f"{group_id}{routed_bot}", f"{group_id}{routed_bot}{user_id}"
+
+
 def _default_logical_invoke_ids(
     group_id: str,
     bot_id: str,
@@ -380,14 +410,60 @@ def _default_logical_invoke_ids(
     u = str(user_id or "").strip()
     if not g or not b or not u:
         return "default_service_id", "default_agent_id"
-    try:
-        from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
-            _default_invoke_ids,
-        )
+    return _default_invoke_ids(g, b, u)
 
-        return _default_invoke_ids(g, b, u)
-    except Exception:
-        return f"{g}{b}", f"{g}{b}{u}"
+
+def _coalesce_loaded_invoke_ids(
+    request: Any,
+    loaded: Any | None,
+) -> tuple[str, str, str]:
+    """与 RuntimeManagement ``_coalesce_loaded_invoke_ids`` 一致（逻辑 ID，尚未 MD5）。"""
+    service_id: str | None = None
+    agent_id: str | None = None
+    workspace_dir: str | None = None
+    if loaded is not None:
+        raw_svc = getattr(loaded, "service_id", None)
+        raw_ag = getattr(loaded, "agent_id", None)
+        raw_ws = getattr(loaded, "workspace_dir", None)
+        if raw_svc and str(raw_svc).strip():
+            service_id = str(raw_svc).strip()
+        if raw_ag and str(raw_ag).strip():
+            agent_id = str(raw_ag).strip()
+        if raw_ws and str(raw_ws).strip():
+            workspace_dir = str(raw_ws).strip()
+
+    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+    ctx = loader_mod.routing_context_from_request(request)
+    default_svc, default_ag = _default_invoke_ids(ctx.group_id, ctx.bot_id, ctx.user_id)
+    default_ws = f"{ctx.group_id}{ctx.bot_id}{ctx.user_id}".strip()
+    return (
+        service_id or default_svc,
+        agent_id or default_ag,
+        workspace_dir or default_ws,
+    )
+
+
+async def _load_effective_service_config_for_tenant_resolve(request: Any) -> Any | None:
+    """按路由加载 service_config 槽位（与 Runtime 安装路径同源，Gateway 可用）。"""
+    try:
+        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
+
+        loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+        schemas_mod = import_manager_ws_client_module("core.enterprise_config.schemas")
+        load_fn = loader_mod.load_effective_enterprise_config
+        slots = [
+            schemas_mod.TemplateRefSlot.SERVICE_CONFIG,
+            schemas_mod.TemplateRefSlot.EXTENSION_CONFIG,
+        ]
+        return await load_fn(request, slots)
+    except Exception as exc:
+        logger.warning(
+            "[InstalledSkill] load service_config for tenant resolve failed: %s",
+            exc,
+        )
+        return None
 
 
 def _md5_logical_tenant_ids(service_id: str, agent_id: str) -> tuple[str, str]:
@@ -481,19 +557,14 @@ async def resolve_final_tenant_ids_async(
                 request_id="tenant-resolve",
                 params={"group_id": g, "bot_id": b, "user_id": u},
             )
-            from openjiuwen_runtime_management_extension.runtime_management_client import (  # type: ignore
-                _coalesce_loaded_invoke_ids,
-                load_effective_service_config_for_request,
-            )
-
-            loaded = await load_effective_service_config_for_request(request)
+            loaded = await _load_effective_service_config_for_tenant_resolve(request)
             logical_svc, logical_ag, _ws = _coalesce_loaded_invoke_ids(request, loaded)
             return _md5_logical_tenant_ids(
                 svc or logical_svc,
                 ag or logical_ag,
             )
         except Exception:
-            logger.debug(
+            logger.warning(
                 "[InstalledSkill] enterprise tenant resolve failed, fallback to default ids",
                 exc_info=True,
             )
