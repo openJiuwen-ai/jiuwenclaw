@@ -19,6 +19,12 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
+import {
+  COMPONENT_CENTER_ATTRACTION_STRENGTH,
+  computeConnectedComponents,
+  seedPositions,
+  stepSkillGraphLayout,
+} from './skillGraphLayout';
 import './SkillGraphPanel.css';
 
 type RawRecord = Record<string, unknown>;
@@ -372,18 +378,6 @@ function normalizeGraph(payload: SkillGraphPayload): NormalizedGraph {
   return { nodes, edges };
 }
 
-function seedPositions(nodes: GraphNode[], width: number, height: number): void {
-  const radius = Math.min(width, height) * 0.36;
-  nodes.forEach((node, index) => {
-    const angle = (index / Math.max(1, nodes.length)) * Math.PI * 2;
-    const jitter = ((index * 97) % 31) / 31;
-    node.x = Math.cos(angle) * radius * (0.55 + jitter * 0.55);
-    node.y = Math.sin(angle) * radius * (0.55 + jitter * 0.55);
-    node.vx = 0;
-    node.vy = 0;
-  });
-}
-
 function nodeSearchText(node: GraphNode): string {
   const props = node.properties || {};
   const values = [
@@ -673,6 +667,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const graphRef = useRef<NormalizedGraph>({ nodes: [], edges: [] });
   const visibleRef = useRef<NormalizedGraph>({ nodes: [], edges: [] });
+  const layoutComponentsRef = useRef<ReturnType<typeof computeConnectedComponents>>([]);
   const transformRef = useRef<Transform>({ x: 0, y: 0, scale: 1 });
   const selectedRef = useRef<GraphNode | null>(null);
   const hoveredRef = useRef<GraphNode | null>(null);
@@ -820,6 +815,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
   useEffect(() => {
     visibleRef.current = visible;
+    layoutComponentsRef.current = computeConnectedComponents(visible.nodes, visible.edges);
     if (selectedRef.current) {
       const visibleSelected = visible.nodes.find((node) => node.id === selectedRef.current?.id);
       if (visibleSelected) {
@@ -1158,48 +1154,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       if (!canvas || nodes.length === 0) return;
       const width = canvas.clientWidth || 900;
       const height = canvas.clientHeight || 620;
-      const nodeById = new Map(nodes.map((node) => [node.id, node]));
-      const linkDistance = 105;
-
-      for (let i = 0; i < nodes.length; i += 1) {
-        for (let j = i + 1; j < nodes.length; j += 1) {
-          const a = nodes[i];
-          const b = nodes[j];
-          const dx = b.x - a.x;
-          const dy = b.y - a.y;
-          const dist2 = Math.max(80, dx * dx + dy * dy);
-          const force = Math.min(460 / dist2, 0.07);
-          a.vx -= dx * force;
-          a.vy -= dy * force;
-          b.vx += dx * force;
-          b.vy += dy * force;
-        }
-      }
-
-      edges.forEach((edge) => {
-        const source = nodeById.get(edge.source);
-        const target = nodeById.get(edge.target);
-        if (!source || !target) return;
-        const dx = target.x - source.x;
-        const dy = target.y - source.y;
-        const dist = Math.max(1, Math.hypot(dx, dy));
-        const force = (dist - linkDistance) * (edge.type === 'can_feed' ? 0.025 : 0.014);
-        source.vx += (dx / dist) * force;
-        source.vy += (dy / dist) * force;
-        target.vx -= (dx / dist) * force;
-        target.vy -= (dy / dist) * force;
-      });
-
-      nodes.forEach((node) => {
-        node.vx += -node.x * 0.002;
-        node.vy += -node.y * 0.002;
-        node.vx *= 0.82;
-        node.vy *= 0.82;
-        node.x += node.vx;
-        node.y += node.vy;
-        node.x = Math.max(-width, Math.min(width, node.x));
-        node.y = Math.max(-height, Math.min(height, node.y));
-      });
+      stepSkillGraphLayout(
+        nodes,
+        edges,
+        width,
+        height,
+        layoutComponentsRef.current,
+        COMPONENT_CENTER_ATTRACTION_STRENGTH,
+      );
     };
 
     const draw = () => {
