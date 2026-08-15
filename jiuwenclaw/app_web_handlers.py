@@ -2250,7 +2250,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """Gateway 只读 DB：按最终 service_id+agent_id 列出已装成功行."""
         from jiuwenclaw.agentserver.installed_skill import (
             list_installed_skills_for_gateway,
-            resolve_final_tenant_ids,
+            resolve_final_tenant_ids_async,
         )
         from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
 
@@ -2259,7 +2259,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         g, b, u = extract_routing_triple(params)
         try:
-            service_id, agent_id = resolve_final_tenant_ids(
+            service_id, agent_id = await resolve_final_tenant_ids_async(
                 group_id=g,
                 bot_id=b,
                 user_id=u,
