@@ -530,7 +530,16 @@ class JiuWenProgressiveToolRail(DeepAgentRail):
             len(self._cached_all_tool_infos), len(live_infos),
         )
         self._cached_all_tool_infos = live_infos
+        # Re-apply the same _EXCLUDED_FROM_SEARCH filter as
+        # _build_executable_corpus (line 663-667): the legacy single-entry
+        # tools (e.g. cron) must stay excluded so a stale-corpus rebuild
+        # doesn't surface them in retry search results.
         self._search_corpus = list(live_infos)
+        if self._EXCLUDED_FROM_SEARCH:
+            self._search_corpus = [
+                t for t in self._search_corpus
+                if str(getattr(t, "name", "") or "") not in self._EXCLUDED_FROM_SEARCH
+            ]
         self._cached_bm25_sig = frozenset()
         await asyncio.to_thread(self._build_bm25_index)
         return await asyncio.to_thread(self._search, query, limit, detail_level)
