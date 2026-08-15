@@ -37,6 +37,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -162,4 +165,191 @@ async def recreate_all_sandboxes() -> int:
         return 0
 
 
-__all__ = ["shutdown_jiuwenbox_sandboxes", "recreate_all_sandboxes"]
+# ---------------------------------------------------------------------------
+# 内部 box-server 启动 (internal 模式), 由 _bootstrap_internal_jiuwenbox 和
+# _apply_sandbox_change 共用. 调用方需确保已通过 sandbox.enabled 和
+# startup_mode 门控.
+# ---------------------------------------------------------------------------
+
+
+def _is_std_cpython(python_exe: str) -> bool:
+    """判断 python.exe 是否标准 CPython 安装 (非 venv trampoline/launcher)."""
+    p = Path(python_exe)
+    try:
+        if not p.is_file():
+            return False
+    except OSError:
+        return False
+    parent = p.parent
+    if parent.name.lower() == "scripts":
+        return False
+    has_dll = any(parent.glob("python3*.dll"))
+    return has_dll
+
+
+async def start_box_server_internal() -> bool:
+    """根据 config.yaml 当前 sandbox 配置启动 box-server (internal 模式).
+
+    包含: 端点解析, policy 路径解析, 端口分配, 环境注入, 子进程拉起.
+    调用方需确保已通过 sandbox.enabled 和 startup_mode 门控.
+
+    Returns:
+        True if box-server is/was started successfully, False otherwise.
+    """
+    from jiuwenclaw.agentserver.jiuwenbox_runner import JiuwenBoxRunner
+    from jiuwenclaw.config import (
+        DEFAULT_SANDBOX_POLICY_FILE,
+        get_sandbox_endpoint,
+        resolve_sandbox_policy_path,
+        update_sandbox_endpoint,
+    )
+
+    try:
+        endpoint = get_sandbox_endpoint()
+        url = endpoint.get("url") or "http://127.0.0.1:8321"
+        sandbox_type = endpoint.get("type") or "jiuwenbox"
+        raw_policy = endpoint.get("policy_file") or ""
+        effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
+        policy_path = resolve_sandbox_policy_path(effective_policy_file)
+        if policy_path is None or not policy_path.is_file():
+            logger.warning(
+                "[sandbox_lifecycle] box-server start skipped: "
+                "policy_file=%r 无法解析到存在的文件 (resolved=%s).",
+                effective_policy_file, policy_path,
+            )
+            return False
+
+        if sys.platform == "win32":
+            try:
+                from jiuwenclaw.agentserver.sandbox_policy_render import (
+                    _ensure_copy_exists,
+                )
+                runtime_policy = _ensure_copy_exists()
+                if runtime_policy is not None and runtime_policy.is_file():
+                    policy_path = runtime_policy
+                    logger.info(
+                        "[sandbox_lifecycle] using runtime policy copy: %s "
+                        "(box-server merges base + copy)",
+                        policy_path,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[sandbox_lifecycle] ensure runtime copy failed, "
+                    "fall back to base policy: %s",
+                    exc,
+                )
+
+        from jiuwenclaw.agentserver.sandbox.port_util import (
+            allocate_internal_jiuwenbox_port,
+            parse_sandbox_host_port,
+        )
+        host, preferred_port = parse_sandbox_host_port(url)
+        port = allocate_internal_jiuwenbox_port(host, preferred_port)
+        if port != preferred_port:
+            url = f"http://{host}:{port}"
+            logger.info(
+                "[sandbox_lifecycle] jiuwenbox auto-start: "
+                "preferred port %d busy, using %d",
+                preferred_port, port,
+            )
+
+        sandbox_env: dict[str, str] = {}
+        try:
+            from jiuwenclaw.runtime.pip_env import (
+                ensure_runtime_venv,
+                resolve_base_python,
+            )
+            venv_dir = ensure_runtime_venv()
+            sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
+            bundled_python = resolve_base_python()
+            sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
+            if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
+                    or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                logger.info("[sandbox_lifecycle] JIUWENBOX_RUNNER_PYTHON 未注入探测候选路径...")
+                import glob as _glob
+                import shutil as _shutil
+                _runner_py: str | None = None
+                _candidates: list[str] = []
+                # 1. 打包
+                _candidates.append(
+                    str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
+                # 2. C:\Python3* (系统安装, 逐版本 glob 覆盖 3.10-3.13+)
+                _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
+                # 3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
+                _lad = os.environ.get("LOCALAPPDATA", "")
+                if _lad:
+                    _candidates += sorted(_glob.glob(
+                        str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
+                for _cand in _candidates:
+                    if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
+                        _runner_py = _cand
+                        break
+                # 4. PATH 里的 python.exe (校验非 venv)
+                if not _runner_py:
+                    _which = _shutil.which("python") or _shutil.which("python3")
+                    if _which and _is_std_cpython(_which):
+                        _runner_py = _which
+                if _runner_py:
+                    sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
+            logger.info(
+                "[sandbox_lifecycle] injected env: "
+                "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
+                "JIUWENBOX_RUNNER_PYTHON=%s",
+                venv_dir, bundled_python.parent,
+                sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[sandbox_lifecycle] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
+                exc,
+            )
+
+        logger.info(
+            "[sandbox_lifecycle] spawning box-server (startup_mode=internal)..."
+        )
+        runner = JiuwenBoxRunner.instance()
+        ok = await runner.ensure_running(
+            host=host,
+            port=port,
+            startup_mode="internal",
+            policy_path=policy_path,
+            extra_env=sandbox_env or None,
+            timeout=120.0,
+        )
+        if not ok:
+            stderr_tail = runner.get_stderr_tail(20)
+            hint = "\n--- jiuwenbox stderr (tail) ---\n" + stderr_tail if stderr_tail else ""
+            logger.warning(
+                "[sandbox_lifecycle] box-server start failed at %s:%d "
+                "(policy=%s).%s",
+                host, port, policy_path, hint,
+            )
+            return False
+
+        actual_url = runner.base_url
+        if actual_url and actual_url != endpoint.get("url"):
+            try:
+                update_sandbox_endpoint(
+                    actual_url, sandbox_type,
+                    startup_mode="internal",
+                    policy_file=effective_policy_file,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[sandbox_lifecycle] persist sandbox endpoint failed "
+                    "after auto-start: %s", exc,
+                )
+        logger.info(
+            "[sandbox_lifecycle] box-server ready at %s, "
+            "sandbox_id 按需 lazy 创建",
+            actual_url,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[sandbox_lifecycle] box-server start failed: %s", exc,
+        )
+        return False
+
+
+__all__ = ["shutdown_jiuwenbox_sandboxes", "recreate_all_sandboxes", "start_box_server_internal"]

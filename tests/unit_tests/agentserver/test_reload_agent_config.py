@@ -979,9 +979,15 @@ async def test_reload_yaml_sandbox_invalid_enabled_raises():
     adapter = _DeepAdapterReloadHarness.build(working=False)
     adapter.configure_for_force_apply_test()
 
+    # reload_agent_config 从 get_config() 而非 config_base 参数读 sandbox
+    # (避免 agent_manager 重放旧 _latest_config_base 覆盖前台 RPC sandbox 值),
+    # 故非法 enabled 必须放进 get_config 返回值才能触达 _sandbox_yaml_to_env_overlay 校验.
     with patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
-        return_value={"react": {"agent_name": "a"}},
+        return_value={
+            "react": {"agent_name": "a"},
+            "sandbox": {"enabled": "maybe"},
+        },
     ), patch(
         "jiuwenclaw.agentserver.deep_agent.interface_deep.memory_cache_fingerprint",
         return_value="mfp",
