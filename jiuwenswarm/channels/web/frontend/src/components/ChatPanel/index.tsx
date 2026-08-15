@@ -10,7 +10,7 @@ import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Shar
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo, type UserAnswerStatus } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
@@ -69,7 +69,12 @@ interface ChatPanelProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
+  onUserAnswer: (
+    requestId: string,
+    answers: UserAnswer[],
+    source?: string,
+    status?: UserAnswerStatus,
+  ) => void;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
   canExportShare?: boolean;

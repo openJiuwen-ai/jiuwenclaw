@@ -42,7 +42,7 @@ import {
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
-import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
+import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session, type UserAnswerStatus } from './types';
 import {
   ensureSessionRuntimes,
   useSessionStore,
@@ -1804,10 +1804,15 @@ function AppContent() {
     [cancel, clearGoal, mode, pause]
   );
 
-  const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
+  const handleUserAnswer = useCallback((
+    requestId: string,
+    answers: UserAnswer[],
+    source?: string,
+    status?: UserAnswerStatus,
+  ) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID) return;
-    void sendUserAnswer(currentSessionId, requestId, answers, source);
+    void sendUserAnswer(currentSessionId, requestId, answers, source, status);
   }, [sendUserAnswer]);
 
   const handleLoadMoreHistory = useCallback(async () => {

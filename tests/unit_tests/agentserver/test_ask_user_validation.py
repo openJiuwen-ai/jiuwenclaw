@@ -102,11 +102,34 @@ async def test_empty_structured_answers_preserve_answered_machine_state():
 
 
 @pytest.mark.asyncio
-async def test_explicit_skipped_preserves_compact_machine_state():
+async def test_explicit_skipped_keeps_readable_default():
     rail = StructuredAskUserRail()
     tc = _make_tool_call(
         {
             "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {"status": "skipped", "answers": []},
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert decision.tool_result == "用户已跳过本次问答，未提供回答。"
+
+
+@pytest.mark.asyncio
+async def test_explicit_skipped_can_opt_in_to_compact_machine_state():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "return_json": True,
             "questions": [
                 {"question": "Which?", "header": "Choice", "options": []}
             ],
@@ -129,6 +152,7 @@ async def test_explicit_skipped_accepts_empty_frontend_answer_shells():
     tc = _make_tool_call(
         {
             "query": "Choose",
+            "return_json": True,
             "questions": [
                 {"question": "Which?", "header": "Choice", "options": []}
             ],
@@ -158,6 +182,28 @@ async def test_explicit_skipped_accepts_empty_frontend_answer_shells():
 
     assert isinstance(decision, RejectResult)
     assert decision.tool_result == '{"status":"skipped","answers":[]}'
+
+
+@pytest.mark.asyncio
+async def test_empty_answered_uses_non_empty_readable_fallback():
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(
+        MagicMock(),
+        tc,
+        {"status": "answered", "answers": []},
+    )
+
+    assert isinstance(decision, RejectResult)
+    assert decision.tool_result == "用户未提供回答。"
 
 
 @pytest.mark.asyncio

@@ -168,11 +168,15 @@ export interface UserAnswer {
   custom_input?: string;
 }
 
+/** AskUser 交互的显式完成状态。缺失时后端按 answered 处理。 */
+export type UserAnswerStatus = 'answered' | 'skipped';
+
 /**
  * 用户回答 Payload（客户端 -> 服务端）
  */
 export interface UserAnswerPayload {
   request_id: string;
+  status?: UserAnswerStatus;
   answers: UserAnswer[];
   evolution_meta?: Record<string, unknown>;
   plan_approval_kind?: string;

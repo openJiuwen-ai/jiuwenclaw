@@ -385,14 +385,6 @@ class StructuredAskUserRail(AskUserRail):
             return self.reject(tool_result=f"[INVALID_ARGUMENT] {exc}")
 
         machine_payload = response.to_dict(include_original_request=False)
-        if response.status == "skipped":
-            return self.reject(
-                tool_result=json.dumps(
-                    machine_payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
         if is_structured and return_json:
             return self.reject(
                 tool_result=json.dumps(
@@ -402,7 +394,9 @@ class StructuredAskUserRail(AskUserRail):
                 )
             )
 
-        if is_structured:
+        if response.status == "skipped":
+            answer_text = "用户已跳过本次问答，未提供回答。"
+        elif is_structured:
             answer_text = response.to_readable_text()
         else:
             answer_text = str(
@@ -411,6 +405,8 @@ class StructuredAskUserRail(AskUserRail):
                     for answer in response.answers
                 }
             )
+        if not answer_text:
+            answer_text = "用户未提供回答。"
         logger.info(
             "[StructuredAskUserRail] Resolved answer: %s",
             answer_text,
