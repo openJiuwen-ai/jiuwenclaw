@@ -160,13 +160,19 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_message_for_test(self, ws, raw, send_lock):
         await self._handle_message(ws, raw, send_lock)
 
-    async def find_team_session_ids_for_test(self, team_name):
-        return await self._find_team_session_ids(team_name)
+    async def find_team_session_ids_for_test(self, team_name, *, sessions_root=None):
+        return await self._find_team_session_ids(
+            team_name,
+            sessions_root=sessions_root,
+        )
 
-    async def _find_team_session_ids(self, team_name: str):
+    async def _find_team_session_ids(self, team_name: str, *, sessions_root=None):
         if self._find_team_session_ids_override is not None:
             return await self._find_team_session_ids_override(team_name)
-        return await super()._find_team_session_ids(team_name)
+        return await super()._find_team_session_ids(
+            team_name,
+            sessions_root=sessions_root,
+        )
 
 
 class DeepAdapterHarness(interface_deep_module.JiuWenSwarmDeepAdapter):
@@ -1629,6 +1635,7 @@ async def test_first_team_chat_auto_binds_and_preserves_original_query(monkeypat
     assert generation_prompts == [original_query]
     persisted = get_session_metadata("sess-auto-team", cache_bust=True)
     assert persisted["team_name"] == "landlord_game_team"
+    assert persisted["runtime_team_name"] == "landlord_game_team_sess-auto-team"
     assert persisted["team_template_id"] == "research"
     assert binding_store.get("landlord_game_team").session_ids == ("sess-auto-team",)
     assert entity_store.get("landlord_game_team") is not None
@@ -1772,6 +1779,36 @@ async def test_handle_team_bindings_list_selects_entity_when_template_deleted(mo
     assert teams[0]["source_template_available"] is False
 
 
+def test_active_team_session_map_uses_logical_binding_name(monkeypatch, tmp_path):
+    class _Manager:
+        @staticmethod
+        def get_runtime_team_snapshot():
+            return {
+                "sess-1": {
+                    "team_name": "research_team_sess-1",
+                    "state": "active",
+                }
+            }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_all_team_managers",
+        lambda: [_Manager()],
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda _session_id, **_kwargs: {
+            "team_name": "research_team",
+            "runtime_team_name": "research_team_sess-1",
+        },
+    )
+
+    active = AgentWebSocketServerHarness._active_team_session_map(
+        sessions_root=tmp_path / "sessions"
+    )
+
+    assert active == {"research_team": "sess-1"}
+
+
 @pytest.mark.asyncio
 async def test_handle_team_session_bind_allows_existing_session_dir_without_metadata(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
@@ -1865,6 +1902,7 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
     metadata = json.loads((sessions_root / "existing_session" / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["mode"] == "code.team"
     assert metadata["team_name"] == "research_team"
+    assert metadata["runtime_team_name"] == "research_team_existing_session"
     assert metadata["team_template_id"] == "default"
     snapshot_path = sessions_root / "existing_session" / ".team-template-snapshot.json"
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
@@ -1884,7 +1922,7 @@ async def test_handle_team_session_bind_allows_existing_session_dir_without_meta
 
 
 @pytest.mark.asyncio
-async def test_handle_team_session_bind_preserves_native_legacy_session_root(monkeypatch, tmp_path):
+async def test_handle_team_session_bind_preserves_native_legacy_root_and_refreshes_snapshot(monkeypatch, tmp_path):
     from jiuwenswarm.server.runtime.team_binding_store import TeamBindingStore
     from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStore
 
@@ -1899,7 +1937,11 @@ async def test_handle_team_session_bind_preserves_native_legacy_session_root(mon
     entity_store.write(
         team_name=binding.team_name,
         template_id=binding.template_id,
-        template_snapshot={"team_name": "template_team", "leader": {"member_name": "lead_1"}},
+        template_snapshot={
+            "team_name": "entity_fallback",
+            "leader": {"member_name": "entity_lead"},
+            "agents": {"entity_lead": {}, "entity_analyst": {}},
+        },
         created_at=binding.created_at,
     )
 
@@ -1914,7 +1956,18 @@ async def test_handle_team_session_bind_preserves_native_legacy_session_root(mon
         "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
         lambda: entity_store,
     )
-    monkeypatch.setattr(server, "_effective_config_for_request", lambda _request: {})
+    effective_config = {
+        "modes": {
+            "team": {
+                "default": {
+                    "team_name": "current_template",
+                    "leader": {"member_name": "current_lead"},
+                    "agents": {"current_lead": {}, "current_analyst": {}},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(server, "_effective_config_for_request", lambda _request: effective_config)
     request = AgentRequest(
         request_id="req-team-session-bind-native",
         channel_id="web",
@@ -1928,9 +1981,30 @@ async def test_handle_team_session_bind_preserves_native_legacy_session_root(mon
         (tenant_sessions_root / "native_session" / "metadata.json").read_text(encoding="utf-8")
     )
     assert metadata["team_name"] == "research_team"
+    assert metadata["runtime_team_name"] == "research_team_native_session"
     assert store.get("research_team").session_ids == ("native_session",)
-    assert not (tenant_sessions_root / "native_session" / ".team-template-snapshot.json").exists()
+    snapshot_path = tenant_sessions_root / "native_session" / ".team-template-snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert "current_analyst" in snapshot["agents"]
+    assert "entity_analyst" not in snapshot["agents"]
     assert fake_ws.sent[0]["ok"] is True
+
+    effective_config["modes"]["team"]["default"]["agents"] = {
+        "current_lead": {},
+        "refreshed_analyst": {},
+    }
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    refreshed_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert "refreshed_analyst" in refreshed_snapshot["agents"]
+    assert "current_analyst" not in refreshed_snapshot["agents"]
+
+    effective_config["modes"]["team"].clear()
+    await server.handle_team_session_bind_for_test(fake_ws, request, asyncio.Lock())
+
+    fallback_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert "entity_analyst" in fallback_snapshot["agents"]
+    assert fake_ws.sent[-1]["ok"] is True
 
 
 @pytest.mark.asyncio
@@ -2387,9 +2461,16 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
         fake_delete_agent_team,
     )
     monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda session_id, **_kwargs: {
+            "team_name": "jiuwen_team",
+            "runtime_team_name": f"jiuwen_team_{session_id}",
+        },
+    )
+    monkeypatch.setattr(
         agent_ws_server_module,
-        "get_agent_sessions_dir",
-        lambda: FakeSessionsRoot(),
+        "_sessions_dir_for_request",
+        lambda _request: FakeSessionsRoot(),
     )
     monkeypatch.setattr(
         agent_ws_server_module.shutil,
@@ -2426,8 +2507,13 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
 
     assert delete_calls == [
         {
-            "team_name": "jiuwen_team",
-            "session_ids": ["team_sess_001", "team_sess_002"],
+            "team_name": "jiuwen_team_team_sess_001",
+            "session_ids": ["team_sess_001"],
+            "force": True,
+        },
+        {
+            "team_name": "jiuwen_team_team_sess_002",
+            "session_ids": ["team_sess_002"],
             "force": True,
         }
     ]
@@ -2452,9 +2538,10 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_handle_team_delete_stops_when_runner_reports_failure(monkeypatch):
+async def test_handle_team_delete_continues_other_runtimes_after_runner_exception(monkeypatch):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
+    delete_calls = []
     store_calls = []
 
     class FakeBindingStore:
@@ -2478,9 +2565,24 @@ async def test_handle_team_delete_stops_when_runner_reports_failure(monkeypatch)
         "jiuwenswarm.agents.harness.team.stop_team_session_runtime_across_managers",
         lambda session_id, reason="": asyncio.sleep(0, result=True),
     )
+    async def fake_delete_agent_team(*, team_name, session_ids, force):
+        delete_calls.append(
+            {"team_name": team_name, "session_ids": session_ids, "force": force}
+        )
+        if team_name == "jiuwen_team_team_sess_001":
+            raise RuntimeError("release info unavailable")
+        return True
+
     monkeypatch.setattr(
         "openjiuwen.core.runner.Runner.delete_agent_team",
-        lambda **kwargs: asyncio.sleep(0, result=False),
+        fake_delete_agent_team,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda session_id, **_kwargs: {
+            "team_name": "jiuwen_team",
+            "runtime_team_name": f"jiuwen_team_{session_id}",
+        },
     )
     monkeypatch.setattr(
         interface_deep_module,
@@ -2496,7 +2598,10 @@ async def test_handle_team_delete_stops_when_runner_reports_failure(monkeypatch)
         lambda: FakeEntityStore(),
     )
     server.set_find_team_session_ids_override_for_test(
-        lambda _team_name: asyncio.sleep(0, result=["team_sess_001"])
+        lambda _team_name: asyncio.sleep(
+            0,
+            result=["team_sess_001", "team_sess_002"],
+        )
     )
 
     request = AgentRequest(
@@ -2508,6 +2613,18 @@ async def test_handle_team_delete_stops_when_runner_reports_failure(monkeypatch)
 
     await server.handle_team_delete_for_test(fake_ws, request, asyncio.Lock())
 
+    assert delete_calls == [
+        {
+            "team_name": "jiuwen_team_team_sess_001",
+            "session_ids": ["team_sess_001"],
+            "force": True,
+        },
+        {
+            "team_name": "jiuwen_team_team_sess_002",
+            "session_ids": ["team_sess_002"],
+            "force": True,
+        },
+    ]
     assert store_calls == []
     assert fake_ws.sent[-1] == {
         "response_id": "req-team-delete-runner-failed",
@@ -2565,8 +2682,8 @@ async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fa
     )
     monkeypatch.setattr(
         agent_ws_server_module,
-        "get_agent_sessions_dir",
-        lambda: FakeSessionsRoot(),
+        "_sessions_dir_for_request",
+        lambda _request: FakeSessionsRoot(),
     )
 
     def fail_rmtree(_path):
@@ -2993,8 +3110,20 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
     cleared_metadata_cache = []
 
     class TeamManagerStub:
-        async def delete_session_runtime(self, session_id: str, reason: str = "") -> bool:
-            delete_calls.append({"session_id": session_id, "reason": reason})
+        async def delete_session_runtime(
+            self,
+            session_id: str,
+            reason: str = "",
+            *,
+            sessions_root=None,
+        ) -> bool:
+            delete_calls.append(
+                {
+                    "session_id": session_id,
+                    "reason": reason,
+                    "sessions_root": sessions_root,
+                }
+            )
             return True
 
     async def fake_ensure_persistent_checkpointer():
@@ -3051,7 +3180,13 @@ async def test_handle_session_delete_unbinds_team_session(monkeypatch, tmp_path)
 
     await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
 
-    assert delete_calls == [{"session_id": "sess-team-1", "reason": "session.delete: "}]
+    assert delete_calls == [
+        {
+            "session_id": "sess-team-1",
+            "reason": "session.delete: ",
+            "sessions_root": sessions_root,
+        }
+    ]
     assert cleared_metadata_cache == ["sess-team-1"]
     assert not session_dir.exists()
     binding = binding_store.get("research_team")
@@ -3133,7 +3268,9 @@ async def test_handle_session_delete_rejects_when_checkpointer_unavailable(monke
 @pytest.mark.asyncio
 async def test_find_team_session_ids_uses_metadata_team_name(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
-    sessions_root = tmp_path / "sessions"
+    global_sessions_root = tmp_path / "global-sessions"
+    sessions_root = tmp_path / "tenant-sessions"
+    (global_sessions_root / "global_team_sess").mkdir(parents=True)
     (sessions_root / "team_sess_001").mkdir(parents=True)
     (sessions_root / "team_sess_002").mkdir(parents=True)
     (sessions_root / "agent_sess_003").mkdir(parents=True)
@@ -3147,14 +3284,22 @@ async def test_find_team_session_ids_uses_metadata_team_name(monkeypatch, tmp_pa
     monkeypatch.setattr(
         agent_ws_server_module,
         "get_agent_sessions_dir",
-        lambda: sessions_root,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda session_id: metadata_map.get(session_id, {}),
+        lambda: global_sessions_root,
     )
 
-    session_ids = await server.find_team_session_ids_for_test("jiuwen_team")
+    def fake_get_session_metadata(session_id, *, sessions_root=None):
+        assert sessions_root == tmp_path / "tenant-sessions"
+        return metadata_map.get(session_id, {})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        fake_get_session_metadata,
+    )
+
+    session_ids = await server.find_team_session_ids_for_test(
+        "jiuwen_team",
+        sessions_root=sessions_root,
+    )
 
     assert session_ids == ["team_sess_001"]
 

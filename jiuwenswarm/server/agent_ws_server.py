@@ -27,6 +27,7 @@ from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_config_file,
     mask_sensitive,
+    resolve_tenant_agent_workspace_dir,
     resolve_tenant_sessions_dir,
 )
 from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
@@ -209,6 +210,12 @@ def _sessions_dir_for_request(request: AgentRequest) -> Path:
     """Resolve tenant ``service_{sid}/agent_{aid}/agent/sessions`` for an AgentRequest."""
     agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
     return resolve_tenant_sessions_dir(service_id, agent_id)
+
+
+def _agent_workspace_dir_for_request(request: AgentRequest) -> Path:
+    """Resolve tenant ``service_{sid}/agent_{aid}/agent/workspace`` for a request."""
+    agent_id, service_id, _workspace_key = TenantAgentPool.extract_ids(request)
+    return resolve_tenant_agent_workspace_dir(service_id, agent_id)
 
 
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
@@ -3049,10 +3056,15 @@ class AgentWebSocketServer:
                 kvc_task.add_done_callback(_background_session_kvc_tasks.discard)
                 kvc_task.add_done_callback(_log_background_session_kvc_failure)
 
-    async def _find_team_session_ids(self, team_name: str) -> list[str]:
+    async def _find_team_session_ids(
+        self,
+        team_name: str,
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> list[str]:
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
-        sessions_dir = get_agent_sessions_dir()
+        sessions_dir = Path(sessions_root) if sessions_root is not None else get_agent_sessions_dir()
         if not sessions_dir.exists():
             return []
 
@@ -3062,7 +3074,13 @@ class AgentWebSocketServer:
                 continue
 
             session_id = session_dir.name
-            metadata = get_session_metadata(session_id)
+            if sessions_root is None:
+                metadata = get_session_metadata(session_id)
+            else:
+                metadata = get_session_metadata(
+                    session_id,
+                    sessions_root=sessions_dir,
+                )
             if not self._is_team_metadata_mode(metadata):
                 continue
 
@@ -3222,6 +3240,7 @@ class AgentWebSocketServer:
             get_session_metadata,
             update_session_metadata,
         )
+        from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
         sessions_root = _sessions_dir_for_request(request)
         metadata = get_session_metadata(
@@ -3285,6 +3304,10 @@ class AgentWebSocketServer:
                     user_content=query,
                     mode=canonical_mode,
                     team_name=binding.team_name,
+                    runtime_team_name=TeamManager.build_session_scoped_team_name(
+                        binding.team_name,
+                        session_id,
+                    ),
                     team_template_id=binding.template_id,
                     touch_last_message_at=False,
                     sync_write=True,
@@ -3335,8 +3358,12 @@ class AgentWebSocketServer:
         return mode in {"team", "team.plan", "code.team"}
 
     @staticmethod
-    def _active_team_session_map() -> dict[str, str]:
+    def _active_team_session_map(
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> dict[str, str]:
         from jiuwenswarm.agents.harness.team import get_all_team_managers
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
         active: dict[str, str] = {}
         for manager in get_all_team_managers():
@@ -3344,8 +3371,14 @@ class AgentWebSocketServer:
             if not callable(snapshot_fn):
                 continue
             for session_id, info in snapshot_fn().items():
-                team_name = str(info.get("team_name") or "").strip()
+                runtime_team_name = str(info.get("team_name") or "").strip()
                 state = str(info.get("state") or "").strip()
+                metadata = get_session_metadata(
+                    str(session_id),
+                    sessions_root=sessions_root,
+                )
+                logical_team_name = str(metadata.get("team_name") or "").strip()
+                team_name = logical_team_name or runtime_team_name
                 if team_name and state in {"active", "pending"}:
                     active.setdefault(team_name, str(session_id))
         return active
@@ -3409,7 +3442,9 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity_for_binding, get_team_entity_store
         from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
 
-        active_by_team = self._active_team_session_map()
+        active_by_team = self._active_team_session_map(
+            sessions_root=_sessions_dir_for_request(request),
+        )
         config_base = self._effective_config_for_request(request)
         templates = {
             str(item.get("template_id") or ""): item
@@ -3560,7 +3595,7 @@ class AgentWebSocketServer:
             await send_wire_payload(ws, wire)
 
     async def _handle_team_session_bind(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        from jiuwenswarm.agents.harness.team import get_team_template_snapshot
+        from jiuwenswarm.agents.harness.team import TeamManager, get_team_template_snapshot
         from jiuwenswarm.agents.harness.team.config_loader import TeamTemplateNotFoundError
         from jiuwenswarm.server.runtime.session.session_metadata import (
             capture_session_team_binding_artifacts,
@@ -3619,16 +3654,14 @@ class AgentWebSocketServer:
                     raise TeamBindingStoreError("team entity config missing", code="NOT_FOUND")
                 from jiuwenswarm.server.runtime.team_entity_store import normalize_team_entity_snapshot
 
-                session_snapshot = None
-                if has_tenant_scope:
-                    try:
-                        raw_snapshot = get_team_template_snapshot(
-                            config_base,
-                            template_id=existing_binding.template_id,
-                        )
-                    except TeamTemplateNotFoundError:
-                        raw_snapshot = entity.template_snapshot
-                    session_snapshot = normalize_team_entity_snapshot(raw_snapshot, config_base)
+                try:
+                    raw_snapshot = get_team_template_snapshot(
+                        config_base,
+                        template_id=existing_binding.template_id,
+                    )
+                except TeamTemplateNotFoundError:
+                    raw_snapshot = entity.template_snapshot
+                session_snapshot = normalize_team_entity_snapshot(raw_snapshot, config_base)
                 artifacts = capture_session_team_binding_artifacts(
                     session_id,
                     sessions_root=sessions_root,
@@ -3639,6 +3672,10 @@ class AgentWebSocketServer:
                         channel_id=str(request.channel_id or "").strip() or None,
                         mode=canonical_mode,
                         team_name=existing_binding.team_name,
+                        runtime_team_name=TeamManager.build_session_scoped_team_name(
+                            existing_binding.team_name,
+                            session_id,
+                        ),
                         team_template_id=existing_binding.template_id,
                         team_template_snapshot=session_snapshot,
                         sync=True,
@@ -3707,6 +3744,10 @@ class AgentWebSocketServer:
             TeamEntityStoreError,
             get_team_entity_store,
         )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            resolve_session_runtime_team_name,
+        )
 
         params = request.params if isinstance(request.params, dict) else {}
         is_team = is_team_params(params)
@@ -3735,7 +3776,11 @@ class AgentWebSocketServer:
             try:
                 binding_store = get_team_binding_store()
                 entity_store = get_team_entity_store()
-                team_session_ids = await self._find_team_session_ids(team_name)
+                sessions_root = _sessions_dir_for_request(request)
+                team_session_ids = await self._find_team_session_ids(
+                    team_name,
+                    sessions_root=sessions_root,
+                )
                 if not team_session_ids:
                     binding = binding_store.get(team_name)
                     if binding is None and not entity_store.exists(team_name):
@@ -3776,11 +3821,39 @@ class AgentWebSocketServer:
                                 reason="team.delete: ",
                             )
 
-                        runtime_deleted = await Runner.delete_agent_team(
-                            team_name=team_name,
-                            session_ids=team_session_ids,
-                            force=True,
-                        )
+                        runtime_sessions: dict[str, list[str]] = {}
+                        for team_session_id in team_session_ids:
+                            metadata = get_session_metadata(
+                                team_session_id,
+                                sessions_root=sessions_root,
+                            )
+                            runtime_team_name = (
+                                resolve_session_runtime_team_name(metadata) or team_name
+                            )
+                            runtime_sessions.setdefault(runtime_team_name, []).append(
+                                team_session_id
+                            )
+
+                        runtime_deleted = True
+                        for runtime_team_name, runtime_session_ids in runtime_sessions.items():
+                            try:
+                                deleted = await Runner.delete_agent_team(
+                                    team_name=runtime_team_name,
+                                    session_ids=runtime_session_ids,
+                                    force=True,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[AgentWebSocketServer] team.delete runtime cleanup failed: "
+                                    "team_name=%s session_ids=%s error=%s",
+                                    runtime_team_name,
+                                    runtime_session_ids,
+                                    exc,
+                                )
+                                runtime_deleted = False
+                                continue
+                            if not deleted:
+                                runtime_deleted = False
                         if not runtime_deleted:
                             resp = AgentResponse(
                                 request_id=request.request_id,
@@ -3797,7 +3870,7 @@ class AgentWebSocketServer:
                         else:
                             failed_session_ids: list[str] = []
                             for team_session_id in team_session_ids:
-                                session_dir = get_agent_sessions_dir() / team_session_id
+                                session_dir = sessions_root / team_session_id
                                 if session_dir.exists():
                                     try:
                                         shutil.rmtree(session_dir)
@@ -3810,7 +3883,10 @@ class AgentWebSocketServer:
                                         )
                                         failed_session_ids.append(team_session_id)
                                         continue
-                                remove_session_metadata_cache(team_session_id)
+                                remove_session_metadata_cache(
+                                    team_session_id,
+                                    sessions_root=sessions_root,
+                                )
 
                             if failed_session_ids:
                                 resp = AgentResponse(
@@ -3930,6 +4006,7 @@ class AgentWebSocketServer:
                             deleted = await team_manager.delete_session_runtime(
                                 target,
                                 reason="session.delete: ",
+                                sessions_root=sessions_root,
                             )
                         else:
                             await Runner.release(target)
@@ -4491,7 +4568,10 @@ class AgentWebSocketServer:
         from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import (
             TeamMonitorHandler,
         )
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            resolve_session_runtime_team_name,
+        )
 
         params = request.params if isinstance(request.params, dict) else {}
         session_id = str(params.get("session_id") or request.session_id or "").strip()
@@ -4524,15 +4604,16 @@ class AgentWebSocketServer:
         # title/content. Fall back whenever live has no tasks.
         needs_db = snapshot is None or not _snapshot_tasks(snapshot)
         if needs_db and session_id:
-            team_name = str(params.get("team_name") or "").strip()
-            if not team_name:
-                team_name = str(
-                    team_manager.get_active_team_name(session_id) or ""
-                ).strip()
-            if not team_name:
-                team_name = str(
-                    (get_session_metadata(session_id) or {}).get("team_name") or ""
-                ).strip()
+            metadata = get_session_metadata(
+                session_id,
+                sessions_root=_sessions_dir_for_request(request),
+            )
+            team_name = str(
+                team_manager.get_active_team_name(session_id)
+                or resolve_session_runtime_team_name(metadata)
+                or params.get("team_name")
+                or ""
+            ).strip()
             if team_name:
                 try:
                     db_snapshot = await TeamMonitorHandler.get_team_snapshot_from_db(
@@ -4620,10 +4701,22 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
             query_team_human_members_for_join,
         )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            resolve_session_runtime_team_name,
+        )
 
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id") or request.session_id or ""
-        team_name = str(params.get("team_name") or "").strip()
+        metadata = get_session_metadata(
+            session_id,
+            sessions_root=_sessions_dir_for_request(request),
+        )
+        team_name = str(
+            resolve_session_runtime_team_name(metadata)
+            or params.get("team_name")
+            or ""
+        ).strip()
         channel_id = request.channel_id or "web"
 
         try:
@@ -5388,7 +5481,11 @@ class AgentWebSocketServer:
         try:
             session_id = request.session_id or "default"
             project_dir = resolve_request_project_dir(request)
-            extra_history_roots = get_session_extra_history_roots(session_id)
+            extra_history_roots = get_session_extra_history_roots(
+                session_id,
+                sessions_root=_sessions_dir_for_request(request),
+                agent_workspace_root=_agent_workspace_dir_for_request(request),
+            )
             diff_service = get_diff_service()
             turns, git_diff = await asyncio.gather(
                 asyncio.to_thread(

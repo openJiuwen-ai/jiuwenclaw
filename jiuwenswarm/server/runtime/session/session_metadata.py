@@ -44,6 +44,12 @@ _TITLE_MAX_LEN = 50
 _HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 
+
+def resolve_session_runtime_team_name(metadata: dict[str, Any] | None) -> str:
+    """Return the Agent Teams runtime identity, with legacy metadata fallback."""
+    values = metadata if isinstance(metadata, dict) else {}
+    return str(values.get("runtime_team_name") or values.get("team_name") or "").strip()
+
 # 匹配所有小写 XML 块:
 # 如 <system-reminder>、<file-content>、<command-name> 等系统/工具注入内容
 _INJECTED_TAG_RE = re.compile(
@@ -827,6 +833,7 @@ def update_session_metadata(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     team_name: str | None = None,
+    runtime_team_name: str | None = None,
     team_template_id: str | None = None,
     team_template_snapshot: dict[str, Any] | None = None,
     accent_color: str | None = None,
@@ -911,6 +918,7 @@ def update_session_metadata(
             "message_count": 1 if increment_message_count else 0,
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
+            "runtime_team_name": runtime_team_name or "",
             "team_template_id": team_template_id or "",
             "round_id": 0,
             "project_dir": project_dir or "",
@@ -936,6 +944,8 @@ def update_session_metadata(
             metadata["mode"] = mode
         if team_name is not None:
             metadata["team_name"] = team_name
+        if runtime_team_name is not None:
+            metadata["runtime_team_name"] = runtime_team_name
         if team_template_id is not None:
             metadata["team_template_id"] = team_template_id
         if accent_color is not None:
@@ -1194,6 +1204,7 @@ def get_session_metadata(
             sessions_root=root_s,
         )
         metadata.setdefault("team_name", "")
+        metadata.setdefault("runtime_team_name", "")
         metadata.setdefault("team_template_id", "")
     return metadata
 

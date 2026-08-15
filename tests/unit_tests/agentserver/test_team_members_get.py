@@ -46,6 +46,7 @@ async def _invoke(
     helpers_result: list[dict[str, Any]],
     team_name: str = "jiwen-team_sess-1",
     channel_id: str = "feishu",
+    runtime_team_name: str | None = None,
 ):
     """Call _handle_team_members_get with ``query_team_human_members_for_join`` mocked.
 
@@ -59,19 +60,31 @@ async def _invoke(
     lock = asyncio.Lock()
     request = _make_request(team_name=team_name, channel_id=channel_id)
 
+    helper_calls: list[tuple[str, str]] = []
+
     async def _stub(_session_id, _team_name):
+        helper_calls.append((_session_id, _team_name))
         return helpers_result
 
-    with mock.patch(
-        "jiuwenswarm.server.runtime.agent_adapter.team_helpers"
-        ".query_team_human_members_for_join",
-        _stub,
+    with (
+        mock.patch(
+            "jiuwenswarm.server.runtime.agent_adapter.team_helpers"
+            ".query_team_human_members_for_join",
+            _stub,
+        ),
+        mock.patch(
+            "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+            return_value={
+                "team_name": team_name,
+                "runtime_team_name": runtime_team_name,
+            },
+        ),
     ):
         await agent_ws_server.AgentWebSocketServer._handle_team_members_get(
             None, ws, request, lock
         )
     assert len(ws.sent) == 1
-    return parse_agent_server_wire_unary(json.loads(ws.sent[0]))
+    return parse_agent_server_wire_unary(json.loads(ws.sent[0])), helper_calls
 
 
 @pytest.mark.anyio
@@ -82,9 +95,14 @@ async def test_returns_human_agent_members() -> None:
         {"member_id": "leader-1", "role": "team_leader"},
         {"member_id": "pm-1", "role": "human_agent"},
     ]
-    resp = await _invoke(members)
+    resp, helper_calls = await _invoke(
+        members,
+        team_name="logical-team",
+        runtime_team_name="logical-team_sess-1",
+    )
 
     assert resp.request_id == "req-1"
+    assert helper_calls == [("sess-1", "logical-team_sess-1")]
     assert resp.ok is True
     assert [m["member_id"] for m in resp.payload["members"]] == ["reviewer-1", "pm-1"]
     # 路线 B 不再回传 team_name（gateway 不消费）
@@ -94,7 +112,7 @@ async def test_returns_human_agent_members() -> None:
 @pytest.mark.anyio
 async def test_empty_members_returns_not_ok() -> None:
     """helpers 返回空 list（team 不存在 / DB miss）→ server ok=False，不带文案。"""
-    resp = await _invoke([])
+    resp, _helper_calls = await _invoke([])
 
     assert resp.ok is False
     assert resp.payload.get("members") == []
@@ -103,7 +121,7 @@ async def test_empty_members_returns_not_ok() -> None:
 @pytest.mark.anyio
 async def test_only_non_human_members_returns_not_ok() -> None:
     """helpers 有成员但全是 team_leader（无 human_agent）→ 过滤后空 → ok=False。"""
-    resp = await _invoke([
+    resp, _helper_calls = await _invoke([
         {"member_id": "leader-1", "role": "team_leader"},
     ])
 

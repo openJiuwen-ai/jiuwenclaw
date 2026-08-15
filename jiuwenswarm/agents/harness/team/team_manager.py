@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import logging
 import re
 import time
@@ -72,6 +73,7 @@ from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.session.session_metadata import (
     get_session_metadata,
     get_session_team_template_snapshot,
+    resolve_session_runtime_team_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -521,8 +523,12 @@ class TeamManager:
         供网关等外部模块做 team/session 一致性校验时复用，避免直接访问受保护成员。
         """
         base_name = str(team_name or "").strip() or "team"
-        session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
+        raw_session_id = str(session_id or "").strip()
+        session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_session_id)
         session_suffix = session_suffix.strip("._-")
+        if raw_session_id and session_suffix != raw_session_id:
+            digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()[:12]
+            session_suffix = f"{session_suffix}_{digest}" if session_suffix else digest
         if not session_suffix:
             return base_name
         if base_name.endswith(f"_{session_suffix}"):
@@ -633,12 +639,13 @@ class TeamManager:
         *,
         config_base: dict[str, Any] | None = None,
         sessions_root: str | Path | None = None,
-    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None]:
         metadata_kwargs: dict[str, Any] = {"cache_bust": True}
         if sessions_root is not None:
             metadata_kwargs["sessions_root"] = sessions_root
         metadata = get_session_metadata(session_id, **metadata_kwargs)
         team_name = str(metadata.get("team_name") or "").strip()
+        runtime_team_name = resolve_session_runtime_team_name(metadata)
         template_id = str(metadata.get("team_template_id") or "").strip()
         template_snapshot = get_session_team_template_snapshot(
             session_id,
@@ -673,7 +680,12 @@ class TeamManager:
             if template_snapshot is None and entity is not None:
                 template_id = entity.template_id
                 template_snapshot = copy.deepcopy(entity.template_snapshot)
-        return team_name or None, template_id or None, template_snapshot
+        return (
+            team_name or None,
+            runtime_team_name or None,
+            template_id or None,
+            template_snapshot,
+        )
 
     def _load_session_team_spec(
         self,
@@ -688,10 +700,12 @@ class TeamManager:
             lookup_kwargs["config_base"] = config_base
         if sessions_root is not None:
             lookup_kwargs["sessions_root"] = sessions_root
-        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(
-            session_id,
-            **lookup_kwargs,
-        )
+        (
+            team_name,
+            runtime_team_name,
+            template_id,
+            template_snapshot,
+        ) = self._lookup_bound_team_identity(session_id, **lookup_kwargs)
         load_kwargs: dict[str, Any] = {}
         if requested_model_name is not None:
             load_kwargs["requested_model_name"] = requested_model_name
@@ -704,7 +718,7 @@ class TeamManager:
             load_kwargs["config_base"] = config_base
         spec = self._load_team_spec(session_id, **load_kwargs)
         if team_name:
-            spec.team_name = team_name
+            spec.team_name = runtime_team_name or team_name
             return spec, True
         return spec, False
 
@@ -967,7 +981,7 @@ class TeamManager:
             return pending_team_name
 
         metadata = get_session_metadata(session_id)
-        team_name = str(metadata.get("team_name") or "").strip()
+        team_name = resolve_session_runtime_team_name(metadata)
         return team_name or None
 
     def _resolve_session_team_name(self, session_id: str) -> str | None:
@@ -1056,9 +1070,16 @@ class TeamManager:
         return self.is_runtime_active(session_id)
 
     @staticmethod
-    def _resolve_delete_session_team_name(session_id: str) -> str | None:
-        metadata = get_session_metadata(session_id)
-        team_name = str(metadata.get("team_name") or "").strip()
+    def _resolve_delete_session_team_name(
+        session_id: str,
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> str | None:
+        if sessions_root is None:
+            metadata = get_session_metadata(session_id)
+        else:
+            metadata = get_session_metadata(session_id, sessions_root=sessions_root)
+        team_name = resolve_session_runtime_team_name(metadata)
         if team_name:
             return team_name
 
@@ -2262,7 +2283,13 @@ class TeamManager:
         )
         return True
 
-    async def delete_session_runtime(self, session_id: str, reason: str = "") -> bool:
+    async def delete_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> bool:
         """Delete a team-mode session and its session-scoped team data.
 
         Jiuwenswarm scopes team names by session id, so deleting a
@@ -2271,7 +2298,10 @@ class TeamManager:
         team name cannot be resolved from session metadata, fall back to
         releasing only the session checkpoint.
         """
-        team_name = self._resolve_delete_session_team_name(session_id)
+        team_name = self._resolve_delete_session_team_name(
+            session_id,
+            sessions_root=sessions_root,
+        )
         await kv_cache_hooks.stop_runtime_before_terminal_delete(
             self.stop_session_runtime,
             session_id=session_id,
@@ -2280,11 +2310,19 @@ class TeamManager:
 
         try:
             if team_name:
-                await Runner.delete_agent_team(
+                deleted = await Runner.delete_agent_team(
                     team_name=team_name,
                     session_ids=[session_id],
                     force=True,
                 )
+                if not deleted:
+                    logger.warning(
+                        "[TeamManager] runner did not delete team session runtime: "
+                        "session_id=%s team_name=%s",
+                        session_id,
+                        team_name,
+                    )
+                    return False
             else:
                 logger.warning(
                     "[TeamManager] delete session runtime fell back to session release: "
