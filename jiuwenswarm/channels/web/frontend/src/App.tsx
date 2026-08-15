@@ -24,6 +24,7 @@ import {
   type ShareImageSnapshot,
 } from './features/shareImageExport';
 import type { CodeReviewTarget } from './features/code-mode/types';
+import { OnboardingGuide, shouldAutoOpenOnboarding } from './features/onboarding';
 
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import {
@@ -323,6 +324,9 @@ function AppContent() {
   const modelSetupGuideEvaluatedRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
+  /** 首次使用配置引导（onboarding）弹框是否打开 */
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const onboardingAutoCheckedRef = useRef(false);
 
   useEffect(() => {
     tRef.current = t;
@@ -351,8 +355,16 @@ function AppContent() {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const nav = (e as CustomEvent<MainNavKey>).detail;
-      if (nav) setActiveNav(nav);
+      const detail = (e as CustomEvent<MainNavKey | { nav: MainNavKey; configGroup?: string }>).detail;
+      if (typeof detail === 'string') {
+        setActiveNav(detail);
+        return;
+      }
+      if (detail && typeof detail === 'object' && detail.nav) {
+        // 携带 configGroup 时先设置初始展开分组，再切到配置页，ConfigPanel 会据此切换页签。
+        if (detail.configGroup) setConfigInitialExpandGroup(detail.configGroup);
+        setActiveNav(detail.nav);
+      }
     };
     window.addEventListener('jiuwen:nav', handler);
     return () => window.removeEventListener('jiuwen:nav', handler);
@@ -1404,6 +1416,24 @@ function AppContent() {
       setInitialDataLoaded(true);
     })();
   }, [fetchConfig, initialDataLoaded, isConnected]);
+
+  // 首次使用自动弹出配置引导：初始化完成后，若本机无「已看过/已关闭」标记则弹出一次。
+  useEffect(() => {
+    if (!initialDataLoaded || onboardingAutoCheckedRef.current) {
+      return;
+    }
+    onboardingAutoCheckedRef.current = true;
+    if (shouldAutoOpenOnboarding()) {
+      setOnboardingOpen(true);
+    }
+  }, [initialDataLoaded]);
+
+  // 手动重开配置引导（来自侧边栏齿轮浮层等入口）。
+  useEffect(() => {
+    const handler = () => setOnboardingOpen(true);
+    window.addEventListener('jiuwen:open-onboarding', handler);
+    return () => window.removeEventListener('jiuwen:open-onboarding', handler);
+  }, []);
 
   useEffect(() => {
     if (!isConnected || !routeSessionId) {
@@ -2751,6 +2781,8 @@ function AppContent() {
           </div>
         </div>
       )}
+
+      <OnboardingGuide open={onboardingOpen} onClose={() => setOnboardingOpen(false)} />
 
       <div className="share-image-stage" aria-hidden="true">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />

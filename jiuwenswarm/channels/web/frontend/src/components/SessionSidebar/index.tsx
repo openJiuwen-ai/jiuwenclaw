@@ -6,6 +6,7 @@
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Compass } from 'lucide-react';
 import './SessionSidebar.css';
 import ChannelIcon from '../../assets/sidebar/channel.svg?react';
 import PluginIcon from '../../assets/sidebar/plugin.svg?react';
@@ -143,6 +144,17 @@ function AdvancedConfigPanel({
         </div>
       </div>
 
+      <button
+        type="button"
+        className="advanced-config-panel__guide"
+        onClick={() => {
+          onClose();
+          window.dispatchEvent(new CustomEvent('jiuwen:open-onboarding'));
+        }}
+      >
+        <Compass size={14} aria-hidden />
+        <span>{t('sessionSidebar.guide')}</span>
+      </button>
     </div>
   );
 }
