@@ -38,6 +38,7 @@ import { ModelProviderIcon } from '../ModelProviderIcon';
 import { FileIcon } from '../FileIcon';
 import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
+import { parseSlashLine, findSlashCommand, filterSlashCommands } from './slashCommands/registry';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import {
@@ -90,7 +91,7 @@ type InputAreaTeamMember = {
   status?: string;
 };
 
-type ComposerSuggestionKind = 'member' | 'role';
+type ComposerSuggestionKind = 'member' | 'role' | 'slash';
 type WorkIconName = 'add' | 'arrow' | 'check' | 'close' | 'collapse' | 'expand' | 'folder' | 'search';
 
 type ComposerSuggestionState = {
@@ -102,6 +103,7 @@ type ComposerSuggestionItem = {
   id: string;
   label: string;
   status?: string;
+  description?: string;
 };
 
 function getComposerSuggestionItems(
@@ -109,6 +111,12 @@ function getComposerSuggestionItems(
   members: ComposerSuggestionItem[]
 ): ComposerSuggestionItem[] {
   if (!suggestion) return [];
+  // slash 指令：从注册表过滤，不依赖团队成员
+  if (suggestion.kind === 'slash') {
+    return filterSlashCommands(suggestion.query)
+      .slice(0, 8)
+      .map((c) => ({ id: c.name, label: `/${c.name}`, description: c.description }));
+  }
   const query = suggestion.query.trim().toLowerCase();
   return members
     .filter((item) => {
@@ -1305,6 +1313,39 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     // 用富文本（含 chip 标记）作为发送内容，气泡可交织渲染技能
     const richContent = extractRichContent();
     const trimmedBase = (richContent + pendingVoiceText).trim();
+
+    // 斜杠命令拦截：控制命令不走 chat.send / 队列 / 中断逻辑（与 command.goal 同级——
+    // 控制操作不该被排进消息队列，/btw 还要能与主对话并行）。命中注册表即执行并 return；
+    if (trimmedBase.startsWith('/')) {
+      const { name, args } = parseSlashLine(trimmedBase);
+      const cmd = findSlashCommand(name);
+      if (cmd) {
+        const slashSid = useChatStore.getState().activeSessionId;
+        if (isListening) stopListening();
+        if (slashSid) useChatStore.getState().setInputValue(slashSid, '');
+        setPendingVoiceText('');
+        setAttachments([]);
+        setAttachmentAlerts([]);
+        if (inputRef.current) inputRef.current.innerHTML = '';
+        setComposerSuggestion(null);
+        // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
+        if (cmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
+          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
+          void cmd.execute(
+            { sessionId: slashSid ?? NEW_CONVERSATION_ID, mode: slashMode, inputLine: trimmedBase, addMessage: useChatStore.getState().addMessage },
+            args,
+          );
+        } else {
+          useChatStore.getState().addMessage(slashSid ?? NEW_CONVERSATION_ID, {
+            id: `slash-sys-${Date.now()}`,
+            role: 'system',
+            content: '请先开始一个对话再使用该指令。',
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return;
+      }
+    }
     const readyDrafts = attachments.filter(
       (attachment) =>
         attachment.status === 'ready' &&
@@ -1438,6 +1479,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     beforeRange.selectNodeContents(el);
     beforeRange.setEnd(range.endContainer, range.endOffset);
     const beforeText = beforeRange.toString().replace(/\u200B/g, '');
+    // slash \u89e6\u53d1\uff1a\u884c\u9996\u6216\u7a7a\u767d\u540e\u7684 '/'\uff08\u907f\u514d\u541e\u8def\u5f84\u5982 foo/bar\uff09
+    const slashMatch = beforeText.match(/(?:^|\s)(\/)([a-zA-Z][\w-]*)?$/);
+    if (slashMatch) {
+      return { kind: 'slash', query: slashMatch[2] ?? '' };
+    }
     const match = beforeText.match(/([@$])([\p{L}\p{N}_\-\u4e00-\u9fa5]*)$/u);
     if (!match) return null;
 
@@ -1449,7 +1495,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const updateComposerSuggestion = useCallback(() => {
     const trigger = getCurrentComposerTrigger();
-    if (!trigger || mentionableMembers.length === 0) {
+    if (!trigger) {
+      setComposerSuggestion(null);
+      return;
+    }
+    // slash 指令不依赖团队成员，即便没有可 @ 的成员也照常弹出
+    if (trigger.kind !== 'slash' && mentionableMembers.length === 0) {
       setComposerSuggestion(null);
       return;
     }
@@ -1480,6 +1531,72 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (!el || !selection || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
     if (!el.contains(range.commonAncestorContainer)) return;
+
+    // slash 选中
+    if (kind === 'slash') {
+      const slashCmd = findSlashCommand(value);
+      // 无参命令（/plan、/compact）：选中即执行，不插入文本、不再等回车
+      // —— 与「输入 /plan + 回车」走同一执行路径（含 NEW_CONVERSATION_ID 提示）。
+      if (slashCmd && !slashCmd.takesArgs) {
+        const trigger = getCurrentComposerTrigger();
+        if (trigger) {
+          const beforeRange = range.cloneRange();
+          beforeRange.selectNodeContents(el);
+          beforeRange.setEnd(range.endContainer, range.endOffset);
+          const beforeTextLength = beforeRange.toString().replace(/​/g, '').length;
+          const triggerLength = trigger.query.length + 1; // '/' + query
+          setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+          range.deleteContents();
+        }
+        const slashSid = useChatStore.getState().activeSessionId;
+        if (slashSid) useChatStore.getState().setInputValue(slashSid, extractPlainText());
+        setComposerSuggestion(null);
+        el.focus();
+        // requiresSession=false 的命令（如 /plan 纯本地开关）无需真实会话，欢迎页也能用
+        if (slashCmd.requiresSession === false || (slashSid && slashSid !== NEW_CONVERSATION_ID)) {
+          const slashMode = useSessionStore.getState().getRuntime(slashSid)?.mode ?? 'agent';
+          void slashCmd.execute(
+            {
+              sessionId: slashSid ?? NEW_CONVERSATION_ID,
+              mode: slashMode,
+              inputLine: `/${value}`,
+              addMessage: useChatStore.getState().addMessage,
+            },
+            '',
+          );
+        } else {
+          useChatStore.getState().addMessage(slashSid ?? NEW_CONVERSATION_ID, {
+            id: `slash-sys-${Date.now()}`,
+            role: 'system',
+            content: '请先开始一个对话再使用该指令。',
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return;
+      }
+      // 有参命令（/btw）：把 "/query" 替换成 "/<name> " 纯文本（不插 chip），尾随空格方便继续输参数
+      const trigger = getCurrentComposerTrigger();
+      if (trigger) {
+        const beforeRange = range.cloneRange();
+        beforeRange.selectNodeContents(el);
+        beforeRange.setEnd(range.endContainer, range.endOffset);
+        const beforeTextLength = beforeRange.toString().replace(/​/g, '').length;
+        const triggerLength = trigger.query.length + 1; // '/' + query
+        setRangeStartByTextOffset(range, el, Math.max(0, beforeTextLength - triggerLength));
+        range.deleteContents();
+      }
+      const textNode = document.createTextNode(`/${value} `);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.setEndAfter(textNode);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const sid = useChatStore.getState().activeSessionId;
+      if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
+      setComposerSuggestion(null);
+      el.focus();
+      return;
+    }
 
     const trigger = getCurrentComposerTrigger();
     if (trigger) {
@@ -2731,18 +2848,25 @@ function ComposerSuggestionMenu({
   onHighlight: (index: number) => void;
   onPick: (kind: ComposerSuggestionKind, value: string, label: string) => void;
 }) {
+  const isSlash = suggestion.kind === 'slash';
   const tokenPrefix = suggestion.kind === 'role' ? '$' : '@';
 
   return (
     <div className="chat-composer-suggestion" role="listbox">
       <div className="chat-composer-suggestion__header">
-        <AtSign size={14} />
-        <span>选择团队成员</span>
+        {isSlash ? (
+          <span>斜杠指令</span>
+        ) : (
+          <>
+            <AtSign size={14} />
+            <span>选择团队成员</span>
+          </>
+        )}
       </div>
       <div className="chat-composer-suggestion__list">
         {items.length === 0 ? (
           <div className="chat-composer-suggestion__empty">
-            暂无可选择的团队成员
+            {isSlash ? '没有匹配的指令' : '暂无可选择的团队成员'}
           </div>
         ) : items.map((item, index) => (
           <button
@@ -2758,15 +2882,26 @@ function ComposerSuggestionMenu({
             onMouseEnter={() => onHighlight(index)}
             onClick={() => onPick(suggestion.kind, item.id, item.label)}
           >
-            <span className="chat-composer-suggestion__avatar" aria-hidden="true">
-              <TeamMemberAvatar member={item.id} className="chat-composer-suggestion__team-avatar" />
-            </span>
-            <span className="chat-composer-suggestion__text">
-              <span className="chat-composer-suggestion__label">{item.label}</span>
-              <span className="chat-composer-suggestion__meta">
-                {`${tokenPrefix}${item.id}`}
+            {isSlash ? (
+              <span className="chat-composer-suggestion__text">
+                <span className="chat-composer-suggestion__label">{item.label}</span>
+                {item.description ? (
+                  <span className="chat-composer-suggestion__meta">{item.description}</span>
+                ) : null}
               </span>
-            </span>
+            ) : (
+              <>
+                <span className="chat-composer-suggestion__avatar" aria-hidden="true">
+                  <TeamMemberAvatar member={item.id} className="chat-composer-suggestion__team-avatar" />
+                </span>
+                <span className="chat-composer-suggestion__text">
+                  <span className="chat-composer-suggestion__label">{item.label}</span>
+                  <span className="chat-composer-suggestion__meta">
+                    {`${tokenPrefix}${item.id}`}
+                  </span>
+                </span>
+              </>
+            )}
           </button>
         ))}
       </div>

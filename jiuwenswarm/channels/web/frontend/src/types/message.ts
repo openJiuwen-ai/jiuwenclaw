@@ -95,6 +95,7 @@ export interface Message {
    * 历史事实，不是当前 Goal 状态的派生值。
    */
   isGoalObjectiveMessage?: boolean;
+  isCommandOutput?: boolean;
 }
 
 export interface ToolCall {
