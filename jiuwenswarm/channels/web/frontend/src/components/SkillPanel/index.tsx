@@ -14,7 +14,6 @@ import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
-import { getRetrievalPollingMode, type RetrievalPollingStatus } from "./polling";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
 
@@ -86,7 +85,9 @@ type SkillDetail = SkillItem & {
 
 type LoadState = "idle" | "loading" | "success" | "error";
 
-type SkillRetrievalStatus = RetrievalPollingStatus & {
+type SkillRetrievalStatus = {
+  enabled?: boolean;
+  build_status?: string;
   index_exists?: boolean;
   fresh?: boolean;
   installed_count?: number;
@@ -104,6 +105,17 @@ type SkillRetrievalStatus = RetrievalPollingStatus & {
   build_cancel_requested?: boolean;
   build_logs?: SkillRetrievalBuildLog[];
 };
+
+function getRetrievalPollingMode(
+  activeTab: string,
+  isActive: boolean,
+  status: SkillRetrievalStatus | null,
+): "running" | "idle" | null {
+  if (!isActive || activeTab !== "index" || status?.enabled === false) {
+    return null;
+  }
+  return status?.build_status === "running" ? "running" : "idle";
+}
 
 type SkillRetrievalBuildLog = {
   time?: string;
