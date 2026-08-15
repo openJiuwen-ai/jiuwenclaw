@@ -33,6 +33,7 @@ INSTANCE_PURGE_TABLES: tuple[str, ...] = (
     "task_memory_config",
     "permissions_config",
     "installed_skill",
+    "cron_job",
 )
 
 _MANAGER_SIGN_PUBKEY_TABLE = "manager_sign_pubkey"
