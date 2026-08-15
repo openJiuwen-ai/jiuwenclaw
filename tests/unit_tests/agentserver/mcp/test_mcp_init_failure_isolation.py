@@ -87,7 +87,7 @@ async def test_init_one_mcp_failure_does_not_starve_the_rest(tmp_path, monkeypat
         degraded.append((name, state))
 
     with patch(
-        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config_yaml_mcp_servers",
         return_value=[
             {"name": "bad", "transport": "sse", "url": "http://bad/mcp", "enabled": True},
             {"name": "good", "transport": "sse", "url": "http://good/mcp", "enabled": True},
@@ -130,7 +130,7 @@ async def test_init_preflight_false_degrades_to_disconnected(tmp_path, monkeypat
         degraded.append((name, state))
 
     with patch(
-        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config_yaml_mcp_servers",
         return_value=[{"name": "down", "transport": "sse", "url": "http://down/mcp", "enabled": True}],
     ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
@@ -166,7 +166,7 @@ async def test_init_promotes_connecting_to_connected(tmp_path, monkeypatch) -> N
         promoted.append((name, state))
 
     with patch(
-        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config_yaml_mcp_servers",
         return_value=[{"name": "feishu", "transport": "sse", "url": "http://feishu/mcp", "enabled": True}],
     ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",
@@ -202,7 +202,7 @@ async def test_init_connected_stays_connected_no_promote(tmp_path, monkeypatch) 
         set_state_calls.append((name, state))
 
     with patch(
-        "jiuwenswarm.common.config.get_config_yaml_mcp_servers",
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_config_yaml_mcp_servers",
         return_value=[{"name": "baidu", "transport": "sse", "url": "http://baidu/mcp", "enabled": True}],
     ), patch(
         "jiuwenswarm.server.runtime.mcp.state_store.set_mcp_state",

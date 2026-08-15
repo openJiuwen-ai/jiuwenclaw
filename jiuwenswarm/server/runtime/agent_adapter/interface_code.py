@@ -454,6 +454,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._is_code_agent: bool = True
         self._runtime_language_override: str | None = None
         self._force_english_runtime_prompt: bool = True
+        self._channel_id: str | None = None
 
     # ─── Language override ────────────────────────
 

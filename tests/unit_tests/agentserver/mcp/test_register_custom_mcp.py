@@ -153,7 +153,7 @@ def test_custom_mcp_appears_in_list_after_register(tmp_path: Path, monkeypatch) 
         state="connected",
         integration_type="remote-mcp",
     )
-    summaries = registry.list_marketplace_mcps(filter="local")
+    summaries = registry.list_marketplace_mcps(mcp_filter="local")
     by_name = {s["name"]: s for s in summaries}
     assert "my-custom" in by_name
     assert by_name["my-custom"]["connection_state"] == "disconnected"
@@ -167,7 +167,7 @@ def test_custom_mcp_appears_in_list_after_register(tmp_path: Path, monkeypatch) 
     assert "enabled" not in by_name["live-custom"]
     assert "connected" not in by_name["live-custom"]
     # builtin filter 只返回预置目录，不含自定义 MCP。
-    builtin_summaries = registry.list_marketplace_mcps(filter="builtin")
+    builtin_summaries = registry.list_marketplace_mcps(mcp_filter="builtin")
     builtin_names = {s["name"] for s in builtin_summaries}
     assert "my-custom" not in builtin_names
     assert "live-custom" not in builtin_names
@@ -214,7 +214,7 @@ def test_list_enabled_false_when_disconnected(tmp_path: Path, monkeypatch) -> No
         state="registered",
         integration_type="stdio-mcp",
     )
-    summaries = registry.list_marketplace_mcps(filter="local")
+    summaries = registry.list_marketplace_mcps(mcp_filter="local")
     by_name = {s["name"]: s for s in summaries}
     assert by_name["stale-custom"]["connection_state"] == "disconnected"
     # enabled/connected 已从返回字段删除。

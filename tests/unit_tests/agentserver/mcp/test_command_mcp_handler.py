@@ -401,7 +401,7 @@ class TestHandleMcpConnect:
         assert payload["credential_kind"] == "token"
 
     @pytest.mark.anyio
-    async def test_connect_remote_unreachable_returns_failed_and_rolls_back(self) -> None:
+    async def test_connect_remote_unreachable_returns_failed_and_rolls_back(self, tmp_path) -> None:
         """Remote-mcp host down: probe fails, type=connect_failed, entry rolled back, no reload."""
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -424,12 +424,20 @@ class TestHandleMcpConnect:
             "server_id_scope": "mcp:github",
         }
         removed = []
+        # rollback_failed_connect routes github to the marketplace branch only
+        # when (_packages_dir()/"github").is_dir() — CI has no marketplace
+        # package cache, so stub a tmp dir containing a github/ subdir so the
+        # rollback reliably hits remove_mcp_record (the assertion target).
+        (tmp_path / "github").mkdir()
         with patch(
             "jiuwenswarm.server.runtime.mcp.registry.connect_mcp",
             return_value=fake_entry,
         ), patch(
             "jiuwenswarm.server.runtime.mcp.state_store.remove_mcp_record",
             side_effect=lambda n: removed.append(n) or {"name": n, "removed": True},
+        ), patch(
+            "jiuwenswarm.server.runtime.mcp.registry._packages_dir",
+            return_value=tmp_path,
         ):
             await server._handle_mcp_connect(ws, request, asyncio.Lock())
         payload = _extract_payload(json.loads(ws.sent[0]))

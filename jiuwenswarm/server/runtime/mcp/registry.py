@@ -4,10 +4,10 @@
 
 Reads the package cache under ``<workspace>/mcp/mcp_builtins/`` and
 exposes MCP records for the ``mcp.*`` RPC handlers. Each package's display
-metadata comes from its ``mcp.json`` / ``cli.json`` / ``connector-meta.json``,
-falling back to the index ``index.json`` (same dir). Connection/enabled
-state is derived from ``<workspace>/mcp/state.json`` (merged with
-config.yaml's hand-written ``mcp.servers`` by ``get_mcp_servers``).
+metadata comes from the marketplace index ``index.json`` (same dir, keyed by
+``source`` == package name); connection/enabled state is derived from
+``<workspace>/mcp/state.json`` (merged with config.yaml's hand-written
+``mcp.servers`` by ``get_mcp_servers``).
 """
 
 from __future__ import annotations
@@ -94,33 +94,15 @@ def _detect_integration_type(pkg_dir: Path) -> str:
 
 
 def _load_index_entry(name: str) -> dict[str, Any]:
-    """从索引 index.json 按 source==name 查一条 MCP 记录。
-
-    多数官方包没有自己的 connector-meta.json，展示字段（中文名/描述/示例）
-    都在这个索引里。索引按 source(== 包名) 查，UTF-8 编码，与包目录同放
-    ``mcp_builtins/index.json``；若不存在则 fallback 到源仓库自带的
-    ``.codebuddy-connector/connectors.json``（外部 clone 的源仓库结构，只读）。
-    """
+    """从索引 index.json 按 source==name 查一条 MCP 记录。"""
     idx_path = _packages_dir() / _INDEX_FILE
     data = _load_json(idx_path)
-    if not data or not isinstance(data.get("connectors"), list):
+    if not data or not isinstance(data.get("mcps"), list):
         return {}
-    for c in data["connectors"]:
+    for c in data["mcps"]:
         if isinstance(c, dict) and str(c.get("source", "")).strip() == name:
             return c
     return {}
-
-
-def _load_meta(pkg_dir: Path) -> dict[str, Any]:
-    """Load an MCP's display metadata.
-
-    Precedence: package-local ``connector-meta.json`` first, then the
-    marketplace index ``index.json`` (keyed by ``source`` == pkg name).
-    """
-    meta = _load_json(pkg_dir / "connector-meta.json") or {}
-    if not meta:
-        meta = _load_index_entry(pkg_dir.name)
-    return meta
 
 
 def _bundled_skill_names(pkg_dir: Path) -> list[str]:
@@ -147,7 +129,7 @@ def _mask_mcp_spec(mcp_spec: dict[str, Any]) -> dict[str, Any]:
 
 
 # Icon 文件名候选：marketplace 包目录下 icon.svg 或 icon.png（固定命名，
-# 源数据 connector-meta.json 的 icon 字段未填，靠探测磁盘确定）。
+# index.json 未声明 icon，靠探测磁盘确定）。
 _ICON_FILES = ("icon.svg", "icon.png")
 
 
@@ -308,8 +290,8 @@ def _connecting_server_names() -> set[str]:
 _MCP_LIST_FILTERS = ("builtin", "local")
 
 
-def list_marketplace_mcps(filter: str = "builtin") -> list[dict[str, Any]]:
-    """List MCPs as summaries, scoped by ``filter``.
+def list_marketplace_mcps(mcp_filter: str = "builtin") -> list[dict[str, Any]]:
+    """List MCPs as summaries, scoped by ``mcp_filter``.
 
     - ``builtin``: 全部预置（marketplace 包目录）MCP，含各自连接状态徽标。
       列表页「预置」tab 用它。
@@ -319,9 +301,9 @@ def list_marketplace_mcps(filter: str = "builtin") -> list[dict[str, Any]]:
 
     其余值按 ``builtin`` 兜底。
     """
-    f = str(filter or "builtin").strip().lower() or "builtin"
+    f = str(mcp_filter or "builtin").strip().lower() or "builtin"
     if f not in _MCP_LIST_FILTERS:
-        logger.debug("[mcp.registry] unknown mcp.list filter %r, fallback builtin", filter)
+        logger.debug("[mcp.registry] unknown mcp.list filter %r, fallback builtin", mcp_filter)
         f = "builtin"
 
     root = _packages_dir()
@@ -337,7 +319,7 @@ def list_marketplace_mcps(filter: str = "builtin") -> list[dict[str, Any]]:
             # local: 只返回已连接的预置 MCP（会话页只需可启用集合）。
             if f == "local" and name not in connected:
                 continue
-            meta = _load_meta(pkg_dir)
+            meta = _load_index_entry(name)
             out.append(_build_summary(name, pkg_dir, meta, connected, connecting))
             seen_names.add(name)
     else:
@@ -389,7 +371,7 @@ def get_mcp(name: str) -> dict[str, Any] | None:
         return None
     pkg_dir = _packages_dir() / target
     if pkg_dir.is_dir():
-        meta = _load_meta(pkg_dir)
+        meta = _load_index_entry(target)
         connected = _connected_server_names()
         connecting = _connecting_server_names()
         return _build_detail(target, pkg_dir, meta, connected, connecting)

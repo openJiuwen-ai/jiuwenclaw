@@ -14,7 +14,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
 
 from jiuwenswarm.common.config import get_mcp_server_config
-from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
+from jiuwenswarm.server.runtime.mcp.credential import (
+    CredentialStore,
+    resolve_placeholders,
+)
 
 _HTTP_MCP_TRANSPORTS = frozenset({"sse", "http", "streamable-http", "streamable_http"})
 
@@ -310,10 +313,6 @@ async def fetch_mcp_tools_via_temp_connection(entry: dict[str, Any]) -> list[dic
     # ``Bearer ${BAIDU_ACCESS_TOKEN}`` string. No-op for form-A entries
     # (no placeholders) and for non-MCP entries (empty store).
     try:
-        from jiuwenswarm.server.runtime.mcp.credential import (
-            CredentialStore,
-            resolve_placeholders,
-        )
         entry = resolve_placeholders(entry, CredentialStore(), name)
     except Exception as resolve_exc:  # noqa: BLE001
         logger.debug("[mcp-config] placeholder resolve failed: %s", resolve_exc)

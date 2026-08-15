@@ -38,7 +38,7 @@ async def test_probe_skill_only_mcp_returns_ok() -> None:
     no-op success. The MCP surfaces via its bundled skills, not the server
     registry."""
     with patch(
-        "jiuwenswarm.common.config.get_mcp_server_config",
+        "jiuwenswarm.common.mcp_config.get_mcp_server_config",
         return_value=None,
     ):
         ok, reason = await probe_mcp_live_connection("feishu-cli")
@@ -59,7 +59,7 @@ async def test_probe_stdio_missing_command_returns_failure() -> None:
         "args": [],
     }
     with patch(
-        "jiuwenswarm.common.config.get_mcp_server_config",
+        "jiuwenswarm.common.mcp_config.get_mcp_server_config",
         return_value=entry,
     ), patch(
         "jiuwenswarm.common.mcp_config.preflight_mcp_server_reachable",

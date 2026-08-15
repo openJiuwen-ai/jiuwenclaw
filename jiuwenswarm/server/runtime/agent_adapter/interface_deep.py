@@ -186,7 +186,6 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
-from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
@@ -304,6 +303,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 )
 from jiuwenswarm.common.config import (
     get_config,
+    get_model_names,
     get_default_models,
     get_evolution_auto_save_enabled,
     get_skill_evolution_enabled,
@@ -311,6 +311,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_mcp_server_config,
+    get_config_yaml_mcp_servers,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -1277,6 +1278,7 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._channel_id: str | None = None
 
     def _schedule_runtime_state_write(
         self,
@@ -2571,7 +2573,6 @@ class JiuWenSwarmDeepAdapter:
     @staticmethod
     def _yaml_enabled_mcp_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
         """Enabled config.yaml mcp.servers; fallback to config_base on read error."""
-        from jiuwenswarm.common.config import get_config_yaml_mcp_servers
         try:
             servers = get_config_yaml_mcp_servers()
         except Exception:  # noqa: BLE001
@@ -3033,7 +3034,6 @@ class JiuWenSwarmDeepAdapter:
         # drop the user's per-session selection.
         selected_entries = []
         for name in getattr(self, "_session_selected_mcp", set()):
-            from jiuwenswarm.common.config import get_mcp_server_config
             entry = get_mcp_server_config(name)
             if entry is not None:
                 selected_entries.append(entry)
