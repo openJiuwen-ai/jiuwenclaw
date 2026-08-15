@@ -691,7 +691,8 @@ class JiuWenClaw:
                 _reload_after_skills = False
             if _reload_after_skills and payload.get("success") is not False:
                 if handler_name in _SKILLS_WEB_HANDLERS:
-                    await self.refresh_enabled_skills_from_db()
+                    # AgentManager.refresh_all_enabled_skills_from_db handles web paths.
+                    pass
                 else:
                     await self.create_instance()
         except Exception as exc:
