@@ -578,7 +578,14 @@ def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-1": {
-            "answers": {"你希望用什么技术实现？": "浏览器（HTML/CSS/JS）"},
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "你希望用什么技术实现？",
+                    "selected_options": ["浏览器（HTML/CSS/JS）"],
+                    "custom_input": None,
+                }
+            ],
             "original_request": "做一个斗地主游戏",
         }
     }
@@ -617,7 +624,7 @@ def test_build_inputs_preserves_explicit_skipped_ask_user_envelope(monkeypatch):
     assert inputs["query"].user_inputs == {
         "tool-ask-skipped-1": {
             "status": "skipped",
-            "answers": answers,
+            "answers": [],
         }
     }
 
@@ -656,11 +663,8 @@ def test_build_inputs_preserves_answered_ask_user_envelope_for_opt_in_consumers(
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-answered-1": {
-            "answers": {"研究重点是什么？": "技术实现"},
-            "_structured_response": {
-                "status": "answered",
-                "answers": answers,
-            },
+            "status": "answered",
+            "answers": answers,
         }
     }
 
@@ -689,6 +693,37 @@ def test_build_inputs_maps_explicit_skipped_with_empty_answers_to_interactive_in
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-skipped-1": {
+            "status": "skipped",
+            "answers": [],
+        }
+    }
+
+
+def test_build_inputs_normalizes_explicit_empty_answered_to_skipped(monkeypatch):
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+
+    request = AgentRequest(
+        request_id="req-empty-answered",
+        channel_id="web",
+        session_id="web-session",
+        params={
+            "query": "",
+            "request_id": "tool-ask-empty-answered-1",
+            "source": "ask_user_interrupt",
+            "status": "answered",
+            "answers": [],
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-ask-empty-answered-1": {
             "status": "skipped",
             "answers": [],
         }
@@ -731,10 +766,19 @@ def test_build_inputs_merges_multi_select_custom_input(monkeypatch):
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-1": {
-            "answers": {
-                "启用哪些模块？": ["auth", "metrics"],
-                "还有其他需求吗？": "tracing",
-            }
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "启用哪些模块？",
+                    "selected_options": ["auth"],
+                    "custom_input": "metrics",
+                },
+                {
+                    "question": "还有其他需求吗？",
+                    "selected_options": [],
+                    "custom_input": "tracing",
+                },
+            ],
         }
     }
 
@@ -776,7 +820,8 @@ def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
     assert isinstance(inputs["query"], InteractiveInput)
     assert inputs["query"].user_inputs == {
         "tool-ask-1": {
-            "answers": {},
+            "status": "skipped",
+            "answers": [],
         }
     }
 

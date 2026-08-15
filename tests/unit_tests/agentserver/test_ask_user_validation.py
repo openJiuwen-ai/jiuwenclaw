@@ -72,7 +72,7 @@ async def test_valid_options_still_interrupt():
 
 @pytest.mark.asyncio
 async def test_empty_structured_answers_are_rejected():
-    """Issue #2330: empty resume (bare Other) must not resolve as a blank answer."""
+    """Issue #2330: an empty answered response is normalized to skipped."""
     rail = StructuredAskUserRail()
     tc = _make_tool_call(
         {
@@ -93,11 +93,11 @@ async def test_empty_structured_answers_are_rejected():
     decision = await rail.resolve_interrupt(
         MagicMock(),
         tc,
-        {"answers": {}},
+        {"status": "answered", "answers": []},
     )
 
     assert isinstance(decision, RejectResult)
-    assert "answers must include at least one non-empty response" in decision.tool_result
+    assert decision.tool_result == '{"status":"skipped","answers":[]}'
 
 
 @pytest.mark.asyncio
@@ -218,7 +218,16 @@ async def test_answered_structured_payload_keeps_readable_text_semantics():
     decision = await rail.resolve_interrupt(
         MagicMock(),
         tc,
-        {"status": "answered", "answers": {"Which?": "A"}},
+        {
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "Which?",
+                    "selected_options": ["A"],
+                    "custom_input": None,
+                }
+            ],
+        },
     )
 
     assert isinstance(decision, RejectResult)
@@ -249,10 +258,7 @@ async def test_answered_structured_payload_can_opt_in_to_machine_state():
     decision = await rail.resolve_interrupt(
         MagicMock(),
         tc,
-        {
-            "answers": {"Which?": "A"},
-            "_structured_response": answer_envelope,
-        },
+        answer_envelope,
     )
 
     assert isinstance(decision, RejectResult)
@@ -269,3 +275,41 @@ async def test_answered_structured_payload_can_opt_in_to_machine_state():
         )
         == "问题: Which?\n回答: A"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "legacy_input",
+    [
+        {"answers": {"Which?": "A"}},
+        {
+            "answers": {"Which?": "A"},
+            "_structured_response": {
+                "status": "answered",
+                "answers": [
+                    {
+                        "question": "Which?",
+                        "selected_options": ["A"],
+                        "custom_input": None,
+                    }
+                ],
+            },
+        },
+        "A",
+    ],
+)
+async def test_legacy_answer_representations_are_rejected(legacy_input):
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": [
+                {"question": "Which?", "header": "Choice", "options": []}
+            ],
+        }
+    )
+
+    decision = await rail.resolve_interrupt(MagicMock(), tc, legacy_input)
+
+    assert isinstance(decision, RejectResult)
+    assert "INVALID_ARGUMENT" in decision.tool_result

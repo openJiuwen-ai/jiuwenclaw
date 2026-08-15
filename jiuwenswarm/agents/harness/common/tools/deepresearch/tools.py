@@ -63,6 +63,7 @@ from jiuwenswarm.common.local_env_config import (
     build_effective_env_overlay,
     get_task_env_overlay,
 )
+from jiuwenswarm.common.schema.ask_user import parse_ask_user_response
 from jiuwenswarm.common.utils import (
     JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
     get_shared_agent_skills_dirs,
@@ -772,24 +773,6 @@ async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
         yield bytes(pending)
 
 
-def _interaction_answer_has_user_input(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return True
-    selected = item.get("selected_options")
-    if isinstance(selected, list):
-        if any(
-            not isinstance(option, str) or bool(option.strip())
-            for option in selected
-        ):
-            return True
-    elif selected is not None:
-        return True
-    custom_input = item.get("custom_input")
-    if custom_input is None:
-        return False
-    return not isinstance(custom_input, str) or bool(custom_input.strip())
-
-
 def _normalize_feedback_handler_resume_feedback(
     feedback: str, interaction_result: str
 ) -> str:
@@ -799,20 +782,8 @@ def _normalize_feedback_handler_resume_feedback(
         result = json.loads(interaction_result)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("interaction_result 必须是合法 JSON") from exc
-    if not isinstance(result, dict):
-        raise ValueError("interaction_result 必须是 JSON 对象")
-    status_value = str(result.get("status") or "").strip().lower()
-    if status_value not in {"answered", "skipped"}:
-        raise ValueError(
-            f"feedback_handler interaction_result status={status_value or 'missing'}"
-        )
-    answers = result.get("answers", [])
-    if not isinstance(answers, list):
-        raise ValueError("interaction_result.answers 必须是数组")
-    has_user_input = any(_interaction_answer_has_user_input(item) for item in answers)
-    if status_value == "skipped" and has_user_input:
-        raise ValueError("skipped interaction_result 不能包含有效回答")
-    if status_value == "skipped" or not has_user_input:
+    response = parse_ask_user_response(result)
+    if response.status == "skipped":
         return _SKIPPED_FEEDBACK_HANDLER_PAYLOAD
     return feedback
 
