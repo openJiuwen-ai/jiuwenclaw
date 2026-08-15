@@ -158,6 +158,68 @@
   opacity: 0.88;
 }
 
+.auth-prompt__deny {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 16px 10px;
+}
+
+.auth-prompt__deny-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+}
+
+.auth-prompt__deny-input:focus,
+.auth-prompt__deny-input:focus-visible {
+  border-color: var(--color-border-focus);
+}
+
+.auth-prompt__deny-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-prompt__deny-back,
+.auth-prompt__deny-submit {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.auth-prompt__deny-back {
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+}
+
+.auth-prompt__deny-submit {
+  border: 1px solid var(--color-action-primary);
+  background: var(--color-action-primary-subtle);
+  color: var(--color-action-primary);
+}
+
+.auth-prompt__deny-back:disabled,
+.auth-prompt__deny-submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 /* 正文：markdown 渲染（展开态用 Tailwind prose）；收起态只显示渲染后的首行 */
 .auth-prompt__body {
   padding: 0 16px 12px;

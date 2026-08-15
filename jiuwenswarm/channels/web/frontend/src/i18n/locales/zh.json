@@ -2444,10 +2444,18 @@
     "titleConfirm": "操作确认",
     "allowOnce": "授权单次",
     "allowAlways": "总是允许",
+    "sessionAllow": "会话内记住",
+    "reject": "拒绝",
     "skip": "跳过",
+    "denyFeedbackPlaceholder": "选填：说明拒绝原因或建议更安全的替代方案",
+    "denySubmit": "拒绝并附言",
+    "denyWithoutNote": "拒绝",
+    "denyBack": "返回",
     "tip": {
       "allowOnce": "仅本次授权执行",
       "allowAlways": "记住该规则，以后自动放行",
+      "sessionAllow": "仅在当前会话内记住此选择",
+      "reject": "拒绝执行此操作",
       "skip": "拒绝执行此操作"
     }
   },

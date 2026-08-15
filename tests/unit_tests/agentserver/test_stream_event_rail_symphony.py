@@ -338,3 +338,15 @@ async def test_stream_event_rail_inserts_missing_tool_result_after_cancelled_cal
     assert messages[2].tool_call_id == "compose-call"
     assert "symphony_compose_graph" in messages[2].content
     assert isinstance(messages[3], UserMessage)
+
+
+def test_infer_tool_result_error_marks_permission_denial():
+    from jiuwenswarm.agents.harness.common.rails import stream_event_rail as mod
+
+    denied = (
+        "[PERMISSION_DENIED] User rejected the tool call. "
+        "The operation was NOT performed. User feedback: dont do nothing"
+    )
+    assert mod._infer_tool_result_error(denied) is True
+    assert mod._infer_tool_result_error("[PERMISSION_REJECTED] User rejected.") is True
+    assert mod._infer_tool_result_error("Wrote 2 lines") is None

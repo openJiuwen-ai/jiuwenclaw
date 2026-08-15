@@ -1,6 +1,11 @@
 import { normalizeFinalContent } from "./final-content.js";
+import {
+  isPermissionDeniedToolResult,
+  summarizePermissionDeniedToolResult,
+} from "./tool-result-permission.js";
 import type { EventFrame } from "./protocol.js";
 import type { HistoryItem, InfoMeta, JsonValue, MediaItem, ToolCallDisplay } from "./types.js";
+import { findLastIndex } from "./app-state-helpers.js";
 
 /** 合并同一次流式请求内多条 assistant 片段的正文；若末条为完整 `chat.final` 且等于前文拼接则去重。 */
 export function mergeAssistantFragmentContents(parts: string[]): string {
@@ -99,6 +104,52 @@ export function coalesceAssistantHistoryEntries(entries: HistoryItem[]): History
       out.push(e);
       i++;
     }
+  }
+  return out;
+}
+
+/** Last assistant bubble to replace on live `patch_segment` (includes streaming intent text). */
+export function findLivePatchSegmentTargetIndex(entries: HistoryItem[]): number {
+  return findLastIndex(
+    entries,
+    (entry) => entry.kind === "assistant" && Boolean(entry.content?.trim()),
+  );
+}
+
+/** Apply `final_mode: patch_segment` from permission deny — replace prior assistant text. */
+export function applyPatchSegmentEntries(entries: HistoryItem[]): HistoryItem[] {
+  const out: HistoryItem[] = [];
+  for (const entry of entries) {
+    if (
+      entry.kind === "assistant" &&
+      entry.finalMode === "patch_segment" &&
+      entry.content.trim()
+    ) {
+      let patched = false;
+      for (let i = out.length - 1; i >= 0; i--) {
+        const prev = out[i];
+        if (prev?.kind === "user") {
+          break;
+        }
+        if (prev?.kind === "assistant" && prev.content.trim()) {
+          out[i] = {
+            ...prev,
+            content: entry.content,
+            requestId: entry.requestId ?? prev.requestId,
+            at: entry.at,
+            eventType: "chat.final",
+            finalMode: undefined,
+          };
+          patched = true;
+          break;
+        }
+      }
+      if (!patched) {
+        out.push({ ...entry, finalMode: undefined });
+      }
+      continue;
+    }
+    out.push(entry);
   }
   return out;
 }
@@ -230,6 +281,7 @@ function inferToolResultError(value: unknown): boolean | undefined {
     return undefined;
   }
   if (typeof parsed === "string") {
+    if (isPermissionDeniedToolResult(parsed)) return true;
     if (/\bsuccess\s*[:=]\s*False\b/i.test(parsed)) return true;
     if (parsed.trimStart().startsWith("[ERROR]")) return true;
     const exitMatch = parsed.match(
@@ -598,11 +650,13 @@ export function applyToolResult(
     inferToolResultError(payload) ??
     inferToolResultError(result) ??
     false;
+  const deniedSummary =
+    typeof result === "string" ? summarizePermissionDeniedToolResult(result) : undefined;
   return {
     ...tool,
     status: isError ? "error" : "completed",
     result,
-    summary: asString(toolPayload.summary),
+    summary: deniedSummary ?? asString(toolPayload.summary),
     isError,
   };
 }
@@ -807,6 +861,7 @@ export function parseHistoryFrame(frame: EventFrame): HistoryItem | null {
       ? normalizeFinalContent(payload)
       : (pickFirstString(payload, ["content"]) ?? "");
   if (!content) return null;
+  const finalMode = pickFirstString(record, ["final_mode"]);
   return {
     kind: "assistant",
     id,
@@ -817,6 +872,7 @@ export function parseHistoryFrame(frame: EventFrame): HistoryItem | null {
     // 供 `coalesceAssistantHistoryEntries` 在同一 requestId 的片段中优先选用 final，
     // 防止 AgentServer 分页倒序导致 delta 追加在 final 之后出现「镜像」叠加。
     eventType,
+    ...(finalMode ? { finalMode } : {}),
   };
 }
 

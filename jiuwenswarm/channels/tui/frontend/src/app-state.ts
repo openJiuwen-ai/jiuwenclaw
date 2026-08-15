@@ -15,6 +15,7 @@ import {
 import {
   applyToolResult,
   coalesceAssistantHistoryEntries,
+  applyPatchSegmentEntries,
   coalesceToolGroupEntries,
   createToolCallDisplay,
   mergeHistoryMessagesForRestore,
@@ -2589,7 +2590,7 @@ export class CliPiAppState {
       })
       .map((item) => item.entry);
 
-    const restored = coalesceAssistantHistoryEntries(ordered);
+    const restored = applyPatchSegmentEntries(coalesceAssistantHistoryEntries(ordered));
     // 合并分散的 tool_group 条目（chat.tool_call + chat.tool_result）
     const restoredWithTools = coalesceToolGroupEntries(restored);
 

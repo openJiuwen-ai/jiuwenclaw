@@ -3,6 +3,7 @@ import {
   createAttachmentInfoEntry,
   createSessionResultToolDisplay,
   extractMediaItems,
+  findLivePatchSegmentTargetIndex,
   isHistoryDonePayload,
 } from "./history-parser.js";
 import { normalizeFinalContent } from "./final-content.js";
@@ -577,7 +578,33 @@ function handleFinal(
   activeSessionId: string,
 ): boolean {
   const content = normalizeFinalContent(payload);
+  const finalMode = typeof payload.final_mode === "string" ? payload.final_mode : "";
   const finalizedAt = new Date().toISOString();
+
+  if (finalMode === "patch_segment" && content.trim()) {
+    const entries = delegate.getEntries();
+    const patchIdx = findLivePatchSegmentTargetIndex(entries);
+    if (patchIdx !== -1) {
+      const prior = entries[patchIdx] as Extract<HistoryItem, { kind: "assistant" }>;
+      delegate.setEntries([
+        ...entries.slice(0, patchIdx),
+        {
+          ...prior,
+          content,
+          requestId:
+            typeof payload.request_id === "string" ? payload.request_id : prior.requestId,
+          at: finalizedAt,
+          streaming: false,
+          eventType: "chat.final",
+        },
+        ...entries.slice(patchIdx + 1),
+      ]);
+      delegate.addWorkedForEntry();
+      delegate.setStreamingState(StreamingState.Idle);
+      return true;
+    }
+  }
+
   const entries = delegate.getEntries();
   const streamingIndex = findLastIndex(
     entries,
@@ -587,7 +614,10 @@ function handleFinal(
     streamingIndex !== -1 && entries[streamingIndex]?.kind === "assistant"
       ? entries[streamingIndex].content
       : "";
-  const finalContent = chooseFinalAssistantContent(streamedContent, content);
+  const finalContent =
+    finalMode === "patch_segment" && content.trim()
+      ? content
+      : chooseFinalAssistantContent(streamedContent, content);
   delegate.setEntries(
     streamingIndex !== -1
       ? [

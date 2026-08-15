@@ -1279,6 +1279,27 @@ export function shouldCollectPlanRejectFeedback(
   return isPlanApprovalRequest(source, planApprovalKind) && isRejectOption(label);
 }
 
+export function shouldCollectPermissionDenyFeedback(
+  source: string | undefined,
+  label: string,
+  planApprovalKind?: string,
+): boolean {
+  if (isPlanApprovalRequest(source, planApprovalKind)) return false;
+  if (source !== "permission_interrupt" && source !== "confirm_interrupt") {
+    return false;
+  }
+  return isRejectOption(label);
+}
+
+/** Esc on tool-permission / action-confirm prompts is handled locally (deny or back). */
+export function shouldRoutePermissionPromptEscape(
+  source: string | undefined,
+  planApprovalKind?: string,
+): boolean {
+  if (isPlanApprovalRequest(source, planApprovalKind)) return false;
+  return source === "permission_interrupt" || source === "confirm_interrupt";
+}
+
 export function shouldAppendPlanRejectFeedback(
   source: string | undefined,
   label: string,
@@ -2671,11 +2692,23 @@ export class AppScreen implements Component, Focusable {
       return;
     }
 
-    // 审批框（pendingQuestion）激活时：Ctrl+C 或 Esc 按一次即中断任务并关闭审批框，
-    // 不再需要双击，也不再退出 TUI 进程；Ctrl+D 不再响应。
+    // 审批框（pendingQuestion）激活时：Ctrl+C 按一次即中断任务并关闭审批框。
+    // permission/confirm 的 Esc 交给 handlePendingQuestionInput（立即拒绝或从备注返回）；
+    // 其余审批框 Esc 仍等同 Ctrl+C 中断任务。
+    if (pendingQuestion && matchesKey(data, "ctrl+c")) {
+      this.transientNotice = null;
+      this.interruptTask();
+      this.tui.requestRender();
+      return;
+    }
+
     if (
       pendingQuestion &&
-      (matchesKey(data, "ctrl+c") || matchesKey(data, "escape"))
+      matchesKey(data, "escape") &&
+      !shouldRoutePermissionPromptEscape(
+        pendingQuestion.source,
+        pendingQuestion.planApprovalKind,
+      )
     ) {
       this.transientNotice = null;
       this.interruptTask();
@@ -2822,7 +2855,7 @@ export class AppScreen implements Component, Focusable {
       if (confirmAction === "confirm:no") {
         const reject = activeQuestion.options.find((option) => isRejectOption(option.label));
         if (reject) {
-          this.handleQuestionSelection(reject.label);
+          this.handleQuestionSelection(reject.label, true);
           return;
         }
       }
@@ -3309,7 +3342,17 @@ export class AppScreen implements Component, Focusable {
   private async handleSubmit(raw: string): Promise<void> {
     const editorText = raw.trim();
     const text = this.expandPastedText(editorText).trim();
-    if (!text) return;
+    const snapshot = this.state.getSnapshot();
+    const pendingLabel = this.pendingQuestionAnswers.get(this.activeQuestionIndex) ?? "";
+    const isPermissionDenyFeedback =
+      this.otherInputMode &&
+      !!snapshot.pendingQuestion &&
+      shouldCollectPermissionDenyFeedback(
+        snapshot.pendingQuestion.source,
+        pendingLabel,
+        snapshot.pendingQuestion.planApprovalKind,
+      );
+    if (!text && !isPermissionDenyFeedback) return;
 
     // 更新用户活动时间戳（用于 auto-recap 空闲检测）
     this.state.recordActivity();
@@ -3340,9 +3383,8 @@ export class AppScreen implements Component, Focusable {
 
     const { content, attachments } = this.buildOutgoingMessage(text);
 
-    const snapshot = this.state.getSnapshot();
-    // Other 自定义输入模式下空内容不得提交（#2330），避免触发黄色 thinking。
-    if (!content) return;
+    // Keep empty "Other" input blocked (#2330); permission deny allows an optional empty note.
+    if (!content && !isPermissionDenyFeedback) return;
 
     if (snapshot.pendingQuestion) {
       if (this.questionList !== null) {
@@ -3379,12 +3421,22 @@ export class AppScreen implements Component, Focusable {
             label,
             pendingQuestion.planApprovalKind,
           );
+          const isPermissionDenyFeedback = shouldCollectPermissionDenyFeedback(
+            pendingQuestion.source,
+            label,
+            pendingQuestion.planApprovalKind,
+          );
           const customInput = this.pendingQuestionCustomInputs.get(index);
-          if (customInput || label === "Other" || isPlanRejectFeedback) {
+          if (
+            customInput ||
+            label === "Other" ||
+            isPlanRejectFeedback ||
+            isPermissionDenyFeedback
+          ) {
             return {
               question: question.question,
               selected_options: multi ?? [label],
-              custom_input: customInput,
+              custom_input: customInput ?? "",
             };
           }
           return {
@@ -9340,7 +9392,9 @@ export class AppScreen implements Component, Focusable {
           palette.text.dim(
             planApprovalRequest
               ? "tell jiuwenswarm what to change · Enter submit · Esc back to options"
-              : "Type your answer · Enter submit · Esc back to options",
+              : permissionRequest
+                ? "optional: tell the agent what to do instead · Enter submit · Esc back"
+                : "Type your answer · Enter submit · Esc back to options",
           ),
           width,
         ),
@@ -9424,7 +9478,7 @@ export class AppScreen implements Component, Focusable {
             permissionRequest
               ? planApprovalRequest
                 ? "↑/↓ review · Type feedback on Reject · Enter/click confirm"
-                : "↑/↓ review · Enter/click confirm · Esc reject"
+                : "↑/↓ review · Enter/click Reject for optional note · Esc deny now"
               : "↑/↓ choose · Enter/click confirm · Esc reject",
           ),
           width,
@@ -9522,7 +9576,7 @@ export class AppScreen implements Component, Focusable {
           this.editor.getCursor().col,
         )
       : question.options.map((option) => ({
-          value: option.label,
+          value: option.value ?? option.label,
           label: formatQuestionOptionLabelForDisplay(option.label, false),
         }));
 
@@ -9665,7 +9719,7 @@ export class AppScreen implements Component, Focusable {
           this.editor.getCursor().col,
         )
       : question.options.map((option) => ({
-          value: option.label,
+          value: option.value ?? option.label,
           label:
             pendingQuestion.source === "permission_interrupt" ||
             pendingQuestion.source === "confirm_interrupt"
@@ -9721,9 +9775,12 @@ export class AppScreen implements Component, Focusable {
       this.handleQuestionSelection(item.value);
     };
     list.onCancel = () => {
-      const reject = question.options.find((option) => option.label === "拒绝");
+      const reject = question.options.find((option) => isRejectOption(option.label));
       if (reject) {
-        this.handleQuestionSelection(reject.label);
+        // Esc always denies immediately without opening the deny-note editor — matches
+        // confirm:no and keeps Esc as a reliable one-key reject (Enter on Reject still
+        // collects an optional note via handleQuestionSelection's normal path).
+        this.handleQuestionSelection(reject.label, true);
       } else {
         this.handleQuestionSelection("");
       }
@@ -9789,7 +9846,13 @@ export class AppScreen implements Component, Focusable {
     this.state.submitQuestionAnswers(answers);
   }
 
-  private handleQuestionSelection(label: string): void {
+  /**
+   * @param skipDenyFeedback When true (Esc / confirm:no fast-path), bypass the deny-note
+   *   editor entirely and submit the reject immediately with no custom_input — matches the
+   *   pre-feedback behavior so Esc always denies right away instead of opening an editor
+   *   the user can only Esc back out of.
+   */
+  private handleQuestionSelection(label: string, skipDenyFeedback = false): void {
     const snapshot = this.state.getSnapshot();
     const pendingQuestion = snapshot.pendingQuestion;
     if (!pendingQuestion) {
@@ -9803,8 +9866,28 @@ export class AppScreen implements Component, Focusable {
       label,
       pendingQuestion.planApprovalKind,
     );
+    const collectPermissionDenyFeedback =
+      !skipDenyFeedback &&
+      shouldCollectPermissionDenyFeedback(
+        pendingQuestion.source,
+        label,
+        pendingQuestion.planApprovalKind,
+      );
 
     if (label === "Other") {
+      this.otherInputMode = true;
+      this.pendingQuestionAnswers.set(this.activeQuestionIndex, label);
+      this.questionList = null;
+      this.setMouseTrackingEnabled(false);
+      this.syncEditorSubmitState(snapshot);
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      collectPermissionDenyFeedback &&
+      !this.pendingQuestionCustomInputs.has(this.activeQuestionIndex)
+    ) {
       this.otherInputMode = true;
       this.pendingQuestionAnswers.set(this.activeQuestionIndex, label);
       this.questionList = null;

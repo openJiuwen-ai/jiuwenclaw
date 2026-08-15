@@ -10,7 +10,7 @@
  * 动作按钮 hover 说明用 portal 挂到 body，避免被容器 overflow 截断。
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
@@ -19,6 +19,15 @@ import { ShieldCheck, ChevronDown } from 'lucide-react';
 import { useChatStore } from '../../stores';
 import type { AskUserQuestionPayload, Question, QuestionOption, UserAnswer } from '../../types';
 import { classifyAuthOption, type AuthSemantic } from './promptRouting';
+import {
+  INITIAL_DENY_DRAFT,
+  buildDenyAnswers,
+  canCollectDenyFeedback,
+  handleDenyEscape,
+  reduceDenyDraft,
+  resolveAuthActionLabel,
+  resolveAuthActionTip,
+} from './authorizationPromptAnswers';
 
 interface AuthorizationPromptProps {
   pending: AskUserQuestionPayload;
@@ -85,23 +94,26 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const [expanded, setExpanded] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [denyDraft, dispatchDenyDraft] = useReducer(reduceDenyDraft, INITIAL_DENY_DRAFT);
+  const { mode: denyMode, note: denyNote } = denyDraft;
 
   const questions = pending.questions ?? [];
   const primary = questions[0];
   const isConfirm = pending.source === 'confirm_interrupt';
   const count = questions.length;
 
-  // 按钮文案与说明原样使用后端下发的 label / description；
-  // semantic 仅用于固定排序与样式映射，不再覆盖显示文案。
+  // 按钮展示文案跟随用户 UI 语言；提交仍使用后端 option value。
   const actions = useMemo<ResolvedAction[]>(() => {
     const opts = primary?.options ?? [];
     const resolved: ResolvedAction[] = opts.map((option) => {
       const semantic = classifyAuthOption(option.value || option.label);
+      const backendLabel = option.label;
+      const backendTip = (option.description || '').trim();
       return {
         semantic,
         option,
-        label: option.label,
-        tip: (option.description || '').trim(),
+        label: resolveAuthActionLabel(semantic, backendLabel, t),
+        tip: resolveAuthActionTip(semantic, backendTip, t),
       };
     });
     const rank = (s: AuthSemantic) => {
@@ -109,7 +121,7 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
       return idx === -1 ? ACTION_ORDER.length : idx;
     };
     return resolved.sort((a, b) => rank(a.semantic) - rank(b.semantic));
-  }, [primary]);
+  }, [primary, t]);
 
   /** 把选中的语义应用到所有 question（多条时统一处理）。 */
   const buildAnswers = useCallback(
@@ -129,6 +141,13 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
   const handlePick = useCallback(
     (picked: ResolvedAction) => {
       if (submitting) return;
+      if (
+        picked.semantic === 'reject' &&
+        canCollectDenyFeedback(pending.source, pending.planApprovalKind)
+      ) {
+        dispatchDenyDraft({ type: 'open' });
+        return;
+      }
       setSubmitting(true);
       onSubmit(pending.request_id, buildAnswers(picked), pending.source);
       const sid = useChatStore.getState().activeSessionId;
@@ -136,6 +155,29 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
     },
     [submitting, onSubmit, pending, buildAnswers, setPendingQuestion],
   );
+
+  const submitDeny = useCallback(() => {
+    if (submitting) return;
+    setSubmitting(true);
+    onSubmit(pending.request_id, buildDenyAnswers(questions, denyNote), pending.source);
+    const sid = useChatStore.getState().activeSessionId;
+    if (sid) setPendingQuestion(sid, null);
+  }, [submitting, onSubmit, pending, questions, denyNote, setPendingQuestion]);
+
+  const cancelDeny = useCallback(() => {
+    dispatchDenyDraft({ type: 'reset' });
+  }, []);
+
+  useEffect(() => {
+    dispatchDenyDraft({ type: 'reset' });
+  }, [pending.request_id]);
+
+  useEffect(() => {
+    if (!denyMode) return;
+    const onKeyDown = (event: KeyboardEvent) => handleDenyEscape(event, cancelDeny);
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [denyMode, cancelDeny]);
 
   if (!primary) return null;
 
@@ -169,21 +211,65 @@ export function AuthorizationPrompt({ pending, onSubmit }: AuthorizationPromptPr
         </div>
 
         {/* 动作按钮区不触发展开/收起 */}
-        <div className="auth-prompt__actions" onClick={(e) => e.stopPropagation()}>
-          {actions.map((action) => (
-            <HoverTip text={action.tip} key={action.semantic + action.option.label}>
-              <button
-                type="button"
-                className={`auth-prompt__btn auth-prompt__btn--${action.semantic}`}
-                disabled={submitting}
-                onClick={() => handlePick(action)}
-              >
-                {action.label}
-              </button>
-            </HoverTip>
-          ))}
-        </div>
+        {!denyMode && (
+          <div className="auth-prompt__actions" onClick={(e) => e.stopPropagation()}>
+            {actions.map((action) => (
+              <HoverTip text={action.tip} key={action.semantic + action.option.label}>
+                <button
+                  type="button"
+                  className={`auth-prompt__btn auth-prompt__btn--${action.semantic}`}
+                  disabled={submitting}
+                  onClick={() => handlePick(action)}
+                >
+                  {action.label}
+                </button>
+              </HoverTip>
+            ))}
+          </div>
+        )}
       </div>
+
+      {denyMode && (
+        <div className="auth-prompt__deny">
+          <textarea
+            autoFocus
+            rows={2}
+            className="auth-prompt__deny-input"
+            value={denyNote}
+            disabled={submitting}
+            placeholder={t('authPrompt.denyFeedbackPlaceholder')}
+            onChange={(event) =>
+              dispatchDenyDraft({ type: 'update-note', note: event.target.value })
+            }
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                submitDeny();
+              }
+            }}
+          />
+          <div className="auth-prompt__deny-actions">
+            <button
+              type="button"
+              className="auth-prompt__deny-back"
+              disabled={submitting}
+              onClick={cancelDeny}
+            >
+              {t('authPrompt.denyBack')}
+            </button>
+            <button
+              type="button"
+              className="auth-prompt__deny-submit"
+              disabled={submitting}
+              onClick={submitDeny}
+            >
+              {denyNote.trim()
+                ? t('authPrompt.denySubmit')
+                : t('authPrompt.denyWithoutNote')}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div
         className={
