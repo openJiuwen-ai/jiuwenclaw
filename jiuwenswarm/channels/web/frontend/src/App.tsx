@@ -1225,9 +1225,11 @@ function AppContent() {
     );
     setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
     setConfigError(null);
-    if (result?.applied_without_restart !== true) {
+    const appliedWithoutRestart = result?.applied_without_restart === true;
+    if (!appliedWithoutRestart) {
       applyConfigSaveUiState(false);
     }
+    return appliedWithoutRestart;
   }, [applyConfigSaveUiState, request]);
 
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {

@@ -103,10 +103,14 @@ type SkillGraphStatus = {
 
 export type SkillGraphPanelHandle = {
   refresh: () => boolean;
+  startIncrementalBuild: () => Promise<void>;
+  cancelActiveBuild: () => Promise<void>;
 };
 
 type SkillGraphPanelProps = {
   onReadingChange?: (reading: boolean) => void;
+  externalError?: string | null;
+  onExternalErrorClear?: () => void;
 };
 
 type GraphNode = {
@@ -660,7 +664,7 @@ function buildLogSignature(entries?: BuildLogEntry[]): string {
 }
 
 export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanelProps>(function SkillGraphPanel(
-  { onReadingChange },
+  { onReadingChange, externalError, onExternalErrorClear },
   ref,
 ) {
   const { t } = useTranslation();
@@ -888,9 +892,11 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     };
   }, [autoFitRequest, fitView, visible.nodes.length, visible.edges.length]);
 
-  const loadGraph = useCallback(async () => {
+  const loadGraph = useCallback(async (clearExternalError = false) => {
+    if (clearExternalError) {
+      onExternalErrorClear?.();
+    }
     setLoading(true);
-    setError(null);
     let keepLoading = false;
     try {
       const data = await webRequest<SkillGraphPayload>('skills.graph.get', {}, { timeoutMs: 60_000 });
@@ -898,7 +904,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       if (!data.success) {
         if (isBuildRunningPayload(data)) {
           setShowBuildLogPanel(true);
-          setError(null);
           keepLoading = true;
           return;
         }
@@ -915,6 +920,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       });
       selectedRef.current = null;
       setSelectedNode(null);
+      setError(null);
       requestAutoFit();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -925,7 +931,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         setLoading(false);
       }
     }
-  }, [applyBuildLog, requestAutoFit, t]);
+  }, [applyBuildLog, onExternalErrorClear, requestAutoFit, t]);
 
   const restoreBuildStatus = useCallback(async (): Promise<boolean> => {
     const data = await webRequest<SkillGraphStatus>(
@@ -938,7 +944,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     externalBuildRunningRef.current = isRunning;
     if (isRunning) {
       setShowBuildLogPanel(true);
-      setError(null);
       setLoading(true);
       return true;
     }
@@ -952,6 +957,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
     setBuildMode(mode);
     setShowBuildLogPanel(true);
     setError(null);
+    onExternalErrorClear?.();
     setTokenUsage(null);
     setBuildProgress({
       stage: 'update.start',
@@ -971,16 +977,25 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       }
       externalBuildRunningRef.current = true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const error = err instanceof Error ? err : new Error(String(err));
+      externalBuildRunningRef.current = false;
+      setError(error.message);
       setUpdating(false);
       setBuildMode(null);
+      setBuildProgress((current) => ({
+        ...current,
+        label: error.message,
+        status: 'error',
+      }));
+      throw error;
     }
-  }, [applyBuildLog, t]);
+  }, [applyBuildLog, onExternalErrorClear, t]);
 
   const cancelBuild = useCallback(async () => {
     setCancellingBuild(true);
     setShowBuildLogPanel(true);
     setError(null);
+    onExternalErrorClear?.();
     try {
       const data = await webRequest<SkillGraphUpdate>(
         'skills.graph.cancel',
@@ -996,6 +1011,34 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancellingBuild(false);
+    }
+  }, [applyBuildLog, onExternalErrorClear, resetBuildUiOnTerminalStatus, t]);
+
+  const cancelActiveBuild = useCallback(async () => {
+    setCancellingBuild(true);
+    setError(null);
+    try {
+      const data = await webRequest<SkillGraphUpdate>(
+        'skills.graph.cancel',
+        {},
+        { timeoutMs: 60_000 },
+      );
+      if (data.build_status === 'idle') {
+        return;
+      }
+      applyBuildLog(data);
+      if (resetBuildUiOnTerminalStatus(data)) {
+        return;
+      }
+      if (!data.success) {
+        throw new Error(localizedServerDetail(data.detail, 'skills.graph.errors.cancelFailed', t));
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setError(error.message);
+      throw error;
     } finally {
       setCancellingBuild(false);
     }
@@ -1082,7 +1125,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           const wasRunning = externalBuildRunningRef.current;
           if (status === 'running') {
             setShowBuildLogPanel(true);
-            setError(null);
             setLoading(true);
             nextDelay = 1000;
           }
@@ -1334,19 +1376,20 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
   const elapsedText = buildElapsedText(buildLog, buildProgress, buildElapsedNow, buildElapsedStart);
   const buildMetricsText = [tokenUsageText, elapsedText].filter(Boolean).join(' · ');
 
-  const detailInputs = selectedNode ? asDetailItems(selectedNode.properties.inputs, t('skills.graph.required')) : [];
-  const detailOutputs = selectedNode ? asDetailItems(selectedNode.properties.outputs, t('skills.graph.required')) : [];
   const detailTasks = selectedNode ? asDetailItems(selectedNode.properties.tasks, t('skills.graph.required')) : [];
+  const visibleError = externalError || error;
 
   useImperativeHandle(ref, () => ({
     refresh: () => {
       if (isBusy) {
         return false;
       }
-      void loadGraph();
+      void loadGraph(true);
       return true;
     },
-  }), [isBusy, loadGraph]);
+    startIncrementalBuild: () => rebuildGraph('incremental'),
+    cancelActiveBuild,
+  }), [cancelActiveBuild, isBusy, loadGraph, rebuildGraph]);
 
   useEffect(() => {
     onReadingChange?.(loading);
@@ -1393,12 +1436,12 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         </div>
 
         <div data-testid="skill-graph-panel-actions" className="skill-graph-panel__actions">
-          <button type="button" onClick={loadGraph} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
+          <button type="button" onClick={() => void loadGraph(true)} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
             {loading ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
           </button>
           <button
             type="button"
-            onClick={() => void rebuildGraph('incremental')}
+            onClick={() => void rebuildGraph('incremental').catch(() => undefined)}
             disabled={isBusy}
             data-testid="skill-graph-panel-action-incremental-build"
             title={t('skills.graph.actions.incrementalBuild')}
@@ -1416,7 +1459,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           </button>
           <button
             type="button"
-            onClick={() => void rebuildGraph('full')}
+            onClick={() => void rebuildGraph('full').catch(() => undefined)}
             disabled={isBusy}
             data-testid="skill-graph-panel-action-full-rebuild"
             title={t('skills.graph.actions.fullRebuild')}
@@ -1457,10 +1500,10 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           </div>
         ) : null}
 
-        {error && !isGraphBuildRunning ? (
+        {visibleError ? (
           <div data-testid="skill-graph-panel-error" className="skill-graph-panel__error">
             <AlertTriangle size={16} aria-hidden="true" />
-            <span data-testid="skill-graph-panel-error-text">{error}</span>
+            <span data-testid="skill-graph-panel-error-text">{visibleError}</span>
           </div>
         ) : null}
 
@@ -1551,41 +1594,14 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
               <span data-testid="skill-graph-panel-detail-out-degree">{t('skills.graph.outDegree')}<strong>{selectedNode.outDegree}</strong></span>
             </div>
             {asString(selectedNode.properties.description) ? (
-              <p data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
-                {asString(selectedNode.properties.description)}
-              </p>
+              <section data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
+                <h4>{t('skills.graph.description')}</h4>
+                <p data-testid="skill-graph-panel-detail-description-content" className="skill-graph-panel__description-content">
+                  {asString(selectedNode.properties.description)}
+                </p>
+              </section>
             ) : null}
             <div data-testid="skill-graph-panel-io-sections" className="skill-graph-panel__io-sections">
-              <section data-testid="skill-graph-panel-io-section-input" className="skill-graph-panel__io-section skill-graph-panel__io-section--input">
-                <h4 data-testid="skill-graph-panel-io-section-input-title">{t('skills.graph.inputs')}</h4>
-                {detailInputs.length === 0 ? (
-                  <div data-testid="skill-graph-panel-io-section-input-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noInputs')}</div>
-                ) : (
-                  <div data-testid="skill-graph-panel-io-section-input-tags" className="skill-graph-panel__tags">
-                    {detailInputs.slice(0, 18).map((item) => (
-                      <span key={item.key} data-testid="skill-graph-panel-io-section-input-tag" data-variant={item.key} title={item.meta || item.label}>
-                        {item.label}
-                        {item.meta ? <small>{item.meta}</small> : null}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </section>
-              <section data-testid="skill-graph-panel-io-section-output" className="skill-graph-panel__io-section skill-graph-panel__io-section--output">
-                <h4 data-testid="skill-graph-panel-io-section-output-title">{t('skills.graph.outputs')}</h4>
-                {detailOutputs.length === 0 ? (
-                  <div data-testid="skill-graph-panel-io-section-output-empty" className="skill-graph-panel__empty skill-graph-panel__empty--compact">{t('skills.graph.noOutputs')}</div>
-                ) : (
-                  <div data-testid="skill-graph-panel-io-section-output-tags" className="skill-graph-panel__tags">
-                    {detailOutputs.slice(0, 18).map((item) => (
-                      <span key={item.key} data-testid="skill-graph-panel-io-section-output-tag" data-variant={item.key} title={item.meta || item.label}>
-                        {item.label}
-                        {item.meta ? <small>{item.meta}</small> : null}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </section>
               {detailTasks.length > 0 ? (
                 <section data-testid="skill-graph-panel-io-section-task" className="skill-graph-panel__io-section skill-graph-panel__io-section--task">
                   <h4 data-testid="skill-graph-panel-io-section-task-title">{t('skills.graph.tasks')}</h4>

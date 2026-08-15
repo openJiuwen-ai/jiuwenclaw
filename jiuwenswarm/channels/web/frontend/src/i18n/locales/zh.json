@@ -1698,7 +1698,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱，并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行成功率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行成功率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
         "toggleLabel": "启用技能编排",
@@ -1719,10 +1719,7 @@
       "updatedAt": "更新时间 {{time}}",
       "inDegree": "入度",
       "outDegree": "出度",
-      "inputs": "输入",
-      "noInputs": "暂无输入",
-      "outputs": "输出",
-      "noOutputs": "暂无输出",
+      "description": "描述",
       "tasks": "任务",
       "relatedEdges": "相关边",
       "noRelatedEdges": "暂无相关边。",
