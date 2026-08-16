@@ -766,16 +766,23 @@ class WorkflowRunState(BaseModel):
         self.status = "running"
         self.started_at = self._now_iso()
 
-        for phase_plan in (progress.phases or []):
-            phase_id = self._generate_phase_id(phase_plan.title)
-            self.phases.append(
-                WorkflowPhaseState(
-                    id=phase_id,
-                    name=phase_plan.title,
-                    description=phase_plan.description,
-                    status="planned",
+        # Resume guard: on a paused/stopped run, the engine re-emits
+        # WORKFLOW_STARTED with the same full META ``phases`` list for the same
+        # run_id, and the Monitor reuses this existing state — populate the
+        # phase list only once, so a resume does not re-append every phase into
+        # duplicate cards (slug, slug-2, slug-3, ...). Status reset above stays
+        # unconditional (resume must flip paused -> running).
+        if not self.phases:
+            for phase_plan in (progress.phases or []):
+                phase_id = self._generate_phase_id(phase_plan.title)
+                self.phases.append(
+                    WorkflowPhaseState(
+                        id=phase_id,
+                        name=phase_plan.title,
+                        description=phase_plan.description,
+                        status="planned",
+                    )
                 )
-            )
 
         return self._build_top_level_delta()
 
