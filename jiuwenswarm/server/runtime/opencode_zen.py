@@ -87,6 +87,11 @@ _FETCH_TIMEOUT_SECONDS = 10.0
 # ``limit.context``; we fall back to this when it is missing.
 _ZEN_FREE_CONTEXT_WINDOW = 200000
 
+# 用户自配的默认模型仍为 .env 占位符（首次启动）时，回退使用的免费模型。
+# 已确认 deepseek-v4-flash-free 长期匿名免费服务（models.dev cost.input==0），
+# 前端展示名为 "DeepSeek V4 Flash"。
+DEFAULT_FREE_MODEL_ID = "deepseek-v4-flash-free"
+
 # Process-wide in-memory cache of Zen free-model entries. Populated once at
 # AgentServer start-up; read by Gateway and AgentServer consumers. An empty
 # cache (start-up failure / disabled / no free models) means "no free models".
@@ -363,3 +368,17 @@ def get_zen_free_model_entries() -> list[dict[str, Any]]:
 def get_zen_free_context_window() -> int:
     """Conservative context window used for display of Zen free models."""
     return _ZEN_FREE_CONTEXT_WINDOW
+
+
+def get_zen_default_free_model_entry() -> dict[str, Any] | None:
+    """Return the free-model entry that may act as the product default model.
+
+    当用户自配的默认模型仍为占位符（首次启动）时，用该免费模型兜底：优先
+    ``DEFAULT_FREE_MODEL_ID``（DeepSeek V4 Flash），其次取第一个免费模型；
+    Zen 不可达/缓存为空/免费模型被关闭时返回 ``None``（调用方保持原行为）。
+    """
+    entries = get_zen_free_model_entries()
+    for entry in entries:
+        if (entry.get("model_client_config") or {}).get("model_name") == DEFAULT_FREE_MODEL_ID:
+            return entry
+    return entries[0] if entries else None

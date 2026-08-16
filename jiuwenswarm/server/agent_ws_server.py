@@ -8887,6 +8887,39 @@ class AgentWebSocketServer:
                 exc_info=True,
             )
 
+        # 首次启动兜底：默认模型仍为 .env 占位符时，改选 Zen 免费模型（如
+        # DeepSeek V4 Flash）作为默认，避免把占位模型发往厂商。仅内存态生效。
+        if self._default_model is not None:
+            try:
+                from jiuwenswarm.common.model_config_validation import (
+                    is_placeholder_model_entry,
+                    model_client_config_view,
+                )
+                from jiuwenswarm.server.runtime.opencode_zen import (
+                    get_zen_default_free_model_entry,
+                )
+                if is_placeholder_model_entry(
+                    model_client_config_view(self._default_model.model_client_config)
+                ):
+                    zen_default = get_zen_default_free_model_entry()
+                    if zen_default is not None:
+                        zmcc = zen_default["model_client_config"]
+                        zname = zmcc["model_name"]
+                        self._model_cache[zname] = build_model_from_entry(
+                            zmcc, zen_default.get("model_config_obj") or {}
+                        )
+                        self._default_model = self._model_cache[zname]
+                        logger.info(
+                            "[AgentServer] default model is placeholder; "
+                            "fallback to zen free model=%s",
+                            zname,
+                        )
+            except Exception:
+                logger.debug(
+                    "[AgentServer] fallback default to zen free model failed",
+                    exc_info=True,
+                )
+
     async def _handle_schedule_request(
         self,
         ws: Any,

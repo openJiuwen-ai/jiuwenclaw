@@ -2323,11 +2323,38 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
                 })
-                # active_model 为列表首位的模型（主对话默认）
-            active_model = result[0]["model_name"] if result else ""
+                # active_model 为列表首位的模型（主对话默认）；首次启动时该条目
+                # 仍为 .env 占位符，则回退到 Zen 免费模型（如 DeepSeek V4 Flash）。
+            default_name = result[0]["model_name"] if result else ""
+            active_model = default_name
+            try:
+                from jiuwenswarm.common.model_config_validation import (
+                    is_placeholder_model_entry,
+                )
+                from jiuwenswarm.server.runtime.opencode_zen import (
+                    get_zen_default_free_model_entry,
+                )
+                if not default_name or is_placeholder_model_entry(
+                    {
+                        "api_base": result[0].get("api_base", ""),
+                        "api_key": result[0].get("api_key", ""),
+                        "model_name": result[0].get("model_name", ""),
+                    }
+                ):
+                    zen_default = get_zen_default_free_model_entry()
+                    if zen_default is not None:
+                        zen_name = (
+                            (zen_default.get("model_client_config") or {})
+                            .get("model_name", "")
+                        )
+                        if zen_name:
+                            active_model = zen_name
+            except Exception:
+                logger.debug("[models.list] resolve default model failed", exc_info=True)
 
             # 追加 Opencode Zen 免费模型（内存态，不入 config.yaml）。
-            # 仅在此处合并展示，不影响 active_model（已取首位用户自配模型）。
+            # 仅在此处合并展示，不影响 active_model（已取首位用户自配模型，
+            # 占位时已在上方回退到 Zen 免费模型）。
             try:
                 from jiuwenswarm.server.runtime.opencode_zen import (
                     get_zen_free_model_entries,

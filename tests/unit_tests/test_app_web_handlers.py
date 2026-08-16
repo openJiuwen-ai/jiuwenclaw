@@ -315,6 +315,53 @@ async def test_openai_account_models_list_returns_refreshed_auth_status(
 
 
 @pytest.mark.asyncio
+async def test_models_list_active_model_falls_back_to_zen_free_when_default_is_placeholder(
+    monkeypatch,
+) -> None:
+    """默认模型为 .env 占位符（首次启动）时，active_model 回退到 Zen 免费模型。"""
+    placeholder_entry = {
+        "model_client_config": {
+            "api_base": "https://example.com/compatible-mode/v1",
+            "api_key": "sk-xxxxxxxxx",
+            "model_name": "your-model-name",
+            "client_provider": "OpenAI",
+        },
+        "model_config_obj": {"temperature": 0.95},
+        "is_default": True,
+    }
+    zen_entry = {
+        "model_client_config": {
+            "api_base": "https://opencode.ai/zen/v1",
+            "api_key": "public",
+            "model_name": "deepseek-v4-flash-free",
+            "client_provider": "OpenAI",
+        },
+        "model_config_obj": {"temperature": 0.95},
+        "alias": "DeepSeek V4 Flash",
+        "is_free": True,
+    }
+
+    from jiuwenswarm.server.runtime import opencode_zen
+
+    monkeypatch.setattr(app_web_handlers, "get_config", lambda: {"models": {}})
+    monkeypatch.setattr(app_web_handlers, "get_default_models", lambda config: [placeholder_entry])
+    monkeypatch.setattr(opencode_zen, "get_zen_free_model_entries", lambda: [zen_entry])
+    monkeypatch.setattr(opencode_zen, "get_zen_default_free_model_entry", lambda: zen_entry)
+    monkeypatch.setattr(opencode_zen, "get_zen_free_context_window", lambda: 200000)
+
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["models.list"](object(), "req-models", {}, "sess-1")
+
+    payload = channel.responses[-1]["payload"]
+    assert payload["active_model"] == "deepseek-v4-flash-free"
+    assert payload["models"][0]["model_name"] == "your-model-name"
+    assert payload["models"][1]["model_name"] == "deepseek-v4-flash-free"
+    assert payload["models"][1]["is_free"] is True
+
+
+@pytest.mark.asyncio
 async def test_updater_reset_source_registered_and_restores_defaults(monkeypatch):
     captured: dict[str, object] = {}
 

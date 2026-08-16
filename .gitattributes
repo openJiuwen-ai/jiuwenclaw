@@ -1,1 +1,5 @@
 *.mp4 filter=lfs diff=lfs merge=lfs -text
+# 文本文件统一换行策略：仓库内存储 LF，检出时按平台（Windows 检出 CRLF）。
+# 有了明确的 text 属性后，Git 不再依赖 core.autocrlf 猜测，
+# 也不会再弹 "LF will be replaced by CRLF" 之类的提示。
+* text=auto

@@ -209,7 +209,11 @@ from jiuwenswarm.agents.harness.common.memory.config import (
     is_proactive_memory,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
+from jiuwenswarm.common.model_config_validation import (
+    is_placeholder_api_base,
+    is_placeholder_model_entry,
+    model_client_config_view,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
@@ -3409,6 +3413,22 @@ class JiuWenSwarmDeepAdapter:
                     break
         if default_name is None:
             default_name = next(iter(self._model_cache))
+
+        # 首次启动兜底：config 默认条目仍为 .env 占位符时，改选 Zen 免费模型
+        # （如 DeepSeek V4 Flash）作为默认，避免把占位模型发往厂商。
+        # 仅内存态生效，不回写 config.yaml；Zen 不可达时保持原占位行为。
+        if is_placeholder_model_entry(
+            model_client_config_view(self._model_cache[default_name].model_client_config)
+        ):
+            from jiuwenswarm.server.runtime.opencode_zen import get_zen_default_free_model_entry
+            zen_default = get_zen_default_free_model_entry()
+            if zen_default is not None:
+                zmcc = zen_default["model_client_config"]
+                zname = zmcc["model_name"]
+                self._model_cache[zname] = build_model_from_entry(
+                    zmcc, zen_default.get("model_config_obj") or {}
+                )
+                default_name = zname
 
         self._default_model_name = default_name
         self._model = self._model_cache[default_name]
