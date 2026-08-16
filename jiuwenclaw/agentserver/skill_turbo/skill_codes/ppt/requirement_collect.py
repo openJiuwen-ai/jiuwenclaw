@@ -288,15 +288,6 @@ def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
     }
 
 
-def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
-    if not inputs.get("audience"):
-        inputs["audience"] = _DEFAULT_AUDIENCE
-    if not inputs.get("presentation_purpose"):
-        inputs["presentation_purpose"] = _DEFAULT_PRESENTATION_PURPOSE
-    if inputs.get("page_count") is None:
-        inputs["page_count"] = _DEFAULT_PAGE_COUNT
-
-
 def _batch_field_is_satisfied(inputs: dict[str, Any], field: str) -> bool:
     if field == "page_count":
         return inputs.get("page_count") is not None

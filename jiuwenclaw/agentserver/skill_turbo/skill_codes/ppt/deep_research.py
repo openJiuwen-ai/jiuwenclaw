@@ -36,6 +36,37 @@ _LIST_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.+)$", re.MULTILINE)
 _NEXT_FIELD_RE = re.compile(r"\*\*[^*]+\*\*[：:]")
 _SEARCHED_SOURCES_RE = re.compile(r"^##\s*已搜索来源", re.MULTILINE)
 _URL_RE = re.compile(r"https?://[^\s\])>\"']+")
+_NEXT_SECTION_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+
+def _unique_urls(urls: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in urls:
+        url = str(raw or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        ordered.append(url)
+    return ordered
+
+
+def _extract_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    return _unique_urls(_URL_RE.findall(text))
+
+
+def _merge_seed_urls(*groups: list[str]) -> list[str]:
+    """按组优先级去重合并 URL；先出现的组（用户链接、已搜索来源）优先。"""
+    merged: list[str] = []
+    for group in groups:
+        merged.extend(group)
+    return _unique_urls(merged)
+
+
+def _seed_source_entries(urls: list[str]) -> list[dict[str, Any]]:
+    return [{"url": url, "from_existing": True} for url in urls]
 
 
 def _compute_min_words_per_page(
@@ -126,7 +157,7 @@ class PrepareNode(PlanNode):
                 "### 职责\n"
                 "1. 读取 `{output_dir}/outline.md`\n"
                 "2. 调用官方 `parse-outline` CLI 解析大纲，消费 `researched_pages` / `structural_pages`；结构页不派研究。CLI 未给出 research_queries / data_needs 时从 outline.md 正则补齐；CLI 失败再正则回退（不走 LLM）\n"
-                "3. 提取 outline 中已搜索的 URL（`searched_urls`，跳过重复搜索）\n"
+                "3. 提取用户原文 URL 与 outline `## 已搜索来源`（`searched_urls`）：去重后优先进深抓池并计入 fetch 上限，不再为这些 URL 重复搜索\n"
                 "4. 判断是否执行搜索（`_should_search`）：\n"
                 "\n"
                 "| search_mode | 素材状态 | 路径 |\n"
@@ -180,7 +211,10 @@ class PrepareNode(PlanNode):
         research_depth = inputs.get("research_depth", "L2")
         source_material = inputs.get("source_material", "")
         topic = inputs.get("topic", "")
-        searched_urls = self._extract_searched_urls(outline_text)
+        searched_urls = _merge_seed_urls(
+            _extract_urls(PptCommon.collect_user_text(inputs)),
+            self._extract_searched_urls(outline_text),
+        )
         need_search = await self._should_search(search_mode, source_material, pages)
 
         no_data_fallback = (
@@ -202,8 +236,9 @@ class PrepareNode(PlanNode):
         )
 
         logger.info(
-            "[P6.0] 预处理完成 pages=%d need_search=%s no_data_fallback=%s min_words_per_page=%d",
-            len(pages), need_search, no_data_fallback, min_words_per_page,
+            "[P6.0] 预处理完成 pages=%d need_search=%s no_data_fallback=%s "
+            "min_words_per_page=%d seed_urls=%d",
+            len(pages), need_search, no_data_fallback, min_words_per_page, len(searched_urls),
         )
 
         return {
@@ -388,7 +423,10 @@ class PrepareNode(PlanNode):
         if not m:
             return []
         section = outline_text[m.end():]
-        return [u for u in _URL_RE.findall(section)]
+        next_heading = _NEXT_SECTION_RE.search(section)
+        if next_heading:
+            section = section[:next_heading.start()]
+        return _extract_urls(section)
 
     async def _should_search(
         self,
@@ -535,7 +573,7 @@ class PageWorkerNode(PlanNode):
                 "- `need_search`: 是否执行搜索（来自 P6.0）\n"
                 "- `no_data_fallback`: 无研究数据降级标志（来自 P6.0）\n"
                 "- `page_coverage`: 每页的素材覆盖度信息（来自 P6.0）\n"
-                "- `searched_urls`: outline 中已搜索的 URL（来自 P6.0）\n"
+                "- `searched_urls`: 用户链接 + outline 已搜索来源（来自 P6.0，优先进深抓池）\n"
                 "- `min_words_per_page`: 每页最低字数（来自 P6.0）\n"
                 "- `source_material` / `search_mode` / `research_depth` / `topic` / `output_dir`（透传）\n"
                 "\n"
@@ -551,8 +589,8 @@ class PageWorkerNode(PlanNode):
                 "   - partial 页：仅搜索未覆盖的数据需求 + 1 次验证性搜索\n"
                 "   - uncovered 页：完整搜索（所有 research_queries + data_needs 综合查询）\n"
                 "b. 并行搜索所有查询\n"
-                "c. 来源评分筛选（A+/A/A-/B+/B/C，C 级丢弃）\n"
-                "d. 已有 URL 合并（searched_urls 直接加入候选池）\n"
+                "c. 用户链接与已搜索来源置于候选池前端并计入 fetch 上限；搜索结果去重后追加\n"
+                "d. 来源评分筛选（仅对新搜索结果：A+/A/A-/B+/B/C，C 级丢弃）\n"
                 "e. 缺口检查（合格来源 <3 个 → 标记缺口页）\n"
                 "f. 定向补搜（最多1轮，加 report/白皮书/官方 限定词）\n"
                 "\n"
@@ -884,20 +922,23 @@ class PageWorkerNode(PlanNode):
         ]
         results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
-        sources: list[dict[str, Any]] = []
+        seed_urls = _unique_urls(searched_urls)
+        sources = _seed_source_entries(seed_urls)
+        seen_urls = set(seed_urls)
         for q, result in zip(queries, results):
             if isinstance(result, Exception):
                 logger.warning("[P6.1] 搜索失败 query=%s: %s", q[:50], result)
                 continue
             if isinstance(result, str) and result.startswith("[ERROR]"):
                 continue
-            sources.extend(self._parse_search_results(result))
+            for item in self._parse_search_results(result):
+                url = str(item.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                sources.append(item)
 
-        # 合并已有 URL
-        for url in searched_urls:
-            sources.append({"url": url, "from_existing": True})
-
-        # 评分筛选
+        # 评分筛选（已有 seed 不参与评分、保持前端优先）
         sources = await self._score_sources_for_page(page, sources)
 
         # 缺口检查 + 补搜
@@ -1028,17 +1069,15 @@ class PageWorkerNode(PlanNode):
                     s["grade"] = grade
                     kept.append(s)
 
-            for s in existing:
-                s["grade"] = "existing"
-                kept.append(s)
-
             kept.sort(key=lambda x: grade_order.get(x.get("grade", ""), 99))
 
             logger.info(
                 "[P6.1] 页面 P%d 来源评分完成，合格 %d / %d",
-                page["page_number"], len(kept), len(unique_sources),
+                page["page_number"],
+                len(existing) + len(kept),
+                len(unique_sources) + len(existing),
             )
-            return kept
+            return existing + kept
         except Exception as e:
             if isinstance(e, AbortError):
                 raise

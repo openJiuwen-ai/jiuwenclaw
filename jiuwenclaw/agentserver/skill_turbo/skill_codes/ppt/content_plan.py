@@ -26,6 +26,7 @@ _OUTLINE_FIELD_PATTERN = re.compile(
     re.MULTILINE,
 )
 _P4_MAX_ATTEMPTS = 2
+_P43_MAX_ATTEMPTS = 2  # 对齐 pptx-craft Stage 3：门禁失败附原因重试 1 次
 _INSUFFICIENT_INFO_MARKER = "[INSUFFICIENT_INFO]"
 _QUERY_BOUNDS_NO_MATERIAL = (5, 8)
 _QUERY_BOUNDS_WITH_MATERIAL = (3, 5)
@@ -1104,13 +1105,8 @@ def _check_insufficient_info(outline_text: str, inputs: dict[str, Any]) -> None:
     )
 
 
-async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
-    _require_p4_prerequisites(inputs)
-
+async def _generate_outline_once(node: PlanNode, inputs: dict[str, Any]) -> None:
     source_type = str(inputs.get("source_type") or "topic").strip()
-    if source_type not in _VALID_SOURCE_TYPES:
-        raise ContentPlanError(f"P4.3 无效的 source_type: {source_type!r}")
-
     source_material = await PptCommon.read_file(
         node,
         inputs.get("doc_raw_path"),
@@ -1153,6 +1149,30 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     inputs["outline_path"] = str(outline_path)
     inputs["p4_outline_gen_status"] = "completed"
     inputs["content_plan_status"] = "outline_generated"
+
+
+async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
+    """生成 outline.md；门禁失败时附原因同节点再试 1 次（对齐 Stage 3）。"""
+    _require_p4_prerequisites(inputs)
+
+    source_type = str(inputs.get("source_type") or "topic").strip()
+    if source_type not in _VALID_SOURCE_TYPES:
+        raise ContentPlanError(f"P4.3 无效的 source_type: {source_type!r}")
+
+    last_error: str | None = None
+    for attempt in range(_P43_MAX_ATTEMPTS):
+        if last_error:
+            inputs["failure_reason"] = last_error
+            logger.info("[P4.3] outline 校验失败，附失败原因重试 1 次")
+        try:
+            await _generate_outline_once(node, inputs)
+            return
+        except ContentPlanError as exc:
+            last_error = str(exc)
+            if attempt + 1 >= _P43_MAX_ATTEMPTS:
+                raise
+
+    raise ContentPlanError(last_error or "P4.3 失败")
 
 
 class P41NormalizeNode(PlanNode):
@@ -1297,8 +1317,8 @@ class P43OutlineGenNode(PlanNode):
                 f"{_P43_COMMON_RULES}\n"
                 "\n"
                 "### 失败兜底\n"
-                "- LLM 生成空内容: raise ContentPlanError\n"
-                "- write_file 失败: raise ContentPlanError\n"
+                "- 门禁失败: 附失败原因同节点再生成 1 次；仍失败则 raise ContentPlanError\n"
+                "- LLM 生成空内容 / write_file 失败: raise ContentPlanError\n"
             ),
         )
 
@@ -1377,7 +1397,7 @@ class ContentPlanNode(PlanNode):
     预期输出（P4.4 校验通过后）:
         p4_validate_status=passed, content_plan_status=completed
 
-    重试：P4 整体最多 2 次（初始 + 1 次重试，从 P4.1 重跑），失败时写入 failure_reason。
+    重试：P4.3 门禁失败同节点再生成 1 次；P4 整体最多 2 次（初始 + 1 次重试，从 P4.1 重跑）。
     """
 
     def __init__(self) -> None:
@@ -1433,6 +1453,7 @@ class ContentPlanNode(PlanNode):
                 "4. P4.4: read_file 读取 outline.md → 规则校验结构与内容\n"
                 "\n"
                 "### 失败兜底\n"
+                "- P4.3 门禁失败: 同节点附失败原因再生成 1 次（不重跑 P4.2）\n"
                 "- P4.4 校验失败: raise ContentPlanError，触发 P4 整体重试（最多 1 次重试）\n"
                 "- 2 次均失败: 写入 failure_reason，由根节点决定后续处理\n"
             ),

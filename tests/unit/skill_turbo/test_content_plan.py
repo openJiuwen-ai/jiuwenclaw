@@ -474,9 +474,96 @@ def test_p43_completes_and_writes_outline(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_p43_raises_on_empty_llm() -> None:
-    node = _make_p43_node(llm_responses=[""])
+    node = _make_p43_node(llm_responses=["", ""])
     ctx = _base_ctx(page_count=2, focus_areas="AI")
     with pytest.raises(cp.ContentPlanError, match="LLM 返回为空"):
+        asyncio.run(node._execute(ctx))
+
+
+@pytest.mark.unit
+def test_p43_retries_once_on_structural_mismatch(tmp_path: Path) -> None:
+    bad = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("chapter", "第一章", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    good = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "目录", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    prompts: list[str] = []
+    node = cp.P43OutlineGenNode()
+    llm_queue = [bad, good]
+
+    async def _mock_call_llm(prompt: str, system_prompt: str = "", **_: Any) -> str:
+        prompts.append(prompt)
+        if not llm_queue:
+            raise RuntimeError("unexpected extra llm call")
+        return llm_queue.pop(0)
+
+    async def _mock_stream_llm(
+        prompt: str, system_prompt: str = "", node_name: str | None = None, **_: Any,
+    ) -> AsyncIterator[str]:
+        text = await _mock_call_llm(prompt, system_prompt=system_prompt)
+        yield text
+
+    async def _mock_call_tool(tool_name: str, **kwargs: Any) -> Any:
+        if tool_name == "write_file":
+            return _mock_write_file(**kwargs)
+        if tool_name == "read_file":
+            return _mock_read_file(**kwargs)
+        raise ValueError(f"unknown tool: {tool_name}")
+
+    node.set_runtime_callbacks(
+        has_tool=lambda name: name in ("write_file", "read_file"),
+        use_tool=_mock_call_tool,
+        call_llm=_mock_call_llm,
+        stream_llm=_mock_stream_llm,
+    )
+    ctx = _base_ctx(
+        output_dir=str(tmp_path),
+        topic="新能源汽车行业分析",
+        page_count=1,
+        structural_page_request="agenda",
+        focus_areas="产销",
+    )
+    result = asyncio.run(node._execute(ctx))
+    assert result["p4_outline_gen_status"] == "completed"
+    assert len(prompts) == 2
+    assert "上次失败原因" not in prompts[0]
+    assert "上次失败原因" in prompts[1]
+    assert "结构页类型不匹配" in prompts[1]
+    content = Path(result["outline_path"]).read_text(encoding="utf-8")
+    assert "**类型**：agenda" in content
+    assert "**类型**：chapter" not in content
+
+
+@pytest.mark.unit
+def test_p43_raises_after_structural_retry_exhausted(tmp_path: Path) -> None:
+    bad = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("chapter", "第一章", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    node = _make_p43_node(llm_responses=[bad, bad])
+    ctx = _base_ctx(
+        output_dir=str(tmp_path),
+        topic="新能源汽车行业分析",
+        page_count=1,
+        structural_page_request="agenda",
+        focus_areas="产销",
+    )
+    with pytest.raises(cp.ContentPlanError, match="结构页类型不匹配"):
         asyncio.run(node._execute(ctx))
 
 

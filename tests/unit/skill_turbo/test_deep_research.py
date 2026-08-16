@@ -450,3 +450,139 @@ class TestMinWordsPerPageFloor:
         # L3 总字数 3500 / 2 页 = 1750
         assert dr._compute_min_words_per_page("L3", "force_search", 2) == 1750
 
+
+class TestSeedUrls:
+    """用户链接 + 已搜索来源优先进深抓池。"""
+
+    @pytest.mark.unit
+    def test_merge_keeps_user_urls_first_and_dedupes(self):
+        merged = dr._merge_seed_urls(
+            ["https://nea.gov.cn/a", "https://example.com/b"],
+            ["https://example.com/b", "https://cpnn.com.cn/c"],
+        )
+        assert merged == [
+            "https://nea.gov.cn/a",
+            "https://example.com/b",
+            "https://cpnn.com.cn/c",
+        ]
+
+    @pytest.mark.unit
+    def test_extract_user_urls_from_query(self):
+        text = (
+            "参考：\n"
+            "1、https://www.nea.gov.cn/20250221/e10f363cabe3458aaf78ba4558970054/c.html\n"
+            "2、https://m.bjx.com.cn/mnews/20251113/1469854.shtml"
+        )
+        urls = dr._extract_urls(text)
+        assert urls[0].endswith("/c.html")
+        assert "bjx.com.cn" in urls[1]
+
+    @pytest.mark.unit
+    def test_extract_searched_urls_stops_before_page_plan(self):
+        outline = """# 大纲：主题
+
+## 已搜索来源
+
+| URL | 覆盖维度 |
+|-----|---------|
+| https://www.nea.gov.cn/seed.html | 官方数据 |
+
+## 页面规划
+
+### P2:
+- **研究查询**：https://example.com/should-not-count
+"""
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        assert node._extract_searched_urls(outline) == ["https://www.nea.gov.cn/seed.html"]
+
+    @pytest.mark.unit
+    def test_prepare_merges_query_urls_ahead_of_outline_sources(self, tmp_path: Path):
+        outline = tmp_path / "outline.md"
+        outline.write_text(
+            """# 大纲：主题
+
+## 已搜索来源
+
+| URL |
+|-----|
+| https://www.cpnn.com.cn/outline.html |
+
+## 页面规划
+
+### P1:
+- **类型**：cover
+- **研究需求**：❌
+- **标题**：封面
+- **内容概要**：封面
+- **研究查询**：-
+- **数据需求**：-
+
+### P2:
+- **类型**：data
+- **研究需求**：✅
+- **标题**：数据页
+- **内容概要**：数据
+- **研究查询**：2024 装机
+- **数据需求**：装机容量
+
+### P3:
+- **类型**：ending
+- **研究需求**：❌
+- **标题**：结束
+- **内容概要**：结束
+- **研究查询**：-
+- **数据需求**：-
+""",
+            encoding="utf-8",
+        )
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+
+        async def _no_search(*_args, **_kwargs):
+            return True
+
+        async def _read(_path: str) -> str:
+            return outline.read_text(encoding="utf-8")
+
+        node._should_search = _no_search
+        node._read_file = _read
+        result = asyncio.run(
+            node._execute(
+                {
+                    "output_dir": str(tmp_path),
+                    "search_mode": "force_search",
+                    "research_depth": "L2",
+                    "query": "基于 https://www.nea.gov.cn/user.html 写汇报",
+                }
+            )
+        )
+        assert result["prepare_status"] == "ok"
+        assert result["searched_urls"] == [
+            "https://www.nea.gov.cn/user.html",
+            "https://www.cpnn.com.cn/outline.html",
+        ]
+
+    @pytest.mark.unit
+    def test_score_keeps_seed_sources_ahead_of_search_hits(self):
+        node = dr.PageWorkerNode.__new__(dr.PageWorkerNode)
+
+        async def _fake_llm(**_kwargs):
+            return '{"1": "B+", "2": "A"}'
+
+        node.stream_llm_collect = _fake_llm
+        node.extract_json = lambda _raw, expected_type=dict: {"1": "B+", "2": "A"}
+        sources = [
+            {"url": "https://seed.example/a", "from_existing": True},
+            {"url": "https://search.example/b", "title": "hit-b"},
+            {"url": "https://search.example/c", "title": "hit-c"},
+        ]
+        ranked = asyncio.run(
+            node._score_sources_for_page({"page_number": 2}, sources)
+        )
+        assert ranked[0]["url"] == "https://seed.example/a"
+        assert ranked[0].get("from_existing") is True
+        assert [item["url"] for item in ranked[1:]] == [
+            "https://search.example/c",
+            "https://search.example/b",
+        ]
+
+
