@@ -997,3 +997,29 @@ def test_resume_workflow_started_resets_paused_to_running():
     assert state.is_terminal is False
     assert state.completed_at is None
     assert delta["status"] == "running"
+
+
+def test_resume_workflow_started_does_not_duplicate_phases():
+    """Re-firing workflow_started for the same run_id must NOT re-append META phases.
+
+    On resume the engine re-emits WORKFLOW_STARTED with the same full META
+    ``phases`` list for the same run_id; the Monitor reuses the existing
+    WorkflowRunState, so the phase cards must be kept — not duplicated into
+    fresh slug-4 / slug-5 / slug-6 cards.
+    """
+    phases_meta = [
+        PhasePlan(title="发牌", description="分配身份"),
+        PhasePlan(title="游戏进行"),
+        PhasePlan(title="结算"),
+    ]
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="werewolf-game", phases=phases_meta))
+    assert len(state.phases) == 3
+    ids_before = [p.id for p in state.phases]
+    # Resume relaunch re-emits workflow_started with the same full phases list.
+    delta = state.apply(_make_progress("workflow_started", workflow_name="werewolf-game", phases=phases_meta))
+    assert len(state.phases) == 3  # no duplicate phase cards
+    assert [p.name for p in state.phases] == ["发牌", "游戏进行", "结算"]
+    assert [p.id for p in state.phases] == ids_before  # ids stable, not slug-N re-append
+    assert state.status == "running"
+    assert len(delta["phases"]) == 3
