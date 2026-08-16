@@ -256,32 +256,43 @@ class SymphonyOrchestrationRail(DeepAgentRail):
     @staticmethod
     def _build_orchestration_guidance() -> str:
         return """
-## Symphony Orchestration
+## Skill Orchestration Contract
 
-When the user says to use skill(s) or 技能, or when you judge that skill
-capabilities, skill chaining, skill ordering, or a specialized toolchain could
-help complete the task, you MUST call `symphony_compose_graph` with the original
-user task as `query` before answering.
-When you identify, inspect, or recommend installed Skills that are relevant to
-the task, you MUST pass their exact identifiers or names as
-`symphony_compose_graph.candidate_skill_ids`. Do not omit this field after
-selecting candidate Skills. Do not choose the execution chain yourself;
-Symphony owns ordering and graph composition. After it returns, present its
-returned `content` directly to the user. If Symphony reports missing inputs,
-ask for those inputs.
+Before executing Skills or answering, you MUST call `symphony_compose_graph`
+with the original user task as `query` when ANY of these conditions is true:
 
-If Symphony reports no suitable candidates, a missing capability, or caveats
-that point to a skill gap, use `search_skill` to discover external skills. When
-installing a discovered skill is appropriate, call `install_skill`; after a
-successful install, call `symphony_refresh_graph` and then call
-`symphony_compose_graph` again with the original user task.
+1. The user explicitly requests using, selecting, combining, or orchestrating
+   Skills, including requests that mention skill(s) or 技能.
+2. The task requires two or more specialized capabilities or an ordered
+   toolchain.
+3. You have identified, inspected, selected, invoked, or recommended any
+   installed Skill for the task.
+
+Calling `skill_branch_explore` creates a mandatory orchestration follow-up. After
+calling it, select only the few Skills relevant to the original user task and
+call `symphony_compose_graph` before executing any Skill or returning a final
+answer. Pass the selected Skills' exact identifiers or names as
+`candidate_skill_ids`; never pass every Skill returned by exploration. If no
+candidate can be selected confidently, still call `symphony_compose_graph`
+with the original query and omit `candidate_skill_ids`.
+
+Do not choose the execution chain yourself; the orchestration tool determines
+Skill ordering and graph composition. After it returns, present its returned
+`content` directly to the user. If the orchestration tool reports missing
+inputs, ask for those inputs.
+
+If the orchestration tool reports no suitable candidates, a missing capability,
+or caveats that point to a Skill gap, use `search_skill` to discover external
+Skills. When installing a discovered Skill is appropriate, call
+`install_skill`; after a successful install, call `symphony_refresh_graph` and
+then call `symphony_compose_graph` again with the original user task.
 
 If either graph tool returns `graph_build_timeout` or `manual_graph_build`, do
 not call `symphony_compose_graph` or `symphony_refresh_graph` again in the
 current round. Tell the user to build the graph manually instead.
 
-For clearly ordinary tasks that do not benefit from skill capabilities, continue
-normally without Symphony.
+Skip skill orchestration only when none of the three trigger conditions is true
+and `skill_branch_explore` was not called in the current round.
 """
 
     @staticmethod

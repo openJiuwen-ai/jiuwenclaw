@@ -453,14 +453,14 @@ class SymphonyToolkit:
         return [
             make_tool(
                 "symphony_read_graph",
-                "Read whether the Symphony graph exists or is stale before composing skill execution.",
+                "Read whether the Skill Graph exists or is stale before composing Skill execution.",
                 {"type": "object", "properties": {}},
                 self.graph_status,
             ),
             make_tool(
                 "symphony_refresh_graph",
                 (
-                    "Extract installed skill features and refresh the Symphony graph. "
+                    "Extract installed Skill features and refresh the Skill Graph. "
                     "If a result reports graph_build_timeout or manual_graph_build, "
                     "do not call this tool or symphony_compose_graph again in this round."
                 ),
@@ -471,13 +471,18 @@ class SymphonyToolkit:
             make_tool(
                 "symphony_compose_graph",
                 (
-                    "MUST call before answering when the user says to use skill(s) "
-                    "or 技能, or when skill capabilities, skill chaining, skill ordering, "
-                    "or a specialized toolchain could help complete the task. When you identify, "
-                    "inspect, or recommend installed Skills that are relevant to the task, you MUST "
-                    "pass their exact identifiers or names as candidate_skill_ids. Do not omit "
-                    "candidate_skill_ids after selecting candidate Skills. "
-                    "This is the Symphony composition entrypoint: it reads the graph, refreshes a stale "
+                    "MUST call before executing Skills or answering when any trigger condition "
+                    "is true: the user explicitly requests using, selecting, combining, or "
+                    "orchestrating Skills (including skill(s) or 技能); the task requires two "
+                    "or more specialized capabilities or an ordered toolchain; or you have "
+                    "identified, inspected, selected, invoked, or recommended an installed Skill. "
+                    "Calling skill_branch_explore requires a follow-up call to this tool before "
+                    "executing any Skill or returning a final answer. Select only the few relevant "
+                    "Skills from exploration and pass their exact identifiers or names as "
+                    "candidate_skill_ids; never pass every explored Skill. If no candidate can be "
+                    "selected confidently, call this tool with the original query and omit "
+                    "candidate_skill_ids. "
+                    "This is the skill-orchestration entrypoint: it reads the graph, refreshes a stale "
                     "or missing graph, then composes the skill execution graph from the provided "
                     "candidates or a default graph subgraph. If no suitable candidates or a missing "
                     "capability is reported, use search_skill to discover external skills; when "
@@ -487,7 +492,8 @@ class SymphonyToolkit:
                     "do not call individual skill tools just to manually recreate the plan. "
                     "If a result reports graph_build_timeout or manual_graph_build, do not "
                     "call this tool or symphony_refresh_graph again in this round. "
-                    "Skip only clearly ordinary tasks that do not benefit from skill capabilities."
+                    "Skip only when none of the three trigger conditions is true and "
+                    "skill_branch_explore was not called in the current round."
                 ),
                 {
                     "type": "object",
@@ -515,7 +521,7 @@ class SymphonyToolkit:
                                 "Optional identifiers or exact names of the installed Skills "
                                 "you consider most relevant to the user's task. When relevant "
                                 "Skills have already been identified, provide them here so "
-                                "Symphony uses them and their eligible neighbors as seeds."
+                                "the orchestration tool uses them and their eligible neighbors as seeds."
                             ),
                         },
                     },

@@ -171,7 +171,7 @@ def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy(
     assert "# JiuwenSwarm 内部数据" not in prompt
     assert "## 输出文件放置规范" not in prompt
     assert "## 文件发送" not in prompt
-    assert "## Symphony Orchestration" not in prompt
+    assert "## Skill Orchestration Contract" not in prompt
     assert "`symphony_compose_graph`" not in prompt
     assert "# 消息说明" not in prompt
 
@@ -238,9 +238,9 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
 
     enabled_prompt = enabled_builder.build()
     disabled_prompt = disabled_builder.build()
-    assert "## Symphony Orchestration" in enabled_prompt
+    assert "## Skill Orchestration Contract" in enabled_prompt
     assert "`symphony_compose_graph`" in enabled_prompt
-    assert "## Symphony Orchestration" not in disabled_prompt
+    assert "## Skill Orchestration Contract" not in disabled_prompt
     assert "`symphony_compose_graph`" not in disabled_prompt
 
 
@@ -268,11 +268,17 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "## Symphony Orchestration" in prompt
+    assert "## Skill Orchestration Contract" in prompt
     assert "`symphony_compose_graph`" in prompt
     assert "exact identifiers or names" in prompt
-    assert "Do not omit this field" in prompt
-    assert "skill_branch_explore" not in prompt
+    assert "when ANY of these conditions is true" in prompt
+    assert "two or more specialized capabilities" in prompt
+    assert "identified, inspected, selected, invoked, or recommended" in prompt
+    assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
+    assert "never pass every Skill returned by exploration" in prompt
+    assert "still call `symphony_compose_graph`" in prompt
+    assert "none of the three trigger conditions is true" in prompt
+    assert "Symphony" not in prompt
 
 
 @pytest.mark.asyncio
@@ -455,7 +461,7 @@ async def test_symphony_timeout_removes_graph_tools_and_orchestration_prompt():
     await rail.before_model_call(ctx)
 
     assert [rail._model_tool_name(tool) for tool in ctx.inputs.tools] == ["other_tool"]
-    assert "## Symphony Orchestration" not in builder.build()
+    assert "## Skill Orchestration Contract" not in builder.build()
 
     next_invoke_ctx = AgentCallbackContext(
         agent=agent,
@@ -474,7 +480,7 @@ async def test_symphony_timeout_removes_graph_tools_and_orchestration_prompt():
         "symphony_compose_graph",
         "symphony_refresh_graph",
     ]
-    assert "## Symphony Orchestration" in builder.build()
+    assert "## Skill Orchestration Contract" in builder.build()
 
 
 @pytest.mark.asyncio
@@ -651,7 +657,7 @@ async def test_symphony_orchestration_rail_clears_when_disabled(
     rail.init(agent)
     await rail.before_model_call(ctx)
 
-    assert "## Symphony Orchestration" not in builder.build()
+    assert "## Skill Orchestration Contract" not in builder.build()
 
 
 def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):

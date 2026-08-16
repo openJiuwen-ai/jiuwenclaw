@@ -384,6 +384,15 @@ def test_get_tools_exposes_only_graph_named_contracts():
     assert "language" not in properties
     assert "most relevant" in properties["candidate_skill_ids"]["description"]
     assert "fast is the default" in properties["mode"]["description"]
+    assert "any trigger condition" in compose_tool.card.description
+    assert "skill_branch_explore requires a follow-up call" in compose_tool.card.description
+    assert "never pass every explored Skill" in compose_tool.card.description
+    assert "none of the three trigger conditions is true" in compose_tool.card.description
+    assert all("Symphony" not in tool.card.description for tool in tools)
+    assert all(
+        "Symphony" not in property_schema.get("description", "")
+        for property_schema in properties.values()
+    )
     assert "graph_build_timeout" in compose_tool.card.description
     assert "manual_graph_build" in compose_tool.card.description
     assert "graph_build_timeout" in tools[1].card.description
