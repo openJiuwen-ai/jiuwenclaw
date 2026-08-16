@@ -5737,13 +5737,32 @@ export class AppScreen implements Component, Focusable {
     ];
   }
 
-  private swarmActionKeyLabel(action: "swarm:budget"): string {
+  private swarmActionKeyLabel(
+    action: "swarm:budget" | "swarm:pauseResume" | "swarm:stop",
+  ): string {
     const key = getContextBindings("SwarmWorkflows").find(
       (binding) => binding.action === action,
     )?.key;
-    if (!key) return "B";
-    if (key === "shift+b") return "B";
+    if (!key) {
+      return action === "swarm:budget" ? "B" : action === "swarm:pauseResume" ? "P" : "S";
+    }
+    // Shifted single letters display as uppercase (shift+b -> B, shift+p -> P, shift+s -> S).
+    if (key.startsWith("shift+")) {
+      const base = key.slice("shift+".length);
+      if (base.length === 1) return base.toUpperCase();
+    }
     return key;
+  }
+
+  private sendSwarmWorkflowControl(
+    workflowId: string,
+    action: "pause" | "resume" | "stop",
+  ): void {
+    const snapshot = this.state.getSnapshot();
+    this.state.sendEventOnly(`swarmflow.${action}`, {
+      session_id: snapshot.sessionId,
+      run_id: workflowId,
+    });
   }
 
   private workflowIdForBudgetView(): string | null {
@@ -6407,6 +6426,34 @@ export class AppScreen implements Component, Focusable {
     }
     if (state.phase === "workflow" && action === "swarm:logs") {
       this.openSwarmWorkflowLogs(state.workflowId);
+      return;
+    }
+    if (action === "swarm:pauseResume" || action === "swarm:stop") {
+      if (state.phase !== "workflow") return;
+      const workflow = this.state
+        .getSnapshot()
+        .workflowRuns.find((item) => item.id === state.workflowId);
+      if (!workflow) return;
+      if (action === "swarm:stop") {
+        if (workflow.status === "running" || workflow.status === "paused") {
+          this.sendSwarmWorkflowControl(state.workflowId, "stop");
+        } else {
+          this.showTransientNotice(
+            `This workflow is ${workflow.status} and cannot be stopped.`,
+          );
+        }
+        return;
+      }
+      // swarm:pauseResume toggles: running -> pause, paused -> resume.
+      if (workflow.status === "paused") {
+        this.sendSwarmWorkflowControl(state.workflowId, "resume");
+      } else if (workflow.status === "running") {
+        this.sendSwarmWorkflowControl(state.workflowId, "pause");
+      } else {
+        this.showTransientNotice(
+          `This workflow is ${workflow.status} and cannot be paused or resumed.`,
+        );
+      }
       return;
     }
     if (state.phase === "agent") {
@@ -7106,6 +7153,14 @@ export class AppScreen implements Component, Focusable {
         : "";
     const workflowSummary = workflow.summary.trim();
     const budgetKey = this.swarmActionKeyLabel("swarm:budget");
+    const pauseKey = this.swarmActionKeyLabel("swarm:pauseResume");
+    const stopKey = this.swarmActionKeyLabel("swarm:stop");
+    const controlHintParts: string[] = [];
+    if (workflow.status === "running") {
+      controlHintParts.push(`${pauseKey} pause · ${stopKey} stop`);
+    } else if (workflow.status === "paused") {
+      controlHintParts.push(`${pauseKey} resume`);
+    }
     const runTokens = formatTokenCount(workflow.token_count);
     const budgetDetail = formatWorkflowBudgetDetail(workflow.budget);
     const usageParts: string[] = [];
@@ -7195,7 +7250,12 @@ export class AppScreen implements Component, Focusable {
       lines.push(...state.agentList.render(width));
     }
     lines.push(
-      padToWidth(palette.text.secondary(`press l to see full logs · ${budgetKey} budget`), width),
+      padToWidth(
+        palette.text.secondary(
+          [`press l to see full logs`, `${budgetKey} budget`, ...controlHintParts].join(" · "),
+        ),
+        width,
+      ),
     );
     lines.push(
       padToWidth(
