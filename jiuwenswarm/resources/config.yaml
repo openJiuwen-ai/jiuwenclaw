@@ -1338,3 +1338,17 @@ modes:
         # 控制记忆内容如何注入到每个成员的 system prompt 中：
         #   "proactive" — 每轮对话开始时主动注入最新记忆摘要
         member_memory_prompt_mode: "proactive"
+
+
+# ============================================================
+# 沙箱配置（officeAce 通过 WS 控制：开关 / 启动方式；文件白黑名单 + 网络域名配置
+# 写进运行时 policy 副本，而不是 config.yaml）
+# enabled 默认 false: 不主动 install 沙箱用户 / 拉起 box-server, 仅在用户显式设
+# sandbox.enabled: true 时才 install + 创建沙箱进程 (opt-in, 避免开箱即拉起)。
+# ============================================================
+sandbox:
+  enabled: false
+  startup_mode: internal
+  url: http://127.0.0.1:8321
+  type: jiuwenbox
+  policy_file: windows-policy.yaml
