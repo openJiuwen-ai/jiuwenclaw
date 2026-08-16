@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.rails.builtin_elements import SKILL_USE as CORE_SKIL
 from openjiuwen.harness.schema import deep_agent_spec as das
 from openjiuwen.agent_teams.harness.manifest import get_catalog, resolve_factory
 from openjiuwen.agent_teams.schema.blueprint import LeaderSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     BuiltinToolSpec,
     DeepAgentSpec,
@@ -1065,6 +1066,47 @@ def test_enrich_skips_absent_roles_gracefully() -> None:
     assert "teammate" not in spec.agents
     leader_rail_names = {rail.type for rail in (spec.agents["leader"].rails or [])}
     assert registry.TEAM_SKILL_EVOLUTION in leader_rail_names
+
+
+def test_enrich_mounts_stream_events_only_on_named_llm_teammates() -> None:
+    """Named predefined LLM teammates emit canonical UI tool events."""
+    spec = TeamAgentSpec(
+        agents={
+            "leader": DeepAgentSpec(),
+            "analyst": DeepAgentSpec(),
+            "reviewer": DeepAgentSpec(rails=[RailSpec(type=registry.STREAM_EVENT)]),
+            "human": DeepAgentSpec(),
+        },
+        team_name="named_team",
+        leader=LeaderSpec(member_name="team_leader"),
+        predefined_members=[
+            TeamMemberSpec(
+                member_name="analyst",
+                display_name="Analyst",
+                role_type=TeamRole.TEAMMATE,
+            ),
+            TeamMemberSpec(
+                member_name="reviewer",
+                display_name="Reviewer",
+                role_type=TeamRole.TEAMMATE,
+            ),
+            TeamMemberSpec(
+                member_name="human",
+                display_name="Human",
+                role_type=TeamRole.HUMAN_AGENT,
+            ),
+        ],
+    )
+
+    enrich_team_spec_for_swarm(spec, session_id="s", mode="team", channel_id="web")
+
+    analyst_rails = [rail.type for rail in (spec.agents["analyst"].rails or [])]
+    reviewer_rails = [rail.type for rail in (spec.agents["reviewer"].rails or [])]
+    human_rails = [rail.type for rail in (spec.agents["human"].rails or [])]
+    assert analyst_rails == [registry.STREAM_EVENT]
+    assert reviewer_rails == [registry.STREAM_EVENT]
+    assert human_rails == []
+    assert not spec.agents["analyst"].tools
 
 
 def test_enriched_spec_serialization_round_trip() -> None:
