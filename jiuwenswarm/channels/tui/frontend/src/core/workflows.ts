@@ -5,6 +5,7 @@ export type WorkflowStatus =
   | "completed"
   | "failed"
   | "stopped"
+  | "paused"
   | "waiting_for_human";
 
 export interface WorkflowAgentActivity {
@@ -186,6 +187,8 @@ export function workflowStatusIcon(status: WorkflowStatus): string {
       return "○";
     case "stopped":
       return "■";
+    case "paused":
+      return "‖";
     case "waiting_for_human":
       return WAITING_FOR_HUMAN_ICON;
   }
