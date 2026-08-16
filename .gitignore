@@ -105,3 +105,10 @@ ai/trace*.txt
 ai/evolve.html
 evolve-draft.md
 traces.db
+
+# 本地工具检索测试脚本/报告（仅本地用，不进 PR）
+cn_recall_test.py
+dynamic_register_test.py
+scale_test.py
+v3_real_eval.py
+测试.md

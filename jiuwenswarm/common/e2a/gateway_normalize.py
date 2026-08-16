@@ -197,6 +197,7 @@ def e2a_from_agent_fields(
     is_stream: bool = False,
     timestamp: float = 0.0,
     metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> E2AEnvelope:
     """由与 AgentRequest 相同的字段构造 E2A（heartbeat / cron / app 管理请求等）。"""
     d: dict[str, Any] = {
@@ -214,6 +215,8 @@ def e2a_from_agent_fields(
             d["method"] = str(req_method)
     if metadata:
         d["metadata"] = dict(metadata)
+    if user_id:
+        d["user_id"] = user_id
     return E2AEnvelope.from_dict(d)
 
 

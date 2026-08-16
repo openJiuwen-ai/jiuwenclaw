@@ -495,6 +495,10 @@ react:
   enable_task_loop: true
   # 单轮任务循环等待上限（秒）；null 表示不限时，避免长任务被静默截断
   completion_timeout: null
+  progressive_tool_enabled: true       # 按需检索开关（默认 true = 默认开启）：true=启用（search 返回完整工具定义到 message，LLM 按名直调，不注入 tools[]，prefill 恒定利于 cache）；false=关闭，回到全量工具列表
+  tool_retrieval:
+    desc_cap: 256                     # 工具描述喂给 BM25 语料的截断长度
+    top_k_max: 3                     # search_tools 返回的最大工具数
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all

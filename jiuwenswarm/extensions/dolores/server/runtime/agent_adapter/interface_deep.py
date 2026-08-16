@@ -220,6 +220,7 @@ from jiuwenswarm.extensions.dolores.common.mcp_config import (
     preflight_mcp_server_reachable,
 )
 from jiuwenswarm.extensions.dolores.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.common.mcp_param_coerce_patch import apply_mcp_param_coerce_patch
 from jiuwenswarm.extensions.dolores.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.extensions.dolores.server.runtime.agent_adapter.sysop_builder import (
     build_filesystem_policy,
@@ -563,6 +564,10 @@ class JiuWenSwarmDeepAdapter:
         # killed remote MCP server fails fast instead of hanging on the MCP
         # SDK's 300s SSE read timeout. Idempotent (module-level _PATCHED guard).
         apply_mcp_call_timeout_patch()
+        # Coerce LLM-stringified array/object params back to list/dict before
+        # MCP schema validation (mirrors the main-line patch). See
+        # jiuwenswarm.common.mcp_param_coerce_patch for rationale.
+        apply_mcp_param_coerce_patch()
         self._instance: DeepAgent | None = None
         self._root_instance_lock: asyncio.Lock | None = None
         self._root_instance_requested: bool = False
@@ -3434,6 +3439,55 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] PrewarmRail create failed: %s", exc)
             return None
 
+    def _build_progressive_tool_rail(self) -> "JiuWenProgressiveToolRail | None":
+        """Build JiuWenProgressiveToolRail（v3 按需检索，照搬主线 interface_deep.py:4641-4689）.
+
+        search_tools 返回完整工具定义（含 JSON Schema）在结果 message 里。
+        LLM 按名直调匹配到的工具——ability_manager 按名解析，不依赖 request
+        tools[] 列表，所以 inputs.tools（prefill）恒定，利于 prompt-cache。
+
+        v3 rail 已解耦（extends DeepAgentRail，零主线耦合），Dolores 的
+        AgentLoop / DeepAgent 都有 rail 用到的 card/ability_manager/
+        system_prompt_builder，可直接 init。
+        """
+        try:
+            from types import SimpleNamespace
+
+            react_cfg = (get_config().get("react", {}) or {})
+            tr_cfg = react_cfg.get("tool_retrieval", {}) or {}
+
+            config = SimpleNamespace(
+                progressive_tool_enabled=True,
+                progressive_tool_always_visible_tools=[
+                    "bash", "read_file", "write_file", "edit_file",
+                    "glob", "grep", "fetch_webpage",
+                ],
+                progressive_tool_default_visible_tools=[],
+                language="cn",
+                # 按需检索算法旋钮（react.tool_retrieval.*）—— v3 仅 BM25+CJK，
+                # dense/embedding 已移除（fastembed/bge 太大无法部署）。
+                tool_retrieval_desc_cap=int(tr_cfg.get("desc_cap", 256)),
+                tool_retrieval_top_k_max=int(tr_cfg.get("top_k_max", 3)),
+            )
+
+            # ── JiuWen ProgressiveToolRail（共享命名空间，Dolores 可 import）──
+            from jiuwenswarm.agents.harness.common.rails.search_tool_rail import (
+                JiuWenProgressiveToolRail,
+            )
+
+            rail = JiuWenProgressiveToolRail(config)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail created | "
+                "always_visible=%d",
+                len(config.progressive_tool_always_visible_tools),
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ProgressiveToolRail create failed: %s", exc
+            )
+            return None
+
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
 
@@ -3518,6 +3572,17 @@ class JiuWenSwarmDeepAdapter:
             ),
             _RailBuildInfo("_prewarm_rail", self._build_prewarm_rail),
         ]
+
+        # ── ProgressiveToolRail（v3 按需检索，照搬主线 interface_deep.py:4969-4972）──
+        # 由 config 的 progressive_tool_enabled 控制（默认 true = opt-out）。关闭时不注册，
+        # 工具全量注入（回退 show-all）。v3 rail = BM25+CJK + name-boost + MCP 归类，
+        # 已解耦（extends DeepAgentRail，零主线耦合），Dolores 直接 import 用。
+        if config.get("progressive_tool_enabled", True):
+            rail_infos.append(
+                _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail),
+            )
+        else:
+            self._progressive_tool_rail = None
 
         # MemoryRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
