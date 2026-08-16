@@ -700,12 +700,13 @@ async def test_feedback_interrupt_injects_accumulated_questions():
 
 
 @pytest.mark.asyncio
-async def test_outline_interrupt_auto_resumes_once_and_completes(tmp_path: Path):
+async def test_outline_interrupt_returns_interrupted_without_auto_resume(tmp_path: Path):
+    """outline_interaction interrupt now surfaces to caller instead of auto-resuming with accepted feedback."""
     outline = json.dumps(
         {"title": "AI Agent", "sections": [{"id": "1", "title": "架构"}]},
         ensure_ascii=False,
     )
-    start_proc = _Proc(
+    proc = _Proc(
         [
             json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
             json.dumps({"agent": "outline", "content": outline}, ensure_ascii=False),
@@ -720,28 +721,6 @@ async def test_outline_interrupt_auto_resumes_once_and_completes(tmp_path: Path)
             ),
         ]
     )
-    resume_proc = _Proc(
-        [
-            json.dumps({"__deepsearch_status__": "resuming", "conversation_id": "C1"}),
-            json.dumps(
-                {
-                    "agent": "sub_reporter",
-                    "section_idx": "1",
-                    "section_total": 1,
-                    "event": "done",
-                }
-            ),
-            json.dumps(
-                {
-                    "__deepsearch_status__": "completed",
-                    "conversation_id": "C1",
-                    "final_result": {"response_content": "done"},
-                }
-            ),
-        ]
-    )
-    spawn = AsyncMock(side_effect=[start_proc, resume_proc])
-    push = AsyncMock()
     route = {
         "request_id": "R1",
         "channel_id": "CH1",
@@ -749,27 +728,196 @@ async def test_outline_interrupt_auto_resumes_once_and_completes(tmp_path: Path)
         "service_id": "default",
         "agent_id": "default",
     }
-    report_path = tmp_path / "report.md"
-    with patch.object(dt, "resolve_python_executable", return_value=Path("/runtime/bin/python")), patch.object(
-        dt, "_resolve_run_script", return_value="/runner"
-    ), patch.object(dt, "_build_deepresearch_request_config", return_value=_valid_config()), patch.object(
-        dt, "_build_deepresearch_child_env", return_value={"PATH": "/runtime/bin"}
-    ), patch.object(dt, "_get_route", return_value=route), patch.object(
-        dt, "WebSocketGatewayPushTransport", return_value=push
-    ), patch.object(
-        dt,
-        "_write_report_artifacts_stream",
-        new=AsyncMock(return_value={"md": str(report_path)}),
-    ), patch("asyncio.create_subprocess_exec", new=spawn):
+    artifact = dt._ProgressArtifact(Path("/private/progress"), (1, 2), (3, 4))
+    remove = Mock()
+    manager = Mock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock()))
+        stack.enter_context(patch.object(dt, "get_deepresearch_manager", return_value=manager))
+        stack.enter_context(patch.object(dt, "_create_progress_artifact", return_value=artifact))
+        stack.enter_context(patch.object(dt, "_remove_progress_artifact", remove))
         outcome = json.loads(
             await dt.deepresearch_stream._func(action="start", query="q", file_name="report")
         )
 
-    assert outcome["status"] == "completed"
-    assert spawn.await_count == 2
-    resume_args = spawn.await_args_list[1].args
-    assert resume_args[2] == "resume"
-    assert '{"interrupt_feedback":"accepted","feedback":""}' in resume_args
+    assert outcome["status"] == "interrupted"
+    assert outcome["node_id"] == "outline_interaction"
+    assert "interaction_policy" not in outcome
+
+
+@pytest.mark.asyncio
+async def test_outline_interrupt_marker_uses_card_markdown_and_caches_json(tmp_path: Path):
+    """When interrupted marker lacks outline, card markdown is built from state.outline_parts and full JSON is cached."""
+    outline_json = {
+        "title": "AI Agent 架构",
+        "thought": "从框架到部署",
+        "sections": [
+            {"id": "1", "title": "架构设计", "is_core_section": True, "description": "核心架构"},
+            {"id": "2", "title": "部署方案", "format_requirements": "markdown"},
+        ],
+    }
+    outline_str = json.dumps(outline_json, ensure_ascii=False)
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps({"agent": "outline", "content": outline_str}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "interrupted",
+                    "agent": "outline_interaction",
+                    "conversation_id": "C1",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    artifact = dt._ProgressArtifact(Path("/private/progress"), (1, 2), (3, 4))
+    remove = Mock()
+    manager = Mock()
+    patches = _stream_patches(proc, route=route)
+    try:
+        with ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            stack.enter_context(patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock()))
+            stack.enter_context(patch.object(dt, "get_deepresearch_manager", return_value=manager))
+            stack.enter_context(patch.object(dt, "_create_progress_artifact", return_value=artifact))
+            stack.enter_context(patch.object(dt, "_remove_progress_artifact", remove))
+            outcome = json.loads(
+                await dt.deepresearch_stream._func(action="start", query="q", file_name="report")
+            )
+
+        assert outcome["status"] == "interrupted"
+        assert outcome["node_id"] == "outline_interaction"
+        assert "interaction_policy" not in outcome
+        marker = outcome["marker"]
+        assert "## 页面规划" in marker["outline"]
+        assert "### P1: 架构设计（重点）" in marker["outline"]
+        assert "### P2: 部署方案" in marker["outline"]
+        assert marker["preview"]["text"] == marker["outline"]
+        cached = dt._get_cached_outline_json(route, "C1")
+        assert cached["title"] == "AI Agent 架构"
+        assert len(cached["sections"]) == 2
+        assert cached["sections"][0]["is_core_section"] is True
+        assert cached["sections"][0]["description"] == "核心架构"
+        assert cached["sections"][1]["format_requirements"] == "markdown"
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+@pytest.mark.asyncio
+async def test_outline_interrupt_handles_unparseable_outline_parts(tmp_path: Path):
+    """Unparseable state.outline_parts produces empty marker.outline and empty preview, still interrupted."""
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps({"agent": "outline", "content": "not valid json"}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "interrupted",
+                    "agent": "outline_interaction",
+                    "conversation_id": "C1",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    artifact = dt._ProgressArtifact(Path("/private/progress"), (1, 2), (3, 4))
+    remove = Mock()
+    manager = Mock()
+    patches = _stream_patches(proc, route=route)
+    try:
+        with ExitStack() as stack:
+            for item in patches:
+                stack.enter_context(item)
+            stack.enter_context(patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock()))
+            stack.enter_context(patch.object(dt, "get_deepresearch_manager", return_value=manager))
+            stack.enter_context(patch.object(dt, "_create_progress_artifact", return_value=artifact))
+            stack.enter_context(patch.object(dt, "_remove_progress_artifact", remove))
+            outcome = json.loads(
+                await dt.deepresearch_stream._func(action="start", query="q", file_name="report")
+            )
+
+        assert outcome["status"] == "interrupted"
+        assert outcome["node_id"] == "outline_interaction"
+        assert "interaction_policy" not in outcome
+        marker = outcome["marker"]
+        assert marker["outline"] == ""
+        assert marker["preview"] == {"text": ""}
+        cached = dt._get_cached_outline_json(route, "C1")
+        assert cached == {}
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+@pytest.mark.asyncio
+async def test_feedback_handler_interrupt_behavior_unchanged(tmp_path: Path):
+    """feedback_handler interrupt still returns interrupted outcome with questions in marker — regression check."""
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "interrupted",
+                    "agent": "feedback_handler",
+                    "conversation_id": "C1",
+                    "questions": [{"id": "q1", "question": "什么?"}],
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    artifact = dt._ProgressArtifact(Path("/private/progress"), (1, 2), (3, 4))
+    remove = Mock()
+    manager = Mock()
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock()))
+        stack.enter_context(patch.object(dt, "get_deepresearch_manager", return_value=manager))
+        stack.enter_context(patch.object(dt, "_create_progress_artifact", return_value=artifact))
+        stack.enter_context(patch.object(dt, "_remove_progress_artifact", remove))
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q", file_name="report")
+        )
+
+    assert outcome["status"] == "interrupted"
+    assert outcome["node_id"] == "feedback_handler"
+    assert "interaction_policy" not in outcome
+    marker = outcome["marker"]
+    assert marker["questions"] == [{"id": "q1", "question": "什么?"}]
+    assert "preview" not in marker
 
 
 @pytest.mark.asyncio
@@ -786,13 +934,26 @@ async def test_repeated_outline_interrupt_returns_loop_error():
             ),
         ]
     )
+    artifact = dt._ProgressArtifact(Path("/private/progress"), (1, 2), (3, 4))
+    remove = Mock()
+    manager = Mock()
     patches = _stream_patches(proc)
     with ExitStack() as stack:
         for item in patches:
             stack.enter_context(item)
+        stack.enter_context(patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock()))
+        stack.enter_context(patch.object(dt, "get_deepresearch_manager", return_value=manager))
+        stack.enter_context(patch.object(dt, "_create_progress_artifact", return_value=artifact))
+        stack.enter_context(patch.object(dt, "_remove_progress_artifact", remove))
         outcome = json.loads(
             await dt.deepresearch_stream._func(
-                action="resume", conversation_id="C1", node="outline_interaction"
+                action="resume",
+                conversation_id="C1",
+                node="outline_interaction",
+                interaction_result=(
+                    '{"status":"answered","answers":[{"question":"q",'
+                    '"selected_options":["outline_confirm"],"custom_input":null}]}'
+                ),
             )
         )
 
@@ -2873,3 +3034,270 @@ def test_posix_zip_extraction_stays_on_held_destination_when_name_is_swapped(
     assert list(outside.iterdir()) == []
     assert moved_owned.is_dir()
     assert list(moved_owned.iterdir()) == []
+
+# --- Todo 3: outline_interaction resume resolver tests ---
+
+def _outline_route() -> dict[str, str]:
+    return {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+
+
+def _three_section_outline() -> dict[str, Any]:
+    return {
+        "title": "AI Agent 架构",
+        "thought": "从框架到部署",
+        "sections": [
+            {"id": "1", "title": "架构设计", "is_core_section": True, "description": "核心架构"},
+            {"id": "2", "title": "部署方案", "format_requirements": "markdown"},
+            {"id": "3", "title": "性能评估", "is_core_section": False, "description": "基准测试"},
+        ],
+    }
+
+
+def _outline_interaction_result(selected: str, custom_input: str | None = None) -> str:
+    payload: dict[str, Any] = {
+        "request_id": "R1",
+        "source": "deepresearch_stream",
+        "answers": [
+            {
+                "question": "请审阅研究报告大纲",
+                "selected_options": [selected],
+                "custom_input": custom_input,
+            }
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def test_resolve_outline_confirm_branch_returns_accepted_feedback() -> None:
+    """outline_confirm -> interrupt_feedback=accepted, empty feedback string."""
+    feedback = dt._resolve_outline_interaction_feedback(
+        _outline_interaction_result("outline_confirm"),
+        conversation_id="C1",
+        route=_outline_route(),
+    )
+    parsed = json.loads(feedback)
+    assert parsed["interrupt_feedback"] == "accepted"
+    assert parsed["feedback"] == ""
+
+
+def test_resolve_outline_use_edited_updates_all_titles_and_preserves_other_fields() -> None:
+    """outline_use_edited with matching page count -> revise_outline, all titles updated, other fields unchanged."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", _three_section_outline())
+    try:
+        edited_md = "### P1: NewA\n### P2: NewB\n### P3: NewC"
+        feedback = dt._resolve_outline_interaction_feedback(
+            _outline_interaction_result("outline_use_edited", custom_input=edited_md),
+            conversation_id="C1",
+            route=route,
+        )
+        parsed = json.loads(feedback)
+        assert parsed["interrupt_feedback"] == "revise_outline"
+        inner = json.loads(parsed["feedback"])
+        assert inner["title"] == "AI Agent 架构"
+        assert inner["sections"][0]["title"] == "NewA"
+        assert inner["sections"][1]["title"] == "NewB"
+        assert inner["sections"][2]["title"] == "NewC"
+        # Other fields preserved
+        assert inner["sections"][0]["is_core_section"] is True
+        assert inner["sections"][0]["description"] == "核心架构"
+        assert inner["sections"][1]["format_requirements"] == "markdown"
+        assert inner["sections"][2]["is_core_section"] is False
+        # Cache not mutated (shallow copy returned by getter is the working surface)
+        cached = dt._get_cached_outline_json(route, "C1")
+        assert cached["sections"][0]["title"] == "架构设计"
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_use_edited_strips_core_section_suffix() -> None:
+    """（重点） suffix in edited title is stripped before mapping to Section.title."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", _three_section_outline())
+    try:
+        edited_md = "### P1: 全新架构（重点）\n### P2: 部署方案"
+        feedback = dt._resolve_outline_interaction_feedback(
+            _outline_interaction_result("outline_use_edited", custom_input=edited_md),
+            conversation_id="C1",
+            route=route,
+        )
+        parsed = json.loads(feedback)
+        inner = json.loads(parsed["feedback"])
+        assert inner["sections"][0]["title"] == "全新架构"
+        assert inner["sections"][1]["title"] == "部署方案"
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_use_edited_cache_miss_raises_value_error() -> None:
+    """No cached Outline JSON -> ValueError (fail closed)."""
+    route = _outline_route()
+    try:
+        with pytest.raises(ValueError, match="cached"):
+            dt._resolve_outline_interaction_feedback(
+                _outline_interaction_result("outline_use_edited", custom_input="### P1: NewA"),
+                conversation_id="C1",
+                route=route,
+            )
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_use_edited_empty_cache_raises_value_error() -> None:
+    """Empty dict cached (Todo 2 parse-failure path) -> ValueError (treat as cache miss)."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", {})
+    try:
+        with pytest.raises(ValueError, match="cached"):
+            dt._resolve_outline_interaction_feedback(
+                _outline_interaction_result("outline_use_edited", custom_input="### P1: NewA"),
+                conversation_id="C1",
+                route=route,
+            )
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_page_count_mismatch_updates_only_matching_indices() -> None:
+    """Edited has fewer pages than cached -> only matching indices updated, unmatched sections untouched."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", _three_section_outline())
+    try:
+        edited_md = "### P1: NewA\n### P2: NewB"
+        feedback = dt._resolve_outline_interaction_feedback(
+            _outline_interaction_result("outline_use_edited", custom_input=edited_md),
+            conversation_id="C1",
+            route=route,
+        )
+        parsed = json.loads(feedback)
+        inner = json.loads(parsed["feedback"])
+        assert inner["sections"][0]["title"] == "NewA"
+        assert inner["sections"][1]["title"] == "NewB"
+        # Third section keeps original title (no add/remove)
+        assert inner["sections"][2]["title"] == "性能评估"
+        assert len(inner["sections"]) == 3
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_page_count_more_than_cached_skips_out_of_range() -> None:
+    """Edited has more pages than cached -> out-of-range pages skipped, no new sections added."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", _three_section_outline())
+    try:
+        edited_md = "### P1: NewA\n### P2: NewB\n### P3: NewC\n### P4: ShouldBeSkipped"
+        feedback = dt._resolve_outline_interaction_feedback(
+            _outline_interaction_result("outline_use_edited", custom_input=edited_md),
+            conversation_id="C1",
+            route=route,
+        )
+        parsed = json.loads(feedback)
+        inner = json.loads(parsed["feedback"])
+        assert len(inner["sections"]) == 3
+        assert inner["sections"][0]["title"] == "NewA"
+        assert inner["sections"][1]["title"] == "NewB"
+        assert inner["sections"][2]["title"] == "NewC"
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+@pytest.mark.parametrize(
+    "interaction_result",
+    [
+        "",
+        "not-json",
+        "[]",
+        json.dumps({"status": "answered"}),  # missing answers
+        json.dumps({"status": "answered", "answers": "not-a-list"}),
+        json.dumps({"status": "answered", "answers": []}),
+        json.dumps({"status": "answered", "answers": [{"selected_options": "not-a-list"}]}),
+        json.dumps({"status": "answered", "answers": [{"selected_options": []}]}),
+        json.dumps({"status": "answered", "answers": [{"selected_options": ["unknown_choice"]}]}),
+        json.dumps({"status": "answered", "answers": [{"selected_options": ["outline_use_edited"], "custom_input": "no heading lines here"}]}),
+    ],
+)
+def test_resolve_outline_malformed_result_raises_value_error(interaction_result: str) -> None:
+    """All malformed interaction_result variants -> ValueError (fail closed, no auto-accept)."""
+    route = _outline_route()
+    dt._cache_outline_json(route, "C1", _three_section_outline())
+    try:
+        with pytest.raises(ValueError):
+            dt._resolve_outline_interaction_feedback(
+                interaction_result,
+                conversation_id="C1",
+                route=route,
+            )
+    finally:
+        with dt._OUTLINE_JSON_CACHES_GUARD:
+            dt._OUTLINE_JSON_CACHES.clear()
+        with dt._OUTLINE_TITLE_CACHES_GUARD:
+            dt._OUTLINE_TITLE_CACHES.clear()
+
+
+def test_resolve_outline_cancel_status_returns_cancel_feedback() -> None:
+    """AskUserQuestion status=cancelled -> interrupt_feedback=cancel, empty feedback."""
+    feedback = dt._resolve_outline_interaction_feedback(
+        json.dumps({"status": "cancelled", "answers": []}, ensure_ascii=False),
+        conversation_id="C1",
+        route=_outline_route(),
+    )
+    parsed = json.loads(feedback)
+    assert parsed["interrupt_feedback"] == "cancel"
+    assert parsed["feedback"] == ""
+
+
+def test_resolve_outline_error_status_returns_cancel_feedback() -> None:
+    """AskUserQuestion status=error -> interrupt_feedback=cancel (treat errors as user-initiated cancellation)."""
+    feedback = dt._resolve_outline_interaction_feedback(
+        json.dumps({"status": "error", "error": "ask_user_question timeout"}, ensure_ascii=False),
+        conversation_id="C1",
+        route=_outline_route(),
+    )
+    parsed = json.loads(feedback)
+    assert parsed["interrupt_feedback"] == "cancel"
+    assert parsed["feedback"] == ""
+
+
+@pytest.mark.asyncio
+async def test_outline_interaction_resume_invalid_result_does_not_spawn():
+    """outline_interaction resume with malformed interaction_result returns outline_interaction_invalid_result and never spawns the subprocess."""
+    spawn = AsyncMock()
+    with patch.object(dt, "resolve_python_executable", return_value=Path("/runtime/bin/python")), patch.object(
+        dt, "_resolve_run_script", return_value="/runner"
+    ), patch("asyncio.create_subprocess_exec", new=spawn):
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(
+                action="resume",
+                conversation_id="C1",
+                node="outline_interaction",
+                interaction_result="not-json",
+            )
+        )
+
+    assert outcome["error_code"] == "outline_interaction_invalid_result"
+    assert outcome["status"] == "error"
+    spawn.assert_not_awaited()
