@@ -101,3 +101,4 @@ reasonix.toml
 
 # Build-time Node runtime cache used by packaging scripts.
 vendor/node/
+token-optimizer
