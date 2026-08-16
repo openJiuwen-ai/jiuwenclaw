@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -81,7 +80,6 @@ def _candidate_binaries() -> list[str]:
         candidates = list(_CHROMIUM_CANDIDATES_MAC)
     else:
         candidates = list(_CHROMIUM_CANDIDATES_LINUX)
-    # which 兜底
     for name in ("msedge", "google-chrome", "chrome", "chromium"):
         resolved = shutil.which(name)
         if resolved and resolved not in candidates:
@@ -106,7 +104,6 @@ def _kill_browser_by_user_data_dir(user_data_dir: str) -> int:
     normalized = str(Path(user_data_dir).expanduser().resolve()).lower().replace("\\", "/")
     killed = 0
     if os.name == "nt":
-        # 同时尝试 chrome.exe 和 msedge.exe
         for proc_name in ("chrome.exe", "msedge.exe"):
             ps_script = (
                 f"Get-WmiObject Win32_Process -Filter \"name='{proc_name}'\" "
@@ -163,40 +160,30 @@ def _cleanup_browser_singleton_files(user_data_dir: str) -> None:
             pass
 
 
-def _get_screen_resolution() -> tuple[int, int]:
-    """获取主屏幕分辨率 (width, height)，用于计算浏览器窗口位置。"""
-    if os.name == "nt":
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            user32.SetProcessDPIAware()
-            return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-        except Exception:
-            pass
-    # macOS / Linux 兜底
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["xdpyinfo" if sys.platform != "darwin" else "system_profiler", "SPDisplaysDataType"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except Exception:
-        pass
-    return 1920, 1080
+def _dedicated_user_data_dir() -> str:
+    """返回 jiuwenswarm 专用浏览器 user-data-dir（与用户日常浏览器隔离）。"""
+    return str(Path.home() / ".jiuwenswarm" / ".browser" / "user-data")
 
 
-def _resolve_start_args(profile: dict[str, Any]) -> Optional[tuple[str, list[str]]]:
+def _resolve_start_args(
+    profile: dict[str, Any],
+) -> Optional[tuple[str, list[str], str, str]]:
     """根据 profile 决定启动哪个浏览器及参数。
 
     优先级：profile.browser_binary 显式配置 > 自动检测。
-    返回 (binary_path, args) 或 None（无法启动）。
-    浏览器窗口占屏幕右下 1/4，避免遮挡 jiuwenswarm 界面。
+    user-data-dir 优先级：profile.user_data_dir > jiuwenswarm 专用目录。
+
+    使用专用 user-data-dir 而非浏览器默认目录，确保：
+    - 浏览器以独立窗口启动（而非在已有实例中新增标签页）
+    - CDP 远程调试端口能正常绑定
+    - 不影响用户日常浏览器会话
+
+    返回 (binary_path, args, user_data_dir, family) 或 None（无法启动）。
     """
     binary = (profile.get("browser_binary") or "").strip()
     if binary and Path(binary).exists():
         family = _detect_browser_family(binary)
     else:
-        # 自动检测
         for cand in _candidate_binaries():
             if Path(cand).exists():
                 binary = cand
@@ -205,29 +192,17 @@ def _resolve_start_args(profile: dict[str, Any]) -> Optional[tuple[str, list[str
         else:
             return None
 
+    # 优先使用 profile 中配置的 user_data_dir；未配置时使用专用目录，
+    # 避免与用户日常浏览器共享 user-data-dir 导致浏览器合并实例（开标签页而非新窗口）
     user_data_dir = (profile.get("user_data_dir") or "").strip()
     if not user_data_dir:
-        # 用默认 user data dir
-        local = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        if family == "edge":
-            user_data_dir = str(Path(local) / "Microsoft" / "Edge" / "User Data")
-        elif family == "chromium":
-            user_data_dir = str(Path(local) / "Chromium" / "User Data")
-        else:
-            user_data_dir = str(Path(local) / "Google" / "Chrome" / "User Data")
+        user_data_dir = _dedicated_user_data_dir()
     Path(user_data_dir).mkdir(parents=True, exist_ok=True)
 
     host = (profile.get("host") or "127.0.0.1").strip() or "127.0.0.1"
     port = int(profile.get("debug_port") or 9333)
     if port <= 0:
         port = 9333
-
-    # 计算右下 1/4 窗口位置和大小
-    screen_w, screen_h = _get_screen_resolution()
-    win_w = screen_w // 2
-    win_h = screen_h // 2
-    win_x = screen_w // 2
-    win_y = screen_h // 2
 
     args = [
         binary,
@@ -236,15 +211,14 @@ def _resolve_start_args(profile: dict[str, Any]) -> Optional[tuple[str, list[str
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        f"--window-position={win_x},{win_y}",
-        f"--window-size={win_w},{win_h}",
+        "--new-window",
         "about:blank",
     ]
     extra = profile.get("extra_args") or []
     if isinstance(extra, list):
         args.extend(str(x) for x in extra if str(x).strip())
 
-    return binary, args
+    return binary, args, user_data_dir, family
 
 
 def _spawn_browser(args: list[str]) -> subprocess.Popen:
@@ -260,21 +234,24 @@ def _spawn_browser(args: list[str]) -> subprocess.Popen:
 
 def ensure_browser(timeout_s: float = 20.0) -> dict[str, Any]:
     """确保浏览器已启动并暴露 CDP endpoint。返回结果 dict。"""
-    emit_progress(0, 5, "正在解析浏览器配置...")
+    emit_progress(0, 4, "正在解析浏览器配置...")
     profile = load_browser_profile()
     cdp_url = resolve_cdp_url()
 
-    emit_progress(1, 5, f"检查 CDP 端点 {cdp_url} ...")
+    emit_progress(1, 4, f"检查 CDP 端点 {cdp_url} ...")
     if is_cdp_ready(cdp_url, timeout_s=1.5):
-        emit_progress(2, 5, "CDP 已就绪，无需启动")
+        emit_progress(2, 4, "CDP 已就绪，无需启动")
         return make_success(
             "browser_ready",
             cdp_url=cdp_url,
-            browser_family=_detect_browser_family(profile.get("browser_binary", "")) if profile else "unknown",
+            browser_family=(
+                _detect_browser_family(profile.get("browser_binary", ""))
+                if profile else "unknown"
+            ),
             started_now=False,
         )
 
-    emit_progress(2, 5, "CDP 未就绪，尝试启动浏览器...")
+    emit_progress(2, 4, "CDP 未就绪，尝试启动浏览器...")
     resolved = _resolve_start_args(profile)
     if resolved is None:
         return make_failure(
@@ -282,17 +259,16 @@ def ensure_browser(timeout_s: float = 20.0) -> dict[str, Any]:
             "未找到可用的浏览器二进制。请安装 Edge/Chrome/Chromium 后重试。",
             cdp_url=cdp_url,
         )
-    binary, args = resolved
-    family = _detect_browser_family(binary)
 
-    # kill existing（同 user_data_dir 残留进程）
-    user_data_dir = (profile.get("user_data_dir") or "").strip()
+    binary, args, user_data_dir, family = resolved
+
+    # kill 占用同 user_data_dir 的残留进程（使用 _resolve_start_args 解析出的实际路径）
     if user_data_dir:
         _kill_browser_by_user_data_dir(user_data_dir)
         time.sleep(1.0)
         _cleanup_browser_singleton_files(user_data_dir)
 
-    emit_progress(3, 5, f"启动 {family}: {Path(binary).name}")
+    emit_progress(3, 4, f"启动 {family}: {Path(binary).name}")
     try:
         proc = _spawn_browser(args)
     except Exception as exc:
@@ -303,9 +279,8 @@ def ensure_browser(timeout_s: float = 20.0) -> dict[str, Any]:
             browser_family=family,
         )
 
-    emit_progress(4, 5, "等待 CDP 端口就绪...")
+    emit_progress(4, 4, "等待 CDP 端口就绪...")
     if wait_for_cdp(cdp_url, timeout_s=timeout_s, poll_s=0.5):
-        emit_progress(5, 5, f"浏览器已就绪 ({family})")
         return make_success(
             "browser_started",
             cdp_url=cdp_url,
@@ -314,7 +289,6 @@ def ensure_browser(timeout_s: float = 20.0) -> dict[str, Any]:
             pid=proc.pid,
         )
 
-    # 超时清理
     try:
         proc.terminate()
     except Exception:

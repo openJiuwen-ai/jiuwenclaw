@@ -2,25 +2,19 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """CDP 连接与浏览器状态工具。
 
-封装 connect_over_cdp、CDP 端口可达性探测、登录态判定等通用逻辑。
+封装 connect_over_cdp、CDP 端口可达性探测、浏览器 profile 解析等通用逻辑。
 所有脚本通过 ``from lib.cdp_client import ...`` 复用。
 """
 from __future__ import annotations
 
 import json
 import os
-import re
-import socket
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.error import URLError
 from urllib.request import urlopen
-
-
-# 登录页 URL 特征（华为云统一身份认证、SSO、IAM）
-_LOGIN_URL_RE = re.compile(r"/(login|iam|sso|auth\.huaweicloud)", re.IGNORECASE)
 
 
 def emit(step: str, message: str) -> None:
@@ -161,54 +155,6 @@ def wait_for_cdp(cdp_url: str, timeout_s: float = 15.0, poll_s: float = 0.5) -> 
     return False
 
 
-def is_port_open(host: str, port: int, timeout_s: float = 0.5) -> bool:
-    """快速判断 TCP 端口是否开放。"""
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True
-    except (OSError, socket.timeout):
-        return False
-
-
-# ---------------------------------------------------------------------------
-# 登录态判定
-# ---------------------------------------------------------------------------
-
-
-def is_login_url(url: str) -> bool:
-    """判断 URL 是否为登录页。"""
-    return bool(_LOGIN_URL_RE.search(url or ""))
-
-
-def page_shows_logged_in(page) -> bool:
-    """通过页面 DOM 元素判定是否已登录。
-
-    判定条件：URL 不含 login/iam/sso，且页面存在用户头像或账号信息元素。
-    任一条件成立即视为已登录。
-    """
-    url = (page.url or "").strip()
-    if is_login_url(url):
-        return False
-    # 探测常见用户头像/账号信息元素
-    selectors = [
-        ".username",
-        ".user-name",
-        "[class*='userName']",
-        "[class*='account']",
-        "[class*='avatar']",
-        "header [class*='user']",
-    ]
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=500):
-                return True
-        except Exception:
-            continue
-    # 兜底：通过 URL hash 判定（控制台页面通常带 #/model-studio/...）
-    return "#/model-studio/" in url
-
-
 # ---------------------------------------------------------------------------
 # Playwright 连接
 # ---------------------------------------------------------------------------
@@ -227,10 +173,12 @@ def import_playwright():
         ) from exc
 
 
-def connect_page(cdp_url: str, timeout_ms: int = 15_000):
+def connect_page(cdp_url: str, timeout_ms: int = 15_000, new_page: bool = False):
     """通过 CDP 连接已有浏览器并返回 (pw, browser, page)。
 
     不创建新 context，使用浏览器默认的 context（保留登录态）。
+    - ``new_page=False``（默认）：复用已有 page（适合后续自动化脚本）
+    - ``new_page=True``：创建新 page（适合 navigate.py，每次跳转在新标签页打开）
     """
     sync_playwright = import_playwright()
     pw = sync_playwright().start()
@@ -238,7 +186,9 @@ def connect_page(cdp_url: str, timeout_ms: int = 15_000):
     if not browser.contexts:
         raise RuntimeError(f"CDP 连接成功但未发现浏览器 context：{cdp_url}")
     context = browser.contexts[0]
-    if context.pages:
+    if new_page:
+        page = context.new_page()
+    elif context.pages:
         page = context.pages[0]
     else:
         page = context.new_page()

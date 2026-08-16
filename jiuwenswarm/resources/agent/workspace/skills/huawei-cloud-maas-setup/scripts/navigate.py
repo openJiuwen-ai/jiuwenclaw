@@ -5,7 +5,7 @@
 只做一件事：通过 CDP 连接已有浏览器，跳转到指定 URL，立即返回。
 不做任何 DOM 操作、不做登录检测、不做任何自动化。
 
-由 Skill 编排层在每个关键步骤调用，跳转后立即用 ``ask_user_question``
+由 Skill 编排层在每个关键步骤调用，跳转后立即用 ``ask_user``
 提醒用户操作。
 
 用法::
@@ -40,7 +40,7 @@ def navigate(url: str, cdp_url: str, wait_until: str = "domcontentloaded",
 
     - **不关闭浏览器**：保留窗口供后续脚本使用
     - **不等待用户**：DOM ready 即可返回
-    - **不检测登录态**：由 ``check_login_status.py`` 单独负责
+    - **不检测登录态**：由 Skill 编排层通过 ask_user 让用户自行确认
     """
     emit_progress(0, 3, "正在连接浏览器...")
     try:

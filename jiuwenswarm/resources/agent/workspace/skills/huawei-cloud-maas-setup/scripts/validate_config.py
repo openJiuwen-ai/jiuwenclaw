@@ -112,7 +112,7 @@ def main() -> int:
 
     if not is_valid:
         print("[FAIL] 未找到有效的 API 配置")
-        print("  请先运行 update_jiuwenswarm_config.py 写入配置，或通过配置面板手动填写。")
+        print("  请先运行 config_writer.py 写入配置，或通过配置面板手动填写。")
         return 1
 
     masked_key = (

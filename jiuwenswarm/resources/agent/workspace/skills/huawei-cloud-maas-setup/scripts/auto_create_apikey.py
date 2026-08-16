@@ -33,6 +33,7 @@ import argparse
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -57,12 +58,21 @@ from lib.huawei_selectors import (  # noqa: E402
     SELECTOR_APIKEY_TAG_INPUT,
     SELECTOR_CREATE_APIKEY_BTN,
     SELECTOR_INSUFFICIENT_BALANCE,
-    click_first_visible,
+    click_copy_key_button,
+    click_wait_first,
     extract_api_key_from_dialog,
 )
 
 
 _API_KEY_RE = re.compile(r"\b[A-Za-z0-9_\-]{30,}\b")
+
+
+def _unique_suffix() -> str:
+    """生成基于当前日期时间的唯一后缀（``YYYYMMDD_HHMMSS``）。
+
+    追加到标签和描述末尾，避免标签重复导致华为云拒绝创建 API Key。
+    """
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def _is_plausible_key(text: str) -> bool:
@@ -101,6 +111,15 @@ def _detect_insufficient_balance(page, timeout_ms: int = 3_000) -> bool:
     return False
 
 
+def _page_text_preview(page, max_chars: int = 1500) -> str:
+    """截取当前页面可读文本，用于失败时返回 DOM 线索以便定位。"""
+    try:
+        text = page.locator("body").inner_text(timeout=2_000) or ""
+    except Exception:
+        return ""
+    return " ".join(text.split())[:max_chars]
+
+
 def auto_create_apikey(
     cdp_url: str,
     tag: str = "jiuwenswarm",
@@ -114,11 +133,20 @@ def auto_create_apikey(
     - 描述（description）：自由文本
     - 权限设置（permission）：保持默认，不主动操作
 
+    为避免标签重复导致创建失败，会自动在 ``tag`` 和 ``description`` 末尾
+    追加日期时间后缀（如 ``-20250816_153045``）。
+
     返回值：
     - 成功：``{ok: true, api_key: "...", ...}``
-    - 欠费：``{ok: false, stage: "insufficient_balance", error: "..."}``
+    - 欠费：``{ok: false, stage: "insufficient_balance", error: "..."}`
     - 其他失败：``{ok: false, stage: "...", error: "..."}``
     """
+    # 追加日期时间后缀，避免标签/描述重复导致创建 Key 失败
+    suffix = _unique_suffix()
+    tag = f"{tag}-{suffix}"
+    description = f"{description}-{suffix}"
+    emit("apikey", f"本次创建标签: {tag}，描述: {description}")
+
     emit_progress(0, 7, "连接浏览器...")
     try:
         pw, browser, page = connect_page(cdp_url, timeout_ms=15_000)
@@ -134,18 +162,23 @@ def auto_create_apikey(
             return make_failure("navigate_failed", f"导航失败: {exc}", cdp_url=cdp_url)
 
         # 2. 点击"创建 API Key"按钮
+        # 按钮为 Angular SPA 异步渲染，等待 15s（组合等待：存在且可见）
         emit_progress(2, 7, "点击'创建 API Key'...")
-        if not click_first_visible(page, SELECTOR_CREATE_APIKEY_BTN, timeout_ms=5_000):
+        if not click_wait_first(page, SELECTOR_CREATE_APIKEY_BTN, timeout_ms=15_000):
+            preview = _page_text_preview(page)
+            emit("apikey", f"未找到创建按钮，当前页面: {page.url} | {preview}")
             return make_failure(
                 "create_btn_not_found",
                 "未找到'创建 API Key'按钮",
                 cdp_url=cdp_url,
+                page_url=page.url,
+                page_text_preview=preview,
             )
         time.sleep(1.0)  # 等待对话框动画
 
         # 3. 填写标签（第一个字段，必填）
         emit_progress(3, 7, f"填写标签: {tag}")
-        tag_input = SELECTOR_APIKEY_TAG_INPUT.first_visible(page, timeout_ms=3_000)
+        tag_input = SELECTOR_APIKEY_TAG_INPUT.wait_first(page, timeout_ms=4_000)
         if tag_input is not None:
             try:
                 tag_input.fill(tag)
@@ -162,7 +195,7 @@ def auto_create_apikey(
 
         # 4. 填写描述（第二个字段）
         emit_progress(4, 7, f"填写描述: {description}")
-        desc_input = SELECTOR_APIKEY_DESC_INPUT.first_visible(page, timeout_ms=3_000)
+        desc_input = SELECTOR_APIKEY_DESC_INPUT.wait_first(page, timeout_ms=4_000)
         if desc_input is not None:
             try:
                 desc_input.fill(description)
@@ -179,7 +212,7 @@ def auto_create_apikey(
 
         # 6. 点击"确定"提交
         emit_progress(5, 7, "提交创建...")
-        if not click_first_visible(page, SELECTOR_APIKEY_CONFIRM, timeout_ms=3_000):
+        if not click_wait_first(page, SELECTOR_APIKEY_CONFIRM, timeout_ms=5_000):
             return make_failure(
                 "confirm_not_found",
                 "未找到 API Key 创建'确定'按钮",
@@ -200,9 +233,9 @@ def auto_create_apikey(
                 recharge_url="https://account.huaweicloud.com/usercenter/#/accountindex/balance",
             )
 
-        # 7b. 等待 Key 展示弹窗
+        # 7b. 等待 Key 展示弹窗（Ti3 modal，等待其真实出现）
         emit("apikey", "等待 API Key 展示弹窗...")
-        if SELECTOR_APIKEY_DIALOG.first_visible(page, timeout_ms=15_000) is None:
+        if SELECTOR_APIKEY_DIALOG.wait_first(page, timeout_ms=12_000) is None:
             return make_failure(
                 "dialog_timeout",
                 "等待 API Key 弹窗超时（可能创建失败）",
@@ -215,15 +248,21 @@ def auto_create_apikey(
         if not api_key or not _is_plausible_key(api_key):
             return make_failure(
                 "extract_failed",
-                "无法从页面提取 API Key。请手动复制 Key 后通过 ask_user_question 填入。",
+                "无法从页面提取 API Key。请手动复制 Key 后通过 ask_user 填入。",
                 cdp_url=cdp_url,
             )
 
         emit("apikey", f"捕获 API Key 成功（长度 {len(api_key)}）")
         emit_progress(7, 7, "Key 捕获成功")
 
-        # 8. 关闭弹窗
-        click_first_visible(page, SELECTOR_APIKEY_SAVED_BTN, timeout_ms=1_500)
+        # 8. best-effort 复制 Key，再点击"我已保存，确认关闭"关闭弹窗
+        if click_copy_key_button(page):
+            emit("apikey", "已点击复制按钮")
+        dialog_closed = click_wait_first(page, SELECTOR_APIKEY_SAVED_BTN, timeout_ms=5_000)
+        if dialog_closed:
+            emit("apikey", "已点击'我已保存，确认关闭'")
+        else:
+            emit("apikey", "警告: 未找到'我已保存，确认关闭'按钮，弹窗可能未关闭")
         time.sleep(0.5)
 
         return make_success(
@@ -232,6 +271,7 @@ def auto_create_apikey(
             api_key=api_key,
             tag=tag,
             description=description,
+            dialog_closed=dialog_closed,
         )
     except Exception as exc:
         return make_failure("exception", f"未预期错误: {exc}", cdp_url=cdp_url)

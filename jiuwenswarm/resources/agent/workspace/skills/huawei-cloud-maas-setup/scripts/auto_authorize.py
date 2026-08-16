@@ -4,7 +4,7 @@
 
 前置条件：
 - 浏览器已由 ``ensure_browser.py`` 启动并通过 CDP 暴露
-- 用户已在浏览器中登录华为云（由 ``navigate.py`` + ``ask_user_question`` 处理）
+- 用户已在浏览器中登录华为云（由 ``navigate.py`` + ``ask_user`` 处理）
 
 本脚本职责：
 - 导航到 MaaS 首页（如果尚未到达）
@@ -49,7 +49,48 @@ from lib.huawei_selectors import (  # noqa: E402
     SELECTOR_AUTH_SUCCESS,
     SELECTOR_AUTH_WARNING,
     click_first_visible,
+    click_wait_first,
 )
+
+# 授权警告关键词（命中任一即认为有未完成授权）
+_AUTH_WARNING_KEYWORDS = (
+    "已有委托",
+    "权限不足",
+    "尚未授权",
+    "访问授权",
+    "委托授权",
+    "模型使用权限",
+)
+
+
+def _detect_auth_warning(page) -> bool:
+    """快速判定页面是否存在授权警告（< 2s）。
+
+    华为云 MaaS 首页的授权提示固定在 ``#authGlobalMessage``（maui-add-auth）：
+    - 已授权：该容器存在但内容为空；
+    - 未授权：容器内有警告文案。
+    容器缺失时退化为整页文本扫描。
+    """
+    try:
+        container = page.locator("#authGlobalMessage").first
+        if container.count() > 0 and container.is_visible():
+            text = container.inner_text(timeout=1_000) or ""
+            return any(k in text for k in _AUTH_WARNING_KEYWORDS) and len(text.strip()) > 0
+    except Exception:
+        pass
+    # 容器缺失/不可见：按警告选择器做一次即时快照
+    try:
+        warning = SELECTOR_AUTH_WARNING.first_visible(page, timeout_ms=1_000)
+        if warning is not None:
+            try:
+                text = warning.inner_text(timeout=1_000) or ""
+                if any(k in text for k in _AUTH_WARNING_KEYWORDS):
+                    return True
+            except Exception:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
@@ -68,10 +109,10 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
         except Exception as exc:
             return make_failure("navigate_failed", f"导航失败: {exc}", cdp_url=cdp_url)
 
-        # 2. 检测授权警告
+        # 2. 等待 SPA 渲染并检测授权警告（快速判定）
         emit_progress(2, 5, "检测授权警告...")
-        warning = SELECTOR_AUTH_WARNING.first_visible(page, timeout_ms=3_000)
-        if warning is None:
+        time.sleep(2.5)  # 等 SPA 子视图渲染完成再判定，避免空容器误判
+        if not _detect_auth_warning(page):
             emit("auth", "未发现授权警告，视为已授权")
             emit_progress(5, 5, "已授权")
             return make_success(
@@ -84,7 +125,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
         # 3. 点击"此处"链接
         emit("auth", "检测到授权提示，尝试自动更新")
         emit_progress(3, 5, "点击'此处'链接...")
-        here_link = SELECTOR_AUTH_HERE_LINK.first_visible(page, timeout_ms=2_000)
+        here_link = SELECTOR_AUTH_HERE_LINK.wait_first(page, timeout_ms=3_000)
         if here_link is not None:
             try:
                 here_link.click()
@@ -92,7 +133,9 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
                 emit("auth", f"点击'此处'失败: {exc}")
                 # 兜底：直接点警告元素本身
                 try:
-                    warning.click()
+                    warning = SELECTOR_AUTH_WARNING.first_visible(page, timeout_ms=1_000)
+                    if warning is not None:
+                        warning.click()
                 except Exception as exc2:
                     return make_failure(
                         "click_failed",
@@ -102,7 +145,9 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
         else:
             # 兜底：直接点警告元素本身
             try:
-                warning.click()
+                warning = SELECTOR_AUTH_WARNING.first_visible(page, timeout_ms=1_000)
+                if warning is not None:
+                    warning.click()
             except Exception as exc:
                 return make_failure(
                     "click_failed",
@@ -112,7 +157,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
 
         # 4. 等待授权对话框
         emit_progress(4, 5, "等待授权对话框...")
-        dialog = SELECTOR_AUTH_DIALOG.first_visible(page, timeout_ms=10_000)
+        dialog = SELECTOR_AUTH_DIALOG.wait_first(page, timeout_ms=10_000)
         if dialog is None:
             return make_failure(
                 "dialog_timeout",
@@ -122,7 +167,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
         time.sleep(1.0)  # 给对话框动画一点时间
 
         # 5. 点击"确定"（追加至已有委托默认已选中）
-        if not click_first_visible(page, SELECTOR_AUTH_CONFIRM, timeout_ms=3_000):
+        if not click_wait_first(page, SELECTOR_AUTH_CONFIRM, timeout_ms=5_000):
             return make_failure(
                 "confirm_not_found",
                 "未找到'确定'按钮",
@@ -131,7 +176,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
 
         # 6. 等待成功提示
         emit_progress(5, 5, "等待授权成功提示...")
-        success = SELECTOR_AUTH_SUCCESS.first_visible(page, timeout_ms=15_000)
+        success = SELECTOR_AUTH_SUCCESS.wait_first(page, timeout_ms=15_000)
         if success is None:
             return make_failure(
                 "success_timeout",

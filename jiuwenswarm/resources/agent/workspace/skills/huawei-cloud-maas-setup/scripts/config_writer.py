@@ -2,20 +2,25 @@
 """华为云 MaaS 模型配置写入脚本。
 
 将华为云 MaaS 的 API Base / API Key 写入 .env（使用 HUAWEI_MAAS_ 前缀隔离），
-并将模型条目以"追加并设为默认"的语义写入 config.yaml 的 models.defaults：
+并将模型条目以"追加，不设默认"的语义写入 config.yaml 的 models.defaults：
 
-- 已存在同 alias 的条目就地更新；
-- 新条目追加到列表；
-- 通过 --default-alias 指定的条目会被置 is_default=true 并移到列表首位；
-- 未涉及的已有条目保留，其 is_default 统一置 false（与前端 ConfigPanel
-  的 handleSetActive 语义一致）。
+- 已存在同 alias 的条目就地更新（保留其 is_default 值）；
+- 新条目追加到列表末尾；
+- 不修改任何条目的 is_default，用户原有默认模型保持不变。
 
-用法示例::
+用法示例（使用 models.json）::
 
     python config_writer.py add \\
         --api-base https://api.modelarts-maas.com/openai/v1 \\
         --api-key ABh8... \\
-        --model name=openPangu-2.0-Pro,alias=huawei-pangu,default \\
+        --models-file models.json
+
+或逐个指定模型::
+
+    python config_writer.py add \\
+        --api-base https://api.modelarts-maas.com/openai/v1 \\
+        --api-key ABh8... \\
+        --model name=openPangu-2.0-Pro,alias=huawei-pangu \\
         --model name=embedding-1,alias=huawei-embedding
 """
 from __future__ import annotations
@@ -147,6 +152,30 @@ def _parse_model_spec(spec: str) -> dict[str, Any]:
     return data
 
 
+def _load_models_from_file(models_file: str) -> list[dict[str, Any]]:
+    """从 models.json 读取模型列表，返回 name/alias 字典列表。"""
+    p = Path(models_file)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        name = (m.get("api_name") or "").strip()
+        if not name:
+            continue
+        alias = (m.get("alias") or "").strip() or name
+        result.append({"name": name, "alias": alias})
+    return result
+
+
 def _build_model_entry(
     model_name: str,
     alias: str,
@@ -250,11 +279,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add.add_argument(
         "--model",
         action="append",
-        required=True,
         help=(
             "模型定义，格式 name=模型名[,alias=别名]，"
             "可多次指定。alias 缺省等于 name。"
+            "优先于 --models-file。"
         ),
+    )
+    p_add.add_argument(
+        "--models-file",
+        default=str(Path(__file__).resolve().parent.parent / "models.json"),
+        help="模型列表 JSON 文件路径（当未指定 --model 时使用）",
     )
     p_add.add_argument(
         "--provider",
@@ -274,11 +308,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "add":
-        try:
-            models = [_parse_model_spec(s) for s in (args.model or [])]
-        except ValueError as exc:
-            print(f"[FAIL] {exc}", file=sys.stderr)
-            return 2
+        if args.model:
+            try:
+                models = [_parse_model_spec(s) for s in args.model]
+            except ValueError as exc:
+                print(f"[FAIL] {exc}", file=sys.stderr)
+                return 2
+        else:
+            models = _load_models_from_file(args.models_file)
+            if not models:
+                print(f"[FAIL] 未从 {args.models_file} 加载到模型", file=sys.stderr)
+                return 2
 
         # 校验 alias 不重复
         aliases = [m["alias"] for m in models]

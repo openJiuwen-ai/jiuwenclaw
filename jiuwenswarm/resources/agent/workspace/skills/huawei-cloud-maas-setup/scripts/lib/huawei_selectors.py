@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 from playwright.sync_api import Locator, Page
 
@@ -30,12 +30,17 @@ class SelectorSet:
     text_patterns: list[str] = field(default_factory=list)
 
     def first_visible(self, page: Page, timeout_ms: int = 3_000) -> Optional[Locator]:
-        """返回第一个可见的 Locator，全部不可见则返回 None。"""
+        """返回第一个当前可见的 Locator（即时快照，不等待）。
+
+        用于\"可选/检测\"类元素（权限字段、授权警告、欠费提示等）：不存在时应立即返回 None，
+        避免因等待整个超时拖慢流程。
+        timeout_ms 仅用于减小极端抖动，语义以即时快照为准。
+        """
         # 优先按 CSS 选择器
         for sel in self.selectors:
             try:
                 loc = page.locator(sel).first
-                if loc.is_visible(timeout=timeout_ms):
+                if loc.is_visible():
                     return loc
             except Exception:
                 continue
@@ -43,8 +48,33 @@ class SelectorSet:
         for txt in self.text_patterns:
             try:
                 loc = page.locator(f"text={txt}").first
-                if loc.is_visible(timeout=timeout_ms):
+                if loc.is_visible():
                     return loc
+            except Exception:
+                continue
+        return None
+
+    def wait_first(self, page: Page, timeout_ms: int = 8_000) -> Optional[Locator]:
+        """等待第一个可见的 Locator 出现（进入 DOM 且可见）。
+
+        用于\"必然出现\"的元素（创建按钮、弹窗、必填输入框等）：
+        Angular SPA 在 ``domcontentloaded`` 之后仍异步渲染子视图，
+        必须真正等到元素出现（进入 DOM 且可见）才算存在，避免\"误判不存在\"或\"秒失败\"。
+        """
+        # 优先按 CSS 选择器
+        for sel in self.selectors:
+            try:
+                loc = page.locator(sel).first
+                loc.wait_for(state="visible", timeout=timeout_ms)
+                return loc
+            except Exception:
+                continue
+        # 退化到文本选择器
+        for txt in self.text_patterns:
+            try:
+                loc = page.locator(f"text={txt}").first
+                loc.wait_for(state="visible", timeout=timeout_ms)
+                return loc
             except Exception:
                 continue
         return None
@@ -61,15 +91,8 @@ MAAS_DEPLOYMENT_URL = (
     "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/deployment"
 )
 
-# 区域信息
-DEFAULT_REGION = "cn-southwest-2"
-DEFAULT_API_BASE = "https://api.modelarts-maas.com/openai/v1"
-DEFAULT_PROVIDER = "openai"
-
-# 要开通的模型（默认列表）
-DEFAULT_MODELS = [
-    ("openPangu-2.0-Pro", "openpangu-2.0-pro"),
-]
+# 模型列表定义在 <skill_dir>/models.json 中，由 auto_open_model.py 和
+# config_writer.py 读取，不再在此硬编码。
 
 
 # 授权相关选择器
@@ -97,7 +120,13 @@ SELECTOR_AUTH_HERE_LINK = SelectorSet(
 
 SELECTOR_AUTH_DIALOG = SelectorSet(
     name="auth_dialog",
-    selectors=[".el-dialog", ".ant-modal", "[role='dialog']"],
+    selectors=[
+        ".el-dialog",
+        ".ant-modal",
+        ".ti3-modal",
+        "[class*='modal']",
+        "[role='dialog']",
+    ],
     text_patterns=["追加至已有委托", "新建委托", "委托名称"],
 )
 
@@ -106,6 +135,8 @@ SELECTOR_AUTH_CONFIRM = SelectorSet(
     selectors=[
         ".el-dialog .el-button--primary",
         ".ant-modal .ant-btn-primary",
+        ".ti3-modal .ti3-btn-primary",
+        "[class*='modal'] .ti3-btn-primary",
     ],
     text_patterns=["确定", "确认"],
 )
@@ -118,10 +149,22 @@ SELECTOR_AUTH_SUCCESS = SelectorSet(
 
 
 # API Key 相关选择器
+# 华为云控制台为 Angular SPA，页面存在稳定属性 id/data-qa-id，
+# 优先使用 CSS 选择器，文本匹配仅作兜底（文案/空白变化不影响）。
 SELECTOR_CREATE_APIKEY_BTN = SelectorSet(
     name="create_apikey_btn",
-    selectors=[],
-    text_patterns=["创建 API Key", "创建API Key", "创建 API key", "新建 API Key"],
+    selectors=[
+        "#authManageToolsCreateBtn",
+        "[data-qa-id='authManageToolsCreateBtn']",
+    ],
+    text_patterns=[
+        "创建 API Key",
+        "创建API Key",
+        "创建 API key",
+        "新建 API Key",
+        "创建密钥",
+        "新建密钥",
+    ],
 )
 
 # 标签输入框（API Key 创建表单的第一个字段）
@@ -134,6 +177,8 @@ SELECTOR_APIKEY_TAG_INPUT = SelectorSet(
         # 弹窗中第一个 input（通常是标签）
         ".el-dialog .el-form-item:first-child input",
         ".el-dialog input:nth-of-type(1)",
+        ".ti3-modal input:nth-of-type(1)",
+        "[class*='modal'] input:nth-of-type(1)",
     ],
 )
 
@@ -146,6 +191,8 @@ SELECTOR_APIKEY_DESC_INPUT = SelectorSet(
         "textarea[placeholder*='备注']",
         # 弹窗中的 textarea（描述通常是多行文本框）
         ".el-dialog textarea",
+        ".ti3-modal textarea",
+        "[class*='modal'] textarea",
     ],
 )
 
@@ -157,27 +204,47 @@ SELECTOR_APIKEY_PERMISSION = SelectorSet(
         "input[placeholder*='权限']",
         ".el-dialog [class*='permission']",
         ".el-dialog [class*='scope']",
+        ".ti3-modal [class*='permission']",
+        ".ti3-modal [class*='scope']",
     ],
     text_patterns=["权限设置", "权限范围"],
 )
 
 SELECTOR_APIKEY_CONFIRM = SelectorSet(
     name="apikey_confirm",
-    selectors=[".el-dialog .el-button--primary", ".ant-modal .ant-btn-primary"],
+    selectors=[
+        ".el-dialog .el-button--primary",
+        ".ant-modal .ant-btn-primary",
+        ".ti3-modal .ti3-btn-primary",
+        "[class*='modal'] .ti3-btn-primary",
+    ],
     text_patterns=["确定", "确认"],
 )
 
+# 创建成功后的 Key 展示弹窗（copy-key-modal）。
+# 注意 text 不能是泛化的 "API Key"/"密钥"，否则会误匹配到列表页头部标题，导致提前返回。
 SELECTOR_APIKEY_DIALOG = SelectorSet(
     name="apikey_dialog",
-    selectors=[".el-dialog", ".ant-modal", "[role='dialog']"],
-    text_patterns=["创建成功", "API Key", "密钥", "Secret", "复制"],
+    selectors=[
+        ".ti3-modal",
+        "copy-key-modal",
+        "[class*='modal']",
+        ".copy-key-modal-form-input",
+    ],
+    text_patterns=["您的API Key", "您的 API Key", "我已保存", "创建成功"],
 )
 
 SELECTOR_APIKEY_SAVED_BTN = SelectorSet(
     name="apikey_saved_btn",
-    selectors=[],
-    text_patterns=["我已保存", "确认关闭", "关闭", "完成", "确定"],
+    selectors=[
+        "#copyKeyModelCloseBtn",
+        "[data-qa-id='copyKeyModelCloseBtn']",
+    ],
+    text_patterns=["我已保存", "确认关闭"],
 )
+
+# 创建成功弹窗中的"复制"按钮（best-effort，点击失败不影响流程）
+COPY_KEY_BUTTON_ID = "copyKeyButton"
 
 # 欠费/余额不足错误提示（创建 Key 失败时检测）
 SELECTOR_INSUFFICIENT_BALANCE = SelectorSet(
@@ -198,41 +265,6 @@ SELECTOR_INSUFFICIENT_BALANCE = SelectorSet(
     ],
 )
 
-# 华为云充值页面 URL
-RECHARGE_URL = "https://account.huaweicloud.com/usercenter/#/accountindex/balance"
-
-# 开通模型相关选择器
-SELECTOR_PRESET_TAB = SelectorSet(
-    name="preset_tab",
-    selectors=[
-        "[role='tab']",
-        ".el-tabs__item",
-    ],
-    text_patterns=["预置服务"],
-)
-
-SELECTOR_MODEL_OPEN_BTN = SelectorSet(
-    name="model_open_btn",
-    selectors=[],
-    text_patterns=["开通服务", "一键开通"],
-)
-
-SELECTOR_MODEL_AGREEMENT = SelectorSet(
-    name="model_agreement",
-    selectors=[
-        "input[type='checkbox']",
-        ".el-checkbox__input",
-        ".el-checkbox__inner",
-    ],
-    text_patterns=["我已阅读并同意", "同意", "MaaS 模型即服务声明"],
-)
-
-SELECTOR_MODEL_OPEN_CONFIRM = SelectorSet(
-    name="model_open_confirm",
-    selectors=[".el-message-box .el-button--primary"],
-    text_patterns=["一键开通", "开通", "确定"],
-)
-
 
 # ---------------------------------------------------------------------------
 # 高层操作函数
@@ -240,7 +272,7 @@ SELECTOR_MODEL_OPEN_CONFIRM = SelectorSet(
 
 
 def click_first_visible(page: Page, selector_set: SelectorSet, timeout_ms: int = 3_000) -> bool:
-    """点击第一个可见的元素。返回是否成功。"""
+    """点击第一个当前可见的元素（即时快照）。返回是否成功。"""
     loc = selector_set.first_visible(page, timeout_ms=timeout_ms)
     if loc is None:
         return False
@@ -252,21 +284,28 @@ def click_first_visible(page: Page, selector_set: SelectorSet, timeout_ms: int =
         return False
 
 
-def find_in_row(page: Page, row_text: str, selector_set: SelectorSet) -> Optional[Locator]:
-    """在包含指定文本的行内查找元素。"""
-    row = page.locator(f"tr:has-text('{row_text}'), div:has-text('{row_text}')").first
+def click_wait_first(page: Page, selector_set: SelectorSet, timeout_ms: int = 8_000) -> bool:
+    """等待元素出现（进入 DOM 且可见）后点击。返回是否成功。
+
+    用于\"必然出现\"的元素（创建按钮、弹窗确定、保存按钮等），
+    避免 SPA 渲染未完成时误判为不存在。
+    """
+    loc = selector_set.wait_first(page, timeout_ms=timeout_ms)
+    if loc is None:
+        return False
     try:
-        if not row.is_visible(timeout=2_000):
-            return None
-    except Exception:
-        return None
-    return row.locator(selector_set.selectors[0]) if selector_set.selectors else None
+        loc.click()
+        return True
+    except Exception as exc:
+        emit(selector_set.name, f"click failed: {exc}")
+        return False
 
 
 def extract_api_key_from_dialog(page: Page) -> str:
     """从 API Key 展示弹窗中提取完整 Key。"""
-    # 策略 1：只读 input/textarea
+    # 策略 1：只读 input/textarea（华为云 copy-key-modal 的 key 输入框）
     for selector in (
+        ".copy-key-modal-form-input",
         "input[readonly]",
         "textarea[readonly]",
         ".api-key-value",
@@ -287,13 +326,14 @@ def extract_api_key_from_dialog(page: Page) -> str:
         except Exception:
             continue
 
-    # 策略 2：evaluate 遍历弹窗 DOM
+    # 策略 2：evaluate 遍历弹窗 DOM（兼容 Ti3 / Element / Ant）
     try:
         key = page.evaluate(
             """
             () => {
                 const dialog = document.querySelector(
-                    '.el-dialog, .ant-modal, [role="dialog"]'
+                    '.ti3-modal, .el-dialog, .ant-modal, copy-key-modal, '
+                    + '[class="modal"], [role="dialog"]'
                 );
                 if (!dialog) return '';
                 const candidates = dialog.querySelectorAll(
@@ -319,3 +359,14 @@ def extract_api_key_from_dialog(page: Page) -> str:
         pass
 
     return ""
+
+
+def click_copy_key_button(page: Page) -> bool:
+    """best-effort 点击 Key 展示弹窗中的复制按钮。失败不影响流程。"""
+    try:
+        loc = page.locator(f"#{COPY_KEY_BUTTON_ID}").first
+        loc.wait_for(state="visible", timeout=3_000)
+        loc.click()
+        return True
+    except Exception:
+        return False
