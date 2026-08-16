@@ -91,6 +91,30 @@ MAAS_DEPLOYMENT_URL = (
     "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/deployment"
 )
 
+# ---------------------------------------------------------------------------
+# 预置服务列表（在线推理 -> 预置服务）选择器
+# 页面为 Angular + Ti3/TinyV 组件：ti-grid > ti-table > tbody > tr 行。
+# 每行列：服务名称 -> 状态 -> 类型 -> 计费方式 -> 推理定价 -> 优惠折扣 ->
+#         模型限流 -> 调用统计 -> 操作（右侧含"开通服务"按钮）
+# ---------------------------------------------------------------------------
+# 数据行（虚拟滚动列表中的 tr）
+MAAS_DEPLOYMENT_ROWS = "tr.ti3-table-detail-icon-tr"
+# 服务名称（每行第一个 ti-grid 单元格内 service-name-render 的文本）
+MAAS_DEPLOYMENT_ROW_NAME = ".service-name-render .name-string"
+# 状态（未开通 / 已开通 / 开通中）
+MAAS_DEPLOYMENT_ROW_STATUS = "grid-status-render .text"
+# 类型（文本生成 / 视频生成 / 文本向量化 / 重排序...），取该单元格文本
+MAAS_DEPLOYMENT_ROW_TYPE = "grid-tip-text-render"
+# 行右侧"开通服务"按钮（aria-label 稳定，作用域限定在行内）
+MAAS_DEPLOYMENT_ROW_OPEN_BTN = "[aria-label='开通服务']"
+# 顶部按名称搜索框（筛选后可跨分页定位模型）
+MAAS_DEPLOYMENT_SEARCH_BOX = (
+    "input#prefabricatedServicesListViewInfo_property_search_searchbox_input, "
+    "input.tp-searchbox-input"
+)
+# 批量开通弹窗容器（Ti3 modal，优先精确 id/组件名）
+MAAS_SUBSCRIBE_MODAL = "#subScribe-model, subscribe-model-modal"
+
 # 模型列表定义在 <skill_dir>/models.json 中，由 auto_open_model.py 和
 # config_writer.py 读取，不再在此硬编码。
 
@@ -99,9 +123,9 @@ MAAS_DEPLOYMENT_URL = (
 SELECTOR_AUTH_WARNING = SelectorSet(
     name="auth_warning",
     selectors=[
-        "[class*='warning']",
+        "#authGlobalMessage",
+        ".ti3-alert",
         "[class*='alert']",
-        "[class*='notice']",
     ],
     text_patterns=[
         "已有委托缺失当前模块依赖的部分服务权限",
@@ -121,10 +145,7 @@ SELECTOR_AUTH_HERE_LINK = SelectorSet(
 SELECTOR_AUTH_DIALOG = SelectorSet(
     name="auth_dialog",
     selectors=[
-        ".el-dialog",
-        ".ant-modal",
         ".ti3-modal",
-        "[class*='modal']",
         "[role='dialog']",
     ],
     text_patterns=["追加至已有委托", "新建委托", "委托名称"],
@@ -133,10 +154,7 @@ SELECTOR_AUTH_DIALOG = SelectorSet(
 SELECTOR_AUTH_CONFIRM = SelectorSet(
     name="auth_confirm",
     selectors=[
-        ".el-dialog .el-button--primary",
-        ".ant-modal .ant-btn-primary",
         ".ti3-modal .ti3-btn-primary",
-        "[class*='modal'] .ti3-btn-primary",
     ],
     text_patterns=["确定", "确认"],
 )
@@ -174,11 +192,7 @@ SELECTOR_APIKEY_TAG_INPUT = SelectorSet(
     selectors=[
         "input[placeholder*='标签']",
         "input[placeholder*='名称']",
-        # 弹窗中第一个 input（通常是标签）
-        ".el-dialog .el-form-item:first-child input",
-        ".el-dialog input:nth-of-type(1)",
-        ".ti3-modal input:nth-of-type(1)",
-        "[class*='modal'] input:nth-of-type(1)",
+        ".ti3-modal input[type='text']",
     ],
 )
 
@@ -189,10 +203,7 @@ SELECTOR_APIKEY_DESC_INPUT = SelectorSet(
         "input[placeholder*='备注']",
         "textarea[placeholder*='描述']",
         "textarea[placeholder*='备注']",
-        # 弹窗中的 textarea（描述通常是多行文本框）
-        ".el-dialog textarea",
         ".ti3-modal textarea",
-        "[class*='modal'] textarea",
     ],
 )
 
@@ -202,8 +213,6 @@ SELECTOR_APIKEY_PERMISSION = SelectorSet(
     name="apikey_permission",
     selectors=[
         "input[placeholder*='权限']",
-        ".el-dialog [class*='permission']",
-        ".el-dialog [class*='scope']",
         ".ti3-modal [class*='permission']",
         ".ti3-modal [class*='scope']",
     ],
@@ -213,23 +222,22 @@ SELECTOR_APIKEY_PERMISSION = SelectorSet(
 SELECTOR_APIKEY_CONFIRM = SelectorSet(
     name="apikey_confirm",
     selectors=[
-        ".el-dialog .el-button--primary",
-        ".ant-modal .ant-btn-primary",
         ".ti3-modal .ti3-btn-primary",
-        "[class*='modal'] .ti3-btn-primary",
     ],
     text_patterns=["确定", "确认"],
 )
 
 # 创建成功后的 Key 展示弹窗（copy-key-modal）。
-# 注意 text 不能是泛化的 "API Key"/"密钥"，否则会误匹配到列表页头部标题，导致提前返回。
+# 优先匹配 copy-key-modal 专属信号（id/data-qa-id/组件名/输入框类名），
+# 不再使用泛化 .ti3-modal / [class*='modal'] 兜底，避免误匹配隐藏/遗留弹窗。
 SELECTOR_APIKEY_DIALOG = SelectorSet(
     name="apikey_dialog",
     selectors=[
-        ".ti3-modal",
+        "#copyKeyModelCloseBtn",
+        "[data-qa-id='copyKeyModelCloseBtn']",
         "copy-key-modal",
-        "[class*='modal']",
         ".copy-key-modal-form-input",
+        ".copy-key-modal-form-input input",
     ],
     text_patterns=["您的API Key", "您的 API Key", "我已保存", "创建成功"],
 )
@@ -246,13 +254,13 @@ SELECTOR_APIKEY_SAVED_BTN = SelectorSet(
 # 创建成功弹窗中的"复制"按钮（best-effort，点击失败不影响流程）
 COPY_KEY_BUTTON_ID = "copyKeyButton"
 
-# 欠费/余额不足错误提示（创建 Key 失败时检测）
+# 欠费/余额不足错误提示（创建 Key 失败时检测）。
+# 不使用 [class*='error'] 等泛化选择器，避免误匹配；主要依赖 text_patterns 关键词命中。
 SELECTOR_INSUFFICIENT_BALANCE = SelectorSet(
     name="insufficient_balance",
     selectors=[
-        ".el-message--error",
-        ".el-notification__content",
-        "[class*='error']",
+        ".ti3-message-error",
+        ".ti3-alert-error",
     ],
     text_patterns=[
         "欠费",
@@ -326,14 +334,14 @@ def extract_api_key_from_dialog(page: Page) -> str:
         except Exception:
             continue
 
-    # 策略 2：evaluate 遍历弹窗 DOM（兼容 Ti3 / Element / Ant）
+    # 策略 2：evaluate 遍历弹窗 DOM（Ti3 / copy-key-modal）
     try:
         key = page.evaluate(
             """
             () => {
                 const dialog = document.querySelector(
-                    '.ti3-modal, .el-dialog, .ant-modal, copy-key-modal, '
-                    + '[class="modal"], [role="dialog"]'
+                    'copy-key-modal, .copy-key-modal-form-input, '
+                    + '.ti3-modal, [role="dialog"]'
                 );
                 if (!dialog) return '';
                 const candidates = dialog.querySelectorAll(

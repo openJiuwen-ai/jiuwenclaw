@@ -80,15 +80,14 @@ def _is_plausible_key(text: str) -> bool:
     return bool(text) and len(text) >= 30 and not text.isdigit()
 
 
-def _detect_insufficient_balance(page, timeout_ms: int = 3_000) -> bool:
+def _detect_insufficient_balance(page, timeout_ms: int = 3_000,
+                                 include_body: bool = True) -> bool:
     """检测页面是否出现欠费/余额不足的错误提示。
 
     在点击"确定"创建 Key 后调用，如果出现错误提示且含欠费关键词，
     返回 True 表示用户需要先充值。
     """
-    # 等待可能出现的错误提示
-    time.sleep(1.0)
-    # 先看页面是否有错误提示元素
+    # 先看页面是否有错误提示元素（轮询场景下不额外 sleep，交给调用方节奏）
     error_el = SELECTOR_INSUFFICIENT_BALANCE.first_visible(page, timeout_ms=timeout_ms)
     if error_el is not None:
         try:
@@ -99,15 +98,16 @@ def _detect_insufficient_balance(page, timeout_ms: int = 3_000) -> bool:
                     return True
         except Exception:
             pass
-    # 兜底：检查整页文本
-    try:
-        body_text = page.locator("body").inner_text(timeout=2_000) or ""
-        for keyword in ("欠费", "余额不足", "请先充值"):
-            if keyword in body_text:
-                emit("apikey", f"页面文本中检测到欠费关键词: {keyword}")
-                return True
-    except Exception:
-        pass
+    # 兜底：检查整页文本（开销较大，轮询时可关闭）
+    if include_body:
+        try:
+            body_text = page.locator("body").inner_text(timeout=2_000) or ""
+            for keyword in ("欠费", "余额不足", "请先充值"):
+                if keyword in body_text:
+                    emit("apikey", f"页面文本中检测到欠费关键词: {keyword}")
+                    return True
+        except Exception:
+            pass
     return False
 
 
@@ -220,28 +220,34 @@ def auto_create_apikey(
             )
 
         # 7. 欠费检测 + Key 提取
-        # 先等一会儿让页面响应
-        time.sleep(2.0)
-
-        # 7a. 检测是否欠费
+        # 提交后改为短轮询：一旦出现 Key 展示弹窗（copy-key-modal）即返回，
+        # 不必固定 sleep(2s) 再等 12s，避免"Key 已创建但脚本仍空等"的卡顿。
         emit_progress(6, 7, "检测创建结果...")
-        if _detect_insufficient_balance(page, timeout_ms=3_000):
-            return make_failure(
-                "insufficient_balance",
-                "账户余额不足，请先充值后再创建 API Key",
-                cdp_url=cdp_url,
-                recharge_url="https://account.huaweicloud.com/usercenter/#/accountindex/balance",
-            )
+        poll_deadline = time.time() + 14.0
+        dialog_ok = False
+        while time.time() < poll_deadline:
+            # 7a. 优先精确检测 copy-key-modal（Key 已创建成功）
+            if SELECTOR_APIKEY_DIALOG.first_visible(page, timeout_ms=500) is not None:
+                dialog_ok = True
+                break
+            # 7b. 每次轮询顺带检测欠费提示（轮询时跳过整页文本扫描）
+            if _detect_insufficient_balance(page, timeout_ms=500,
+                                             include_body=False):
+                return make_failure(
+                    "insufficient_balance",
+                    "账户余额不足，请先充值后再创建 API Key",
+                    cdp_url=cdp_url,
+                    recharge_url="https://account.huaweicloud.com/usercenter/#/accountindex/balance",
+                )
+            time.sleep(0.5)
 
-        # 7b. 等待 Key 展示弹窗（Ti3 modal，等待其真实出现）
-        emit("apikey", "等待 API Key 展示弹窗...")
-        if SELECTOR_APIKEY_DIALOG.wait_first(page, timeout_ms=12_000) is None:
+        if not dialog_ok:
             return make_failure(
                 "dialog_timeout",
                 "等待 API Key 弹窗超时（可能创建失败）",
                 cdp_url=cdp_url,
             )
-        time.sleep(1.0)
+        time.sleep(0.6)
 
         # 7c. 提取 Key（三级策略）
         api_key = extract_api_key_from_dialog(page)

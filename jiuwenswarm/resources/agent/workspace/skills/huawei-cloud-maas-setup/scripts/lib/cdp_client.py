@@ -17,23 +17,62 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
+def _ensure_utf8_stdout() -> None:
+    """Windows/GBK 控制台下强制 stdout 使用 UTF-8，避免 ¥ 等字符打印报错。
+
+    GPT 时间线证据：auto_open_model 输出含 ¥（价格预览）时在 GBK 控制台触发
+    ``UnicodeEncodeError: 'gbk' codec can't encode character '\\xa5'``，
+    导致 JSON 结果写不出（stdout 为空）并让上层误判为失败。
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+# 模块加载即尝试切到 UTF-8，保证后续所有 print（stdout/stderr）不受 GBK 限制
+_ensure_utf8_stdout()
+
+
 def emit(step: str, message: str) -> None:
     """向 stderr 输出进度行，格式 ``[step] <message>``。
 
     Skill 编排层可通过 grep ``[step]`` 提取进度。
     """
-    print(f"[step] {step} {message}", file=sys.stderr, flush=True)
+    _ensure_utf8_stdout()
+    try:
+        print(f"[step] {step} {message}", file=sys.stderr, flush=True)
+    except UnicodeEncodeError:
+        print(f"[step] {step} {message}".encode("utf-8", "replace").decode("utf-8"),
+              file=sys.stderr, flush=True)
 
 
 def emit_progress(current: int, total: int, message: str) -> None:
     """输出带百分比的进度行，便于 Skill 在终端流中向用户展示。"""
+    _ensure_utf8_stdout()
     pct = int(round(current / max(total, 1) * 100))
-    print(f"[step] {current}/{total} ({pct}%) {message}", file=sys.stderr, flush=True)
+    line = f"[step] {current}/{total} ({pct}%) {message}"
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode("utf-8", "replace").decode("utf-8"),
+              file=sys.stderr, flush=True)
 
 
 def output_json(payload: dict[str, Any]) -> None:
-    """向 stdout 输出最终 JSON 结果。"""
-    print(json.dumps(payload, ensure_ascii=False))
+    """向 stdout 输出最终 JSON 结果（强制 UTF-8 写入）。"""
+    _ensure_utf8_stdout()
+    data = json.dumps(payload, ensure_ascii=False)
+    try:
+        sys.stdout.buffer.write((data + "\n").encode("utf-8"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        # 极端兜底：直接 print ASCII JSON，保证 stdout 始终有可解析内容
+        print(json.dumps(payload, ensure_ascii=True), flush=True)
 
 
 # ---------------------------------------------------------------------------

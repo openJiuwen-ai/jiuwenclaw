@@ -2124,6 +2124,8 @@ overflow: hidden;
 .model-select__menu {
   min-width: 220px;
   max-width: 320px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .model-select__section-header {
