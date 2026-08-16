@@ -44,6 +44,19 @@ def test_read_default_headers_falls_back_to_petal_json() -> None:
         reset_task_env_overlay(token)
 
 
+def test_read_default_headers_does_not_reuse_petal_auth_for_custom_openai() -> None:
+    token = bind_task_env_overlay(
+        {
+            "API_KEY": "sk-custom-openai",
+            "PETAL_SEARCH_HEADERS": '{"Authorization":"Basic petal"}',
+        }
+    )
+    try:
+        assert read_default_headers() is None
+    finally:
+        reset_task_env_overlay(token)
+
+
 def test_read_default_headers_ignores_non_json_petal_key() -> None:
     token = bind_task_env_overlay({"PETAL_API_KEY": "sk-not-json"})
     try:
