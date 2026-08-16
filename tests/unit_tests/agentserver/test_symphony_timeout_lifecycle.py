@@ -160,7 +160,7 @@ async def test_outer_symphony_timeout_terminates_without_retry(
         orchestration_rail._model_tool_name(tool)
         for tool in same_invoke_model_ctx.inputs.tools
     ] == ["other_tool"]
-    assert "## Symphony Orchestration" not in agent.system_prompt_builder.build()
+    assert "## Skill Orchestration Contract" not in agent.system_prompt_builder.build()
 
     new_invoke_model_ctx = AgentCallbackContext(
         agent=agent,
@@ -177,7 +177,7 @@ async def test_outer_symphony_timeout_terminates_without_retry(
         orchestration_rail._model_tool_name(tool)
         for tool in new_invoke_model_ctx.inputs.tools
     ] == ["symphony_compose_graph", "symphony_refresh_graph"]
-    assert "## Symphony Orchestration" in agent.system_prompt_builder.build()
+    assert "## Skill Orchestration Contract" in agent.system_prompt_builder.build()
 
     exceptions = {
         id(ctx.exception): ctx.exception
