@@ -328,8 +328,20 @@ class SymphonyGraphBuilder:
             llm_config=llm_config,
             runtime_config=runtime_config,
         )
+
+        def record_fingerprint_progress(event: dict[str, Any]) -> None:
+            if event.get("event") != "fingerprint.extract.progress":
+                return
+            _record_build_log(
+                build_log,
+                "fingerprint.extract.start",
+                current=event.get("current"),
+                total=event.get("total"),
+            )
+
         fingerprint_artifact = await fingerprint_service.build(
             force=force,
+            progress_callback=record_fingerprint_progress,
         )
         fingerprint_failure_count = sum(
             len(item.failures) for item in fingerprint_artifact.fingerprints

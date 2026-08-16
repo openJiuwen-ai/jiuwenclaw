@@ -132,6 +132,18 @@ check_gateway_up_dependency() {
         warning "WEB_PORT not set, using default: 19000"
     fi
 
+    # AgentOS IAM：空则默认 http://MASTER_NODE_IP:8090（与 registry/frontend 同 host 约定）。
+    # 外置 / K8s Service 等场景请在 .env.custom 写完整 URL 覆盖。
+    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]:-}" ]; then
+        DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]="http://${DEPLOY_VARS["MASTER_NODE_IP"]}:8090"
+        info "AGENTOS_AUTH_SERVICE_URL not set, using MASTER_NODE_IP: ${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]}"
+    fi
+
+    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]:-}" ]; then
+        DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]="10"
+        warning "AGENTOS_AUTH_TIMEOUT not set, using default: 10"
+    fi
+
     if [ -z "${DEPLOY_VARS["FUNCTION_ID"]:-}" ]; then
         error "FUNCTION_ID is not set. Please deploy jiuwenswarm first or set FUNCTION_ID in .env.custom."
     fi

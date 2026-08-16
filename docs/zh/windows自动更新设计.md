@@ -155,3 +155,9 @@ pip 安装模式额外支持 `pypi_mirror` 字段。
 - 所有外部路径在 helper 脚本中均使用 `shlex.quote` 转义，防止 release 接口返回恶意资源名时发生 shell 注入
 - helper 脚本写入用户工作区下的 `.updates` 目录，写入前检查写权限
 - macOS helper 将完整执行日志写入日志目录的 `update_helper.log`
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

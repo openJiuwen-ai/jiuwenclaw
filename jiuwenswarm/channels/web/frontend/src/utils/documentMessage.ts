@@ -5,11 +5,15 @@ export interface UploadDocumentHint {
   filename: string;
   path?: string;
   /**
-   * Source file when `path` points at a generated sidecar (e.g. the .txt
-   * extracted from a PDF). Listed alongside so the model can still reach the
-   * binary for page-level tools such as read_pdf.
+   * Preferred absolute path for `@path` refs. When set and different from
+   * `path`, this wins (legacy sidecar cases); otherwise equals `path`.
    */
   originalPath?: string;
+}
+
+/** Quote `@path` when the path contains whitespace. */
+export function formatAtPath(path: string): string {
+  return /\s/.test(path) ? `@"${path}"` : `@${path}`;
 }
 
 /** Strip agent document-hint blocks from user-visible bubble text. */
@@ -17,35 +21,45 @@ export function stripUploadDocumentBlocks(content: string): string {
   if (!content || !content.includes('【上传文档')) {
     return content;
   }
+  // Document hints are always appended after the user query — drop from the
+  // marker through the end so titles / bubbles only keep the query text.
   return content
-    // New compact form: 【上传文档】 plus following "- name: path" lines.
-    .replace(/(?:^|\n+)【上传文档】(?:\n-[^\n]*)*/g, '')
-    // Legacy per-file blocks: 【上传文档: name】 / 路径 / 说明
-    .replace(/(?:^|\n+)【上传文档[:：][^\n]*(?:\n(?!【)[^\n]*)*/g, '')
+    .replace(/【上传文档】[\s\S]*$/u, '')
+    .replace(/【上传文档[:：][\s\S]*$/u, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/** Session / header title: strip document hints and collapse whitespace. */
+export function toDisplaySessionTitle(title: string): string {
+  return stripUploadDocumentBlocks(title).replace(/\s+/g, ' ').trim();
 }
 
 /**
  * Append the agent-facing document hint block to `text`.
  *
+ * Format:
+ *   【上传文档】
+ *   @/abs/path
+ *
  * Any block already present is stripped first, so calling this again with
- * freshly persisted records replaces filename-only lines with real paths.
- * Documents without a path still get listed — the agent at least learns the
- * file exists and can ask for it.
+ * freshly persisted records replaces incomplete lines with real `@path` refs.
+ * Entries without a path are skipped.
  */
 export function withUploadDocumentBlock(text: string, docs: UploadDocumentHint[]): string {
   const base = stripUploadDocumentBlocks(text);
   if (!docs.length) {
     return base;
   }
-  const lines = docs.map((doc) => {
-    if (!doc.path) return `- ${doc.filename}`;
-    if (doc.originalPath && doc.originalPath !== doc.path) {
-      return `- ${doc.filename}: ${doc.path} (original file: ${doc.originalPath})`;
-    }
-    return `- ${doc.filename}: ${doc.path}`;
-  });
+  const lines = docs
+    .map((doc) => {
+      const path = (doc.originalPath || doc.path || '').trim();
+      return path ? formatAtPath(path) : '';
+    })
+    .filter(Boolean);
+  if (!lines.length) {
+    return base;
+  }
   return [base, UPLOAD_DOCUMENT_BLOCK_HEADER, ...lines].filter(Boolean).join('\n');
 }
 
@@ -64,9 +78,10 @@ export function toUploadDocumentHints(mediaItems: unknown): UploadDocumentHint[]
     const record = item as Record<string, unknown>;
     if (record.type !== 'document') continue;
     const path = readString(record.path);
+    const originalPath = readString(record.original_path) || path;
     const filename = readString(record.filename) || (path ? path.split(/[\\/]/).pop() : undefined);
     if (!filename) continue;
-    hints.push({ filename, path, originalPath: readString(record.original_path) });
+    hints.push({ filename, path, originalPath });
   }
   return hints;
 }

@@ -339,10 +339,17 @@ class WorkflowRunState(BaseModel):
         A node left ``waiting_for_human`` at teardown (the run was torn down
         while a human_session turn was pending) is also closed — otherwise the
         frontend would spin forever on a reply that will never arrive.
+
+        Counters are derived, so after stamping we refresh the phase card —
+        otherwise the teardown / phase-seal path (which does not go through
+        :meth:`_bump_completion`) would leave ``completed_agent_count`` stale,
+        diverging from the run-level totals that :meth:`_refresh_run_agent_counts`
+        recomputes from the same agent list.
         """
         for agent in phase.agents:
             if agent.status in ("running", "waiting_for_human"):
                 self._stamp_agent_terminal(agent, terminal_status)
+        self._refresh_phase_counts(phase)
 
     def _finalize_running_phases(self, terminal_status: str) -> None:
         """Mark all running phases and their running agents as terminal.
@@ -371,6 +378,15 @@ class WorkflowRunState(BaseModel):
         if error is not None:
             self.error = error
         self._finalize_running_phases(status)
+        # Re-aggregate parent cards after all leaf/child phases were finalized —
+        # _finalize_running_agents refreshed each card, but parent totals are a
+        # derived sum over children and must be recomputed here so the terminal
+        # delta's parent ``done/total`` matches its children.
+        for phase in self.phases:
+            if phase.parent_phase is not None and phase.phase_type == "child":
+                parent = self._find_parent_author_phase(name=phase.parent_phase)
+                if parent is not None:
+                    self._refresh_parent_counts(parent)
         self._refresh_run_agent_counts()
         return self._build_terminal_delta()
 
@@ -599,12 +615,22 @@ class WorkflowRunState(BaseModel):
     # -- _finalize_agent helpers ----------------------------------------------
 
     def _leaf_agent_counts(self) -> tuple[int, int]:
-        """Run-level totals from real agents only — not parent aggregate fields."""
+        """Run-level totals from real agents only — not parent aggregate fields.
+
+        ``completed_agent_count`` counts **all terminal agents**
+        (``completed`` / ``failed`` / ``stopped``), not just ``completed`` —
+        aligned with phase-level :meth:`_refresh_phase_counts` and the
+        phase-seal check :meth:`_all_agents_terminal`, so the top-level
+        ``done/total`` equals the sum of every phase card's ``done/total``.
+        """
         total = 0
         completed = 0
         for phase in self.phases:
             total += len(phase.agents)
-            completed += sum(1 for a in phase.agents if a.status == "completed")
+            completed += sum(
+                1 for a in phase.agents
+                if self._is_terminal_status(a.status)
+            )
         return completed, total
 
     @staticmethod
@@ -612,6 +638,23 @@ class WorkflowRunState(BaseModel):
         """True when every agent on the phase has reached a terminal status."""
         return bool(phase.agents) and all(
             WorkflowRunState._is_terminal_status(a.status) for a in phase.agents
+        )
+
+    def _refresh_phase_counts(self, phase: WorkflowPhaseState) -> None:
+        """Recompute a phase card's counters from its agent list (derived).
+
+        ``agent_count`` is the total number of agent instances on the card;
+        ``completed_agent_count`` is the number that reached a **terminal**
+        status (``completed`` / ``failed`` / ``stopped``) — same terminal set
+        as :meth:`_all_agents_terminal` so the card's ``done/total`` matches
+        its seal check. Derived, not incrementally maintained, so the teardown
+        path (:meth:`_finalize_running_agents` stamps terminal status without
+        bumping a counter) is reflected here automatically.
+        """
+        phase.agent_count = len(phase.agents)
+        phase.completed_agent_count = sum(
+            1 for a in phase.agents
+            if WorkflowRunState._is_terminal_status(a.status)
         )
 
     def _refresh_run_agent_counts(self) -> None:
@@ -628,10 +671,7 @@ class WorkflowRunState(BaseModel):
         not accumulated, so concurrent out-of-order agent events can't corrupt
         the parent's totals the way scattered ``+= 1`` did.
         """
-        parent.agent_count = len(parent.agents)
-        parent.completed_agent_count = sum(
-            1 for a in parent.agents if a.status == "completed"
-        )
+        self._refresh_phase_counts(parent)
         for child in self.phases:
             if child.phase_type == "child" and child.parent_phase == parent.name:
                 parent.agent_count += child.agent_count or 0
@@ -652,12 +692,11 @@ class WorkflowRunState(BaseModel):
                 agent.error = error
                 updated = True
             if updated:
-                if phase.completed_agent_count < phase.agent_count:
-                    phase.completed_agent_count += 1
                 if progress.tokens is not None:
                     agent.token_count = progress.tokens
                 if progress.budget is not None:
                     self.budget = progress.budget
+                self._refresh_phase_counts(phase)
                 self._refresh_run_agent_counts()
                 self.token_count = sum(a.token_count or 0 for ph in self.phases for a in ph.agents)
                 return self._build_phase_delta(phase)
@@ -665,14 +704,14 @@ class WorkflowRunState(BaseModel):
         if status == "failed" and agent.status == "failed":
             if error is not None and not agent.error:
                 agent.error = error
+                self._refresh_phase_counts(phase)
+                self._refresh_run_agent_counts()
                 return self._build_phase_delta(phase)
         return None
 
     def _bump_completion(self, phase: WorkflowPhaseState, progress: WorkflowProgress,
                          agent: WorkflowAgentState) -> None:
-        """Increment phase counters, write tokens / budget, refresh run totals."""
-        if agent.status == "completed":
-            phase.completed_agent_count += 1
+        """Refresh phase counters, write tokens / budget, refresh run totals."""
         if progress.tokens is not None:
             agent.token_count = progress.tokens
         if progress.budget is not None:
@@ -681,6 +720,7 @@ class WorkflowRunState(BaseModel):
         if progress.tokens is not None and progress.tokens > 0:
             logger.debug("[WF_DBG tok] agent=%s tokens=%s run_sum=%s",
                          agent.name, progress.tokens, self.token_count)
+        self._refresh_phase_counts(phase)
         if phase.phase_type == "child" and phase.parent_phase:
             parent = self._find_parent_author_phase(name=phase.parent_phase)
             if parent is not None:
@@ -778,6 +818,10 @@ class WorkflowRunState(BaseModel):
             if parent is not None and parent.status == "running":
                 parent.status = "completed"
                 self._finalize_running_agents(parent, "completed")
+                # Parent totals are a derived sum over its child cards — refresh
+                # after sealing so its completed_agent_count reflects the just-sealed
+                # children, not only its own (possibly empty) direct-agent list.
+                self._refresh_parent_counts(parent)
                 logger.info("[WF_DBG child] sealed parent phase=%s (all sibling child phases done)", parent.name)
                 return parent
         return None
@@ -857,7 +901,7 @@ class WorkflowRunState(BaseModel):
             if self._is_terminal_status(child_phase.status):
                 child_phase.status = "running"
                 logger.info("[WF_DBG child] reactivated child phase=%s (new agent arrived)", child_phase.name)
-            child_phase.agent_count += 1
+            self._refresh_phase_counts(child_phase)
             parent: Optional[WorkflowPhaseState] = None
             if child_phase.parent_phase:
                 parent = self._find_parent_author_phase(name=child_phase.parent_phase)
@@ -886,7 +930,9 @@ class WorkflowRunState(BaseModel):
 
         target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
         target_phase.agents.append(agent_state)
-        target_phase.agent_count += 1
+        self._refresh_phase_counts(target_phase)
+        if sealed_phase is not None:
+            self._refresh_phase_counts(sealed_phase)
         self._refresh_run_agent_counts()
         logger.info("[WF_DBG WorkflowRunState] agent %s -> running, phase=%s", label, target_phase.name)
         if sealed_phase is not None:

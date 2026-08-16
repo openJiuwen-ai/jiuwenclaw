@@ -8,6 +8,11 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     normalize_work_mode,
 )
+from jiuwenswarm.common.mode_matrix import (
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    is_team_mode,
+)
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
 
 
@@ -75,6 +80,8 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent.plan",  # legacy（归一到 agent）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
+        TEAM_PLAN_NORMAL_MODE,
+        TEAM_PLAN_CODE_MODE,
         "code.team",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
@@ -95,6 +102,7 @@ _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
     "agent.plan": "agent",
     "agent.fast": "agent",
+    "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
 
 
@@ -141,8 +149,6 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
         "max_timeout_seconds": CRON_MAX_TIMEOUT_SECONDS,
     }
 
-
-_TEAM_CRON_MODES: frozenset[str] = frozenset({"team", "team.plan", "code.team"})
 
 CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
 CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
@@ -205,8 +211,7 @@ def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
 
 def is_team_cron_mode(mode: str | None) -> bool:
     """Return True when a cron job should run via Team + SwarmFlow streaming."""
-    value = str(mode or "").strip().lower()
-    return value in _TEAM_CRON_MODES
+    return is_team_mode(mode)
 
 
 @dataclass(frozen=True)

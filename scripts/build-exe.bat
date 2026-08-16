@@ -7,8 +7,8 @@ cd /d "%~dp0\.."
 echo === JiuwenSwarm 打包 exe ===
 echo.
 
-echo [1/3] 安装 Python 依赖...
-call uv sync --extra dev
+echo [1/3] Installing Python deps (uv sync --extra dev --extra codex)...
+call uv sync --extra dev --extra codex
 if errorlevel 1 exit /b 1
 
 echo.
@@ -23,6 +23,11 @@ cd ..\..
 echo.
 echo [3/3] 执行 PyInstaller 打包...
 call uv run pyinstaller scripts\jiuwenswarm.spec
+if errorlevel 1 exit /b 1
+
+echo.
+echo Verifying frozen A2UI v0.8 bundle...
+start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
 if errorlevel 1 exit /b 1
 
 echo.

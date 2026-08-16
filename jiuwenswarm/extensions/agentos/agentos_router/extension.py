@@ -72,6 +72,18 @@ class AgentOSRouter(AgentServerClientExtension, ThirdAgentExtension):
     def get_third_agent(self) -> ThirdAgent:
         return self._third_agent
 
+    def set_key_issuer(
+        self,
+        key_issuer,
+        *,
+        ephemeral_key_ttl_sec: float = 300.0,
+    ) -> None:
+        """Inject AgentOS SSH key issuer (or clear)."""
+        self._router_client.set_key_issuer(
+            key_issuer,
+            ephemeral_key_ttl_sec=ephemeral_key_ttl_sec,
+        )
+
     async def shutdown(self) -> None:
         if self._closed:
             return

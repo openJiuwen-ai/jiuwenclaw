@@ -8,6 +8,7 @@ import {
   useTodoStore,
 } from '../../stores';
 import type { AgentMode, Session } from '../../types';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 
 export const NEW_CONVERSATION_ID = 'new';
 
@@ -20,7 +21,7 @@ interface ConversationRuntimeSettings {
 const locallyCreatedConversations = new Map<string, Session>();
 
 export function createConversationTitle(content: string): string {
-  return content.replace(/\{\{skill:[^}]+\}\}/g, '').trim().replace(/\n/g, ' ');
+  return toDisplaySessionTitle(content.replace(/\{\{skill:[^}]+\}\}/g, ''));
 }
 
 function applyRuntimeSettings(

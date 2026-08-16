@@ -86,31 +86,6 @@ In the web frontend, the **Agent** page is a **workspace file browser** for view
 
 ---
 
-## Web frontend Agent page
-
-In the web frontend, the **Agent** page is a **workspace file browser** for viewing the agent's workspace files and memory content.
-
-![Agent Management page](../assets/images/current-ui-en/03-Agent-Management.png)
-
-### Page features
-
-| Feature | Description |
-|---------|-------------|
-| **Workspace browsing** | Browse the agent workspace directory structure, view files and directories |
-| **File preview** | Preview the content of previewable files in the workspace |
-| **Refresh** | Refresh the workspace file list |
-
-### How to use
-
-1. Click **Agent** in the left navigation bar
-2. The left side of the page shows the workspace directory structure (e.g. `workspace/`)
-3. Click a directory to expand and view the file list
-4. Click a previewable file to display its content preview on the right
-
-> **Tip:** The Agent page is mainly for viewing workspace files. To modify configuration, go to **More** → **Configuration**.
-
----
-
 ## Structure
 
 ### What an agent is made of
@@ -244,8 +219,6 @@ C:\Users\<username>\.jiuwenswarm\
 │       ├── IDENTITY_EN.md           # Identity (English)
 │       ├── SOUL_ZH.md               # Values and persona (Chinese)
 │       ├── SOUL_EN.md               # Values and persona (English)
-│       ├── HEARTBEAT_ZH.md          # Heartbeat tasks (Chinese)
-│       ├── HEARTBEAT_EN.md          # Heartbeat tasks (English)
 │       ├── USER.md                  # User profile and preferences
 │       ├── memory/                  # Agent memory store
 │       ├── todo/                    # Agent todo items storage
@@ -269,7 +242,6 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/AGENT_ZH.md` | Bootstrap config (Chinese) | Yes, when needed | Affects startup behavior |
 | `agent/workspace/IDENTITY_ZH.md` | Identity (Chinese) | Customizable | Affects how the agent sees its role |
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
-| `agent/workspace/HEARTBEAT_ZH.md` | Heartbeat tasks (Chinese) | Adjustable | Affects scheduled / proactive behavior |
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
 | `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
@@ -292,8 +264,6 @@ C:\Users\Administrator\.jiuwenswarm\
 │       ├── IDENTITY_EN.md
 │       ├── SOUL_ZH.md
 │       ├── SOUL_EN.md
-│       ├── HEARTBEAT_ZH.md
-│       ├── HEARTBEAT_EN.md
 │       ├── USER.md
 │       ├── memory\
 │       ├── todo\                    # Agent todo items
@@ -341,7 +311,6 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 |-----|---------|------------|
 | `preferred_language` | Preferred language | Read-only OK |
 | `logging.level` | Log level | Read-only OK |
-| `heartbeat.every` | Heartbeat interval | Read-only OK |
 | `channels.*.enabled` | Channel on/off | Read-only OK |
 
 **Category 2 — change with care**
@@ -350,7 +319,6 @@ C:\Users\<username>\.jiuwenswarm\config\config.yaml
 |-----|---------|--------|------------|
 | `models.defaults[0].model_client_config.model_name` | Default model | Quality and speed | Confirm the model works first |
 | `models.defaults[0].model_config_obj.temperature` | Temperature | Creativity vs. stability | Often 0.7–1.0 |
-| `heartbeat.active_hours` | Active window | When proactive runs fire | Match your schedule |
 | `permissions.tools.*` | Tool permissions | Safety | Understand risk before changing |
 
 **Category 3 — avoid unless you know why**

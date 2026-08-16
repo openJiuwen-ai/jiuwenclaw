@@ -2,6 +2,9 @@ import asyncio
 
 import pytest
 
+from jiuwenswarm.gateway.channel_manager.tui import (
+    harmonyos_dev as harmonyos_dev_module,
+)
 from jiuwenswarm.gateway.channel_manager.tui import tui_connect as tui_connect_module
 from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
     CliHandlersBindParams,
@@ -47,6 +50,11 @@ class FakeMessageHandler:
         self.cancelled = []
         self.scheduled = []
         self.reconnected = []
+        self.disconnected_websockets = []
+
+    async def unregister_ws_subscriptions(self, channel_id, ws_id):
+        self.disconnected_websockets.append((channel_id, ws_id))
+        return 1
 
     async def cancel_agent_sessions_on_disconnect(
         self, session_keys, *, stale_request_keys=None, user_id=None
@@ -106,6 +114,9 @@ async def test_register_cli_handlers_registers_local_methods():
     assert "chat.resume" in cli_handlers
     assert "history.get" in cli_handlers
     assert "tui.disconnect" in cli_handlers
+    assert "harmonyos.dev_init" in cli_handlers
+    assert "harmonyos.dev_init_cancel" in cli_handlers
+    assert "harmonyos.project_init" in cli_handlers
 
     await cli_handlers["chat.send"](object(), "req-1", {}, "sess-1")
 
@@ -118,6 +129,163 @@ async def test_register_cli_handlers_registers_local_methods():
             "code": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_harmonyos_dev_init_cancel_waits_for_background_cleanup(monkeypatch):
+    server = FakeGatewayServer()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    received_params = []
+
+    async def fake_run_harmonyos_dev_init(params):
+        received_params.append(params)
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        harmonyos_dev_module,
+        "run_harmonyos_dev_init",
+        fake_run_harmonyos_dev_init,
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=None,
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+    ws = type("FakeWs", (), {})()
+    handlers = server.local_handlers["/tui"]
+
+    await handlers["harmonyos.dev_init"](
+        ws,
+        "req-init",
+        {"operationId": "dev-init-op-1", "skipDevecocliUpdate": True},
+        "sess-1",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert received_params == [{"skipDevecocliUpdate": True}]
+    assert all(response["id"] != "req-init" for response in server.responses)
+
+    await asyncio.wait_for(
+        handlers["harmonyos.dev_init_cancel"](
+            ws,
+            "req-cancel",
+            {"operationId": "dev-init-op-1"},
+            "sess-1",
+        ),
+        timeout=1,
+    )
+
+    assert cancelled.is_set()
+    assert server.responses[-2] == {
+        "id": "req-init",
+        "ok": False,
+        "payload": {},
+        "error": "HarmonyOS Dev Init operation was cancelled",
+        "code": "CANCELLED",
+    }
+    assert server.responses[-1] == {
+        "id": "req-cancel",
+        "ok": True,
+        "payload": {
+            "operationId": "dev-init-op-1",
+            "cancelRequested": True,
+            "cancelled": True,
+        },
+        "error": None,
+        "code": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_harmonyos_dev_init_is_cancelled_when_websocket_disconnects(monkeypatch):
+    server = FakeGatewayServer()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_run_harmonyos_dev_init(_params):
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        harmonyos_dev_module,
+        "run_harmonyos_dev_init",
+        fake_run_harmonyos_dev_init,
+    )
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui"))
+    binding.install(server)
+    ws = type("FakeWs", (), {})()
+
+    await server.local_handlers["/tui"]["harmonyos.dev_init"](
+        ws,
+        "req-disconnect-init",
+        {"operationId": "dev-init-disconnect-op"},
+        "sess-disconnect",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await asyncio.wait_for(binding.disconnect_handler(ws, [], []), timeout=1)
+
+    assert cancelled.is_set()
+    assert server.responses[-1]["id"] == "req-disconnect-init"
+    assert server.responses[-1]["code"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_harmonyos_dev_init_rejects_untrackable_websocket(monkeypatch):
+    server = FakeGatewayServer()
+    called = False
+
+    async def fake_run_harmonyos_dev_init(_params):
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        harmonyos_dev_module,
+        "run_harmonyos_dev_init",
+        fake_run_harmonyos_dev_init,
+    )
+    register_cli_handlers(
+        CliHandlersBindParams(
+            channel=server,
+            agent_client=None,
+            message_handler=None,
+            on_config_saved=None,
+            path="/tui",
+        )
+    )
+
+    class SlottedWs:
+        __slots__ = ()
+
+    await server.local_handlers["/tui"]["harmonyos.dev_init"](
+        SlottedWs(),
+        "req-untrackable",
+        {"operationId": "dev-init-untrackable-op"},
+        "sess-untrackable",
+    )
+
+    assert called is False
+    assert server.responses[-1] == {
+        "id": "req-untrackable",
+        "ok": False,
+        "payload": {},
+        "error": "websocket does not support HarmonyOS Dev Init task tracking",
+        "code": "INTERNAL_ERROR",
+    }
 
 
 @pytest.mark.asyncio
@@ -223,6 +391,17 @@ async def test_tui_route_disconnect_schedules_cancel_for_transport_close():
 
     assert handler.scheduled == [([("tui", "sess-drop")], [("tui", "req-drop")])]
     assert handler.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_tui_route_disconnect_unregisters_physical_subscriptions():
+    handler = FakeMessageHandler()
+    binding = build_cli_route_binding(CliRouteBindParams(path="/tui", message_handler=handler))
+    ws = type("FakeWs", (), {"_jiuwen_ws_id": "tui-ws-dead"})()
+
+    await binding.disconnect_handler(ws, [("tui", "sess-drop")], [])
+
+    assert handler.disconnected_websockets == [("tui", "tui-ws-dead")]
 
 
 @pytest.mark.asyncio

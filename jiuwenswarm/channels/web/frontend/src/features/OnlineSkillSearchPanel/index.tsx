@@ -300,9 +300,10 @@ export function OnlineSkillSearchPanel({
   const visibleItems = items.filter(item => enabledSources.has(item.source));
 
   return (
-    <div className='flex h-full min-h-0 flex-col'>
+    <div data-testid='online-skill-search-panel' className='flex h-full min-h-0 flex-col'>
       {message?.type === 'success' ? (
         <div
+          data-testid='online-skill-search-panel-message' data-variant='success'
           className='fixed right-4 top-4 z-[9999] flex h-[40px] w-[564px] items-center gap-3 rounded-[4px] px-4 text-sm text-text shadow-lg'
           style={{ backgroundColor: 'var(--color-feedback-success-toast)' }}
         >
@@ -315,13 +316,13 @@ export function OnlineSkillSearchPanel({
         </div>
       ) : null}
       {message?.type === 'error' ? (
-        <div className='mb-3 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger'>{message.text}</div>
+        <div data-testid='online-skill-search-panel-message' data-variant='error' className='mb-3 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger'>{message.text}</div>
       ) : null}
       {partial ? (
-        <div className='mb-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn'>{t('skills.onlineSearch.partialFailure')}</div>
+        <div data-testid='online-skill-search-panel-message' data-variant='partial' className='mb-3 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn'>{t('skills.onlineSearch.partialFailure')}</div>
       ) : null}
       {sourceStatuses.length > 0 ? (
-        <div className='mb-3 flex flex-wrap items-center gap-2 text-xs'>
+        <div data-testid='online-skill-search-panel-source-filter' className='mb-3 flex flex-wrap items-center gap-2 text-xs'>
           {sourceStatuses.map(sourceStatus => {
             const sourceLabel = sourceStatus.source === 'skillnet' ? 'SkillNet' : 'ClawHub';
             const statusLabel = t(`skills.onlineSearch.sourceStatus.${sourceStatus.status}`, { count: sourceStatus.count });
@@ -339,6 +340,7 @@ export function OnlineSkillSearchPanel({
               <button
                 key={sourceStatus.source}
                 type='button'
+                data-testid={`online-skill-search-panel-source-filter-button-${sourceStatus.source}`}
                 aria-pressed={selected}
                 title={
                   isLastSelected
@@ -355,6 +357,7 @@ export function OnlineSkillSearchPanel({
             );
           })}
           <span
+            data-testid='online-skill-search-panel-source-filter-help'
             className='inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[10px] font-normal text-text-muted cursor-help'
             title={t('skills.onlineSearch.sourceFilterHelp') ?? undefined}
             aria-label={t('skills.onlineSearch.sourceFilterHelp')}
@@ -364,15 +367,15 @@ export function OnlineSkillSearchPanel({
         </div>
       ) : null}
 
-      <div className='min-h-0 flex-1 overflow-auto'>
-        {loadState === 'loading' ? <div className='flex h-full items-center justify-center text-text-muted'>{t('common.loading')}</div> : null}
-        {loadState === 'error' && !message ? <div className='text-sm text-text-muted'>{t('skills.onlineSearch.searchFailed')}</div> : null}
-        {loadState === 'success' && items.length === 0 ? <div className='text-sm text-text-muted'>{t('skills.onlineSearch.noResults')}</div> : null}
+      <div data-testid='online-skill-search-panel-results' className='min-h-0 flex-1 overflow-auto'>
+        {loadState === 'loading' ? <div data-testid='online-skill-search-panel-loading' className='flex h-full items-center justify-center text-text-muted'>{t('common.loading')}</div> : null}
+        {loadState === 'error' && !message ? <div data-testid='online-skill-search-panel-error-text' className='text-sm text-text-muted'>{t('skills.onlineSearch.searchFailed')}</div> : null}
+        {loadState === 'success' && items.length === 0 ? <div data-testid='online-skill-search-panel-no-results' className='text-sm text-text-muted'>{t('skills.onlineSearch.noResults')}</div> : null}
         {loadState === 'success' && items.length > 0 && visibleItems.length === 0 ? (
-          <div className='text-sm text-text-muted'>{t('skills.onlineSearch.noFilteredResults')}</div>
+          <div data-testid='online-skill-search-panel-no-filtered-results' className='text-sm text-text-muted'>{t('skills.onlineSearch.noFilteredResults')}</div>
         ) : null}
         {loadState === 'success' && visibleItems.length > 0 ? (
-          <div className={`mt-4 min-h-0 flex-1 overflow-y-auto ${viewMode === 'grid' ? 'flex flex-wrap content-start gap-4' : 'space-y-3'}`}>
+          <div data-testid='online-skill-search-panel-list' data-variant={viewMode} className={`mt-4 min-h-0 flex-1 overflow-y-auto ${viewMode === 'grid' ? 'flex flex-wrap content-start gap-4' : 'space-y-3'}`}>
             {visibleItems.map(item => {
               const key = onlineItemKey(item);
               const installed = isInstalled(item);
@@ -388,7 +391,7 @@ export function OnlineSkillSearchPanel({
                   ? t('skills.skillNet.installFromResult')
                   : t('skills.actions.install');
               const installControl = installed ? (
-                <span className='flex h-[28px] items-center whitespace-nowrap rounded-2xl border border-[color:var(--color-border-success)] bg-ok-subtle px-4 text-sm text-ok'>
+                <span data-testid='online-skill-search-panel-item-install-status' data-variant='installed' className='flex h-[28px] items-center whitespace-nowrap rounded-2xl border border-[color:var(--color-border-success)] bg-ok-subtle px-4 text-sm text-ok'>
                   {t('skills.status.installed')}
                 </span>
               ) : (
@@ -396,6 +399,7 @@ export function OnlineSkillSearchPanel({
                   type='button'
                   onClick={() => void handleInstall(item)}
                   disabled={Boolean(installingKey)}
+                  data-testid='online-skill-search-panel-item-install-button'
                   className={`h-[28px] min-w-[76px] whitespace-nowrap rounded-[24px] border border-text px-3 text-sm text-text hover:bg-secondary/50 ${
                     installingKey ? 'cursor-not-allowed text-text-muted' : ''
                   }`}
@@ -406,36 +410,37 @@ export function OnlineSkillSearchPanel({
               return (
                 <div
                   key={key}
+                  data-testid='online-skill-search-panel-item' data-variant={viewMode}
                   className={`rounded-lg border border-border bg-panel p-4 ${viewMode === 'grid' ? 'flex flex-col' : 'flex items-start justify-between gap-4'}`}
                   style={viewMode === 'grid' ? { width: '496px', height: isExpanded ? 'auto' : '168px', flexShrink: 0 } : undefined}
                 >
                   {viewMode === 'list' ? (
                     <>
                       <div className='flex min-w-0 flex-1 items-center gap-3'>
-                        <div className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg ${avatar.color} font-semibold text-text-inverse`}>
+                        <div data-testid='online-skill-search-panel-item-avatar' className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg ${avatar.color} font-semibold text-text-inverse`}>
                           {avatar.firstChar}
                         </div>
                         <div className='min-w-0 flex-1'>
                           <div className='flex min-w-0 items-center gap-2'>
-                            <div className='min-w-0 truncate text-base font-semibold text-text-strong'>{item.name}</div>
-                            <span className='flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted'>
+                            <div data-testid='online-skill-search-panel-item-name' className='min-w-0 truncate text-base font-semibold text-text-strong'>{item.name}</div>
+                            <span data-testid='online-skill-search-panel-item-source-badge' data-variant={item.source} className='flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted'>
                               {isSkillNet ? 'SkillNet' : 'ClawHub'}
                             </span>
                           </div>
-                          <div className='mt-1 line-clamp-3 text-sm text-text-muted'>{item.description || t('skills.noDescription')}</div>
+                          <div data-testid='online-skill-search-panel-item-description' className='mt-1 line-clamp-3 text-sm text-text-muted'>{item.description || t('skills.noDescription')}</div>
                           {isSkillNet ? (
-                            <div className='mt-1 text-xs text-text-muted'>
+                            <div data-testid='online-skill-search-panel-item-meta' className='mt-1 text-xs text-text-muted'>
                               {t('skills.skillNet.meta', { author: item.author || 'unknown', stars: item.native_score || 0 })}
                             </div>
                           ) : null}
                           {isExpanded ? (
-                            <div className='mt-2 space-y-1 break-all text-xs text-text-muted'>
+                            <div data-testid='online-skill-search-panel-item-detail' data-variant='expanded' className='mt-2 space-y-1 break-all text-xs text-text-muted'>
                               <div>
                                 {t('skills.skillNet.category')}: {item.category || 'unknown'}
                               </div>
                               <div>
                                 {t('skills.skillNet.url')}:{' '}
-                                <a href={item.identifier} target='_blank' rel='noreferrer' className='text-accent hover:underline'>
+                                <a data-testid='online-skill-search-panel-item-url' href={item.identifier} target='_blank' rel='noreferrer' className='text-accent hover:underline'>
                                   {item.identifier}
                                 </a>
                               </div>
@@ -449,6 +454,7 @@ export function OnlineSkillSearchPanel({
                           <button
                             type='button'
                             onClick={() => setExpandedKey(current => (current === key ? null : key))}
+                            data-testid='online-skill-search-panel-item-toggle-detail'
                             className='whitespace-nowrap text-xs text-link hover:underline'
                           >
                             {isExpanded ? t('skills.skillNet.hideDetail') : t('skills.skillNet.showDetail')}
@@ -460,22 +466,23 @@ export function OnlineSkillSearchPanel({
                     <>
                       <div className='flex flex-shrink-0 items-start gap-3'>
                         <div
+                          data-testid='online-skill-search-panel-item-avatar'
                           className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg ${avatar.color} text-sm font-semibold text-text-inverse`}
                         >
                           {avatar.firstChar}
                         </div>
                         <div className='min-w-0 flex-1'>
                           <div className='flex min-w-0 items-center gap-2'>
-                            <div className='min-w-0 truncate text-sm font-semibold text-text-strong'>{item.name}</div>
-                            <span className='flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted'>
+                            <div data-testid='online-skill-search-panel-item-name' className='min-w-0 truncate text-sm font-semibold text-text-strong'>{item.name}</div>
+                            <span data-testid='online-skill-search-panel-item-source-badge' data-variant={item.source} className='flex-shrink-0 rounded-full border border-border bg-secondary px-2 py-0.5 text-xs font-normal text-text-muted'>
                               {isSkillNet ? 'SkillNet' : 'ClawHub'}
                             </span>
                           </div>
-                          <div className='mt-1 line-clamp-2 text-xs text-text-muted'>{item.description || t('skills.noDescription')}</div>
+                          <div data-testid='online-skill-search-panel-item-description' className='mt-1 line-clamp-2 text-xs text-text-muted'>{item.description || t('skills.noDescription')}</div>
                         </div>
                       </div>
                       <div className='mt-2 flex flex-shrink-0 flex-wrap gap-1.5 text-xs text-text-muted'>
-                        <span className='truncate rounded-full border border-border bg-secondary px-2 py-0.5'>
+                        <span data-testid='online-skill-search-panel-item-meta' className='truncate rounded-full border border-border bg-secondary px-2 py-0.5'>
                           {isSkillNet
                             ? t('skills.skillNet.meta', { author: item.author || 'unknown', stars: item.native_score || 0 })
                             : item.updated_at
@@ -484,13 +491,13 @@ export function OnlineSkillSearchPanel({
                         </span>
                       </div>
                       {isExpanded ? (
-                        <div className='mt-2 flex-shrink-0 space-y-1 break-all text-xs text-text-muted'>
+                        <div data-testid='online-skill-search-panel-item-detail' data-variant='expanded' className='mt-2 flex-shrink-0 space-y-1 break-all text-xs text-text-muted'>
                           <div className='truncate'>
                             {t('skills.skillNet.category')}: {item.category || 'unknown'}
                           </div>
                           <div className='truncate'>
                             {t('skills.skillNet.url')}:{' '}
-                            <a href={item.identifier} target='_blank' rel='noreferrer' className='text-accent hover:underline'>
+                            <a data-testid='online-skill-search-panel-item-url' href={item.identifier} target='_blank' rel='noreferrer' className='text-accent hover:underline'>
                               {item.identifier}
                             </a>
                           </div>
@@ -502,6 +509,7 @@ export function OnlineSkillSearchPanel({
                             <button
                               type='button'
                               onClick={() => setExpandedKey(current => (current === key ? null : key))}
+                              data-testid='online-skill-search-panel-item-toggle-detail'
                               className='whitespace-nowrap text-xs text-link hover:underline'
                             >
                               {isExpanded ? t('skills.skillNet.hideDetail') : t('skills.skillNet.showDetail')}

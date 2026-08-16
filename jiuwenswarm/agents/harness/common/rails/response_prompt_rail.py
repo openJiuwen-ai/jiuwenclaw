@@ -20,9 +20,6 @@ from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     is_a2ui_browser_workflow_request,
 )
-from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
-    is_a2ui_browser_workflow_request,
-)
 
 logger = logging.getLogger(__name__)
 
