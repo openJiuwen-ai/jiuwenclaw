@@ -38,6 +38,7 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.path_safety import (
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
     RouterState,
+    _format_outline_card_markdown,
     advance_stage,
     build_interrupt_prompt,
     collected_questions,
@@ -63,7 +64,6 @@ from jiuwenswarm.common.local_env_config import (
     build_effective_env_overlay,
     get_task_env_overlay,
 )
-from jiuwenswarm.common.schema.ask_user import parse_ask_user_response
 from jiuwenswarm.common.utils import (
     JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
     get_shared_agent_skills_dirs,
@@ -187,6 +187,10 @@ _OUTLINE_TITLE_CACHES: dict[
     tuple[str, str, str], dict[str, dict[str, str]]
 ] = {}
 _OUTLINE_TITLE_CACHES_GUARD = threading.Lock()
+_OUTLINE_JSON_CACHES: dict[
+    tuple[str, str, str], dict[str, dict[str, Any]]
+] = {}
+_OUTLINE_JSON_CACHES_GUARD = threading.Lock()
 
 
 class _ReportPublicationCollision(FileExistsError):
@@ -340,6 +344,60 @@ def _clear_outline_title_cache(
         cache.pop(conversation, None)
         if not cache:
             _OUTLINE_TITLE_CACHES.pop(key, None)
+
+
+def _get_cached_outline_json(
+    route: dict[str, object], conversation_id: object
+) -> dict[str, Any]:
+    conversation = str(conversation_id or "").strip()
+    if not conversation:
+        return {}
+    key = _outline_cache_key(route)
+    with _OUTLINE_JSON_CACHES_GUARD:
+        cache = _OUTLINE_JSON_CACHES.get(key)
+        return dict(cache.get(conversation, {})) if cache is not None else {}
+
+
+def _cache_outline_json(
+    route: dict[str, object],
+    conversation_id: object,
+    outline_json: dict[str, Any],
+) -> None:
+    conversation = str(conversation_id or "").strip()
+    if not conversation or not isinstance(outline_json, dict):
+        return
+    serialized = json.dumps(outline_json, ensure_ascii=False)
+    if len(serialized) > DEEPRESEARCH_OUTLINE_CACHE_TEXT_CHARS:
+        return
+    key = _outline_cache_key(route)
+    with _OUTLINE_JSON_CACHES_GUARD:
+        cache = _OUTLINE_JSON_CACHES.get(key)
+        if cache is None:
+            while len(_OUTLINE_JSON_CACHES) >= DEEPRESEARCH_OUTLINE_CACHE_TENANTS:
+                _OUTLINE_JSON_CACHES.pop(next(iter(_OUTLINE_JSON_CACHES)))
+            cache = {}
+            _OUTLINE_JSON_CACHES[key] = cache
+        if conversation in cache:
+            cache.pop(conversation)
+        while len(cache) >= DEEPRESEARCH_OUTLINE_CACHE_CONVERSATIONS:
+            cache.pop(next(iter(cache)))
+        cache[conversation] = dict(outline_json)
+
+
+def _clear_outline_json_cache(
+    route: dict[str, object], conversation_id: object
+) -> None:
+    conversation = str(conversation_id or "").strip()
+    if not conversation:
+        return
+    key = _outline_cache_key(route)
+    with _OUTLINE_JSON_CACHES_GUARD:
+        cache = _OUTLINE_JSON_CACHES.get(key)
+        if cache is None:
+            return
+        cache.pop(conversation, None)
+        if not cache:
+            _OUTLINE_JSON_CACHES.pop(key, None)
 
 
 def _map_provider_to_type(provider: str) -> str:
@@ -773,6 +831,24 @@ async def _iter_ndjson_lines(stream: Any, read_size: int = 64 * 1024):
         yield bytes(pending)
 
 
+def _interaction_answer_has_user_input(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return True
+    selected = item.get("selected_options")
+    if isinstance(selected, list):
+        if any(
+            not isinstance(option, str) or bool(option.strip())
+            for option in selected
+        ):
+            return True
+    elif selected is not None:
+        return True
+    custom_input = item.get("custom_input")
+    if custom_input is None:
+        return False
+    return not isinstance(custom_input, str) or bool(custom_input.strip())
+
+
 def _normalize_feedback_handler_resume_feedback(
     feedback: str, interaction_result: str
 ) -> str:
@@ -782,10 +858,114 @@ def _normalize_feedback_handler_resume_feedback(
         result = json.loads(interaction_result)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("interaction_result 必须是合法 JSON") from exc
-    response = parse_ask_user_response(result)
-    if response.status == "skipped" or not response.answers:
+    if not isinstance(result, dict):
+        raise ValueError("interaction_result 必须是 JSON 对象")
+    status_value = str(result.get("status") or "").strip().lower()
+    if status_value not in {"answered", "skipped"}:
+        raise ValueError(
+            f"feedback_handler interaction_result status={status_value or 'missing'}"
+        )
+    answers = result.get("answers", [])
+    if not isinstance(answers, list):
+        raise ValueError("interaction_result.answers 必须是数组")
+    has_user_input = any(_interaction_answer_has_user_input(item) for item in answers)
+    if status_value == "skipped" and has_user_input:
+        raise ValueError("skipped interaction_result 不能包含有效回答")
+    if status_value == "skipped" or not has_user_input:
         return _SKIPPED_FEEDBACK_HANDLER_PAYLOAD
     return feedback
+
+
+_OUTLINE_EDITED_HEADING_RE = re.compile(r"^###\s*P(\d+):\s*(.*)$")
+_OUTLINE_CORE_SUFFIX = "（重点）"
+
+
+def _resolve_outline_interaction_feedback(
+    interaction_result: str,
+    *,
+    conversation_id: str,
+    route: dict[str, object],
+) -> str:
+    """Resolve resume feedback for the ``outline_interaction`` node.
+
+    Returns a JSON string ready for the SDK ``--feedback`` argument:
+
+    * ``outline_confirm``       -> ``{"interrupt_feedback":"accepted","feedback":""}``
+    * ``outline_use_edited``    -> ``{"interrupt_feedback":"revise_outline","feedback":"<outline JSON string>"}``
+    * user cancel/error status  -> ``{"interrupt_feedback":"cancel","feedback":""}``
+
+    Raises ``ValueError`` on any malformed ``interaction_result`` (fail closed);
+    the caller returns the ``outline_interaction_invalid_result`` error outcome
+    without spawning the subprocess.
+    """
+    if not interaction_result:
+        raise ValueError("interaction_result is empty")
+    try:
+        result = json.loads(interaction_result)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("interaction_result 必须是合法 JSON") from exc
+    if not isinstance(result, dict):
+        raise ValueError("interaction_result 必须是 JSON 对象")
+
+    status_value = str(result.get("status") or "").strip().lower()
+    if status_value in {"cancelled", "error"}:
+        return '{"interrupt_feedback":"cancel","feedback":""}'
+
+    answers = result.get("answers")
+    if not isinstance(answers, list) or not answers:
+        raise ValueError("interaction_result.answers 缺失或为空")
+    first_answer = answers[0]
+    if not isinstance(first_answer, dict):
+        raise ValueError("interaction_result.answers[0] 必须是 JSON 对象")
+    selected_options = first_answer.get("selected_options")
+    if not isinstance(selected_options, list) or not selected_options:
+        raise ValueError("selected_options 缺失或为空")
+    choice = selected_options[0]
+
+    if choice == "outline_confirm":
+        return '{"interrupt_feedback":"accepted","feedback":""}'
+
+    if choice == "outline_use_edited":
+        cached_outline = _get_cached_outline_json(route, conversation_id)
+        sections = cached_outline.get("sections") if isinstance(cached_outline, dict) else None
+        if not cached_outline or not isinstance(sections, list) or not sections:
+            raise ValueError("cached Outline JSON missing or empty")
+
+        custom_input = str(first_answer.get("custom_input") or "")
+        edited_titles: dict[int, str] = {}
+        for line in custom_input.split("\n"):
+            match = _OUTLINE_EDITED_HEADING_RE.match(line)
+            if not match:
+                continue
+            page_num = int(match.group(1))
+            raw_title = match.group(2).rstrip()
+            if raw_title.endswith(_OUTLINE_CORE_SUFFIX):
+                raw_title = raw_title[: -len(_OUTLINE_CORE_SUFFIX)].rstrip()
+            edited_titles[page_num] = raw_title
+        if not edited_titles:
+            raise ValueError("no ### P{N}: title patterns in custom_input")
+
+        # Copy sections to avoid mutating the cache (the getter returns a
+        # shallow copy whose nested ``sections`` list is still shared).
+        new_sections = [dict(section) for section in sections]
+        new_outline = {**cached_outline, "sections": new_sections}
+        for page_num, edited_title in edited_titles.items():
+            idx = page_num - 1
+            if 0 <= idx < len(new_sections):
+                new_sections[idx]["title"] = edited_title
+            # Page count mismatch: skip out-of-range pages, do NOT add/remove
+            # sections. Caller's contract: only matching indices update.
+
+        outline_json_str = json.dumps(new_outline, ensure_ascii=False)
+        return json.dumps(
+            {
+                "interrupt_feedback": "revise_outline",
+                "feedback": outline_json_str,
+            },
+            ensure_ascii=False,
+        )
+
+    raise ValueError(f"unknown selected_options[0]={choice!r}")
 
 
 def _resolve_skill_root() -> str:
@@ -1476,6 +1656,31 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                     },
                     ensure_ascii=False,
                 )
+        elif node == "outline_interaction":
+            if not interaction_result:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error_code": "outline_interaction_invalid_result",
+                        "error": "outline_interaction resume requires interaction_result",
+                    },
+                    ensure_ascii=False,
+                )
+            try:
+                feedback = _resolve_outline_interaction_feedback(
+                    interaction_result,
+                    conversation_id=conversation_id,
+                    route=route,
+                )
+            except ValueError as exc:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error_code": "outline_interaction_invalid_result",
+                        "error": f"outline_interaction interaction_result invalid: {exc}",
+                    },
+                    ensure_ascii=False,
+                )
         argv = [
             str(python_bin),
             script,
@@ -1648,6 +1853,9 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         _clear_outline_title_cache(
             route, outcome.get("conversation_id", conversation_id)
         )
+        _clear_outline_json_cache(
+            route, outcome.get("conversation_id", conversation_id)
+        )
     if (
         outcome.get("status") == "interrupted"
         and outcome.get("node_id") == "outline_interaction"
@@ -1664,14 +1872,6 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
                 },
                 ensure_ascii=False,
             )
-        return await _call_deepresearch_stream_impl(
-            action="resume",
-            conversation_id=str(outcome.get("conversation_id", conversation_id)),
-            feedback='{"interrupt_feedback":"accepted","feedback":""}',
-            node="outline_interaction",
-            file_name=file_name,
-            _router_state=outcome.pop("_router_state", None),
-        )
     outcome.pop("_router_state", None)
     outcome = _sanitize_terminal_outcome(outcome, config)
     return json.dumps(outcome, ensure_ascii=False)
@@ -1822,6 +2022,7 @@ async def _consume_stream(
                 questions = collected_questions(state)
                 if questions:
                     marker["questions"] = questions
+            outline_json_dict: dict[str, Any] | None = None
             missing_outline = (
                 node_id == "outline_interaction"
                 and not marker.get("outline")
@@ -1832,7 +2033,18 @@ async def _consume_stream(
                 and state.outline_parts
             )
             if missing_outline:
-                marker["outline"] = "".join(state.outline_parts)
+                card_markdown = ""
+                try:
+                    outline_json_dict = json.loads("".join(state.outline_parts))
+                    formatted = _format_outline_card_markdown(outline_json_dict)
+                    if formatted:
+                        card_markdown = formatted
+                    else:
+                        outline_json_dict = {}
+                except (json.JSONDecodeError, TypeError):
+                    outline_json_dict = {}
+                marker["outline"] = card_markdown
+                marker["preview"] = {"text": card_markdown}
             resolved_cid = str(
                 chunk.get("conversation_id")
                 or outcome_cid
@@ -1848,6 +2060,8 @@ async def _consume_stream(
                     )
                     if titles and resolved_cid:
                         _cache_outline_titles(route, resolved_cid, titles)
+                if outline_json_dict is not None and resolved_cid:
+                    _cache_outline_json(route, resolved_cid, outline_json_dict)
             if node_id == "user_feedback_processor" and state.report_parts:
                 report = "".join(state.report_parts)
                 marker["report"] = report[:6000] + (
@@ -1861,8 +2075,6 @@ async def _consume_stream(
                 "prompt": build_interrupt_prompt(node_id, state, marker, query),
                 "_router_state": state,
             }
-            if node_id == "outline_interaction":
-                outcome["interaction_policy"] = "silent_auto_accept"
             continue
         if status_value == "completed":
             final_result = chunk.get("final_result")
