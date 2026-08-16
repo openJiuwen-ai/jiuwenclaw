@@ -196,7 +196,7 @@ class WorkflowRunState(BaseModel):
     id: str = ""
     name: str = ""
     summary: str = ""
-    status: str = "running"  # running / completed / failed / stopped
+    status: str = "running"  # running / paused / completed / failed / stopped
     agent_count: int = 0
     completed_agent_count: int = 0
     started_at: Optional[str] = None
@@ -233,6 +233,8 @@ class WorkflowRunState(BaseModel):
         "human_replied": "_on_human_replied",
         "workflow_completed": "_on_workflow_completed",
         "workflow_failed": "_on_workflow_failed",
+        "workflow_paused": "_on_workflow_paused",
+        "workflow_stopped": "_on_workflow_stopped",
         "log": "_on_log",
     }
     _TERMINAL_STATUSES: ClassVar[frozenset[str]] = frozenset({"completed", "failed", "stopped"})
@@ -1017,6 +1019,27 @@ class WorkflowRunState(BaseModel):
             status="failed",
             error=progress.text or progress.outcome or "workflow failed",
         )
+
+    def _on_workflow_paused(self, progress: WorkflowProgress) -> dict[str, Any]:
+        """Mark workflow as paused (non-terminal, resumable).
+
+        A pause is a control state, not a terminal one: it never stamps
+        ``completed_at`` / ``duration_ms`` and never finalizes running
+        phases/agents. The delta mirrors ``_on_workflow_started`` so the
+        frontend sees the status flip to ``paused`` while phases stay intact.
+        """
+        self.status = "paused"
+        return self._build_top_level_delta()
+
+    def _on_workflow_stopped(self, progress: WorkflowProgress) -> dict[str, Any]:
+        """Mark workflow as stopped (terminal, control outcome — not a failure).
+
+        Reuses ``_finalize_workflow`` like completed/failed: stamps the terminal
+        status with completion timestamp, finalizes running phases/agents to
+        ``stopped``. No result/error text — a stop is a control decision, not a
+        leader failure.
+        """
+        return self._finalize_workflow(status="stopped")
 
     def _on_log(self, progress: WorkflowProgress) -> dict[str, Any]:
         """Append log text to top-level ``self.logs`` and emit delta with logs.

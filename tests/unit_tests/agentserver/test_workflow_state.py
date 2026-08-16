@@ -912,3 +912,88 @@ def test_workflow_failed_freezes_budget():
                                            budget={"total": 500000, "spent": 500000, "remaining": 0, "scope": "leader", "exhausted": True}))
     assert r.budget["exhausted"] is True
     assert r.status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Task 10c: workflow_paused / workflow_stopped 状态
+# ---------------------------------------------------------------------------
+
+def test_workflow_paused_marks_status_paused_non_terminal():
+    """workflow_paused sets status=paused (non-terminal, resumable) — no completed_at."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    delta = state.apply(_make_progress("workflow_paused"))
+    assert state.status == "paused"
+    assert state.is_terminal is False
+    assert state.completed_at is None
+    assert delta is not None
+    assert delta["status"] == "paused"
+
+
+def test_workflow_paused_does_not_stamp_terminal_fields():
+    """paused must not go through _stamp_workflow_terminal — no duration / completed_at."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("workflow_paused"))
+    assert state.status == "paused"
+    assert state.completed_at is None
+    assert state.duration_ms is None
+
+
+def test_workflow_stopped_marks_terminal_without_error():
+    """workflow_stopped is terminal (control outcome) — no error/result text."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("phase", phase="Phase 1"))
+    state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a"))
+    delta = state.apply(_make_progress("workflow_stopped"))
+    assert state.status == "stopped"
+    assert state.is_terminal is True
+    assert state.completed_at is not None
+    assert state.error is None
+    assert state.result is None
+    assert delta["status"] == "stopped"
+
+
+def test_workflow_stopped_finalizes_running_phases_and_agents():
+    """stopped finalizes running phases/agents to stopped, mirroring completed/failed."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("phase", phase="Phase 1"))
+    state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a"))
+    state.apply(_make_progress("workflow_stopped"))
+    assert state.status == "stopped"
+    assert state.phases[0].status == "stopped"
+    assert state.phases[0].agents[0].status == "stopped"
+    assert state.phases[0].completed_agent_count == 1
+    assert state.completed_agent_count == 1
+
+
+def test_kind_handlers_route_paused_and_stopped():
+    """_KIND_HANDLERS maps workflow_paused / workflow_stopped to their handlers.
+
+    Access via an instance (Pydantic v2 wraps the un-annotated underscore
+    attribute in a ModelPrivateAttr descriptor on the class).
+    """
+    state = WorkflowRunState()
+    assert state._KIND_HANDLERS["workflow_paused"] == "_on_workflow_paused"
+    assert state._KIND_HANDLERS["workflow_stopped"] == "_on_workflow_stopped"
+
+
+def test_resume_workflow_started_resets_paused_to_running():
+    """A paused run resumed with the same run_id re-fires workflow_started → back to running.
+
+    The Monitor reuses the existing WorkflowRunState by run_id and
+    _on_workflow_started unconditionally sets status=running — the paused state
+    is reset, not orphaned/duplicated.
+    """
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("workflow_paused"))
+    assert state.status == "paused"
+    # Resume relaunch (SwarmflowTool._relaunch re-runs with the same run_id).
+    delta = state.apply(_make_progress("workflow_started", workflow_name="test"))
+    assert state.status == "running"
+    assert state.is_terminal is False
+    assert state.completed_at is None
+    assert delta["status"] == "running"
