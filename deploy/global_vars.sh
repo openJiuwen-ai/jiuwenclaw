@@ -159,6 +159,7 @@ declare -A DEPLOY_VARS=(
     ["LOKI_IMAGE"]="grafana/loki:3.0.0"
     ["LOKI_STORAGE_SIZE"]="4Gi"
     ["MANAGER_DB_NAME"]="manager"
+    ["WEB_DB_NAME"]="web"
     ["MANAGER_PG_SCHEMA"]="public"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"

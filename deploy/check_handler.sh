@@ -210,6 +210,21 @@ check_if_db_up() {
             fi
         done
     fi
+
+    # 企业 Web 会话历史库（选型看 WEB_DB_TYPE / DB_TYPE，与 GATEWAY_DB_TYPE 对称；
+    # 连接用 WEB_DB_*；未单独配账号时从 GATEWAY_DB_* / DB_* 回填）
+    if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["GATEWAY_DB_USER"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["DB_USER"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]:-}
+    fi
 }
 
 check_if_obs_up() {
