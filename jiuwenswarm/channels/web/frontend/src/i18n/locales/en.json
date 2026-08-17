@@ -1700,7 +1700,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills (consuming tokens) and uses the graph during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling it stops skill orchestration but does not delete the existing skill graph.",
+        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills (consuming tokens) and uses the graph during task execution to automatically select, combine, and orchestrate skills, improving task execution efficiency. Disabling it stops skill orchestration but does not delete the existing skill graph.",
         "graphDefinition": "A skill graph is like a map of skill relationships: each dot represents a skill, and lines between dots show which skills can work together.",
         "saving": "Saving…",
         "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
