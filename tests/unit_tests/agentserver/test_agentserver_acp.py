@@ -2625,11 +2625,15 @@ async def test_handle_team_delete_continues_other_runtimes_after_runner_exceptio
 
 
 @pytest.mark.asyncio
-async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fails(monkeypatch):
+async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fails(
+    monkeypatch, tmp_path
+):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
     store_calls = []
     cleared_metadata_cache = []
+    sessions_root = tmp_path / "sessions"
+    (sessions_root / "team_sess_001").mkdir(parents=True)
 
     class FakeBindingStore:
         @staticmethod
@@ -2642,16 +2646,6 @@ async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fa
         def delete_team_directory(team_name: str):
             store_calls.append(("entity", team_name))
             return True
-
-    class FakeSessionDir:
-        @staticmethod
-        def exists() -> bool:
-            return True
-
-    class FakeSessionsRoot:
-        @staticmethod
-        def __truediv__(_session_id: str):
-            return FakeSessionDir()
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -2669,7 +2663,7 @@ async def test_handle_team_delete_keeps_catalog_when_session_directory_delete_fa
     monkeypatch.setattr(
         agent_ws_server_module,
         "_sessions_dir_for_request",
-        lambda _request: FakeSessionsRoot(),
+        lambda _request: sessions_root,
     )
 
     def fail_rmtree(_path):

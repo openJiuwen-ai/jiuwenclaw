@@ -283,7 +283,7 @@ def normalize_env_ns_id(value: str | None, *, default: str = _DEFAULT_AGENT_ID) 
         text = str(value).strip() or default
     if "__" in text:
         raise EnvNsIdError(f"env ns id must not contain '__': {text!r}")
-    if "\x00" in text or "/" in text or "\\" in text or text in {".", ".."}:
+    if any(token in text for token in ("\x00", "/", "\\")) or text in {".", ".."}:
         raise EnvNsIdError(f"env ns id must not contain path syntax: {text!r}")
     return text
 
