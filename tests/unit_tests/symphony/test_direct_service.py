@@ -1714,6 +1714,42 @@ def test_build_progress_uses_completed_batches_and_never_regresses():
     assert _build_progress(entries)["percent"] == 84
 
 
+def test_build_progress_uses_global_candidate_counts_across_matcher_windows():
+    entries = [
+        {"stage": "graph.resolve.start", "candidate_count": 143},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 20,
+            "total_candidate_count": 143,
+        },
+    ]
+
+    progress = _build_progress(entries)
+
+    assert progress["percent"] == 74
+    assert progress["current"] == 20
+    assert progress["total"] == 143
+
+
 def test_build_progress_invalid_relation_totals_stay_at_stage_start():
     entries = [
         {

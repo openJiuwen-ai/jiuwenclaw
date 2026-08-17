@@ -795,13 +795,19 @@ def _build_progress(entries: list[dict[str, Any]]) -> dict[str, Any]:
         status = "error"
     elif stage == "update.cancelled":
         status = "cancelled"
+    current = latest.get("current")
+    total = latest.get("total")
+    if stage == "graph.resolve.progress":
+        candidate_counts = _graph_resolve_candidate_counts(latest)
+        if candidate_counts is not None:
+            current, total = candidate_counts
     return {
         "stage": stage,
         "label": str(latest.get("label") or _BUILD_STAGE_LABELS.get(stage, stage)),
         "percent": _build_stage_percent(stage, latest, entries=entries),
         "status": status,
-        "current": latest.get("current"),
-        "total": latest.get("total"),
+        "current": current,
+        "total": total,
         "ts": latest.get("ts"),
     }
 
@@ -908,6 +914,20 @@ def _graph_resolve_percent(
 ) -> int:
     """Advance relation progress only after a matcher batch has completed."""
 
+    candidate_progress = [
+        counts
+        for candidate in entries
+        if candidate.get("stage") == "graph.resolve.progress"
+        if (counts := _graph_resolve_candidate_counts(candidate)) is not None
+    ]
+    if candidate_progress:
+        current, total = max(candidate_progress, key=lambda item: item[0] / item[1])
+        return _progress_between(
+            {"current": current, "total": total},
+            start=72,
+            end=84,
+        )
+
     completed: list[tuple[int, int]] = []
     for candidate in entries:
         if candidate.get("stage") != "graph.resolve.progress":
@@ -930,6 +950,17 @@ def _graph_resolve_percent(
         start=72,
         end=84,
     )
+
+
+def _graph_resolve_candidate_counts(entry: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        current = int(entry.get("completed_candidate_count") or 0)
+        total = int(entry.get("total_candidate_count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    return max(0, min(current, total)), total
 
 
 def _progress_between(entry: dict[str, Any], *, start: int, end: int) -> int:
