@@ -359,14 +359,14 @@ class UpdaterService:
         }.get(platform_key)
 
         if desktop_suffix:
-            candidates = [
-                asset
-                for asset in release.assets
-                if asset.download_url
-                and "/" not in asset.name
-                and "\\" not in asset.name
-                and asset.name.lower().endswith(desktop_suffix)
-            ]
+            candidates = []
+            for asset in release.assets:
+                if not asset.download_url:
+                    continue
+                if "/" in asset.name or "\\" in asset.name:
+                    continue
+                if asset.name.lower().endswith(desktop_suffix):
+                    candidates.append(asset)
             if not candidates:
                 raise RuntimeError(
                     f"No {platform_key} desktop installer ({desktop_suffix}) found "

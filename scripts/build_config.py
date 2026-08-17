@@ -12,10 +12,11 @@ import json
 import re
 import shlex
 import sys
-import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
+
+import tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -255,7 +256,7 @@ def main() -> None:
     try:
         if args.sync:
             for path in write_expected(project_root):
-                print(f"updated {path}", file=sys.stderr)
+                sys.stderr.write(f"updated {path}\n")
         elif args.check:
             drift = find_drift(project_root)
             if drift:
@@ -272,18 +273,19 @@ def main() -> None:
     output_requested = args.version or args.name or args.emit_shell or args.emit_batch or args.emit_json
     if (args.sync or args.check) and not output_requested:
         if args.check:
-            print("Build config is synchronized.")
+            sys.stdout.write("Build config is synchronized.\n")
         return
     if args.version:
-        print(config.version)
+        sys.stdout.write(f"{config.version}\n")
     elif args.name:
-        print(config.package_name)
+        sys.stdout.write(f"{config.package_name}\n")
     elif args.emit_shell:
-        print(render_shell(config), end="")
+        sys.stdout.write(render_shell(config))
     elif args.emit_batch:
-        print(render_batch(config), end="")
+        sys.stdout.write(render_batch(config))
     else:
-        print(json.dumps(config.values(), ensure_ascii=True, sort_keys=True))
+        output = json.dumps(config.values(), ensure_ascii=True, sort_keys=True)
+        sys.stdout.write(f"{output}\n")
 
 
 if __name__ == "__main__":

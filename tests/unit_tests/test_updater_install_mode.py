@@ -541,6 +541,7 @@ def test_desktop_check_does_not_update_for_same_or_older_timestamp(
 
     monkeypatch.delattr(sys, "frozen", raising=False)
     monkeypatch.setenv("JIUWENSWARM_DESKTOP", "1")
+    monkeypatch.setattr(sys, "platform", "win32")
 
     class FakeSource:
         def fetch_latest(self, current_version=""):

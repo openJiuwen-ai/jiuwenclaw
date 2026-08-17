@@ -300,13 +300,10 @@ class VersionSource(ABC):
                 if best is None or best_key is None or key > best_key:
                     best = release
                     best_key = key
-                if (
-                    normalized_current
-                    and release.version == normalized_current
-                    and (current_key is None or key > current_key)
-                ):
-                    current_key = key
-                    current_published_at = release.published_at
+                if normalized_current and release.version == normalized_current:
+                    if current_key is None or key > current_key:
+                        current_key = key
+                        current_published_at = release.published_at
             if len(entries) < RELEASES_PER_PAGE:
                 break
         if best is not None:
@@ -329,8 +326,9 @@ class VersionSource(ABC):
                     f"{releases_url}/tags/{quote(tag, safe='')}",
                     headers,
                 )
-            except Exception:
-                continue
+            except Exception as exc:
+                logger.debug("Failed to fetch release tag %s: %s", tag, exc)
+                data = None
             if not isinstance(data, dict):
                 continue
             release = self._parse_release(data)
