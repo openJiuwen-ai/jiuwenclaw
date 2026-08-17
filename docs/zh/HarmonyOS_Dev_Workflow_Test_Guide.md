@@ -485,3 +485,9 @@ npm uninstall -g @deveco/deveco-cli
 ```
 
 最终报告必须分别给出“自动化基线”“真实 TUI 交互”“远程知识 MCP”“真实工程识别/上下文隔离”和“Agent/Skill 调用”的结论，不能用一个总 PASS 掩盖未执行或被阻塞的子项。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

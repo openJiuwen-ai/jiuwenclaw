@@ -116,6 +116,7 @@ export function PresentationPreview({
         className="flex h-full min-h-[240px] items-center justify-center gap-2 text-sm text-text-muted"
         aria-label={title}
         data-testid="artifact-presentation-preview"
+        data-variant="loading"
       >
         <LoaderCircle className="animate-spin" size={16} />
         {t('common.loading')}
@@ -124,19 +125,19 @@ export function PresentationPreview({
   }
   if (state === 'too-large')
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview" data-variant="too-large">
         <PreviewMessage danger>{t('artifacts.presentationTooLarge', { size: '50 MiB' })}</PreviewMessage>
       </div>
     );
   if (state === 'resource-limit')
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview" data-variant="resource-limit">
         <PreviewMessage danger>{t('artifacts.presentationResourceLimitExceeded')}</PreviewMessage>
       </div>
     );
   if (state === 'error' || !presentation)
     return (
-      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview">
+      <div className="h-full" aria-label={title} data-testid="artifact-presentation-preview" data-variant="error">
         <PreviewMessage danger>{t('artifacts.presentationPreviewFailed')}</PreviewMessage>
       </div>
     );
@@ -229,9 +230,10 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
       className="flex h-full min-h-0 w-full flex-col overflow-hidden border border-border bg-card"
       aria-label={title}
       data-testid="artifact-presentation-preview"
+      data-variant="ready"
     >
-      <section ref={canvasRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6">
+      <section ref={canvasRef} className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="artifact-presentation-canvas">
+        <div className="min-h-0 flex-1 overflow-auto bg-bg-muted p-6" data-testid="artifact-presentation-slide-stage">
           <div
             className="flex min-h-full min-w-full items-center justify-center"
             style={{ width: Math.max(viewport.width - 48, presentation.width * scale), height: Math.max(viewport.height - 48, presentation.height * scale) }}
@@ -240,12 +242,13 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
           </div>
         </div>
       </section>
-      <nav className="shrink-0 border-t border-border bg-panel" aria-label={t('artifacts.presentationSlides')}>
+      <nav className="shrink-0 border-t border-border bg-panel" aria-label={t('artifacts.presentationSlides')} data-testid="artifact-presentation-thumbnails">
         <div className="relative">
           <div
             ref={thumbnailListRef}
             id={thumbnailListId}
             className="flex min-w-0 gap-2 overflow-x-auto overflow-y-hidden p-2 [overscroll-behavior-inline:contain]"
+            data-testid="artifact-presentation-thumbnail-list"
             onScroll={updateThumbnailScrollState}
           >
             {presentation.slides.map((slide, index) => (
@@ -256,6 +259,8 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
                   'flex w-fit shrink-0 flex-col items-center gap-1 rounded border p-1 transition-colors',
                   index === slideIndex ? 'border-accent bg-accent-subtle' : 'border-transparent hover:border-border hover:bg-secondary',
                 )}
+                data-testid="artifact-presentation-thumbnail"
+                data-variant={slide.id}
                 onClick={() => goTo(index)}
                 aria-current={index === slideIndex ? 'page' : undefined}
                 aria-label={t('artifacts.presentationGoToSlide', { index: index + 1 })}
@@ -272,6 +277,7 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
               <button
                 type="button"
                 className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full border border-border bg-card p-1 text-text-muted shadow-sm transition-colors hover:bg-secondary hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
+                data-testid="artifact-presentation-thumbnail-prev"
                 onClick={() => scrollThumbnailList(-1)}
                 disabled={!thumbnailScrollState.canScrollBack}
                 aria-controls={thumbnailListId}
@@ -282,6 +288,7 @@ function PresentationViewer({ presentation, title }: { presentation: Presentatio
               <button
                 type="button"
                 className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full border border-border bg-card p-1 text-text-muted shadow-sm transition-colors hover:bg-secondary hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
+                data-testid="artifact-presentation-thumbnail-next"
                 onClick={() => scrollThumbnailList(1)}
                 disabled={!thumbnailScrollState.canScrollForward}
                 aria-controls={thumbnailListId}

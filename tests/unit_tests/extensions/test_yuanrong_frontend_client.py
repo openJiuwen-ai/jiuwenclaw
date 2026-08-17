@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
     YuanrongAgentApiError,
+    YuanrongAgentFileError,
     YuanrongFrontendAgentClient,
 )
 
@@ -29,6 +31,13 @@ class YuanrongFrontendAgentClientProbe(YuanrongFrontendAgentClient):
             req_method=req_method,
             stream=stream,
         )
+
+    def parse_agent_file_list_response(
+        self,
+        body: str,
+        status: int,
+    ) -> list[dict[str, Any]]:
+        return self._parse_agent_file_list_response(body, status)
 
 
 @pytest.fixture
@@ -347,3 +356,35 @@ async def test_create_sandbox_requires_required_fields(
             workspace="/home/hhc/workspaceA",
             runtime_spec={"runtime": "python3.11", "rootfs": {}},
         )
+
+
+def test_parse_list_unwraps_faas_envelope(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({
+        "body": {
+            "items": [
+                {
+                    "name": "hello.txt",
+                    "path": "/home/agentos/hello.txt",
+                    "is_directory": False,
+                    "size": 10,
+                },
+            ]
+        },
+        "innerCode": "0",
+        "billingDuration": "todo",
+    })
+    items = client.parse_agent_file_list_response(body, 200)
+    assert len(items) == 1
+    assert items[0]["name"] == "hello.txt"
+
+
+def test_parse_list_plain_items_still_works(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({"items": [{"name": "a", "path": "/home/agentos/a"}]})
+    items = client.parse_agent_file_list_response(body, 200)
+    assert items[0]["name"] == "a"
+
+
+def test_parse_list_faas_error_raises(client: YuanrongFrontendAgentClientProbe):
+    body = json.dumps({"body": {"error": "boom"}, "innerCode": "1"})
+    with pytest.raises(YuanrongAgentFileError):
+        client.parse_agent_file_list_response(body, 200)

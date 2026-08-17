@@ -113,10 +113,10 @@ check_gateway_up_dependency() {
         warning "SSH_PORT not set, using default: 2223"
     fi
 
-    # TUI (/tui on GatewayServer) bind host defaults to master node IP.
+    # TUI (/tui on GatewayServer) bind host defaults to 0.0.0.0 (对外可访问)。
     if [ -z "${DEPLOY_VARS["GATEWAY_HOST"]:-}" ]; then
-        DEPLOY_VARS["GATEWAY_HOST"]="${DEPLOY_VARS["MASTER_NODE_IP"]}"
-        info "GATEWAY_HOST not set, using MASTER_NODE_IP: ${DEPLOY_VARS["GATEWAY_HOST"]}"
+        DEPLOY_VARS["GATEWAY_HOST"]="0.0.0.0"
+        info "GATEWAY_HOST not set, using default: 0.0.0.0"
     fi
 
     if [ -z "${DEPLOY_VARS["GATEWAY_PORT"]:-}" ]; then
@@ -124,10 +124,10 @@ check_gateway_up_dependency() {
         warning "GATEWAY_PORT not set, using default: 19001"
     fi
 
-    # WebChannel (/ws) bind host defaults to master node IP.
+    # WebChannel (/ws) bind host defaults to 0.0.0.0 (对外可访问)。
     if [ -z "${DEPLOY_VARS["WEB_HOST"]:-}" ]; then
-        DEPLOY_VARS["WEB_HOST"]="${DEPLOY_VARS["MASTER_NODE_IP"]}"
-        info "WEB_HOST not set, using MASTER_NODE_IP: ${DEPLOY_VARS["WEB_HOST"]}"
+        DEPLOY_VARS["WEB_HOST"]="0.0.0.0"
+        info "WEB_HOST not set, using default: 0.0.0.0"
     fi
 
     if [ -z "${DEPLOY_VARS["WEB_PORT"]:-}" ]; then
@@ -135,8 +135,40 @@ check_gateway_up_dependency() {
         warning "WEB_PORT not set, using default: 19000"
     fi
 
+    # AgentOS IAM：空则默认 http://MASTER_NODE_IP:8090（与 registry/frontend 同 host 约定）。
+    # 外置 / K8s Service 等场景请在 .env.custom 写完整 URL 覆盖。
+    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]:-}" ]; then
+        DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]="http://${DEPLOY_VARS["MASTER_NODE_IP"]}:8090"
+        info "AGENTOS_AUTH_SERVICE_URL not set, using MASTER_NODE_IP: ${DEPLOY_VARS["AGENTOS_AUTH_SERVICE_URL"]}"
+    fi
+
+    if [ -z "${DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]:-}" ]; then
+        DEPLOY_VARS["AGENTOS_AUTH_TIMEOUT"]="10"
+        warning "AGENTOS_AUTH_TIMEOUT not set, using default: 10"
+    fi
+
     if [ -z "${DEPLOY_VARS["FUNCTION_ID"]:-}" ]; then
         error "FUNCTION_ID is not set. Please deploy jiuwenswarm first or set FUNCTION_ID in .env.custom."
+    fi
+}
+
+# web server 依赖 gateway 已起(WEB_PORT 的 /ws 是 web 的代理目标),
+# 故复用 check_gateway_up_dependency 完成 MASTER_NODE_IP / WEB_PORT 等公共变量初始化,
+# 再补 web 专有变量 WEB_STATIC_HOST / WEB_STATIC_PORT。
+check_web_up_dependency() {
+    check_gateway_up_dependency
+
+    # web 静态服务器监听地址,默认 0.0.0.0(对外可访问)。
+    if [ -z "${DEPLOY_VARS["WEB_STATIC_HOST"]:-}" ]; then
+        DEPLOY_VARS["WEB_STATIC_HOST"]="0.0.0.0"
+        info "WEB_STATIC_HOST not set, using default: 0.0.0.0"
+    fi
+
+    # web 静态服务器监听端口,默认 5173(app_web.py 的 FRONTEND_PORT 默认值)。
+    # 注意:此处用独立变量 WEB_STATIC_PORT, 不复用 FRONTEND_PORT(后者已指 yuanrong frontend 8888)。
+    if [ -z "${DEPLOY_VARS["WEB_STATIC_PORT"]:-}" ]; then
+        DEPLOY_VARS["WEB_STATIC_PORT"]="5173"
+        warning "WEB_STATIC_PORT not set, using default: 5173"
     fi
 }
 

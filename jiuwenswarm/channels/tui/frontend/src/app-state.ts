@@ -67,6 +67,7 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
+import { runStatusLineCommand } from "./core/statusline-runner.js";
 import { generateCreateToken } from "./core/session-state.js";
 import {
   applyWorkflowUpdate,
@@ -84,10 +85,7 @@ import {
   type WorkflowRun,
 } from "./core/workflows.js";
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
-import { execFile, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface ModelUsageEntry {
   model: string;
@@ -3267,57 +3265,22 @@ export class CliPiAppState {
     }
     const jsonInput = JSON.stringify(this.buildStatusLineJsonInput());
     const cmd = sl.command;
-    const isWindows = process.platform === "win32";
-
     try {
-      if (isWindows) {
-        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
-        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
-        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
-        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
-        writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile
-          .split(sep)
-          .join("/")
-          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
-        const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
-        const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
-
-        const child = execFile(
-          "sh",
-          ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
-        child.stdin?.end(jsonInput);
-      } else {
-        // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile(
-          "sh",
-          ["-c", cmd],
-          { timeout: 3_000, maxBuffer: 10_240 },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        child.stdin?.end(jsonInput);
-      }
+      runStatusLineCommand(
+        cmd,
+        jsonInput,
+        getCurrentCwd() || process.cwd(),
+        (err, stdout) => {
+          if (err) return;
+          const text = stdout.trim().replace(/\r\n/g, "\n");
+          if (text !== this.statusLineText) {
+            this.statusLineText = text || null;
+            this.emitChange();
+          }
+        },
+      );
     } catch {
-      // Silently ignore — sh may not be in PATH on Windows
+      // Ignore launch errors; invalid commands should not disrupt the TUI.
     }
   }
 

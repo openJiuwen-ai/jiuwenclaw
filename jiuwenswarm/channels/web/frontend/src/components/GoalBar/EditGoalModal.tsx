@@ -22,10 +22,10 @@ export function EditGoalModal({ initialObjective, onCancel, onSave }: EditGoalMo
   const canSave = Boolean(value.trim()) && value.trim() !== initialObjective.trim();
 
   return createPortal(
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
-      <div className="relative w-[420px] rounded-2xl border border-border bg-card p-5 shadow-lg">
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40" data-testid="goal-bar-edit-modal">
+      <div className="relative w-[420px] rounded-2xl border border-border bg-card p-5 shadow-lg" data-testid="goal-bar-edit-modal-card">
         <div className="mb-3 flex items-center justify-between">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-secondary text-accent">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-secondary text-accent" data-testid="goal-bar-edit-modal-icon">
             <Target size={15} strokeWidth={2} />
           </div>
           <button
@@ -33,23 +33,26 @@ export function EditGoalModal({ initialObjective, onCancel, onSave }: EditGoalMo
             onClick={onCancel}
             aria-label="close"
             className="rounded-md p-1 text-text-muted hover:bg-secondary hover:text-text"
+            data-testid="goal-bar-edit-modal-close-button"
           >
             <X size={16} strokeWidth={2} />
           </button>
         </div>
-        <h3 className="mb-3 text-[15px] font-semibold text-text-strong">{t('goal.editTitle')}</h3>
+        <h3 className="mb-3 text-[15px] font-semibold text-text-strong" data-testid="goal-bar-edit-modal-title">{t('goal.editTitle')}</h3>
         <textarea
           autoFocus
           className="w-full resize-none rounded-lg border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
           rows={5}
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          data-testid="goal-bar-edit-modal-textarea"
         />
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex justify-end gap-2" data-testid="goal-bar-edit-modal-actions">
           <button
             type="button"
             onClick={onCancel}
             className="rounded-lg border border-border px-4 py-1.5 text-[13px] text-text-muted hover:bg-secondary"
+            data-testid="goal-bar-edit-modal-cancel-button"
           >
             {t('goal.formCancel')}
           </button>
@@ -58,6 +61,7 @@ export function EditGoalModal({ initialObjective, onCancel, onSave }: EditGoalMo
             disabled={!canSave}
             onClick={() => onSave(value.trim())}
             className="rounded-lg bg-text-strong px-4 py-1.5 text-[13px] text-card disabled:opacity-50"
+            data-testid="goal-bar-edit-modal-save-button"
           >
             {t('goal.formSubmit')}
           </button>

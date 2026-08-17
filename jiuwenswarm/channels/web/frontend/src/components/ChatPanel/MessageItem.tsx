@@ -73,12 +73,12 @@ export function TeamMemberMessageFrame({
   contentClassName?: string;
 }) {
   return (
-    <div className="team-member-message animate-fade-in">
+    <div className="team-member-message animate-fade-in" data-testid="chat-panel-team-member-message">
       {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
-      <div className="team-member-message__header" aria-hidden={!showAvatar}>
+      <div className="team-member-message__header" aria-hidden={!showAvatar} data-testid="chat-panel-team-member-message-header">
         {showAvatar ? <TeamMemberAvatar member={member} /> : null}
       </div>
-      <div className={clsx('team-member-message__body', contentClassName)}>
+      <div className={clsx('team-member-message__body', contentClassName)} data-testid="chat-panel-team-member-message-body">
         {children}
       </div>
     </div>
@@ -110,17 +110,16 @@ function TeamLeaderPlainTextMessage({
       {fileItems && fileItems.length > 0 && (
         <FileDownloadList
           files={fileItems}
-          className="w-full md:w-1/2"
+          className="chat-message-file-list"
           onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
         />
       )}
-      <div className="team-member-message__plain">
+      <div className="team-member-message__plain" data-testid="chat-panel-team-leader-message-plain">
         <A2UIMessageContent
           content={content}
           messageId={messageId}
           isStreaming={isStreaming}
           disableInteraction={disableA2UIInteraction}
-          testId="team-leader-message-body"
         />
       </div>
     </TeamMemberMessageFrame>
@@ -149,12 +148,16 @@ export function ContextCompressionLines({
     .join('\n');
 
   return (
-    <div className="context-compression-lines">
+    <div className="context-compression-lines" data-testid="chat-panel-context-compression-lines">
       {showRuntime && (
-        <div className={clsx(
-          'mt-2 flex items-center gap-1.5 text-xs',
-          isFailed ? 'text-danger' : 'text-text-muted'
-        )}>
+        <div
+          className={clsx(
+            'mt-2 flex items-center gap-1.5 text-xs',
+            isFailed ? 'text-danger' : 'text-text-muted'
+          )}
+          data-testid="chat-panel-context-compression-runtime"
+          data-variant={isRunning ? 'running' : isFailed ? 'failed' : 'done'}
+        >
           <span className={clsx(isRunning && 'context-compression-running-text')}>
             {isRunning
               ? contextCompressionRunningText(t, runtime?.processor, runtime?.summary ?? '')
@@ -166,6 +169,7 @@ export function ContextCompressionLines({
         <div
           className="mt-2 flex items-center gap-1.5 text-xs text-text-muted"
           title={detailText || undefined}
+          data-testid="chat-panel-context-compression-summary"
         >
           <Info className="h-3.5 w-3.5" strokeWidth={1.8} />
           <span>
@@ -189,7 +193,12 @@ function renderRichContent(content: string): ReactNode[] {
       parts.push(content.slice(lastIndex, match.index));
     }
     parts.push(
-      <span key={`skill-${key++}`} className="chat-message-skill-chip">
+      <span
+        key={`skill-${key++}`}
+        className="chat-message-skill-chip"
+        data-testid="chat-panel-message-skill-chip"
+        data-variant={match[1]}
+      >
         <span className="chat-message-skill-chip__icon" aria-hidden="true" />
         <span className="chat-message-skill-chip__label">{match[1]}</span>
       </span>
@@ -410,10 +419,11 @@ export const MessageItem = memo(function MessageItem({
  	         const { description, result } = sessionData;
  	         
  	         return (
- 	           <div className="chat-tool-card animate-rise">
+ 	           <div className="chat-tool-card animate-rise" data-testid="chat-panel-session-result-card">
  	             <div
  	               className="cursor-pointer"
  	               onClick={() => setIsExpanded(!isExpanded)}
+	               data-testid="chat-panel-session-result-card-header"
  	             >
  	               <div className="flex items-center gap-2">
  	                 <span className="w-5 h-5 rounded bg-accent-2-subtle text-accent-2 flex items-center justify-center text-sm">
@@ -421,7 +431,7 @@ export const MessageItem = memo(function MessageItem({
  	                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V19.5a2.25 2.25 0 002.25 2.25h.75m0-3h-3.75m0 0h-3.75m0 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9" />
  	                   </svg>
  	                 </span>
- 	                 <span className="font-mono text-sm font-medium text-text">
+ 	                 <span className="font-mono text-sm font-medium text-text" data-testid="chat-panel-session-result-card-title">
  	                   会话任务：【{description || '未知任务'}】已完成
  	                 </span>
  	                 <span className="text-text-muted text-sm">
@@ -430,9 +440,9 @@ export const MessageItem = memo(function MessageItem({
  	               </div>
  	             </div>
  	             {isExpanded && (
- 	               <div className="mt-2 p-2 rounded-md bg-card border border-border">
+ 	               <div className="mt-2 p-2 rounded-md bg-card border border-border" data-testid="chat-panel-session-result-card-details">
  	                 {description && (
- 	                   <div className="mb-2">
+ 	                   <div className="mb-2" data-testid="chat-panel-session-result-card-description">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Description:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap">
  	                       {description}
@@ -440,7 +450,7 @@ export const MessageItem = memo(function MessageItem({
  	                   </div>
  	                 )}
  	                 {result && (
- 	                   <div>
+ 	                   <div data-testid="chat-panel-session-result-card-result">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Result:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
  	                       {result}
@@ -454,7 +464,7 @@ export const MessageItem = memo(function MessageItem({
  	       } catch (e) {
  	         // 如果解析失败，显示原始内容
  	         return (
- 	           <div className="flex justify-center my-4 animate-fade-in">
+ 	           <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-session-result-fallback">
  	             <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
  	               {content}
  	             </div>
@@ -485,21 +495,21 @@ export const MessageItem = memo(function MessageItem({
 	               member={event.fromMember}
 	               showAvatar={showAvatar}
 	             >
-	               <div className="team-member-message__card">
-	                 <div className="team-member-message__content">
+	               <div className="team-member-message__card" data-testid="chat-panel-team-event-card">
+	                 <div className="team-member-message__content" data-testid="chat-panel-team-event-card-content">
 	                   {event.isP2P && event.toMember && (
-	                     <span className="team-event-group-chip team-event-group-chip--p2p">
+	                     <span className="team-event-group-chip team-event-group-chip--p2p" data-testid="chat-panel-team-event-chip-p2p">
 	                       @{event.toMember}
 	                     </span>
 	                   )}
 	                   {event.isBroadcast && (
-	                     <span className="team-event-group-chip team-event-group-chip--broadcast">
+	                     <span className="team-event-group-chip team-event-group-chip--broadcast" data-testid="chat-panel-team-event-chip-broadcast">
 	                       {t('chat.teamBroadcastTarget')}
 	                     </span>
 	                   )}
 	                   <MarkdownMessageBody
 	                     content={event.content}
-	                     className="team-message-markdown team-message-markdown--inline"
+	                     className="team-message-markdown team-message-markdown--inline" data-testid="chat-panel-team-event-card-body"
 	                   />
 	                 </div>
 	               </div>
@@ -507,7 +517,7 @@ export const MessageItem = memo(function MessageItem({
 	           );
 	       }
 	       return (
-	         <div className="flex justify-center my-4 animate-fade-in">
+	         <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-team-event-fallback">
 	           <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
 	             {content}
 	           </div>
@@ -544,7 +554,7 @@ export const MessageItem = memo(function MessageItem({
 	     }
 	     
     return (
-      <div className="flex justify-center my-4 animate-fade-in">
+      <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-system-message-bubble">
         <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
           {content}
         </div>
@@ -570,20 +580,28 @@ export const MessageItem = memo(function MessageItem({
   const withAssistantAvatar = !isUser && enableAssistantAvatar;
 
   return (
-    <div className={clsx(
+    <div
+    data-testid="chat-panel-message-row"
+    className={clsx(
       'flex animate-rise',
       isUser ? 'justify-end' : 'justify-start',
       withAssistantAvatar && 'assistant-row'
     )}>
       {withAssistantAvatar && (
         // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
-        <div className="assistant-row__avatar" aria-hidden={!showAvatar}>
+        <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-assistant-row-avatar">
           {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
         </div>
       )}
-      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
+      <div
+        className={clsx(
+          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
+        )}
+        data-testid="chat-panel-bubble-wrapper"
+      >
         {!isUser && (
-          <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
+          <div className="hidden" data-testid="chat-panel-thinking-summary" aria-hidden="true" />
         )}
 
         {isUser && visibleMediaItems && (
@@ -598,7 +616,9 @@ export const MessageItem = memo(function MessageItem({
               !isUser && !isStreaming && 'markdown',
               isStreaming && 'streaming'
             )}
-            data-testid={!isUser ? 'thinking-panel' : undefined}
+            data-testid="chat-panel-message-bubble"
+            data-variant={isUser ? 'user' : 'assistant'}
+            data-state={isStreaming ? 'streaming' : 'final'}
           >
             {isStreaming ? (
               isUser ? (
@@ -610,14 +630,13 @@ export const MessageItem = memo(function MessageItem({
                   messageId={id}
                   isStreaming={true}
                   disableInteraction={disableA2UIInteraction}
-                  testId="thinking-body"
                 />
               )
             ) : (
               <>
                 {isUser ? (
                   hasDisplayText ? (
-                    <div className="chat-text">
+                    <div className="chat-text" data-testid="chat-panel-message-text">
                       <span className="whitespace-pre-wrap">{renderRichContent(displayContent)}</span>
                     </div>
                   ) : null
@@ -627,7 +646,6 @@ export const MessageItem = memo(function MessageItem({
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
-                    testId="thinking-body"
                   />
                 )}
                 {!isUser && visibleMediaItems && (
@@ -636,6 +654,7 @@ export const MessageItem = memo(function MessageItem({
                 {visibleFileItems && (
                   <FileDownloadList
                     files={visibleFileItems}
+                    className="chat-message-file-list"
                     onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}
@@ -646,7 +665,7 @@ export const MessageItem = memo(function MessageItem({
 
         {/* Token usage summary */}
         {!isUser && !isStreaming && message.usageSummary && message.usageSummary.total_tokens > 0 && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5" data-testid="chat-panel-message-usage-summary">
             <span>
               {message.usageSummary.input_tokens.toLocaleString()} in /{' '}
               {message.usageSummary.output_tokens.toLocaleString()} out /{' '}
@@ -664,28 +683,30 @@ export const MessageItem = memo(function MessageItem({
 
         {!isStreaming && !hideMeta && (
           <div
+            data-testid="chat-panel-message-meta"
             className={clsx(
               'flex items-center gap-3 text-sm mt-2 text-text-muted',
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
-            <span>{formatTimestamp(timestamp)}</span>
+            <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
 
             {isUser && isGoalObjectiveMessage && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted">
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />
                 {t('goal.badge')}
               </span>
             )}
 
             {showCopy && (
-              <div className="relative">
+              <div className="relative" data-testid="chat-panel-message-copy">
                 {copied && (
-                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
+                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md" data-testid="chat-panel-message-copied-tip">
                     {t('chatUi.copied')}
                   </span>
                 )}
                 <button
+                  data-testid="chat-panel-message-copy-btn"
                   onClick={handleCopy}
                   className={clsx(
                     'p-1.5 rounded-md ',
@@ -704,6 +725,8 @@ export const MessageItem = memo(function MessageItem({
 
             {showTTS && (
               <button
+                data-testid="chat-panel-message-tts-btn"
+                data-variant={isPlaying ? 'playing' : 'idle'}
                 onClick={handleSpeak}
                 className={clsx(
                   'p-1.5 rounded-md ',
@@ -797,13 +820,16 @@ function FileDownloadList({
   };
 
   return (
-    <div className={clsx('mt-2 space-y-2', className)}>
+    <div data-testid="chat-panel-file-download-list"
+    className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
         return (
           <div
             key={`${file.name}-${index}`}
+            data-testid="chat-panel-file-download-item"
+            data-variant={file.name}
             className={clsx(
               'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
@@ -819,6 +845,7 @@ function FileDownloadList({
           >
             <button
               type="button"
+              data-testid="chat-panel-file-download-preview"
               className="flex min-w-0 flex-1 items-center gap-3 text-left"
               disabled={expired || !onPreview}
               onClick={(event) => {
@@ -829,15 +856,15 @@ function FileDownloadList({
               aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
             >
               <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
+              <div className="flex-1 min-w-0" data-testid="chat-panel-file-download-info">
+                <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{file.name}</div>
+                <div className="flex items-center gap-1.5 mt-0.5" data-testid="chat-panel-file-download-meta">
+                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none" data-testid="chat-panel-file-download-ext">
                     {ext || 'FILE'}
                   </span>
-                  <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
+                  <span className="text-xs text-text-muted" data-testid="chat-panel-file-download-size">{formatFileSize(file.size)}</span>
                   {expired && (
-                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none" data-testid="chat-panel-file-download-expired">
                       {t('chatUi.fileExpired')}
                     </span>
                   )}
@@ -846,6 +873,7 @@ function FileDownloadList({
             </button>
             <button
               type="button"
+              data-testid="chat-panel-file-download-btn"
               className={clsx(
                 'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired

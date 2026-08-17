@@ -489,6 +489,7 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
     # agentos_router.load_router_config 不会解析 ${VAR}，部署时用 <<>> 替换进 yaml。
+    # 部署脚本空值默认 http://<<MASTER_NODE_IP>>:8090；可用 AGENTOS_AUTH_SERVICE_URL 覆盖。
     auth_service_url: <<AGENTOS_AUTH_SERVICE_URL>>
     timeout: <<AGENTOS_AUTH_TIMEOUT>>
     # TUI token 鉴权；本 template 默认开启。true 时创建 AgentOSAuthenticator 校验 TUI 连接。
@@ -861,10 +862,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 

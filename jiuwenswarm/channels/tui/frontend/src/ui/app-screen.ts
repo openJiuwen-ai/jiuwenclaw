@@ -3469,12 +3469,17 @@ export class AppScreen implements Component, Focusable {
       // /<installedSkill> 行首分流：命中已装 skill 时当普通消息发送（content 原样
       // 保留 /<skill> 前缀，skill 名由 extractSkillsFromContent 提取注入 params.skills）。
       // 未命中已装 skill 的 /xxx 不在此拦截，继续走下面的命令分支（仍可能 Unknown command）。
+      // 新建技能后缓存可能仍旧：若首 token 也不是注册命令，先 refresh 再重试，避免误报 Unknown command。
       {
         const slashMatch = text.match(/^\/(\S+)/);
         const firstToken = slashMatch?.[1] ?? "";
-        const installedSkill = firstToken
+        let installedSkill = firstToken
           ? this.commands.getInstalledSkills().find((s) => s.name === firstToken)
           : undefined;
+        if (!installedSkill && firstToken && !this.commands.resolve(firstToken)) {
+          await this.commands.refreshSkills(this.state.getCommandContext());
+          installedSkill = this.commands.getInstalledSkills().find((s) => s.name === firstToken);
+        }
         if (installedSkill) {
           // 只有 /<skill> 而没有内容时没什么可发的。pi-tui 在补全弹窗上按回车会
           // 「应用补全」并顺势提交（见其 editor 的 tui.select.confirm 分支），这一下
@@ -9888,6 +9893,17 @@ export class AppScreen implements Component, Focusable {
       // Track the exact turn so session-detail can close as soon as this reply
       // is accepted, even if the workflow continues or opens another turn.
       this.lastRepliedHumanPrompt = { workflowRunId, correlationId };
+      const currentView = this.swarmWorkflowsViewState;
+      if (
+        currentView?.phase === "agent" &&
+        currentView.returnTo?.kind === "pending-list"
+      ) {
+        // Entering a pending turn's detail is a temporary drill-down. Once the
+        // reply is submitted, return to the screen that opened the pending list
+        // instead of leaving the user on the now-completed detail page.
+        this.restoreFromPendingList(currentView.returnTo.previous_phase);
+        return true;
+      }
       this.replyingToHumanPrompt = null;
       this.editor.setText("");
       this.editor.focused = false;

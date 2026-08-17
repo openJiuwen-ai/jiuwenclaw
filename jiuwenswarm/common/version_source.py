@@ -7,9 +7,10 @@ import socket
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from jiuwenswarm.common.version import __version__
@@ -17,6 +18,8 @@ from jiuwenswarm.common.version import __version__
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 20
+RELEASES_PER_PAGE = 100
+MAX_RELEASE_PAGES = 100
 GITHUB_API = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
 GITCODE_API = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
 PYPI_SIMPLE_API = "https://pypi.org/simple/{package}/"
@@ -80,6 +83,22 @@ def release_sort_key(version: str) -> tuple[tuple[int, ...], int, tuple[int, ...
         if m:
             pre_num = (int(m.group(1)),)
     return (base_key, pre_type_rank, pre_num)
+
+
+def release_timestamp_key(value: str) -> datetime:
+    """Parse an ISO 8601 release timestamp and normalize it to UTC."""
+    normalized = (value or "").strip()
+    if normalized.endswith(("Z", "z")):
+        normalized = normalized[:-1] + "+00:00"
+    if not normalized:
+        raise ValueError("Release timestamp is missing.")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Invalid release timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"Release timestamp must include a timezone: {value}")
+    return parsed.astimezone(timezone.utc)
 
 
 def _detect_prerelease_type(version: str) -> str:
@@ -164,6 +183,7 @@ class ReleaseInfo:
     assets: list[ReleaseAsset] = field(default_factory=list)
     source_type: str = ""
     prerelease: bool = False
+    current_release_published_at: str = ""
 
 
 class VersionSource(ABC):
@@ -172,7 +192,7 @@ class VersionSource(ABC):
         self._name = name
 
     @abstractmethod
-    def fetch_latest(self) -> ReleaseInfo:
+    def fetch_latest(self, current_version: str = "") -> ReleaseInfo:
         ...
 
     def fetch_assets(self) -> list[ReleaseAsset]:
@@ -201,58 +221,125 @@ class VersionSource(ABC):
 
     @classmethod
     def _best_version_from_release_data(cls, data: dict, assets_raw: list) -> str:
-        """Resolve a release version from tags, names, and asset filenames.
+        """Resolve a release version while treating release metadata as canonical.
 
-        Some release APIs can omit or normalize the tag for pre-releases.  The
-        desktop installers still carry the canonical version in their filenames,
-        so include asset names when selecting the newest release.
+        Product and installer names are allowed to change independently of the
+        release version.  Prefer the first explicit tag/version field so digits
+        in arbitrary asset names cannot override the Release identity.  The
+        release name and asset names remain last-resort compatibility fallbacks
+        for hosts that omit all explicit version metadata.
         """
-        candidates = [
-            str(data.get("tag_name") or ""),
-            str(data.get("tag") or ""),
-            str(data.get("version") or ""),
-            str(data.get("name") or ""),
-        ]
-        candidates.extend(
+        for key in ("tag_name", "tag", "version"):
+            version = cls._clean_version(str(data.get(key) or ""))
+            if version:
+                return version
+
+        release_name_version = cls._clean_version(str(data.get("name") or ""))
+        if release_name_version:
+            return release_name_version
+
+        asset_names = [
             str(item.get("name") or "")
             for item in assets_raw
             if isinstance(item, dict)
-        )
-        return cls._best_version_from_texts(candidates)
+        ]
+        return cls._best_version_from_texts(asset_names)
 
     def _fetch_newest_from_list(
-        self, list_url: str, headers: dict[str, str]
+        self,
+        list_url: str,
+        headers: dict[str, str],
+        current_version: str = "",
     ) -> ReleaseInfo | None:
         """Fetch the releases list and return the newest entry (incl. pre-releases).
 
         Drafts are skipped; pre-releases are included so that beta channels are
-        detected.  Returns None when the list cannot be fetched or is empty.
+        detected. Releases are ordered only by their publication timestamps.
+        The installed version is used only to find its corresponding timestamp.
+        Returns None when the list cannot be fetched or has no timestamped entry.
         """
-        try:
-            raw = self._fetch_json(list_url, headers)
-        except Exception as exc:
-            logger.warning(
-                "Failed to fetch releases list from %s (falling back to "
-                "/latest, which excludes pre-releases): %s",
-                list_url, exc,
-            )
-            return None
-        entries = _unwrap_list(raw)
-        if entries is None:
-            return None
         best: ReleaseInfo | None = None
-        best_key: tuple = ()
-        for entry in entries:
-            if not isinstance(entry, dict) or _is_draft_entry(entry):
-                continue
-            release = self._parse_release(entry)
-            if release is None:
-                continue
-            key = release_sort_key(release.version)
-            if best is None or key > best_key:
-                best = release
-                best_key = key
+        best_key: datetime | None = None
+        current_key: datetime | None = None
+        current_published_at = ""
+        normalized_current = self._clean_version(current_version)
+        for page in range(1, MAX_RELEASE_PAGES + 1):
+            page_url = _with_query_params(
+                list_url,
+                per_page=RELEASES_PER_PAGE,
+                page=page,
+            )
+            try:
+                raw = self._fetch_json(page_url, headers)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to fetch releases list from %s (falling back to "
+                    "/latest, which excludes pre-releases): %s",
+                    page_url,
+                    exc,
+                )
+                if best is not None:
+                    best.current_release_published_at = current_published_at
+                return best
+            entries = _unwrap_list(raw)
+            if entries is None:
+                if best is not None:
+                    best.current_release_published_at = current_published_at
+                return best
+            for entry in entries:
+                if not isinstance(entry, dict) or _is_draft_entry(entry):
+                    continue
+                release = self._parse_release(entry)
+                if release is None:
+                    continue
+                try:
+                    key = release_timestamp_key(release.published_at)
+                except ValueError as exc:
+                    logger.warning("Skipping release without a valid timestamp: %s", exc)
+                    continue
+                if best is None or best_key is None or key > best_key:
+                    best = release
+                    best_key = key
+                if normalized_current and release.version == normalized_current:
+                    if current_key is None or key > current_key:
+                        current_key = key
+                        current_published_at = release.published_at
+            if len(entries) < RELEASES_PER_PAGE:
+                break
+        if best is not None:
+            best.current_release_published_at = current_published_at
         return best
+
+    def _fetch_release_timestamp_by_tag(
+        self,
+        releases_url: str,
+        headers: dict[str, str],
+        current_version: str,
+    ) -> str:
+        """Find the installed Release timestamp when list pagination cannot."""
+        normalized = self._clean_version(current_version)
+        if not normalized:
+            return ""
+        for tag in (normalized, f"v{normalized}", f"release_{normalized}"):
+            try:
+                data = self._fetch_json(
+                    f"{releases_url}/tags/{quote(tag, safe='')}",
+                    headers,
+                )
+            except Exception as exc:
+                logger.debug("Failed to fetch release tag %s: %s", tag, exc)
+                data = None
+            if not isinstance(data, dict):
+                continue
+            release = self._parse_release(data)
+            if release is None or release.version != normalized:
+                continue
+            try:
+                release_timestamp_key(release.published_at)
+            except ValueError:
+                continue
+            return release.published_at
+        return ""
 
     def _parse_release(self, data: dict) -> ReleaseInfo | None:
         """Parse a single release dict.  Override in subclasses."""
@@ -297,10 +384,22 @@ class GitHubReleasesSource(VersionSource):
             per_page=100,
         )
 
-    def fetch_latest(self) -> ReleaseInfo:
+    def fetch_latest(self, current_version: str = "") -> ReleaseInfo:
         headers = self._build_headers()
-        release = self._fetch_newest_from_list(self._list_url, headers)
+        release = self._fetch_newest_from_list(
+            self._list_url,
+            headers,
+            current_version,
+        )
         if release is not None:
+            if current_version and not release.current_release_published_at:
+                release.current_release_published_at = (
+                    self._fetch_release_timestamp_by_tag(
+                        self._api_url.removesuffix("/latest"),
+                        headers,
+                        current_version,
+                    )
+                )
             return release
 
         # Fallback to /latest (stable-only) when the list endpoint is unusable.
@@ -308,10 +407,18 @@ class GitHubReleasesSource(VersionSource):
         release = self._parse_release(data)
         if release is None:
             raise RuntimeError("GitHub release tag_name is missing or empty.")
+        if release.version == self._clean_version(current_version):
+            release.current_release_published_at = release.published_at
+        elif current_version:
+            release.current_release_published_at = self._fetch_release_timestamp_by_tag(
+                self._api_url.removesuffix("/latest"),
+                headers,
+                current_version,
+            )
         return release
 
     def _parse_release(self, data: dict) -> ReleaseInfo | None:
-        published_at = str(data.get("published_at") or "")
+        published_at = str(data.get("published_at") or data.get("created_at") or "")
         body = str(data.get("body") or "")
         prerelease = _is_prerelease_entry(data)
         assets_raw = data.get("assets") or []
@@ -364,10 +471,22 @@ class GitCodeReleasesSource(VersionSource):
             per_page=100,
         )
 
-    def fetch_latest(self) -> ReleaseInfo:
+    def fetch_latest(self, current_version: str = "") -> ReleaseInfo:
         headers = self._build_headers()
-        release = self._fetch_newest_from_list(self._list_url, headers)
+        release = self._fetch_newest_from_list(
+            self._list_url,
+            headers,
+            current_version,
+        )
         if release is not None:
+            if current_version and not release.current_release_published_at:
+                release.current_release_published_at = (
+                    self._fetch_release_timestamp_by_tag(
+                        self._api_url.removesuffix("/latest"),
+                        headers,
+                        current_version,
+                    )
+                )
             return release
 
         # Fallback to the /latest endpoint when the list endpoint is unusable.
@@ -377,6 +496,14 @@ class GitCodeReleasesSource(VersionSource):
         release = self._parse_release(data)
         if release is None:
             raise RuntimeError("GitCode release tag_name is missing or empty.")
+        if release.version == self._clean_version(current_version):
+            release.current_release_published_at = release.published_at
+        elif current_version:
+            release.current_release_published_at = self._fetch_release_timestamp_by_tag(
+                self._api_url.removesuffix("/latest"),
+                headers,
+                current_version,
+            )
         return release
 
     def _parse_release(self, data: dict) -> ReleaseInfo | None:
@@ -436,7 +563,8 @@ class PyPIVersionSource(VersionSource):
             self._base_url = "https://pypi.org"
             self._api_url = PYPI_SIMPLE_API.format(package=package)
 
-    def fetch_latest(self) -> ReleaseInfo:
+    def fetch_latest(self, current_version: str = "") -> ReleaseInfo:
+        del current_version
         data = self._fetch_simple_json()
         if data is None:
             raise RuntimeError("Failed to fetch PyPI simple API response.")

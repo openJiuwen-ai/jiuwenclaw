@@ -21,7 +21,6 @@ interface A2UIMessageContentProps {
   messageId: string;
   isStreaming?: boolean;
   disableInteraction?: boolean;
-  testId?: string;
 }
 
 type RenderPart =
@@ -52,7 +51,6 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
   messageId,
   isStreaming = false,
   disableInteraction = false,
-  testId,
 }: A2UIMessageContentProps) {
   const { processMessages } = useA2UIActions();
   const { t } = useTranslation();
@@ -157,7 +155,7 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
   }, [renderParts]);
 
   return (
-    <div className="chat-text a2ui-message-content" data-testid={testId}>
+    <div className="chat-text a2ui-message-content" data-testid="a2ui-message-content">
       {renderParts.map((part) => {
         if (part.kind === 'text') {
           return (
@@ -173,24 +171,24 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
         const Renderer = getA2UIRenderer(part.protocolVersion);
         if (!Renderer) {
           return (
-            <div key={part.key} className="text-sm text-danger">
+            <div key={part.key} className="text-sm text-danger" data-testid="a2ui-unsupported-protocol">
               {t('a2ui.unsupportedProtocol', { version: part.protocolVersion })}
             </div>
           );
         }
 
         return (
-          <div key={part.key} className="a2ui-message-content__surfaces">
+          <div key={part.key} className="a2ui-message-content__surfaces" data-testid="a2ui-surfaces">
             {part.surfaceIds.map((surfaceId) => (
               <A2UIErrorBoundary
                 key={`${surfaceId}:${part.resetKey}`}
                 resetKey={part.resetKey}
                 fallback={(
-                  <div className="a2ui-error-boundary p-4 border border-danger/30 rounded-lg bg-danger/5">
-                    <p className="text-danger text-sm font-medium mb-1">
+                  <div className="a2ui-error-boundary p-4 border border-danger/30 rounded-lg bg-danger/5" data-testid="a2ui-error-boundary-fallback">
+                    <p className="text-danger text-sm font-medium mb-1" data-testid="a2ui-error-boundary-fallback-title">
                       {t('a2ui.unavailableTitle')}
                     </p>
-                    <p className="text-text-muted text-xs">
+                    <p className="text-text-muted text-xs" data-testid="a2ui-error-boundary-fallback-hint">
                       {t('a2ui.retry')}
                     </p>
                   </div>

@@ -183,35 +183,47 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
   };
 
   if (!userId) {
-    return <p className="text-xs text-text-muted italic py-2">{t("ownerScopes.setUserIdFirst")}</p>;
+    return <p className="text-xs text-text-muted italic py-2" data-testid="channels-panel-avatar-perm-empty">{t("ownerScopes.setUserIdFirst")}</p>;
   }
   if (loading) {
-    return <p className="text-xs text-text-muted py-2">{t("ownerScopes.loading")}</p>;
+    return <p className="text-xs text-text-muted py-2" data-testid="channels-panel-avatar-perm-loading">{t("ownerScopes.loading")}</p>;
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" data-testid="channels-panel-avatar-perm-editor">
       {/* Quick actions */}
       <div className="flex items-center gap-2">
-        <span className="text-[11px] text-text-muted">{t("ownerScopes.quickSet")}:</span>
+        <span className="text-[11px] text-text-muted" data-testid="channels-panel-avatar-perm-quick-label">{t("ownerScopes.quickSet")}:</span>
         <button onClick={() => setAllTools("allow")}
           className="text-[11px] px-2 py-0.5 rounded border border-emerald-500/30 text-emerald-600 bg-emerald-500/10 hover:bg-emerald-500/20 "
+          data-testid="channels-panel-avatar-perm-allow-all-btn"
         >{t("ownerScopes.allowAll")}</button>
         <button onClick={() => setAllTools("deny")}
           className="text-[11px] px-2 py-0.5 rounded border border-red-500/30 text-red-600 bg-red-500/10 hover:bg-red-500/20 "
+          data-testid="channels-panel-avatar-perm-deny-all-btn"
         >{t("ownerScopes.denyAll")}</button>
       </div>
 
       {/* External directory */}
-      <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+      <div
+        className="flex items-center justify-between rounded-md border border-border px-3 py-2"
+        data-testid="channels-panel-avatar-perm-external-directory"
+      >
         <div className="min-w-0">
-          <span className="text-[12px] font-medium text-text">{t("ownerScopes.externalDirectory")}</span>
-          <p className="text-[10px] text-text-muted">{t("ownerScopes.externalDirectoryDesc")}</p>
+          <span
+            className="text-[12px] font-medium text-text"
+            data-testid="channels-panel-avatar-perm-external-directory-label"
+          >{t("ownerScopes.externalDirectory")}</span>
+          <p
+            className="text-[10px] text-text-muted"
+            data-testid="channels-panel-avatar-perm-external-directory-hint"
+          >{t("ownerScopes.externalDirectoryDesc")}</p>
         </div>
         <button
           onClick={() => setExtDir(extDir === "allow" ? "deny" : "allow")}
           className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   ${
             extDir === "allow" ? "bg-ok" : "bg-secondary"}`}
+          data-testid="channels-panel-avatar-perm-external-directory-toggle"
         >
           <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
             extDir === "allow" ? "translate-x-4" : "translate-x-0"}`} />
@@ -219,9 +231,15 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
       </div>
 
       {/* Tool groups — one toggle per group */}
-      <div>
-        <label className="block text-[11px] text-text-muted mb-1.5">{t("ownerScopes.toolPermissions")}</label>
-        <div className="rounded-md border border-border overflow-hidden">
+      <div data-testid="channels-panel-avatar-perm-tool-groups">
+        <label
+          className="block text-[11px] text-text-muted mb-1.5"
+          data-testid="channels-panel-avatar-perm-tool-groups-label"
+        >{t("ownerScopes.toolPermissions")}</label>
+        <div
+          className="rounded-md border border-border overflow-hidden"
+          data-testid="channels-panel-avatar-perm-tool-group-list"
+        >
           {TOOL_GROUPS.map((group, idx) => {
             const allowed = isGroupAllowed(group);
             return (
@@ -230,15 +248,27 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
                 className={`flex items-center justify-between px-3 py-2 ${
                   idx > 0 ? "border-t border-border" : ""
                 } ${idx % 2 === 1 ? "bg-secondary/10" : ""}`}
+                data-testid="channels-panel-avatar-perm-tool-group"
+                data-variant={group.groupKey}
               >
                 <div className="min-w-0 flex-1">
-                  <span className="text-[12px] font-medium text-text">{t(group.groupKey)}</span>
-                  <p className="text-[10px] text-text-muted leading-tight">{t(group.groupDescKey)}</p>
+                  <span
+                    className="text-[12px] font-medium text-text"
+                    data-testid="channels-panel-avatar-perm-tool-group-label"
+                    data-variant={group.groupKey}
+                  >{t(group.groupKey)}</span>
+                  <p
+                    className="text-[10px] text-text-muted leading-tight"
+                    data-testid="channels-panel-avatar-perm-tool-group-hint"
+                    data-variant={group.groupKey}
+                  >{t(group.groupDescKey)}</p>
                 </div>
                 <button
                   onClick={() => toggleGroup(group)}
                   className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent   ${
                     allowed ? "bg-ok" : "bg-secondary"}`}
+                  data-testid="channels-panel-avatar-perm-tool-group-toggle"
+                  data-variant={group.groupKey}
                 >
                   <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow   ${
                     allowed ? "translate-x-4" : "translate-x-0"}`} />
@@ -250,13 +280,23 @@ export function AvatarPermEditor({ channelId, userId }: AvatarPermEditorProps) {
       </div>
 
       {/* Save */}
-      <div className="flex items-center justify-end gap-2">
-        {success && <span className="text-[11px] text-ok">{t("ownerScopes.saved")}</span>}
-        {error && <span className="text-[11px] text-danger truncate max-w-[200px]">{error}</span>}
+      <div
+        className="flex items-center justify-end gap-2"
+        data-testid="channels-panel-avatar-perm-save"
+      >
+        {success && <span
+          className="text-[11px] text-ok"
+          data-testid="channels-panel-avatar-perm-saved"
+        >{t("ownerScopes.saved")}</span>}
+        {error && <span
+          className="text-[11px] text-danger truncate max-w-[200px]"
+          data-testid="channels-panel-avatar-perm-error"
+        >{error}</span>}
         <button
           onClick={() => void save()}
           disabled={!hasChanges || saving}
           className="btn primary !px-2.5 !py-1 text-[12px] disabled:opacity-50 disabled:cursor-not-allowed"
+          data-testid="channels-panel-avatar-perm-save-btn"
         >{saving ? t("common.saving") : t("ownerScopes.saveBtn")}</button>
       </div>
     </div>
