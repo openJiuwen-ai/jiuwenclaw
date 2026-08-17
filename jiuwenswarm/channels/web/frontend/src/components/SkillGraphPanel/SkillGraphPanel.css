@@ -476,15 +476,13 @@
   min-width: 0;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid var(--color-border-default);
-  border-left-width: 3px;
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-page);
-  padding: 10px;
 }
 
-.skill-graph-panel__description h4 {
+.skill-graph-panel__detail-section-title {
   color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .skill-graph-panel__description-content {

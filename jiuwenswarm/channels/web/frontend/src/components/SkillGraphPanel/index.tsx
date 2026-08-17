@@ -1663,7 +1663,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             </div>
             {asString(selectedNode.properties.description) ? (
               <section data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
-                <h4>{t('skills.graph.description')}</h4>
+                <h4 className="skill-graph-panel__detail-section-title">{t('skills.graph.description')}</h4>
                 <p data-testid="skill-graph-panel-detail-description-content" className="skill-graph-panel__description-content">
                   {asString(selectedNode.properties.description)}
                 </p>
@@ -1685,7 +1685,9 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
               ) : null}
             </div>
             <div data-testid="skill-graph-panel-related" className="skill-graph-panel__related">
-              <h4 data-testid="skill-graph-panel-related-title">{t('skills.graph.relatedEdges')}</h4>
+              <h4 data-testid="skill-graph-panel-related-title" className="skill-graph-panel__detail-section-title">
+                {t('skills.graph.relatedEdges')}
+              </h4>
               {relatedEdges.length === 0 ? (
                 <div data-testid="skill-graph-panel-related-empty" className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
               ) : (
