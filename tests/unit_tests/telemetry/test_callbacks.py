@@ -2910,15 +2910,28 @@ async def test_context_token_metrics_are_emitted_without_a_recording_span(
     }
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "control_error",
     [asyncio.CancelledError(), KeyboardInterrupt(), SystemExit()],
 )
-async def test_input_control_errors_propagate_after_state_cleanup(
+def test_input_control_errors_propagate_after_state_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     control_error: BaseException,
 ) -> None:
+    async def _inline_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def _inline_wait_for(aw, timeout=None):
+        del timeout
+        return await aw
+
+    # KeyboardInterrupt/SystemExit inside pytest-asyncio (or asyncio.wait_for's
+    # nested task) aborts the whole pytest session. Drive the coroutine with
+    # an explicitly closed event loop so pytest.raises can catch them without
+    # leaving its selector sockets behind after a prior async test.
+    monkeypatch.setattr(callbacks_module.asyncio, "to_thread", _inline_to_thread)
+    monkeypatch.setattr(callbacks_module.asyncio, "wait_for", _inline_wait_for)
+
     def raise_control(messages, tools):
         del messages, tools
         raise control_error
@@ -2930,8 +2943,19 @@ async def test_input_control_errors_propagate_after_state_cleanup(
         config=TelemetryConfig(enabled=True),
     )
 
-    with pytest.raises(type(control_error)):
+    async def _exercise() -> None:
         await callbacks._on_llm_invoke_input(messages=[], model="control-model")
+
+    def _run_in_closed_loop() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_exercise())
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+    with pytest.raises(type(control_error)):
+        _run_in_closed_loop()
 
     assert callbacks._metric_state.active_count() == 0
     assert callbacks._span_state.active_count() == 0

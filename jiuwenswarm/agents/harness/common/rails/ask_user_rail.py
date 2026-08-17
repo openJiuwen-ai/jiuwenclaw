@@ -42,6 +42,18 @@ logger = logging.getLogger(__name__)
 
 MAX_STRUCTURED_QUESTIONS = 4
 
+
+def _decode_questions_array(raw_questions: Any) -> tuple[Any, bool]:
+    """Accept one accidental JSON encoding layer around a questions array."""
+    if not isinstance(raw_questions, str):
+        return raw_questions, False
+    try:
+        decoded = json.loads(raw_questions)
+    except (ValueError, TypeError):
+        return raw_questions, False
+    return (decoded, True) if isinstance(decoded, list) else (raw_questions, False)
+
+
 # ---------------------------------------------------------------------------
 # Extended input schema
 # ---------------------------------------------------------------------------
@@ -314,7 +326,11 @@ class StructuredAskUserRail(AskUserRail):
                     "[INVALID_ARGUMENT] return_json must be a boolean when provided."
                 )
             )
-        raw_questions = args.get("questions")
+        raw_questions, questions_were_decoded = _decode_questions_array(
+            args.get("questions")
+        )
+        if questions_were_decoded:
+            args["questions"] = raw_questions
         if "questions" in args and not isinstance(raw_questions, list):
             return self.reject(
                 tool_result=(
@@ -403,7 +419,12 @@ class StructuredAskUserRail(AskUserRail):
                 )
 
         if user_input is None:
-            return self.interrupt(self._build_ask_request(tool_call))
+            interrupt_tool_call = tool_call
+            if tool_call is not None and questions_were_decoded:
+                interrupt_tool_call = tool_call.model_copy(
+                    update={"arguments": json.dumps(args, ensure_ascii=False)}
+                )
+            return self.interrupt(self._build_ask_request(interrupt_tool_call))
 
         # Detect if this was a structured questions call by checking tool_args
         is_structured = questions_data is not None and len(questions_data) > 0

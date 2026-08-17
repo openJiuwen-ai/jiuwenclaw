@@ -390,6 +390,12 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
             shutdown_agent_observability()
         except Exception as exc:
             logger.warning("[AgentServer] agent observability shutdown failed: %s", exc)
+        try:
+            from jiuwenswarm.server.runtime.session import session_history
+
+            await asyncio.to_thread(session_history.shutdown)
+        except Exception as exc:
+            logger.warning("[AgentServer] history flush failed: %s", exc)
         logger.info("[AgentServer] stopped")
         _set_exit_reason("clean_shutdown")
 

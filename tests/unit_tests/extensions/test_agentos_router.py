@@ -25,6 +25,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
     AgentOSRouterClient,
     resolve_agent_workspace,
 )
+from jiuwenswarm.extensions.agentos.agentos_router import router_client
 from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
 
 
@@ -212,31 +213,41 @@ async def test_swarm_request_repeated_stays_direct() -> None:
     assert yuanrong.send_calls == 2
 
 
-def test_resolve_agent_workspace_defaults_under_agentos_users() -> None:
-    assert resolve_agent_workspace("alice") == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice"
+def test_resolve_agent_workspace_defaults_under_agentos_users(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(router_client, "DEFAULT_AGENT_WORKSPACE_ROOT", str(tmp_path))
+    expected_root = tmp_path.resolve()
+
+    assert resolve_agent_workspace("alice") == str(expected_root / "alice")
     assert resolve_agent_workspace("alice/../bob") == (
-        f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice_.._bob"
+        str(expected_root / "alice_.._bob")
     )
     assert resolve_agent_workspace("u1", workspace_root="/data/ws") == "/data/ws/u1"
 
 
 @pytest.mark.asyncio
-async def test_third_party_type_creates_via_yuanrong() -> None:
+async def test_third_party_type_creates_via_yuanrong(tmp_path) -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = AgentOSRouterClient(yuanrong, FakeRegistryClient(), agent_manager)
+    workspace_root = str(tmp_path)
+    expected_workspace = str(tmp_path.resolve() / "u1")
+    client = AgentOSRouterClient(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        workspace_root=workspace_root,
+    )
 
     response = await client.send_request(_envelope(agent_type="opencode"))
 
     assert response.ok
     assert yuanrong.create_calls == 1
-    assert yuanrong.create_payloads[0]["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert yuanrong.create_payloads[0]["workspace"] == expected_workspace
     assert yuanrong.send_calls == 1
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.agent_type == "opencode"
     assert agents[0].info.status is AgentStatus.READY
     assert agents[0].info.sandbox_id == "sbx-1"
-    assert agents[0].info.metadata["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert agents[0].info.metadata["workspace"] == expected_workspace
 
 
 @pytest.mark.asyncio

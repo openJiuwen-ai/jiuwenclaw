@@ -125,6 +125,46 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     if chunk_type == "chat.ask_user_question":
         return parse_ask_user_question_payload(payload)
 
+    if chunk_type == "task.start":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.start",
+                "task_id": payload.get("task_id"),
+                "task_content": payload.get("task_content"),
+                "task_index": payload.get("task_index"),
+                "total_tasks": payload.get("total_tasks"),
+                "parent_request_id": payload.get("parent_request_id"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
+    if chunk_type == "task.update":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.update",
+                "tasks": payload.get("tasks", []),
+                "total_tasks": payload.get("total_tasks", 0),
+                "completed_tasks": payload.get("completed_tasks", 0),
+                "in_progress_tasks": payload.get("in_progress_tasks", 0),
+                "pending_tasks": payload.get("pending_tasks", 0),
+                "parent_request_id": payload.get("parent_request_id"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
+    if chunk_type == "task.complete":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "task.complete",
+                "task_id": payload.get("task_id"),
+                "task_content": payload.get("task_content"),
+                "status": payload.get("status"),
+                "duration_ms": payload.get("duration_ms"),
+                "error": payload.get("error"),
+                "timestamp": payload.get("timestamp"),
+            }
+        return None
+
     if isinstance(chunk_type, str) and "." in chunk_type:
         if chunk_type == "context.compression_state":
             if hasattr(payload, "model_dump"):
@@ -263,7 +303,9 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             return None
 
         if _has_streamed_content and not is_chunked:
-            return {"event_type": "chat.final", "content": content}
+            # Keep chat.final as a completion marker when the final answer text
+            # has already been streamed via chat.delta.
+            return {"event_type": "chat.final", "content": ""}
         if is_chunked:
             return {"event_type": "chat.delta", "content": content}
         return {"event_type": "chat.final", "content": content}

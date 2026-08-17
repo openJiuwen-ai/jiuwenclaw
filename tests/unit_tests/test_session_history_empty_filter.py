@@ -123,12 +123,12 @@ def test_has_persistable_assistant_payload_processing_status_still_rejected():
     ) is False
 
 
-def test_has_persistable_assistant_payload_tool_update_still_rejected():
+def test_has_persistable_assistant_payload_tool_update_is_merged():
     assert session_history._has_persistable_assistant_payload(
         content_text="",
         event_type="chat.tool_update",
         extra={"tool_call_id": "call_abc", "beam_search": {}},
-    ) is False
+    ) is True
 
 
 def test_append_history_persists_tool_result(tmp_path, monkeypatch):

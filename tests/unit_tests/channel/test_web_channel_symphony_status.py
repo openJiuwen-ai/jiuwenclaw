@@ -108,6 +108,40 @@ def test_web_channel_preserves_goal_structured_payloads():
         assert WebChannel._build_event_payload(msg, event_name) == expected
 
 
+def test_web_channel_preserves_task_lifecycle_payloads():
+    tasks = [
+        {"id": "todo:1", "content": "写封面", "status": "pending"},
+    ]
+    msg = Message(
+        id="req-task",
+        type="event",
+        channel_id="web",
+        session_id="sess-task",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload={
+            "event_type": "task.update",
+            "tasks": tasks,
+            "total_tasks": 1,
+            "completed_tasks": 0,
+            "in_progress_tasks": 0,
+            "pending_tasks": 1,
+        },
+        event_type=EventType.TASK_UPDATE,
+    )
+
+    assert WebChannel._build_event_payload(msg, "task.update") == {
+        "event_type": "task.update",
+        "tasks": tasks,
+        "total_tasks": 1,
+        "completed_tasks": 0,
+        "in_progress_tasks": 0,
+        "pending_tasks": 1,
+        "session_id": "sess-task",
+    }
+
+
 @pytest.mark.asyncio
 async def test_web_channel_preserves_symphony_status_payload():
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())

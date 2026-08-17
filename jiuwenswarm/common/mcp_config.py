@@ -11,12 +11,16 @@ import json
 import os
 import re
 import sys
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 
 try:
     from openjiuwen.core.foundation.tool.mcp.client import (
@@ -635,12 +639,208 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
     )
 
 
+_OFFICE_CLAW_MCP_ENV_KEYS = frozenset(
+    {
+        "OFFICE_CLAW_API_URL",
+        "OFFICE_CLAW_INVOCATION_ID",
+        "OFFICE_CLAW_CALLBACK_TOKEN",
+        "OFFICE_CLAW_USER_ID",
+        "OFFICE_CLAW_AGENT_ID",
+        "OFFICE_CLAW_SIGNAL_USER",
+        "OFFICE_CLAW_MCP_EXCLUDED_TOOLS",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
+
+
+@dataclass(frozen=True)
+class OfficeClawMcpRegistration:
+    """Tools installed on one session agent for one Relay request."""
+
+    request_id: str
+    tool_ids: tuple[str, ...]
+    tool_names: tuple[str, ...]
+
+
+def extract_office_claw_mcp(params: Any) -> dict[str, Any] | None:
+    """Return only the legacy ``office_claw_mcp`` request field."""
+
+    if not isinstance(params, dict):
+        return None
+    raw = params.get("office_claw_mcp")
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return dict(raw)
+
+
+def _normalized_path(value: str) -> str:
+    return os.path.normcase(str(Path(value).expanduser().resolve(strict=False)))
+
+
+def validate_office_claw_mcp_config(
+    config: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Validate request config against Relay's startup-time MCP identity.
+
+    The request may choose only callback-related environment values. The
+    executable, arguments, and working directory must exactly match the values
+    with which Relay started Jiuwen, preventing this request field from
+    becoming a general-purpose subprocess execution surface.
+    """
+
+    env_source = os.environ if environ is None else environ
+    expected_command = str(env_source.get("OFFICE_CLAW_MCP_COMMAND") or "").strip()
+    expected_args_raw = str(env_source.get("OFFICE_CLAW_MCP_ARGS_JSON") or "").strip()
+    expected_cwd = str(env_source.get("OFFICE_CLAW_MCP_CWD") or "").strip()
+    if not expected_command or not expected_args_raw or not expected_cwd:
+        raise ValueError("Relay OfficeClaw MCP startup identity is incomplete")
+
+    try:
+        expected_args = json.loads(expected_args_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("OFFICE_CLAW_MCP_ARGS_JSON is invalid") from exc
+    if not isinstance(expected_args, list):
+        raise ValueError("OFFICE_CLAW_MCP_ARGS_JSON must contain a list")
+    expected_args = [str(item) for item in expected_args]
+
+    command = str(config.get("command") or "").strip()
+    args = config.get("args")
+    cwd = str(config.get("cwd") or "").strip()
+    request_env = config.get("env")
+    if not command:
+        raise ValueError("office_claw_mcp command is required")
+    if not isinstance(args, list):
+        raise ValueError("office_claw_mcp args must be a list")
+    if not cwd:
+        raise ValueError("office_claw_mcp cwd is required")
+    if not isinstance(request_env, dict):
+        raise ValueError("office_claw_mcp env must be an object")
+
+    normalized_args = [str(item) for item in args]
+    if _normalized_path(command) != _normalized_path(expected_command):
+        raise ValueError("office_claw_mcp command does not match Relay startup identity")
+    if normalized_args != expected_args:
+        raise ValueError("office_claw_mcp args do not match Relay startup identity")
+    if _normalized_path(cwd) != _normalized_path(expected_cwd):
+        raise ValueError("office_claw_mcp cwd does not match Relay startup identity")
+
+    unknown_env_keys = {str(key) for key in request_env}.difference(
+        _OFFICE_CLAW_MCP_ENV_KEYS
+    )
+    if unknown_env_keys:
+        raise ValueError(
+            "office_claw_mcp env contains unsupported keys: "
+            + ", ".join(sorted(unknown_env_keys))
+        )
+
+    return {
+        "command": command,
+        "args": normalized_args,
+        "cwd": cwd,
+        "env": {
+            str(key): str(value)
+            for key, value in request_env.items()
+            if key is not None and value is not None
+        },
+    }
+
+
+def _stdio_server_parameters(params: Mapping[str, Any]):
+    from mcp import StdioServerParameters
+
+    return StdioServerParameters(
+        command=str(params["command"]),
+        args=list(params["args"]),
+        env=dict(params.get("env") or {}),
+        cwd=str(params["cwd"]),
+        encoding_error_handler="strict",
+    )
+
+
+async def list_office_claw_mcp_tools(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Start OfficeClaw MCP once, collect its tool schemas, then stop it."""
+
+    from mcp import ClientSession
+    from mcp.client.stdio import stdio_client
+
+    stack = AsyncExitStack()
+    try:
+        read, write = await stack.enter_async_context(
+            stdio_client(_stdio_server_parameters(params))
+        )
+        session = await stack.enter_async_context(
+            ClientSession(read, write, sampling_callback=None)
+        )
+        await session.initialize()
+        response = await session.list_tools()
+        return [
+            {
+                "name": tool.name,
+                "description": getattr(tool, "description", "") or "",
+                "input_params": getattr(tool, "inputSchema", {}) or {},
+            }
+            for tool in response.tools
+        ]
+    finally:
+        await stack.aclose()
+
+
+class RequestScopedOfficeClawMcpTool(Tool):
+    """Invoke one OfficeClaw tool through a fresh request-configured process."""
+
+    def __init__(self, card: ToolCard, params: Mapping[str, Any]) -> None:
+        super().__init__(card)
+        self._params = dict(params)
+
+    async def stream(self, inputs: Any, **kwargs: Any):
+        raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
+
+    async def invoke(self, inputs: Any, **kwargs: Any) -> dict[str, Any]:
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
+        arguments = inputs if isinstance(inputs, dict) else {}
+        stack = AsyncExitStack()
+        try:
+            read, write = await stack.enter_async_context(
+                stdio_client(_stdio_server_parameters(self._params))
+            )
+            session = await stack.enter_async_context(
+                ClientSession(read, write, sampling_callback=None)
+            )
+            await session.initialize()
+            result = await session.call_tool(self._card.name, arguments=arguments)
+            result_content: str | None = None
+            if result.content:
+                result_content = getattr(result.content[-1], "text", None)
+            return {"result": result_content}
+        except Exception as exc:
+            raise build_error(
+                StatusCode.TOOL_MCP_EXECUTION_ERROR,
+                cause=exc,
+                reason=str(exc),
+                method="invoke",
+                card=self._card,
+            ) from exc
+        finally:
+            await stack.aclose()
+
+
 __all__ = [
+    "OfficeClawMcpRegistration",
+    "RequestScopedOfficeClawMcpTool",
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
     "create_mcp_tool",
     "extract_enabled_mcp_server_entries",
+    "extract_office_claw_mcp",
+    "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
+    "validate_office_claw_mcp_config",
     "_check_dangerous_args",
     "_is_blocked_host",
     "_loopback_mcp_allowed",

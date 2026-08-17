@@ -1683,6 +1683,46 @@ def test_windows_output_root_reparse_point_is_rejected(tmp_path: Path):
             dt._open_output_root(tmp_path)
 
 
+def test_progress_artifact_accepts_windows_synthetic_mode_bits(
+    tmp_path: Path, monkeypatch
+):
+    directory = tmp_path / "deepresearch-progress"
+    directory.mkdir(mode=0o700)
+    original_lstat = Path.lstat
+    original_fstat = os.fstat
+
+    def windows_lstat(path: Path):
+        metadata = original_lstat(path)
+        if path == directory:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o777,
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_file_attributes=0,
+            )
+        return metadata
+
+    def windows_fstat(descriptor: int):
+        metadata = original_fstat(descriptor)
+        return SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o666,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_nlink=1,
+            st_file_attributes=0,
+        )
+
+    monkeypatch.setattr(dt.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
+    monkeypatch.setattr(Path, "lstat", windows_lstat)
+    monkeypatch.setattr(dt.os, "fstat", windows_fstat)
+
+    artifact = dt._create_progress_artifact()
+    try:
+        assert artifact.path == directory / "progress.jsonl"
+    finally:
+        dt._remove_progress_artifact(artifact)
+
+
 def test_build_deepresearch_config_maps_only_required_values():
     source = {
         "MODEL_NAME": "model",
