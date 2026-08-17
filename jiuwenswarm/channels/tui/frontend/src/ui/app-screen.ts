@@ -78,6 +78,7 @@ import {
   isWorkflowBudgetLow,
   pendingHumanViewHint,
   pendingInputsBannerText,
+  pausedWorkflowsBannerText,
   runningWorkflowsBannerText,
   sessionMembersInPhase,
   shouldShowTurnInDetailOrReply,
@@ -1487,6 +1488,7 @@ function workflowStatusTone(status: WorkflowStatus): (value: string) => string {
   switch (status) {
     case "planned":
     case "pending":
+    case "paused":
       return palette.status.warning;
     case "running":
       return palette.status.info;
@@ -6691,11 +6693,19 @@ export class AppScreen implements Component, Focusable {
     const pendingPrompts = snapshot.pendingHumanPrompts;
 
     const runningWorkflows = workflowRuns.filter((item) => item.status === "running");
+    const pausedWorkflows = workflowRuns.filter((item) => item.status === "paused");
     const totalPending = pendingPrompts?.size ?? 0;
 
-    if (runningWorkflows.length === 0 && totalPending === 0) return [];
+    if (
+      runningWorkflows.length === 0 &&
+      pausedWorkflows.length === 0 &&
+      totalPending === 0
+    ) {
+      return [];
+    }
 
     const waitingIcon = workflowStatusIcon("waiting_for_human");
+    const pausedIcon = workflowStatusIcon("paused");
     const spinner =
       totalPending > 0
         ? palette.text.humanInput(`${waitingIcon} `)
@@ -6708,18 +6718,50 @@ export class AppScreen implements Component, Focusable {
       return padToWidth(`  ${nameAndTime}${suffix}`, width);
     };
 
+    const renderPausedRow = (workflow: WorkflowRun): string => {
+      const nameAndTime = `${palette.text.dim(workflow.name)} ${palette.text.dim(formatWorkflowTimingText(workflow))}`;
+      return padToWidth(`  ${palette.status.warning(`${pausedIcon} `)}${nameAndTime}`, width);
+    };
+
     if (totalPending > 0) {
       const runningSuffix =
         runningWorkflows.length > 0
           ? ` · ${palette.text.assistant(runningWorkflowsBannerText(runningWorkflows.length))}`
           : "";
+      const pausedSuffix =
+        pausedWorkflows.length > 0
+          ? ` · ${palette.text.assistant(pausedWorkflowsBannerText(pausedWorkflows.length))}`
+          : "";
       const firstLine = padToWidth(
-        `${spinner}${palette.text.humanInput(pendingInputsBannerText(totalPending))} · ${palette.text.dim(pendingHumanViewHint())}${runningSuffix}`,
+        `${spinner}${palette.text.humanInput(pendingInputsBannerText(totalPending))} · ${palette.text.dim(pendingHumanViewHint())}${runningSuffix}${pausedSuffix}`,
         width,
       );
       const lines = [firstLine];
       for (const wf of runningWorkflows) {
         lines.push(renderRow(wf));
+      }
+      for (const wf of pausedWorkflows) {
+        lines.push(renderPausedRow(wf));
+      }
+      return lines;
+    }
+
+    // Paused workflows present (no pending) — surface them alongside running ones.
+    if (pausedWorkflows.length > 0) {
+      const banner = [
+        runningWorkflowsBannerText(runningWorkflows.length),
+        pausedWorkflowsBannerText(pausedWorkflows.length),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const prefix =
+        runningWorkflows.length > 0 ? spinner : palette.status.warning(`${pausedIcon} `);
+      const lines = [padToWidth(`${prefix} ${palette.text.assistant(banner)}`, width)];
+      for (const wf of runningWorkflows) {
+        lines.push(renderRow(wf));
+      }
+      for (const wf of pausedWorkflows) {
+        lines.push(renderPausedRow(wf));
       }
       return lines;
     }
