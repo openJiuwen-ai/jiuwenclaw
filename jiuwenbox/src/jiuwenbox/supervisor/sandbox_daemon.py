@@ -1144,6 +1144,30 @@ class FastPathStats:
     at ``/tmp/fastpath_stats.json`` inside the sandbox so host-side tooling
     and the perf scripts can read them through the normal exec/files path -
     no new API surface. Purely diagnostic; never used for control flow.
+
+    Counting口径 (daemon-side, single source of truth):
+
+    * ``requests``  -- exec requests the daemon actually *judged*, i.e. that
+      entered ``_try_fastpath_exec`` (server-marked candidates the admit cap
+      let through). NOT total server candidates: server-side admit-cap drops
+      never reach the daemon and are not represented here.
+    * ``hits``      -- judged requests the fast path executed to a *normal*
+      ``exit_code`` response (``"error" not in response``).
+    * ``fallbacks`` -- judged requests that did not hit, broken down by
+      ``fallback_reasons``: ``not_eligible`` / ``breaker_open`` /
+      ``worker_unavailable`` / ``spawn_failed`` / ``worker_error``.
+
+    Invariant: ``requests == hits + fallbacks`` (every judged request lands in
+    exactly one bucket). ``record_request`` is taken at the *entry* of
+    ``_try_fastpath_exec`` (before the eligibility check) so ``not_eligible``
+    is counted; ``record_hit`` is only taken on a normal worker response, so
+    a ``worker_error`` response is a fallback, never also a hit.
+
+    Throttle / eventual flush: ``write_snapshot`` writes at most once per
+    ``FASTPATH_STATS_THROTTLE``; a skipped write sets ``_dirty`` so the next
+    in-window record or the 5s idle-reaper wakeup (``flush``) force-writes
+    the accumulated counters. A one-off fallback followed by silence is
+    therefore never permanently lost.
     """
 
     def __init__(self) -> None:
@@ -1161,6 +1185,7 @@ class FastPathStats:
             "breaker_failures": 0,
         }
         self._last_write = 0.0
+        self._dirty = False
 
     def record_request(self) -> None:
         with self._lock:
@@ -1169,12 +1194,19 @@ class FastPathStats:
     def record_hit(self) -> None:
         with self._lock:
             self._data["hits"] += 1
+        # A hit is the terminal state for this request; flush the snapshot
+        # (throttled) so steady traffic is visible without per-record I/O.
+        self.write_snapshot()
 
     def record_fallback(self, reason: str) -> None:
         with self._lock:
             self._data["fallbacks"] += 1
             reasons = self._data["fallback_reasons"]
             reasons[reason] = reasons.get(reason, 0) + 1
+        # Every fallback path must reach a flush attempt, otherwise a class
+        # of fallback (e.g. ``not_eligible``) can stay invisible in the file
+        # when no concurrent hit triggers a write. Throttled write.
+        self.write_snapshot()
 
     def record_cold_start(self) -> None:
         with self._lock:
@@ -1202,16 +1234,36 @@ class FastPathStats:
             return dict(self._data)
 
     def write_snapshot(self, force: bool = False) -> None:
-        """Write the throttled JSON snapshot; never raises on failure."""
+        """Write the throttled JSON snapshot; never raises on failure.
+
+        Within ``FASTPATH_STATS_THROTTLE`` of the last write the snapshot is
+        *not* rewritten; instead ``_dirty`` is set so a later in-window record
+        or ``flush`` (idle-reaper) picks up the accumulated counters. ``force``
+        always writes and clears ``_dirty``.
+        """
         now = time.monotonic()
         if not force and (now - self._last_write) < FASTPATH_STATS_THROTTLE:
+            self._dirty = True
             return
         try:
             with open(FASTPATH_STATS_PATH, "wb") as fh:
                 fh.write(json.dumps(self.snapshot()).encode("utf-8"))
             self._last_write = now
+            self._dirty = False
         except Exception:  # pragma: no cover - diagnostics must not break exec
             pass
+
+    def flush(self) -> None:
+        """Force-write the snapshot if a throttled write was skipped.
+
+        Called by the idle-reaper on every wakeup so a one-off fallback
+        followed by silence does not stay invisible past the throttle window.
+        Cheap when there is nothing pending (one lock + flag check).
+        """
+        with self._lock:
+            dirty = self._dirty
+        if dirty:
+            self.write_snapshot(force=True)
 
 
 class FastPathUnavailable(RuntimeError):
@@ -1285,6 +1337,10 @@ class ForkServerPool:
 
     def _reaper_loop(self) -> None:
         while not self._stop_event.wait(FASTPATH_REAP_INTERVAL):
+            # Flush any snapshot write skipped by the throttle so a one-off
+            # fallback followed by silence does not stay invisible in the
+            # stats file past the throttle window.
+            self.stats.flush()
             idle_for = time.monotonic() - self._last_activity
             if idle_for < _fastpath_idle_timeout():
                 continue
@@ -1448,7 +1504,12 @@ class ForkServerPool:
         ``subprocess.Popen`` path.
         """
         self._last_activity = time.monotonic()
-        self.stats.record_request()
+        # NOTE: request/hit accounting lives in ``_try_fastpath_exec`` so the
+        # ``not_eligible`` fallback (which never reaches ``submit``) is counted
+        # and ``requests == hits + fallbacks`` holds. Here we only advance the
+        # breaker on a worker round-trip: a *responded* worker resets the
+        # failure count even when the response itself carries an internal
+        # ``error`` (that case is a ``worker_error`` fallback, not a hit).
         if not self._allow_attempt():
             raise FastPathUnavailable("breaker_open")
 
@@ -1540,7 +1601,10 @@ class ForkServerPool:
         else:
             with self._lock:
                 self._record_success_locked()
-            self.stats.record_hit()
+            # ``record_hit`` is taken by ``_try_fastpath_exec`` only when the
+            # response is a normal ``exit_code`` result; a response carrying
+            # an internal ``error`` is recorded as a ``worker_error`` fallback
+            # there instead, so one request is never both a hit and a fallback.
         finally:
             wlock.release()
         return response
@@ -1581,7 +1645,13 @@ def _try_fastpath_exec(
     Returns ``True`` when a response was sent (fastpath success or timeout),
     ``False`` when the caller should fall back to ``subprocess.Popen``.
     Records fast-path hits / fallback reasons for observability.
+
+    Accounting: every call counts one ``request`` (taken here, before the
+    eligibility check, so ``not_eligible`` is counted). The request then lands
+    in exactly one terminal bucket -- ``hits`` (normal ``exit_code`` response)
+    or one ``fallbacks`` reason -- so ``requests == hits + fallbacks``.
     """
+    _FORK_POOL.stats.record_request()
     try:
         plan = _fastpath_plan(command, header)
     except Exception:  # a recogniser bug must never break exec handling
@@ -1607,10 +1677,11 @@ def _try_fastpath_exec(
         )
     except FastPathUnavailable as exc:
         _FORK_POOL.stats.record_fallback(exc.reason)
-        _FORK_POOL.stats.write_snapshot()
         return False
-    _FORK_POOL.stats.write_snapshot()
     if "error" in response:
+        # The worker responded but hit an internal error (``_run_child``
+        # defensive except) -- fastpath attempted and failed to run the code,
+        # so this is a fallback, not a hit.
         _FORK_POOL.stats.record_fallback("worker_error")
         _send_response(
             conn,
@@ -1622,6 +1693,7 @@ def _try_fastpath_exec(
             ),
         )
         return True
+    _FORK_POOL.stats.record_hit()
     _send_response(
         conn,
         _exec_response(
