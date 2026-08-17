@@ -2930,7 +2930,7 @@ function AgentosModelSection({
   };
 
   return (
-    <div className="space-y-2 opacity-60">
+    <div className="space-y-2">
       {models.map((model, idx) => {
         const isExpanded = expandedIdx === idx;
         const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
@@ -2942,8 +2942,23 @@ function AgentosModelSection({
           ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
           : model.model_name;
         return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+          <div
+            key={`${model.model_name}-${idx}`}
+            className="rounded-lg border border-border bg-secondary/20"
+            data-testid="config-panel-agentos-model-item"
+          >
             <div className="flex items-center justify-between px-3 py-2 gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-amber-500 bg-amber-500/10 border-amber-500/20 shrink-0">
+                  <span className="text-xs">⚙</span>
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-text-strong truncate flex items-center gap-1">
+                    {displayName}
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border">{t("config.agentos.backupBadge")}</span>
+                  </div>
+                </div>
+              </div>
               <button
                 type="button"
                 className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
@@ -2969,35 +2984,26 @@ function AgentosModelSection({
                 </button>
               </div>
             </div>
-            {isExpanded && (
-              <div className="border-t border-border px-3 py-2 space-y-2">
-                {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
-                  <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0">
-                      <ConfigFieldHintLabel label={field} help={getKeyLabelHintText(field, t) || undefined} />
-                    </label>
-                    {field === "model_provider" ? (
-                      <input
-                        type="text"
-                        value={models[idx]?.[field] ?? ""}
-                        readOnly
-                        className="flex-1 rounded border border-border bg-secondary/30 px-2 py-1 text-text-muted text-xs"
-                      />
-                    ) : (
-                      <input
-                        type={field === "api_key" ? "password" : "text"}
-                        value={models[idx]?.[field] ?? ""}
-                        readOnly
-                        className="flex-1 rounded border border-border bg-secondary/30 px-2 py-1 text-text-muted text-xs"
-                      />
-                    )}
-                  </div>
-                ))}
-                <div className="text-[11px] text-text-muted">
-                  {t("config.agentos.readonly")}
+            <div className="border-t border-border px-3 py-2 space-y-2">
+              {([
+                { field: "model", value: model.model_name || "" },
+                { field: "provider", value: model.model_provider || "" },
+                { field: "api_base", value: model.api_base || "" },
+                { field: "api_key", value: model.api_key || "" },
+              ] as const).map(({ field, value }) => (
+                <div key={field} className="flex items-center gap-2 text-xs">
+                  <label className="w-28 text-text-muted shrink-0">
+                    <ConfigFieldHintLabel label={<>{field}</>} help={getKeyLabelHintText(field, t) || undefined} />
+                  </label>
+                  <input
+                    type={field === "api_key" ? "password" : "text"}
+                    value={value}
+                    disabled
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                  />
                 </div>
-              </div>
-            )}
+              ))}
+            </div>
           </div>
         );
       })}
@@ -4744,14 +4750,25 @@ export function ConfigPanel({
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
+  // 是否存在可用的 agentos 备份模型：若 defaults 凭证为空但 agentos 已配置，
+  // 实际对话走 agentos 请求级注入，故 defaults 必填项应放宽（允许空值保存）。
+  // 仅当 agentos 也未配置时才维持 defaults 必填，避免两者皆空导致无法对话。
+  const hasAgentosBackup = useMemo(
+    () => storeAvailableModels.some((m) => m.is_agentos === true),
+    [storeAvailableModels],
+  );
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => {
       if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
         return false;
       }
+      // 有 agentos 备份模型时，defaults 必填项放宽（.env 全空场景兼容）
+      if (hasAgentosBackup) {
+        return false;
+      }
       return !(draftValues[key] ?? "").trim();
     }),
-    [draftValues],
+    [draftValues, hasAgentosBackup],
   );
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
   const hasDuplicateAgentNames = useMemo(

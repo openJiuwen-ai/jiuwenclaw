@@ -155,7 +155,7 @@ export function createModelCommand(): SlashCommand {
             }
             return {
               label: String(i + 1),
-              value: `${displayName}${meta?.is_agentos === true ? " [backup]" : ""}${keySuffix}${isCurrent ? " (current)" : ""}`,
+              value: `${displayName}${meta?.is_agentos === true ? " [agentos]" : ""}${keySuffix}${isCurrent ? " (current)" : ""}`,
             };
           });
           ctx.addItem(
@@ -185,6 +185,7 @@ export function createModelCommand(): SlashCommand {
           applied?: boolean;
           type?: string;
           is_agentos?: boolean;
+          provider?: string;
         }>("command.model", { model: value });
 
         const isSwitch = !!payload.requested;
@@ -192,7 +193,7 @@ export function createModelCommand(): SlashCommand {
         // 不调 setModel（不改启动默认），改调 setSelectedAgentosModel 全局记录，
         // 后续 sendMessage 注入 model_name 路由到 agentos 缓存条目。
         if (isSwitch && (payload.type === "switched_agentos" || payload.is_agentos === true)) {
-          ctx.setSelectedAgentosModel?.(payload.current ?? payload.requested ?? value);
+          ctx.setSelectedAgentosModel?.(payload.current ?? payload.requested ?? value, payload.provider);
         } else if (isSwitch) {
           ctx.setModel(payload.current ?? payload.requested ?? "");
         }

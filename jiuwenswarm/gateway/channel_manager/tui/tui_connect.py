@@ -3033,7 +3033,21 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                     _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
                 payload["models"] = _models_list
             else:
+                # models.defaults 不存在/为空：仍需展示 agentos 备份模型（若有），
+                # 否则 .env 全空且只有 agentos 时列表为空，用户无法切换。
                 payload["current"] = os.getenv("MODEL_NAME", "unknown")
+                _agentos_raw = (_raw.get("models") or {}).get("agentos")
+                _agentos_list = _agentos_raw if isinstance(_agentos_raw, list) else []
+                _models_list = []
+                for _ai, _ab in enumerate(_agentos_list):
+                    if not isinstance(_ab, dict):
+                        continue
+                    _ab_mcc = _ab.get("model_client_config")
+                    if not (isinstance(_ab_mcc, dict) and _ab_mcc.get("model_name")):
+                        continue
+                    _models_list.append(_model_meta(_ai, _ab, is_agentos=True))
+                if _models_list:
+                    payload["models"] = _models_list
             await channel.send_response(ws, req_id, ok=True, payload=payload)
             return
 
@@ -3052,6 +3066,11 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         _agentos_blocks = (_raw_cfg.get("models") or {}).get("agentos")
         _agentos_blocks = _agentos_blocks if isinstance(_agentos_blocks, list) else []
         _agentos_matched_name = ""
+        _agentos_matched_provider = ""
+        logger.info(
+            "[cli command.model] agentos 匹配: target=%s, blocks=%d, raw_has_agentos=%s",
+            target, len(_agentos_blocks), _agentos_blocks is not None and len(_agentos_blocks) > 0,
+        )
         for _ab in _agentos_blocks:
             if not isinstance(_ab, dict):
                 continue
@@ -3060,8 +3079,13 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 continue
             _ab_name = resolve_env_vars(str(_ab_mcc.get("model_name", "")))
             _ab_alias = resolve_env_vars(str(_ab.get("alias", ""))) if _ab.get("alias") else ""
+            logger.info(
+                "[cli command.model] agentos 条目: name=%s alias=%s vs target=%s",
+                _ab_name, _ab_alias, target,
+            )
             if _ab_name == target or (_ab_alias and _ab_alias == target):
                 _agentos_matched_name = _ab_name
+                _agentos_matched_provider = resolve_env_vars(str(_ab_mcc.get("client_provider", "")))
                 break
         if _agentos_matched_name:
             logger.info(
@@ -3070,6 +3094,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             await channel.send_response(ws, req_id, ok=True, payload={
                 "current": _agentos_matched_name,
+                "provider": _agentos_matched_provider,
                 "requested": target,
                 "type": "switched_agentos",
                 "applied": True,

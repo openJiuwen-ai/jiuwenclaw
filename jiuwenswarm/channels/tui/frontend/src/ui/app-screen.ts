@@ -4632,11 +4632,11 @@ export class AppScreen implements Component, Focusable {
         const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
         const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
         const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
-        // agentos 备份模型标记：仅展示用，提示用户这是手动添加的备份模型，
+        // agentos 模型标记：仅展示用，提示用户这是手动添加的 AgentOS 模型，
         // 切换走请求级注入而非 defaults 重排 reload。
-        const backupBadge = meta?.is_agentos === true ? " [backup]" : "";
+        const agentosBadge = meta?.is_agentos === true ? " [agentos]" : "";
         return {
-          label: `${i + 1}. ${displayName}${backupBadge}${labelSuffix}${isCurrent ? " (current)" : ""}`,
+          label: `${i + 1}. ${displayName}${agentosBadge}${labelSuffix}${isCurrent ? " (current)" : ""}`,
           description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
           value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };
@@ -4820,7 +4820,7 @@ export class AppScreen implements Component, Focusable {
     if (!this.modelList) return;
     // agentos 备份模型只读：禁止通过 TUI 编辑（仅 config.yaml 手动管理）
     if (target && typeof target.index === "string" && target.index.startsWith("a")) {
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS backup models are read-only; edit them in config.yaml.", "m"));
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS models are read-only; edit them in config.yaml.", "m"));
       return;
     }
     this.editor.setText("");
@@ -4838,7 +4838,7 @@ export class AppScreen implements Component, Focusable {
     if (!this.modelList) return;
     // agentos 备份模型只读：禁止通过 TUI 删除（仅 config.yaml 手动管理）
     if (typeof target.index === "string" && target.index.startsWith("a")) {
-      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS backup models are read-only; remove them in config.yaml.", "m"));
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS models are read-only; remove them in config.yaml.", "m"));
       return;
     }
     this.modelList = {
@@ -5155,17 +5155,18 @@ export class AppScreen implements Component, Focusable {
         applied?: boolean;
         type?: string;
         is_agentos?: boolean;
+        provider?: string;
       }>("command.model", reqParams);
       // agentos 备份模型：后端走"请求级注入"路径，回包 type=switched_agentos。
       // 不改 config、不抢启动默认，仅全局记录选中名，后续 chat.send 注入 model_name。
       // defaults 模型仍走 setModel（更新当前模型回显 + config reload）。
       if (payload.type === "switched_agentos" || payload.is_agentos === true) {
         const agentosName = payload.current ?? modelName;
-        this.state.setSelectedAgentosModel(agentosName);
+        this.state.setSelectedAgentosModel(agentosName, payload.provider);
         this.state.addItem(
           addInfo(
             this.state.getSnapshot().sessionId,
-            `Switched to backup model (request-level): ${agentosName}`,
+            `Switched to agentos model (request-level): ${agentosName}`,
             "m",
           ),
         );
