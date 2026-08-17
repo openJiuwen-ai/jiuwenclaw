@@ -940,6 +940,18 @@ def test_workflow_paused_does_not_stamp_terminal_fields():
     assert state.duration_ms is None
 
 
+def test_workflow_paused_marks_running_agents_stopped():
+    """pause stops the in-flight agents: running agents flip to stopped (spec: agent-level pause/stop both show stopped)."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("phase", phase="Phase 1"))
+    state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a"))
+    assert state.phases[0].agents[0].status == "running"
+    state.apply(_make_progress("workflow_paused"))
+    assert state.status == "paused"
+    assert state.phases[0].agents[0].status == "stopped"
+
+
 def test_workflow_stopped_marks_terminal_without_error():
     """workflow_stopped is terminal (control outcome) — no error/result text."""
     state = WorkflowRunState()
