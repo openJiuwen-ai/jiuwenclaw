@@ -267,8 +267,8 @@
     "placeholderTeamMode": "Team mode, new input will run in parallel...",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
-    "welcomeLogoAlt": "JiuwenSwarm logo",
-    "welcomeHeading": "Hi, I'm JiuwenSwarm. Nice to meet you!",
+    "welcomeLogoAlt": "WorkSwarm logo",
+    "welcomeHeading": "Hi, I'm WorkSwarm. Nice to meet you!",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
       "skills": "Can you tell me what skills you have?"
@@ -603,7 +603,7 @@
     "skillnet": {
       "usageNoticeTitle": "Notes",
       "usageNotice1": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
-      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenSwarm can reach GitHub</strong> (network / proxy).",
+      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running WorkSwarm can reach GitHub</strong> (network / proxy).",
       "usageNotice3": "GitHub's API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page"
     }
@@ -1299,7 +1299,7 @@
       "trigger": "Create",
       "manual": "Create manually",
       "viaChat": "Create via chat",
-      "viaChatPrompt": "Let's set up a scheduled task together. First, explain how scheduled tasks work in JiuwenSwarm. Then ask me what I'd like to schedule and when it should run."
+      "viaChatPrompt": "Let's set up a scheduled task together. First, explain how scheduled tasks work in WorkSwarm. Then ask me what I'd like to schedule and when it should run."
     },
     "stats": {
       "total": "Total tasks ({{count}})"
@@ -1775,7 +1775,7 @@
     },
     "graph": {
       "orchestration": {
-        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills and uses it during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling orchestration does not delete the existing skill graph.",
+        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills (consuming tokens) and uses the graph during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling it stops skill orchestration but does not delete the existing skill graph.",
         "saving": "Saving…",
         "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
         "toggleLabel": "Enable skill orchestration",
@@ -1796,10 +1796,7 @@
       "updatedAt": "Updated {{time}}",
       "inDegree": "In",
       "outDegree": "Out",
-      "inputs": "Inputs",
-      "noInputs": "No inputs",
-      "outputs": "Outputs",
-      "noOutputs": "No outputs",
+      "description": "Description",
       "tasks": "Tasks",
       "relatedEdges": "Related Edges",
       "noRelatedEdges": "No related edges.",
@@ -1935,7 +1932,7 @@
       "url": "URL",
       "installTimeout": "SkillNet install timed out (it may still be running). Refresh the skill list later.",
       "usageNoticeTitle": "Notes",
-      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenSwarm can reach GitHub</strong> (network / proxy).",
+      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running WorkSwarm can reach GitHub</strong> (network / proxy).",
       "usageNotice2": "GitHub’s API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page",
       "usageNotice3": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
@@ -2230,7 +2227,7 @@
     "shareButton": "Invite members",
     "waiting": "{{joined}}/{{total}} joined. Team execution is not blocked.",
     "allJoined": "All {{count}} human members have joined",
-    "instructionHint": "Members will join team tasks through the JiuwenSwarm platform configured for them and participate as their assigned identity.",
+    "instructionHint": "Members will join team tasks through the WorkSwarm platform configured for them and participate as their assigned identity.",
     "copy": "Copy",
     "copied": "Copied",
     "joinedNote": "This member has joined. No need to send the join command again.",
@@ -2333,7 +2330,7 @@
   },
   "version": "Version {{version}}",
   "app": {
-    "title": "JiuwenSwarm",
+    "title": "WorkSwarm",
     "subtitle": "AI Assistant",
     "errorTitle": "Application Error",
     "unknownError": "Unknown error",

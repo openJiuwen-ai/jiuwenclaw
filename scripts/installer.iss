@@ -1,14 +1,14 @@
-; JiuwenSwarm Inno Setup Installer Script
+; WorkSwarm Inno Setup Installer Script
 ; 用法: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\installer.iss
 
-#define MyAppName "JiuwenSwarm"
-#define MyAppVersion "0.2.4.beta4"
+#define MyAppName "WorkSwarm"
+#define MyAppVersion "0.2.5.beta1"
 #define MyAppPublisher "openJiuwen"
-#define MyAppExeName "jiuwenswarm.exe"
+#define MyAppExeName "workswarm.exe"
 #define MyAppURL "https://openjiuwen.com"
 
 [Setup]
-AppId={{B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C}
+AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -17,16 +17,19 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=JiuwenSwarm-setup-{#MyAppVersion}
+OutputBaseFilename=WorkSwarm-setup-{#MyAppVersion}
 SetupIconFile=..\jiuwenswarm\channels\web\frontend\public\logo.ico
-UninstallDisplayIcon={app}\jiuwenswarm.exe
+UninstallDisplayIcon={app}\workswarm.exe
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=force
+; Every frozen JiuwenSwarm process creates both mutexes. Setup and Uninstall
+; must wait until the desktop process tree has exited before touching {app}.
+AppMutex=JiuwenSwarm.App,Global\JiuwenSwarm.App
+CloseApplications=yes
 RestartApplications=no
 
 [Languages]
@@ -36,14 +39,22 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "..\dist\jiuwenswarm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\workswarm\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[UninstallDelete]
+; Remove only application-owned paths that may gain runtime-generated files.
+; User data lives outside {app}, under ~/.jiuwenswarm, and is intentionally kept.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: files; Name: "{app}\{#MyAppExeName}"
+Type: dirifempty; Name: "{app}"
+
 [Run]
 ; 通过 Explorer 代启动程序，使安装完成后的启动上下文更接近桌面快捷方式启动
-; postinstall 在安装向导最后一页显示"运行 JiuwenSwarm"复选框，由用户决定是否启动
+; postinstall 在安装向导最后一页显示"运行 WorkSwarm"复选框，由用户决定是否启动
 Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall

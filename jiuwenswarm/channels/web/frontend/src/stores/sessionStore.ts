@@ -52,7 +52,9 @@ const DEFAULT_MODE: AgentMode = 'agent';
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
   const normalized = mode.trim().toLowerCase();
-  if (normalized === 'team') return 'team';
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
   // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
   return 'agent';

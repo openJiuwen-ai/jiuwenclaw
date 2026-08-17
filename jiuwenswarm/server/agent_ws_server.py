@@ -2255,7 +2255,7 @@ class AgentWebSocketServer:
                 from jiuwenswarm.server.runtime.session.work_mode import (
                     default_work_mode_for_channel,
                 )
-                channel_id_for_default = request.channel_id or "web"
+                channel_id_for_default = channel_id or request.channel_id or "web"
                 runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
                 logger.warning(
                     "[_prepare_code_mode_chat_turn] work_mode missing in both session "
@@ -3740,6 +3740,18 @@ class AgentWebSocketServer:
             get_team_entity_store,
         )
 
+        def delete_team_directory_best_effort(team_name: str) -> None:
+            try:
+                entity_store.delete_team_directory(team_name)
+            except TeamEntityStoreError as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] failed to delete local team directory; "
+                    "continuing team delete: team_name=%s code=%s error=%s",
+                    team_name,
+                    getattr(exc, "code", "DELETE_FAILED"),
+                    exc,
+                )
+
         params = request.params if isinstance(request.params, dict) else {}
         is_team = is_team_params(params)
         team_name = str(params.get("team_name") or "").strip()
@@ -3779,7 +3791,7 @@ class AgentWebSocketServer:
                             metadata=request.metadata,
                         )
                     else:
-                        entity_store.delete_team_directory(team_name)
+                        delete_team_directory_best_effort(team_name)
                         binding_store.delete(team_name)
                         resp = AgentResponse(
                             request_id=request.request_id,
@@ -3861,7 +3873,7 @@ class AgentWebSocketServer:
                             else:
                                 # agent-core normally removes team_home; retry here because it logs and
                                 # suppresses filesystem cleanup failures.
-                                entity_store.delete_team_directory(team_name)
+                                delete_team_directory_best_effort(team_name)
                                 binding_store.delete(team_name)
                                 resp = AgentResponse(
                                     request_id=request.request_id,
@@ -5300,7 +5312,9 @@ class AgentWebSocketServer:
             session_id = request.session_id or "default"
             params = request.params or {}
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
+            mode, sub_mode, canonical_mode = resolve_agent_request_mode(
+                params.get("mode", "agent")
+            )
             agent_mode = "agent" if mode == "auto_harness" else mode
 
             agent = await self._agent_manager.get_agent(
@@ -5313,7 +5327,10 @@ class AgentWebSocketServer:
             if agent is None:
                 raise ValueError("Failed to get agent")
 
-            result_data = await agent.generate_recap(session_id=session_id)
+            result_data = await agent.generate_recap(
+                session_id=session_id,
+                current_mode=canonical_mode,
+            )
 
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -8208,13 +8225,17 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
-            is_swarm = bool(params.get("is_swarm")) or is_team_mode(canonical_mode)
-            if not is_swarm:
-                mode, _, canonical_mode = resolve_agent_request_mode(
-                    canonical_mode,
-                    work_mode=final_work_mode,
-                )
-                params["mode"] = canonical_mode
+            # Resolve after the final work_mode is known. This is important for Web
+            # Team sessions: mode=team + work_mode=code must enter the same
+            # code.team runtime as the TUI team.code mode.
+            resolved = resolve_request_runtime_mode(
+                request,
+                work_mode=final_work_mode,
+            )
+            mode = resolved.manager_mode
+            canonical_mode = resolved.canonical_mode
+            params["mode"] = canonical_mode
+            is_swarm = bool(params.get("is_swarm")) or resolved.is_team
             prewarm_eligible = (
                 not is_swarm
                 and canonical_mode in {"agent", "code", "code.normal"}

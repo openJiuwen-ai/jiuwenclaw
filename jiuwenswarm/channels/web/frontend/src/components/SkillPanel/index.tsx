@@ -18,6 +18,7 @@ import { getSkillAvatar } from "../../utils/skillAvatar";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
+import { coordinateSymphonyEnabledChange } from "./symphonyGraphAction";
 
 /** 刷新会 git pull marketplace，略放宽；普通进页单次 RPC 一般很快。 */
 const SKILLS_FETCH_TIMEOUT_REFRESH_MS = 60_000;
@@ -134,7 +135,7 @@ interface SkillPanelProps {
   sessionId: string;
   isConnected: boolean;
   symphonyEnabled: boolean;
-  onSymphonyEnabledChange: (enabled: boolean) => Promise<void>;
+  onSymphonyEnabledChange: (enabled: boolean) => Promise<boolean>;
   onNavigateToConfig?: () => void;
   /** 当前是否处于激活状态（左边栏选中技能） */
   isActive?: boolean;
@@ -611,6 +612,7 @@ export function SkillPanel({
   const [symphonyEnabledDraft, setSymphonyEnabledDraft] = useState(symphonyEnabled);
   const [symphonySaving, setSymphonySaving] = useState(false);
   const [symphonySaveError, setSymphonySaveError] = useState<string | null>(null);
+  const [graphActionError, setGraphActionError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
   const [retrievalTree, setRetrievalTree] = useState("");
@@ -646,20 +648,39 @@ export function SkillPanel({
     }
   }, [symphonyEnabled, symphonySaving]);
 
+  const clearGraphActionError = useCallback(() => {
+    setGraphActionError(null);
+  }, []);
+
   const updateSymphonyEnabled = useCallback(async (enabled: boolean) => {
-    if (!isConnected || symphonySaving) return;
+    if (!isConnected || symphonySaving || enabled === symphonyEnabledDraft) return;
     setSymphonyEnabledDraft(enabled);
     setSymphonySaving(true);
     setSymphonySaveError(null);
-    try {
-      await onSymphonyEnabledChange(enabled);
-    } catch {
+    const result = await coordinateSymphonyEnabledChange({
+      enabled,
+      save: onSymphonyEnabledChange,
+      getGraphPanel: () => skillGraphPanelRef.current,
+      request: webRequest,
+      refreshFailedMessage: t('skills.graph.errors.refreshFailed'),
+      cancelFailedMessage: t('skills.graph.errors.cancelFailed'),
+      onGraphActionStart: clearGraphActionError,
+    });
+    if (result.configSaveFailed) {
       setSymphonyEnabledDraft(symphonyEnabled);
       setSymphonySaveError(t('skills.graph.orchestration.saveFailed'));
-    } finally {
       setSymphonySaving(false);
+      return;
     }
-  }, [isConnected, onSymphonyEnabledChange, symphonyEnabled, symphonySaving, t]);
+    if (!result.appliedWithoutRestart) {
+      setSymphonySaving(false);
+      return;
+    }
+    if (result.graphActionError) {
+      setGraphActionError(result.graphActionError);
+    }
+    setSymphonySaving(false);
+  }, [clearGraphActionError, isConnected, onSymphonyEnabledChange, symphonyEnabled, symphonyEnabledDraft, symphonySaving, t]);
 
   const updateGraphReading = useCallback((reading: boolean) => {
     if (graphReadingTimerRef.current !== null) {
@@ -1964,7 +1985,12 @@ export function SkillPanel({
               </div>
             </div>
             <div className="flex-1 min-h-0">
-              <SkillGraphPanel ref={skillGraphPanelRef} onReadingChange={updateGraphReading} />
+              <SkillGraphPanel
+                ref={skillGraphPanelRef}
+                onReadingChange={updateGraphReading}
+                externalError={graphActionError}
+                onExternalErrorClear={clearGraphActionError}
+              />
             </div>
           </div>
         ) : null}

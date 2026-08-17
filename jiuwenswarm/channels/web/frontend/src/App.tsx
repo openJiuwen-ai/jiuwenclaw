@@ -253,20 +253,21 @@ class ErrorBoundary extends Component<
 function ErrorFallback({ error }: { error: Error | null }) {
   const { t } = useTranslation();
   return (
-    <div className="flex items-center justify-center h-screen bg-bg text-text p-8">
-      <div className="max-w-2xl card">
-        <h1 className="text-2xl font-bold text-danger mb-4">
+    <div className="flex items-center justify-center h-screen bg-bg text-text p-8" data-testid="app-error-fallback">
+      <div className="max-w-2xl card" data-testid="app-error-fallback-card">
+        <h1 className="text-2xl font-bold text-danger mb-4" data-testid="app-error-fallback-title">
           {t('app.errorTitle')}
         </h1>
-        <p className="text-text-muted mb-4">
+        <p className="text-text-muted mb-4" data-testid="app-error-fallback-message">
           {error?.message || t('app.unknownError')}
         </p>
-        <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono">
+        <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono" data-testid="app-error-fallback-stack">
           {error?.stack}
         </pre>
         <button
           onClick={() => window.location.reload()}
           className="btn primary mt-4"
+          data-testid="app-error-fallback-reload"
         >
           {t('app.reload')}
         </button>
@@ -1225,9 +1226,11 @@ function AppContent() {
     );
     setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
     setConfigError(null);
-    if (result?.applied_without_restart !== true) {
+    const appliedWithoutRestart = result?.applied_without_restart === true;
+    if (!appliedWithoutRestart) {
       applyConfigSaveUiState(false);
     }
+    return appliedWithoutRestart;
   }, [applyConfigSaveUiState, request]);
 
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
@@ -2373,7 +2376,7 @@ function AppContent() {
       {/* Main Content */}
       <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
-          <div className="card mb-4">
+          <div className="card mb-4" data-testid="app-config-error">
             <div className="text-sm text-text-muted">
               {configError}. {t('app.configErrorHint')}
               <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
@@ -2397,10 +2400,10 @@ function AppContent() {
               />
               <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
                 {showConversationNotFound && (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-4">
-                    <h1 className="text-lg font-semibold text-text">{t('multiSession.notFound.title')}</h1>
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
+                    <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>
                     <div className="flex gap-2">
-                      <button className="btn primary" onClick={() => enterNewConversation()}>
+                      <button className="btn primary" onClick={() => enterNewConversation()} data-testid="app-conversation-not-found-new-button">
                         {t('multiSession.notFound.newConversation')}
                       </button>
                     </div>
@@ -2410,6 +2413,7 @@ function AppContent() {
                 <div
                   className={`${showConversationNotFound ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
+                  data-testid="app-chat-surface"
                 >
                   <div className={`flex-1 min-h-0`}>
                     <ChatPanel
@@ -2452,6 +2456,7 @@ function AppContent() {
                     role="separator"
                     aria-orientation="vertical"
                     onPointerDown={handleDividerPointerDown}
+                    data-testid="app-workspace-divider"
                     onPointerMove={handleDividerPointerMove}
                     onPointerUp={finishDividerResize}
                     onPointerCancel={finishDividerResize}
@@ -2619,24 +2624,24 @@ function AppContent() {
 
       {/* 连接状态提示 */}
       {!isConnected && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-connection-toast animate-rise">
+        <div className="app-toast-wrapper app-toast-wrapper--top" data-testid="app-connection-toast">
+          <div className="app-connection-toast animate-rise" data-testid="app-connection-toast-message" data-variant={serverConfig ? 'connecting' : 'loadingConfig'}>
             {serverConfig ? t('connection.connecting') : t('connection.loadingConfig')}
           </div>
         </div>
       )}
 
       {saveToastVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top-center">
-          <div className="app-session-toast animate-rise">
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="app-save-toast">
+          <div className="app-session-toast animate-rise" data-testid="app-save-toast-message">
             {t('common.saveSuccess')}
           </div>
         </div>
       )}
 
       {proactiveToastVisible && proactiveToastMessage && (
-        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
-          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="app-proactive-notification-toast">
+          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm" data-testid="app-proactive-notification-toast-message">
             {proactiveToastMessage}
           </div>
         </div>
@@ -2644,12 +2649,12 @@ function AppContent() {
 
       {/* 安全警告提示 */}
       {securityAlertVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-security-alert animate-rise">
-            <div className="app-security-alert__header">
-              <div className="app-security-alert__title">
+        <div className="app-toast-wrapper app-toast-wrapper--top" data-testid="app-security-alert">
+          <div className="app-security-alert animate-rise" data-testid="app-security-alert-panel">
+            <div className="app-security-alert__header" data-testid="app-security-alert-header">
+              <div className="app-security-alert__title" data-testid="app-security-alert-title">
                 <span>⚠️</span>
-                <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
+                <span className="text-xs font-medium text-text" data-testid="app-security-alert-title-text">{t('app.securityAlertTitle')}</span>
               </div>
               <button
                 type="button"
@@ -2661,13 +2666,14 @@ function AppContent() {
                   }
                 }}
                 className="app-security-alert__close"
+                data-testid="app-security-alert-close"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-            <div className="app-security-alert__content text-sm">
+            <div className="app-security-alert__content text-sm" data-testid="app-security-alert-content">
               {securityAlertContent}
             </div>
           </div>
@@ -2676,20 +2682,20 @@ function AppContent() {
 
       {/* 配置保存后重启状态弹窗 */}
       {restartModalOpen && (
-        <div className="app-restart-modal">
-          <div className="app-restart-modal__backdrop" />
-          <div className="app-restart-modal__panel">
-            <div className="flex flex-col items-center text-center">
+        <div className="app-restart-modal" data-testid="app-restart-modal">
+          <div className="app-restart-modal__backdrop" data-testid="app-restart-modal-backdrop" />
+          <div className="app-restart-modal__panel" data-testid="app-restart-modal-panel">
+            <div className="flex flex-col items-center text-center" data-testid="app-restart-modal-body">
               {!restartSuccess ? (
-                <div className="w-12 h-12 rounded-full border-4 border-border border-t-accent animate-spin mb-4" />
+                <div className="w-12 h-12 rounded-full border-4 border-border border-t-accent animate-spin mb-4" data-testid="app-restart-modal-status-icon" data-variant="loading" />
               ) : (
-                <div className="w-12 h-12 rounded-full bg-ok/15 text-ok flex items-center justify-center mb-4">
+                <div className="w-12 h-12 rounded-full bg-ok/15 text-ok flex items-center justify-center mb-4" data-testid="app-restart-modal-status-icon" data-variant="success">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
                 </div>
               )}
-              <h3 className="text-base font-semibold text-text mb-1">
+              <h3 className="text-base font-semibold text-text mb-1" data-testid="app-restart-modal-title">
                 {!restartSuccess
                   ? t('app.restarting')
                   : a2uiRefreshPending
@@ -2698,7 +2704,7 @@ function AppContent() {
                       ? t('app.configApplied')
                       : t('app.restartSuccess')}
               </h3>
-              <p className="text-sm text-text-muted mb-5">
+              <p className="text-sm text-text-muted mb-5" data-testid="app-restart-modal-description">
                 {!restartSuccess
                   ? t('app.restartWaiting')
                   : a2uiRefreshPending
@@ -2718,6 +2724,7 @@ function AppContent() {
                     }
                   }}
                   className="btn primary !px-4 !py-2"
+                  data-testid="app-restart-modal-ok"
                 >
                   {t('common.ok')}
                 </button>
@@ -2728,22 +2735,22 @@ function AppContent() {
       )}
 
       {configChangedConfirmOpen && (
-        <div className="app-restart-modal">
-          <div className="app-restart-modal__backdrop" />
-          <div className="app-restart-modal__panel">
-            <div className="flex flex-col items-center text-center">
-              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4">
+        <div className="app-restart-modal" data-testid="app-config-changed-modal">
+          <div className="app-restart-modal__backdrop" data-testid="app-config-changed-modal-backdrop" />
+          <div className="app-restart-modal__panel" data-testid="app-config-changed-modal-panel">
+            <div className="flex flex-col items-center text-center" data-testid="app-config-changed-modal-body">
+              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4" data-testid="app-config-changed-modal-icon">
                 <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                 </svg>
               </div>
-              <h3 className="text-base font-semibold text-text mb-1">{t('config.errors.configChangedTitle')}</h3>
-              <p className="text-sm text-text-muted mb-5">{t('config.errors.configChangedDesc')}</p>
-              <div className="flex gap-3">
-                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2">
+              <h3 className="text-base font-semibold text-text mb-1" data-testid="app-config-changed-modal-title">{t('config.errors.configChangedTitle')}</h3>
+              <p className="text-sm text-text-muted mb-5" data-testid="app-config-changed-modal-description">{t('config.errors.configChangedDesc')}</p>
+              <div className="flex gap-3" data-testid="app-config-changed-modal-actions">
+                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2" data-testid="app-config-changed-modal-confirm">
                   {t('config.errors.configChangedConfirm')}
                 </button>
-                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2">
+                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2" data-testid="app-config-changed-modal-cancel">
                   {t('config.errors.configChangedCancel')}
                 </button>
               </div>
@@ -2752,7 +2759,7 @@ function AppContent() {
         </div>
       )}
 
-      <div className="share-image-stage" aria-hidden="true">
+      <div className="share-image-stage" aria-hidden="true" data-testid="app-share-image-stage">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />
       </div>
     </div>

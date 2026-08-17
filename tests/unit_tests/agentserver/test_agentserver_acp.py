@@ -19,6 +19,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.team_entity_store import TeamEntityStoreError
 
 
 class FakeWebSocket:
@@ -2181,6 +2182,110 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_team_delete_warns_when_local_team_directory_cleanup_fails(monkeypatch):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    store_calls = []
+    warning_calls = []
+
+    class FakeBindingStore:
+        @staticmethod
+        def delete(team_name: str):
+            store_calls.append(("binding", team_name))
+            return True
+
+    class FakeEntityStore:
+        @staticmethod
+        def delete_team_directory(team_name: str):
+            store_calls.append(("entity", team_name))
+            raise TeamEntityStoreError(
+                "failed to delete team entity directory: [WinError 5] access denied: pack.idx",
+                code="INTERNAL_ERROR",
+            )
+
+    class FakeSessionDir:
+        @staticmethod
+        def exists() -> bool:
+            return False
+
+    class FakeSessionsRoot:
+        @staticmethod
+        def __truediv__(_session_id: str):
+            return FakeSessionDir()
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.stop_team_session_runtime_across_managers",
+        lambda session_id, reason="": asyncio.sleep(0, result=True),
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.Runner.delete_agent_team",
+        lambda **kwargs: asyncio.sleep(0, result=True),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: FakeSessionsRoot(),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _session_id: None,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ensure_persistent_checkpointer",
+        lambda: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_binding_store.get_team_binding_store",
+        lambda: FakeBindingStore(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.team_entity_store.get_team_entity_store",
+        lambda: FakeEntityStore(),
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module.logger,
+        "warning",
+        lambda message, *args: warning_calls.append((message, args)),
+    )
+    server.set_find_team_session_ids_override_for_test(
+        lambda _team_name: asyncio.sleep(0, result=["team_sess_001"])
+    )
+
+    request = AgentRequest(
+        request_id="req-team-delete-team-dir-failed",
+        channel_id="web",
+        req_method=ReqMethod.TEAM_DELETE,
+        params={"mode": "team", "team_name": "jiuwen_team"},
+    )
+
+    await server.handle_team_delete_for_test(fake_ws, request, asyncio.Lock())
+
+    assert store_calls == [("entity", "jiuwen_team"), ("binding", "jiuwen_team")]
+    assert len(warning_calls) == 1
+    warning_message, warning_args = warning_calls[0]
+    assert "failed to delete local team directory" in warning_message
+    assert warning_args[0] == "jiuwen_team"
+    assert warning_args[1] == "INTERNAL_ERROR"
+    assert "[WinError 5] access denied: pack.idx" in str(warning_args[2])
+    assert fake_ws.sent[-1] == {
+        "response_id": "req-team-delete-team-dir-failed",
+        "payload": {
+            "team_name": "jiuwen_team",
+            "session_ids": ["team_sess_001"],
+            "deleted": True,
+        },
+        "ok": True,
+    }
 
 
 @pytest.mark.asyncio
