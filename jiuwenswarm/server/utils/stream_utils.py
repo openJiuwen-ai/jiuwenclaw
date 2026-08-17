@@ -112,7 +112,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     if chunk_type == "chat.ask_user_question":
         return parse_ask_user_question_payload(payload)
 
-    if chunk_type in ("subagent_updated", "subagent_activity"):
+    if chunk_type in ("subagent_updated", "subagent_activity", "subagent_message"):
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
         return JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)

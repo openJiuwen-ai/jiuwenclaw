@@ -84,7 +84,7 @@ from openjiuwen.harness.rails.context_engineer.context_assemble_rail import Cont
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
-from openjiuwen.harness.subagent_runtime import SUBAGENT_ACTIVITY_EVENT_TYPE, SUBAGENT_UPDATED_EVENT_TYPE
+from openjiuwen.harness.subagent_runtime import SUBAGENT_ACTIVITY_EVENT_TYPE, SUBAGENT_MESSAGE_EVENT_TYPE, SUBAGENT_UPDATED_EVENT_TYPE
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -10325,6 +10325,69 @@ class JiuWenSwarmDeepAdapter:
         return payload
 
     @staticmethod
+    def _persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        seq = projection.get("seq")
+        request_id = f"{subagent_id}:{seq}" if seq is not None else subagent_id
+        role = str(projection.get("role") or "assistant")
+        event_type = str(projection.get("event_type") or "").strip() or None
+        content = str(projection.get("content") or "")
+        timestamp_ms = projection.get("at_ms")
+        timestamp = float(timestamp_ms) / 1000 if timestamp_ms else time.time()
+
+        extra: dict[str, Any] = {}
+        reasoning_content = projection.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            extra["reasoning_content"] = reasoning_content.strip()
+        nested_extra = projection.get("extra")
+        if isinstance(nested_extra, dict):
+            extra.update(nested_extra)
+
+        append_history_record(
+            session_id=parent_session_id,
+            subagent_id=subagent_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role=role,
+            content=content,
+            timestamp=timestamp,
+            event_type=event_type if role == "assistant" else None,
+            extra=extra or None,
+            mode="subagent",
+        )
+
+    @staticmethod
+    def _persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        updated_at_ms = projection.get("updated_at_ms") or projection.get("created_at_ms")
+        timestamp = float(updated_at_ms) / 1000 if updated_at_ms else time.time()
+        revision = projection.get("revision")
+        request_id = (
+            f"subagent-roster-{subagent_id}:{revision}"
+            if revision is not None
+            else f"subagent-roster-{subagent_id}"
+        )
+        append_history_record(
+            session_id=parent_session_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role="assistant",
+            event_type="chat.subtask_update",
+            content=str(web_payload.get("description") or subagent_id),
+            timestamp=timestamp,
+            extra=web_payload,
+            mode="subagent",
+        )
+
+    @staticmethod
     def _parse_stream_chunk(
         chunk,
         *,
@@ -10528,7 +10591,18 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if not isinstance(projection, dict):
                         return None
-                    return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+                    web_payload = JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+                    JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
+                    return web_payload
+
+                if chunk_type == SUBAGENT_MESSAGE_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_message") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
+                    return None
 
                 if chunk_type == SUBAGENT_ACTIVITY_EVENT_TYPE:
                     projection = (

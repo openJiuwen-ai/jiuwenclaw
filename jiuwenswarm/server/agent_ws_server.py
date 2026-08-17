@@ -4276,7 +4276,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        subagent_id = params.get("subagent_id")
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            subagent_id=subagent_id if isinstance(subagent_id, str) else None,
+        )
         if data is None:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -4791,7 +4796,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        subagent_id = params.get("subagent_id")
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            subagent_id=subagent_id if isinstance(subagent_id, str) else None,
+        )
         if data is None:
             err_chunk = AgentResponseChunk(
                 request_id=request.request_id,
@@ -4814,6 +4824,7 @@ class AgentWebSocketServer:
         messages = data.get("messages", [])
         total_pages = data.get("total_pages")
         page = data.get("page_idx")
+        response_subagent_id = data.get("subagent_id")
         if isinstance(messages, list):
             for seq, item in enumerate(messages):
                 chunk = AgentResponseChunk(
@@ -4823,6 +4834,7 @@ class AgentWebSocketServer:
                         "event_type": "history.message",
                         "message": item,
                         "session_id": str(session_id or ""),
+                        "subagent_id": str(response_subagent_id or subagent_id or ""),
                         "total_pages": total_pages,
                         "page_idx": page,
                     },
@@ -4852,6 +4864,7 @@ class AgentWebSocketServer:
                 "event_type": "history.message",
                 "status": "done",
                 "session_id": str(session_id or ""),
+                "subagent_id": str(response_subagent_id or subagent_id or ""),
                 "total_pages": total_pages,
                 "page_idx": page,
             },
@@ -7661,7 +7674,12 @@ class AgentWebSocketServer:
         return self._agent_manager
 
     @staticmethod
-    def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
+    def get_conversation_history(
+        session_id: str,
+        page_idx: int,
+        *,
+        subagent_id: str | None = None,
+    ) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录
         if not isinstance(session_id, str) or not session_id.strip():
             return None
@@ -7669,10 +7687,24 @@ class AgentWebSocketServer:
             return None
 
         normalized_session_id = session_id.strip()
-        if not history_exists(normalized_session_id):
+        normalized_subagent_id = (
+            subagent_id.strip() if isinstance(subagent_id, str) and subagent_id.strip() else None
+        )
+        if normalized_subagent_id:
+            if not history_exists(normalized_session_id, subagent_id=normalized_subagent_id):
+                return {
+                    "messages": [],
+                    "total_pages": 1,
+                    "page_idx": page_idx,
+                    "subagent_id": normalized_subagent_id,
+                }
+        elif not history_exists(normalized_session_id):
             return None
         try:
-            raw = load_history_records(normalized_session_id)
+            raw = load_history_records(
+                normalized_session_id,
+                subagent_id=normalized_subagent_id,
+            )
         except Exception:
             return None
         if not isinstance(raw, list):
@@ -7696,19 +7728,23 @@ class AgentWebSocketServer:
             for item in ordered[start:end]
         ]
         logger.debug(
-            "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
+            "[history.get] session_id=%s subagent_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,
+            normalized_subagent_id or "",
             page_idx,
             len(raw),
             total,
             total_pages,
             len(page_messages),
         )
-        return {
+        result = {
             "messages": page_messages,
             "total_pages": total_pages,
             "page_idx": page_idx,
         }
+        if normalized_subagent_id:
+            result["subagent_id"] = normalized_subagent_id
+        return result
 
     async def _handle_initialize(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
