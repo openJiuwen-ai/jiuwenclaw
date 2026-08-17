@@ -7115,15 +7115,19 @@ class JiuWenSwarmDeepAdapter:
         # for task-loop runs, or agent.<name>.invoke for single-round) under the root
         # run span per iteration/round. It is the only thing that creates the
         # task_iteration / invoke spans that llm.call + tool.* nest under. It
-        # self-disables (before_* returns early when get_team_span() is None), so
-        # attaching it unconditionally is safe and also adapts to runtime
+        # self-disables (before_* returns early when there is no run root span),
+        # so attaching it unconditionally is safe and also adapts to runtime
         # enable/disable of agent_observability without rebuilding the agent.
+        #
+        # The harness rail is the whole agent tier here: the team contribution
+        # (agentteam.* identity) is a separate rail the team blueprint mounts,
+        # and a single agent has no team to describe.
         try:
-            from openjiuwen.agent_teams.observability.rail import ObservabilityRail
+            from openjiuwen.harness.observability import AgentObservabilityRail
 
-            rails_list.append(ObservabilityRail())
+            rails_list.append(AgentObservabilityRail())
         except Exception as exc:
-            logger.warning("%s Failed to attach ObservabilityRail: %s", log_prefix, exc)
+            logger.warning("%s Failed to attach AgentObservabilityRail: %s", log_prefix, exc)
         stage_timer.mark("observability_rail")
 
         total_ms = stage_timer.total_ms()
@@ -11610,7 +11614,6 @@ class JiuWenSwarmDeepAdapter:
         # 抛 UnboundLocalError，掩盖真因。提前到函数顶部规避（见 traceback 8111）。
         from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
-            mark_single_agent_team,
             open_agent_run_span,
         )
 
@@ -11666,7 +11669,6 @@ class JiuWenSwarmDeepAdapter:
             # config before running, and open a root span so OtelCallbackHandler
             # has a parent for LLM/tool spans (see streaming path for details).
             sync_agent_observability()
-            mark_single_agent_team(self._instance)
             from jiuwenswarm.server.runtime.debug_trace.paths import (
                 resolve_debug_trace_mode,
             )
@@ -12267,7 +12269,6 @@ class JiuWenSwarmDeepAdapter:
         # close_agent_run_span 因名字未绑定抛 UnboundLocalError，掩盖真因。
         from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
-            mark_single_agent_team,
             open_agent_run_span,
         )
 
@@ -12356,7 +12357,6 @@ class JiuWenSwarmDeepAdapter:
             # Sync single-agent / coding-agent observability with current config
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
-            mark_single_agent_team(self._instance)
             _run_span = open_agent_run_span(
                 session_id=session_id, mode=_debug_trace_mode
             )
