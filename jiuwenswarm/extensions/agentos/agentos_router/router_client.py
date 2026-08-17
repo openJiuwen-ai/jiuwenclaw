@@ -358,13 +358,14 @@ class AgentOSRouterClient(AgentServerClient):
 
 
     def set_channel_manager(self, channel_manager: ChannelManager) -> None:
-        """Subscribe TUI connect hooks (token auth) and channel disconnect events.
-
-        Web is intentionally not hooked: browser WS cannot send Authorization
-        headers, and the stock Web UI does not pass ``?token=``.
-        """
+        """Subscribe Web/TUI connect hooks (token auth) and channel disconnect events."""
+        web_channel = channel_manager.get_channel(ChannelType.WEB)
         tui_channel = channel_manager.get_channel(ChannelType.CLI)
 
+        if web_channel:
+            on_connect = getattr(web_channel, "on_connect", None)
+            if callable(on_connect):
+                on_connect(self.on_connect)
         if tui_channel:
             on_connect = getattr(tui_channel, "on_connect", None)
             if callable(on_connect):
