@@ -81,8 +81,9 @@ export interface CommandContext {
   setMode: (mode: ClientMode) => void;
   markPlanEntryFromSlashCommand?: () => void;
   setModel: (name: string) => void;
-  /** 全局选中 agentos 备份模型（请求级注入）；传 null 清空，恢复启动默认 */
-  setSelectedAgentosModel?: (name: string | null) => void;
+  /** 全局选中 agentos 备份模型（请求级注入）；传 null 清空，恢复启动默认。
+   *  provider 可选，仅用于头部 Provider 行展示。 */
+  setSelectedAgentosModel?: (name: string | null, provider?: string) => void;
   setPreferredLanguage: (language: PreferredLanguage) => void;
   setThemeName: (theme: ThemeName) => void;
   setAccentColor: (color: AccentColorName) => void;

@@ -165,6 +165,8 @@ export interface AppSnapshot {
   modelInfo: { provider: string; model: string; version: string };
   /** 全局选中的 agentos 备份模型名（请求级注入）；null 表示使用启动默认 */
   selectedAgentosModel: string | null;
+  /** 全局选中的 agentos 备份模型 provider（仅展示用，头部 Provider 行）；空表示未取到 */
+  selectedAgentosProvider: string;
   preferredLanguage: PreferredLanguage;
   sessionTitle: string;
   statusLineText: string | null;
@@ -395,6 +397,7 @@ export class CliPiAppState {
    * 时由 setModel 清空（恢复启动默认模型路由）。
    */
   private selectedAgentosModel: string | null = null;
+  private selectedAgentosProvider: string = "";
   private preferredLanguage: PreferredLanguage = "zh";
   private memoryWarnings: {
     path: string;
@@ -1149,6 +1152,7 @@ export class CliPiAppState {
       contextUsedPercentage: this.contextUsedPercentage,
       modelInfo: this.modelInfo,
       selectedAgentosModel: this.selectedAgentosModel,
+      selectedAgentosProvider: this.selectedAgentosProvider,
       preferredLanguage: this.preferredLanguage,
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
@@ -2083,6 +2087,7 @@ export class CliPiAppState {
     // 切回 defaults 模型 → 放弃 agentos 请求级注入，恢复启动默认模型路由
     if (this.selectedAgentosModel !== null) {
       this.selectedAgentosModel = null;
+      this.selectedAgentosProvider = "";
       this.emitChange();
     }
   };
@@ -2092,11 +2097,12 @@ export class CliPiAppState {
    * 选 agentos 不改 modelInfo（启动默认不变），仅记录注入名；
    * setModel 会清空本字段。
    */
-  readonly setSelectedAgentosModel = (name: string | null): void => {
+  readonly setSelectedAgentosModel = (name: string | null, provider?: string): void => {
     const trimmed = name ? name.trim() : "";
     const next = trimmed || null;
-    if (this.selectedAgentosModel !== next) {
+    if (this.selectedAgentosModel !== next || this.selectedAgentosProvider !== (provider ?? "")) {
       this.selectedAgentosModel = next;
+      this.selectedAgentosProvider = next ? (provider ?? "") : "";
       this.emitChange();
     }
   };

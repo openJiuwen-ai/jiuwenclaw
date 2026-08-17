@@ -323,7 +323,7 @@
       "free": "Free Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model",
-      "backup": "backup"
+      "backup": "AgentOS"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -1209,8 +1209,8 @@
         "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
       },
       "agentos": {
-        "label": "AgentOS Backup Models",
-        "hint": "Manually added backup models; read-only and switchable, does not override the startup default"
+        "label": "AgentOS Models",
+        "hint": "Manually added AgentOS models; read-only and switchable, does not override the startup default"
       }
     },
     "booleanLabels": {
@@ -1326,7 +1326,7 @@
       "proactiveIntOutOfRange": "{{field}} must be a positive integer in {{lo}}-{{hi}}; current: {{value}}"
     },
     "agentos": {
-      "backupBadge": "backup",
+      "backupBadge": "AgentOS",
       "switchToThis": "Use this model",
       "readonly": "Read-only (config.yaml-defined)"
     }
