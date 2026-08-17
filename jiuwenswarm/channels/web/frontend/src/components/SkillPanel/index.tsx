@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight, Info, Loader2 } from 'lucide-react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
@@ -1952,6 +1952,13 @@ export function SkillPanel({
 
         {activeTab === "graph" ? (
           <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
+            <div
+              data-testid="skill-panel-graph-definition"
+              className="flex flex-none items-start gap-2 rounded-md border border-border bg-secondary/30 px-3 py-2 text-[10px] leading-4 text-text-muted"
+            >
+              <Info size={14} className="mt-px flex-shrink-0" aria-hidden="true" />
+              <span>{t('skills.graph.orchestration.graphDefinition')}</span>
+            </div>
             <div data-testid="skill-panel-graph-orchestration-card" className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
               <div className="min-w-[240px] flex-1">
                 <p data-testid="skill-panel-graph-orchestration-description" className="text-xs leading-5 text-text-muted">

@@ -1701,6 +1701,7 @@
     "graph": {
       "orchestration": {
         "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills (consuming tokens) and uses the graph during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling it stops skill orchestration but does not delete the existing skill graph.",
+        "graphDefinition": "A skill graph is like a map of skill relationships: each dot represents a skill, and lines between dots show which skills can work together.",
         "saving": "Saving…",
         "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
         "toggleLabel": "Enable skill orchestration",
@@ -1708,10 +1709,12 @@
       },
       "stats": {
         "skillsSuffix": " skills",
-        "edgesSuffix": " edges"
+        "edgesSuffix": " links"
       },
       "searchPlaceholder": "Search skills",
-      "minConfidence": "Minimum confidence {{percent}}%",
+      "minConfidence": "Minimum link strength {{percent}}%",
+      "minConfidenceHelp": "Drag the slider to adjust the minimum link strength in the right view; higher values show fewer links, while lower values show more.",
+      "linkStrength": "Link strength {{percent}}%",
       "buildLogFallback": "Build log",
       "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "Required",
@@ -1723,15 +1726,21 @@
       "outDegree": "Out",
       "description": "Description",
       "tasks": "Tasks",
-      "relatedEdges": "Related Edges",
-      "noRelatedEdges": "No related edges.",
-      "selectSkillHint": "Select a skill to view its fingerprint",
+      "relatedEdges": "Linked skills",
+      "noRelatedEdges": "No linked skills.",
+      "selectSkillHint": "Select a skill to view details",
       "actions": {
         "read": "Read graph",
         "incrementalBuild": "Incremental build",
         "cancelBuild": "Cancel build",
-        "fullRebuild": "Full rebuild",
-        "fitView": "Fit view"
+        "fullRebuild": "Full build",
+        "fitView": "Adjust view"
+      },
+      "actionHelp": {
+        "incrementalBuild": "Incremental build: Update new or changed skills.",
+        "cancelBuild": "Cancel build: Stop the current incremental or full build.",
+        "fullRebuild": "Full build: Scan all installed skills for first use or rebuilding the graph.",
+        "fitView": "Adjust view: Center and fit the graph within the right panel."
       },
       "status": {
         "refreshing": "Refreshing skill graph",

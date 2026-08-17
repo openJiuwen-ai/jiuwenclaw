@@ -9,13 +9,10 @@ import {
 } from 'react';
 import {
   AlertTriangle,
-  Focus,
-  GitBranch,
+  CircleStop,
   Loader2,
-  RefreshCw,
-  RotateCcw,
+  Plus,
   Search,
-  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
@@ -169,6 +166,26 @@ const DEFAULT_MIN_CONFIDENCE = 0.7;
 
 type SymphonyBuildMode = 'incremental' | 'full';
 type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+function FullBuildIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5Z" />
+      <path d="M12 16v-6m0 0L9 8m3 2 3-2" />
+    </svg>
+  );
+}
+
+function ArrangeGraphIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="4" r="2" />
+      <circle cx="5" cy="17" r="2" />
+      <circle cx="19" cy="17" r="2" />
+      <path d="M9.5 5.2a8.5 8.5 0 0 0-5.8 8.7M7.6 19.2a8.5 8.5 0 0 0 8.8 0m3.9-5.3a8.5 8.5 0 0 0-5.8-8.7" />
+    </svg>
+  );
+}
 
 const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
   idle: 'idle',
@@ -447,6 +464,7 @@ function buildLogSummary(entry: BuildLogEntry, t: Translate): string {
     asString(entry.label || entry.stage, t('skills.graph.buildLogFallback')),
     t,
   );
+  if (entry.stage === 'update.done') return label;
   const countKeys: Array<[string, string?]> = [
     ['current', 'total'],
     ['skill_count', undefined],
@@ -1432,13 +1450,13 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 setMinConfidence(Number(event.target.value));
               }}
             />
+            <small data-testid="skill-graph-panel-min-confidence-help" className="skill-graph-panel__filter-help">
+              {t('skills.graph.minConfidenceHelp')}
+            </small>
           </label>
         </div>
 
         <div data-testid="skill-graph-panel-actions" className="skill-graph-panel__actions">
-          <button type="button" onClick={() => void loadGraph(true)} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
-            {loading ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
-          </button>
           <button
             type="button"
             onClick={() => void rebuildGraph('incremental').catch(() => undefined)}
@@ -1446,7 +1464,8 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-incremental-build"
             title={t('skills.graph.actions.incrementalBuild')}
           >
-            {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <GitBranch size={16} aria-hidden="true" />}
+            {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}
+            <span>{t('skills.graph.actions.incrementalBuild')}</span>
           </button>
           <button
             type="button"
@@ -1455,7 +1474,8 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-cancel-build"
             title={t('skills.graph.actions.cancelBuild')}
           >
-            {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <X size={16} aria-hidden="true" />}
+            {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <CircleStop size={16} aria-hidden="true" />}
+            <span>{t('skills.graph.actions.cancelBuild')}</span>
           </button>
           <button
             type="button"
@@ -1464,12 +1484,22 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-full-rebuild"
             title={t('skills.graph.actions.fullRebuild')}
           >
-            {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RotateCcw size={16} aria-hidden="true" />}
+            {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <FullBuildIcon />}
+            <span>{t('skills.graph.actions.fullRebuild')}</span>
           </button>
           <button type="button" onClick={fitView} disabled={!visible.nodes.length} data-testid="skill-graph-panel-action-fit-view" title={t('skills.graph.actions.fitView')}>
-            <Focus size={16} aria-hidden="true" />
+            <ArrangeGraphIcon />
+            <span>{t('skills.graph.actions.fitView')}</span>
           </button>
         </div>
+        <section data-testid="skill-graph-panel-actions-help" className="skill-graph-panel__actions-help">
+          <ul>
+            <li data-testid="skill-graph-panel-actions-help-item-incremental">{t('skills.graph.actionHelp.incrementalBuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-cancel">{t('skills.graph.actionHelp.cancelBuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-full">{t('skills.graph.actionHelp.fullRebuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-fit">{t('skills.graph.actionHelp.fitView')}</li>
+          </ul>
+        </section>
 
         {(updating || showBuildLogPanel) ? (
           <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
@@ -1524,7 +1554,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                   onClick={() => selectNode(node)}
                 >
                   <span>{node.label}</span>
-                  <small>{t('skills.graph.degreeSummary', { inDegree: node.inDegree, outDegree: node.outDegree })}</small>
                 </button>
               ))
           )}
@@ -1635,11 +1664,10 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                     >
                       <span>{edge.source === selectedNode.id ? '→' : '←'} {other?.label || labelFromId(otherId)}</span>
                       <small>
-                        {edge.type}
+                        {t('skills.graph.linkStrength', { percent: Math.round(edge.confidence * 100) })}
                         {edge.runtimeWeight === undefined
                           ? ''
                           : ` · runtime_weight ${edge.runtimeWeight.toFixed(2)}`}
-                        {' · '}{Math.round(edge.confidence * 100)}%
                       </small>
                     </button>
                   );

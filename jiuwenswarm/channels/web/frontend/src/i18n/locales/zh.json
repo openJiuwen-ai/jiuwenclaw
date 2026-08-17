@@ -1699,6 +1699,7 @@
     "graph": {
       "orchestration": {
         "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行成功率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
         "toggleLabel": "启用技能编排",
@@ -1706,10 +1707,12 @@
       },
       "stats": {
         "skillsSuffix": "技能",
-        "edgesSuffix": "边"
+        "edgesSuffix": "关联"
       },
       "searchPlaceholder": "搜索技能",
-      "minConfidence": "最小置信度 {{percent}}%",
+      "minConfidence": "最小关联强度 {{percent}}%",
+      "minConfidenceHelp": "拖动滑块，调整右侧视图中的最小关联强度；数值越高，可显示的关联越少；数值越低，可显示的关联越多。",
+      "linkStrength": "关联强度 {{percent}}%",
       "buildLogFallback": "构建日志",
       "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
@@ -1721,15 +1724,21 @@
       "outDegree": "出度",
       "description": "描述",
       "tasks": "任务",
-      "relatedEdges": "相关边",
-      "noRelatedEdges": "暂无相关边。",
-      "selectSkillHint": "选择一个技能查看指纹",
+      "relatedEdges": "关联技能",
+      "noRelatedEdges": "暂无关联技能。",
+      "selectSkillHint": "选择一个技能查看详情",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",
         "cancelBuild": "取消构建",
-        "fullRebuild": "全量重新构建",
-        "fitView": "适配视图"
+        "fullRebuild": "全量构建",
+        "fitView": "调整视图"
+      },
+      "actionHelp": {
+        "incrementalBuild": "增量构建：更新新增或变更的技能，适合日常维护。",
+        "cancelBuild": "取消构建：停止当前增量或全量构建。",
+        "fullRebuild": "全量构建：扫描全部已安装技能，首次使用或重建图谱时使用。",
+        "fitView": "调整视图：自动调整右侧视图，使图谱居中并完整显示。"
       },
       "status": {
         "refreshing": "正在刷新技能图谱",
