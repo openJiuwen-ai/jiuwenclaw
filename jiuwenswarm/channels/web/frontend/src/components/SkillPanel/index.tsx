@@ -1442,22 +1442,27 @@ export function SkillPanel({
     }));
   }, []);
 
-  const handleEditSkill = useCallback((skillName: string) => {
+  // 新建会话：skill-creator（所有 Skill Creator 统一入口）chip + "帮我修改这个技能" + 该技能 chip
+  const handleEditSkill = useCallback((skillName: string, skillType?: string) => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
-        skillName: 'skill-creator-router',
+        skillName: 'skill-creator',
         suffixText: '帮我修改这个技能',
         secondSkillName: skillName,
-        metadata: { scene: 'edit_skill', target_skill: skillName }
+        metadata: {
+          scene: 'edit_skill',
+          target_skill: skillName,
+          ...(skillType ? { target_skill_type: skillType } : {}),
+        }
       }
     }));
   }, []);
 
-  // 通过聊天创建：新建会话，选中 skill-creator-router 技能并在 chip 后追加创建提示文字
+  // 通过聊天创建：新建会话，选中 skill-creator（统一入口）并在 chip 后追加创建提示文字
   const handleCreateViaChat = useCallback(() => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
-        skillName: 'skill-creator-router',
+        skillName: 'skill-creator',
         suffixText: '请帮我创建一个可以实现xxx功能的技能/团队技能/多模态技能',
         metadata: { scene: 'create_skill' }
       }
@@ -2765,7 +2770,7 @@ export function SkillPanel({
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
-                            handleEditSkill(selectedSkill.name);
+                            handleEditSkill(selectedSkill.name, selectedSkill.skill_type);
                           }}
                           data-testid="skill-panel-my-detail-edit-btn"
                           className="px-3 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50"
@@ -3153,7 +3158,7 @@ export function SkillPanel({
                                     type="button"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      handleEditSkill(skill.name);
+                                      handleEditSkill(skill.name, skill.skill_type);
                                     }}
                                     data-testid="skill-panel-my-skill-edit-btn"
                                     className="px-2 py-1 rounded-md text-xs text-text-muted hover:text-text hover:bg-secondary/50"

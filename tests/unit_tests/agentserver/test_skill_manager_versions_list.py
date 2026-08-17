@@ -311,9 +311,32 @@ async def test_skills_versions_list_corrupt_index_errors(manager: SkillManager) 
 def test_detect_skill_type_priority(tmp_path: Path) -> None:
     swarm = tmp_path / "swarm"
     swarm.mkdir()
-    (swarm / "workflow.md").write_text("x", encoding="utf-8")
+    (swarm / "SKILL.md").write_text(
+        "---\nname: swarm-demo\nkind: swarm-skill\n---\nbody\n",
+        encoding="utf-8",
+    )
     (swarm / "a.png").write_bytes(b"1")
     assert detect_skill_type(swarm) == SKILL_TYPE_SWARM
+
+    # kind: team-skill 不再判为 swarm_skill
+    team_kind = tmp_path / "team-kind"
+    team_kind.mkdir()
+    (team_kind / "SKILL.md").write_text(
+        "---\nname: team-demo\nkind: team-skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    assert detect_skill_type(team_kind) == SKILL_TYPE_SKILL
+
+    # 仅有 workflow.md / roles 目录、无 swarm-skill kind 时，不再判为 swarm
+    legacy_layout = tmp_path / "legacy-layout"
+    legacy_layout.mkdir()
+    (legacy_layout / "workflow.md").write_text("x", encoding="utf-8")
+    (legacy_layout / "roles").mkdir()
+    (legacy_layout / "SKILL.md").write_text(
+        "---\nname: legacy\n---\nbody\n",
+        encoding="utf-8",
+    )
+    assert detect_skill_type(legacy_layout) == SKILL_TYPE_SKILL
 
     multi = tmp_path / "multi"
     multi.mkdir()
