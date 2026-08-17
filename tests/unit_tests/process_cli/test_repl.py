@@ -67,7 +67,7 @@ async def test_interactive_prompt_keeps_existing_text(monkeypatch) -> None:
 
     monkeypatch.setattr("builtins.input", fake_input)
 
-    assert await repl._read_prompt() == "/exit"
+    assert await repl._read_prompt(None) == "/exit"
     assert prompts == ["jiuwenswarm> "]
 
 
@@ -160,7 +160,7 @@ async def test_repl_runs_every_instruction_in_a_new_worker_and_reuses_session(
     prompts = iter(("first", "second", "/new", "third", "/session", "/exit"))
     calls: list[tuple[str, str | None]] = []
 
-    async def fake_read_prompt() -> str:
+    async def fake_read_prompt(_session) -> str:
         return next(prompts)
 
     async def fake_run_worker(
@@ -173,6 +173,7 @@ async def test_repl_runs_every_instruction_in_a_new_worker_and_reuses_session(
         return 0, session_id or f"runtime-session-{len(calls)}"
 
     monkeypatch.setattr(repl, "_read_prompt", fake_read_prompt)
+    monkeypatch.setattr(repl, "_create_prompt_session", lambda: None)
     monkeypatch.setattr(repl, "_run_worker", fake_run_worker)
     monkeypatch.setattr(
         repl,

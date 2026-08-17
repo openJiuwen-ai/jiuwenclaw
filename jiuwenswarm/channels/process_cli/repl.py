@@ -14,19 +14,24 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jiuwenswarm.channels.process_cli.commands import resolve_slash_command
 from jiuwenswarm.channels.process_cli.display_context import (
     resolve_configured_model_name as _resolve_configured_model_name,
 )
 from jiuwenswarm.channels.process_cli.display_context import (
     resolve_display_mode as _resolve_display_mode,
 )
+from jiuwenswarm.channels.process_cli.prompt import (
+    create_prompt_session as _create_prompt_session,
+)
+from jiuwenswarm.channels.process_cli.prompt import read_prompt as _read_prompt
 from jiuwenswarm.channels.process_cli.ui import ProcessCliUI, resolved_cwd
 
 if TYPE_CHECKING:
     import argparse
     from asyncio.subprocess import Process
 
-_EXIT_COMMANDS = frozenset({"/exit", "/quit", "exit", "quit"})
+_EXIT_COMMANDS = frozenset({"exit", "quit"})
 
 
 def _worker_command(
@@ -131,10 +136,6 @@ async def _run_worker(
         return return_code, next_session
 
 
-async def _read_prompt() -> str:
-    return await asyncio.to_thread(input, "jiuwenswarm> ")
-
-
 async def run_repl(args: argparse.Namespace) -> int:
     """Run a UI-only shell; every instruction owns a fresh worker process."""
     ui = ProcessCliUI()
@@ -142,6 +143,7 @@ async def run_repl(args: argparse.Namespace) -> int:
     cwd = resolved_cwd(args.cwd)
     model_name = _resolve_configured_model_name()
     display_mode = _resolve_display_mode(args.mode, args.work_mode)
+    prompt_session = _create_prompt_session()
     ui.startup(
         model_name=model_name,
         mode=display_mode,
@@ -156,23 +158,24 @@ async def run_repl(args: argparse.Namespace) -> int:
             session_id=session_id,
         )
         try:
-            prompt = (await _read_prompt()).strip()
+            prompt = (await _read_prompt(prompt_session)).strip()
         except EOFError:
             print()
             return 0
         if not prompt:
             continue
         lowered = prompt.lower()
-        if lowered in _EXIT_COMMANDS:
+        slash_command = resolve_slash_command(lowered)
+        if lowered in _EXIT_COMMANDS or slash_command == "/exit":
             return 0
-        if lowered == "/help":
+        if slash_command == "/help":
             ui.help()
             continue
-        if lowered == "/new":
+        if slash_command == "/new":
             session_id = None
             ui.notice("下一条指令将创建新的 Runtime 会话。")
             continue
-        if lowered == "/session":
+        if slash_command == "/session":
             ui.session(session_id)
             continue
         _return_code, session_id = await _run_worker(

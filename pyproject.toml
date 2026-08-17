@@ -20,6 +20,7 @@ dependencies = [
     "openjiuwen[claude,codex] @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
     "pgvector>=0.4.2",
     "portalocker>=3.2.0",
+    "prompt-toolkit>=3.0,<4.0",
     "websockets>=12.0",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",

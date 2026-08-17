@@ -40,7 +40,8 @@ def test_startup_uses_chinese_card_and_jiuwenswarm_title(monkeypatch) -> None:
     assert "模式：  code.normal" in text
     assert "会话：  尚未创建" in text
     assert "工作模式" not in text
-    assert "/help      查看所有命令" in text
+    assert "输入 / 查看可用命令。" in text
+    assert "/help      查看所有命令" not in text
     assert "\033[" not in text
 
 

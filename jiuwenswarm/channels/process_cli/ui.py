@@ -12,6 +12,8 @@ import unicodedata
 from pathlib import Path
 from typing import TextIO
 
+from jiuwenswarm.channels.process_cli.commands import SLASH_COMMANDS
+
 _ANSI_RESET = "\033[0m"
 _ANSI_BOLD_CYAN = "\033[1;36m"
 _ANSI_CYAN = "\033[36m"
@@ -131,8 +133,12 @@ class ProcessCliUI:
             "每条指令均在独立进程中运行，Runtime 会话将在不同轮次间保留。",
             indent="  ",
         )
+        self._write_wrapped(
+            "输入 / 查看可用命令。",
+            style=_ANSI_DIM,
+            indent="  ",
+        )
         self._write("\n")
-        self.help(compact=True)
 
     def help(self, *, compact: bool = False) -> None:
         if compact:
@@ -142,20 +148,19 @@ class ProcessCliUI:
             self._write("\n")
             self._write_wrapped("可用命令：", style=_ANSI_BOLD_CYAN)
             self._write("\n")
+        labels = [
+            f"{command.name:<11}{command.description}" for command in SLASH_COMMANDS
+        ]
         if self.columns >= 68:
-            self._write_wrapped(
-                "/help      查看所有命令          /new       创建新会话", indent="  "
-            )
-            self._write_wrapped(
-                "/session   查看当前会话          /exit      退出 JiuwenSwarm",
-                indent="  ",
-            )
+            for index in range(0, len(labels), 2):
+                left = labels[index]
+                right = labels[index + 1] if index + 1 < len(labels) else ""
+                gap = " " * max(4, 36 - _display_width(left))
+                self._write_wrapped(f"{left}{gap}{right}", indent="  ")
             self._write("\n")
         else:
-            self._write_wrapped("/help      查看所有命令", indent="  ")
-            self._write_wrapped("/new       创建新会话", indent="  ")
-            self._write_wrapped("/session   查看当前会话", indent="  ")
-            self._write_wrapped("/exit      退出 JiuwenSwarm", indent="  ")
+            for label in labels:
+                self._write_wrapped(label, indent="  ")
             self._write("\n")
 
     def status(
