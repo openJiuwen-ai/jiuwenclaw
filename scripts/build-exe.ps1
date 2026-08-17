@@ -1,4 +1,4 @@
-# JiuwenSwarm 打包 exe 脚本
+# WorkSwarm 打包 exe 脚本
 # 用法: .\scripts\build-exe.ps1  或  pwsh -File scripts\build-exe.ps1
 
 param(
@@ -174,12 +174,12 @@ if (Test-Truthy $BundleNode) {
     Use-NodeRuntime -SourceDir $NodeSource
 }
 
-Write-Host "=== JiuwenSwarm Build Exe ===" -ForegroundColor Cyan
+Write-Host "=== WorkSwarm Build Exe ===" -ForegroundColor Cyan
 Write-Host "Project root: $ProjectRoot`n" -ForegroundColor Gray
 
 # 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
-uv sync --extra dev
+Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev --extra codex)..." -ForegroundColor Yellow
+uv sync --extra dev --extra codex
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend
@@ -204,7 +204,7 @@ uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Verify the actual frozen runtime, not only the PyInstaller source configuration.
-$FrozenExe = Join-Path $ProjectRoot "dist\jiuwenswarm\jiuwenswarm.exe"
+$FrozenExe = Join-Path $ProjectRoot "dist\workswarm\workswarm.exe"
 $A2UIVerifier = Join-Path $ProjectRoot "scripts\verify_a2ui_bundle.py"
 $VerifyProcess = Start-Process `
     -FilePath $FrozenExe `
@@ -213,13 +213,13 @@ $VerifyProcess = Start-Process `
     -PassThru `
     -NoNewWindow
 if ($VerifyProcess.ExitCode -ne 0) {
-    throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/jiuwenswarm_exe_error.log"
+    throw "Frozen A2UI bundle verification failed. See ~/.jiuwenswarm/logs/workswarm_exe_error.log"
 }
 
 # 3.5 Bundle Node.js runtime for browser tools
 if (Test-Truthy $BundleNode) {
     Write-Host "`n[3.5/4] Bundling Node.js runtime..." -ForegroundColor Yellow
-    $DistDir = Join-Path $ProjectRoot "dist\jiuwenswarm"
+    $DistDir = Join-Path $ProjectRoot "dist\workswarm"
     Copy-NodeRuntime -SourceDir $NodeSource -DistDir $DistDir
 } else {
     Write-Host "`n[3.5/4] Skipping bundled Node.js runtime (BUNDLE_NODE=$BundleNode)" -ForegroundColor Yellow
@@ -257,7 +257,7 @@ if (-not $Iscc) {
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $InstallerPath = (
-    Get-ChildItem "$ProjectRoot\dist\JiuwenSwarm-setup-*.exe" |
+    Get-ChildItem "$ProjectRoot\dist\WorkSwarm-setup-*.exe" |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 ).FullName

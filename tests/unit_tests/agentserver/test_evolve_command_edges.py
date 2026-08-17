@@ -5,6 +5,9 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.agents.harness.observability_runtime import (
+    get_trajectory_span_processor,
+)
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
@@ -190,6 +193,7 @@ async def test_evolve_slash_lazy_init_registers_active_review_rails(monkeypatch,
             "auto_save": auto_save,
             "disabled_skills": ["disabled-demo"],
             "language": "en",
+            "trajectory_span_processor": get_trajectory_span_processor(),
         }
     ]
 
@@ -471,6 +475,53 @@ def _install_interaction_followup_agent(
     adapter._instance.send_input = AsyncMock(  # pylint: disable=protected-access
         side_effect=_send_input
     )
+
+
+@pytest.mark.anyio
+async def test_stream_error_answer_aborts_active_round_without_debug_logger(monkeypatch):
+    adapter = _adapter_ready_for_followup_execution(monkeypatch)
+    closed_with: list[bool] = []
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield SimpleNamespace(
+                type="answer",
+                payload={
+                    "output": "任务循环单轮执行超过 10 秒，已终止本轮任务。",
+                    "result_type": "error",
+                },
+            )
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            closed_with.append(abort_active_round)
+
+    adapter._instance.attach_output = AsyncMock(return_value=_FakeInteractionStream())
+    adapter._instance.send_input = AsyncMock()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_message_stream_impl(
+            AgentRequest(
+                request_id="req-timeout",
+                channel_id="web",
+                session_id="sess-timeout",
+                params={"query": "run benchmark", "mode": "agent.plan"},
+                is_stream=True,
+            ),
+            {"query": "run benchmark"},
+        )
+    ]
+
+    payloads = [chunk.payload for chunk in chunks if isinstance(chunk.payload, dict)]
+    assert {
+        "event_type": "chat.error",
+        "error": "任务循环单轮执行超过 10 秒，已终止本轮任务。",
+    } in payloads
+    assert not any(payload.get("event_type") == "chat.final" for payload in payloads)
+    assert closed_with == [True]
 
 
 @pytest.mark.anyio

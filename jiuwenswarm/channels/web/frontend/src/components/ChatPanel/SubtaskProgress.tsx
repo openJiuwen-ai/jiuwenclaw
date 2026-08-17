@@ -29,14 +29,14 @@ export function SubtaskProgress() {
   const completedCount = total - subtasks.length;
 
   return (
-    <div className="mx-4 my-2 p-3 bg-accent-subtle rounded-lg border border-border">
-      <div className="flex items-center gap-2 mb-2">
+    <div className="mx-4 my-2 p-3 bg-accent-subtle rounded-lg border border-border" data-testid="chat-panel-subtask-progress">
+      <div className="flex items-center gap-2 mb-2" data-testid="chat-panel-subtask-progress-header">
         <span className="w-2 h-2 rounded-full bg-info animate-pulse" />
-        <span className="text-sm font-medium text-text-strong">
+        <span className="text-sm font-medium text-text-strong" data-testid="chat-panel-subtask-progress-title">
           {t('chatUi.parallelProgress', { completedCount, total })}
         </span>
       </div>
-      <div className="space-y-2">
+      <div className="space-y-2" data-testid="chat-panel-subtask-progress-list">
         {subtasks.map((subtask) => (
           <SubtaskItem key={subtask.task_id} subtask={subtask} />
         ))}
@@ -65,19 +65,19 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
     switch (subtask.status) {
       case 'starting':
         return (
-          <span className="w-3 h-3 rounded-full border-2 border-info animate-pulse flex-shrink-0" />
+          <span className="w-3 h-3 rounded-full border-2 border-info animate-pulse flex-shrink-0" data-testid="chat-panel-subtask-progress-item-icon" data-variant="starting" />
         );
       case 'tool_call':
         return (
-          <span className="w-3 h-3 rounded-full bg-warn animate-pulse flex-shrink-0" />
+          <span className="w-3 h-3 rounded-full bg-warn animate-pulse flex-shrink-0" data-testid="chat-panel-subtask-progress-item-icon" data-variant="tool_call" />
         );
       case 'tool_result':
         return (
-          <span className="w-3 h-3 rounded-full bg-info flex-shrink-0" />
+          <span className="w-3 h-3 rounded-full bg-info flex-shrink-0" data-testid="chat-panel-subtask-progress-item-icon" data-variant="tool_result" />
         );
       default:
         return (
-          <span className="w-3 h-3 rounded-full border border-border-strong flex-shrink-0" />
+          <span className="w-3 h-3 rounded-full border border-border-strong flex-shrink-0" data-testid="chat-panel-subtask-progress-item-icon" />
         );
     }
   };
@@ -102,16 +102,18 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
         subtask.status === 'tool_call' && 'bg-warn/10',
         subtask.status === 'tool_result' && 'bg-info/10'
       )}
+      data-testid="chat-panel-subtask-progress-item"
+      data-variant={subtask.task_id}
     >
       {getStatusIcon()}
       <div className="flex-1 min-w-0">
-        <div className="font-medium text-text-strong truncate">
+        <div className="font-medium text-text-strong truncate" data-testid="chat-panel-subtask-progress-item-label">
           {t('chatUi.subtask.taskLabel', { index: subtask.index + 1, description: subtask.description })}
         </div>
-        <div className="text-text-muted truncate">{getStatusText()}</div>
+        <div className="text-text-muted truncate" data-testid="chat-panel-subtask-progress-item-status">{getStatusText()}</div>
       </div>
       {subtask.tool_count > 0 && (
-        <span className="text-text-muted text-xs px-1.5 py-0.5 bg-secondary rounded">
+        <span className="text-text-muted text-xs px-1.5 py-0.5 bg-secondary rounded" data-testid="chat-panel-subtask-progress-item-call-count">
           {t('chatUi.subtask.callCount', { count: subtask.tool_count })}
         </span>
       )}

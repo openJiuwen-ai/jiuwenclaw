@@ -377,6 +377,8 @@ tools:
 
 > **注意**：即使没有依赖，也必须显式写 `skills: []` 和 `tools: []`（空列表表示"已检查，确认无依赖"，与省略段不同，省略是规范违规）。
 
+> **关于 `skills` 段的依赖**：这里声明的 Agent Skill 需要已经安装在全局技能库 `~/.jiuwenswarm/agent/workspace/skills/` 中，并且对执行该角色的团队成员可见。团队不会为自己复制一份技能，成员能看见哪些技能由可见性声明决定，详见 [Agent Team](AgentTeam.md) 的「Team Skills」小节。
+
 ---
 
 ## 3. 使用指导
@@ -397,7 +399,7 @@ Swarm Skills 需要在 Agent Team 集群模式下运行。在使用前，请确�
 1. 打开 jiuwenSwarm 的「技能」面板
 2. 点击「Swarm Skills Hub 在线搜索」
 3. 输入关键词搜索所需的团队技能（如"医疗会诊"、"研究报告"等）
-4. 点击「安装」将技能添加到工作区
+4. 点击「安装」将技能装入全局技能库
 
 也可以通过命令行搜索和安装：
 
@@ -413,6 +415,8 @@ Swarm Skills 需要在 Agent Team 集群模式下运行。在使用前，请确�
 ```
 
 > **提示**：`<asset_id>` 是 Swarm Skills Hub 上的技能唯一标识（如 `sk-123`），搜索结果中会显示。
+
+> **技能装在哪里**：无论 Swarm Skill 还是普通 Agent Skill，安装后都只存在一份实体，统一位于全局技能库 `~/.jiuwenswarm/agent/workspace/skills/`。团队和团队成员不会各自拿到一份副本，它们只有一份可见性声明，用来决定各自能看见库里的哪些技能（默认继承全库）。因此安装一次即对全团队生效，无需在团队内再分发。
 
 **步骤二：在 jiuwenSwarm 中使用**
 
@@ -931,3 +935,9 @@ A: 默认地址为 `https://swarmskills.openjiuwen.com`，可通过环境变量 
 *文档版本：v2.0*
 *适用对象：jiuwenSwarm 用户、技能开发者*
 *最后更新：2026-07-13*
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

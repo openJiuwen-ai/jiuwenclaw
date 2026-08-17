@@ -105,7 +105,8 @@
     },
     "taskDetail": {
       "sourcePrompt": "Source prompt: {{prompt}}",
-      "noDetail": "No detailed task description was provided"
+      "noDetail": "No detailed task description was provided",
+      "skipReasonPlanned": "Planned but not executed: the phase never started before the workflow ended"
     },
     "contextCompression": {
       "running": "Compressing context",
@@ -266,8 +267,8 @@
     "placeholderTeamMode": "Team mode, new input will run in parallel...",
     "placeholderTeamModeProcessing": "Team mode processing, new input will run in parallel...",
     "placeholderVoice": "Listening...",
-    "welcomeLogoAlt": "JiuwenSwarm logo",
-    "welcomeHeading": "Hi, I'm JiuwenSwarm. Nice to meet you!",
+    "welcomeLogoAlt": "WorkSwarm logo",
+    "welcomeHeading": "Hi, I'm WorkSwarm. Nice to meet you!",
     "welcomeSuggestions": {
       "journey": "Let's begin a brand-new journey!",
       "skills": "Can you tell me what skills you have?"
@@ -601,7 +602,7 @@
     "skillnet": {
       "usageNoticeTitle": "Notes",
       "usageNotice1": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
-      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenSwarm can reach GitHub</strong> (network / proxy).",
+      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running WorkSwarm can reach GitHub</strong> (network / proxy).",
       "usageNotice3": "GitHub's API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page"
     }
@@ -765,7 +766,6 @@
     "clickMore": "Select More to continue",
     "acknowledge": "Got it",
     "skip": "Skip",
-    "open": "Setup guide",
     "steps": {
       "1": {
         "title": "Configure your first model",
@@ -831,6 +831,10 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "externalCliAgentClaudeEnabled": "Enable Claude",
+      "externalCliAgentUseBuiltin": "Use built-in",
+      "externalCliAgentCliPath": "CLI path",
+      "externalCliAgentCodexEnabled": "Enable Codex",
       "kvCacheReleaseEnabled": "Legacy path (KV release)",
       "kvCacheAffinityEnabled": "New path (Ascend affinity)",
       "skillRetrievalBuildRootCategoriesPlaceholder": "Edit the YAML/JSON root taxonomy directly",
@@ -844,6 +848,7 @@
       "teamTeammateMode": "Teammate Mode",
       "teamSpawnMode": "Spawn Mode",
       "teamEnablePermissions": "Safety Guardrail",
+      "teamExternalCliAgents": "Third-Party Agents",
       "teamLeaderMemberName": "Member Name",
       "teamLeaderDisplayName": "Display Name",
       "teamLeaderPersona": "Persona",
@@ -918,6 +923,13 @@
       "teamTeammateMode": "Collaboration mode: build_mode or plan_mode.",
       "teamSpawnMode": "How the team starts and spawns members.",
       "teamEnablePermissions": "Whether tool safety guardrails (permissions) apply to this Team.",
+      "teamExternalCliAgents": "Third-party agent types that the Leader may spawn. Claude uses in-host SDK tool binding; Codex configures an external MCP publish channel.",
+      "teamExternalCliClaude": "Allow the Leader to spawn Claude SDK members.",
+      "teamExternalCliCodex": "Allow the Leader to spawn Codex SDK members; saving installs the Codex Python dependency when needed.",
+      "externalCliAgentClaude": "Enable Claude for Team mode.",
+      "externalCliAgentUseBuiltin": "Do not set a local CLI path; let the SDK use its default lookup.",
+      "externalCliAgentCliPath": "Set the Claude/Codex executable path.",
+      "externalCliAgentCodex": "Enable Codex for Team mode. Saving installs the Codex Python dependency when needed.",
       "teamMemberName": "Internal member ID: must start with a lowercase letter, then lowercase letters, digits, or hyphens.",
       "teamPersona": "Role persona and responsibilities; shapes behavior and division of labor.",
       "teamPromptHint": "Extra prompt fragment injected into this member's system prompt.",
@@ -1029,6 +1041,8 @@
       "lifecycleTemporary": "Temporary",
       "teammateModeBuild": "Build Mode",
       "teammateModePlan": "Plan Mode",
+      "externalCliClaude": "Claude",
+      "externalCliCodex": "Codex",
       "untitled": "Untitled",
       "deleteConfirmTitle": "Delete Team?",
       "deleteConfirmMessage": "Are you sure you want to delete team \"{{teamName}}\"?",
@@ -1056,6 +1070,7 @@
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
       "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
+      "externalCliAgents": { "label": "Third-Party Agents", "hint": "Configure third-party agents available in Team mode." },
       "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
       "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
@@ -1073,8 +1088,41 @@
       "enabled": "Enable",
       "dynamicGraph": "Enable dynamic graph",
       "kvCacheRelease": "Legacy path (KV release)",
-      "kvCacheAffinity": "New path (Ascend affinity)"
-    },
+      "kvCacheAffinity": "New path (Ascend affinity)",
+        "externalCliClaude": "Enable Claude",
+        "externalCliCodex": "Enable Codex",
+        "externalCliUseBuiltin": "Use built-in"
+      },
+      "externalCli": {
+        "claude": "Claude",
+        "codex": "Codex",
+        "claudeHint": "Use Claude from PATH or specify an executable path.",
+        "codexHint": "Use Codex from PATH or specify an executable path.",
+        "useBuiltin": "Use built-in",
+        "detect": "Detect",
+        "selectFile": "Choose file",
+        "selectFileTitle": "Choose {{agent}} command",
+        "selectFileFailed": "Failed to choose file",
+        "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
+        "statusUnknown": "Not checked",
+        "statusOk": "Available",
+        "statusWarning": "May be incompatible",
+        "statusMissing": "Not found",
+        "statusUnsupported": "Unsupported path",
+        "statusUnavailable": "Unavailable",
+        "version": "Version {{version}}",
+        "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
+        "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
+        "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
+        "codexDependencyInstalling": "Codex dependencies are being installed in the background. Codex is not enabled during installation; after installation finishes, enable Codex again and save the configuration.",
+        "codexDependencyInstalled": "Enable Codex again and save the configuration.",
+        "codexInstallPhasePreparing": "Preparing Codex dependency installation",
+        "codexInstallPhaseInstalling": "Installing Codex dependencies",
+        "codexInstallPhaseVerifying": "Verifying Codex dependencies",
+        "codexInstallPhaseSucceeded": "Codex dependencies installed",
+        "codexInstallPhaseFailed": "Codex dependency installation failed",
+        "codexInstallRecentOutput": "Installation log"
+      },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
       "subtitle": "Set allow / ask / deny per tool name; writes config and hot-reloads. Pattern-based rules are not managed here.",
@@ -1171,7 +1219,7 @@
       "trigger": "Create",
       "manual": "Create manually",
       "viaChat": "Create via chat",
-      "viaChatPrompt": "Let's set up a scheduled task together. First, explain how scheduled tasks work in JiuwenSwarm. Then ask me what I'd like to schedule and when it should run."
+      "viaChatPrompt": "Let's set up a scheduled task together. First, explain how scheduled tasks work in WorkSwarm. Then ask me what I'd like to schedule and when it should run."
     },
     "stats": {
       "total": "Total tasks ({{count}})"
@@ -1474,7 +1522,7 @@
       "mySkills": "My Skills",
       "marketplace": "Marketplace",
       "skillIndex": "Skill Index",
-      "skillGraph": "Skill Score"
+      "skillGraph": "Skill Graph"
     },
     "mySkillsTabs": {
       "all": "All",
@@ -1651,6 +1699,13 @@
       }
     },
     "graph": {
+      "orchestration": {
+        "description": "When enabled, JiuwenSwarm builds a skill graph for installed skills (consuming tokens) and uses the graph during task execution to automatically select, combine, and orchestrate skills, improving task success rates. Disabling it stops skill orchestration but does not delete the existing skill graph.",
+        "saving": "Saving…",
+        "saveFailed": "Failed to save the skill orchestration setting. Please try again.",
+        "toggleLabel": "Enable skill orchestration",
+        "connectionRequired": "Connect to the server to change skill orchestration"
+      },
       "stats": {
         "skillsSuffix": " skills",
         "edgesSuffix": " edges"
@@ -1666,49 +1721,46 @@
       "updatedAt": "Updated {{time}}",
       "inDegree": "In",
       "outDegree": "Out",
-      "inputs": "Inputs",
-      "noInputs": "No inputs",
-      "outputs": "Outputs",
-      "noOutputs": "No outputs",
+      "description": "Description",
       "tasks": "Tasks",
       "relatedEdges": "Related Edges",
       "noRelatedEdges": "No related edges.",
       "selectSkillHint": "Select a skill to view its fingerprint",
       "actions": {
-        "read": "Read score",
+        "read": "Read graph",
         "incrementalBuild": "Incremental build",
         "cancelBuild": "Cancel build",
         "fullRebuild": "Full rebuild",
         "fitView": "Fit view"
       },
       "status": {
-        "refreshing": "Refreshing skill score",
-        "cancelled": "Skill score build cancelled",
-        "reading": "Reading skill score",
+        "refreshing": "Refreshing skill graph",
+        "cancelled": "Skill graph build cancelled",
+        "reading": "Reading skill graph",
         "noBuildLogs": "No build logs",
         "waitingBuildLogs": "Waiting for build logs...",
-        "prepareFull": "Preparing full skill score rebuild",
-        "prepareIncremental": "Preparing incremental skill score build"
+        "prepareFull": "Preparing full skill graph rebuild",
+        "prepareIncremental": "Preparing incremental skill graph build"
       },
       "errors": {
-        "readFailed": "Unable to read the skill score. Refresh the score first.",
-        "refreshFailed": "Failed to refresh the skill score",
-        "cancelFailed": "Failed to cancel the skill score build",
-        "buildFailedWithDetail": "Symphony score build failed: {{detail}}"
+        "readFailed": "Unable to read the skill graph. Refresh the graph first.",
+        "refreshFailed": "Failed to refresh the skill graph",
+        "cancelFailed": "Failed to cancel the skill graph build",
+        "buildFailedWithDetail": "Symphony graph build failed: {{detail}}"
       },
       "serverDetails": {
-        "noRunningBuild": "No skill score build is currently running.",
-        "buildStarted": "Skill score background build started.",
-        "cancelRequested": "Skill score build cancelled. Completed cache and checkpoints will be kept.",
-        "buildRunning": "A skill score build is already running in the background.",
-        "buildCancelled": "Skill score build cancelled. Run an incremental build again to continue.",
-        "graphMissing": "The skill score is missing or incomplete. Build the score first."
+        "noRunningBuild": "No skill graph build is currently running.",
+        "buildStarted": "Skill graph background build started.",
+        "cancelRequested": "Skill graph build cancelled. Completed cache and checkpoints will be kept.",
+        "buildRunning": "A skill graph build is already running in the background.",
+        "buildCancelled": "Skill graph build cancelled. Run an incremental build again to continue.",
+        "graphMissing": "The skill graph is missing or incomplete. Build the graph first."
       },
       "buildStages": {
         "idle": "No build logs",
-        "updateStart": "Starting skill score build",
-        "updateCancelRequested": "Cancelling skill score build",
-        "updateCancelled": "Skill score build cancelled",
+        "updateStart": "Starting skill graph build",
+        "updateCancelRequested": "Cancelling skill graph build",
+        "updateCancelled": "Skill graph build cancelled",
         "scanStart": "Scanning skill directories",
         "scanDone": "Skill directory scan complete",
         "diffDone": "Checking skill changes",
@@ -1727,17 +1779,17 @@
         "graphResolveStart": "Resolving candidate relations",
         "graphResolveProgress": "Resolving candidate relations",
         "graphResolveDone": "Candidate relation resolution complete",
-        "graphMaterializeStart": "Generating score structure",
-        "graphMaterializeDone": "Score structure generated",
-        "graphLookupStart": "Building score lookup structure",
-        "graphLookupDone": "Score lookup structure built",
+        "graphMaterializeStart": "Generating graph structure",
+        "graphMaterializeDone": "Graph structure generated",
+        "graphLookupStart": "Building graph lookup structure",
+        "graphLookupDone": "Graph lookup structure built",
         "graphBuildDone": "Skill relation graph built",
-        "artifactGraphWriteStart": "Writing score files",
-        "artifactGraphWriteDone": "Score files written",
-        "stateWriteStart": "Writing score state",
-        "stateWriteDone": "Score state written",
-        "updateFailed": "Score build failed",
-        "updateDone": "Score build complete"
+        "artifactGraphWriteStart": "Writing graph files",
+        "artifactGraphWriteDone": "Graph files written",
+        "stateWriteStart": "Writing graph state",
+        "stateWriteDone": "Graph state written",
+        "updateFailed": "Graph build failed",
+        "updateDone": "Graph build complete"
       }
     },
     "evolution": {
@@ -1805,7 +1857,7 @@
       "url": "URL",
       "installTimeout": "SkillNet install timed out (it may still be running). Refresh the skill list later.",
       "usageNoticeTitle": "Notes",
-      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenSwarm can reach GitHub</strong> (network / proxy).",
+      "usageNotice1": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running WorkSwarm can reach GitHub</strong> (network / proxy).",
       "usageNotice2": "GitHub’s API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
       "configPageLinkAria": "Go to configuration page",
       "usageNotice3": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
@@ -2100,7 +2152,7 @@
     "shareButton": "Invite members",
     "waiting": "{{joined}}/{{total}} joined. Team execution is not blocked.",
     "allJoined": "All {{count}} human members have joined",
-    "instructionHint": "Members will join team tasks through the JiuwenSwarm platform configured for them and participate as their assigned identity.",
+    "instructionHint": "Members will join team tasks through the WorkSwarm platform configured for them and participate as their assigned identity.",
     "copy": "Copy",
     "copied": "Copied",
     "joinedNote": "This member has joined. No need to send the join command again.",
@@ -2203,7 +2255,7 @@
   },
   "version": "Version {{version}}",
   "app": {
-    "title": "JiuwenSwarm",
+    "title": "WorkSwarm",
     "subtitle": "AI Assistant",
     "errorTitle": "Application Error",
     "unknownError": "Unknown error",

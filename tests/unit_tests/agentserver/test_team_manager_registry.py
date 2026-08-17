@@ -18,7 +18,6 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     RuntimeInfo,
     TeamWorkspaceInfo,
     get_team_manager,
-    refresh_team_shared_skill_links_across_managers,
     reset_team_manager,
 )
 
@@ -346,8 +345,9 @@ async def test_initially_disabled_team_context_reenables_role_rails(
         channel="web",
         team_id="disabled-team",
         team_ws_root="/tmp/disabled-team",
-        team_skills_dir="/tmp/disabled-team/skills",
-        trajectory_registry=object(),
+        project_dir="/tmp/user-project",
+        global_skills_dir="/tmp/skill-library",
+        trajectory_span_processor=object(),
         language="cn",
     )
 
@@ -443,28 +443,6 @@ def test_find_team_skill_rail_for_request_uses_pending_governance() -> None:
 
     assert manager.find_team_skill_rail_for_request("evolve_simplify_req1") is rail
     assert manager.find_team_skill_rail_for_request("missing") is None
-
-
-def test_refresh_team_shared_skill_links_across_managers_uses_registered_session(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    global_skills_dir = tmp_path / "global-skills"
-    skill_dir = global_skills_dir / "skill-a"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: skill-a\n---\n", encoding="utf-8")
-    team_shared_skills = tmp_path / "team-workspace" / "skills"
-
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
-        lambda: global_skills_dir,
-    )
-
-    manager = get_team_manager("web")
-    manager.register_team_shared_skill_link_target("sess-1", team_shared_skills)
-
-    assert refresh_team_shared_skill_links_across_managers("sess-1")
-    assert (team_shared_skills / "skill-a").resolve() == skill_dir.resolve()
 
 
 @pytest.mark.asyncio
@@ -660,12 +638,6 @@ async def test_team_manager_keeps_single_session_per_channel(monkeypatch: pytest
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Mock _initialize_team_shared_skill_links to avoid file operations
-    monkeypatch.setattr(
-        TeamManager,
-        "_initialize_team_shared_skill_links",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -705,12 +677,6 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Mock _initialize_team_shared_skill_links to avoid file operations
-    monkeypatch.setattr(
-        TeamManager,
-        "_initialize_team_shared_skill_links",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -742,11 +708,6 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
             return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
-    monkeypatch.setattr(
-        TeamManager,
-        "_initialize_team_shared_skill_links",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(
@@ -778,11 +739,6 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
             return SimpleNamespace()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
-    monkeypatch.setattr(
-        TeamManager,
-        "_initialize_team_shared_skill_links",
-        staticmethod(lambda spec: None),
-    )
     # Provider assembly is covered by the swarm suite; stub it so this
     # session-management test runs on the minimal fake spec.
     monkeypatch.setattr(

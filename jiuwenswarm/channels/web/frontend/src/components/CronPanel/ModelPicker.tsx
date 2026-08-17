@@ -122,8 +122,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
                 )}
                 role="menuitemradio"
                 aria-checked={active}
-                data-testid="cron-model-option"
-                data-variant={m.model_name}
+                data-testid={`cron-model-option-${key}`}
               >
                 <span className="chat-mode-select__option-main">
                   <span className="chat-mode-select__icon" aria-hidden="true">

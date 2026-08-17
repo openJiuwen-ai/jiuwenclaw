@@ -8,7 +8,6 @@ export type ModelSetupGuideStep = 1 | 2;
 
 interface ModelSetupGuideProps {
   step: ModelSetupGuideStep;
-  manual: boolean;
   onAcknowledge: () => void;
   onSkip: () => void;
 }
@@ -66,7 +65,6 @@ function findVerticalScrollContainer(target: Element): HTMLElement | null {
 
 export function ModelSetupGuide({
   step,
-  manual,
   onAcknowledge,
   onSkip,
 }: ModelSetupGuideProps) {
@@ -187,7 +185,7 @@ export function ModelSetupGuide({
   if (!spotlight || !calloutStyle) return null;
 
   return createPortal(
-    <div className="model-setup-guide" aria-live="polite">
+    <div className="model-setup-guide" aria-live="polite" data-testid="model-setup-guide">
       <div
         className="model-setup-guide__mask"
         style={{ top: 0, right: 0, height: spotlight.top, left: 0 }}
@@ -223,52 +221,55 @@ export function ModelSetupGuide({
           height: spotlight.height,
         }}
         aria-hidden
+        data-testid="model-setup-guide-spotlight"
       />
       <section
         key={step}
-        className={`model-setup-guide__callout${manual ? ' model-setup-guide__callout--manual' : ''}`}
+        className="model-setup-guide__callout"
         style={calloutStyle}
         aria-labelledby={`model-setup-guide-title-${step}`}
         aria-describedby={`model-setup-guide-description-${step}`}
+        data-testid="model-setup-guide-callout"
+        data-variant={step}
       >
-        {manual ? (
-          <button
-            type="button"
-            className="model-setup-guide__skip"
-            onClick={onSkip}
-            aria-label={t('modelSetupGuide.skip')}
-            title={t('modelSetupGuide.skip')}
-          >
-            {t('modelSetupGuide.skip')}
-          </button>
-        ) : null}
-        <div className="model-setup-guide__content">
+        <button
+          type="button"
+          className="model-setup-guide__skip"
+          onClick={onSkip}
+          aria-label={t('modelSetupGuide.skip')}
+          title={t('modelSetupGuide.skip')}
+          data-testid="model-setup-guide-skip"
+        >
+          {t('modelSetupGuide.skip')}
+        </button>
+        <div className="model-setup-guide__content" data-testid="model-setup-guide-content">
           <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" />
-          <div className="model-setup-guide__copy">
-            <h2 id={`model-setup-guide-title-${step}`} className="model-setup-guide__title">
+          <div className="model-setup-guide__copy" data-testid="model-setup-guide-copy">
+            <h2 id={`model-setup-guide-title-${step}`} className="model-setup-guide__title" data-testid="model-setup-guide-title" data-variant={step}>
               {t(`modelSetupGuide.steps.${step}.title`)}
             </h2>
-            <p id={`model-setup-guide-description-${step}`} className="model-setup-guide__description">
+            <p id={`model-setup-guide-description-${step}`} className="model-setup-guide__description" data-testid="model-setup-guide-description">
               {t(`modelSetupGuide.steps.${step}.description`)}
             </p>
           </div>
         </div>
-        <footer className="model-setup-guide__footer">
+        <footer className="model-setup-guide__footer" data-testid="model-setup-guide-footer">
           {step === 2 ? (
-            <div className="model-setup-guide__actions">
+            <div className="model-setup-guide__actions" data-testid="model-setup-guide-actions">
               <button
                 ref={acknowledgementRef}
                 type="button"
                 className="model-setup-guide__text-button model-setup-guide__text-button--primary"
                 onClick={onAcknowledge}
+                data-testid="model-setup-guide-acknowledge"
               >
                 {t('modelSetupGuide.acknowledge')}
               </button>
             </div>
           ) : (
-            <p className="model-setup-guide__hint">{t('modelSetupGuide.clickMore')}</p>
+            <p className="model-setup-guide__hint" data-testid="model-setup-guide-hint">{t('modelSetupGuide.clickMore')}</p>
           )}
-          <span className="model-setup-guide__progress">{t('modelSetupGuide.progress', { current: step, total: 2 })}</span>
+          <span className="model-setup-guide__progress" data-testid="model-setup-guide-progress">{t('modelSetupGuide.progress', { current: step, total: 2 })}</span>
         </footer>
       </section>
     </div>,

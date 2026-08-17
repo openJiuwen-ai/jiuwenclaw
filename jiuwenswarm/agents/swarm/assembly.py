@@ -6,6 +6,9 @@
 provider-based assembly. Given a ``TeamAgentSpec`` it:
 
 * registers all swarm providers / rail types (idempotent),
+* points openjiuwen's single Skill library at the platform-owned directory and
+  resolves where the team's Skill visibility document lives (it never writes
+  it: ``TeamWorkspaceManager.initialize`` is that document's only seeder),
 * builds the per-team base :class:`SwarmBuildContext` carrying the live runtime
   handles every provider needs,
 * rewrites each present member spec ("leader" / "teammate") with its
@@ -24,13 +27,17 @@ import os
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import (
+    SKILL_VISIBILITY_FILENAME,
+    configure_global_skills_dir,
+    team_home,
+)
 from openjiuwen.agent_teams.schema.blueprint import TransportSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
+from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
@@ -85,9 +92,9 @@ def _with_project_cwd(member_spec: Any, project_dir: str | None) -> Any:
     """Point a member's cwd / project root at the request project directory.
 
     Only the working directory moves: the member keeps its own workspace for
-    artifacts (memory, skills view, ``.team`` mount). When worktree isolation
-    is on, ``AgentConfigurator`` overrides cwd again with the member worktree,
-    which is why this is unconditional here.
+    artifacts (memory, Skill visibility metadata, ``.team`` mount). When
+    worktree isolation is on, ``AgentConfigurator`` overrides cwd again with
+    the member worktree, which is why this is unconditional here.
     """
     project_root = str(project_dir or "").strip()
     if not project_root:
@@ -125,6 +132,13 @@ def enrich_team_spec_for_swarm(
     register_swarm_providers()
     _ensure_external_team_transport(spec, channel_id)
 
+    # Point openjiuwen's single Skill library at the platform-owned directory
+    # before any team / member / rail resolves it. Without this openjiuwen falls
+    # back to ``~/.openjiuwen/workspace/skills`` and the two sides read
+    # different libraries. The call is idempotent.
+    skills_library = get_agent_skills_dir()
+    configure_global_skills_dir(skills_library)
+
     config = get_config()
     workspace = spec.workspace
     team_ws_root = (
@@ -132,8 +146,17 @@ def enrich_team_spec_for_swarm(
         if workspace and workspace.root_path
         else str(team_home(spec.team_name) / "team-workspace")
     )
-    team_skills_dir = str(Path(team_ws_root) / "skills")
-    global_skills_dir = str(get_agent_skills_dir())
+    # Derived from the actual team workspace root rather than from
+    # ``paths.team_skill_visibility_path`` so a relocated team workspace keeps
+    # its metadata next to the workspace it really uses. For the default layout
+    # the two are the same path.
+    #
+    # Resolved only, never written: the team document has exactly one seeder,
+    # ``TeamWorkspaceManager.initialize``, which runs when the team workspace
+    # comes up. A missing document reads back as "no restriction", so a team
+    # without a workspace needs no file here.
+    team_visibility_path = str(Path(team_ws_root) / SKILL_VISIBILITY_FILENAME)
+    global_skills_dir = str(skills_library)
 
     base = SwarmBuildContext(
         session_id=session_id,
@@ -147,9 +170,9 @@ def enrich_team_spec_for_swarm(
         disable_teammate_worktree=str(channel_id or "").strip().lower() == "web",
         team_id=spec.team_name,
         team_ws_root=team_ws_root,
-        team_skills_dir=team_skills_dir,
+        team_skill_visibility_path=team_visibility_path,
         global_skills_dir=global_skills_dir,
-        trajectory_registry=InMemoryTrajectoryRegistry(),
+        trajectory_span_processor=get_trajectory_span_processor(),
         config=config,
     )
     mcp_configs = build_enabled_mcp_server_configs(

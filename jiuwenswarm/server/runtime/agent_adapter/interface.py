@@ -33,6 +33,10 @@ from jiuwenswarm.server.runtime.session.session_history import (
     collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
+from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
+    STATUSLINE_SETUP_SYSTEM_PROMPT,
+    build_statusline_setup_dispatch,
+)
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.utils.utils import is_team_params
@@ -40,6 +44,7 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_EXECUTE_OPTION_VALUES,
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
+    PLAN_REVISE_OPTION_VALUES,
     PLAN_SKIP_OPTION_VALUES,
     plan_skip_feedback,
 )
@@ -58,9 +63,11 @@ from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
+    configure_skill_library,
     get_agent_home_dir,
     get_agent_workspace_dir,
     get_env_file,
+    migrate_team_skill_views,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.server.runtime.a2ui.integration import (
@@ -583,7 +590,20 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_STATUS: "handle_skills_evolution_status",
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
+    ReqMethod.SKILLS_VISIBILITY_GET: "handle_skills_visibility_get",
+    ReqMethod.SKILLS_VISIBILITY_SET: "handle_skills_visibility_set",
+    ReqMethod.SKILLS_VISIBILITY_UPDATE: "handle_skills_visibility_update",
 }
+
+# Handlers that persist a Skill visibility document; every one of them must
+# trigger a rail refresh so a grant or a revocation takes effect on the next
+# turn. The read-only ``get`` deliberately stays out.
+_SKILL_VISIBILITY_WRITE_HANDLERS: frozenset[str] = frozenset(
+    {
+        "handle_skills_visibility_set",
+        "handle_skills_visibility_update",
+    }
+)
 
 _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_LIST: "handle_plugins_list",
@@ -599,7 +619,7 @@ _SKILL_COMMAND_REGEX = re.compile(
 )
 
 # /statusline prompt-type 模式：
-# 用户输入 "/statusline <描述>" → 直接注入 statusline-setup 指令到 prompt
+# 用户输入 "/statusline <描述>" → 让父代理调用内置 statusline-setup 子代理
 # 排除已知子命令（set, padding, clear, help, json）——这些由 TUI 前端本地处理，
 # 但如果消息经过 Gateway 传到 AgentServer，后端也需要区分。
 _STATUSLINE_KNOWN_SUBCOMMANDS = {"set", "padding", "clear", "help", "json", "get"}
@@ -607,133 +627,10 @@ _STATUSLINE_PROMPT_REGEX = re.compile(
     r"^/statusline\s+(?P<description>.+)$"
 )
 
-# 不调用 /skills，直接把指令文本嵌入 prompt
-_STATUSLINE_SETUP_PROMPT = """\
-You are a status line setup agent. Your job is to configure the user's TUI status line \
-by generating a shell command and writing it to the config file so the bottom bar \
-updates immediately.
-
-This is NOT about writing Python scripts or creating files — it's about writing a \
-**shell command** that runs every 2 seconds and whose stdout becomes the status bar text.
-
-## How the Status Line Works
-
-1. The TUI runs the configured shell command every 2 seconds
-2. Each time, it pipes a JSON object with session info as stdin to the command
-3. The command's stdout is displayed at the bottom of the TUI screen
-4. Config is stored in ~/.jiuwenswarm-tui/config.json under the "statusLine" field
-
-The shell command can do anything a normal shell command can — read JSON fields, \
-run git, check files, call system utilities, etc. The JSON input is just one \
-convenient data source, not a constraint.
-
-## Three Command Styles
-
-**Style A: Pure JSON fields** — for session info (model, tokens, mode, etc.)
-```
-input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); \
-echo "label:$field1"
-```
-
-**Style B: Pure shell utilities** — for system info (git branch, disk, \
-time, etc.) — no `input=$(cat)` needed
-```
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-time=$(date +%H:%M:%S); echo "$branch | $time"
-```
-
-**Style C: Mixed** — JSON fields + shell utilities (most common)
-```
-input=$(cat); model=$(echo "$input" | jq -r '.model // "?"'); \
-branch=$(git branch --show-current 2>/dev/null || echo "?"); \
-echo "$model | git:$branch"
-```
-
-## JSON Input Field Reference
-
-The command receives this JSON via stdin every 2 seconds:
-
-| Field | Description |
-|-------|-------------|
-| session_id | Current session ID |
-| session_name | Session title (set via /rename) |
-| cwd | Current working directory |
-| mode | Current mode (agent / code.normal / code.team / team) |
-| model | Current model name |
-| provider | Model provider |
-| version | jiuwenswarm version |
-| connection | Connection state (idle / connecting / connected / reconnecting / auth_failed) |
-| is_processing | Is agent currently processing |
-| last_error | Most recent error message or null |
-| evolution_status | Evolution state (idle / running) |
-| active_subtask_count | Number of active subtasks |
-| todo_count | Number of todo items |
-| trusted_dirs | Trusted directory paths (array) |
-| usage.total_input_tokens | Session total input tokens |
-| usage.total_output_tokens | Session total output tokens |
-| usage.total_tokens | Session total tokens |
-| context_window.context_window_size | Max context window tokens |
-| context_window.used_percentage | Context used percentage (0-100) |
-| context_window.remaining_percentage | Context remaining percentage (0-100) |
-
-Common non-JSON shell approaches: git branch --show-current, \
-df -h, date, hostname -s, whoami, etc.
-
-## How to Apply the Config
-
-DO NOT use `python -c "..."` one-liners — they break on Windows due \
-to quoting and escaping issues. Instead, write a Python script file \
-and then execute it. This is the ONLY reliable way on Windows.
-
-Step 1: Write a Python script file (e.g. /tmp/update_statusline.py) \
-that merges the new statusLine into the config:
-```python
-import json, os
-d = os.path.expanduser('~/.jiuwenswarm-tui')
-os.makedirs(d, exist_ok=True)
-p = os.path.join(d, 'config.json')
-if not os.path.exists(p):
-    with open(p, 'w') as f:
-        f.write('{}\\n')
-with open(p) as f:
-    c = json.load(f)
-c['statusLine'] = {
-    'type': 'command',
-    'command': 'YOUR_COMMAND_HERE',
-    'padding': 0
-}
-with open(p, 'w') as f:
-    json.dump(c, f, indent=2)
-    f.write('\\n')
-print('StatusLine configured')
-```
-
-Step 2: Execute the script:
-```bash
-python /tmp/update_statusline.py
-```
-
-IMPORTANT: The TUI polls config.json every 2 seconds, so the status \
-bar updates automatically within 2 seconds after you write the config. \
-No restart needed.
-
-Guidelines:
-- Only write to ~/.jiuwenswarm-tui/config.json — never overwrite \
-  system files
-- Always merge with existing config — preserve trustedDirs, theme, etc.
-- Never hardcode secrets or API keys in the command
-- The statusLine command runs in bash (sh -c) context, NOT in \
-  PowerShell — so `$(cat)`, `$var`, `jq`, `echo` etc. are all \
-  standard bash/sh syntax
-- Commands should handle failures gracefully: use 2>/dev/null, \
-  || echo "fallback"
-- On Windows, $(cat) is automatically patched to read from a temp \
-  file by the TUI
-- DO NOT use `python -c` one-liners for config updates — they \
-  break on Windows. Always write a .py script file and execute it.
-- DO NOT read config.json with `cat` — use Python os.path.expanduser \
-  instead, as `~` may not resolve correctly in some shell environments
-"""
+# Backward-compatible alias for tests and callers that imported the old name.
+# The text is now the dedicated subagent's system prompt, not a suffix appended
+# to every parent-agent user turn.
+_STATUSLINE_SETUP_PROMPT = STATUSLINE_SETUP_SYSTEM_PROMPT
 
 
 def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
@@ -756,17 +653,14 @@ def _handle_skills_use_slash_command(query: str) -> Tuple[list, str]:
 def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
     """处理 /statusline <prompt>
 
-    不调用 /skills 命令，不依赖 SkillUseRail，
-    直接把 statusline-setup 指令文本嵌入 user prompt。
-
-    _handle_statusline_prompt_command() → 返回 (statusline_prompt, description)
-    build_user_prompt() 把 statusline_prompt 嵌入到 user prompt 后面
+    不调用 /skills 命令。返回一条让父代理通过 ``task_tool`` 调用内置
+    ``statusline-setup`` 子代理的调度指令。
 
     Args:
         query: 用户原始输入（含 "/statusline" 前缀）
 
     Returns:
-        (statusline_prompt, description) — 注入的 prompt 文本和提取的描述
+        (dispatch_prompt, description) — 子代理调度指令和提取的描述
         如果不是 /statusline prompt 模式，返回 ("", query)
     """
     stripped = query.strip()
@@ -782,7 +676,7 @@ def _handle_statusline_prompt_command(query: str) -> Tuple[str, str]:
             return "", query
         if description:
             # 把用户的描述转化为让 Agent 自动配置状态栏的 prompt
-            return _STATUSLINE_SETUP_PROMPT, description
+            return build_statusline_setup_dispatch(description), description
 
     # /statusline 无参数 → 不是 prompt 模式（TUI 应已拦截处理 help）
     return "", query
@@ -841,12 +735,37 @@ class JiuWenSwarm:
     STREAM_QUEUE_MAXSIZE = 64
 
     def __init__(self) -> None:
+        self._prepare_skill_library()
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    @staticmethod
+    def _prepare_skill_library() -> None:
+        """Pin the single Skill library and retire legacy per-workspace views.
+
+        Runs before any adapter, team or rail is built so legacy view directories
+        are gone by the time anything reads a team workspace. Correctness no
+        longer depends on that ordering: the migration seeds its allow lists at
+        ``AUTHORITY_MIGRATION``, which outranks the config seeds written during
+        assembly whichever one lands first. The agent-teams home still has to be
+        pinned before the scan, otherwise it would look under openJiuWen's own
+        default root instead of this instance's workspace.
+
+        Single-agent mode is untouched by all of this: it reads the same library
+        directory it always did and owns no visibility document.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
+
+            configure_agent_teams_home()
+            configure_skill_library()
+            migrate_team_skill_views()
+        except Exception as exc:
+            logger.warning("[JiuWenSwarm] skill library preparation failed: %s", exc)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -935,19 +854,28 @@ class JiuWenSwarm:
                 busy_checker=lambda: sm.has_active_tasks(),))
 
     async def _on_skillnet_install_complete(self) -> None:
-        """Reload the agent and refresh active team shared skill links after async install."""
+        """Reload the agent and refresh live team skill rails after async install."""
         await self.create_instance()
-        self._refresh_team_shared_skill_links()
+        await self._reload_team_skill_rails()
 
     @staticmethod
-    def _refresh_team_shared_skill_links(session_id: str | None = None) -> None:
-        """Refresh team shared skill links after the global skill root changes."""
-        try:
-            from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+    async def _reload_team_skill_rails(session_id: str | None = None) -> None:
+        """Re-scan the shared Skill library for live team members.
 
-            refresh_team_shared_skill_links_across_managers(session_id)
+        Replaces the old shared-link refresh: teams no longer own a mirrored
+        ``skills/`` directory, so nothing has to be re-linked. What still needs
+        a nudge is each running member's in-memory Skill rail, which otherwise
+        keeps serving the library listing from before the change.
+
+        Args:
+            session_id: Restrict the reload to one session; None reloads all.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team import reload_team_skill_views_across_managers
+
+            await reload_team_skill_views_across_managers(session_id)
         except Exception as exc:
-            logger.warning("[JiuWenSwarm] team shared skill link refresh failed: %s", exc)
+            logger.warning("[JiuWenSwarm] team skill view reload failed: %s", exc)
 
     async def _refresh_skill_rails_after_change(self) -> None:
         """轻量刷新 skill rail，避免 uninstall 后全量重建 agent 实例.
@@ -1115,14 +1043,14 @@ class JiuWenSwarm:
                     final_query = turn.render()
             else:
                 final_query = turn.render()
-                # 调试日志：确认 /statusline prompt 注入是否生效
+                # 调试日志：确认 /statusline 是否已改写为内置子代理调度
                 if isinstance(query, str) and "/statusline" in query:
                     logger.info(
                         "[_build_inputs][STATUSLINE] 原始 query=%s, 最终 prompt 长度=%d, "
-                        "包含 statusline-setup 指令=%s",
+                        "包含 statusline-setup 调度=%s",
                         query[:200],
                         len(final_query) if isinstance(final_query, str) else 0,
-                        "status line setup agent" in final_query if isinstance(final_query, str) else False,
+                        "statusline-setup" in final_query if isinstance(final_query, str) else False,
                     )
 
         inputs: dict[str, Any] = {
@@ -1457,6 +1385,16 @@ class JiuWenSwarm:
                 or plan_skip_feedback(get_config().get("preferred_language")),
                 "plan_skip": True,
             }
+        elif value in PLAN_REVISE_OPTION_VALUES:
+            # Web 的"下一步"：不退出 plan，按修改意见续跑。``plan_revise`` 是额外键，
+            # ConfirmPayload 会忽略它；rail 只在看到它时才给假回执包修订前缀。
+            # TUI 仍发 ``reject``，不会进这个分支。
+            confirm_payload = {
+                "approved": False,
+                "auto_confirm": False,
+                "feedback": custom_input or "用户希望继续规划",
+                "plan_revise": True,
+            }
         elif value in ("reject", "拒绝", "Reject", "继续规划", "其他意见"):
             feedback = custom_input or (
                 "用户希望继续规划" if value in ("Keep planning", "继续规划", "其他意见") else "用户拒绝"
@@ -1525,13 +1463,18 @@ class JiuWenSwarm:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
                 # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
                 # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，
                 # 这里主动调用 reload_skills() 确保立即生效，避免延迟到下一次模型调用。
                 await self._refresh_skill_rails_after_change()
-                self._refresh_team_shared_skill_links(request.session_id)
+                await self._reload_team_skill_rails(request.session_id)
+            elif handler_name in _SKILL_VISIBILITY_WRITE_HANDLERS and payload.get("success"):
+                # 可见性只改 metadata，库内容没变：agent 无需重建，只要让各
+                # skill rail 重新读一次 metadata，授权/撤权即刻生效。
+                await self._refresh_skill_rails_after_change()
+                await self._reload_team_skill_rails(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenSwarm] skills 请求处理失败: %s", exc)
             return AgentResponse(
@@ -3271,13 +3214,18 @@ class JiuWenSwarm:
             raise ValueError("Agent adapter not available")
         return await adapter.get_context_usage(session_id=session_id)
 
-    async def generate_recap(self, session_id: str) -> dict[str, Any]:
+    async def generate_recap(
+        self,
+        session_id: str,
+        current_mode: str | None = None,
+    ) -> dict[str, Any]:
         """生成会话快速回顾（read-only，不修改对话历史）。
 
         取最近30条消息 → fast model → 1-2句摘要。
 
         Args:
             session_id: 会话ID
+            current_mode: 触发 recap 时的 canonical runtime mode。
 
         Returns:
             包含 recap 结果的字典:
@@ -3288,7 +3236,10 @@ class JiuWenSwarm:
         adapter = self._adapter
         if adapter is None:
             raise ValueError("Agent adapter not available")
-        return await adapter.generate_recap(session_id=session_id)
+        return await adapter.generate_recap(
+            session_id=session_id,
+            current_mode=current_mode,
+        )
 
     async def compact_partial(
         self,

@@ -1,15 +1,15 @@
 @echo off
-REM JiuwenSwarm build-exe script
+REM WorkSwarm build-exe script
 REM Usage: scripts\build-exe.bat  or double-click to run
 
 REM Project root = parent of this bat's own dir. Path-relative, survives relocation.
 cd /d "%~dp0\.."
 
-echo === JiuwenSwarm build-exe ===
+echo === WorkSwarm build-exe ===
 echo.
 
-echo [1/3] Installing Python deps (uv sync --extra dev)...
-call uv sync --extra dev
+echo [1/3] Installing Python deps (uv sync --extra dev --extra codex)...
+call uv sync --extra dev --extra codex
 if errorlevel 1 exit /b 1
 
 echo.
@@ -34,13 +34,13 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo Verifying frozen A2UI v0.8 bundle...
-start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
+start "" /wait "%cd%\dist\workswarm\workswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
 if errorlevel 1 exit /b 1
 
 echo.
 echo === Build complete ===
-echo Desktop dir: %cd%\dist\jiuwenswarm
-echo Main exe:    %cd%\dist\jiuwenswarm\jiuwenswarm.exe
+echo Desktop dir: %cd%\dist\workswarm
+echo Main exe:    %cd%\dist\workswarm\workswarm.exe
 pause
 exit /b 0
 

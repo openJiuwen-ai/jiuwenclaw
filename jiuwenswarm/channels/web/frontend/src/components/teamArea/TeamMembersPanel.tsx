@@ -228,21 +228,21 @@ export function TeamMembersPanel({
 
   if (variant === 'compact') {
     return (
-      <div className="flex flex-1 flex-col overflow-hidden rounded-b-lg bg-card min-h-0 px-3">
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-border">
+      <div className="flex flex-1 flex-col overflow-hidden rounded-b-lg bg-card min-h-0 px-3" data-testid="team-area-members-panel" data-variant="compact">
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3 border-border" data-testid="team-area-members-header">
           <div className="flex items-center gap-2">
             <img src={teamIcon} alt="" className="h-4 w-4 text-text-muted" />
-            <span className="text-sm font-medium text-text">{t('team.members')} ({visibleMembers.length})</span>
+            <span className="text-sm font-medium text-text" data-testid="team-area-members-count">{t('team.members')} ({visibleMembers.length})</span>
           </div>
         </div>
-        <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+        <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3" data-testid="team-area-members-list">
           {visibleMembers.length === 0 ? (
-            <div className="py-8 text-center text-xs text-text-muted">{t('team.noMemberData')}</div>
+            <div className="py-8 text-center text-xs text-text-muted" data-testid="team-area-members-empty">{t('team.noMemberData')}</div>
           ) : visibleMembers.map((member) => (
-            <MemberListItem 
-              key={member.member_id} 
-              member={member} 
-              compact 
+            <MemberListItem
+              key={member.member_id}
+              member={member}
+              compact
               taskProgress={memberTaskProgress[member.member_id]}
               onClick={() => onMemberClick?.(member.member_id)}
             />
@@ -253,16 +253,16 @@ export function TeamMembersPanel({
   }
 
   return (
-    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
+    <div className="flex min-w-0 flex-1 overflow-x-auto overflow-y-hidden" data-testid="team-area-members-panel" data-variant="expanded">
       {activeDetailTab === 'members' && (
-        <aside className="w-[260px] shrink-0 overflow-y-auto border-r border-border bg-card">
+        <aside className="w-[260px] shrink-0 overflow-y-auto border-r border-border bg-card" data-testid="team-area-members-sidebar">
           <div className="px-3 pt-4">
             <DetailTabSwitch activeTab={activeDetailTab} onChange={onDetailTabChange} />
           </div>
 
-          <div className="space-y-3 px-3 py-4">
+          <div className="space-y-3 px-3 py-4" data-testid="team-area-members-sidebar-list">
             {visibleMembers.length === 0 ? (
-              <div className="py-10 text-center text-sm text-text-muted">{t('team.noMemberData')}</div>
+              <div className="py-10 text-center text-sm text-text-muted" data-testid="team-area-members-sidebar-empty">{t('team.noMemberData')}</div>
             ) : visibleMembers.map((member) => (
               <MemberListItem
                 key={member.member_id}
@@ -289,7 +289,7 @@ export function TeamMembersPanel({
           historyMessages={historyMessages}
         />
       ) : (
-        <div className="flex flex-1 items-center justify-center bg-card text-sm text-text-muted">
+        <div className="flex flex-1 items-center justify-center bg-card text-sm text-text-muted" data-testid="team-area-member-detail-empty">
           {t('team.selectMember')}
         </div>
       )}
@@ -307,9 +307,10 @@ function DetailTabSwitch({
   const { t } = useTranslation();
 
   return (
-    <div className="grid grid-cols-2 rounded-md bg-secondary p-1 text-sm">
+    <div className="grid grid-cols-2 rounded-md bg-secondary p-1 text-sm" data-testid="team-area-detail-tab-switch">
       <button
         type="button"
+        data-testid="team-area-detail-tab-members"
         className={`h-8 rounded text-center  ${activeTab === 'members' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('members')}
       >
@@ -317,6 +318,7 @@ function DetailTabSwitch({
       </button>
       <button
         type="button"
+        data-testid="team-area-detail-tab-group"
         className={`h-8 rounded text-center  ${activeTab === 'group' ? 'bg-card font-medium text-text shadow-sm' : 'text-text-muted hover:text-text'}`}
         onClick={() => onChange?.('group')}
       >
@@ -359,17 +361,20 @@ function GroupChatDetail({
   };
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-card">
-      <div className="flex shrink-0 items-center justify-between gap-5 border-b border-border bg-card px-3 py-4">
+    <section
+      className="flex min-w-0 flex-1 flex-col bg-card"
+      data-testid="team-area-group-chat"
+    >
+      <div className="flex shrink-0 items-center justify-between gap-5 border-b border-border bg-card px-3 py-4" data-testid="team-area-group-chat-section">
         <div className="w-[235px] shrink-0">
           <DetailTabSwitch activeTab={activeTab} onChange={onTabChange} />
         </div>
         <div className="flex min-w-0 items-center justify-end gap-3">
           <div className="min-w-0 text-right">
-            <div className="text-base font-semibold text-text">{t('team.groupChat')}</div>
-            <div className="mt-1 truncate text-xs text-text-muted">{memberNames}</div>
+            <div className="text-base font-semibold text-text" data-testid="team-area-group-chat-title">{t('team.groupChat')}</div>
+            <div className="mt-1 truncate text-xs text-text-muted" data-testid="team-area-group-chat-member-names">{memberNames}</div>
           </div>
-          <div className="flex -space-x-2">
+          <div className="flex -space-x-2" data-testid="team-area-group-chat-avatar-stack">
             <GroupAvatarStack memberIds={avatarMemberIds} />
           </div>
         </div>
@@ -379,9 +384,10 @@ function GroupChatDetail({
         ref={scrollContainerRef}
         className="min-h-0 flex-1 overflow-y-auto px-7 py-6"
         onScroll={handleScroll}
+        data-testid="team-area-group-chat-message-list"
       >
         {items.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-text-muted">
+          <div className="flex h-full items-center justify-center text-sm text-text-muted" data-testid="team-area-group-chat-empty">
             {t('team.noGroupMessages')}
           </div>
         ) : (
@@ -409,7 +415,10 @@ function GroupAvatarStack({ memberIds }: { memberIds: string[] }) {
         <TeamMemberAvatar key={memberId} member={memberId} className="!h-7 !w-7 ring-2 ring-card" />
       ))}
       {hiddenCount > 0 && (
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-team-overflow-surface)] text-xs font-medium text-accent ring-2 ring-card">
+        <span
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-team-overflow-surface)] text-xs font-medium text-accent ring-2 ring-card"
+          data-testid="team-area-group-chat-avatar-overflow"
+        >
           +{hiddenCount}
         </span>
       )}
@@ -417,24 +426,30 @@ function GroupAvatarStack({ memberIds }: { memberIds: string[] }) {
   );
 }
 
-function GroupChatMessage({ event }: { event: ParsedTeamEvent }) {
+function GroupChatMessage({
+  event,
+}: {
+  event: ParsedTeamEvent;
+}) {
   const { t } = useTranslation();
   const displayName = getMemberDisplayName(event.fromMember);
   const isUser = isUserMember(event.fromMember);
 
   return (
-    <div className={`flex items-start gap-3 ${isUser ? 'justify-end' : ''}`}>
+    <div
+      className={`flex items-start gap-3 ${isUser ? 'justify-end' : ''}`}
+    >
       {!isUser && <TeamMemberAvatar member={event.fromMember} className="h-8 w-8" />}
       <div className={`min-w-0 ${isUser ? 'max-w-[72%] text-right' : 'flex-1'}`}>
-        <div className="mb-1 text-sm font-semibold text-text">{displayName}</div>
+        <div className="mb-1 text-sm font-semibold text-text" data-testid="team-area-group-chat-message-sender">{displayName}</div>
         <div className={`text-sm leading-6 text-text ${isUser ? 'inline-block rounded-lg bg-accent-subtle px-3 py-2 text-left' : ''}`}>
           {event.isP2P && event.toMember && (
-            <span className="team-event-group-chip team-event-group-chip--p2p">
+            <span className="team-event-group-chip team-event-group-chip--p2p" data-testid="team-area-group-chat-message-p2p-chip">
               @{getMemberDisplayName(event.toMember)}
             </span>
           )}
           {event.isBroadcast && (
-            <span className="team-event-group-chip team-event-group-chip--broadcast">
+            <span className="team-event-group-chip team-event-group-chip--broadcast" data-testid="team-area-group-chat-message-broadcast-chip">
               @{t('team.allMembers')}
             </span>
           )}
@@ -510,14 +525,17 @@ function MemberTaskDetail({
   };
 
   return (
-    <section className="flex min-w-[320px] flex-1 flex-col bg-card">
-      <div className="flex shrink-0 items-center bg-card px-7 pt-3 h-[34px]">
-        <div className="text-sm font-semibold text-text">
+    <section
+      className="flex min-w-[320px] flex-1 flex-col bg-card"
+      data-testid="team-area-member-task-detail"
+    >
+      <div className="flex shrink-0 items-center bg-card px-7 pt-3 h-[34px]" data-testid="team-area-member-detail-section">
+        <div className="text-sm font-semibold text-text" data-testid="team-area-member-detail-title">
           {t('team.memberTasksTitle', { member: displayName })}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-7 py-7">
+      <div className="min-h-0 flex-1 overflow-y-auto px-7 py-7" data-testid="team-area-member-detail-body">
         <ProcessListCard
           items={processItems}
           expandedIds={expandedProcessIds}
@@ -526,7 +544,7 @@ function MemberTaskDetail({
         <FinalSummaryList events={finalEvents} />
       </div>
 
-      <div className="shrink-0 border-t border-border bg-card">
+      <div className="shrink-0 border-t border-border bg-card" data-testid="team-area-member-detail-footer">
         <TeamMemberContextCompressionBar
           state={contextCompressionState}
           onClose={() => {
@@ -542,28 +560,36 @@ function MemberTaskDetail({
           completedCount={completedCount}
         />
         {taskListExpanded && (
-          <div className="px-5 pb-4 max-h-[200px] overflow-y-auto">
+          <div className="px-5 pb-4 max-h-[200px] overflow-y-auto" data-testid="team-area-member-detail-task-list-panel">
             {memberTasks.length === 0 ? (
-              <div className="py-4 text-center text-sm text-text-muted">
+              <div className="py-4 text-center text-sm text-text-muted" data-testid="team-area-member-detail-task-list-empty">
                 {t('team.noMemberTasks')}
               </div>
             ) : (
               <div className="space-y-3">
                 {memberTasks.map((task) => (
-                  <div key={task.id} className="flex items-start gap-3 rounded-md px-1 py-1.5">
+                  <div
+                    key={task.id}
+                    className="flex items-start gap-3 rounded-md px-1 py-1.5"
+                    data-testid="team-area-member-detail-task-item"
+                    data-variant={task.id}
+                  >
                     <StatusIcon status={task.status} />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm text-text">{task.title}</div>
-                      <div className="mt-1 text-xs leading-5 text-text-muted">{task.detail}</div>
-                      <div className="mt-1 text-[11px] text-muted">
+                      <div className="truncate text-sm text-text" data-testid="team-area-member-detail-task-title">{task.title}</div>
+                      <div className="mt-1 text-xs leading-5 text-text-muted" data-testid="team-area-member-detail-task-detail">{task.detail}</div>
+                      <div className="mt-1 text-[11px] text-muted" data-testid="team-area-member-detail-task-status-label">
                         {getTaskStatusLabel(task.status)}
                         {task.id ? ` · ${task.id}` : ''}
                       </div>
-                      <div className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--color-team-detail-text)]">
+                      <div
+                        className="mt-2 rounded bg-[var(--color-team-detail-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--color-team-detail-text)]"
+                        data-testid="team-area-member-detail-task-raw"
+                      >
                         {buildTaskRawEntries(task).map(([label, value]) => (
                           <div key={label} className="grid grid-cols-[88px_minmax(0,1fr)] gap-2">
-                            <span className="text-[var(--color-team-detail-label)]">{label}</span>
-                            <span className="whitespace-pre-wrap break-words">{value}</span>
+                            <span className="text-[var(--color-team-detail-label)]" data-testid="team-area-member-detail-task-raw-label">{label}</span>
+                            <span className="whitespace-pre-wrap break-words" data-testid="team-area-member-detail-task-raw-value">{value}</span>
                           </div>
                         ))}
                       </div>
@@ -623,8 +649,12 @@ function TeamMemberContextCompressionBar({
     : 'team-event-group-summary__activity';
 
   return (
-    <div className="team-event-group team-event-group--context-compression w-[auto]">
-      <div className={`team-event-group-summary team-event-group-summary--context-compression ${stateClass}`}>
+    <div className="team-event-group team-event-group--context-compression w-[auto]" data-testid="team-area-context-compression">
+      <div
+        className={`team-event-group-summary team-event-group-summary--context-compression ${stateClass}`}
+        data-testid="team-area-context-compression-summary"
+        data-variant={stateClass}
+      >
         <span className="team-event-group-summary__main">
           <span
             className="team-event-group-summary__icon team-event-group-summary__icon--status"
@@ -633,7 +663,7 @@ function TeamMemberContextCompressionBar({
           >
             {statusIcon}
           </span>
-          <span className="team-event-group-summary__title">{statusTitle}</span>
+          <span className="team-event-group-summary__title" data-testid="team-area-context-compression-status-title">{statusTitle}</span>
           {isRunning && (
             <span className="team-event-group-summary__icon team-event-group-summary__icon--status" aria-hidden="true">
               <LoaderCircle size={14} className="animate-spin" />
@@ -641,7 +671,7 @@ function TeamMemberContextCompressionBar({
           )}
         </span>
         {runtime?.summary && !isComplete && (
-          <span className={activityClassName}>
+          <span className={activityClassName} data-testid="team-area-context-compression-activity">
             {isRunning
               ? contextCompressionRunningText(t, runtime?.processor, runtime.summary)
               : runtime.summary}
@@ -652,6 +682,7 @@ function TeamMemberContextCompressionBar({
             type="button"
             className="team-event-group-summary__icon team-event-group-summary__icon--close"
             onClick={onClose}
+            data-testid="team-area-context-compression-close-button"
             title={t('team.contextCompression.close')}
             aria-label={t('team.contextCompression.close')}
           >
@@ -671,12 +702,12 @@ function FinalSummaryList({ events }: { events: TeamMemberExecutionEvent[] }) {
   }
 
   return (
-    <div className="mx-auto mt-5 max-w-[720px] border-t border-[var(--color-team-detail-divider)] pt-4">
-      <h3 className="text-sm font-semibold text-text">{t('team.process.execution.final')}</h3>
+    <div className="mx-auto mt-5 max-w-[720px] border-t border-[var(--color-team-detail-divider)] pt-4" data-testid="team-area-final-summary">
+      <h3 className="text-sm font-semibold text-text" data-testid="team-area-final-summary-title">{t('team.process.execution.final')}</h3>
       <div className="mt-4 space-y-6">
         {events.map((event) => (
-          <section key={event.id} className="space-y-3">
-            <div className="whitespace-pre-wrap break-words text-sm leading-7 text-text">
+          <section key={event.id} className="space-y-3" data-testid="team-area-final-summary-item" data-variant={event.id}>
+            <div className="whitespace-pre-wrap break-words text-sm leading-7 text-text" data-testid="team-area-final-summary-content">
               {event.content || '-'}
             </div>
           </section>
@@ -698,9 +729,9 @@ function ProcessListCard({
   const { t } = useTranslation();
 
   return (
-    <div className="mx-auto max-w-[720px] overflow-hidden rounded-md border border-border bg-card">
+    <div className="mx-auto max-w-[720px] overflow-hidden rounded-md border border-border bg-card" data-testid="team-area-process-card">
       {items.length === 0 ? (
-        <div className="px-5 py-12 text-center text-sm text-text-muted">
+        <div className="px-5 py-12 text-center text-sm text-text-muted" data-testid="team-area-process-card-empty">
           {t('team.noProcessData')}
         </div>
       ) : (
@@ -708,25 +739,26 @@ function ProcessListCard({
           {items.map((item) => {
             const expanded = expandedIds.has(item.id);
             return (
-              <div key={item.id}>
+              <div key={item.id} data-testid="team-area-process-item" data-variant={item.id}>
                 <button
                   type="button"
                   onClick={() => onToggle(item.id)}
+                  data-testid="team-area-process-item-toggle"
                   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-secondary"
                 >
                   <ProcessIcon item={item} />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-2 text-sm text-text-muted">
-                      <span className="shrink-0">{item.title}</span>
+                      <span className="shrink-0" data-testid="team-area-process-item-title">{item.title}</span>
                       {item.subtitle && (
                         <>
-                          <span className="shrink-0 text-muted">|</span>
-                          <span className="truncate text-muted">{item.subtitle}</span>
+                          <span className="shrink-0 text-muted" data-testid="team-area-process-item-separator">|</span>
+                          <span className="truncate text-muted" data-testid="team-area-process-item-subtitle">{item.subtitle}</span>
                         </>
                       )}
                     </div>
                   </div>
-                  <span className="shrink-0 text-xs text-muted">{formatTime(item.timestamp)}</span>
+                  <span className="shrink-0 text-xs text-muted" data-testid="team-area-process-item-timestamp">{formatTime(item.timestamp)}</span>
                   <span className="shrink-0 text-muted"><Chevron expanded={expanded} /></span>
                 </button>
                 {expanded && <ProcessDetail item={item} />}
@@ -762,12 +794,12 @@ function ProcessDetail({ item }: { item: ProcessItem }) {
   const rows = buildProcessDetailRows(item, t);
 
   return (
-    <div className="border-t border-border bg-secondary px-12 py-3 text-xs text-text">
+    <div className="border-t border-border bg-secondary px-12 py-3 text-xs text-text" data-testid="team-area-process-detail">
       <div className="space-y-2">
         {rows.map(([label, value]) => (
           <div key={label} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3">
-            <span className="text-muted">{label}</span>
-            <span className="whitespace-pre-wrap break-words">{value}</span>
+            <span className="text-muted" data-testid="team-area-process-detail-label">{label}</span>
+            <span className="whitespace-pre-wrap break-words" data-testid="team-area-process-detail-value">{value}</span>
           </div>
         ))}
       </div>
@@ -792,17 +824,18 @@ function TaskListBar({
     <button
       type="button"
       onClick={onToggle}
+      data-testid="team-area-member-detail-task-list-bar"
       className="flex w-full h-[54px] items-center justify-between px-5 text-left  hover:bg-secondary"
     >
       <div className="flex min-w-0 items-center gap-2">
-        <span className="text-sm font-medium text-text">{t('team.memberTasks')}</span>
+        <span className="text-sm font-medium text-text" data-testid="team-area-task-list-bar-title">{t('team.memberTasks')}</span>
         <span className="text-muted">|</span>
-        <span className="shrink-0 text-sm text-text-muted">
+        <span className="shrink-0 text-sm text-text-muted" data-testid="team-area-task-list-bar-toggle-label">
           {expanded ? t('team.collapseView') : t('team.expandView')}
         </span>
       </div>
       <div className="ml-4 flex shrink-0 items-center gap-4">
-        <span className="text-sm text-text-muted">{completedCount}/{tasks.length}</span>
+        <span className="text-sm text-text-muted" data-testid="team-area-task-list-bar-count">{completedCount}/{tasks.length}</span>
         <span className="text-text-muted"><Chevron expanded={expanded} /></span>
       </div>
     </button>

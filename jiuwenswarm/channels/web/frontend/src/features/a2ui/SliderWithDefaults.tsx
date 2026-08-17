@@ -49,11 +49,12 @@ export function SliderWithDefaults({
   const label = labelValue ? resolveString(labelValue as Parameters<typeof resolveString>[0]) : '';
 
   return (
-    <div className="a2ui-slider" style={hostWeightStyle(node.weight)}>
+    <div className="a2ui-slider" data-testid="a2ui-slider" style={hostWeightStyle(node.weight)}>
       <section className={classMapToString(theme.components.Slider.container)}>
         <label
           htmlFor={id}
           className={classMapToString(theme.components.Slider.label)}
+          data-testid="a2ui-slider-label"
         >
           {label}
         </label>
@@ -67,8 +68,9 @@ export function SliderWithDefaults({
           onChange={updateFromInput}
           className={classMapToString(theme.components.Slider.element)}
           style={stylesToObject(theme.additionalStyles?.Slider)}
+          data-testid="a2ui-slider-input"
         />
-        <span className={classMapToString(theme.components.Slider.label)}>
+        <span className={classMapToString(theme.components.Slider.label)} data-testid="a2ui-slider-value">
           {value}
         </span>
       </section>

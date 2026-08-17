@@ -1,13 +1,17 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm import Model, ToolMessage
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    ModelCallInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.single_agent.ability_manager import AbilityExecutionError
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
@@ -32,6 +36,9 @@ from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import Respons
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import SkillRetrievalPromptRail
 from jiuwenswarm.agents.harness.common.rails.symphony import (
     SymphonyOrchestrationRail,
+)
+from jiuwenswarm.agents.harness.common.tools.symphony_toolkits import (
+    SymphonyToolkit,
 )
 
 
@@ -141,7 +148,7 @@ def _tool_call_ctx(
         name=tool_name,
         arguments=dict(args),
     )
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         inputs=ToolCallInputs(
             tool_call=tool_call,
             tool_name=tool_name,
@@ -151,6 +158,9 @@ def _tool_call_ctx(
         extra={} if extra is None else extra,
         exception=None,
     )
+    ctx.force_finished = []
+    ctx.request_force_finish = ctx.force_finished.append
+    return ctx
 
 
 def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy():
@@ -161,7 +171,7 @@ def test_build_agent_identity_prompt_contains_stable_identity_and_task_strategy(
     assert "# JiuwenSwarm 内部数据" not in prompt
     assert "## 输出文件放置规范" not in prompt
     assert "## 文件发送" not in prompt
-    assert "## Symphony Orchestration" not in prompt
+    assert "## Skill Orchestration Contract" not in prompt
     assert "`symphony_compose_graph`" not in prompt
     assert "# 消息说明" not in prompt
 
@@ -228,9 +238,9 @@ async def test_symphony_orchestration_rail_respects_config_snapshot():
 
     enabled_prompt = enabled_builder.build()
     disabled_prompt = disabled_builder.build()
-    assert "## Symphony Orchestration" in enabled_prompt
+    assert "## Skill Orchestration Contract" in enabled_prompt
     assert "`symphony_compose_graph`" in enabled_prompt
-    assert "## Symphony Orchestration" not in disabled_prompt
+    assert "## Skill Orchestration Contract" not in disabled_prompt
     assert "`symphony_compose_graph`" not in disabled_prompt
 
 
@@ -258,11 +268,234 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
-    assert "## Symphony Orchestration" in prompt
+    assert "## Skill Orchestration Contract" in prompt
     assert "`symphony_compose_graph`" in prompt
     assert "exact identifiers or names" in prompt
-    assert "Do not omit this field" in prompt
-    assert "skill_branch_explore" not in prompt
+    assert "when ANY of these conditions is true" in prompt
+    assert "two or more specialized capabilities" in prompt
+    assert "identified, inspected, selected, invoked, or recommended" in prompt
+    assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
+    assert "never pass every Skill returned by exploration" in prompt
+    assert "still call `symphony_compose_graph`" in prompt
+    assert "none of the three trigger conditions is true" in prompt
+    assert "Symphony" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "operation", "language", "expected_content"),
+    [
+        (
+            "symphony_compose_graph",
+            "plan",
+            "cn",
+            "技能较多时，技能图谱构建时间可能较长，本次会话内构建已超时。请前往「我的技能」>「技能图谱」，点击「增量构建」并等待构建完成；完成后请重新发送任务。为避免再次超时，本轮不会重复调用图谱构建。",
+        ),
+        (
+            "symphony_refresh_graph",
+            "refresh_graph",
+            "en",
+            "With many skills, building the Skill Graph can take a while",
+        ),
+    ],
+)
+async def test_symphony_timeout_is_terminal_manual_build_result(
+    tool_name,
+    operation,
+    language,
+    expected_content,
+    monkeypatch,
+):
+    async def blocking_handler(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.symphony_toolkits.load_symphony_config",
+        lambda config=None: SimpleNamespace(enabled=True),
+    )
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: 0.01),
+    )
+    toolkit = SymphonyToolkit(
+        SimpleNamespace(plan=blocking_handler, refresh_graph=blocking_handler)
+    )
+    raw_timeout_result = (
+        await toolkit.plan("compose")
+        if tool_name == "symphony_compose_graph"
+        else await toolkit.refresh_graph()
+    )
+    builder = SystemPromptBuilder(language=language)
+    agent = _FakeAgent(builder)
+    rail = SymphonyOrchestrationRail()
+    rail.init(agent)
+    ctx = _tool_call_ctx(
+        tool_name,
+        {"query": "compose"},
+        result=raw_timeout_result,
+    )
+
+    await rail.after_tool_call(ctx)
+
+    result = ctx.inputs.tool_result
+    assert result["direct_display"] is True
+    assert result["continue_after_display"] is False
+    assert result["followup_action"] == "manual_graph_build"
+    assert result["content"] == expected_content or expected_content in result["content"]
+    assert result["operation"] == operation
+    assert result["timeout_s"] == 0.01
+    assert ctx.extra["symphony_graph_build_timeout"] is True
+    assert ctx.force_finished == [
+        {"output": result["content"], "result_type": "answer"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "operation", "timeout_s"),
+    [
+        ("symphony_compose_graph", "plan", 3600.0),
+        ("symphony_refresh_graph", "refresh_graph", 3600.0),
+    ],
+)
+async def test_symphony_outer_timeout_forces_manual_build(
+    tool_name,
+    operation,
+    timeout_s,
+):
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx(tool_name, {})
+    timeout = TimeoutError("hard timeout")
+    ctx.exception = AbilityExecutionError(
+        status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+        msg=f"Tool '{tool_name}' timed out after {timeout_s}s",
+        cause=timeout,
+        tool_message=ToolMessage(
+            content=f"Tool '{tool_name}' timed out after {timeout_s}s",
+            tool_call_id="timeout-call",
+        ),
+    )
+
+    await rail.on_tool_exception(ctx)
+
+    result = ctx.inputs.tool_result
+    assert result["operation"] == operation
+    assert result["timeout_s"] == timeout_s
+    assert result["followup_action"] == "manual_graph_build"
+    assert result["continue_after_display"] is False
+    assert ctx.force_finished
+    assert isinstance(ctx.exception, AbilityExecutionError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exception",
+    [
+        TimeoutError("raw timeout"),
+        AbilityExecutionError(
+            status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+            msg="Tool execution error: current failure",
+            cause=RuntimeError("wrapper"),
+            tool_message=ToolMessage(
+                content="Tool 'symphony_compose_graph' timed out after 3600.0s",
+                tool_call_id="timeout-call",
+            ),
+        ),
+        AbilityExecutionError(
+            status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+            msg="wrong tool timeout",
+            cause=TimeoutError("hard timeout"),
+            tool_message=ToolMessage(
+                content="Tool 'symphony_refresh_graph' timed out after 3600.0s",
+                tool_call_id="timeout-call",
+            ),
+        ),
+    ],
+)
+async def test_symphony_outer_timeout_rejects_non_ability_manager_shapes(exception):
+    if isinstance(exception, AbilityExecutionError) and isinstance(
+        exception.__cause__, RuntimeError
+    ):
+        exception.__cause__.__cause__ = TimeoutError("nested timeout")
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx("symphony_compose_graph", {})
+    ctx.exception = exception
+
+    await rail.on_tool_exception(ctx)
+
+    assert ctx.inputs.tool_result["success"] is True
+    assert ctx.force_finished == []
+
+
+@pytest.mark.asyncio
+async def test_symphony_timeout_removes_graph_tools_and_orchestration_prompt():
+    builder = SystemPromptBuilder(language="cn")
+    agent = _FakeAgent(builder)
+    rail = SymphonyOrchestrationRail(
+        config_base={"symphony": {"enabled": True}},
+    )
+    rail.init(agent)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                {"function": {"name": "symphony_compose_graph"}},
+                SimpleNamespace(name="symphony_refresh_graph"),
+                SimpleNamespace(name="other_tool"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+
+    timed_out_tool_ctx = _tool_call_ctx(
+        "symphony_compose_graph",
+        {"query": "compose"},
+        extra=ctx.extra,
+        result={"success": False, "reason": "graph_build_timeout"},
+    )
+    await rail.after_tool_call(timed_out_tool_ctx)
+
+    await rail.before_model_call(ctx)
+
+    assert [rail._model_tool_name(tool) for tool in ctx.inputs.tools] == ["other_tool"]
+    assert "## Skill Orchestration Contract" not in builder.build()
+
+    next_invoke_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(
+            tools=[
+                SimpleNamespace(name="symphony_compose_graph"),
+                SimpleNamespace(name="symphony_refresh_graph"),
+            ]
+        ),
+        session=_FakeSession(),
+        extra={},
+    )
+    await rail.before_model_call(next_invoke_ctx)
+
+    assert [rail._model_tool_name(tool) for tool in next_invoke_ctx.inputs.tools] == [
+        "symphony_compose_graph",
+        "symphony_refresh_graph",
+    ]
+    assert "## Skill Orchestration Contract" in builder.build()
+
+
+@pytest.mark.asyncio
+async def test_symphony_non_timeout_failure_does_not_force_finish():
+    rail = SymphonyOrchestrationRail()
+    ctx = _tool_call_ctx("symphony_compose_graph", {})
+    ctx.exception = AbilityExecutionError(
+        status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+        msg="service unavailable",
+    )
+
+    await rail.on_tool_exception(ctx)
+
+    assert ctx.inputs.tool_result["success"] is True
+    assert ctx.force_finished == []
 
 
 @pytest.mark.asyncio
@@ -424,7 +657,7 @@ async def test_symphony_orchestration_rail_clears_when_disabled(
     rail.init(agent)
     await rail.before_model_call(ctx)
 
-    assert "## Symphony Orchestration" not in builder.build()
+    assert "## Skill Orchestration Contract" not in builder.build()
 
 
 def test_deep_adapter_syncs_symphony_tools_from_config_snapshot(monkeypatch):
@@ -1312,7 +1545,10 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    assert subagents == ["research_spec", "browser_spec"]
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "research_spec", "browser_spec"]
     # sys_operation is forwarded so the subagent shares the parent's filesystem
     # boundary; this bare adapter has none configured.
     mock_research.assert_called_once_with(
@@ -1351,8 +1587,12 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     ):
         subagents, _ = adapter.build_configured_subagents(model, config)
 
-    # DeepAdapter: no research_agent configured, browser enabled
-    assert subagents == ["browser_spec"]
+    # DeepAdapter: no research_agent configured; built-in status-line setup and
+    # browser remain available.
+    assert [
+        item.agent_card.name if hasattr(item, "agent_card") else item
+        for item in subagents
+    ] == ["statusline-setup", "browser_spec"]
     mock_research.assert_not_called()
     mock_browser.assert_called_once_with(
         model,

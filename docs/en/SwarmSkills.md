@@ -371,6 +371,8 @@ tools:
 
 > **Note**: Even when there are no dependencies, you must explicitly write `skills: []` and `tools: []` (an empty list signals "checked, confirmed no dependency of this type" — different from omitting the segment, which is a spec violation).
 
+> **About the `skills` segment**: an Agent Skill declared here must already be installed in the global skill library `~/.jiuwenswarm/agent/workspace/skills/` and must be visible to the team member playing that role. The team keeps no copy of its own; what a member can see is decided by its visibility declaration — see the "Team Skills" section of [Agent Team](AgentTeam.md).
+
 ***
 
 ## 3. Usage Guide
@@ -384,7 +386,7 @@ Users typically begin using Swarm Skills through the following steps:
 1. Open JiuwenSwarm's "Skills" panel
 2. Click "Team Skills Hub Online Search"
 3. Enter keywords to search for the team skill you need (e.g., "medical consultation", "research report")
-4. Click "Install" to add the skill to your workspace
+4. Click "Install" to add the skill to the global skill library
 
 You can also search and install via command line:
 
@@ -400,6 +402,8 @@ You can also search and install via command line:
 ```
 
 > **Tip**: `<asset_id>` is the unique skill identifier on Team Skills Hub (e.g., `sk-123`), shown in search results.
+
+> **Where skills are installed**: Swarm Skills and ordinary Agent Skills alike exist in exactly one place after installation — the global skill library `~/.jiuwenswarm/agent/workspace/skills/`. Neither the team nor its members get their own copy; each holds only a visibility declaration deciding which skills in that library it may see (inheriting the whole library by default). Installing once therefore applies to the whole team, with nothing to distribute inside the team.
 
 **Step 2: Use in JiuwenSwarm**
 
