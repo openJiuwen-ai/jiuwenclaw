@@ -735,6 +735,23 @@ def _all_sections_completed(state: RouterState) -> bool:
     return bool(expected) and expected.issubset(state.completed_section_indices)
 
 
+def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
+    """Recognize the SDK EndNode result emitted after the workflow has finished."""
+    if (
+        agent != "end"
+        or event != "summary_response"
+        or str(chunk.get("section_idx", "0")).strip() not in {"", "0"}
+    ):
+        return False
+    result = _as_json_object(chunk.get("content"))
+    return bool(
+        result
+        and isinstance(result.get("response_content"), str)
+        and result["response_content"].strip()
+        and not result.get("exception_info")
+    )
+
+
 def _final_report_boundary(event_type: str) -> dict:
     return {
         "event_type": event_type,
@@ -913,6 +930,14 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
             "stream_source_id": "dr_outline",
             "content": "大纲已根据您的修改重新生成，自动确认继续研究",
         })
+        return frames
+
+    # DeepSearch emits a successful top-level EndNode result before the runner's
+    # terminal marker.  It is the formal workflow boundary even when an SDK
+    # version omits one of the parallel sub_reporter ``done`` events.  Section
+    # ``end``/``SECTION END`` frames are excluded by section_idx and content.
+    if _is_successful_workflow_end(chunk, agent, event):
+        frames.extend(start_final_report_processing(state))
         return frames
 
     if not agent or agent in _SKIP_NODES:

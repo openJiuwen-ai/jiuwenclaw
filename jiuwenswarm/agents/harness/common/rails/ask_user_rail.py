@@ -95,6 +95,22 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
             "default": False,
             "description": "Allow multiple selections instead of just one.",
         },
+        "preview": {
+            "type": "object",
+            "description": (
+                "Optional question-level artifact preview. Use this for a shared "
+                "outline or document that the choices confirm or edit."
+            ),
+            "properties": {
+                "title": {"type": "string"},
+                "text": {"type": "string", "minLength": 1},
+                "format": {"type": "string", "enum": ["markdown"]},
+                "editable": {"type": "boolean"},
+                "outline_ref": {"type": "string"},
+                "meta": {"type": "object"},
+            },
+            "required": ["text"],
+        },
     },
     "required": ["question"],
 }
@@ -342,6 +358,18 @@ class StructuredAskUserRail(AskUserRail):
                         "must be a string when provided."
                     )
                 )
+            if "preview" in question:
+                preview = question["preview"]
+                preview_text = (
+                    preview.get("text") if isinstance(preview, Mapping) else None
+                )
+                if not isinstance(preview_text, str) or not preview_text.strip():
+                    return self.reject(
+                        tool_result=(
+                            f"[INVALID_ARGUMENT] questions[{question_index}].preview "
+                            "must be an object with non-empty text."
+                        )
+                    )
             if "options" not in question:
                 continue
             options = question["options"]

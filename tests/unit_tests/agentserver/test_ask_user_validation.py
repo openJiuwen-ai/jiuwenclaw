@@ -11,7 +11,10 @@ import pytest
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptResult, RejectResult
 
-from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
+from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
+    StructuredAskUserRail,
+    StructuredAskUserTool,
+)
 
 
 def _make_tool_call(arguments: dict) -> ToolCall:
@@ -21,6 +24,18 @@ def _make_tool_call(arguments: dict) -> ToolCall:
         name="ask_user",
         arguments=json.dumps(arguments),
     )
+
+
+def test_structured_ask_user_schema_declares_question_preview():
+    tool = StructuredAskUserTool(language="cn", agent_id="test")
+
+    preview_schema = tool.card.input_params["properties"]["questions"]["items"][
+        "properties"
+    ]["preview"]
+
+    assert preview_schema["type"] == "object"
+    assert preview_schema["required"] == ["text"]
+    assert preview_schema["properties"]["text"]["type"] == "string"
 
 
 @pytest.mark.asyncio

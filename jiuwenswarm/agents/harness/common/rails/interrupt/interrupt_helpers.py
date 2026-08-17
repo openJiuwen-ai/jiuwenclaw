@@ -695,6 +695,9 @@ def _build_multi_questions(questions_data: list) -> list:
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        preview = _normalize_question_preview(q.get("preview"))
+        if preview is not None:
+            question_payload["preview"] = preview
         questions.append(question_payload)
     return questions
 
@@ -732,6 +735,29 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     preview = option.get("preview")
     if isinstance(preview, str) and preview.strip():
         normalized["preview"] = preview
+    return normalized
+
+
+def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
+    if not isinstance(preview, dict):
+        return None
+    text = preview.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    normalized: dict[str, Any] = {"text": text}
+    for field in ("title", "outline_ref"):
+        value = preview.get(field)
+        if isinstance(value, str):
+            normalized[field] = value
+    if preview.get("format") == "markdown":
+        normalized["format"] = "markdown"
+    editable = preview.get("editable")
+    if isinstance(editable, bool):
+        normalized["editable"] = editable
+    meta = preview.get("meta")
+    if isinstance(meta, dict):
+        normalized["meta"] = dict(meta)
     return normalized
 
 

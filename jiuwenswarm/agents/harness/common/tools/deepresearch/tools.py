@@ -878,6 +878,17 @@ def _normalize_feedback_handler_resume_feedback(
 
 _OUTLINE_EDITED_HEADING_RE = re.compile(r"^###\s*P(\d+):\s*(.*)$")
 _OUTLINE_CORE_SUFFIX = "（重点）"
+_OUTLINE_CONFIRM_CHOICES = {
+    "outline_confirm",
+    "确认大纲，继续研究",
+    "确认",
+}
+_OUTLINE_EDIT_CHOICES = {
+    "outline_use_edited",
+    "需要修改",
+    "其他",
+    "Other",
+}
 
 
 def _resolve_outline_interaction_feedback(
@@ -912,6 +923,13 @@ def _resolve_outline_interaction_feedback(
         return '{"interrupt_feedback":"cancel","feedback":""}'
 
     answers = result.get("answers")
+    if status_value == "skipped":
+        if isinstance(answers, list) and any(
+            _interaction_answer_has_user_input(answer) for answer in answers
+        ):
+            raise ValueError("skipped interaction_result 不能包含有效回答")
+        return '{"interrupt_feedback":"accepted","feedback":""}'
+
     if not isinstance(answers, list) or not answers:
         raise ValueError("interaction_result.answers 缺失或为空")
     first_answer = answers[0]
@@ -922,10 +940,10 @@ def _resolve_outline_interaction_feedback(
         raise ValueError("selected_options 缺失或为空")
     choice = selected_options[0]
 
-    if choice == "outline_confirm":
+    if choice in _OUTLINE_CONFIRM_CHOICES:
         return '{"interrupt_feedback":"accepted","feedback":""}'
 
-    if choice == "outline_use_edited":
+    if choice in _OUTLINE_EDIT_CHOICES:
         cached_outline = _get_cached_outline_json(route, conversation_id)
         sections = cached_outline.get("sections") if isinstance(cached_outline, dict) else None
         if not cached_outline or not isinstance(sections, list) or not sections:

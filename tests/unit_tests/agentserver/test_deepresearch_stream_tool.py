@@ -1004,6 +1004,75 @@ async def test_completed_marker_requires_all_section_progress():
 
 
 @pytest.mark.asyncio
+async def test_completed_marker_accepts_p_numbered_sections_beneath_wrapper_heading(
+    tmp_path: Path,
+):
+    outline = (
+        "# 大纲：用户需求洞察报告\n"
+        "## 页面规划\n"
+        "### P1: 用户画像构建（重点）\n"
+        "### P2: 行为习惯分析（重点）\n"
+        "### P3: 真实痛点挖掘（重点）\n"
+        "### P4: 消费决策逻辑剖析（重点）\n"
+        "### P5: 潜在需求识别与产品设计建议（重点）"
+    )
+    lines = [
+        json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+        json.dumps({"agent": "outline", "content": outline}),
+        *[
+            json.dumps(
+                {
+                    "agent": "sub_reporter",
+                    "section_idx": str(index),
+                    "section_total": 5,
+                    "event": "done",
+                }
+            )
+            for index in range(1, 6)
+        ],
+        json.dumps(
+            {
+                "__deepsearch_status__": "completed",
+                "conversation_id": "C1",
+                "final_result": {"response_content": "# Final"},
+            }
+        ),
+    ]
+    proc = _Proc(lines)
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+        )
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=AsyncMock(return_value={"md": str(tmp_path / "r.md")}),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert outcome == {
+        "status": "completed",
+        "conversation_id": "C1",
+        "report_delivered": True,
+        "report_chars": len("# Final"),
+    }
+
+
+@pytest.mark.asyncio
 async def test_completed_marker_accepts_sdk_final_report_after_degraded_section(
     tmp_path: Path,
 ):
@@ -1069,6 +1138,126 @@ async def test_completed_marker_accepts_sdk_final_report_after_degraded_section(
         "report_delivered": True,
         "report_chars": len("# Final"),
     }
+
+
+@pytest.mark.asyncio
+async def test_completed_marker_accepts_formal_sdk_end_result_when_section_done_is_missing(
+    tmp_path: Path,
+):
+    """The SDK's successful EndNode result is the authoritative workflow boundary."""
+    final_result = {"response_content": "# Final"}
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "sub_reporter",
+                    "section_idx": "1",
+                    "section_total": 2,
+                    "event": "done",
+                }
+            ),
+            json.dumps(
+                {
+                    "agent": "reporter",
+                    "section_idx": "0",
+                    "event": "start",
+                    "content": "assembling report",
+                }
+            ),
+            json.dumps(
+                {
+                    "agent": "end",
+                    "section_idx": "0",
+                    "event": "summary_response",
+                    "content": json.dumps(final_result),
+                }
+            ),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "completed",
+                    "conversation_id": "C1",
+                    "final_result": final_result,
+                }
+            ),
+        ]
+    )
+    route = {
+        "request_id": "R1",
+        "channel_id": "CH1",
+        "session_id": "S1",
+        "service_id": "default",
+        "agent_id": "default",
+    }
+    patches = _stream_patches(proc, route=route)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch.object(dt, "WebSocketGatewayPushTransport", return_value=AsyncMock())
+        )
+        stack.enter_context(
+            patch.object(
+                dt,
+                "_write_report_artifacts_stream",
+                new=AsyncMock(return_value={"md": str(tmp_path / "r.md")}),
+            )
+        )
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert outcome == {
+        "status": "completed",
+        "conversation_id": "C1",
+        "report_delivered": True,
+        "report_chars": len("# Final"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_completed_marker_rejects_sdk_end_result_with_exception() -> None:
+    final_result = {
+        "response_content": "# Partial",
+        "exception_info": "report workflow failed",
+    }
+    proc = _Proc(
+        [
+            json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
+            json.dumps(
+                {
+                    "agent": "reporter",
+                    "section_idx": "0",
+                    "event": "start",
+                    "content": "assembling report",
+                }
+            ),
+            json.dumps(
+                {
+                    "agent": "end",
+                    "section_idx": "0",
+                    "event": "summary_response",
+                    "content": json.dumps(final_result),
+                }
+            ),
+            json.dumps(
+                {
+                    "__deepsearch_status__": "completed",
+                    "conversation_id": "C1",
+                    "final_result": final_result,
+                }
+            ),
+        ]
+    )
+    patches = _stream_patches(proc)
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        outcome = json.loads(
+            await dt.deepresearch_stream._func(action="start", query="q")
+        )
+
+    assert outcome["error_code"] == "incomplete_section_progress"
 
 
 @pytest.mark.asyncio
@@ -3083,6 +3272,62 @@ def test_resolve_outline_confirm_branch_returns_accepted_feedback() -> None:
     parsed = json.loads(feedback)
     assert parsed["interrupt_feedback"] == "accepted"
     assert parsed["feedback"] == ""
+
+
+def test_resolve_outline_confirm_accepts_live_ask_user_label() -> None:
+    """The generic AskUser card returns its display label, not the UI-only id."""
+    interaction_result = json.dumps(
+        {
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "请审阅生成的研究报告大纲，确认后将继续执行深度研究。",
+                    "selected_options": ["确认大纲，继续研究"],
+                    "custom_input": None,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    feedback = dt._resolve_outline_interaction_feedback(
+        interaction_result,
+        conversation_id="C1",
+        route=_outline_route(),
+    )
+
+    assert json.loads(feedback) == {
+        "interrupt_feedback": "accepted",
+        "feedback": "",
+    }
+
+
+def test_resolve_outline_skipped_result_defaults_to_accepted() -> None:
+    """Outline timeout/skip follows the skill contract and continues research."""
+    interaction_result = json.dumps(
+        {
+            "status": "skipped",
+            "answers": [
+                {
+                    "question": "请审阅生成的研究报告大纲，确认后将继续执行深度研究。",
+                    "selected_options": [],
+                    "custom_input": None,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    feedback = dt._resolve_outline_interaction_feedback(
+        interaction_result,
+        conversation_id="C1",
+        route=_outline_route(),
+    )
+
+    assert json.loads(feedback) == {
+        "interrupt_feedback": "accepted",
+        "feedback": "",
+    }
 
 
 def test_resolve_outline_use_edited_updates_all_titles_and_preserves_other_fields() -> None:

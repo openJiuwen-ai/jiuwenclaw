@@ -401,6 +401,12 @@ class DeepResearchTaskManager:
             if match:
                 section_titles[match.group(1)] = match.group(2).strip()
                 continue
+            match = re.match(
+                r"[Pp](\d+)(?:\s*[：:、.)-]\s*|\s+)(.+)", heading
+            )
+            if match:
+                section_titles[match.group(1)] = match.group(2).strip()
+                continue
             section_titles[idx] = heading
         return section_titles
 
