@@ -26,6 +26,10 @@ from jiuwenclaw.agentserver.agent_adapters import (
     create_adapter,
     resolve_sdk_choice,
 )
+from jiuwenclaw.agentserver.enterprise_attachment_materializer import (
+    enterprise_files_need_download,
+    materialize_url_attachments,
+)
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
@@ -159,7 +163,7 @@ def build_user_prompt(content: str, files: dict | list, channel: str, language: 
         "files_updated_by_user": files_json,
         "type": "user input",
     }
-    if os.getenv("AGENT_RUNTIME", "").strip() and files:
+    if os.getenv("AGENT_RUNTIME", "").strip() and enterprise_files_need_download(files):
         payload["file_handling_hint"] = _enterprise_file_download_hint(language)
     return prompt + json.dumps(payload, ensure_ascii=False)
 
@@ -330,6 +334,37 @@ class JiuWenClaw:
             resolved,
         )
         return existing
+
+    async def _materialize_enterprise_attachments(
+        self,
+        request: AgentRequest,
+        session_id: str,
+    ) -> None:
+        """企业版：将 URL 附件预下载到 session 工作区，写入 path 供 vision 等工具使用。"""
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return
+        if not isinstance(request.params, dict):
+            return
+
+        files = request.params.get("files")
+        if not isinstance(files, list) or not files:
+            return
+        if not enterprise_files_need_download(files):
+            return
+
+        param_project_dir = request.params.get("project_dir")
+        param_pd = param_project_dir if isinstance(param_project_dir, str) else None
+        workspace_dir = self._effective_project_dir_for_session(session_id, param_pd)
+
+        materialized = await materialize_url_attachments(
+            files,
+            workspace_dir,
+            request_id=request.request_id or "",
+        )
+        if materialized is not files:
+            params = dict(request.params)
+            params["files"] = materialized
+            request.params = params
 
     def _apply_effective_project_dir_to_request(
         self,
@@ -827,6 +862,7 @@ class JiuWenClaw:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
+        await self._materialize_enterprise_attachments(request, session_id)
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
@@ -935,6 +971,7 @@ class JiuWenClaw:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
+        await self._materialize_enterprise_attachments(request, session_id)
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
         rid = request.request_id
