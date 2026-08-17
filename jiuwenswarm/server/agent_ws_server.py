@@ -49,6 +49,10 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_json_parse_error_wire,
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
+from jiuwenswarm.common.invocation_context import (
+    reset_current_invocation_context,
+    set_current_invocation_context,
+)
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
@@ -65,6 +69,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -1476,6 +1481,7 @@ class AgentWebSocketServer:
                 preview_text(_request_query_text(request)),
             )
 
+        invocation_token = set_current_invocation_context(build_invocation_context(request))
         try:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
@@ -1843,6 +1849,8 @@ class AgentWebSocketServer:
                         describe_ws_exception(send_exc),
                     ),
                 )
+        finally:
+            reset_current_invocation_context(invocation_token)
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -4520,6 +4528,9 @@ class AgentWebSocketServer:
     ) -> None:
         """Relay one external team event into the active core team runtime."""
         from jiuwenswarm.agents.harness.team import get_team_manager
+        from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+            build_team_request_metadata,
+        )
 
         session_id = request.session_id or ""
         channel_id = request.channel_id or "web"
@@ -4532,7 +4543,11 @@ class AgentWebSocketServer:
         elif not isinstance(payload, dict) or payload.get("type") != "team.external_event":
             success, reason = False, "invalid_external_event"
         else:
-            success, reason = await get_team_manager(channel_id).interact(session_id, payload)
+            success, reason = await get_team_manager(channel_id).interact(
+                session_id,
+                payload,
+                request_metadata=build_team_request_metadata(request),
+            )
 
         resp = AgentResponse(
             request_id=request.request_id,

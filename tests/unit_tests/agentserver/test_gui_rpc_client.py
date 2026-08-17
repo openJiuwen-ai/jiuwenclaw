@@ -15,7 +15,6 @@ from jiuwenswarm.common.gui_rpc.models import (
 from jiuwenswarm.common.invocation_context.models import (
     INVOCATION_CONTEXT_VERSION,
     InvocationContext,
-    XiaoyiInvocationContext,
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.server.gui_rpc.client import (
@@ -24,6 +23,7 @@ from jiuwenswarm.server.gui_rpc.client import (
     GuiRpcContextError,
     build_gui_rpc_request,
 )
+from jiuwenswarm.server.xiaoyi_invocation import build_xiaoyi_invocation_extension
 
 
 def _agent_request(channel_id: str = "xiaoyi") -> AgentRequest:
@@ -51,13 +51,7 @@ def _invocation(channel_id: str = "xiaoyi") -> InvocationContext:
         session_id=request.session_id,
         channel_id=request.channel_id,
         chat_id=request.chat_id,
-        xiaoyi=XiaoyiInvocationContext(
-            root_session_id="xiaoyi-session-1",
-            params_session_id=None,
-            task_id="xiaoyi-task-1",
-            message_id="xiaoyi-message-1",
-            device_id="device-1",
-        ),
+        metadata=build_xiaoyi_invocation_extension(request),
     )
 
 

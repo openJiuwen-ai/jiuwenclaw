@@ -20,6 +20,7 @@ from jiuwenswarm.common.utils import logger
 from jiuwenswarm.server.gui_rpc.reverse_rpc import (
     get_xiaoyi_gui_reverse_rpc_client,
 )
+from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_invocation_extension
 
 from .utils import ToolInputError, format_success_response
 
@@ -107,7 +108,7 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
         raise RuntimeError(
             "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前调用不是 Xiaoyi channel"
         )
-    xiaoyi = invocation.xiaoyi
+    xiaoyi = get_xiaoyi_invocation_extension(invocation)
     xiaoyi_session_id = _first_text(
         xiaoyi.root_session_id if xiaoyi else None,
         xiaoyi.params_session_id if xiaoyi else None,
@@ -129,7 +130,6 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
             "GUI Agent 调用失败 [INVALID_CONTEXT]: 当前 Xiaoyi invocation 缺少 "
             + ", ".join(missing)
         )
-    metadata = invocation.metadata if isinstance(invocation.metadata, dict) else {}
     logger.info(
         "[GUI_RPC_TRACE] phase=TOOL_CALL_BEGIN source_request_id=%s "
         "jiuwen_session_id=%s channel_id=%s query_len=%s",
@@ -148,8 +148,8 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
             xiaoyi_message_id=xiaoyi_message_id,
             device_id=_first_text(xiaoyi.device_id if xiaoyi else None),
             execution_id=invocation.invocation_id,
-            app_id=_first_text(metadata.get("app_id")),
-            binding_id=_first_text(metadata.get("binding_id")),
+            app_id=_first_text(xiaoyi.app_id if xiaoyi else None),
+            binding_id=_first_text(xiaoyi.binding_id if xiaoyi else None),
             timeout=XIAOYI_GUI_MAX_TIMEOUT_SECONDS,
         )
     except ReverseRpcTransportDisconnected as exc:

@@ -10,12 +10,14 @@ from .codec import (
     attach_invocation_context,
     invocation_context_from_dict,
     invocation_context_to_dict,
+    trace_context_from_dict,
+    trace_context_to_dict,
 )
-from .adapters import build_device_command_context_from_invocation
 from .models import (
     INVOCATION_CONTEXT_VERSION,
+    TRACE_CONTEXT_VERSION,
     InvocationContext,
-    XiaoyiInvocationContext,
+    TraceContext,
 )
 from .runtime import (
     get_current_invocation_context,
@@ -23,16 +25,23 @@ from .runtime import (
     set_current_invocation_context,
 )
 
+TRACE_CONTEXT_METADATA_KEY = "jiuwenswarm_trace_context"
+TRACE_HEADER_EXPORTER_METADATA_KEY = "jiuwenswarm_trace_header_exporter"
+
 __all__ = [
     "INVOCATION_CONTEXT_EXTRA_KEY",
     "INVOCATION_CONTEXT_VERSION",
+    "TRACE_CONTEXT_VERSION",
+    "TRACE_CONTEXT_METADATA_KEY",
+    "TRACE_HEADER_EXPORTER_METADATA_KEY",
     "InvocationContext",
-    "XiaoyiInvocationContext",
+    "TraceContext",
     "attach_invocation_context",
-    "build_device_command_context_from_invocation",
     "get_current_invocation_context",
     "invocation_context_from_dict",
     "invocation_context_to_dict",
     "reset_current_invocation_context",
     "set_current_invocation_context",
+    "trace_context_from_dict",
+    "trace_context_to_dict",
 ]

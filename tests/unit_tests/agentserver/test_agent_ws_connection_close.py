@@ -11,6 +11,7 @@ from jiuwenswarm.common.e2a.gateway_normalize import (
     e2a_from_agent_fields,
 )
 from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
+from jiuwenswarm.common.invocation_context import get_current_invocation_context
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
@@ -40,6 +41,16 @@ class _AgentWsTestHarness(AgentWebSocketServer):
 class ClosedDuringUnaryServer(_AgentWsTestHarness):
     async def _handle_unary(self, ws, request, send_lock) -> None:
         raise ConnectionClosedError(None, None)
+
+
+class TraceObservedUnaryServer(_AgentWsTestHarness):
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_trace = None
+
+    async def _handle_unary(self, ws, request, send_lock) -> None:
+        invocation = get_current_invocation_context()
+        self.observed_trace = invocation.trace if invocation is not None else None
 
 
 class _FakeInterruptAgent:
@@ -154,6 +165,31 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> Non
 
     assert "no close frame received or sent" in caplog.text
     assert "request_id=req-closed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_handle_message_binds_trace_context_for_non_agent_dispatch() -> None:
+    server = TraceObservedUnaryServer()
+    env = e2a_from_agent_fields(
+        request_id="req-trace",
+        channel_id="xiaoyi",
+        session_id="session-trace",
+        req_method=ReqMethod.CONFIG_GET,
+        params={},
+        is_stream=False,
+        timestamp=0.0,
+        metadata={"xiaoyi_task_id": "root&19&abc&0"},
+    )
+
+    await server.handle_message_for_test(
+        FakeWebSocket(),
+        json.dumps(env.to_dict(), ensure_ascii=False),
+        asyncio.Lock(),
+    )
+
+    assert server.observed_trace is not None
+    assert server.observed_trace.trace_id == "root&19&abc&0"
+    assert get_current_invocation_context() is None
 
 
 @pytest.mark.asyncio

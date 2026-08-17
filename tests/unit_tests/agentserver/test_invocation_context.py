@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, fields
 from types import SimpleNamespace
 
 import pytest
@@ -18,26 +19,34 @@ from jiuwenswarm.common.invocation_context import (
     INVOCATION_CONTEXT_EXTRA_KEY,
     INVOCATION_CONTEXT_VERSION,
     InvocationContext,
-    XiaoyiInvocationContext,
+    TraceContext,
     attach_invocation_context,
     get_current_invocation_context,
     invocation_context_from_dict,
     invocation_context_to_dict,
-)
-from jiuwenswarm.common.invocation_context.adapters import (
-    build_device_command_context_from_invocation,
+    trace_context_from_dict,
+    trace_context_to_dict,
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 from jiuwenswarm.server.request_context import build_device_context_from_request
 from jiuwenswarm.server.gui_rpc.client import build_gui_rpc_request
+from jiuwenswarm.server.xiaoyi_invocation import (
+    XIAOYI_INVOCATION_EXTENSION_KEY,
+    XiaoyiInvocationExtension,
+    build_xiaoyi_device_command_context,
+)
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import utils as device_utils
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_tool as gui_tool,
 )
 
 
-def _context(*, xiaoyi: XiaoyiInvocationContext | None = None) -> InvocationContext:
+def _context(
+    *,
+    xiaoyi: XiaoyiInvocationExtension | None = None,
+    trace: TraceContext | None = None,
+) -> InvocationContext:
     return InvocationContext(
         version=INVOCATION_CONTEXT_VERSION,
         invocation_id="invocation-1",
@@ -45,10 +54,12 @@ def _context(*, xiaoyi: XiaoyiInvocationContext | None = None) -> InvocationCont
         session_id="session-1",
         channel_id="xiaoyi" if xiaoyi is not None else "web",
         chat_id="chat-1",
-        xiaoyi=xiaoyi,
-        metadata={"scheduled_device": {"required_intents": ["CreateNote"]}}
-        if xiaoyi is not None
-        else {},
+        trace=trace,
+        metadata=(
+            {XIAOYI_INVOCATION_EXTENSION_KEY: asdict(xiaoyi)}
+            if xiaoyi is not None
+            else {}
+        ),
     )
 
 
@@ -57,9 +68,16 @@ def test_invocation_context_round_trip_without_xiaoyi() -> None:
     assert invocation_context_from_dict(invocation_context_to_dict(context)) == context
 
 
+def test_public_invocation_context_does_not_define_xiaoyi_extension() -> None:
+    context = _context()
+
+    assert "xiaoyi" not in {field.name for field in fields(InvocationContext)}
+    assert "xiaoyi" not in invocation_context_to_dict(context)
+
+
 def test_invocation_context_round_trip_with_xiaoyi_and_unknown_optional_field() -> None:
     context = _context(
-        xiaoyi=XiaoyiInvocationContext(
+        xiaoyi=XiaoyiInvocationExtension(
             root_session_id="root",
             params_session_id="params",
             task_id="task",
@@ -72,6 +90,64 @@ def test_invocation_context_round_trip_with_xiaoyi_and_unknown_optional_field() 
     payload = invocation_context_to_dict(context)
     payload["unknown_optional"] = {"ignored": True}
     assert invocation_context_from_dict(payload) == context
+
+
+def test_invocation_context_round_trip_with_platform_neutral_trace() -> None:
+    context = _context(
+        trace=TraceContext(
+            version=1,
+            trace_id="root&19&abc&0",
+            conversation_id="root",
+            interaction_id="19",
+        )
+    )
+    assert invocation_context_from_dict(invocation_context_to_dict(context)) == context
+
+
+def test_trace_context_public_codec_round_trip() -> None:
+    trace = TraceContext(
+        version=1,
+        trace_id="root&19&abc&0",
+        conversation_id="root",
+        interaction_id="19",
+    )
+
+    assert trace_context_from_dict(trace_context_to_dict(trace)) == trace
+
+
+def test_builder_extracts_trace_from_xiaoyi_task_id() -> None:
+    invocation = build_invocation_context(
+        AgentRequest(
+            request_id="request-1",
+            channel_id="xiaoyi",
+            metadata={"xiaoyi_task_id": "root&19&abc&0"},
+        )
+    )
+    assert invocation.trace == TraceContext(
+        version=1,
+        trace_id="root&19&abc&0",
+        conversation_id="root",
+        interaction_id="19",
+    )
+
+
+def test_builder_prefers_cron_identity_for_trace() -> None:
+    invocation = build_invocation_context(
+        AgentRequest(
+            request_id="cron-request-1",
+            channel_id="__cron__",
+            metadata={
+                "xiaoyi_task_id": "stale-task",
+                "cron": {"job_id": "job-1", "run_id": "run/1"},
+            },
+        )
+    )
+    assert invocation.trace == TraceContext(
+        version=1,
+        trace_id="cron_run%2F1",
+        conversation_id="job-1",
+        interaction_id="run%2F1",
+    )
 
 
 @pytest.mark.parametrize(
@@ -127,7 +203,7 @@ def test_builder_and_device_adapter_preserve_routing_fields() -> None:
     )
     invocation = build_invocation_context(request)
     legacy = build_device_context_from_request(request)
-    device = build_device_command_context_from_invocation(invocation)
+    device = build_xiaoyi_device_command_context(invocation)
     assert device.source_request_id == legacy.source_request_id
     assert device.channel_id == legacy.channel_id
     assert device.jiuwen_session_id == legacy.jiuwen_session_id
@@ -146,7 +222,7 @@ def test_builder_and_device_adapter_preserve_routing_fields() -> None:
 
 def test_gui_builder_uses_explicit_invocation() -> None:
     context = _context(
-        xiaoyi=XiaoyiInvocationContext(
+        xiaoyi=XiaoyiInvocationExtension(
             root_session_id="root",
             params_session_id="params",
             task_id="task",
@@ -167,7 +243,7 @@ def test_gui_builder_uses_explicit_invocation() -> None:
 async def test_invocation_context_rail_nested_task_reset() -> None:
     outer = _context()
     inner = _context(
-        xiaoyi=XiaoyiInvocationContext(
+        xiaoyi=XiaoyiInvocationExtension(
             root_session_id="root",
             task_id="task",
             message_id="message",
@@ -212,13 +288,17 @@ async def test_invocation_context_rail_isolated_for_concurrent_sessions() -> Non
             session_id=f"session-{request_id}",
             channel_id="xiaoyi",
             chat_id=f"chat-{request_id}",
-            xiaoyi=XiaoyiInvocationContext(
-                root_session_id=f"root-{request_id}",
-                params_session_id=f"params-{request_id}",
-                task_id=task_id,
-                message_id=f"message-{request_id}",
-                device_id=f"device-{request_id}",
-            ),
+            metadata={
+                XIAOYI_INVOCATION_EXTENSION_KEY: asdict(
+                    XiaoyiInvocationExtension(
+                        root_session_id=f"root-{request_id}",
+                        params_session_id=f"params-{request_id}",
+                        task_id=task_id,
+                        message_id=f"message-{request_id}",
+                        device_id=f"device-{request_id}",
+                    )
+                )
+            },
         )
         rail = InvocationContextRail()
         callback = SimpleNamespace(
@@ -286,7 +366,7 @@ async def test_persistent_lifecycle_probe_rail_and_tool_binding(monkeypatch) -> 
     """
 
     context = _context(
-        xiaoyi=XiaoyiInvocationContext(
+        xiaoyi=XiaoyiInvocationExtension(
             root_session_id="root",
             params_session_id="params",
             task_id="task",
@@ -346,7 +426,7 @@ async def test_real_deep_agent_persistent_lifecycle_binds_tool_task_context() ->
     """Carry invocation data through the real persistent supervisor/task loop."""
 
     context = _context(
-        xiaoyi=XiaoyiInvocationContext(
+        xiaoyi=XiaoyiInvocationExtension(
             root_session_id="root",
             params_session_id="params",
             task_id="task",

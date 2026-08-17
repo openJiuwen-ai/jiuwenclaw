@@ -100,23 +100,21 @@ class TestCsplClient:
         assert headers["x-request-from"] == "openclaw"
         assert headers["x-skill-id"] == "skill-scope"
 
-    def test_resolve_behaviordetect_context_from_device_context(self):
-        from jiuwenswarm.common.device_rpc.models import DeviceCommandContext
+    def test_resolve_behaviordetect_context_from_xiaoyi_invocation_extension(self):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 
         cfg = _enabled_config(request_from="openclaw", package_name="com.huawei.hag")
-        device = DeviceCommandContext(
-            source_request_id="req-1",
-            channel_id="xiaoyi",
-            jiuwen_session_id="jw-sess",
-            xiaoyi_root_session_id="sess-abc",
-            xiaoyi_params_session_id="sess-params",
-            xiaoyi_task_id="task-xyz",
-            xiaoyi_rpc_id="rpc-1",
-            metadata={"xiaoyi_session_id": "sess-abc"},
+        invocation = build_invocation_context(
+            AgentRequest(
+                request_id="req-1",
+                channel_id="xiaoyi",
+                metadata={"xiaoyi_task_id": "task-xyz"},
+            )
         )
         with patch(
-            "jiuwenswarm.server.request_context.get_device_context",
-            return_value=device,
+            "jiuwenswarm.common.invocation_context.get_current_invocation_context",
+            return_value=invocation,
         ), patch(
             "jiuwenswarm.server.request_context.get_current_agent_request",
             return_value=None,

@@ -33,9 +33,7 @@ from typing import Any, Dict
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.invocation_context import get_current_invocation_context
-from jiuwenswarm.common.invocation_context.adapters import (
-    build_device_command_context_from_invocation,
-)
+from jiuwenswarm.server.xiaoyi_invocation import build_xiaoyi_device_command_context
 from jiuwenswarm.common.utils import logger
 
 from .utils import ToolInputError, execute_device_command
@@ -265,7 +263,7 @@ async def huawei_id_tool(clientId: str, skillName: str) -> Dict[str, Any]:
     invocation = get_current_invocation_context()
     if invocation is None:
         raise RuntimeError("No active Jiuwen invocation context")
-    context = build_device_command_context_from_invocation(invocation)
+    context = build_xiaoyi_device_command_context(invocation)
 
     # 跨进程桥：把 getLoginToken 请求投到 gateway 进程，由 gateway 侧
     # XiaoyiDeviceCapability 的共享 executor 特判 intent=GetLoginToken 调

@@ -7,25 +7,17 @@ from typing import Any
 
 
 INVOCATION_CONTEXT_VERSION = 1
+TRACE_CONTEXT_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
-class XiaoyiInvocationContext:
-    """Xiaoyi routing fields associated with an invocation.
+class TraceContext:
+    """Platform-neutral trace identity approved for outbound propagation."""
 
-    ``scheduled_device`` and ``cron`` are intentionally opaque dictionaries:
-    the shape belongs to the existing Device RPC/scheduled-device contract and
-    must not be duplicated or changed here.
-    """
-
-    root_session_id: str | None = None
-    params_session_id: str | None = None
-    task_id: str | None = None
-    message_id: str | None = None
-    device_id: str | None = None
-
-    scheduled_device: dict[str, Any] | None = None
-    cron: dict[str, Any] | None = None
+    version: int
+    trace_id: str
+    conversation_id: str | None = None
+    interaction_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +33,6 @@ class InvocationContext:
     channel_id: str
     chat_id: str | None
 
-    xiaoyi: XiaoyiInvocationContext | None = None
+    trace: TraceContext | None = None
 
     metadata: dict[str, Any] = field(default_factory=dict)
