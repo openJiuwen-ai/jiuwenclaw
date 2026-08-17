@@ -137,6 +137,7 @@ declare -A DEPLOY_VARS=(
     ["JINA_READER_NUM"]="2"
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["MANAGER_DB_NAME"]="manager"
+    ["WEB_DB_NAME"]="web"
     ["MANAGER_PG_SCHEMA"]="public"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_SERVER_NAME"]="jiuwenclaw-manager-server"
