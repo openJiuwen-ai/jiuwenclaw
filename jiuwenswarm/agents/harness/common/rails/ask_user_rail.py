@@ -22,20 +22,20 @@ import logging
 import uuid
 from typing import Any, Iterable, Mapping, Optional
 
-from pydantic import BaseModel, Field
-
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails.interrupt.ask_user_rail import (
-    AskUserPayload,
-    AskUserRail,
-)
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import (
     InterruptDecision,
+)
+from jiuwenswarm.common.schema.ask_user import (
+    AskUserResponseError,
+    ask_user_response_schema,
+    parse_ask_user_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,22 @@ _QUESTIONS_ITEM_SCHEMA: dict[str, Any] = {
             "default": False,
             "description": "Allow multiple selections instead of just one.",
         },
+        "preview": {
+            "type": "object",
+            "description": (
+                "Optional question-level artifact preview. Use this for a shared "
+                "outline or document that the choices confirm or edit."
+            ),
+            "properties": {
+                "title": {"type": "string"},
+                "text": {"type": "string", "minLength": 1},
+                "format": {"type": "string", "enum": ["markdown"]},
+                "editable": {"type": "boolean"},
+                "outline_ref": {"type": "string"},
+                "meta": {"type": "object"},
+            },
+            "required": ["text"],
+        },
     },
     "required": ["question"],
 }
@@ -124,7 +140,7 @@ EXTENDED_INPUT_PARAMS_EN: dict[str, Any] = {
             "description": (
                 "Return the answered structured-question envelope as compact JSON "
                 "instead of readable text. Use only when a downstream tool must "
-                "preserve status and the original answers array."
+                "preserve status and the canonical answers array."
             ),
         },
     },
@@ -154,7 +170,7 @@ EXTENDED_INPUT_PARAMS_CN: dict[str, Any] = {
             "default": False,
             "description": (
                 "将结构化问题的回答 envelope 作为紧凑 JSON 返回，而不是可读文本。"
-                "仅当下游工具必须保留 status 和原始 answers 数组时使用。"
+                "仅当下游工具必须保留 status 和标准 answers 数组时使用。"
             ),
         },
     },
@@ -185,42 +201,6 @@ _EXTENDED_DESCRIPTION_CN: str = (
     "如带围栏代码块的 ASCII mockup）展示在选项旁，用于对比具体产物；"
     "仅在视觉对比有助于用户决策时使用。"
 )
-
-# ---------------------------------------------------------------------------
-# Structured answer payload
-# ---------------------------------------------------------------------------
-
-
-class StructuredAskUserPayload(BaseModel):
-    """Payload for structured user answers."""
-
-    answers: dict[str, str | list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of question text to selected option label(s). "
-            "Value is a str for single-select, or list[str] for multi-select."
-        ),
-    )
-
-
-def _skipped_answer_has_user_input(item: Any) -> bool:
-    """Return whether a skipped answer shell contains an effective response."""
-    if not isinstance(item, dict):
-        return True
-    selected = item.get("selected_options")
-    if isinstance(selected, list):
-        if any(
-            not isinstance(option, str) or bool(option.strip())
-            for option in selected
-        ):
-            return True
-    elif selected is not None:
-        return True
-    custom_input = item.get("custom_input")
-    if custom_input is None:
-        return False
-    return not isinstance(custom_input, str) or bool(custom_input.strip())
-
 
 # ---------------------------------------------------------------------------
 # Extended AskUserTool
@@ -323,11 +303,8 @@ class StructuredAskUserRail(AskUserRail):
     ) -> InterruptDecision:
         """Handle interrupt resolution with structured answer support.
 
-        For structured questions: user_input contains a dict with an `answers`
-        key mapping question text → selected option label. We convert this to
-        a rejection with the answer text.
-
-        For plain query: delegate to parent class behavior (AskUserPayload).
+        All answers use the canonical ``status + answers[]`` response. The
+        readable and machine outputs are derived from that single value.
         """
         args = self._parse_tool_args(tool_call)
         return_json = args.get("return_json", False)
@@ -381,6 +358,18 @@ class StructuredAskUserRail(AskUserRail):
                         "must be a string when provided."
                     )
                 )
+            if "preview" in question:
+                preview = question["preview"]
+                preview_text = (
+                    preview.get("text") if isinstance(preview, Mapping) else None
+                )
+                if not isinstance(preview_text, str) or not preview_text.strip():
+                    return self.reject(
+                        tool_result=(
+                            f"[INVALID_ARGUMENT] questions[{question_index}].preview "
+                            "must be an object with non-empty text."
+                        )
+                    )
             if "options" not in question:
                 continue
             options = question["options"]
@@ -418,130 +407,39 @@ class StructuredAskUserRail(AskUserRail):
 
         # Detect if this was a structured questions call by checking tool_args
         is_structured = questions_data is not None and len(questions_data) > 0
+        try:
+            response = parse_ask_user_response(user_input)
+        except AskUserResponseError as exc:
+            return self.reject(tool_result=f"[INVALID_ARGUMENT] {exc}")
 
-        if is_structured:
-            if isinstance(user_input, dict) and user_input.get("status") == "skipped":
-                skipped_answers = user_input.get("answers")
-                if (
-                    set(user_input) == {"status", "answers"}
-                    and isinstance(skipped_answers, list)
-                    and not any(
-                        _skipped_answer_has_user_input(answer)
-                        for answer in skipped_answers
-                    )
-                ):
-                    return self.reject(
-                        tool_result=json.dumps(
-                            {"status": "skipped", "answers": []},
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    )
-                return self.reject(
-                    tool_result=(
-                        "[INVALID_ARGUMENT] skipped responses must contain only "
-                        "status='skipped' and answers without selected options "
-                        "or custom input."
-                    )
+        machine_payload = response.to_dict(include_original_request=False)
+        if is_structured and return_json:
+            return self.reject(
+                tool_result=json.dumps(
+                    machine_payload,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
                 )
-            try:
-                if return_json:
-                    envelope = (
-                        user_input.get("_structured_response")
-                        if isinstance(user_input, dict)
-                        else None
-                    )
-                    if not (
-                        isinstance(envelope, dict)
-                        and envelope.get("status") == "answered"
-                        and isinstance(envelope.get("answers"), list)
-                    ):
-                        return self.reject(
-                            tool_result=(
-                                "[INVALID_ARGUMENT] return_json requires an answered "
-                                "structured response envelope."
-                            )
-                        )
-                    return self.reject(
-                        tool_result=json.dumps(
-                            {
-                                "status": "answered",
-                                "answers": envelope["answers"],
-                            },
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    )
-
-                if isinstance(user_input, StructuredAskUserPayload):
-                    payload = user_input
-                elif isinstance(user_input, dict):
-                    if "answers" in user_input:
-                        payload = StructuredAskUserPayload(
-                            answers=user_input.get("answers", {}),
-                        )
-                    else:
-                        # Frontend sends answers as {question: selected_option}
-                        payload = StructuredAskUserPayload(answers=user_input)
-                elif isinstance(user_input, AskUserPayload):
-                    # Upstream AskUserPayload changed: answer (str) → answers (dict)
-                    free_text = getattr(user_input, "answer", None)
-                    if free_text is not None:
-                        payload = StructuredAskUserPayload(
-                            answers={"__free_text__": free_text},
-                        )
-                    else:
-                        payload = StructuredAskUserPayload(
-                            answers=user_input.answers,
-                        )
-                elif isinstance(user_input, str):
-                    payload = StructuredAskUserPayload(
-                        answers={"__free_text__": user_input},
-                    )
-                else:
-                    return self.interrupt(self._build_ask_request(tool_call))
-
-                # Format answer as readable text for the LLM
-                answer_parts = []
-                for q_text, selected in payload.answers.items():
-                    if q_text == "__free_text__":
-                        answer_parts.append(selected if isinstance(selected, str) else ", ".join(selected))
-                    else:
-                        value_text = selected if isinstance(selected, str) else ", ".join(selected)
-                        answer_parts.append(f"{q_text}: {value_text}")
-                answer_text = "\n".join(answer_parts) if answer_parts else ""
-                if not answer_text.strip():
-                    # Empty resume (e.g. bare Other) must not look like a valid answer (#2330).
-                    return self.reject(
-                        tool_result=(
-                            "[INVALID_ARGUMENT] answers must include at least "
-                            "one non-empty response."
-                        )
-                    )
-                logger.info(
-                    "[StructuredAskUserRail] Resolved structured answer: %s",
-                    answer_text,
-                )
-                return self.reject(tool_result=answer_text)
-
-            except Exception as exc:
-                logger.warning(
-                    "[StructuredAskUserRail] Failed to parse structured answer: %s, "
-                    "falling back to interrupt",
-                    exc,
-                )
-                return self.interrupt(self._build_ask_request(tool_call))
-
-        # Plain query — delegate to parent which handles AskUserPayload.answers
-        if isinstance(user_input, AskUserPayload):
-            return await super().resolve_interrupt(
-                ctx, tool_call, user_input, auto_confirm_config
             )
-        elif isinstance(user_input, str):
-            return self.reject(tool_result=user_input)
-        return await super().resolve_interrupt(
-            ctx, tool_call, user_input, auto_confirm_config
+
+        if response.status == "skipped":
+            answer_text = "用户已跳过本次问答，未提供回答。"
+        elif is_structured:
+            answer_text = response.to_readable_text()
+        else:
+            answer_text = str(
+                {
+                    answer.question or "__free_text__": answer.readable_value()
+                    for answer in response.answers
+                }
+            )
+        if not answer_text:
+            answer_text = "用户未提供回答。"
+        logger.info(
+            "[StructuredAskUserRail] Resolved answer: %s",
+            answer_text,
         )
+        return self.reject(tool_result=answer_text)
 
     def _build_ask_request(self, tool_call: Optional[ToolCall]) -> InterruptRequest:
         """Build interrupt request. For structured questions, the questions data
@@ -549,7 +447,9 @@ class StructuredAskUserRail(AskUserRail):
         interrupt handler). No need to attach questions to InterruptRequest
         itself since from_tool_call() doesn't copy extra fields."""
         request = super()._build_ask_request(tool_call)
-        return request
+        return request.model_copy(
+            update={"payload_schema": ask_user_response_schema()}
+        )
 
     def extract_questions(
         self, tool_call: Optional[ToolCall]

@@ -1,4 +1,4 @@
-"""Isolated interpreter selection and child environment for DeepResearch."""
+"""Jiuwen interpreter reuse and isolated child environment for DeepResearch."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import stat
+import sys
 import tempfile
 import zipfile
 from contextlib import asynccontextmanager, suppress
@@ -13,9 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from jiuwenswarm.common.local_env_config import export_spawn_environ, read_env
+from jiuwenswarm.common.local_env_config import export_spawn_environ
 
-_PYTHON_EXECUTABLE_ENV = "DEEPRESEARCH_PYTHON_EXECUTABLE"
 _ALLOWED_PROXY_KEYS = (
     "HTTP_PROXY",
     "http_proxy",
@@ -43,7 +43,7 @@ _BRIDGE_JSON_MAX_CONTAINER = 20_000
 
 
 class DeepResearchRuntimeError(RuntimeError):
-    """Raised when the configured isolated DeepResearch runtime is unusable."""
+    """Raised when the DeepResearch child runtime is unusable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,23 +54,19 @@ class _BridgeArtifact:
     descriptor: int
 
 
-def resolve_python_executable() -> Path:
-    """Resolve and validate the explicitly configured virtualenv interpreter."""
-    configured = read_env(_PYTHON_EXECUTABLE_ENV, "").strip()
-    if not configured:
-        raise DeepResearchRuntimeError("runtime_python_missing")
+def _virtualenv_root(executable: Path) -> Path | None:
+    root = executable.parent.parent
+    return root if (root / "pyvenv.cfg").is_file() else None
 
-    candidate = Path(configured)
+
+def resolve_python_executable() -> Path:
+    """Return the interpreter that is running JiuwenSwarm."""
+    candidate = Path(sys.executable)
     if not candidate.is_absolute():
         raise DeepResearchRuntimeError("runtime_python_invalid")
 
     lexical_path = Path(os.path.abspath(os.fspath(candidate)))
-    venv_root = lexical_path.parent.parent
-    if (
-        not lexical_path.is_file()
-        or not os.access(lexical_path, os.X_OK)
-        or not (venv_root / "pyvenv.cfg").is_file()
-    ):
+    if not lexical_path.is_file() or not os.access(lexical_path, os.X_OK):
         raise DeepResearchRuntimeError("runtime_python_invalid")
     return lexical_path
 
@@ -79,7 +75,7 @@ def build_child_env(executable: Path) -> dict[str, str]:
     """Build the minimal process environment for an isolated DeepResearch child."""
     python = Path(executable)
     bin_dir = python.parent
-    venv_root = bin_dir.parent
+    venv_root = _virtualenv_root(python)
     child_env = export_spawn_environ()
 
     for key in _FORBIDDEN_INHERITED_KEYS:
@@ -97,7 +93,10 @@ def build_child_env(executable: Path) -> dict[str, str]:
         if inherited_path
         else str(bin_dir)
     )
-    child_env["VIRTUAL_ENV"] = str(venv_root)
+    if venv_root is None:
+        child_env.pop("VIRTUAL_ENV", None)
+    else:
+        child_env["VIRTUAL_ENV"] = str(venv_root)
     return child_env
 
 

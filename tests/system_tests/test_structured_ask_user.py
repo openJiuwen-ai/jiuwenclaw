@@ -21,8 +21,6 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import (
     ToolCallInterruptRequest,
 )
-from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
-
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
     EXTENDED_INPUT_PARAMS_CN,
     EXTENDED_INPUT_PARAMS_EN,
@@ -589,6 +587,25 @@ class TestStructuredAskUserRailResolveInterrupt:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_interrupt_advertises_canonical_response_schema():
+        """The public interrupt schema must match the canonical resume contract."""
+        rail = StructuredAskUserRail()
+        tc = _make_tool_call(arguments={"query": "What is your role?"})
+
+        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+        schema = decision.request.payload_schema
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is True
+        assert schema["required"] == ["status", "answers"]
+        assert schema["properties"]["status"]["enum"] == ["answered", "skipped"]
+        assert schema["properties"]["answers"]["type"] == "array"
+        answer_schema = schema["properties"]["answers"]["items"]
+        assert answer_schema["additionalProperties"] is True
+        assert answer_schema["required"] == ["selected_options"]
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_four_questions_are_allowed():
         """The maximum supported batch should still produce an interrupt."""
         rail = StructuredAskUserRail()
@@ -844,8 +861,8 @@ class TestStructuredAskUserRailResolveInterrupt:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_structured_answer_dict_returns_reject():
-        """Structured answer as dict should return RejectResult with formatted text."""
+    async def test_canonical_structured_answer_returns_readable_text():
+        """The canonical answer array produces the readable model response."""
         rail = StructuredAskUserRail()
         tc = _make_tool_call(arguments={
             "query": "Update?",
@@ -855,7 +872,16 @@ class TestStructuredAskUserRailResolveInterrupt:
         ctx = MagicMock()
 
         # Simulate user selecting "Apply update"
-        user_input = {"answers": {"Apply update?": "Apply update"}}
+        user_input = {
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "Apply update?",
+                    "selected_options": ["Apply update"],
+                    "custom_input": None,
+                }
+            ],
+        }
         decision = await rail.resolve_interrupt(ctx, tc, user_input)
 
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
@@ -864,8 +890,8 @@ class TestStructuredAskUserRailResolveInterrupt:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_structured_answer_string_fallback():
-        """String answer for a structured question should be handled as free-text."""
+    async def test_canonical_structured_free_text_answer():
+        """Free text uses custom_input in the same canonical answer array."""
         rail = StructuredAskUserRail()
         tc = _make_tool_call(arguments={
             "query": "Update?",
@@ -873,7 +899,20 @@ class TestStructuredAskUserRailResolveInterrupt:
         })
         ctx = MagicMock()
 
-        decision = await rail.resolve_interrupt(ctx, tc, "I want to customize")
+        decision = await rail.resolve_interrupt(
+            ctx,
+            tc,
+            {
+                "status": "answered",
+                "answers": [
+                    {
+                        "question": "Apply?",
+                        "selected_options": [],
+                        "custom_input": "I want to customize",
+                    }
+                ],
+            },
+        )
 
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
         assert isinstance(decision, RejectResult)
@@ -881,23 +920,27 @@ class TestStructuredAskUserRailResolveInterrupt:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_plain_query_delegates_to_parent():
-        """Plain query (no questions) should delegate to parent AskUserRail."""
+    async def test_plain_query_uses_canonical_answer():
+        """Plain queries use custom_input instead of a second payload type."""
         rail = StructuredAskUserRail()
         tc = _make_tool_call(arguments={"query": "What is your role?"})
         ctx = MagicMock()
 
-        # AskUserPayload changed: answer (str) → answers (dict)
-        # Construct payload compatible with both old and new upstream versions
-        if "answer" in AskUserPayload.model_fields:
-            user_input = AskUserPayload(answer="I am a developer")
-        else:
-            user_input = AskUserPayload(answers={"What is your role?": "I am a developer"})
+        user_input = {
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "",
+                    "selected_options": [],
+                    "custom_input": "I am a developer",
+                }
+            ],
+        }
         decision = await rail.resolve_interrupt(ctx, tc, user_input)
 
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
         assert isinstance(decision, RejectResult)
-        assert "I am a developer" in decision.tool_result
+        assert decision.tool_result == "{'__free_text__': 'I am a developer'}"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -914,10 +957,19 @@ class TestStructuredAskUserRailResolveInterrupt:
         ctx = MagicMock()
 
         user_input = {
-            "answers": {
-                "Branch naming?": "feature/*",
-                "Test runner?": "pytest",
-            },
+            "status": "answered",
+            "answers": [
+                {
+                    "question": "Branch naming?",
+                    "selected_options": ["feature/*"],
+                    "custom_input": None,
+                },
+                {
+                    "question": "Test runner?",
+                    "selected_options": ["pytest"],
+                    "custom_input": None,
+                },
+            ],
         }
         decision = await rail.resolve_interrupt(ctx, tc, user_input)
 

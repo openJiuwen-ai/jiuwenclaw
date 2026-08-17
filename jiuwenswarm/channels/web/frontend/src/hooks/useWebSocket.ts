@@ -18,6 +18,7 @@ import {
   AskUserQuestionPayload,
   EvolutionStatusPayload,
   UserAnswer,
+  UserAnswerStatus,
   MediaItem,
   AgentMode,
   Session,
@@ -523,7 +524,8 @@ interface UseWebSocketReturn {
     sessionId: string,
     requestId: string,
     answers: UserAnswer[],
-    source?: string
+    source?: string,
+    status?: UserAnswerStatus
   ) => Promise<void>;
   respondActivate: (
     sessionId: string,
@@ -1689,7 +1691,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送用户回答
   const sendUserAnswer = useCallback(
-    async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
+    async (
+      sessionId: string,
+      requestId: string,
+      answers: UserAnswer[],
+      source?: string,
+      status?: UserAnswerStatus,
+    ) => {
       try {
         const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestion;
         const pendingMatches = pendingQuestion?.request_id === requestId;
@@ -1708,6 +1716,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : {};
         const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
         const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
+        const statusPayload = status ? { status } : {};
         const structuredPlanPayload =
           pendingMatches && pendingQuestion?.planApprovalKind === 'plan_approval'
             ? {
@@ -1736,6 +1745,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers: answers,
+            ...statusPayload,
             ...sourcePayload,
             ...structuredPlanPayload,
             ...approvalSchemaPayload,
@@ -1766,6 +1776,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             ...getSessionWorkContext(sessionId),
             request_id: requestId,
             answers,
+            ...statusPayload,
             ...sourcePayload,
             ...approvalSchemaPayload,
             ...evolutionMetaPayload,

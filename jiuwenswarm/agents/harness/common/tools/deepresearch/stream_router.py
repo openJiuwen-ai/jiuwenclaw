@@ -486,6 +486,41 @@ def _format_outline_markdown(data: dict[str, Any]) -> str | None:
     return "\n\n".join(blocks)
 
 
+def _format_outline_card_markdown(data: dict[str, Any]) -> str | None:
+    """Format outline JSON as a card-style markdown with ## 页面规划 and ### P{N}: entries.
+
+    The （重点） suffix becomes part of the display title after the colon.
+    """
+    title = _text_field(data.get("title"))
+    thought = _text_field(data.get("thought"))
+    raw_sections = data.get("sections")
+    if not title or not isinstance(raw_sections, list):
+        return None
+
+    sections: list[tuple[dict[str, Any], str]] = []
+    for section in raw_sections:
+        if not isinstance(section, dict):
+            continue
+        section_title = _text_field(section.get("title"))
+        if section_title:
+            sections.append((section, section_title))
+    if not sections:
+        return None
+
+    blocks: list[str] = []
+    blocks.append(f"# 大纲：{_escape_markdown_text(title)}")
+    if thought:
+        blocks.append(f"**研究思路**：{_escape_markdown_text(thought)}")
+
+    section_lines: list[str] = ["## 页面规划"]
+    for section_number, (section, section_title) in enumerate(sections, start=1):
+        core_suffix = "（重点）" if section.get("is_core_section") is True else ""
+        safe_section_title = _escape_markdown_text(section_title)
+        section_lines.append(f"### P{section_number}: {safe_section_title}{core_suffix}")
+    blocks.append("\n".join(section_lines))
+    return "\n\n".join(blocks)
+
+
 def _format_plan_markdown(data: dict[str, Any]) -> str | None:
     title = _text_field(data.get("title"))
     thought = _text_field(data.get("thought"))
@@ -700,6 +735,23 @@ def _all_sections_completed(state: RouterState) -> bool:
     return bool(expected) and expected.issubset(state.completed_section_indices)
 
 
+def _is_successful_workflow_end(chunk: dict, agent: str, event: str) -> bool:
+    """Recognize the SDK EndNode result emitted after the workflow has finished."""
+    if (
+        agent != "end"
+        or event != "summary_response"
+        or str(chunk.get("section_idx", "0")).strip() not in {"", "0"}
+    ):
+        return False
+    result = _as_json_object(chunk.get("content"))
+    return bool(
+        result
+        and isinstance(result.get("response_content"), str)
+        and result["response_content"].strip()
+        and not result.get("exception_info")
+    )
+
+
 def _final_report_boundary(event_type: str) -> dict:
     return {
         "event_type": event_type,
@@ -868,6 +920,24 @@ def route_chunk(chunk: dict, state: RouterState) -> list[dict]:
         cid = chunk.get("conversation_id", "")
         if cid:
             state.interrupt_conversation_id = cid
+        return frames
+
+    # 用户输入结束:大纲已根据修改重新生成,自动确认继续研究
+    if str(chunk.get("event")) == "user_input_ended":
+        frames.append({
+            "event_type": "chat.reasoning",
+            "task_id": "deepresearch_stage_2",
+            "stream_source_id": "dr_outline",
+            "content": "大纲已根据您的修改重新生成，自动确认继续研究",
+        })
+        return frames
+
+    # DeepSearch emits a successful top-level EndNode result before the runner's
+    # terminal marker.  It is the formal workflow boundary even when an SDK
+    # version omits one of the parallel sub_reporter ``done`` events.  Section
+    # ``end``/``SECTION END`` frames are excluded by section_idx and content.
+    if _is_successful_workflow_end(chunk, agent, event):
+        frames.extend(start_final_report_processing(state))
         return frames
 
     if not agent or agent in _SKIP_NODES:

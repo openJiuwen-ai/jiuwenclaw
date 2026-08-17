@@ -213,3 +213,39 @@ def test_build_multi_questions_appends_other_for_valid_options():
     )
 
     assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]
+
+
+def test_build_multi_questions_preserves_question_preview():
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        _build_multi_questions,
+    )
+
+    questions = _build_multi_questions(
+        [
+            {
+                "question": "Review the outline?",
+                "header": "Outline",
+                "options": [
+                    {"label": "Confirm", "description": "Continue"},
+                    {"label": "Edit", "description": "Revise"},
+                ],
+                "preview": {
+                    "title": "Research outline",
+                    "text": "# Outline\n\n## P1: Scope",
+                    "format": "markdown",
+                    "editable": True,
+                    "outline_ref": "outline-1",
+                    "meta": {"currentRound": 1},
+                },
+            }
+        ]
+    )
+
+    assert questions[0]["preview"] == {
+        "title": "Research outline",
+        "text": "# Outline\n\n## P1: Scope",
+        "format": "markdown",
+        "editable": True,
+        "outline_ref": "outline-1",
+        "meta": {"currentRound": 1},
+    }

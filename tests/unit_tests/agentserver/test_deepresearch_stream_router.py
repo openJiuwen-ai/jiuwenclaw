@@ -13,6 +13,7 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
     complete_final_report_processing,
     route_chunk,
     start_final_report_processing,
+    _format_outline_card_markdown,
 )
 
 
@@ -1616,3 +1617,66 @@ def test_retrieved_source_allows_only_constructed_http_link():
     assert r"\[mail\]\(mailto" in content
     assert r"\[internal\]\(\/models\)" in content
     assert r"\<a href" in content
+
+
+def test_format_outline_card_markdown_happy_path():
+    data = {
+        "title": "行业分析",
+        "thought": "先分析市场，再比较竞争格局。",
+        "sections": [
+            {"title": "市场现状", "is_core_section": True},
+            {"title": "竞争格局", "is_core_section": False},
+            {"title": "发展趋势", "is_core_section": True},
+        ],
+    }
+    result = _format_outline_card_markdown(data)
+    assert result is not None
+    assert "## 页面规划" in result
+    assert "### P1: 市场现状（重点）" in result
+    assert "### P2: 竞争格局" in result
+    assert "### P3: 发展趋势（重点）" in result
+    assert "# 大纲：行业分析" in result
+    assert "**研究思路**：先分析市场，再比较竞争格局。" in result
+
+
+def test_format_outline_card_markdown_missing_title_returns_none():
+    assert _format_outline_card_markdown({}) is None
+    assert _format_outline_card_markdown({"title": "", "sections": []}) is None
+    assert _format_outline_card_markdown({"title": "t", "sections": []}) is None
+    assert _format_outline_card_markdown({"title": "t", "sections": None}) is None
+
+
+def test_format_outline_card_markdown_empty_sections_returns_none():
+    data = {"title": "测试", "sections": [{"title": ""}]}
+    assert _format_outline_card_markdown(data) is None
+
+
+def test_format_outline_card_markdown_no_thought():
+    data = {
+        "title": "测试",
+        "sections": [{"title": "第一章", "is_core_section": False}],
+    }
+    result = _format_outline_card_markdown(data)
+    assert result is not None
+    assert "**研究思路**" not in result
+    assert "### P1: 第一章" in result
+
+
+def test_user_input_ended_emits_chat_reasoning():
+    state = RouterState()
+    frames = route_chunk({"event": "user_input_ended"}, state)
+    assert frames == [
+        {
+            "event_type": "chat.reasoning",
+            "task_id": "deepresearch_stage_2",
+            "stream_source_id": "dr_outline",
+            "content": "大纲已根据您的修改重新生成，自动确认继续研究",
+        },
+    ]
+
+
+def test_user_input_ended_does_not_mutate_state():
+    state = RouterState()
+    route_chunk({"event": "user_input_ended"}, state)
+    assert state.active_nodes == {}
+    assert state.interrupt_node_id == ""
