@@ -118,12 +118,18 @@ _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
         _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
 
-# Inno Setup checks these named mutexes before install/uninstall. Every
-# frozen Windows process that can keep files under {app} open holds both
-# mutexes for its entire lifetime, so an orphaned desktop child still blocks
-# uninstall. The detached update helper is intentionally exempt: after the
-# desktop process tree exits it must be able to launch the next installer.
+# Inno Setup checks these named mutexes before install/uninstall. The legacy
+# names are a stable upgrade protocol: installers using the existing AppId must
+# still detect a running JiuwenSwarm process after the product rename. Every
+# new frozen process holds both legacy and current names for its entire lifetime.
+# The detached update helper is intentionally exempt: after the desktop process
+# tree exits it must be able to launch the next installer.
+_LEGACY_WINDOWS_APP_MUTEX_NAMES = (
+    "JiuwenSwarm.App",
+    r"Global\JiuwenSwarm.App",
+)
 _WINDOWS_APP_MUTEX_NAMES = (
+    *_LEGACY_WINDOWS_APP_MUTEX_NAMES,
     f"{DISPLAY_NAME}.App",
     rf"Global\{DISPLAY_NAME}.App",
 )

@@ -42,9 +42,9 @@ WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Every frozen product process creates both mutexes. Setup and Uninstall
-; must wait until the desktop process tree has exited before touching {app}.
-AppMutex={#MyAppName}.App,Global\{#MyAppName}.App
+; Keep the legacy mutexes as a stable upgrade protocol for the existing AppId.
+; New frozen processes also create the product-derived mutexes.
+AppMutex=JiuwenSwarm.App,Global\JiuwenSwarm.App,{#MyAppName}.App,Global\{#MyAppName}.App
 CloseApplications=yes
 RestartApplications=no
 

@@ -188,10 +188,19 @@ def test_installer_blocks_running_app_and_preserves_user_data(exe_entry):
     )[0]
 
     assert exe_entry._WINDOWS_APP_MUTEX_NAMES == (
+        "JiuwenSwarm.App",
+        r"Global\JiuwenSwarm.App",
         "WorkSwarm.App",
         r"Global\WorkSwarm.App",
     )
-    assert "AppMutex={#MyAppName}.App,Global\\{#MyAppName}.App" in script
+    app_mutex = next(
+        line.removeprefix("AppMutex=")
+        for line in script.splitlines()
+        if line.startswith("AppMutex=")
+    ).split(",")
+    assert set(exe_entry._LEGACY_WINDOWS_APP_MUTEX_NAMES) <= set(app_mutex)
+    assert "{#MyAppName}.App" in app_mutex
+    assert "Global\\{#MyAppName}.App" in app_mutex
     assert "CloseApplications=yes" in script
     assert "CloseApplications=force" not in script
     assert 'Name: "{app}\\_internal"' in uninstall_delete
