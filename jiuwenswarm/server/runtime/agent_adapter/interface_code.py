@@ -620,6 +620,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         await self._register_mcp_servers_from_config(config_base, tag="code")
         logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
+        # 恢复已激活的 harness packages（skills, rails, tools）——与 DeepAdapter
+        # create_instance 对齐，否则 code 模式新建实例时不携带已激活扩展。
+        await self._load_active_packages()
         await self.load_user_rails()
 
     # ─── Rails 构建 ──────────────────────────

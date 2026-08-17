@@ -4161,14 +4161,37 @@ class JiuWenSwarmDeepAdapter:
 
         return config_paths
 
+    async def _unload_active_packages(
+        self, config_paths: list[str] | None = None
+    ) -> None:
+        """Unload every active harness package. Idempotent —
+        ``unload_harness_config`` no-ops when the ledger has no record, so
+        safe to run before every re-bind cycle.
+        """
+        if self._instance is None:
+            return
+        if config_paths is None:
+            config_paths = self._get_active_package_config_paths()
+        if not config_paths:
+            return
+        for config_path in config_paths:
+            try:
+                await self._instance.unload_harness_config(config_path)
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] Failed to unload active package %s: %s: %r",
+                    config_path,
+                    exc.__class__.__name__,
+                    exc,
+                )
+
     async def _load_active_packages(self) -> list[str]:
-        """Load all active packages via load_harness_config.
+        """Restore active harness packages from harness-packages.json.
 
-        Called after agent instance is created to restore previously activated
-        packages (skills, rails, tools) from harness-packages.json.
-
-        Returns:
-            List of loaded resource names.
+        Idempotent: unloads first so re-binding onto an agent that already
+        carries those tool names does not trip openjiuwen's "already bound"
+        raise (which rolls back the whole batch). Called at create_instance
+        and after configure() reconciles harness tools out of config.tools.
         """
         if self._instance is None:
             return []
@@ -4176,6 +4199,9 @@ class JiuWenSwarmDeepAdapter:
         config_paths = self._get_active_package_config_paths()
         if not config_paths:
             return []
+
+        # Unload first (same path list) so re-bind does not trip "already bound".
+        await self._unload_active_packages(config_paths)
 
         loaded: list[str] = []
         for config_path in config_paths:
@@ -4189,9 +4215,10 @@ class JiuWenSwarmDeepAdapter:
                         resources,
                     )
             except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] Failed to load active package %s: %s",
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] Failed to load active package %s: %s: %r",
                     config_path,
+                    exc.__class__.__name__,
                     exc,
                 )
 
@@ -4216,10 +4243,11 @@ class JiuWenSwarmDeepAdapter:
                 return await self._instance.unload_harness_config(config_path)
             return await self._instance.load_harness_config(config_path)
         except Exception as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] apply_package_change(%s) failed on %s: %s",
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] apply_package_change(%s) failed on %s: %s: %r",
                 operation,
                 config_path,
+                exc.__class__.__name__,
                 exc,
             )
             return None
@@ -5874,6 +5902,11 @@ class JiuWenSwarmDeepAdapter:
         self._sync_active_evolution_review_agent_after_reload()
 
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
+
+        # configure() drops harness-injected tools (they live in
+        # deep_config.tools, not the config.yaml-driven tool_cards) as stale;
+        # re-bind so MCP/model/config saves don't strip harness tools.
+        await self._load_active_packages()
 
         await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
 
