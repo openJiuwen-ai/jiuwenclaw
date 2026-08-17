@@ -76,11 +76,13 @@ class _FakeHost:
     ) -> dict[str, object]:
         return self._record("patch_runtime_config", patch, dict(patch))
 
-    async def select_model(self, origin_index: int) -> dict[str, object]:
+    async def select_model(self, model_index: int) -> dict[str, object]:
+        if type(model_index) is not int or model_index < 0:
+            raise ValueError("model_index must be a non-negative integer")
         return self._record(
             "select_model",
-            origin_index,
-            {"model_origin_index": origin_index},
+            model_index,
+            {"model_index": model_index},
         )
 
     async def list_fetch_services(self) -> list[dict[str, object]]:
@@ -223,7 +225,7 @@ PCS_HOST_CALLS = [
         "patch_runtime_config",
         {"strategy_profile": "rules"},
     ),
-    (ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"origin_index": 0}, "select_model", 0),
+    (ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"model_index": 0}, "select_model", 0),
     (ReqMethod.PCS_FETCH_LIST_SERVICES, {}, "list_fetch_services", None),
     (
         ReqMethod.PCS_FETCH_PATCH_SERVICE,
@@ -309,6 +311,25 @@ async def test_non_graph_methods_call_exact_host_operation(
     assert ws.sent[0]["is_final"] is True
     assert ws.sent[0]["status"] == "succeeded"
     assert ws.sent[0]["agent_ref"] == {"mode": "agent", "id": "agent-1"}
+
+
+@pytest.mark.asyncio
+async def test_select_model_rejects_old_origin_index_parameter(
+    capture_wire: None,
+) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+
+    await handle_pcs_request(
+        host,
+        ws,
+        _request(ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"origin_index": 0}),
+        asyncio.Lock(),
+    )
+
+    assert host.calls == []
+    assert ws.sent[0]["status"] == "failed"
+    assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
 
 
 @pytest.mark.asyncio

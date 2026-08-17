@@ -185,14 +185,14 @@ def _is_runtime_active(status: object) -> bool:
 
 
 def _resolve_model_reference(
-    origin_index: object,
+    model_index: object,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    if type(origin_index) is not int or origin_index < 0:
-        _raise_host_error("model origin_index must be a non-negative integer")
+    if type(model_index) is not int or model_index < 0:
+        _raise_host_error("model_index must be a non-negative integer")
     models = get_default_models()
-    if origin_index >= len(models):
+    if model_index >= len(models):
         _raise_host_error("selected JiuwenSwarm model no longer exists")
-    entry = models[origin_index]
+    entry = models[model_index]
     if not isinstance(entry, dict):
         _raise_host_error("selected JiuwenSwarm model is invalid")
     client_raw = entry.get("model_client_config")
@@ -210,11 +210,11 @@ def _resolve_model_reference(
 
 def _build_core_config(stored: dict[str, object]) -> PCS.Config:
     raw = deepcopy(stored)
-    origin_index = raw.pop("model_origin_index", None)
+    model_index = raw.pop("model_index", None)
     raw.pop("model_client", None)
     raw.pop("model_request", None)
-    if origin_index is not None:
-        client, request = _resolve_model_reference(origin_index)
+    if model_index is not None:
+        client, request = _resolve_model_reference(model_index)
         raw["model_client"] = client
         raw["model_request"] = request
     try:
@@ -237,8 +237,8 @@ def _prepare_stored_config(
     normalized = candidate.model_dump(mode="json", by_alias=True)
     normalized.pop("model_client", None)
     normalized.pop("model_request", None)
-    if "model_origin_index" in stored:
-        normalized["model_origin_index"] = stored["model_origin_index"]
+    if "model_index" in stored:
+        normalized["model_index"] = stored["model_index"]
     return normalized, candidate
 
 
@@ -402,16 +402,16 @@ class PCSHostAPI:
             )
             return deepcopy(stored)
 
-    async def select_model(self, origin_index: int) -> dict[str, object]:
+    async def select_model(self, model_index: int) -> dict[str, object]:
         """Select one current JiuwenSwarm model by its models.list index."""
 
-        if type(origin_index) is not int or origin_index < 0:
-            _raise_host_error("origin_index must be a non-negative integer")
+        if type(model_index) is not int or model_index < 0:
+            _raise_host_error("model_index must be a non-negative integer")
         async with self._operation_lock:
             if self._stored_config is None:
                 _raise_host_error("PCS is not configured")
             stored = deepcopy(self._stored_config)
-            stored["model_origin_index"] = origin_index
+            stored["model_index"] = model_index
             stored, candidate = _prepare_stored_config(stored)
             await self._apply_configuration_locked(
                 candidate,

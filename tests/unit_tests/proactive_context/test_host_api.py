@@ -211,7 +211,9 @@ async def test_authorize_provider_delegates_to_configured_core(
 
 
 @pytest.mark.asyncio
-async def test_get_graph_delegates_to_core(fake_host: tuple[PCSHostAPI, FakeCore]) -> None:
+async def test_get_graph_delegates_to_core(
+    fake_host: tuple[PCSHostAPI, FakeCore],
+) -> None:
     host, core = fake_host
 
     result = await host.get_graph()
@@ -221,7 +223,9 @@ async def test_get_graph_delegates_to_core(fake_host: tuple[PCSHostAPI, FakeCore
 
 
 @pytest.mark.asyncio
-async def test_search_graph_delegates_to_core(fake_host: tuple[PCSHostAPI, FakeCore]) -> None:
+async def test_search_graph_delegates_to_core(
+    fake_host: tuple[PCSHostAPI, FakeCore],
+) -> None:
     host, core = fake_host
 
     result = await host.search_graph("主动上下文")
@@ -231,7 +235,9 @@ async def test_search_graph_delegates_to_core(fake_host: tuple[PCSHostAPI, FakeC
 
 
 @pytest.mark.asyncio
-async def test_get_graph_page_delegates_to_core(fake_host: tuple[PCSHostAPI, FakeCore]) -> None:
+async def test_get_graph_page_delegates_to_core(
+    fake_host: tuple[PCSHostAPI, FakeCore],
+) -> None:
     host, core = fake_host
 
     result = await host.get_graph_page("page:topics/pcs.md")
@@ -361,14 +367,14 @@ async def test_patch_runtime_configuration_changes_only_strategy_profile(
     )
     host, _core = fake_host
     await host.configure(_config(enabled=False, root_dir=tmp_path))
-    await host.select_model(0)
+    await host.select_model(model_index=0)
     before = await host.get_runtime_config()
 
     after = await host.patch_runtime_config({"strategy_profile": "balanced"})
 
     assert after["strategy_profile"] == "balanced"
     assert after["fetch_services"] == before["fetch_services"]
-    assert after["model_origin_index"] == 0
+    assert after["model_index"] == 0
 
 
 @pytest.mark.asyncio
@@ -387,7 +393,7 @@ async def test_patch_runtime_configuration_rejects_unknown_field_without_writing
 
 
 @pytest.mark.asyncio
-async def test_select_model_persists_only_origin_index(
+async def test_select_model_persists_only_model_index(
     fake_host: tuple[PCSHostAPI, FakeCore],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -411,17 +417,49 @@ async def test_select_model_persists_only_origin_index(
     await host.configure(_config(enabled=False, root_dir=tmp_path))
     core.calls.clear()
 
-    result = await host.select_model(0)
+    result = await host.select_model(model_index=0)
 
     saved = yaml.safe_load(host._config_path.read_text(encoding="utf-8"))
     applied = next(
         value for name, value in reversed(core.calls) if name == "set_configuration"
     )
-    assert result["model_origin_index"] == 0
-    assert saved["model_origin_index"] == 0
+    assert result["model_index"] == 0
+    assert saved["model_index"] == 0
+    assert "model_origin_index" not in saved
     assert "model_client" not in saved
     assert "model_request" not in saved
     assert applied.model_request.model_name == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_configure_rejects_old_model_origin_index(
+    fake_host: tuple[PCSHostAPI, FakeCore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        host_module,
+        "get_default_models",
+        lambda: [
+            {
+                "model_client_config": {
+                    "client_provider": "OpenAI",
+                    "api_key": "key",
+                    "api_base": "https://example.invalid/v1",
+                    "model_name": "model-a",
+                },
+                "model_config_obj": {"temperature": 0.2},
+            }
+        ],
+    )
+    host, _core = fake_host
+    stored = _config(enabled=False, root_dir=tmp_path)
+    stored["model_origin_index"] = 0
+
+    with pytest.raises(PCS.Error):
+        await host.configure(stored)
+
+    assert not host._config_path.exists()
 
 
 @pytest.mark.asyncio
@@ -436,7 +474,7 @@ async def test_select_model_rejects_missing_model_without_writing(
     before = host._config_path.read_bytes()
 
     with pytest.raises(PCS.Error):
-        await host.select_model(0)
+        await host.select_model(model_index=0)
 
     assert host._config_path.read_bytes() == before
 
@@ -465,7 +503,7 @@ async def test_start_rejects_saved_model_index_when_model_was_removed(
     home.mkdir()
     stored = _config(enabled=True, root_dir=tmp_path)
     stored["strategy_profile"] = "balanced"
-    stored["model_origin_index"] = 0
+    stored["model_index"] = 0
     (home / "pcs.yaml").write_text(
         yaml.safe_dump(stored, sort_keys=False),
         encoding="utf-8",

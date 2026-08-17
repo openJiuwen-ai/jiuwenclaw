@@ -209,7 +209,7 @@ async def _execute(host: PCSHostAPI, request: AgentRequest) -> dict[str, object]
             cast(dict[str, object], params.get("patch"))
         )
     if method == ReqMethod.PCS_RUNTIME_SELECT_MODEL:
-        return await host.select_model(cast(int, params.get("origin_index")))
+        return await host.select_model(cast(int, params.get("model_index")))
     if method == ReqMethod.PCS_FETCH_LIST_SERVICES:
         return {"services": await host.list_fetch_services()}
     if method == ReqMethod.PCS_FETCH_PATCH_SERVICE:
