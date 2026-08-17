@@ -322,7 +322,8 @@
       "configured": "已配置模型",
       "free": "免费模型",
       "addModel": "添加自定义模型",
-      "placeholder": "选择模型"
+      "placeholder": "选择模型",
+      "backup": "备份"
     },
     "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
     "configLockedHistory": "会话已有消息，请新建会话后更改配置",
@@ -1115,29 +1116,102 @@
       "duration": "时长"
     },
     "groups": {
-      "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },
-      "modelVideo": { "label": "视频模型", "hint": "视频理解（可选）" },
-      "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
-      "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
-      "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
-      "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
-      "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
-      "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制免费搜索引擎启用" },
-      "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
-      "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用，且必须添加Team" },
-      "team": { "label": "Team配置", "hint": "多智能体团队配置" },
-      "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
-      "kvCacheAffinity": { "label": "算力亲和", "hint": "控制 Ascend KV Cache 亲和能力" },
-      "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
-      "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
-      "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
-      "externalCliAgents": { "label": "三方 Agent", "hint": "配置 Team 模式可用的三方 Agent" },
-      "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐" },
-      "skillRetrieval": { "label": "技能交响乐", "hint": "控制技能交响乐" },
-      "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
-      "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
-      "other": { "label": "其他配置", "hint": "未归类的扩展参数" },
-      "proactive": { "label": "主动推荐", "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整" }
+      "modelDefault": {
+        "label": "默认模型（主对话）",
+        "hint": "主对话模型服务与鉴权参数"
+      },
+      "modelVideo": {
+        "label": "视频模型",
+        "hint": "视频理解（可选）"
+      },
+      "modelAudio": {
+        "label": "音频模型",
+        "hint": "语音识别（可选）"
+      },
+      "modelVision": {
+        "label": "视觉模型",
+        "hint": "图像理解（可选）"
+      },
+      "model": {
+        "label": "模型配置",
+        "hint": "模型服务与鉴权参数"
+      },
+      "embed": {
+        "label": "Embed配置",
+        "hint": "Embed 服务与鉴权参数"
+      },
+      "thirdParty": {
+        "label": "第三方服务配置",
+        "hint": "API Key 配置"
+      },
+      "freeSearch": {
+        "label": "免费搜索引擎配置",
+        "hint": "控制免费搜索引擎启用"
+      },
+      "evolution": {
+        "label": "自演进配置",
+        "hint": "Skills 在线自演进参数"
+      },
+      "agents": {
+        "label": "多Agent配置",
+        "hint": "仅供集群模式使用，且必须添加Team"
+      },
+      "team": {
+        "label": "Team配置",
+        "hint": "多智能体团队配置"
+      },
+      "contextEngine": {
+        "label": "上下文压缩",
+        "hint": "控制对话上下文是否启用压缩"
+      },
+      "kvCacheAffinity": {
+        "label": "算力亲和",
+        "hint": "控制 Ascend KV Cache 亲和能力"
+      },
+      "permissions": {
+        "label": "工具安全护栏",
+        "hint": "控制工具调用时的权限检查"
+      },
+      "a2ui": {
+        "label": "A2UI",
+        "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词"
+      },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控"
+      },
+      "externalCliAgents": {
+        "label": "三方 Agent",
+        "hint": "配置 Team 模式可用的三方 Agent"
+      },
+      "symphony": {
+        "label": "技能交响乐",
+        "hint": "控制技能交响乐"
+      },
+      "skillRetrieval": {
+        "label": "技能交响乐",
+        "hint": "控制技能交响乐"
+      },
+      "memory": {
+        "label": "记忆系统敏感信息过滤",
+        "hint": "配置禁止写入记忆的敏感信息类型"
+      },
+      "email": {
+        "label": "邮箱配置",
+        "hint": "邮件账号与令牌参数"
+      },
+      "other": {
+        "label": "其他配置",
+        "hint": "未归类的扩展参数"
+      },
+      "proactive": {
+        "label": "主动推荐",
+        "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整"
+      },
+      "agentos": {
+        "label": "AgentOS 备份模型",
+        "hint": "手动添加的备份模型；只读且可切换，不抢占启动默认"
+      }
     },
     "booleanLabels": {
       "skillEvolution": "启用技能自动学习",
@@ -1250,6 +1324,11 @@
       "proactiveIntEmpty": "{{field}} 不能为空，需为 {{lo}}-{{hi}} 的正整数",
       "proactiveIntNotInteger": "{{field}} 必须是正整数（{{lo}}-{{hi}}），当前值无效：{{value}}",
       "proactiveIntOutOfRange": "{{field}} 需为 {{lo}}-{{hi}} 的正整数，当前：{{value}}"
+    },
+    "agentos": {
+      "backupBadge": "备份",
+      "switchToThis": "切换使用此模型",
+      "readonly": "只读（config.yaml 中定义）"
     }
   },
   "cron": {
@@ -1319,11 +1398,6 @@
       "history": "运行历史",
       "triggeredSessions": "执行记录",
       "noTriggeredSessions": "暂无触发记录"
-    },
-    "empty": {
-      "createButton": "创建定时任务",
-      "templateSectionTitle": "任务模板",
-      "templateMore": "更多"
     },
     "history": {
       "comingSoon": "该功能即将上线"
@@ -2635,10 +2709,22 @@
       "cancel": "取消",
       "confirm": "确定"
     },
-    "runtime": { "processing": "处理中" },
-    "deleteDialog": { "title": "删除", "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。" },
-    "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
-    "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
+    "runtime": {
+      "processing": "处理中"
+    },
+    "deleteDialog": {
+      "title": "删除",
+      "description": "确定删除“<name>{{title}}</name>”吗？此操作不可撤销。"
+    },
+    "notFound": {
+      "title": "对话不存在或已删除",
+      "newConversation": "新建对话"
+    },
+    "errors": {
+      "delete": "删除对话失败",
+      "create": "创建对话失败",
+      "send": "发送消息失败"
+    }
   },
   "subagent": {
     "title": "Subagents",

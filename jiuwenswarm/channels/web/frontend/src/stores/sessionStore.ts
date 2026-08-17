@@ -1386,7 +1386,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableModels: (models, activeModel) => {
     set((state) => {
-      const defaultModels = models.filter((m) => m.is_default !== false);
+      const defaultModels = models.filter((m) => m.is_default !== false || m.is_agentos === true);
       // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
       // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
       const chatModels = defaultModels.length > 0 ? defaultModels : models;

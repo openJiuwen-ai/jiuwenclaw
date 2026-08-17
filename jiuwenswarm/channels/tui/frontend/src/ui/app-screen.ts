@@ -4632,8 +4632,11 @@ export class AppScreen implements Component, Focusable {
         const provider = meta?.model_provider ? ` · ${meta.model_provider}` : "";
         const apiBase = meta?.api_base ? ` · ${meta.api_base}` : "";
         const reasoning = meta?.reasoning_level ? ` · reasoning:${meta.reasoning_level}` : "";
+        // agentos 备份模型标记：仅展示用，提示用户这是手动添加的备份模型，
+        // 切换走请求级注入而非 defaults 重排 reload。
+        const backupBadge = meta?.is_agentos === true ? " [backup]" : "";
         return {
-          label: `${i + 1}. ${displayName}${labelSuffix}${isCurrent ? " (current)" : ""}`,
+          label: `${i + 1}. ${displayName}${backupBadge}${labelSuffix}${isCurrent ? " (current)" : ""}`,
           description: `${provider}${apiBase}${reasoning}`.replace(/^ · /, ""),
           value: `${m}${MODEL_VALUE_SEPARATOR}${entry.origIdx}`,
         };
@@ -4773,12 +4776,25 @@ export class AppScreen implements Component, Focusable {
     return { modelName, modelIndex };
   }
 
-  private getSelectedModelTarget(): { name: string; index: number; value: string } | null {
+  private getSelectedModelTarget(): { name: string; index: number | string; value: string; isAgentos: boolean } | null {
     const selected = this.modelList?.list?.getSelectedItem();
     if (!selected) return null;
     const { modelName, modelIndex } = this.parseModelValue(selected.value);
-    if (modelIndex === undefined || isNaN(modelIndex)) return null;
-    return { name: modelName, index: modelIndex, value: selected.value };
+    // agentos 条目的 index 是 "a{i}" 字符串（parseModelValue 的 parseInt 返回 NaN），
+    // 此处需放行：后端按 name/alias 匹配，不靠数字 index。NaN 仅表示"非数字 index"，
+    // 对 agentos 合法，不能因此返回 null 导致列表选中失败。
+    // defaults 条目的 index 为纯数字，parseInt 正常返回数值。
+    if (modelIndex === undefined) return null;
+    const isAgentos = isNaN(modelIndex);
+    // 对 defaults 数字 index 正常返回；对 agentos（NaN）用原始 value 中的 index 串
+    const idx = isAgentos ? this.parseAgentosIndex(selected.value) : modelIndex;
+    return { name: modelName, index: idx, value: selected.value, isAgentos };
+  }
+
+  /** 从 "modelName\x00a0" 形态抽取 agentos 的字符串 index（"a0"）。 */
+  private parseAgentosIndex(modelValue: string): string {
+    const sepIdx = modelValue.indexOf(MODEL_VALUE_SEPARATOR);
+    return sepIdx >= 0 ? modelValue.substring(sepIdx + 1) : "";
   }
 
   private createModelForm(mode: "add" | "edit", target?: { index: number }): ModelFormState {
@@ -4800,25 +4816,35 @@ export class AppScreen implements Component, Focusable {
     };
   }
 
-  private openModelInput(mode: "add" | "edit", target?: { name: string; index: number }): void {
+  private openModelInput(mode: "add" | "edit", target?: { name: string; index: number | string }): void {
     if (!this.modelList) return;
+    // agentos 备份模型只读：禁止通过 TUI 编辑（仅 config.yaml 手动管理）
+    if (target && typeof target.index === "string" && target.index.startsWith("a")) {
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS backup models are read-only; edit them in config.yaml.", "m"));
+      return;
+    }
     this.editor.setText("");
     this.modelList = {
       ...this.modelList,
       phase: "input",
       inputMode: mode,
-      target,
-      form: this.createModelForm(mode, target),
+      target: target as { name: string; index: number } | undefined,
+      form: this.createModelForm(mode, target as { index: number } | undefined),
     };
     this.tui.requestRender();
   }
 
-  private openModelDeleteConfirm(target: { name: string; index: number }): void {
+  private openModelDeleteConfirm(target: { name: string; index: number | string }): void {
     if (!this.modelList) return;
+    // agentos 备份模型只读：禁止通过 TUI 删除（仅 config.yaml 手动管理）
+    if (typeof target.index === "string" && target.index.startsWith("a")) {
+      this.state.addItem(addInfo(this.state.getSnapshot().sessionId, "AgentOS backup models are read-only; remove them in config.yaml.", "m"));
+      return;
+    }
     this.modelList = {
       ...this.modelList,
       phase: "delete_confirm",
-      target,
+      target: target as { name: string; index: number },
     };
     this.tui.requestRender();
   }
@@ -5127,7 +5153,25 @@ export class AppScreen implements Component, Focusable {
         current?: string;
         requested?: string;
         applied?: boolean;
+        type?: string;
+        is_agentos?: boolean;
       }>("command.model", reqParams);
+      // agentos 备份模型：后端走"请求级注入"路径，回包 type=switched_agentos。
+      // 不改 config、不抢启动默认，仅全局记录选中名，后续 chat.send 注入 model_name。
+      // defaults 模型仍走 setModel（更新当前模型回显 + config reload）。
+      if (payload.type === "switched_agentos" || payload.is_agentos === true) {
+        const agentosName = payload.current ?? modelName;
+        this.state.setSelectedAgentosModel(agentosName);
+        this.state.addItem(
+          addInfo(
+            this.state.getSnapshot().sessionId,
+            `Switched to backup model (request-level): ${agentosName}`,
+            "m",
+          ),
+        );
+        this.tui.requestRender();
+        return;
+      }
       const nextModel = payload.current ?? modelName;
       this.state.setModel(nextModel);
       this.state.addItem(

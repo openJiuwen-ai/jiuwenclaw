@@ -322,7 +322,8 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
-      "placeholder": "Select Model"
+      "placeholder": "Select Model",
+      "backup": "backup"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -1115,31 +1116,101 @@
        "duration": "duration"
     },
     "groups": {
-      "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },
-      "modelVideo": { "label": "Video Model", "hint": "Video understanding/generation model (optional)" },
-      "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
-      "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
-      "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
-      "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
-      "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
-      "freeSearch": { "label": "Free Search Engines", "hint": "Enable free search engines" },
-      "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
-      "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
-      "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
-      "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
-      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
-      "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
-      "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
-      "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
-      "externalCliAgents": { "label": "Third-Party Agents", "hint": "Configure third-party agents available in Team mode." },
-      "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
-      "email": { "label": "Email Settings", "hint": "Email account and token settings" },
-      "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
+      "modelDefault": {
+        "label": "Default Model (Main Chat)",
+        "hint": "Primary chat model service and auth"
+      },
+      "modelVideo": {
+        "label": "Video Model",
+        "hint": "Video understanding/generation model (optional)"
+      },
+      "modelAudio": {
+        "label": "Audio Model",
+        "hint": "Speech recognition/synthesis model (optional)"
+      },
+      "modelVision": {
+        "label": "Vision Model",
+        "hint": "Image understanding model (optional)"
+      },
+      "model": {
+        "label": "Model Configuration",
+        "hint": "Model service and authentication settings"
+      },
+      "embed": {
+        "label": "Embed Configuration",
+        "hint": "Embed service and authentication settings"
+      },
+      "thirdParty": {
+        "label": "Third-Party Services",
+        "hint": "API key settings"
+      },
+      "freeSearch": {
+        "label": "Free Search Engines",
+        "hint": "Enable free search engines"
+      },
+      "evolution": {
+        "label": "Evolution Settings",
+        "hint": "Online skill evolution settings"
+      },
+      "agents": {
+        "label": "Multi-Agent Configuration",
+        "hint": "For cluster mode only, Team required"
+      },
+      "team": {
+        "label": "Team Configuration",
+        "hint": "Multi-agent team settings"
+      },
+      "contextEngine": {
+        "label": "Context Compression",
+        "hint": "Enable or disable dialogue context compression"
+      },
+      "kvCacheAffinity": {
+        "label": "Compute Affinity",
+        "hint": "Control Ascend KV Cache affinity"
+      },
+      "permissions": {
+        "label": "Tool Safety Guardrail",
+        "hint": "Enable or disable permission checks for tool calls"
+      },
+      "a2ui": {
+        "label": "A2UI",
+        "hint": "Enable or disable generated UI rendering and A2UI runtime prompts."
+      },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode."
+      },
+      "externalCliAgents": {
+        "label": "Third-Party Agents",
+        "hint": "Configure third-party agents available in Team mode."
+      },
+      "symphony": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "skillRetrieval": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "memory": {
+        "label": "Memory Sensitive Info Filter",
+        "hint": "Configure sensitive content types forbidden from memory"
+      },
+      "email": {
+        "label": "Email Settings",
+        "hint": "Email account and token settings"
+      },
+      "other": {
+        "label": "Other Settings",
+        "hint": "Unclassified extended parameters"
+      },
       "proactive": {
         "label": "Proactive Recommendation",
         "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      },
+      "agentos": {
+        "label": "AgentOS Backup Models",
+        "hint": "Manually added backup models; read-only and switchable, does not override the startup default"
       }
     },
     "booleanLabels": {
@@ -1253,6 +1324,11 @@
       "proactiveIntEmpty": "{{field}} cannot be empty; must be a positive integer ({{lo}}-{{hi}})",
       "proactiveIntNotInteger": "{{field}} must be a positive integer ({{lo}}-{{hi}}); invalid value: {{value}}",
       "proactiveIntOutOfRange": "{{field}} must be a positive integer in {{lo}}-{{hi}}; current: {{value}}"
+    },
+    "agentos": {
+      "backupBadge": "backup",
+      "switchToThis": "Use this model",
+      "readonly": "Read-only (config.yaml-defined)"
     }
   },
   "cron": {
@@ -1322,11 +1398,6 @@
       "history": "Run history",
       "triggeredSessions": "Run history",
       "noTriggeredSessions": "No trigger records"
-    },
-    "empty": {
-      "createButton": "Create scheduled task",
-      "templateSectionTitle": "Templates",
-      "templateMore": "More"
     },
     "history": {
       "comingSoon": "Coming soon"
@@ -2638,10 +2709,22 @@
       "cancel": "Cancel",
       "confirm": "Confirm"
     },
-    "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
-    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
-    "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+    "runtime": {
+      "processing": "Processing"
+    },
+    "deleteDialog": {
+      "title": "Delete",
+      "description": "Delete “<name>{{title}}</name>”? This action cannot be undone."
+    },
+    "notFound": {
+      "title": "Conversation not found or deleted",
+      "newConversation": "New conversation"
+    },
+    "errors": {
+      "delete": "Failed to delete conversation",
+      "create": "Failed to create conversation",
+      "send": "Failed to send message"
+    }
   },
   "subagent": {
     "title": "Subagents",
