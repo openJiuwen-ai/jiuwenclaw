@@ -15,6 +15,9 @@ from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
     StructuredAskUserRail,
     StructuredAskUserTool,
 )
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    convert_interactions_to_ask_user_question,
+)
 
 
 def _make_tool_call(arguments: dict) -> ToolCall:
@@ -83,6 +86,53 @@ async def test_valid_options_still_interrupt():
     decision = await rail.resolve_interrupt(MagicMock(), tc, None)
 
     assert isinstance(decision, InterruptResult)
+
+
+@pytest.mark.asyncio
+async def test_json_encoded_questions_array_still_interrupts_with_structured_payload():
+    """A provider may serialize the valid questions array once more."""
+    questions = [
+        {
+            "question": "Which option?",
+            "header": "Choice",
+            "options": [
+                {"label": "A", "description": "a"},
+                {"label": "B", "description": "b"},
+            ],
+        }
+    ]
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call(
+        {
+            "query": "Choose",
+            "questions": json.dumps(questions),
+        }
+    )
+
+    decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+    assert isinstance(decision, InterruptResult)
+    assert decision.request.questions == questions
+
+    interaction = MagicMock()
+    interaction.id = "req_ask"
+    interaction.value = decision.request
+    payload = convert_interactions_to_ask_user_question([interaction])
+    assert payload is not None
+    assert payload["source"] == "ask_user_interrupt"
+    assert payload["questions"][0]["question"] == questions[0]["question"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("questions", ["[not json]", json.dumps({"question": "not an array"})])
+async def test_json_encoded_non_array_questions_remain_rejected(questions):
+    rail = StructuredAskUserRail()
+    tc = _make_tool_call({"query": "Choose", "questions": questions})
+
+    decision = await rail.resolve_interrupt(MagicMock(), tc, None)
+
+    assert isinstance(decision, RejectResult)
+    assert "questions must be an array" in decision.tool_result
 
 
 @pytest.mark.asyncio

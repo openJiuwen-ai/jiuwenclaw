@@ -7,6 +7,7 @@ import asyncio
 import io
 import json
 import os
+import stat
 import sys
 import types
 import zipfile
@@ -104,8 +105,10 @@ def test_bridge_writes_only_to_precreated_private_regular_file(tmp_path: Path):
     assert zipfile.is_zipfile(output)
 
 
-@pytest.mark.parametrize("kind", ["missing", "symlink", "hardlink", "mode", "nonempty"])
-def test_bridge_rejects_unsafe_output(tmp_path: Path, kind: str):
+@pytest.mark.parametrize(
+    "kind", ["missing", "symlink", "hardlink", "mode", "nonempty", "reparse"]
+)
+def test_bridge_rejects_unsafe_output(tmp_path: Path, kind: str, monkeypatch):
     output = tmp_path / "styled.zip"
     if kind == "symlink":
         source = tmp_path / "source"
@@ -121,6 +124,25 @@ def test_bridge_rejects_unsafe_output(tmp_path: Path, kind: str):
     elif kind == "nonempty":
         _private_file(output)
         output.write_bytes(b"occupied")
+    elif kind == "reparse":
+        _private_file(output)
+        original_lstat = Path.lstat
+
+        def reparse_lstat(path: Path):
+            metadata = original_lstat(path)
+            if path == output:
+                return types.SimpleNamespace(
+                    st_mode=metadata.st_mode,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_nlink=metadata.st_nlink,
+                    st_size=metadata.st_size,
+                    st_ctime_ns=metadata.st_ctime_ns,
+                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+            return metadata
+
+        monkeypatch.setattr(Path, "lstat", reparse_lstat)
     with pytest.raises(bridge.BridgeError, match="bridge_output_invalid"):
         bridge.write_convert_content(output, base64.b64encode(_zip_bytes()).decode())
 
@@ -177,6 +199,113 @@ def test_parent_keeps_bridge_output_open_until_cleanup():
 
     with pytest.raises(OSError):
         os.fstat(artifact.descriptor)
+
+
+def test_parent_bridge_artifact_accepts_windows_synthetic_mode_bits(
+    tmp_path: Path, monkeypatch
+):
+    directory = tmp_path / "deepresearch-sdk-bridge"
+    directory.mkdir(mode=0o700)
+    original_lstat = Path.lstat
+    original_fstat = os.fstat
+
+    def windows_lstat(path: Path):
+        metadata = original_lstat(path)
+        if path == directory:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o777,
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_file_attributes=0,
+            )
+        return metadata
+
+    def windows_fstat(descriptor: int):
+        metadata = original_fstat(descriptor)
+        return types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o666,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_nlink=1,
+            st_file_attributes=0,
+        )
+
+    monkeypatch.setattr(runtime.tempfile, "mkdtemp", lambda **_kwargs: str(directory))
+    monkeypatch.setattr(Path, "lstat", windows_lstat)
+    monkeypatch.setattr(runtime.os, "fstat", windows_fstat)
+
+    artifact = runtime._create_bridge_artifact()
+    try:
+        assert artifact.path == directory / "styled.zip"
+    finally:
+        runtime._remove_bridge_artifact(artifact)
+
+
+def test_parent_validates_windows_synthetic_archive_mode(monkeypatch):
+    artifact = runtime._create_bridge_artifact()
+    original_lstat = Path.lstat
+    try:
+        os.write(artifact.descriptor, _zip_bytes())
+        os.fsync(artifact.descriptor)
+
+        def windows_lstat(path: Path):
+            metadata = original_lstat(path)
+            if path == artifact.path:
+                return types.SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o666,
+                    st_dev=metadata.st_dev,
+                    st_ino=metadata.st_ino,
+                    st_nlink=metadata.st_nlink,
+                    st_size=metadata.st_size,
+                    st_file_attributes=0,
+                )
+            return metadata
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        runtime._validate_bridge_output(artifact)
+    finally:
+        runtime._remove_bridge_artifact(artifact)
+
+
+def test_child_bridge_accepts_windows_synthetic_mode_bits(
+    tmp_path: Path, monkeypatch
+):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    original_lstat = Path.lstat
+    original_fstat = os.fstat
+
+    def windows_lstat(path: Path):
+        metadata = original_lstat(path)
+        if path == output:
+            return types.SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o666,
+                st_dev=metadata.st_dev,
+                st_ino=metadata.st_ino,
+                st_nlink=metadata.st_nlink,
+                st_size=metadata.st_size,
+                st_ctime_ns=metadata.st_ctime_ns,
+                st_file_attributes=0,
+            )
+        return metadata
+
+    def windows_fstat(descriptor: int):
+        metadata = original_fstat(descriptor)
+        return types.SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o666,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_nlink=metadata.st_nlink,
+            st_size=metadata.st_size,
+            st_ctime_ns=metadata.st_ctime_ns,
+            st_file_attributes=0,
+        )
+
+    monkeypatch.setattr(Path, "lstat", windows_lstat)
+    monkeypatch.setattr(bridge.os, "fstat", windows_fstat)
+
+    bridge.write_convert_content(output, base64.b64encode(_zip_bytes()).decode())
+    assert zipfile.is_zipfile(output)
 
 
 @pytest.mark.asyncio

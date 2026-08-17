@@ -35,6 +35,8 @@ from jiuwenswarm.agents.harness.common.tools.deepresearch.runtime import (
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.path_safety import (
     is_direct_directory,
+    is_direct_regular_file,
+    private_mode_is_compatible,
 )
 from jiuwenswarm.agents.harness.common.tools.deepresearch.stream_router import (
     RouterState,
@@ -1048,9 +1050,8 @@ def _create_progress_artifact() -> _ProgressArtifact:
     try:
         directory_metadata = directory.lstat()
         if (
-            not stat.S_ISDIR(directory_metadata.st_mode)
-            or stat.S_ISLNK(directory_metadata.st_mode)
-            or stat.S_IMODE(directory_metadata.st_mode) != 0o700
+            not is_direct_directory(directory_metadata)
+            or not private_mode_is_compatible(directory_metadata, 0o700)
         ):
             raise OSError("unsafe DeepResearch progress directory")
         path = directory / "progress.jsonl"
@@ -1060,9 +1061,9 @@ def _create_progress_artifact() -> _ProgressArtifact:
         try:
             file_metadata = os.fstat(descriptor)
             if (
-                not stat.S_ISREG(file_metadata.st_mode)
+                not is_direct_regular_file(file_metadata)
                 or file_metadata.st_nlink != 1
-                or stat.S_IMODE(file_metadata.st_mode) != 0o600
+                or not private_mode_is_compatible(file_metadata, 0o600)
             ):
                 raise OSError("unsafe DeepResearch progress file")
         finally:

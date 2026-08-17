@@ -2927,7 +2927,8 @@ def test_input_control_errors_propagate_after_state_cleanup(
 
     # KeyboardInterrupt/SystemExit inside pytest-asyncio (or asyncio.wait_for's
     # nested task) aborts the whole pytest session. Drive the coroutine with
-    # asyncio.run() so pytest.raises can catch them in a sync test.
+    # an explicitly closed event loop so pytest.raises can catch them without
+    # leaving its selector sockets behind after a prior async test.
     monkeypatch.setattr(callbacks_module.asyncio, "to_thread", _inline_to_thread)
     monkeypatch.setattr(callbacks_module.asyncio, "wait_for", _inline_wait_for)
 
@@ -2945,8 +2946,16 @@ def test_input_control_errors_propagate_after_state_cleanup(
     async def _exercise() -> None:
         await callbacks._on_llm_invoke_input(messages=[], model="control-model")
 
+    def _run_in_closed_loop() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_exercise())
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
     with pytest.raises(type(control_error)):
-        asyncio.run(_exercise())
+        _run_in_closed_loop()
 
     assert callbacks._metric_state.active_count() == 0
     assert callbacks._span_state.active_count() == 0

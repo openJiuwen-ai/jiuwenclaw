@@ -75,10 +75,27 @@ async def test_active_standby_unreachable_server_degrades(
         init_gateway_redis_from_config,
     )
 
+    class _UnreachableRedisClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def open(self) -> None:
+            pass
+
+        async def ping(self) -> bool:
+            return False
+
+        async def close(self) -> None:
+            pass
+
     monkeypatch.setenv("AGENT_RUNTIME", "1")
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.redis.redis_runtime._load_gateway_redis_client_class",
+        lambda: _UnreachableRedisClient,
+    )
     await init_gateway_redis_from_config({
         "gateway": {"deployment_mode": "active-standby"},
-        "redis": {"host": "127.0.0.1", "port": 6379},
+        "redis": {"host": "unreachable.test", "port": 1},
     })
     assert get_declared_deployment_mode() == "active-standby"
     assert not get_effective_distributed_redis_active()
