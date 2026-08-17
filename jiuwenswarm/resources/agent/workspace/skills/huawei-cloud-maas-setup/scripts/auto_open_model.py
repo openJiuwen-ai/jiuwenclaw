@@ -9,16 +9,14 @@
 
 本脚本职责：
 - 导航到预置服务页
-- 对每个目标模型：先在"类型"列中确认其为【文本生成】，再点击该行
-  右侧的"开通服务"按钮（逐模型开通，不再是点击任意行的按钮触发批量弹窗）
-- 在开通弹窗中确保目标模型已勾选、勾选同意声明并点击"一键开通"
-- 返回逐个模型的开通结果
+- 搜索第一个目标模型并点击其"开通服务"按钮，打开批量订阅弹窗
+- 在弹窗中一次性勾选所有目标模型，勾选同意声明并点击"一键开通"
+- 已开通的模型记入 ``already_opened``，不重复点击
+- 返回批量开通结果
 
 **关键约束**：
 - **不抛异常给上层**：失败时返回 ``{ok:false, stage:..., error:...}``
 - 仅开通类型为【文本生成】的模型（可通过 --type-filter 调整）
-- 已开通/开通中的模型记入 ``already_opened``，不重复点击
-- 每个模型之间自动清场（关闭残留弹窗 / 刷新页面），避免上次弹窗拦截点击
 - 整个流程 ≤ 90s
 
 用法::
@@ -497,9 +495,15 @@ def auto_open_models(
     type_filter: str = "文本生成",
     timeout_s: int = 90,
 ) -> dict:
-    """逐个开通"文本生成"类型的预置服务模型。"""
+    """批量开通"文本生成"类型的预置服务模型。
+
+    优化策略：只需搜索第一个目标模型并点击其"开通服务"按钮，
+    在弹出的批量订阅弹窗中一次性勾选所有目标模型，然后点击一次"一键开通"。
+    避免逐模型搜索+开通的冗余操作。
+    """
     total = len(models)
-    emit_progress(0, total + 5, "连接浏览器...")
+    steps = total + 5
+    emit_progress(0, steps, "连接浏览器...")
     try:
         pw, browser, page = connect_page(cdp_url, timeout_ms=15_000)
     except Exception as exc:
@@ -511,7 +515,7 @@ def auto_open_models(
     failed: list[dict] = []
     try:
         # 1. 导航到预置服务页
-        emit_progress(1, total + 5, f"导航到 {MAAS_DEPLOYMENT_URL}")
+        emit_progress(1, steps, f"导航到 {MAAS_DEPLOYMENT_URL}")
         try:
             page.goto(MAAS_DEPLOYMENT_URL, wait_until="domcontentloaded",
                       timeout=30_000)
@@ -529,24 +533,12 @@ def auto_open_models(
         # 清理满意度评价等干扰浮层，避免遮挡"开通服务"按钮
         _dismiss_satisfaction_popup(page)
 
-        # 2. 逐模型定位并点击其右侧"开通服务"
-        for idx, model_name in enumerate(models, start=2):
-            emit_progress(idx, total + 5, f"开通 {model_name}…")
-            if idx > 2:
-                # 每个模型之间刷新页面，清掉上一模型的搜索条件/弹窗残留
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=20_000)
-                    if not _wait_table_ready(page):
-                        failed.append({"model": model_name, "error": "刷新后列表未加载"})
-                        continue
-                except Exception as exc:
-                    failed.append({"model": model_name, "error": f"刷新页面失败: {exc}"})
-                    continue
-                # 刷新后满意度评价等浮层可能再次弹出，先清理再定位
-                _dismiss_satisfaction_popup(page)
-
-            # 2.1 定位模型行
-            emit("model", f"定位模型: {model_name}")
+        # 2. 搜索第一个目标模型，点击其"开通服务"按钮打开批量订阅弹窗。
+        #    若第一个模型已开通（无"开通服务"按钮），则依次尝试下一个，
+        #    直到找到可打开的入口或全部已开通/失败。
+        dialog = None
+        for model_name in models:
+            emit("model", f"搜索模型: {model_name}")
             row = _find_model_row(page, model_name)
             if row is None:
                 failed.append({
@@ -555,19 +547,16 @@ def auto_open_models(
                 })
                 continue
 
-            # 2.2 校验类型为【文本生成】
             type_text, status_text = _row_status(row)
             if type_text != type_filter:
                 failed.append({
                     "model": model_name,
-                    "error": f"该服务类型为 {type_text or '未知'}，仅开通{type_filter}，跳过",
+                    "error": f"该服务类型为 {type_text or '未知'}，"
+                             f"仅开通{type_filter}，跳过",
                 })
                 emit("model", f"{model_name} 类型为 {type_text}，跳过")
                 continue
 
-            # 2.3 定位该行右侧"开通服务"按钮
-            #     未开通行显示"开通服务"；已开通/开通中行显示"关闭服务/更多"，
-            #     因此无"开通服务"按钮即视为已开通，记入 already_opened。
             open_btn = _row_open_button(row)
             if open_btn is None:
                 already_opened.append(model_name)
@@ -575,10 +564,11 @@ def auto_open_models(
                      f"{model_name} 无'开通服务'按钮"
                      f"（状态: {status_text or '未知'}），视为已开通")
                 continue
+
+            # 找到可开通的模型，点击"开通服务"打开批量订阅弹窗
+            _dismiss_satisfaction_popup(page)
+            emit("model", f"点击 {model_name} 的'开通服务'")
             try:
-                # 点击前再清理一次满意度浮层，避免遮挡固定右列的"开通服务"按钮
-                _dismiss_satisfaction_popup(page)
-                emit("model", f"点击 {model_name} 的'开通服务'")
                 open_btn.click(timeout=8_000)
                 time.sleep(1.5)  # 等待弹窗出现
             except Exception as exc:
@@ -588,7 +578,6 @@ def auto_open_models(
                 })
                 continue
 
-            # 2.5 等待开通弹窗
             dialog = _wait_for_dialog(page)
             if dialog is None:
                 failed.append({
@@ -596,13 +585,32 @@ def auto_open_models(
                     "error": "等待开通弹窗超时",
                 })
                 continue
+
+            emit("model", f"已通过 {model_name} 打开批量订阅弹窗")
+            break
+
+        # 3. 在批量弹窗中勾选所有待开通模型，然后一次性点击"一键开通"
+        if dialog is not None:
+            emit_progress(2, steps, "在弹窗中批量勾选目标模型…")
             time.sleep(0.8)
 
-            # 2.6 确保模型勾选（批量列表勾选 / 单模型弹窗直接通过）
-            if not _ensure_model_checked(page, dialog, model_name):
-                emit("model", f"警告: 未能在弹窗中勾选 {model_name}，尝试直接开通")
+            # 待开通模型 = 全部模型中尚未标记为已开通/失败的
+            failed_names = {f["model"] for f in failed}
+            pending = [
+                m for m in models
+                if m not in already_opened and m not in failed_names
+            ]
 
-            # 2.7 勾选同意声明并点击"一键开通"
+            # 在弹窗中确保每个待开通模型已勾选
+            checked_models: list[str] = []
+            for model_name in pending:
+                if _ensure_model_checked(page, dialog, model_name):
+                    checked_models.append(model_name)
+                else:
+                    emit("model", f"警告: 未能在弹窗中勾选 {model_name}")
+
+            # 4. 勾选同意声明并点击"一键开通"
+            emit_progress(3, steps, "勾选同意声明并开通…")
             emit("model", "勾选同意声明...")
             if not _ensure_agreement_checked(page):
                 emit("model", "警告: 未能勾选同意声明，'一键开通'可能保持禁用")
@@ -617,64 +625,79 @@ def auto_open_models(
                     while time.time() < deadline_wait and confirm_btn.is_disabled():
                         time.sleep(0.5)
                 if confirm_btn.is_disabled():
-                    failed.append({
-                        "model": model_name,
-                        "error": "'一键开通'按钮禁用：模型未勾选或同意声明未勾选",
-                    })
+                    for model_name in pending:
+                        failed.append({
+                            "model": model_name,
+                            "error": "'一键开通'按钮禁用："
+                                     "模型未勾选或同意声明未勾选",
+                        })
                     _close_dialog(page, dialog)
-                    continue
-                confirm_btn.click()
-                emit("model", "已点击'一键开通'")
+                else:
+                    confirm_btn.click()
+                    emit("model", "已点击'一键开通'")
+
+                    # 5. 等待开通完成（弹窗关闭 / 成功提示）
+                    emit("model", "等待开通完成...")
+                    emit_progress(4, steps, "等待开通完成…")
+                    deadline = time.time() + min(30, timeout_s)
+                    success = False
+                    while time.time() < deadline:
+                        time.sleep(1.5)
+                        try:
+                            if page.locator("#subscribe-button").count() == 0:
+                                success = True
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            if not dialog.is_visible(timeout=1_000):
+                                success = True
+                                break
+                        except Exception:
+                            success = True
+                            break
+                        try:
+                            success_msg = page.locator(
+                                ".ti3-message-success, .ti3-toast-success, "
+                                "text=开通成功, text=开通完成"
+                            ).first
+                            if success_msg.is_visible(timeout=800):
+                                success = True
+                                break
+                        except Exception:
+                            pass
+
+                    if success:
+                        opened.extend(checked_models)
+                        # 未能在弹窗中勾选的模型标记为失败
+                        for model_name in pending:
+                            if model_name not in checked_models:
+                                failed.append({
+                                    "model": model_name,
+                                    "error": "未能在弹窗中找到并勾选该模型",
+                                })
+                        emit("model",
+                             f"批量开通成功: {', '.join(checked_models)}")
+                    else:
+                        for model_name in checked_models:
+                            failed.append({
+                                "model": model_name,
+                                "error": "等待开通完成超时"
+                                         "（弹窗未关闭或未出现成功提示）",
+                            })
+                    _close_dialog(page, dialog)
+                    time.sleep(0.5)
             except Exception as exc:
-                failed.append({
-                    "model": model_name,
-                    "error": f"点击'一键开通'失败: {exc}",
-                })
+                for model_name in pending:
+                    if model_name not in {f["model"] for f in failed}:
+                        failed.append({
+                            "model": model_name,
+                            "error": f"点击'一键开通'失败: {exc}",
+                        })
                 _close_dialog(page, dialog)
-                continue
 
-            # 2.8 等待开通完成（弹窗关闭 / 成功提示）
-            emit("model", "等待开通完成...")
-            per_model_deadline = time.time() + min(30, timeout_s)
-            success = False
-            while time.time() < per_model_deadline:
-                time.sleep(1.5)
-                try:
-                    if page.locator("#subscribe-button").count() == 0:
-                        success = True
-                        break
-                except Exception:
-                    pass
-                try:
-                    if not dialog.is_visible(timeout=1_000):
-                        success = True
-                        break
-                except Exception:
-                    success = True
-                    break
-                try:
-                    success_msg = page.locator(
-                        ".ti3-message-success, .ti3-toast-success, "
-                        "text=开通成功, text=开通完成"
-                    ).first
-                    if success_msg.is_visible(timeout=800):
-                        success = True
-                        break
-                except Exception:
-                    pass
-            if success:
-                opened.append(model_name)
-                emit("model", f"{model_name} 开通成功")
-            else:
-                failed.append({
-                    "model": model_name,
-                    "error": "等待开通完成超时（弹窗未关闭或未出现成功提示）",
-                })
-            _close_dialog(page, dialog)
-            time.sleep(0.5)
-
-        # 3. 汇总
-        emit_progress(total + 2, total + 5, "收集结果...")
+        # 6. 汇总
+        emit_progress(steps - 1, steps, "收集结果...")
         return make_success(
             "open_models",
             cdp_url=cdp_url,

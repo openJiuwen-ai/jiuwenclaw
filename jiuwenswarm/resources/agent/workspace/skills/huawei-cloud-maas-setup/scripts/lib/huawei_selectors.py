@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -91,6 +92,16 @@ MAAS_DEPLOYMENT_URL = (
     "https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/deployment"
 )
 
+# 费用中心首页（登录落地页，兼检测实名认证状态）
+HUAWEI_COST_CENTER_URL = (
+    "https://account.huaweicloud.com/usercenter/?region=cn-southwest-2#/userindex/allview"
+)
+
+# 实名认证页面（个人支付宝认证入口，ask_user 引导链接用）
+HUAWEI_REALNAME_AUTH_URL = (
+    "https://account.huaweicloud.com/usercenter/?locale=zh-cn#/accountindex/realNameAuth"
+)
+
 # ---------------------------------------------------------------------------
 # 预置服务列表（在线推理 -> 预置服务）选择器
 # 页面为 Angular + Ti3/TinyV 组件：ti-grid > ti-table > tbody > tr 行。
@@ -163,6 +174,38 @@ SELECTOR_AUTH_SUCCESS = SelectorSet(
     name="auth_success",
     selectors=[],
     text_patterns=["权限更新成功", "授权成功"],
+)
+
+
+# MaaS 服务声明弹窗（首次访问 MaaS 控制台时出现）。
+# 弹窗含复选框"我已阅读并同意《MaaS 服务声明》"和"确定"按钮，
+# 按钮初始 disabled，勾选复选框后 Angular 移除 disabled 并启用。
+SELECTOR_DISCLAIMER_MODAL = SelectorSet(
+    name="disclaimer_modal",
+    selectors=[
+        "app-disclaimer",
+        ".maas_disclaimer",
+    ],
+    text_patterns=["MaaS 服务声明"],
+)
+
+SELECTOR_DISCLAIMER_CHECKBOX = SelectorSet(
+    name="disclaimer_checkbox",
+    selectors=[
+        "#disclaimer-input",
+        "[data-qa-id='disclaimer-input']",
+        "#disclaimer-input_checkbox",
+        "label.disclaimer-label",
+    ],
+)
+
+SELECTOR_DISCLAIMER_CONFIRM = SelectorSet(
+    name="disclaimer_confirm",
+    selectors=[
+        "#signAgreement",
+        "[data-qa-id='signAgreement']",
+    ],
+    text_patterns=["确定"],
 )
 
 
@@ -274,6 +317,43 @@ SELECTOR_INSUFFICIENT_BALANCE = SelectorSet(
 )
 
 
+# 未实名认证错误提示（创建 Key 失败时检测）。
+# 华为云在账号未完成实名认证时创建 API Key，会弹出全局错误消息
+# "Cloud services require real-name authentication."。
+# 该消息出现在 ti-global-message 组件（与 ti3-message 不同的 Tiny3 组件）。
+SELECTOR_REALNAME_REQUIRED = SelectorSet(
+    name="realname_required",
+    selectors=[
+        ".ti-global-message-container-error",
+        ".ti3-message-error",
+        ".ti3-alert-error",
+    ],
+    text_patterns=[
+        "real-name authentication",
+        "Cloud services require real-name",
+        "实名认证",
+    ],
+)
+
+
+# 费用中心引导弹窗（"费用总览全面升级"等 ti-guide-modal）。
+# 关闭方式：点击关闭按钮或"我已了解"按钮。
+# 选择器按优先级排列：先试专属 id（最稳定），再试通用 class。
+SELECTOR_GUIDE_MODAL_CLOSE = SelectorSet(
+    name="guide_modal_close",
+    selectors=[
+        "#guide-allview-hc-new_3.0_close",
+        "ti-guide-modal .ti3-modal-close",
+        "ti-guide-modal #start-to-learn",
+        ".ti3-modal ti-modal-header + .ti3-modal-close",
+    ],
+    text_patterns=[
+        "我已了解",
+        "知道了",
+    ],
+)
+
+
 # ---------------------------------------------------------------------------
 # 高层操作函数
 # ---------------------------------------------------------------------------
@@ -378,3 +458,141 @@ def click_copy_key_button(page: Page) -> bool:
         return True
     except Exception:
         return False
+
+
+def handle_disclaimer(page: Page) -> bool:
+    """检测并处理 MaaS 服务声明弹窗（首次访问时出现）。
+
+    如果弹窗存在：勾选"我已阅读并同意《MaaS 服务声明》"复选框 →
+    等待"确定"按钮启用 → 点击"确定" → 等待弹窗关闭。
+    返回 True 表示处理了弹窗，False 表示无弹窗或处理失败。
+
+    Ti3 自定义 checkbox 结构：``input#disclaimer-input``（真实 checkbox）+
+    ``label#disclaimer-input_checkbox``（可见皮肤，for=disclaimer-input）+
+    ``label.disclaimer-label``（文案 label，for=disclaimer-input）。
+    优先点 checkbox skin label 触发 toggle，与 auto_open_model 的
+    ``_ensure_agreement_checked`` 保持一致的勾选策略。
+    """
+    # 轮询检测弹窗（SPA 异步渲染可能比上游 sleep 稍慢，最多再等 ~3s）
+    modal = None
+    for _ in range(6):
+        modal = SELECTOR_DISCLAIMER_MODAL.first_visible(page, timeout_ms=500)
+        if modal is not None:
+            break
+        time.sleep(0.5)
+    if modal is None:
+        return False
+
+    emit("disclaimer", "检测到 MaaS 服务声明弹窗，自动同意")
+
+    # 1. 勾选复选框
+    try:
+        inp = page.locator("#disclaimer-input").first
+        if not inp.is_checked():
+            # 优先点 checkbox skin label（#disclaimer-input_checkbox）
+            label = page.locator("#disclaimer-input_checkbox").first
+            if label.count() > 0 and label.is_visible(timeout=1_000):
+                label.click(timeout=3_000)
+            else:
+                # 兜底：点 disclaimer-label 或直接 check input
+                try:
+                    page.locator("label.disclaimer-label").first.click(timeout=2_000)
+                except Exception:
+                    inp.check(timeout=3_000)
+            time.sleep(0.5)
+    except Exception as exc:
+        emit("disclaimer", f"勾选复选框失败: {exc}")
+        return False
+
+    # 2. 等待"确定"按钮启用（勾选后 Angular 移除 disabled 属性）
+    try:
+        btn = page.locator("#signAgreement").first
+        btn.wait_for(state="visible", timeout=3_000)
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if btn.is_enabled():
+                break
+            time.sleep(0.3)
+        if not btn.is_enabled():
+            emit("disclaimer", "'确定'按钮仍为禁用态，可能复选框未生效")
+            return False
+        btn.click(timeout=3_000)
+        emit("disclaimer", "已点击'确定'，服务声明处理完成")
+        time.sleep(1.0)  # 等待弹窗关闭、页面重新渲染
+        return True
+    except Exception as exc:
+        emit("disclaimer", f"点击'确定'按钮失败: {exc}")
+        return False
+
+
+def dismiss_popups(page: Page, max_rounds: int = 3) -> int:
+    """关闭干扰弹窗（费用中心引导弹窗等）。返回关闭的弹窗数量。
+
+    费用中心等页面加载后会弹出 ti-guide-modal（"费用总览全面升级"），
+    对自动化流程有干扰（遮挡页面元素、误触发点击）。
+    本函数轮询检测并关闭这类弹窗，最多关闭 max_rounds 个。
+    """
+    closed = 0
+    for _ in range(max_rounds):
+        loc = SELECTOR_GUIDE_MODAL_CLOSE.first_visible(page, timeout_ms=500)
+        if loc is None:
+            break
+        try:
+            loc.click()
+            closed += 1
+            emit("popup", f"已关闭引导弹窗（第 {closed} 个）")
+            time.sleep(0.3)
+        except Exception as exc:
+            emit("popup", f"关闭弹窗失败: {exc}")
+            break
+    return closed
+
+
+def detect_realname_status(page: Page, timeout_ms: int = 5_000) -> bool:
+    """检测华为云账号是否已完成实名认证。返回 True 表示已认证。
+
+    两级检测策略：
+    1. JS 变量（主）：读取 ``window.myRoleTags``，若含 ``op_restricted``
+       或 ``op_unverified`` 则未认证。最稳定，不受文案/DOM 布局变化影响。
+    2. DOM 提醒条（备）：费用中心页头 ``#cf_header_reminder_container``
+       若含"实名认证"文案则未认证。JS 变量不可用时的兜底。
+    """
+    import time as _time
+
+    deadline = _time.time() + timeout_ms / 1000
+    while _time.time() < deadline:
+        # 策略 1：JS 变量
+        try:
+            tags = page.evaluate("window.myRoleTags || []")
+            if isinstance(tags, list) and tags:
+                is_restricted = any(
+                    t in tags for t in ("op_restricted", "op_unverified")
+                )
+                if is_restricted:
+                    emit("realname", f"myRoleTags={tags} → 未实名认证")
+                    return False
+                # tags 存在且不含 restricted/unverified → 已认证
+                emit("realname", f"myRoleTags={tags} → 已实名认证")
+                return True
+        except Exception:
+            pass
+
+        # 策略 2：DOM 提醒条（JS 变量尚未就绪时的兜底）
+        try:
+            reminder = page.locator("#cf_header_reminder_container").first
+            if reminder.count() > 0:
+                text = reminder.inner_text(timeout=500) or ""
+                if "实名认证" in text:
+                    emit("realname", "DOM 提醒条含'实名认证' → 未实名认证")
+                    return False
+                # 提醒条存在但不含实名认证关键词 → 可能已认证
+                if text.strip():
+                    emit("realname", f"DOM 提醒条不含'实名认证' → 可能已认证")
+                    return True
+        except Exception:
+            pass
+
+        _time.sleep(0.5)
+
+    emit("realname", "超时未能检测实名认证状态，视为未认证（兜底）")
+    return False

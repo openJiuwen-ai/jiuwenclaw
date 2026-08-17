@@ -14,6 +14,9 @@
 | MaaS 控制台首页 | https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/homepage |
 | API Key 管理页面 | https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/authmanage |
 | 在线推理（预置服务） | https://console.huaweicloud.com/modelarts/?region=cn-southwest-2#/model-studio/deployment |
+| 实名认证（个人支付宝） | https://account.huaweicloud.com/usercenter/?locale=zh-cn#/accountindex/realNameAuth |
+| 费用中心首页（登录落地页） | https://account.huaweicloud.com/usercenter/?region=cn-southwest-2#/userindex/allview |
+| 账户充值 | https://account.huaweicloud.com/usercenter/#/accountindex/balance |
 
 > 以上 URL 均指定 `cn-southwest-2`（西南-贵阳一）区域，MaaS 预置服务仅支持该区域。
 

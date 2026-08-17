@@ -50,6 +50,7 @@ from lib.huawei_selectors import (  # noqa: E402
     SELECTOR_AUTH_WARNING,
     click_first_visible,
     click_wait_first,
+    handle_disclaimer,
 )
 
 # 授权警告关键词（命中任一即认为有未完成授权）
@@ -112,6 +113,13 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
         # 2. 等待 SPA 渲染并检测授权警告（快速判定）
         emit_progress(2, 5, "检测授权警告...")
         time.sleep(2.5)  # 等 SPA 子视图渲染完成再判定，避免空容器误判
+
+        # 2.5 处理 MaaS 服务声明弹窗（首次访问时出现，会遮挡页面）
+        disclaimer_handled = handle_disclaimer(page)
+        if disclaimer_handled:
+            # 弹窗关闭后等待页面重新渲染
+            time.sleep(1.5)
+
         if not _detect_auth_warning(page):
             emit("auth", "未发现授权警告，视为已授权")
             emit_progress(5, 5, "已授权")
@@ -120,6 +128,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
                 cdp_url=cdp_url,
                 auth_done=False,
                 skipped_reason="no_warning",
+                disclaimer_handled=disclaimer_handled,
             )
 
         # 3. 点击"此处"链接
@@ -191,6 +200,7 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
             cdp_url=cdp_url,
             auth_done=True,
             skipped_reason=None,
+            disclaimer_handled=disclaimer_handled,
         )
     except Exception as exc:
         return make_failure("exception", f"未预期错误: {exc}", cdp_url=cdp_url)

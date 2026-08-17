@@ -949,7 +949,7 @@
       "teamPersona": "Role persona and responsibilities; shapes behavior and division of labor.",
       "teamPromptHint": "Extra prompt fragment injected into this member's system prompt.",
       "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration.",
-      "enableFreeModels": "When enabled, available free models are fetched live. Note that free models may have limitations such as rate limits or restricted context window size."
+      "enableFreeModels": "When enabled, available free models are fetched live. Note that free models may have limitations such as rate limits or restricted context window size. Free models are sourced from the Opencode Zen gateway (https://opencode.ai/zen), obtained by intersecting the models.dev catalog (https://models.opencode.ai/api.json) with the Zen live model list (criterion: input price is 0)."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",

@@ -949,7 +949,7 @@
       "teamPersona": "角色人设与职责描述，影响该成员的行为风格与分工。",
       "teamPromptHint": "额外提示词片段，会注入该成员的系统提示中。",
       "teamAgentKey": "绑定到「多 Agent 配置」中已有 Agent 的名称（name）。",
-      "enableFreeModels": "开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。"
+      "enableFreeModels": "开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。免费模型来源于 Opencode Zen 网关（https://opencode.ai/zen），由 models.dev 目录（https://models.opencode.ai/api.json）与 Zen 实时模型列表取交集得到（判定标准：输入价格为 0）。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",

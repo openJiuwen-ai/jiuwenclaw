@@ -262,17 +262,15 @@ export function ModelSetupGuide({
               </span>
             </button>
           </div>
-          {manual ? (
-            <button
-              type="button"
-              className="model-setup-guide__skip"
-              onClick={onSkip}
-              aria-label={t('modelSetupGuide.skip')}
-              title={t('modelSetupGuide.skip')}
-            >
-              {t('modelSetupGuide.skip')}
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className="model-setup-guide__skip"
+            onClick={onSkip}
+            aria-label={t('modelSetupGuide.skip')}
+            title={t('modelSetupGuide.skip')}
+          >
+            {t('modelSetupGuide.skip')}
+          </button>
         </section>
       </div>,
       document.body

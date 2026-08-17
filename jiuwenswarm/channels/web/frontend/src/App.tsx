@@ -2177,7 +2177,18 @@ function AppContent() {
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
     setModelSetupGuideManual(false);
-  }, []);
+
+    void request('config.set', { setup_guide_enabled: 'false' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'false',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to disable setup guide:', error);
+      });
+  }, [request]);
 
   const quickSetupModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);

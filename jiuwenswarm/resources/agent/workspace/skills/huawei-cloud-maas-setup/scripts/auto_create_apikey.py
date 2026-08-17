@@ -10,7 +10,7 @@
 本脚本职责：
 - 导航到 API Key 管理页
 - 点击"创建 API Key"按钮
-- 正确填写表单：标签 + 描述 + 权限设置（保持默认）
+- 正确填写表单：标签 + 描述 + 权限设置（选择"全部"）
 - 提交后检测是否欠费，如欠费返回 ``stage=insufficient_balance``
 - 从结果弹窗提取完整 Key（仅显示一次）
 - 关闭弹窗
@@ -49,6 +49,7 @@ from lib.cdp_client import (  # noqa: E402
 )
 from lib.flow_state import make_failure, make_success  # noqa: E402
 from lib.huawei_selectors import (  # noqa: E402
+    HUAWEI_REALNAME_AUTH_URL,
     MAAS_APIKEY_URL,
     SELECTOR_APIKEY_CONFIRM,
     SELECTOR_APIKEY_DESC_INPUT,
@@ -58,6 +59,7 @@ from lib.huawei_selectors import (  # noqa: E402
     SELECTOR_APIKEY_TAG_INPUT,
     SELECTOR_CREATE_APIKEY_BTN,
     SELECTOR_INSUFFICIENT_BALANCE,
+    SELECTOR_REALNAME_REQUIRED,
     click_copy_key_button,
     click_wait_first,
     extract_api_key_from_dialog,
@@ -111,6 +113,85 @@ def _detect_insufficient_balance(page, timeout_ms: int = 3_000,
     return False
 
 
+def _detect_realname_required(page, timeout_ms: int = 3_000,
+                              include_body: bool = True) -> bool:
+    """检测页面是否出现未实名认证的错误提示。
+
+    在点击"确定"创建 Key 后调用，如果出现错误提示且含实名认证关键词，
+    返回 True 表示用户需要先完成实名认证。
+    """
+    error_el = SELECTOR_REALNAME_REQUIRED.first_visible(page, timeout_ms=timeout_ms)
+    if error_el is not None:
+        try:
+            error_text = error_el.inner_text(timeout=1_000) or ""
+            for keyword in ("real-name authentication", "Cloud services require",
+                            "实名认证"):
+                if keyword in error_text:
+                    emit("apikey", f"检测到未实名认证提示: {error_text[:100]}")
+                    return True
+        except Exception:
+            pass
+    if include_body:
+        try:
+            body_text = page.locator("body").inner_text(timeout=2_000) or ""
+            for keyword in ("real-name authentication",
+                            "Cloud services require real-name", "实名认证"):
+                if keyword in body_text:
+                    emit("apikey", f"页面文本中检测到未实名认证关键词: {keyword}")
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _select_permission_all(page) -> bool:
+    """选择 API Key 权限范围为"全部"。
+
+    华为云客服建议：权限范围选择"全部"便于访问全部模型。
+    权限字段可能是下拉选择（Ti3 select）或单选按钮组，尝试多种方式选择"全部"。
+    失败时返回 False，由调用方决定是否降级。
+    """
+    # 策略1：弹窗内直接查找"全部"可点击元素（单选按钮或已展开的选项）
+    for sel in (
+        ".ti3-modal [class*='radio']:has-text('全部')",
+        ".ti3-modal label:has-text('全部')",
+        ".ti3-modal [class*='option']:has-text('全部')",
+    ):
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible():
+                loc.click(timeout=2_000)
+                emit("apikey", "已选择权限范围: 全部")
+                return True
+        except Exception:
+            continue
+
+    # 策略2：点击权限下拉框触发器，打开选项面板后再选"全部"
+    permission = SELECTOR_APIKEY_PERMISSION.first_visible(page, timeout_ms=1_000)
+    if permission is not None:
+        try:
+            permission.click(timeout=2_000)
+            time.sleep(0.5)
+            # Ti3 select 下拉面板可能挂载在 body 下（不在 .ti3-modal 内）
+            for sel in (
+                "[class*='select-option']:has-text('全部')",
+                "[class*='select-panel'] li:has-text('全部')",
+                "ti3-select-option:has-text('全部')",
+            ):
+                try:
+                    loc = page.locator(sel).first
+                    if loc.is_visible():
+                        loc.click(timeout=2_000)
+                        emit("apikey", "已通过下拉选择权限范围: 全部")
+                        return True
+                except Exception:
+                    continue
+        except Exception as exc:
+            emit("apikey", f"点击权限下拉框失败: {exc}")
+
+    return False
+
+
 def _page_text_preview(page, max_chars: int = 1500) -> str:
     """截取当前页面可读文本，用于失败时返回 DOM 线索以便定位。"""
     try:
@@ -131,7 +212,7 @@ def auto_create_apikey(
     表单字段：
     - 标签（tag）：1-100 字符，支持大小写英文字母、数字、下划线、中划线
     - 描述（description）：自由文本
-    - 权限设置（permission）：保持默认，不主动操作
+    - 权限设置（permission）：选择"全部"权限范围，便于访问全部模型
 
     为避免标签重复导致创建失败，会自动在 ``tag`` 和 ``description`` 末尾
     追加日期时间后缀（如 ``-20250816_153045``）。
@@ -202,13 +283,10 @@ def auto_create_apikey(
             except Exception as exc:
                 emit("apikey", f"填写描述失败（可忽略）: {exc}")
 
-        # 5. 权限设置（第三个字段，保持默认不操作）
-        # 仅检测是否存在，不做任何操作
-        permission = SELECTOR_APIKEY_PERMISSION.first_visible(page, timeout_ms=1_000)
-        if permission is not None:
-            emit("apikey", "检测到权限设置字段，保持默认值")
-        else:
-            emit("apikey", "未检测到权限设置字段（可能已隐藏）")
+        # 5. 权限设置：选择"全部"权限范围
+        # 华为云客服建议：权限范围选择"全部"便于访问全部模型
+        if not _select_permission_all(page):
+            emit("apikey", "未能选择'全部'权限范围，保持默认值（如默认为全部则无影响）")
 
         # 6. 点击"确定"提交
         emit_progress(5, 7, "提交创建...")
@@ -230,7 +308,7 @@ def auto_create_apikey(
             if SELECTOR_APIKEY_DIALOG.first_visible(page, timeout_ms=500) is not None:
                 dialog_ok = True
                 break
-            # 7b. 每次轮询顺带检测欠费提示（轮询时跳过整页文本扫描）
+            # 7b. 每次轮询顺带检测欠费提示和未实名认证提示（跳过整页文本扫描）
             if _detect_insufficient_balance(page, timeout_ms=500,
                                              include_body=False):
                 return make_failure(
@@ -238,6 +316,14 @@ def auto_create_apikey(
                     "账户余额不足，请先充值后再创建 API Key",
                     cdp_url=cdp_url,
                     recharge_url="https://account.huaweicloud.com/usercenter/#/accountindex/balance",
+                )
+            if _detect_realname_required(page, timeout_ms=500,
+                                          include_body=False):
+                return make_failure(
+                    "realname_required",
+                    "账号未完成实名认证，请先完成实名认证后再创建 API Key",
+                    cdp_url=cdp_url,
+                    realname_url=HUAWEI_REALNAME_AUTH_URL,
                 )
             time.sleep(0.5)
 
