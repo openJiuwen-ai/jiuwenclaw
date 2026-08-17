@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.harness.security.patterns import (
+from openjiuwen.harness.security.toolguard.patterns import (
     merge_permission_allow_rule_into_permissions,
 )
 
@@ -116,7 +116,7 @@ def _merge_file_guard_path_into_permissions(
     优先调用 agent-core ``merge_file_guard_path_rule``；不可用时本地写入。
     """
     try:
-        from openjiuwen.harness.security.patterns import merge_file_guard_path_rule
+        from openjiuwen.harness.security.toolguard.patterns import merge_file_guard_path_rule
 
         merged, wrote = merge_file_guard_path_rule(
             permissions, path_norm, read=read, write=write, exec_=exec_,
@@ -218,7 +218,7 @@ def persist_external_directory_allow(
         return
 
     try:
-        from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
+        from openjiuwen.harness.security.toolguard.patterns import merge_file_guard_access_allows
 
         data, yaml_path = _load_config_yaml_round_trip()
         permissions = _ensure_permissions_dict(data)

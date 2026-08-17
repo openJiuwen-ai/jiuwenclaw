@@ -110,7 +110,7 @@ async def check_avatar_permission(
     Returns:
         "allow" 或 "deny"
     """
-    from openjiuwen.harness.security.core import PermissionEngine as OJPermissionEngine
+    from openjiuwen.harness.security.engine import PermissionEngine as OJPermissionEngine
     from openjiuwen.harness.security.models import PermissionLevel as OJPermissionLevel
     from jiuwenswarm.common.config import get_config
     from jiuwenswarm.common.utils import get_workspace_dir
@@ -209,7 +209,7 @@ def _resolve_owner_scope_level(
 def _match_args(pattern: str, tool_args: dict[str, Any]) -> bool:
     """简化的参数模式匹配（复用 openjiuwen harness patterns）。"""
     try:
-        from openjiuwen.harness.security.patterns import (
+        from openjiuwen.harness.security.toolguard.patterns import (
             match_command,
             match_path,
             match_wildcard as match_pattern,

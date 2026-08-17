@@ -225,6 +225,7 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     TOOL_PERMISSION_CHANNEL_ID,
+    TOOL_PERMISSION_SESSION_ID,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
@@ -4784,8 +4785,8 @@ class JiuWenSwarmDeepAdapter:
     def _resolve_sys_operation(self) -> SysOperation | None:
         """Create a sys operation.
 
-        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
-        ``sandbox.url`` / ``sandbox.type`` 已配置）。其他 sandbox 字段
+        是否走沙箱由产品 ``sandbox_intent``（三档 compose）× 用户 ``sandbox.enabled``
+        × jiuwenbox 是否可用（url/type）共同决定，见 ``resolve_sysop_placement``。
         (``excluded_commands`` / ``files`` / ``idle_ttl_seconds`` /
         ``idle_check_interval``) 透传给 ``create_sandbox_sysop_card``,
         分别写入 ``launcher_config.extra_params`` 与 ``launcher_config`` 上
@@ -4798,12 +4799,30 @@ class JiuWenSwarmDeepAdapter:
         供 ``apply_sandbox_runtime_patch`` 等运行时热更使用。
         """
         try:
+            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+                get_sandbox_intent,
+                resolve_sysop_placement,
+            )
+
             endpoint = get_sandbox_endpoint()
             sandbox_url = endpoint.get("url") or None
             sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
+            user_enabled = bool(runtime.get("enabled"))
+            available = bool(sandbox_url and sandbox_type)
+            intent = get_sandbox_intent()
+            resolve, warning = resolve_sysop_placement(
+                intent,
+                enabled=user_enabled,
+                available=available,
+            )
+            if warning:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
+                    "Fail-Open to HOST (sandbox.url/type missing or incomplete)"
+                )
             sysop_card: SysOperationCard | None
-            if runtime.get("enabled") and sandbox_url and sandbox_type:
+            if resolve == "sandbox":
                 # 走 ``self.`` 而不是 ``JiuWenSwarmDeepAdapter.``——_create_sandbox_
                 # sys_operation 已从 staticmethod 改成 instance method (要透传
                 # ``self._is_code_agent``), 用类名直接调会绕过 MRO 把 Code 子类
@@ -6161,11 +6180,21 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
-        permission_config = config_base.get("permissions", {}) if config_base else {}
+        from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+            compose_host_effective_permissions,
+        )
+
+        raw = config_base.get("permissions", {}) if config_base else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        baked = compose_host_effective_permissions(
+            session_id=TOOL_PERMISSION_SESSION_ID.get() or None,
+            global_permissions=raw,
+        )
         if self._permission_rail is not None:
-            self._permission_rail.update_config(permission_config)
+            self._permission_rail.update_config(baked)
             logger.info("[JiuWenSwarmDeepAdapter] _permission_rail config hot-updated")
-        elif permission_config.get("enabled", False):
+        elif baked.get("enabled", False):
             self._permission_rail = build_permission_rail(
                 config=config_base,
                 llm=self._model,
@@ -7442,6 +7471,14 @@ class JiuWenSwarmDeepAdapter:
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = workspace_root
         init_cwd(runtime_cwd, project_root=workspace_root, workspace=workspace_root)
+        from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+            PERMISSION_TASK_WORKSPACE,
+        )
+
+        try:
+            PERMISSION_TASK_WORKSPACE.set(str(Path(workspace_root).expanduser().resolve()))
+        except (OSError, RuntimeError):
+            PERMISSION_TASK_WORKSPACE.set(workspace_root)
 
     @dataclass
     class _RuntimeConfig:
@@ -10008,6 +10045,7 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
@@ -10175,6 +10213,7 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -10299,6 +10338,7 @@ class JiuWenSwarmDeepAdapter:
             # the long-lived team stream task keeps the values this request set
             # even after the resets below run at request end.
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
             token_perm = setup_permission_context(request)
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
@@ -10327,6 +10367,7 @@ class JiuWenSwarmDeepAdapter:
 
                 reset_current_multimodal_image_files(image_files_token)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                TOOL_PERMISSION_SESSION_ID.reset(token_sid)
                 cleanup_permission_context(token_perm)
             return
 
@@ -10592,6 +10633,7 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+        token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -11330,6 +11372,7 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+            TOOL_PERMISSION_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)

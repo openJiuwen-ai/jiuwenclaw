@@ -16,6 +16,22 @@ TOOL_PERMISSION_CHANNEL_ID: contextvars.ContextVar[str] = contextvars.ContextVar
     default="",
 )
 
+# 当前会话 id（供 session_permissions.yaml 落盘）；由接口层在 run_agent 前 set。
+TOOL_PERMISSION_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "jiuwenswarm_tool_permission_session_id",
+    default="",
+)
 
-__all__ = ["TOOL_PERMISSION_CHANNEL_ID"]
+# 当前任务 workspace（file_guard 区内路径）。由 ``_seed_runtime_cwd`` 写入，
+# 与 DeepAgent ``get_workspace()``（artifact 根）刻意分开。
+PERMISSION_TASK_WORKSPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "jiuwenswarm_permission_task_workspace",
+    default="",
+)
 
+
+__all__ = [
+    "PERMISSION_TASK_WORKSPACE",
+    "TOOL_PERMISSION_CHANNEL_ID",
+    "TOOL_PERMISSION_SESSION_ID",
+]

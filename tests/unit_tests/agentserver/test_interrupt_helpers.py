@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,11 @@ import pytest
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
+    resolve_permission_workspace_dir,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    PERMISSION_TASK_WORKSPACE,
+    TOOL_PERMISSION_SESSION_ID,
 )
 
 
@@ -207,3 +213,163 @@ def test_build_multi_questions_appends_other_for_valid_options():
     )
 
     assert [opt["label"] for opt in questions[0]["options"]] == ["A", "B", "Other"]
+
+
+def _patch_agent_workspace(monkeypatch, agent_ws: Path) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_workspace_dir",
+        lambda: agent_ws,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_agent_workspace_dir",
+        lambda: agent_ws,
+    )
+
+
+def test_permission_workspace_uses_session_dir_when_cwd_is_artifact(tmp_path, monkeypatch):
+    """CwdState 被 DeepAgent 写成 artifact 根时，回退到会话任务目录而不是放行父目录。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
+
+    agent_ws = tmp_path / "workspace"
+    project = agent_ws / "projects" / "web_xxx"
+    project.mkdir(parents=True)
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    monkeypatch.setattr(
+        "jiuwenswarm.common.utils.get_default_project_session_workspace_dir",
+        lambda session_id=None: project,
+    )
+    token = _cwd_state.set(None)
+    perm_token = PERMISSION_TASK_WORKSPACE.set("")
+    try:
+        init_cwd(str(agent_ws), project_root=str(agent_ws), workspace=str(agent_ws))
+        sid = TOOL_PERMISSION_SESSION_ID.set("web_xxx")
+        try:
+            resolved = resolve_permission_workspace_dir()
+            assert resolved == project.resolve()
+        finally:
+            TOOL_PERMISSION_SESSION_ID.reset(sid)
+    finally:
+        PERMISSION_TASK_WORKSPACE.reset(perm_token)
+        _cwd_state.reset(token)
+
+
+def test_permission_host_uses_runtime_workspace_not_agent_root(tmp_path, monkeypatch):
+    """file_guard workspace 应是当前任务目录，而不是 ~/.jiuwenswarm/agent/workspace。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
+
+    agent_ws = tmp_path / "workspace"
+    project = agent_ws / "projects" / "web_xxx"
+    project.mkdir(parents=True)
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    token = _cwd_state.set(None)
+    perm_token = PERMISSION_TASK_WORKSPACE.set("")
+    try:
+        init_cwd(str(project), project_root=str(project), workspace=str(project))
+        rail = build_permission_rail({"permissions": {"enabled": True, "mode": "auto"}})
+        assert rail is not None
+        resolved = Path(rail._host.resolve_workspace_dir()).resolve()
+        assert resolved == project.resolve()
+        assert resolved != agent_ws.resolve()
+    finally:
+        PERMISSION_TASK_WORKSPACE.reset(perm_token)
+        _cwd_state.reset(token)
+
+
+def test_permission_workspace_ignores_deepagent_artifact_root(tmp_path, monkeypatch):
+    """DeepAgent 的 get_workspace() 是 artifact 根，file_guard 应改用任务 project_root。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
+
+    agent_ws = tmp_path / "workspace"
+    project = agent_ws / "projects" / "web_xxx"
+    project.mkdir(parents=True)
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    token = _cwd_state.set(None)
+    perm_token = PERMISSION_TASK_WORKSPACE.set("")
+    try:
+        init_cwd(str(project), project_root=str(project), workspace=str(agent_ws))
+        resolved = resolve_permission_workspace_dir()
+        assert resolved is not None
+        assert resolved == project.resolve()
+        assert resolved != agent_ws.resolve()
+    finally:
+        PERMISSION_TASK_WORKSPACE.reset(perm_token)
+        _cwd_state.reset(token)
+
+
+def test_permission_workspace_ignores_leaked_seed_from_other_adapter(tmp_path, monkeypatch):
+    """上一轮 adapter 留下的 PERMISSION_TASK_WORKSPACE 不得盖住本轮 CwdState。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
+
+    agent_ws = tmp_path / "workspace"
+    project = agent_ws / "projects" / "web_xxx"
+    leaked = tmp_path / "fallback_project_workspace"
+    project.mkdir(parents=True)
+    leaked.mkdir(parents=True)
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    token = _cwd_state.set(None)
+    perm_token = PERMISSION_TASK_WORKSPACE.set(str(leaked))
+    try:
+        init_cwd(str(project), project_root=str(project), workspace=str(project))
+        resolved = resolve_permission_workspace_dir()
+        assert resolved == project.resolve()
+        assert resolved != leaked.resolve()
+    finally:
+        PERMISSION_TASK_WORKSPACE.reset(perm_token)
+        _cwd_state.reset(token)
+
+
+def test_permission_workspace_does_not_fallback_to_agent_root(tmp_path, monkeypatch):
+    """CwdState 缺失时不得把 agent 数据根当成 file_guard workspace。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state
+
+    agent_ws = tmp_path / "workspace"
+    agent_ws.mkdir()
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    token = _cwd_state.set(None)
+    perm_token = PERMISSION_TASK_WORKSPACE.set("")
+    session_token = TOOL_PERMISSION_SESSION_ID.set("")
+    try:
+        resolved = resolve_permission_workspace_dir()
+        assert resolved is None or resolved != agent_ws.resolve()
+    finally:
+        TOOL_PERMISSION_SESSION_ID.reset(session_token)
+        PERMISSION_TASK_WORKSPACE.reset(perm_token)
+        _cwd_state.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_permission_sync_does_not_clobber_task_workspace_when_cwd_missing(
+    tmp_path, monkeypatch
+):
+    """check 时 ContextVar 丢失，不得用 agent 根覆盖已经绑好的任务目录。"""
+    from openjiuwen.core.sys_operation.cwd import _cwd_state, init_cwd
+    from openjiuwen.harness.security.models import PermissionLevel
+
+    agent_ws = tmp_path / "workspace"
+    project = agent_ws / "projects" / "web_xxx"
+    project.mkdir(parents=True)
+    leak = agent_ws / "test1.txt"
+    _patch_agent_workspace(monkeypatch, agent_ws)
+    token = _cwd_state.set(None)
+    try:
+        init_cwd(str(project), project_root=str(project), workspace=str(project))
+        rail = build_permission_rail({"permissions": {"enabled": True, "mode": "auto"}})
+        assert rail is not None
+        lost = _cwd_state.set(None)
+        lost_perm = PERMISSION_TASK_WORKSPACE.set("")
+        lost_sid = TOOL_PERMISSION_SESSION_ID.set("")
+        try:
+            sync = getattr(rail, "_sync_workspace_root_from_host", None)
+            if callable(sync):
+                sync()
+            result = await rail._engine.check_permission(
+                "write_file",
+                {"file_path": str(leak), "content": "3234"},
+            )
+            assert result.permission == PermissionLevel.ASK
+        finally:
+            TOOL_PERMISSION_SESSION_ID.reset(lost_sid)
+            PERMISSION_TASK_WORKSPACE.reset(lost_perm)
+            _cwd_state.reset(lost)
+    finally:
+        _cwd_state.reset(token)
