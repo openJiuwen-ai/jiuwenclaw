@@ -36,6 +36,8 @@ import {
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
 import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
+import { LoginPage } from './features/auth/LoginPage';
+import { LogoutButton } from './features/auth/LogoutButton';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -2774,4 +2776,61 @@ function App() {
   );
 }
 
-export default App;
+/**
+ * 鉴权外壳: 进入前探测 cookie 是否携带有效 access_token + 是否一体机模式。
+ * - GET /api/web-config: 本地端点, 拿 {remote: bool}(一体机模式 → 显示登出按钮)
+ * - GET /auth-api/v1/auth/permissions (同源, 浏览器自动带 HttpOnly cookie)
+ *   - 200 -> 已登录, 渲染主 App (+ 一体机模式时浮 LogoutButton)
+ *   - 401/其他 -> 未登录, 渲染 LoginPage
+ * control-panel 只认 Authorization: Bearer, app_web.py 的 _proxy_auth_http
+ * 会从 jw_token cookie 取 token 注入头, 故前端只需同源请求。
+ */
+function AppWithAuth() {
+  const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn'>('checking');
+  const [remote, setRemote] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    // 并行: 一体机模式标志(本地端点, 永远 200) + 登录态探测
+    fetch('/api/web-config', { credentials: 'same-origin' })
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (!cancelled && cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
+      })
+      .catch(() => {});
+    fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
+      .then((resp) => {
+        if (cancelled) return;
+        if (resp.ok) {
+          setAuthStatus('loggedIn');
+        } else {
+          setAuthStatus('loggedOut');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAuthStatus('loggedOut');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authStatus === 'checking') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+        <div className="text-slate-400 text-sm">Loading…</div>
+      </div>
+    );
+  }
+  if (authStatus === 'loggedOut') {
+    return <LoginPage />;
+  }
+  return (
+    <>
+      {remote && <LogoutButton />}
+      <App />
+    </>
+  );
+}
+
+export default AppWithAuth;
