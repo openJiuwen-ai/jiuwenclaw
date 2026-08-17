@@ -269,7 +269,8 @@ class ModelRoutingRail(DeepAgentRail):
             and recommended_cap.model is not None
         ):
             try:
-                ctx.agent.set_llm(recommended_cap.model)
+                react_agent = _resolve_react_agent(ctx.agent)
+                react_agent.set_llm(recommended_cap.model)
                 # 记下实际切到的 cap，供 after_model_call 按 client_id 记 token（同模型多 API 场景）
                 if isinstance(ctx.extra, dict):
                     ctx.extra["_model_routing_used_cap"] = recommended_cap
@@ -278,25 +279,39 @@ class ModelRoutingRail(DeepAgentRail):
                     or recommended_cap.model_name
                 )
                 if mname:
-                    cfg = getattr(ctx.agent, "_config", None) or getattr(ctx.agent, "config", None)
+                    # Sync inner ReActAgent config
+                    cfg = getattr(react_agent, "_config", None) or getattr(react_agent, "config", None)
                     if cfg is not None:
                         try:
                             setattr(cfg, "model_name", mname)
-                            # 同步 api_base/api_key/client_provider + model_config，
-                            # 否则 railed model call 用路由后的 model_name 但 model_client_config
-                            # 还是前端的 → 打到前端端点 → 返回前端模型名（set_llm 只设 _llm 不够）
                             setattr(cfg, "model_client_config", recommended_cap.model.model_client_config)
                             setattr(cfg, "model_config_obj", recommended_cap.model.model_config)
                         except Exception as exc:
-                            logger.debug("[ModelRouting] setattr config failed: %s", exc)
-                    # 补 set_llm 不更新 agent.model_name 的缺口：set_llm 只装 _llm，
-                    # 不碰 model_name；这里同步成路由后的名字，让 RuntimePromptRail 的
-                    # "当前模型"段读到实时模型（而非 runtime_state 的旧值）
+                            logger.debug("[ModelRouting] setattr inner config failed: %s", exc)
+                    # Sync outer DeepAgent config too (if ctx.agent is the wrapper)
+                    if ctx.agent is not react_agent:
+                        outer_cfg = getattr(ctx.agent, "_config", None) or getattr(ctx.agent, "config", None)
+                        if outer_cfg is not None:
+                            try:
+                                setattr(outer_cfg, "model_name", mname)
+                                setattr(outer_cfg, "model_client_config", recommended_cap.model.model_client_config)
+                                setattr(outer_cfg, "model_config_obj", recommended_cap.model.model_config)
+                            except Exception as exc:
+                                logger.debug("[ModelRouting] setattr outer config failed: %s", exc)
+                        deep_cfg = getattr(ctx.agent, "_deep_config", None) or getattr(ctx.agent, "deep_config", None)
+                        if deep_cfg is not None:
+                            try:
+                                setattr(deep_cfg, "model", recommended_cap.model)
+                            except Exception as exc:
+                                logger.debug("[ModelRouting] setattr deep_config.model failed: %s", exc)
+                    # Sync agent.model_name
                     try:
-                        if hasattr(ctx.agent, "model_name"):
+                        if hasattr(react_agent, "model_name"):
+                            setattr(react_agent, "model_name", mname)
+                        if ctx.agent is not react_agent and hasattr(ctx.agent, "model_name"):
                             setattr(ctx.agent, "model_name", mname)
                     except Exception as exc:
-                        logger.debug("[ModelRouting] setattr agent.model_name failed: %s", exc)
+                        logger.debug("[ModelRouting] setattr model_name failed: %s", exc)
                 logger.info("[ModelRouting] applied set_llm -> %s", mname or "unknown")
             except Exception as exc:
                 logger.warning("[ModelRouting] set_llm failed: %s", exc)
@@ -341,3 +356,21 @@ class ModelRoutingRail(DeepAgentRail):
             len(self._capability_table),
         )
         self._load_persisted_table()
+
+
+# ---- Helpers ---- #
+
+
+def _resolve_react_agent(agent: Any) -> Any:
+    """Return the inner ReActAgent if *agent* is a DeepAgent, else *agent* itself.
+
+    DeepAgent does not expose ``set_llm``; its inner ``_react_agent``
+    (a ReActAgent) does.  This mirrors the adapter-level pattern in
+    ``interface_deep._apply_model_to_react_agent``.
+    """
+    if callable(getattr(agent, "set_llm", None)):
+        return agent
+    inner = getattr(agent, "_react_agent", None)
+    if inner is not None and callable(getattr(inner, "set_llm", None)):
+        return inner
+    return agent
