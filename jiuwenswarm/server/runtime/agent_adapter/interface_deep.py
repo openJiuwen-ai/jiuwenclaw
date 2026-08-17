@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -863,79 +863,55 @@ def _deep_agent_context_engine_config(
     model_name: str | None = None,
     model: Any = None,
 ) -> ContextEngineConfig:
-    """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
+    """Build the agent-core Context Engine configuration.
 
-    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
-    ``react.kv_cache_affinity_config`` 管理。
-
-    AgentOS per-model 覆盖——"选中哪个模型配置就用哪个的 max_tokens"：
-
-    路径 A（首选，精确）：传入 ``model``（当前选中的 ``Model`` 对象）时，直接从其
-    普通属性 ``_agentos_ctx_window`` 读 agentos 输入侧上下文窗口值。该属性由
-    ``build_model_from_entry`` 在构造完 agentos 的 ``Model`` 后挂到 Model 实例上
-    （从原始 mco 取 max_tokens 值——该值已在 reasoning_injector 公共出口被 pop、
-    不在 ModelRequestConfig 里）。**该属性不进 ModelRequestConfig 的 extra**，
-    故不经 ``model_dump`` 流到厂商 SDK；Model 是普通 Python 类，挂普通属性即可。
-    每个 agentos 条目各造各的 Model 对象、各带自己的属性，故同名多条目也能精确
-    区分"选中哪个用哪个的值"。
-
-    路径 B（回退，兼容）：仅在**未传 ``model``**（调用方拿不到选中 Model 变量，
-    如 usage 回调 L10215）时，从 ``full_config["models"]["agentos"]`` 按
-    ``model_name`` 反查，取首个匹配条目。此路径在同名多条目时无法区分，仅供兜底；
-    且**不**在"传了 model 但路径 A 读不到值"时启用——否则本条目未配 max_tokens、
-    却存在同名带 max_tokens 条目时，会取到别人的值错误覆盖。
-    defaults 不受影响（不带 _agentos_ctx_window 属性，路径 A 读到 None；defaults 的
-    model_name 也不匹配 agentos 列表，路径 B 不会命中）。
+    Processor-only fields such as ``round_level_compressor_config`` are
+    filtered out, while every field owned by ``ContextEngineConfig`` is
+    preserved.  The selected AgentOS model may override the configured context
+    window without leaking ``max_tokens`` into the provider request.
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
-    cw_tokens = parse_int(cec.get("context_window_tokens"), None)
 
-    # AgentOS per-model 覆盖。
-    # 路径 A：传了 model 时，从选中 Model 的普通属性直接读（精确，同名可区分；
-    # 不进 model_dump，不流到 SDK）。若该 Model 无此属性（如 defaults，或 agentos
-    # 未配 max_tokens）-> agentos_cw 为 None，保持全局基础值，**不**回退路径 B：
-    # 否则当本条目未配 max_tokens、却存在同名带 max_tokens 的 agentos 条目时，
-    # 路径 B 会取到别人的值错误覆盖。
+    defaults = ReActAgentConfig().context_engine_config
+    supported = {
+        key: value
+        for key, value in cec.items()
+        if key in ContextEngineConfig.model_fields
+    }
+    # Preserve the established tolerant behavior for malformed window values.
+    if "context_window_tokens" in supported:
+        supported["context_window_tokens"] = parse_int(
+            supported["context_window_tokens"], None
+        )
+
+    # Prefer the selected Model object so duplicate AgentOS entries with the
+    # same model name cannot borrow another entry's max_tokens value.
     agentos_cw: int | None = None
     if model is not None:
         agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
-    # 路径 B：仅在**未传 model**（如 usage 回调拿不到选中 Model 变量）时，
-    # 从 config 的 agentos 列表按 model_name 反查取首个匹配（兜底，同名无法区分）。
-    if model is None and full_config and model_name:
+    elif full_config and model_name:
         agentos_raw = (full_config.get("models") or {}).get("agentos")
         agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
-        for blk in agentos_list:
-            if not isinstance(blk, dict):
+        for block in agentos_list:
+            if not isinstance(block, dict):
                 continue
-            blk_mcc = blk.get("model_client_config") or {}
-            if isinstance(blk_mcc, dict) and blk_mcc.get("model_name") == model_name:
-                agentos_cw = parse_int((blk.get("model_config_obj") or {}).get("max_tokens"), None)
+            model_client_config = block.get("model_client_config") or {}
+            if (
+                isinstance(model_client_config, dict)
+                and model_client_config.get("model_name") == model_name
+            ):
+                model_config = block.get("model_config_obj") or {}
+                agentos_cw = parse_int(model_config.get("max_tokens"), None)
                 break
     if agentos_cw is not None:
-        cw_tokens = agentos_cw
+        supported["context_window_tokens"] = agentos_cw
 
-    recall = cec.get("compression_recall_config")
-    recall = recall if isinstance(recall, dict) else {}
-    return ReActAgentConfig().context_engine_config.model_copy(
-        update={
-            "enable_reload": bool(cec.get("enable_reload", False)),
-            "enable_openrouter_model_context_window_tokens": bool(
-                cec.get("enable_openrouter_model_context_window_tokens", False)
-            ),
-            # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
-            "context_window_tokens": cw_tokens,
-            # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
-            # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
-            "enable_context_debug": bool(cec.get("enable_context_debug", False)),
-            "context_debug_dir": cec.get("context_debug_dir") or None,
-            # 压缩召回：压缩时归档原始消息，供模型按需召回
-            "compression_recall_config": CompressionRecallConfig(
-                enabled=bool(recall.get("enabled", False)),
-                chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
-                chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
-            ),
+    return ContextEngineConfig.model_validate(
+        {
+            **defaults.model_dump(),
+            **supported,
         }
     )
 
