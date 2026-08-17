@@ -136,7 +136,7 @@ class ForkAgentExecutor:
         self._model = model
         self._resolve_model = resolve_model
         self._default_role_prompts = default_role_prompts or {}
-        self._active_fork_agents: dict[str, Any] = {}
+        self._active_fork_agents: dict[str, tuple[Any, asyncio.Task | None]] = {}
 
     def set_model(self, model: Model) -> None:
         """Update default model for subagent execution (e.g. after config hot-reload)."""
@@ -254,78 +254,90 @@ class ForkAgentExecutor:
             if now - pending_since >= _SUBAGENT_STREAM_FLUSH_INTERVAL_SECONDS:
                 await flush_pending_model_stream()
 
-        async for chunk in Runner.run_agent_streaming(agent=agent, inputs=inputs):
-            # 软超时检查：每次收到 chunk 时检查距上次有效活动的时间
-            now = time.monotonic()
-            if now - last_activity_time > soft_timeout:
-                logger.warning(
-                    "[Subagent] Soft timeout: no activity for %.1f seconds (soft_timeout=%.1f), aborting",
-                    now - last_activity_time, soft_timeout,
-                )
-                raise SoftTimeoutError(
-                    f"Soft timeout: no streaming activity for {soft_timeout:.0f} seconds"
-                )
+        gen = Runner.run_agent_streaming(agent=agent, inputs=inputs)
+        try:
+            async for chunk in gen:
+                # 软超时检查：每次收到 chunk 时检查距上次有效活动的时间
+                now = time.monotonic()
+                if now - last_activity_time > soft_timeout:
+                    logger.warning(
+                        "[Subagent] Soft timeout: no activity for %.1f seconds (soft_timeout=%.1f), aborting",
+                        now - last_activity_time, soft_timeout,
+                    )
+                    raise SoftTimeoutError(
+                        f"Soft timeout: no streaming activity for {soft_timeout:.0f} seconds"
+                    )
 
-            parsed = parse_stream_chunk(chunk, _has_streamed_content=has_streamed_content)
-            if not isinstance(parsed, dict):
-                continue
+                parsed = parse_stream_chunk(chunk, _has_streamed_content=has_streamed_content)
+                if not isinstance(parsed, dict):
+                    continue
 
-            event_type = parsed.get("event_type")
+                event_type = parsed.get("event_type")
 
-            # 收到有效事件，重置软超时计时器
-            last_activity_time = time.monotonic()
-            if session_proxy is not None and event_type in self._FORWARDED_MODEL_EVENTS:
-                if event_type in ("chat.delta", "chat.reasoning"):
-                    await buffer_model_stream(event_type, str(parsed.get("content", "") or ""))
-                else:
+                # 收到有效事件，重置软超时计时器
+                last_activity_time = time.monotonic()
+                if session_proxy is not None and event_type in self._FORWARDED_MODEL_EVENTS:
+                    if event_type in ("chat.delta", "chat.reasoning"):
+                        await buffer_model_stream(event_type, str(parsed.get("content", "") or ""))
+                    else:
+                        await flush_pending_model_stream()
+                        await session_proxy.write_stream(chunk)
+                elif event_type not in ("chat.delta", "chat.reasoning"):
                     await flush_pending_model_stream()
-                    await session_proxy.write_stream(chunk)
-            elif event_type not in ("chat.delta", "chat.reasoning"):
-                await flush_pending_model_stream()
 
-            if event_type == "chat.delta":
-                content = parsed.get("content", "")
-                if content:
-                    has_streamed_content = True
-                    streamed_parts.append(str(content))
-            elif event_type == "chat.final":
-                content = parsed.get("content", "")
-                if content:
-                    final_text = str(content)
-            elif event_type in ("chat.llm_usage", "llm_usage"):
-                # 提取 usage_metadata 中的字段
-                # chat.llm_usage: parsed has top-level usage_metadata dict
-                # llm_usage: same structure but without chat. prefix
-                usage_meta = parsed.get("usage_metadata", {}) if isinstance(parsed, dict) else {}
-                if isinstance(usage_meta, dict):
-                    usage = {
-                        "input_tokens": usage_meta.get("input_tokens", 0) or 0,
-                        "output_tokens": usage_meta.get("output_tokens", 0) or 0,
-                        "total_tokens": usage_meta.get("total_tokens", 0) or 0,
-                        "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
-                        "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
-                        "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
-                    }
-            elif event_type == "chat.usage_metadata":
-                # interface_deep emits this with data nested under "metadata" key
-                # metadata may itself contain usage_metadata dict
-                raw_meta = parsed.get("metadata", {}) if isinstance(parsed, dict) else {}
-                if not isinstance(raw_meta, dict):
-                    raw_meta = {}
-                # Try nested usage_metadata first, then treat metadata itself as usage
-                usage_meta = raw_meta.get("usage_metadata", raw_meta)
-                if isinstance(usage_meta, dict):
-                    usage = {
-                        "input_tokens": usage_meta.get("input_tokens", 0) or 0,
-                        "output_tokens": usage_meta.get("output_tokens", 0) or 0,
-                        "total_tokens": usage_meta.get("total_tokens", 0) or 0,
-                        "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
-                        "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
-                        "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
-                    }
+                if event_type == "chat.delta":
+                    content = parsed.get("content", "")
+                    if content:
+                        has_streamed_content = True
+                        streamed_parts.append(str(content))
+                elif event_type == "chat.final":
+                    content = parsed.get("content", "")
+                    if content:
+                        final_text = str(content)
+                elif event_type in ("chat.llm_usage", "llm_usage"):
+                    # 提取 usage_metadata 中的字段
+                    # chat.llm_usage: parsed has top-level usage_metadata dict
+                    # llm_usage: same structure but without chat. prefix
+                    usage_meta = parsed.get("usage_metadata", {}) if isinstance(parsed, dict) else {}
+                    if isinstance(usage_meta, dict):
+                        usage = {
+                            "input_tokens": usage_meta.get("input_tokens", 0) or 0,
+                            "output_tokens": usage_meta.get("output_tokens", 0) or 0,
+                            "total_tokens": usage_meta.get("total_tokens", 0) or 0,
+                            "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
+                            "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
+                            "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
+                        }
+                elif event_type == "chat.usage_metadata":
+                    # interface_deep emits this with data nested under "metadata" key
+                    # metadata may itself contain usage_metadata dict
+                    raw_meta = parsed.get("metadata", {}) if isinstance(parsed, dict) else {}
+                    if not isinstance(raw_meta, dict):
+                        raw_meta = {}
+                    # Try nested usage_metadata first, then treat metadata itself as usage
+                    usage_meta = raw_meta.get("usage_metadata", raw_meta)
+                    if isinstance(usage_meta, dict):
+                        usage = {
+                            "input_tokens": usage_meta.get("input_tokens", 0) or 0,
+                            "output_tokens": usage_meta.get("output_tokens", 0) or 0,
+                            "total_tokens": usage_meta.get("total_tokens", 0) or 0,
+                            "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
+                            "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
+                            "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
+                        }
 
-        await flush_pending_model_stream()
-        return (final_text or "".join(streamed_parts), usage)
+            await flush_pending_model_stream()
+            return (final_text or "".join(streamed_parts), usage)
+        except (asyncio.CancelledError, SoftTimeoutError) as _exc:
+            logger.info(
+                "[ForkAgentExecutor] _run_agent_streaming_for_result: closing generator due to %s",
+                type(_exc).__name__,
+            )
+            try:
+                await gen.aclose()
+            except Exception:
+                pass  # suppress secondary exceptions to preserve original
+            raise
 
     async def abort_active_subagents(
         self,
@@ -349,11 +361,12 @@ class ForkAgentExecutor:
                 self._abort_one_active_subagent(
                     task_id,
                     agent,
+                    exec_task,
                     timeout_seconds=timeout_seconds,
                     reason=reason,
                 )
             )
-            for task_id, agent in active_agents.items()
+            for task_id, (agent, exec_task) in active_agents.items()
         ]
         await asyncio.gather(*abort_tasks, return_exceptions=True)
 
@@ -363,17 +376,37 @@ class ForkAgentExecutor:
         self,
         task_id: str,
         agent: Any,
+        exec_task: asyncio.Task | None,
         *,
         timeout_seconds: float,
         reason: str | None,
     ) -> None:
+        _abort_start = time.monotonic()
         try:
+            # 1. Cancel the asyncio Task directly (most reliable)
+            if exec_task is not None and not exec_task.done():
+                exec_task.cancel()
+                try:
+                    await asyncio.wait_for(exec_task, timeout=timeout_seconds)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.warning(
+                        "[ForkAgentExecutor] exec_task cancel exception task_id=%s timeout=%s",
+                        task_id, timeout_seconds,
+                    )
+            else:
+                logger.info(
+                    "[ForkAgentExecutor] exec_task is None or already done task_id=%s",
+                    task_id,
+                )
+
+            # 2. Also call agent.abort() as fallback (may be no-op in single-round mode)
             abort = getattr(agent, "abort", None)
             if callable(abort):
                 result = abort()
                 if inspect.isawaitable(result):
                     await asyncio.wait_for(result, timeout=timeout_seconds)
-                logger.info("[ForkAgentExecutor] Aborted subagent task_id=%s", task_id)
             else:
                 logger.warning(
                     "[ForkAgentExecutor] Active subagent has no abort method, task_id=%s",
@@ -394,6 +427,10 @@ class ForkAgentExecutor:
             )
         finally:
             self._active_fork_agents.pop(task_id, None)
+            logger.info(
+                "[ForkAgentExecutor] Aborted subagent task_id=%s elapsed=%.3fs reason=%s",
+                task_id, time.monotonic() - _abort_start, reason or "",
+            )
 
     def _resolve_task_model(
         self,
@@ -549,7 +586,7 @@ class ForkAgentExecutor:
         Returns:
             True if resolved successfully, False otherwise
         """
-        for task_id, fork_agent in self._active_fork_agents.items():
+        for task_id, (fork_agent, _exec_task) in self._active_fork_agents.items():
             resolve_method = getattr(fork_agent, "_resolve_permission_approval", None)
             if resolve_method is not None:
                 try:
@@ -681,9 +718,9 @@ Approach each task methodically and deliver high-quality results.
             )
 
             # 4. Register active agent for permission approval resolution
-            self._active_fork_agents[task.task_id] = fork_agent
+            #    Store (agent, exec_task) tuple; exec_task will be created below
 
-            # 5. Set session_id for LLM IO trace logging
+            # 5. Set session_id for LLM IO trace logging (must be set before creating exec_task)
             if session_proxy:
                 trace_session_id = session_proxy.get_session_id()
             else:
@@ -691,23 +728,33 @@ Approach each task methodically and deliver high-quality results.
             llm_trace_var = _get_llm_trace_session_id_var()
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
-            # 6. Execute fork agent
+            # 6. Execute fork agent with independent asyncio Task for reliable cancellation
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
 
+            exec_task = asyncio.ensure_future(
+                self._run_agent_streaming_for_result(
+                    agent=fork_agent,
+                    inputs=invoke_inputs,
+                    session_proxy=session_proxy,
+                    soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
+                )
+            )
+            self._active_fork_agents[task.task_id] = (fork_agent, exec_task)
             try:
                 result_text, fork_usage = await asyncio.wait_for(
-                    self._run_agent_streaming_for_result(
-                        agent=fork_agent,
-                        inputs=invoke_inputs,
-                        session_proxy=session_proxy,
-                        soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
-                    ),
+                    exec_task,
                     timeout=timeout_seconds,
                 )
             finally:
+                if not exec_task.done():
+                    exec_task.cancel()
+                    try:
+                        await asyncio.wait_for(exec_task, timeout=1.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
                 self._active_fork_agents.pop(task.task_id, None)
                 llm_trace_var.reset(token_trace_sid)
 
@@ -846,9 +893,9 @@ Approach each task methodically and deliver high-quality results.
             )
 
             # 6. Register active agent for permission approval resolution
-            self._active_fork_agents[task.task_id] = spawn_agent
+            #    Store (agent, exec_task) tuple; exec_task will be created below
 
-            # 7. Set session_id for LLM IO trace logging
+            # 7. Set session_id for LLM IO trace logging (must be set before creating exec_task)
             if session_proxy:
                 trace_session_id = session_proxy.get_session_id()
             else:
@@ -856,23 +903,33 @@ Approach each task methodically and deliver high-quality results.
             llm_trace_var = _get_llm_trace_session_id_var()
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
-            # 8. Execute with isolated context
+            # 8. Execute with isolated context using independent asyncio Task for reliable cancellation
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             timeout_seconds = task.timeout if task.timeout is not None else _DEFAULT_TIMEOUT_SECONDS
 
+            exec_task = asyncio.ensure_future(
+                self._run_agent_streaming_for_result(
+                    agent=spawn_agent,
+                    inputs=invoke_inputs,
+                    session_proxy=session_proxy,
+                    soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
+                )
+            )
+            self._active_fork_agents[task.task_id] = (spawn_agent, exec_task)
             try:
                 result_text, spawn_usage = await asyncio.wait_for(
-                    self._run_agent_streaming_for_result(
-                        agent=spawn_agent,
-                        inputs=invoke_inputs,
-                        session_proxy=session_proxy,
-                        soft_timeout=_DEFAULT_SOFT_TIMEOUT_SECONDS,
-                    ),
+                    exec_task,
                     timeout=timeout_seconds,
                 )
             finally:
+                if not exec_task.done():
+                    exec_task.cancel()
+                    try:
+                        await asyncio.wait_for(exec_task, timeout=1.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
                 self._active_fork_agents.pop(task.task_id, None)
                 llm_trace_var.reset(token_trace_sid)
 
