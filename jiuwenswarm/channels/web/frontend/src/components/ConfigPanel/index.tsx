@@ -2919,16 +2919,16 @@ function AgentosModelSection({
 }) {
   if (models.length === 0) return null;
   return (
-    <div className="space-y-2 opacity-60">
+    <div className="space-y-2">
       {models.map((model, idx) => {
         const displayName = model.alias || model.model_name;
         return (
           <div
             key={`${model.model_name}-${idx}`}
-            className="rounded-lg border border-border bg-secondary/30 p-3"
+            className="rounded-lg border border-border bg-secondary/20"
             data-testid="config-panel-agentos-model-item"
           >
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between px-3 py-2 gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-amber-500 bg-amber-500/10 border-amber-500/20 shrink-0">
                   <span className="text-xs">⚙</span>
@@ -2938,7 +2938,6 @@ function AgentosModelSection({
                     {displayName}
                     <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border">{t("config.agentos.backupBadge")}</span>
                   </div>
-                  <div className="text-[11px] text-text-muted truncate">{t("config.agentos.readonly")}</div>
                 </div>
               </div>
               <button
@@ -2956,35 +2955,25 @@ function AgentosModelSection({
                 {t("config.agentos.switchToThis")}
               </button>
             </div>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-              <label className="text-text-muted">{t("config.modelList.modelName")}</label>
-              <input
-                type="text"
-                value={model.model_name || ""}
-                disabled
-                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
-              />
-              <label className="text-text-muted">{t("config.modelList.provider")}</label>
-              <input
-                type="text"
-                value={model.model_provider || ""}
-                disabled
-                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
-              />
-              <label className="text-text-muted">{t("config.modelList.apiBase")}</label>
-              <input
-                type="text"
-                value={model.api_base || ""}
-                disabled
-                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
-              />
-              <label className="text-text-muted">{t("config.modelList.alias")}</label>
-              <input
-                type="text"
-                value={model.alias || ""}
-                disabled
-                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
-              />
+            <div className="border-t border-border px-3 py-2 space-y-2">
+              {([
+                { field: "model", value: model.model_name || "" },
+                { field: "provider", value: model.model_provider || "" },
+                { field: "api_base", value: model.api_base || "" },
+                { field: "api_key", value: model.api_key || "" },
+              ] as const).map(({ field, value }) => (
+                <div key={field} className="flex items-center gap-2 text-xs">
+                  <label className="w-28 text-text-muted shrink-0">
+                    <ConfigFieldHintLabel label={<>{field}</>} help={getKeyLabelHintText(field, t) || undefined} />
+                  </label>
+                  <input
+                    type={field === "api_key" ? "password" : "text"}
+                    value={value}
+                    disabled
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs disabled:cursor-not-allowed disabled:bg-secondary/30 disabled:text-text-muted"
+                  />
+                </div>
+              ))}
             </div>
           </div>
         );
@@ -4732,14 +4721,25 @@ export function ConfigPanel({
   useEffect(() => {
     onHasChangesChange?.(hasChanges);
   }, [hasChanges, onHasChangesChange]);
+  // 是否存在可用的 agentos 备份模型：若 defaults 凭证为空但 agentos 已配置，
+  // 实际对话走 agentos 请求级注入，故 defaults 必填项应放宽（允许空值保存）。
+  // 仅当 agentos 也未配置时才维持 defaults 必填，避免两者皆空导致无法对话。
+  const hasAgentosBackup = useMemo(
+    () => storeAvailableModels.some((m) => m.is_agentos === true),
+    [storeAvailableModels],
+  );
   const missingRequiredModelFields = useMemo(
     () => REQUIRED_MODEL_FIELDS.filter((key) => {
       if (key === "api_key" && isOpenAIAccountProvider(draftValues.model_provider)) {
         return false;
       }
+      // 有 agentos 备份模型时，defaults 必填项放宽（.env 全空场景兼容）
+      if (hasAgentosBackup) {
+        return false;
+      }
       return !(draftValues[key] ?? "").trim();
     }),
-    [draftValues],
+    [draftValues, hasAgentosBackup],
   );
   const hasMissingRequiredModelFields = missingRequiredModelFields.length > 0;
   const hasDuplicateAgentNames = useMemo(
