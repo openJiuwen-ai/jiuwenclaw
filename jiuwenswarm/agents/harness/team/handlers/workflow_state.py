@@ -1031,11 +1031,15 @@ class WorkflowRunState(BaseModel):
         """Mark workflow as paused (non-terminal, resumable).
 
         A pause is a control state, not a terminal one: it never stamps
-        ``completed_at`` / ``duration_ms`` and never finalizes running
-        phases/agents. The delta mirrors ``_on_workflow_started`` so the
-        frontend sees the status flip to ``paused`` while phases stay intact.
+        ``completed_at`` / ``duration_ms`` on the workflow. But the in-flight
+        agents ARE stopped by the abort — spec requires agent-level status to
+        show ``stopped`` for both pause and stop — so finalize each running /
+        waiting agent to ``stopped`` while leaving the phase (and workflow)
+        non-terminal so a resume can continue.
         """
         self.status = "paused"
+        for phase in self.phases:
+            self._finalize_running_agents(phase, "stopped")
         return self._build_top_level_delta()
 
     def _on_workflow_stopped(self, progress: WorkflowProgress) -> dict[str, Any]:
