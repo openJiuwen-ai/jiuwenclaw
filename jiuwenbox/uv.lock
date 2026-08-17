@@ -431,7 +431,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenbox"
-version = "0.2.0rc1"
+version = "0.2.1rc1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

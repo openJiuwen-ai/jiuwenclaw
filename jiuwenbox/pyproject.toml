@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenbox"
-version = "0.2.0rc1"
+version = "0.2.1rc1"
 description = "Jiuwen sandbox system"
 readme = "README.md"
 requires-python = ">=3.11"
