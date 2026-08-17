@@ -2842,6 +2842,115 @@ function MultiModelSection({
   );
 }
 
+/**
+ * AgentOS 备份模型只读展示区。与 defaults 的 MultiModelSection 并列，但：
+ * - 字段全部只读（disabled）：agentos 由用户手动写入 config.yaml，UI 不应改写。
+ * - 无 add/remove/setPrimaryDefault：只能"切换使用"。
+ * - "切换使用"按钮 = 调 setSelectedModelName(sessionId, model_name) + 关闭配置面板回聊天，
+ *   复用与 defaults 完全一致的请求级 model_name 注入机制（chat.send 带 model_name，
+ *   AgentServer _resolve_model_for_request 命中 agentos 缓存条目）。
+ */
+function AgentosModelSection({
+  models,
+  isConnected,
+  activeSessionId,
+  setSelectedModelName,
+  onSwitched,
+  t,
+}: {
+  models: ModelEntry[];
+  isConnected: boolean;
+  activeSessionId: string | null;
+  setSelectedModelName: (sessionId: string, name: string) => void;
+  onSwitched?: () => void;
+  t: (key: string, options?: Record<string, unknown>) => string;
+}) {
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(0);
+  if (models.length === 0) return null;
+
+  const handleSwitchTo = (model: ModelEntry) => {
+    if (!activeSessionId) return;
+    const key = model.alias || model.model_name;
+    setSelectedModelName(activeSessionId, key);
+    onSwitched?.();
+  };
+
+  return (
+    <div className="space-y-2 opacity-60">
+      {models.map((model, idx) => {
+        const isExpanded = expandedIdx === idx;
+        const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
+          if (m.model_name === model.model_name) acc.push(i);
+          return acc;
+        }, []);
+        const sameNameCount = sameNameIndices.length;
+        const displayName = sameNameCount > 1
+          ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
+          : model.model_name;
+        return (
+          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+            <div className="flex items-center justify-between px-3 py-2 gap-2">
+              <button
+                type="button"
+                className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
+                onClick={() => setExpandedIdx(isExpanded ? null : idx)}
+              >
+                <svg className={`w-3 h-3 shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                <ModelProviderIcon model={model} className="shrink-0" />
+                <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">
+                  {t("config.agentos.backupBadge")}
+                </span>
+              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchTo(model)}
+                  disabled={!isConnected || !activeSessionId}
+                  className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60 disabled:opacity-40"
+                >
+                  {t("config.agentos.switchToThis")}
+                </button>
+              </div>
+            </div>
+            {isExpanded && (
+              <div className="border-t border-border px-3 py-2 space-y-2">
+                {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
+                  <div key={field} className="flex items-center gap-2 text-xs">
+                    <label className="w-28 text-text-muted shrink-0">
+                      <ConfigFieldHintLabel label={field} help={getKeyLabelHintText(field, t) || undefined} />
+                    </label>
+                    {field === "model_provider" ? (
+                      <input
+                        type="text"
+                        value={models[idx]?.[field] ?? ""}
+                        readOnly
+                        className="flex-1 rounded border border-border bg-secondary/30 px-2 py-1 text-text-muted text-xs"
+                      />
+                    ) : (
+                      <input
+                        type={field === "api_key" ? "password" : "text"}
+                        value={models[idx]?.[field] ?? ""}
+                        readOnly
+                        className="flex-1 rounded border border-border bg-secondary/30 px-2 py-1 text-text-muted text-xs"
+                      />
+                    )}
+                  </div>
+                ))}
+                <div className="text-[11px] text-text-muted">
+                  {t("config.agentos.readonly")}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** 多Agent管理（受控组件，编辑状态由父组件持有） */
 function MultiAgentSection({
   agents,
@@ -3962,6 +4071,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
+  const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
   const storeAvailableModels = availableModels;
   const storeAvailableModelsRef = useRef(storeAvailableModels);
@@ -3974,7 +4084,7 @@ export function ConfigPanel({
     }
     return next;
   });
-  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
+  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m })));
 
   const [draftAgents, setDraftAgents] = useState<AgentEntry[]>([]);
   const [draftTeams, setDraftTeams] = useState<TeamEntry[]>([]);
@@ -4256,7 +4366,9 @@ export function ConfigPanel({
   }, [normalizedConfig]);
 
   useEffect(() => {
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    // draftModels 仅承载 defaults 主对话模型；agentos 备份模型走独立只读页签，
+    // 不进入 MultiModelSection，避免在默认模型页签重复展示。
+    setDraftModels(storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m, alias: m.alias || "" })));
     setModelError(null);
   }, [storeAvailableModels]);
 
@@ -4738,7 +4850,7 @@ export function ConfigPanel({
   const handleCancel = () => {
     if (!hasChanges) return;
     setDraftValues(normalizedConfig);
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setDraftModels(storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m, alias: m.alias || "" })));
     setDraftAgents(initialAgents);
     setDraftTeams(initialTeams);
     setAgentsTeamsEdited(false);
@@ -5101,6 +5213,35 @@ export function ConfigPanel({
                       />
                     </div>
                   </div>
+                  {(() => {
+                    // agentos 备份模型只读卡片：仅当 config.yaml 手动配置了 models.agentos
+                    // 且条目 model_name 非空时由后端返回（is_agentos=true）。无则不渲染。
+                    const agentosModels = availableModels.filter((m) => m.is_agentos === true);
+                    if (agentosModels.length === 0) return null;
+                    return (
+                      <div
+                        id="config-group-agentos"
+                        className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                      >
+                        <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.agentos.label")}</span>
+                          <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.agentos.hint")}</span>
+                        </div>
+                        <div className="p-3">
+                          <AgentosModelSection
+                            models={agentosModels}
+                            isConnected={isConnected}
+                            activeSessionId={activeSessionId}
+                            setSelectedModelName={setSelectedModelName}
+                            onSwitched={() => {
+                              window.dispatchEvent(new CustomEvent<string>('jiuwen:nav', { detail: 'chat' }));
+                            }}
+                            t={t}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {yamlModelGroups.map((group) => (
                     <GroupSection
                       key={group.tag}

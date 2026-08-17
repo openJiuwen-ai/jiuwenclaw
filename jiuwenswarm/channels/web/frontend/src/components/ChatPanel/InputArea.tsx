@@ -2898,6 +2898,11 @@ function ModelSelector({
                     <ModelProviderIcon model={m} />
                   </span>
                   <span className="chat-mode-select__label">{key}</span>
+                  {m.is_agentos === true && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border ml-1">
+                      {t('chat.modelSelector.backup')}
+                    </span>
+                  )}
                 </span>
                 {isActive && (
                   <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
