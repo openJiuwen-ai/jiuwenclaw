@@ -39,8 +39,11 @@ from jiuwenswarm.common.utils import (
     get_user_workspace_dir,
     prepare_workspace,
     reset_free_search_runtime_flags,
+    migrate_legacy_user_config_if_needed,
 )
 from jiuwenswarm.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
+
+migrate_legacy_user_config_if_needed()
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()

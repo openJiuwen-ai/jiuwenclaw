@@ -28,6 +28,7 @@ Runtime layout:
 """
 
 import asyncio
+import copy
 import ctypes
 import hashlib
 import json
@@ -46,7 +47,9 @@ from typing import Any, Literal, Optional
 import logging
 from logging.handlers import BaseRotatingHandler
 from collections import OrderedDict
+import yaml
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 # 尝试导入 pythonjsonlogger（用于 JSON 格式化输出，缺失时优雅降级为文本 Formatter）
 try:
@@ -316,16 +319,147 @@ class _CompositeFilter(logging.Filter):
         return any(f.filter(record) for f in self.filters)
 
 
-def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenswarm/config/config.yaml 中的 logging 段（无则空）。"""
+# ---------------------------------------------------------------------------
+# Sparse-override config merge utilities
+# ---------------------------------------------------------------------------
+
+def merge_template_with_override(
+    template: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """模板默认值 + 用户 override；用户键覆盖模板。
+
+    - override 中独有的顶层键**不会保留**，会被清理（与 migrate_config_from_template
+      的 Remove 规则一致）。
+    - 深度递归（上限 4 层）。
+    """
+    return _deep_merge(template, override, depth=0)
+
+
+def _deep_merge(
+    template: dict[str, Any],
+    override: dict[str, Any],
+    depth: int = 0,
+) -> dict[str, Any]:
+    """Recursively merge template with user override, cleaning deprecated fields.
+
+    Rules:
+    - Add: fields only in template → use template value
+    - Keep: override values for fields that exist in template (preserve user settings)
+    - Remove: fields only in override (deprecated config, cleanup)
+    - Max recursion depth: 4
+    """
+    if depth >= 4:
+        return override
+
+    result: dict[str, Any] = {}
+
+    for key, tmpl_val in template.items():
+        if key not in override:
+            result[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(tmpl_val, dict) and isinstance(override.get(key), dict):
+            result[key] = _deep_merge(tmpl_val, override[key], depth + 1)
+        else:
+            result[key] = override[key]
+
+    return result
+
+
+def load_yaml_dict(path: Path) -> dict[str, Any]:
+    """用 yaml.safe_load 读取 YAML 文件为 dict；不存在或无效时返回空 dict。"""
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_shipped_template_config_path() -> Path:
+    """包内 shipped 模板：jiuwenswarm/resources/config.yaml。"""
+    return Path(__file__).resolve().parent.parent / "resources" / "config.yaml"
+
+
+def _read_template_version_value(template_path: Path) -> Any:
+    """读取模板 config.yaml 顶层的 ``version``（缺省 ``1.0``）。"""
+    if not template_path.exists():
+        return 1.0
     try:
-        cf = get_config_file()
-        if not cf.exists():
-            return {}
         rt = YAML()
-        with open(cf, "r", encoding="utf-8") as f:
-            data = rt.load(f) or {}
-        raw = data.get("logging")
+        rt.preserve_quotes = True
+        with open(template_path, "r", encoding="utf-8") as f:
+            tpl = rt.load(f)
+        if isinstance(tpl, dict) and tpl.get("version") is not None:
+            return tpl["version"]
+    except OSError as e:
+        logger.warning("Failed to read template version from %s: %s", template_path, e)
+    return 1.0
+
+
+def _write_initial_user_override_config(template_src: Path, dest: Path) -> None:
+    """首次初始化用户目录时写入稀疏 override（仅 ``version``，取自模板）。"""
+    version_val = _read_template_version_value(template_src)
+    rt = YAML()
+    rt.preserve_quotes = True
+    rt.default_flow_style = False
+    rt.indent(mapping=2, sequence=4, offset=2)
+    rt.width = 4096
+    data = CommentedMap()
+    data["version"] = version_val
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        rt.dump(data, f)
+
+
+def migrate_legacy_user_config_if_needed() -> None:
+    """无 ``version`` 的旧版完整 config 迁移为稀疏 override：仅保留 permissions + version。
+
+    已有 ``version`` 的用户文件不修改。
+    """
+    cfg_path = get_config_file()
+    if not cfg_path.exists():
+        return
+    try:
+        rt = YAML()
+        rt.preserve_quotes = True
+        rt.default_flow_style = False
+        rt.indent(mapping=2, sequence=4, offset=2)
+        rt.width = 4096
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = rt.load(f)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return
+        ver = data.get("version")
+        if ver is not None and str(ver).strip() != "":
+            return
+
+        package_root = _find_package_root()
+        tpl_file = (package_root / "resources" / "config.yaml") if package_root else None
+        version_val = _read_template_version_value(tpl_file) if tpl_file else 1.0
+
+        new_data = CommentedMap()
+        new_data["version"] = version_val
+        if "permissions" in data:
+            new_data["permissions"] = data["permissions"]
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            rt.dump(new_data, f)
+        logger.info(
+            "[jiuwenswarm] migrated legacy config.yaml to sparse override (schema version %s)",
+            version_val,
+        )
+    except OSError as e:
+        logger.warning("[jiuwenswarm] legacy config migration failed: %s", e)
+
+
+def _load_logging_config_from_yaml() -> dict[str, Any]:
+    """读取合并后的 logging 段（包内模板 + 用户 override）。"""
+    try:
+        template = load_yaml_dict(resolve_shipped_template_config_path())
+        override = load_yaml_dict(get_config_file())
+        merged = merge_template_with_override(template, override)
+        raw = merged.get("logging")
         if isinstance(raw, dict):
             return raw
     except Exception as e:
@@ -500,20 +634,22 @@ def _find_package_root() -> Path | None:
 def _resolve_preferred_language(
     config_yaml_dest: Path, explicit: Optional[str]
 ) -> str:
-    """确定初始化使用的语言：显式参数优先，否则读已复制的 config，默认 zh。"""
+    """确定初始化使用的语言：显式参数优先，否则读 override + 模板，默认 zh。"""
     if explicit is not None:
         lang = str(explicit).strip().lower()
         return lang if lang in ("zh", "en") else "zh"
-    if config_yaml_dest.exists():
-        try:
-            rt = YAML()
-            with open(config_yaml_dest, "r", encoding="utf-8") as f:
-                data = rt.load(f) or {}
-            lang = str(data.get("preferred_language") or "zh").strip().lower()
-            if lang in ("zh", "en"):
-                return lang
-        except Exception as e:
-            logger.error(f"Failed to load config.yaml: {e}")
+    # 稀疏 override 模式：先读 override，再读模板
+    for cfg_path in (config_yaml_dest, resolve_shipped_template_config_path()):
+        if cfg_path.exists():
+            try:
+                rt = YAML()
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = rt.load(f) or {}
+                lang = str(data.get("preferred_language") or "").strip().lower()
+                if lang in ("zh", "en"):
+                    return lang
+            except Exception as e:
+                logger.error(f"Failed to load config.yaml: {e}")
     return "zh"
 
 
@@ -1005,7 +1141,13 @@ def cleanup_team_files(workspace_dir: Path) -> None:
 
 
 def update_config() -> None:
-    """Merge new template fields into user config.yaml, preserving user values."""
+    """稀疏 override 模式：迁移旧版全量 config（无 version 字段）并清理 override 中模板已删除的字段。
+
+    - migrate_legacy_user_config_if_needed: 旧版全量 config → 稀疏 override
+    - 清理 override 中模板已不存在的字段（Remove 规则）
+    """
+    migrate_legacy_user_config_if_needed()
+
     package_root = _find_package_root()
     if not package_root:
         raise RuntimeError("package root not found")
@@ -1026,9 +1168,10 @@ def update_config() -> None:
         )
 
     config_yaml_dest = workspace_dir / "config" / "config.yaml"
-    from jiuwenswarm.common.config import migrate_config_from_template
+    # 稀疏 override 模式：清理 override 中模板已删除的废弃字段
+    from jiuwenswarm.common.config import cleanup_override_against_template
 
-    migrate_config_from_template(config_yaml_src, config_yaml_dest)
+    cleanup_override_against_template(config_yaml_src, config_yaml_dest)
 
 
 def prepare_workspace(
@@ -1048,6 +1191,7 @@ def prepare_workspace(
     # 初始化累积结果（用于追踪所有复制操作）
     cumulative_diff = CopyDiffResult([], [], [])
     workspace_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_user_config_if_needed()
 
     # Migrate from legacy jiuwenclaw_workspace directory name to workspace
     _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
@@ -1102,13 +1246,7 @@ def prepare_workspace(
     config_yaml_dest = config_dest_dir / "config.yaml"
 
     if overwrite or not config_yaml_dest.exists():
-        with TrackCopyDiff(
-            dest=config_yaml_dest,
-            is_file=True,
-            cumulative=cumulative_diff,
-            overwrite=overwrite,
-        ):
-            shutil.copy2(config_yaml_src, config_yaml_dest)
+        _write_initial_user_override_config(config_yaml_src, config_yaml_dest)
 
     builtin_rules_src = resources_dir / "builtin_rules.yaml"
     builtin_rules_dest = config_dest_dir / "builtin_rules.yaml"
@@ -1273,9 +1411,8 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
-    from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
+    from jiuwenswarm.common.config import set_preferred_language_in_config_file
 
-    migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
 
     # ----- 默认安装内置技能: skill-creator 和 swarmskill-creator -----

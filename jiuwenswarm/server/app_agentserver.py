@@ -33,7 +33,10 @@ from jiuwenswarm.common.utils import (
     prepare_workspace,
     reset_free_search_runtime_flags,
     update_config,
+    migrate_legacy_user_config_if_needed,
 )
+
+migrate_legacy_user_config_if_needed()
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
