@@ -168,8 +168,8 @@ def _release_single_instance_lock() -> None:
 
 
 def _show_already_running_message() -> None:
-    msg = "JiuwenSwarm is already running. Please use the existing window."
-    title = "JiuwenSwarm"
+    msg = "WorkSwarm is already running. Please use the existing window."
+    title = "WorkSwarm"
     try:
         if os.name == "nt":
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
@@ -190,7 +190,7 @@ def _write_child_error(exc: BaseException) -> None:
     try:
         log_dir = Path(os.environ.get("JIUWENSARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "jiuwenswarm_exe_error.log"
+        log_file = log_dir / "workswarm_exe_error.log"
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{'=' * 60}\n")
             f.write(f"argv: {sys.argv}\n")

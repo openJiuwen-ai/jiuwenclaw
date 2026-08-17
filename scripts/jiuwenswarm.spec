@@ -384,7 +384,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    name="jiuwenswarm",
+    name="workswarm",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -432,20 +432,20 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="jiuwenswarm",
+    name="workswarm",
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="JiuwenSwarm.app",
+        name="WorkSwarm.app",
         icon=icon_path,
-        bundle_identifier="com.jiuwenswarm.desktop",
+        bundle_identifier="com.workswarm.desktop",
         info_plist={
-            "CFBundleName": "JiuwenSwarm",
-            "CFBundleDisplayName": "JiuwenSwarm",
-            "CFBundleShortVersionString": "0.2.4.beta4",
-            "CFBundleVersion": "0.2.4.beta4",
+            "CFBundleName": "WorkSwarm",
+            "CFBundleDisplayName": "WorkSwarm",
+            "CFBundleShortVersionString": "0.2.5.beta1",
+            "CFBundleVersion": "0.2.5.beta1",
             "NSHighResolutionCapable": "True",
         },
     )
