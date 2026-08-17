@@ -283,6 +283,22 @@ class WorkflowRunState(BaseModel):
         return last_running
 
     @staticmethod
+    def _find_agent_in_phase_by_id(
+            phase: WorkflowPhaseState, agent_id: str,
+    ) -> Optional[WorkflowAgentState]:
+        """Exact ``id`` match within a single phase — the resume dedup key.
+
+        Unlike :meth:`_find_agent_in_phase` (label fallback), this matches the
+        structural ``id`` only, which is stable across a pause/resume relaunch.
+        A label alone may legitimately repeat within a phase, so a resume must
+        dedup on ``id`` and never on the label.
+        """
+        for agent in phase.agents:
+            if agent.id == agent_id:
+                return agent
+        return None
+
+    @staticmethod
     def _find_completed_agent_needing_outcome(
             phase: WorkflowPhaseState, agent_label: str,
     ) -> Optional[WorkflowAgentState]:
@@ -764,7 +780,8 @@ class WorkflowRunState(BaseModel):
         self.name = progress.workflow_name or "workflow"
         self.summary = progress.description or ""
         self.status = "running"
-        self.started_at = self._now_iso()
+        if self.started_at is None:
+            self.started_at = self._now_iso()
 
         # Resume guard: on a paused/stopped run, the engine re-emits
         # WORKFLOW_STARTED with the same full META ``phases`` list for the same
@@ -905,8 +922,28 @@ class WorkflowRunState(BaseModel):
                 correlation_id=progress.correlation_id,
             )
 
+        def _reuse_existing(existing: WorkflowAgentState) -> None:
+            """Resume path: reactivate a stopped node — do NOT append a duplicate.
+
+            On resume the engine re-emits ``agent_started`` for cache-hit nodes
+            with the same ``agent_id`` (the structural, relaunch-stable key).
+            Reusing the existing node instead of appending keeps ``agent_count``
+            from doubling; its pause-time ``completed_at`` / ``duration_ms``
+            stamps are cleared so a running node does not carry stale terminal
+            timestamps.
+            """
+            existing.status = "running"
+            existing.prompt = progress.prompt
+            existing.model = progress.model
+            existing.completed_at = None
+            existing.duration_ms = None
+
         def _attach_child(child_phase: WorkflowPhaseState, agent_state: WorkflowAgentState) -> dict:
-            child_phase.agents.append(agent_state)
+            existing = self._find_agent_in_phase_by_id(child_phase, progress.agent_id) if progress.agent_id else None
+            if existing is not None:
+                _reuse_existing(existing)
+            else:
+                child_phase.agents.append(agent_state)
             if self._is_terminal_status(child_phase.status):
                 child_phase.status = "running"
                 logger.info("[WF_DBG child] reactivated child phase=%s (new agent arrived)", child_phase.name)
@@ -938,7 +975,11 @@ class WorkflowRunState(BaseModel):
             return _attach_child(child_phase, agent_state)
 
         target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
-        target_phase.agents.append(agent_state)
+        existing = self._find_agent_in_phase_by_id(target_phase, progress.agent_id) if progress.agent_id else None
+        if existing is not None:
+            _reuse_existing(existing)
+        else:
+            target_phase.agents.append(agent_state)
         self._refresh_phase_counts(target_phase)
         if sealed_phase is not None:
             self._refresh_phase_counts(sealed_phase)
@@ -1039,6 +1080,8 @@ class WorkflowRunState(BaseModel):
         """
         self.status = "paused"
         for phase in self.phases:
+            if phase.status == "running":
+                phase.status = "paused"
             self._finalize_running_agents(phase, "stopped")
         return self._build_top_level_delta()
 

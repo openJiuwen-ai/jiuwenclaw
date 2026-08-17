@@ -1035,3 +1035,65 @@ def test_resume_workflow_started_does_not_duplicate_phases():
     assert [p.id for p in state.phases] == ids_before  # ids stable, not slug-N re-append
     assert state.status == "running"
     assert len(delta["phases"]) == 3
+
+
+def test_workflow_paused_flips_running_phase_to_paused():
+    """A running phase flips to paused on workflow_paused (its agents stop).
+
+    The phase stays non-terminal so a resume can continue; only the in-flight
+    agent status shows ``stopped`` (spec: agent-level pause/stop both show
+    stopped while the phase card shows the control state ``paused``).
+    """
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("phase", phase="Phase 1"))
+    state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a", agent_id="c:1"))
+    assert state.phases[0].status == "running"
+    assert state.phases[0].agents[0].status == "running"
+    state.apply(_make_progress("workflow_paused"))
+    assert state.status == "paused"
+    assert state.phases[0].status == "paused"
+    assert state.phases[0].agents[0].status == "stopped"
+    assert state.phases[0].agent_count == 1
+
+
+def test_resume_agent_started_reuses_same_agent_id():
+    """On resume, agent_started with the SAME agent_id reuses the node — no duplicate.
+
+    The engine re-emits ``agent_started`` for cache-hit agents (same
+    ``agent_id``) when a paused run is relaunched. Reusing the existing node
+    instead of appending keeps ``agent_count`` from doubling while the node
+    flips back to ``running``.
+    """
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    state.apply(_make_progress("phase", phase="Phase 1"))
+    state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a", agent_id="c:1"))
+    assert len(state.phases[0].agents) == 1
+    assert state.phases[0].agents[0].status == "running"
+    state.apply(_make_progress("workflow_paused"))
+    assert state.phases[0].agents[0].status == "stopped"
+    # Resume relaunch re-emits workflow_started + agent_started for the same node.
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    delta = state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a", agent_id="c:1"))
+    assert len(state.phases[0].agents) == 1
+    agent = state.phases[0].agents[0]
+    assert agent.status == "running"
+    assert state.phases[0].agent_count == 1
+    assert state.agent_count == 1
+    assert delta is not None
+
+
+def test_resume_workflow_started_keeps_original_started_at():
+    """A resume re-fires workflow_started — started_at must NOT be reset.
+
+    Otherwise the duration recomputes from the resume moment instead of the
+    original launch, shrinking the reported run duration on every pause/resume.
+    """
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    original = state.started_at
+    assert original is not None
+    state.apply(_make_progress("workflow_paused"))
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    assert state.started_at == original
