@@ -9584,7 +9584,7 @@ class JiuWenSwarmDeepAdapter:
                 if _dbg_settings.enabled and _dbg_settings.dump_enabled:
                     _debug_logger = DebugTraceLogger(
                         file_path=debug_trace_file(_debug_trace_mode, session_id),
-                        mode=mode,
+                        mode=_debug_trace_mode,
                         session_id=session_id,
                         request_id=rid,
                         settings=_dbg_settings,
