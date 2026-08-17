@@ -1192,8 +1192,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableModels: (models, activeModel) => {
     set(() => {
-      const chatModels = models.filter((m) => m.is_default !== false);
-      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
+      // defaults 主对话模型（is_default!==false）+ agentos 备份模型（is_agentos===true）
+      // 均进 chatAvailableModels，使 ModelSelector 下拉两者并列可选可切换。
+      // 主干判定 is_default!==false 保持不动，仅追加 || is_agentos===true 让 agentos 进下拉。
+      const chatModels = models.filter((m) => m.is_default !== false || m.is_agentos === true);
+      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名。
+      // active_model 恒为 defaults 首位（agentos is_default=false 不抢），故不会误选 agentos 为默认。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const selected = matchedModel
         ? (matchedModel.alias || matchedModel.model_name)
