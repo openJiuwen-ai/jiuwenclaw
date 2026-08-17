@@ -218,9 +218,9 @@ Two additional related configuration groups:
 
 ## 5. Self-Evolution Configuration
 
-Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
+Self-evolution controls Skill experience review and saving, as well as automatic Skill-creation suggestions.
 
-![Self-Evolution Configuration Example](../assets/images/config_self_evolve.png)
+![Enable automatic skill learning](../assets/images/skill演进_开关.png)
 
 ### Toggles
 
@@ -228,9 +228,19 @@ The frontend shows the following options under **Self-Evolution Configuration**:
 
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
-| **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
+| **Enable automatic skill learning** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill-creation suggestions and Skill evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
+
+**What happens when enabled:**
+
+- A Single Agent currently runs a self-check every five eligible non-follow-up task iterations by default. A Team Leader runs a self-check whenever a team task is confirmed complete.
+- Errors and user corrections are review evidence; they do not necessarily create experience.
+- Validated proposals from a Single Agent or Team Leader require user approval or are saved automatically according to `auto_save`.
+- The Skill page shows saved experience and its change details.
+- `/evolve <skill_name> [user_query]` starts an immediate evolution review for the named Skill.
 
 > 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
+
+> ⚠️ **Upgrade note**: An upgrade synchronizes the configuration structure with the new template, but it does not translate values from legacy `enabled`, `auto_scan`, `skill_create`, or related environment variables into `skill_evolution`. If those capabilities were previously enabled, check this switch again after upgrading.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
