@@ -4749,17 +4749,23 @@ export function ConfigPanel({
     },
     [draftAgents],
   );
+  // 判断 defaults 条目是否为"全空占位条目"：model_name/api_base/api_key/
+  // model_provider 四项全空。agentos 已配置时，这种条目是 .env 全空场景下
+  // 后端 get_default_models 走环境变量回退构造的占位（config.py 1225-1243），
+  // 不应参与"缺少必填项"校验，否则保存按钮恒 disabled，issue 目标诉求无法达成。
+  const isEmptyPlaceholder = (m: ModelEntry): boolean =>
+    !m.model_name.trim() && !m.api_base.trim() && !m.api_key.trim() && !m.model_provider.trim();
   const hasMissingModelApiKey = useMemo(
-    () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim()),
-    [draftModels],
+    () => draftModels.some((m) => !isOpenAIAccountProvider(m.model_provider) && !m.api_key.trim() && !(hasAgentosBackup && isEmptyPlaceholder(m))),
+    [draftModels, hasAgentosBackup],
   );
   const hasMissingModelName = useMemo(
-    () => draftModels.some((m) => !m.model_name.trim()),
-    [draftModels],
+    () => draftModels.some((m) => !m.model_name.trim() && !(hasAgentosBackup && isEmptyPlaceholder(m))),
+    [draftModels, hasAgentosBackup],
   );
   const hasMissingModelApiBase = useMemo(
-    () => draftModels.some((m) => !m.api_base.trim()),
-    [draftModels],
+    () => draftModels.some((m) => !m.api_base.trim() && !(hasAgentosBackup && isEmptyPlaceholder(m))),
+    [draftModels, hasAgentosBackup],
   );
 
   const getAgentsTeamsValidationError = () => {
