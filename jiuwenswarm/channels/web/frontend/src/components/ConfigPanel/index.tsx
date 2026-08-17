@@ -4692,9 +4692,14 @@ export function ConfigPanel({
   }, [draftValues, normalizedConfig]);
   const hasConfigChanges = Object.keys(configUpdates).length > 0;
   const hasModelChanges = useMemo(() => {
-    if (draftModels.length !== storeAvailableModels.length) return true;
+    // 比较基准与 draftModels 同口径：仅 defaults（过滤掉 is_agentos）。
+    // agentos 备份模型走独立只读页签，不参与 defaults 编辑态判定；
+    // 否则配了 agentos 时 storeAvailableModels.length > draftModels.length，
+    // 长度不等会恒返 true，导致"有改动"恒脏（保存按钮永远可点）。
+    const persistedDefaults = storeAvailableModels.filter((m) => m.is_agentos !== true);
+    if (draftModels.length !== persistedDefaults.length) return true;
     return draftModels.some((draftModel, index) => {
-      const persistedModel = storeAvailableModels[index];
+      const persistedModel = persistedDefaults[index];
       return !persistedModel || !modelEntriesEqual(draftModel, persistedModel);
     });
   }, [draftModels, storeAvailableModels]);
