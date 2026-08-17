@@ -2251,6 +2251,21 @@ function AppContent() {
       });
   }, [request]);
 
+  const openModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(1);
+
+    void request('config.set', { setup_guide_enabled: 'true' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'true',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to enable setup guide:', error);
+      });
+  }, [request]);
+
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId || currentSessionId === NEW_CONVERSATION_ID || (isProcessing && !isPaused) || isExportingShare) {
