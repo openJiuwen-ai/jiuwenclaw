@@ -463,14 +463,19 @@ function buildLogSummary(entry: BuildLogEntry, t: Translate): string {
     t,
   );
   if (entry.stage === 'update.done') return label;
-  const countKeys: Array<[string, string?]> = [
-    ['current', 'total'],
-    ['skill_count', undefined],
-    ['changed_count', undefined],
-    ['removed_count', undefined],
-    ['edge_count', undefined],
-    ['diagnostics_count', undefined],
-  ];
+  const hasGlobalCandidateProgress = entry.stage === 'graph.resolve.progress'
+    && entry.completed_candidate_count !== undefined
+    && entry.total_candidate_count !== undefined;
+  const countKeys: Array<[string, string?]> = hasGlobalCandidateProgress
+    ? [['completed_candidate_count', 'total_candidate_count']]
+    : [
+      ['current', 'total'],
+      ['skill_count', undefined],
+      ['changed_count', undefined],
+      ['removed_count', undefined],
+      ['edge_count', undefined],
+      ['diagnostics_count', undefined],
+    ];
   const counts = countKeys
     .map(([key, totalKey]) => {
       const value = entry[key];

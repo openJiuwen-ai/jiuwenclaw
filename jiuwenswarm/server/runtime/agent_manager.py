@@ -855,8 +855,10 @@ class AgentManager:
             channel_id: Optional channel ID to limit broadcast scope.
             skip_instance: Optional agent instance to skip (already processed by caller).
         """
-        # plan / fast 已合并为单一 agent；agent.fast / agent.plan 作为历史 token 仍兼容匹配。
-        target_modes = {"agent", "agent.fast", "agent.plan"}
+        # 单 agent 模式热生效：work(agent) 与 code。manager_mode 在上游已归一，
+        # cache_key 前缀只会是 agent 或 code。code.team / team.* 走独立
+        # TeamAgent 体系，cache_key 前缀为 code.team/team，严格相等不命中。
+        target_modes = {"agent", "code"}
 
         for channel_key, channel_agents in self.agents.items():
             # Limit to specific channel if provided

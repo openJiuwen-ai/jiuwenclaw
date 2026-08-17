@@ -781,10 +781,10 @@ body.workspace-resize-active iframe {
     line-height: 1.7142857;
   }
 
-  /* Proactive Recommendation Card */
+  /* Proactive Recommendation Card — 外层 MessageItem 已用 assistant-row + avatar
+     占位对齐正常 agent 回复，这里不再单独限宽，撑满 chat-bubble-wrapper 即可。 */
   .proactive-recommendation-card {
     margin: 0.75rem 0;
-    max-width: 85%;
   }
 
   .proactive-card {
