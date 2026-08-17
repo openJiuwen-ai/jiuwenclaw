@@ -9,6 +9,9 @@ import {
   buildGoalCompletedContent,
   isGoalCompletedContent,
 } from '../components/GoalBar/goalCompletedMessage';
+import { HistoryRecordReassembler } from './historyRecordReassembler';
+
+export { HistoryRecordReassembler };
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -1164,6 +1167,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   let disposed = false;
   let finalized = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  const reassembler = new HistoryRecordReassembler();
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1187,17 +1191,21 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     const raw = extractHistoryMessagePayload(payload);
     const record = normalizeHistoryContent(raw, options.onError);
     if (record) {
-      const entry = parseHistoryTimelineEntry(record, options.sessionId);
+      const full = reassembler.feed(record);
+      if (!full) {
+        return;
+      }
+      const entry = parseHistoryTimelineEntry(full, options.sessionId);
       if (entry) {
         entries.unshift(entry);
       }
-      const reasoningText = extractHistoryReasoningText(record);
+      const reasoningText = extractHistoryReasoningText(full);
       if (reasoningText) {
         entries.unshift({
           kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
+          at: recordTimestampIso(full) ?? '',
           text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
+          updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }
     }
@@ -1228,6 +1236,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function finalize(): void {
     if (disposed || finalized) return;
     finalized = true;
+    reassembler.flush();
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1309,6 +1318,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   let disposed = false;
   let finalized = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  const reassembler = new HistoryRecordReassembler();
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1332,17 +1342,21 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     const raw = extractHistoryMessagePayload(payload);
     const record = normalizeHistoryContent(raw, options.onError);
     if (record) {
-      const entry = parseHistoryTimelineEntry(record, options.sessionId);
+      const full = reassembler.feed(record);
+      if (!full) {
+        return;
+      }
+      const entry = parseHistoryTimelineEntry(full, options.sessionId);
       if (entry) {
         entries.unshift(entry);
       }
-      const reasoningText = extractHistoryReasoningText(record);
+      const reasoningText = extractHistoryReasoningText(full);
       if (reasoningText) {
         entries.unshift({
           kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
+          at: recordTimestampIso(full) ?? '',
           text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
+          updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }
     }
@@ -1368,6 +1382,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function finalize(): void {
     if (disposed || finalized) return;
     finalized = true;
+    reassembler.flush();
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);

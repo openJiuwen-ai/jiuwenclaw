@@ -136,6 +136,10 @@ async def test_team_history_get_cursor_continues_next_page(monkeypatch):
 
 
 def test_history_get_sanitizes_large_restorable_records(monkeypatch):
+    """chat.tool_result 不在切片白名单里：仍要走 string-truncate 才发到 wire。
+    新逻辑下 sanitize 不在 get_conversation_history 里做（移到 split_history_record_for_stream
+    里），所以这里直接调 split_history_record_for_stream 验最终 wire record 有界、
+    content 被截断。"""
     large_record = {
         "id": "tool-result-large",
         "role": "assistant",
@@ -154,13 +158,25 @@ def test_history_get_sanitizes_large_restorable_records(monkeypatch):
         lambda session_id: [large_record],
     )
 
+    # get_conversation_history 现在返回 raw record（不在内部 sanitize）——
+    # sanitize 移到 _handle_history_get_stream 里调 split 时做。这里先验 raw 透传。
     result = agent_ws_server_module.AgentWebSocketServer.get_conversation_history(
         "sess-large",
         1,
     )
 
     assert result is not None
-    message = result["messages"][0]
+    raw_message = result["messages"][0]
+    # raw 状态——还没被 string-truncate
+    assert raw_message["content"] == "x" * 100_000
+
+    # 真正的 sanitize 在 split_history_record_for_stream 里：chat.tool_result 仍单帧，
+    # content 字符串被截断到 16KB + [truncated]。
+    from jiuwenswarm.server.wire_truncate import split_history_record_for_stream
+
+    chunks = split_history_record_for_stream(raw_message)
+    assert len(chunks) == 1
+    message = chunks[0]
     assert message["content"].endswith("[truncated]")
     assert message["tool_result"]["result"].endswith("[truncated]")
     from jiuwenswarm.server import wire_truncate as wire_truncate_module
