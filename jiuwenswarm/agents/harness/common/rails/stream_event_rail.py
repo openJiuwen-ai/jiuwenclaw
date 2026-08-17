@@ -268,6 +268,52 @@ def _infer_tool_result_error(value: Any) -> bool | None:
     return None
 
 
+_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
+_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
+_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
+_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+
+
+def _reset_skill_turbo_adapter_token(ctx: AgentCallbackContext) -> None:
+    """Restore SkillTurbo adapter ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_current_skill_turbo_adapter,
+        )
+        reset_current_skill_turbo_adapter(token)
+
+
+def _reset_skill_turbo_metadata_token(ctx: AgentCallbackContext) -> None:
+    """Restore request-metadata ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+            reset_current_request_metadata,
+        )
+        reset_current_request_metadata(token)
+
+
+def _reset_skill_turbo_workspace_token(ctx: AgentCallbackContext) -> None:
+    """Restore effective_request_workspace_dir ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_effective_request_workspace_dir,
+        )
+        reset_effective_request_workspace_dir(token)
+
+
+def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
+    """Restore interactive_ask ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_interactive_ask,
+        )
+        reset_interactive_ask(token)
+
+
 class JiuSwarmStreamEventRail(DeepAgentRail):
     """Emit frontend stream events and enforce pause/abort checkpoints.
 
@@ -307,10 +353,25 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._symphony_stream_handler = SymphonyToolStreamHandler()
         # Tenant-scoped checkpointer for early checkpoint (prefer over Factory default).
         self._checkpointer: Optional[Any] = None
+        self._skill_turbo_adapter: Any | None = None
+        # 当前请求的 metadata（由 adapter 在 _apply_runtime_config_stages 注入）。
+        # metadata 的 ContextVar 在请求任务中设置，但工具在 harness 执行任务里运行，
+        # ContextVar 不跨任务传播，故经由本属性在 before_tool_call（工具执行上下文）转绑。
+        self._skill_turbo_request_metadata: Optional[dict[str, Any]] = None
 
     def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
         """Bind tenant-scoped checkpointer for early checkpoint saves."""
         self._checkpointer = checkpointer
+
+    def set_skill_turbo_adapter(self, adapter: Any) -> None:
+        """注入 SkillTurbo adapter，用于 HITL 中断/恢复桥接。"""
+        self._skill_turbo_adapter = adapter
+
+    def set_skill_turbo_request_metadata(self, metadata: Optional[dict]) -> None:
+        """注入当前请求 metadata，供 skill_turbo 工具在工具执行上下文中读取。"""
+        self._skill_turbo_request_metadata = (
+            dict(metadata) if isinstance(metadata, dict) else None
+        )
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -640,6 +701,26 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("[StreamEventRail] reset_shell_session_id failed", exc_info=True)
 
+        # SkillTurbo: ensure adapter token is reset after invoke
+        if self._skill_turbo_adapter is not None:
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    clear_current_skill_turbo_adapter,
+                )
+                # 兜底清理：token 已丢失或需无条件清空时用 None 覆盖
+                clear_current_skill_turbo_adapter()
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] clear skill_turbo adapter failed after invoke",
+                    exc_info=True,
+                )
+
+        # SkillTurbo: 确保请求级 ContextVar token 在 invoke 后还原
+        # （与 after_tool_call / on_model_exception 对称，幂等：已 reset 则 pop 得 None 跳过）
+        _reset_skill_turbo_metadata_token(ctx)
+        _reset_skill_turbo_workspace_token(ctx)
+        _reset_skill_turbo_interactive_ask_token(ctx)
+
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
     # ------------------------------------------------------------------
@@ -861,6 +942,54 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     "session_id": sid,
                 }
 
+        # SkillTurbo adapter ContextVar 绑定
+        if self._skill_turbo_adapter is not None:
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    set_current_skill_turbo_adapter,
+                )
+                token = set_current_skill_turbo_adapter(self._skill_turbo_adapter)
+                if not hasattr(ctx, 'extra'):
+                    ctx.extra = {}
+                ctx.extra[_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY] = token
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] bind skill_turbo adapter token failed",
+                    exc_info=True,
+                )
+
+        # SkillTurbo request metadata ContextVar 转绑：
+        # 请求任务里 set_current_request_metadata 的绑定无法传播到本工具执行上下文，
+        # 这里用 rail 上保存的副本重新绑定，供 skill_turbo 工具读取 session_id 等。
+        if self._skill_turbo_request_metadata is not None:
+            if not hasattr(ctx, 'extra'):
+                ctx.extra = {}
+            from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                set_current_request_metadata,
+            )
+            meta_token = set_current_request_metadata(self._skill_turbo_request_metadata)
+            ctx.extra[_SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY] = meta_token
+
+        # SkillTurbo effective_project_dir / interactive_ask ContextVar 转绑：
+        # 与 metadata 同机制，从 rail 保存的副本中提取并在工具执行上下文重新绑定，
+        # 供 skill_turbo 工具读取 effective_project_dir、rail 判定非引导模式跳过。
+        if isinstance(self._skill_turbo_request_metadata, dict):
+            if not hasattr(ctx, 'extra'):
+                ctx.extra = {}
+            _md = self._skill_turbo_request_metadata
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                set_effective_request_workspace_dir,
+                set_interactive_ask,
+            )
+            _epd = _md.get("effective_project_dir")
+            if isinstance(_epd, str) and _epd.strip():
+                ws_token = set_effective_request_workspace_dir(_epd.strip())
+                ctx.extra[_SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY] = ws_token
+            _ia = _md.get("interactive_ask")
+            if _ia is not None:
+                ia_token = set_interactive_ask(bool(_ia))
+                ctx.extra[_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY] = ia_token
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
@@ -876,6 +1005,44 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Remove from in-flight tracking on completion
         if tc_id:
             self._inflight_tool_calls.pop(tc_id, None)
+
+        # SkillTurbo HITL: skill_turbo_tools 在 ContextVar 存了 ToolInterruptException，
+        # 此处改写 ctx.inputs.tool_result 为 TIE，使 harness 原生 HITL 机制检测并暂停。
+        if self._skill_turbo_adapter is not None:
+            _reset_skill_turbo_adapter_token(ctx)
+            _reset_skill_turbo_metadata_token(ctx)
+            _reset_skill_turbo_workspace_token(ctx)
+            _reset_skill_turbo_interactive_ask_token(ctx)
+            try:
+                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                    get_skill_turbo_hitl_tic,
+                    set_skill_turbo_hitl_tic,
+                )
+                _skill_turbo_tic = get_skill_turbo_hitl_tic()
+                if _skill_turbo_tic is not None:
+                    set_skill_turbo_hitl_tic(None)
+                    if isinstance(ctx.inputs, ToolCallInputs):
+                        from openjiuwen.core.single_agent.interrupt.exception import (
+                            ToolInterruptException,
+                        )
+                        new_tic = ToolInterruptException(
+                            request=_skill_turbo_tic.request,
+                            tool_call=ctx.inputs.tool_call,
+                        )
+                        ctx.inputs.tool_result = new_tic
+                        ctx.inputs.tool_msg = None
+                    logger.info(
+                        "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
+                        "original_tcid=%s harness_tcid=%s",
+                        _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
+                        ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
+                    )
+                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
+            except Exception:
+                logger.debug(
+                    "[StreamEventRail] skill_turbo HITL rewrite failed",
+                    exc_info=True,
+                )
 
         normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
@@ -911,6 +1078,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
+        # Clear context on exception（四个 token 全清，避免异常时 ContextVar 泄漏）
+        _reset_skill_turbo_adapter_token(ctx)
+        _reset_skill_turbo_metadata_token(ctx)
+        _reset_skill_turbo_workspace_token(ctx)
+        _reset_skill_turbo_interactive_ask_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx)

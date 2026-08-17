@@ -373,7 +373,27 @@ def build_permission_rail(
             permission_scene_hook=_permission_scene_hook,
         )
 
-        permission_rail = PermissionInterruptRail(
+        # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
+        rail_cls = PermissionInterruptRail
+        try:
+            from jiuwenswarm.common.config import get_config as _get_cfg
+            _cfg = _get_cfg()
+            _react = _cfg.get("react", {}) if isinstance(_cfg, dict) else {}
+            _st = _react.get("skill_turbo", {}) if isinstance(_react, dict) else {}
+            if _st.get("enabled", False):
+                from jiuwenswarm.server.runtime.skill_turbo.rails.permission_rail import (
+                    SkillTurboPermissionRail,
+                )
+                rail_cls = SkillTurboPermissionRail
+                logger.info("[InterruptHelpers] Using SkillTurboPermissionRail")
+        except Exception:
+            logger.debug(
+                "[InterruptHelpers] SkillTurboPermissionRail switch failed, "
+                "fallback to PermissionInterruptRail",
+                exc_info=True,
+            )
+
+        permission_rail = rail_cls(
             config=permission_config,
             tool_names=tool_names,
             llm=llm,

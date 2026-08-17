@@ -379,6 +379,34 @@ def e2a_response_from_agent_chunk(
             metadata=_chunk_metadata,
         )
 
+    # Tool / HITL: stream transport closes but invocation is not a successful
+    # terminal (e.g. permission or ask_user_question waiting for chat.user_answer).
+    # Emit in_progress chunk with is_final=False so clients do not treat as "task done".
+    # 镜像 vendor(clowder-ai) 的 e2a_response_from_agent_chunk 同款特判。
+    if chunk.is_complete and isinstance(pl, dict) and pl.get("awaiting_user_input") is True:
+        return E2AResponse(
+            protocol_version=E2A_PROTOCOL_VERSION,
+            response_id=response_id,
+            request_id=chunk.request_id,
+            sequence=sequence,
+            is_final=False,
+            status=E2A_RESPONSE_STATUS_IN_PROGRESS,
+            response_kind=E2A_RESPONSE_KIND_E2A_CHUNK,
+            timestamp=ts,
+            provenance=prov,
+            body={
+                "delta_kind": "custom",
+                "delta": pl,
+                "event_type": "chat.invocation_paused",
+                "awaiting_user_input": True,
+            },
+            channel=chunk.channel_id or None,
+            identity_origin=IdentityOrigin.AGENT,
+            is_stream=is_stream,
+            agent_ref=_chunk_agent_ref,
+            metadata=_chunk_metadata,
+        )
+
     if chunk.is_complete:
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
