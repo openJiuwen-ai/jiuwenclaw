@@ -9,18 +9,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shlex
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, TextIO
 
 import tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONFIG_PATH = Path("jiuwenswarm/common/_build_config.py")
+
+
+def _emit(message: str, stream: TextIO) -> None:
+    """Emit CLI output through logging without changing its wire format."""
+    cli_logger = logging.Logger("workswarm.build_config.cli", level=logging.INFO)
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.terminator = ""
+    cli_logger.addHandler(handler)
+    cli_logger.info("%s", message)
 
 
 @dataclass(frozen=True)
@@ -256,7 +267,7 @@ def main() -> None:
     try:
         if args.sync:
             for path in write_expected(project_root):
-                sys.stderr.write(f"updated {path}\n")
+                _emit(f"updated {path}\n", sys.stderr)
         elif args.check:
             drift = find_drift(project_root)
             if drift:
@@ -273,19 +284,19 @@ def main() -> None:
     output_requested = args.version or args.name or args.emit_shell or args.emit_batch or args.emit_json
     if (args.sync or args.check) and not output_requested:
         if args.check:
-            sys.stdout.write("Build config is synchronized.\n")
+            _emit("Build config is synchronized.\n", sys.stdout)
         return
     if args.version:
-        sys.stdout.write(f"{config.version}\n")
+        _emit(f"{config.version}\n", sys.stdout)
     elif args.name:
-        sys.stdout.write(f"{config.package_name}\n")
+        _emit(f"{config.package_name}\n", sys.stdout)
     elif args.emit_shell:
-        sys.stdout.write(render_shell(config))
+        _emit(render_shell(config), sys.stdout)
     elif args.emit_batch:
-        sys.stdout.write(render_batch(config))
+        _emit(render_batch(config), sys.stdout)
     else:
         output = json.dumps(config.values(), ensure_ascii=True, sort_keys=True)
-        sys.stdout.write(f"{output}\n")
+        _emit(f"{output}\n", sys.stdout)
 
 
 if __name__ == "__main__":

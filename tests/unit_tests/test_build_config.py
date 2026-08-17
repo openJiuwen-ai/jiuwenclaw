@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -187,3 +190,64 @@ def test_build_config_does_not_own_lockfile_updates() -> None:
 
     assert "subprocess" not in source
     assert "uv lock" not in source
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ("--version", "version"),
+        ("--name", "package_name"),
+    ],
+)
+def test_cli_scalar_output_remains_prefix_free(option: str, expected: str) -> None:
+    config = load_build_config(PROJECT_ROOT)
+
+    result = subprocess.run(
+        [sys.executable, "scripts/build_config.py", option],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == f"{getattr(config, expected)}\n"
+    assert result.stderr == ""
+
+
+def test_cli_json_output_remains_machine_readable() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/build_config.py", "--emit-json"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout)["version"] == load_build_config(PROJECT_ROOT).version
+    assert result.stderr == ""
+
+
+def test_cli_sync_status_uses_stderr_without_log_prefix(tmp_path: Path) -> None:
+    _create_project_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts/build_config.py"),
+            "--root",
+            str(tmp_path),
+            "--sync",
+            "--version",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "1.2.3.beta4\n"
+    assert result.stderr.splitlines() == [
+        "updated pyproject.toml",
+        "updated packages/jiuwenswarm-tui/pyproject.toml",
+        "updated jiuwenswarm/common/_build_config.py",
+    ]
