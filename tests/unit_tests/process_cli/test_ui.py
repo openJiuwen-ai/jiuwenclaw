@@ -26,17 +26,20 @@ def test_startup_uses_chinese_card_and_jiuwenswarm_title(monkeypatch) -> None:
     ui = ProcessCliUI(output, columns=80)
 
     ui.startup(
+        model_name="gpt-5.6-sol",
         mode="code.normal",
-        work_mode="code",
         cwd="D:\\work_space\\jiuwenswarm",
         session_id=None,
     )
 
     text = output.getvalue()
-    assert "JiuwenSwarm" in text
+    assert ">_ JiuwenSwarm" in text
     assert "进程式 CLI · 本地 Runtime" in text
-    assert "运行模式：  code.normal" in text
-    assert "当前会话：  尚未创建" in text
+    assert "模型：  gpt-5.6-sol" in text
+    assert "目录：  D:\\work_space\\jiuwenswarm" in text
+    assert "模式：  code.normal" in text
+    assert "会话：  尚未创建" in text
+    assert "工作模式" not in text
     assert "/help      查看所有命令" in text
     assert "\033[" not in text
 
@@ -47,15 +50,17 @@ def test_narrow_terminal_falls_back_to_plain_layout(monkeypatch) -> None:
     ui = ProcessCliUI(output, columns=40)
 
     ui.startup(
+        model_name="gpt-5.6-sol",
         mode="code.normal",
-        work_mode="code",
         cwd="D:\\work_space\\jiuwenswarm",
         session_id="runtime-session",
     )
 
     text = output.getvalue()
-    assert "运行模式：code.normal" in text
-    assert "当前会话：runtime-session" in text
+    assert "模型：gpt-5.6-sol" in text
+    assert "模式：code.normal" in text
+    assert "会话：runtime-session" in text
+    assert "工作模式" not in text
     assert "╭" not in text
 
 
@@ -66,14 +71,31 @@ def test_startup_never_exceeds_terminal_width(monkeypatch, columns: int) -> None
     ui = ProcessCliUI(output, columns=columns)
 
     ui.startup(
+        model_name="a-very-long-model-name-for-width-regression",
         mode="code.normal",
-        work_mode="code",
         cwd="D:\\very\\long\\workspace\\directory\\with\\many\\nested\\segments",
         session_id="runtime-session-with-a-long-identifier",
     )
 
     for line in output.getvalue().splitlines():
         assert ui_module._display_width(line) <= columns, (columns, line)
+
+
+def test_status_shows_model_and_canonical_mode_without_work_mode(monkeypatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+    output = TtyBuffer()
+    ui = ProcessCliUI(output, columns=80)
+
+    ui.status(
+        model_name="gpt-5.6-sol",
+        mode="code.normal",
+        cwd="D:\\work_space\\jiuwenswarm",
+        session_id="runtime-session",
+    )
+
+    text = output.getvalue()
+    assert "gpt-5.6-sol · code.normal" in text
+    assert "工作模式" not in text
 
 
 def test_human_renderer_shows_chinese_runtime_states(monkeypatch) -> None:

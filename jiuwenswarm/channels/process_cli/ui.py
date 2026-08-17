@@ -99,41 +99,31 @@ class ProcessCliUI:
     def startup(
         self,
         *,
+        model_name: str,
         mode: str,
-        work_mode: str,
         cwd: str,
         session_id: str | None,
     ) -> None:
         session = session_id or "尚未创建"
+        model = model_name or "未配置"
         if self.columns < 48:
-            self._write_wrapped("JiuwenSwarm", style=_ANSI_BOLD_CYAN)
+            self._write_wrapped(">_ JiuwenSwarm", style=_ANSI_BOLD_CYAN)
             self._write_wrapped("进程式 CLI · 本地 Runtime")
-            self._write_wrapped(f"运行模式：{mode}")
-            self._write_wrapped(f"工作模式：{work_mode}")
-            self._write_wrapped(f"工作目录：{cwd}")
-            self._write_wrapped(f"当前会话：{session}")
+            self._write_wrapped(f"模型：{model}")
+            self._write_wrapped(f"目录：{cwd}")
+            self._write_wrapped(f"模式：{mode}")
+            self._write_wrapped(f"会话：{session}")
             self._write("\n")
         else:
             lines = [
-                ("JiuwenSwarm", _ANSI_BOLD_CYAN),
+                (">_ JiuwenSwarm", _ANSI_BOLD_CYAN),
                 ("进程式 CLI · 本地 Runtime", _ANSI_DIM),
                 ("", ""),
+                (f"模型：  {model}", ""),
+                (f"目录：  {cwd}", ""),
+                (f"模式：  {mode}", ""),
+                (f"会话：  {session}", ""),
             ]
-            if self.columns >= 68:
-                lines.append((f"运行模式：  {mode}    工作模式：  {work_mode}", ""))
-            else:
-                lines.extend(
-                    [
-                        (f"运行模式：  {mode}", ""),
-                        (f"工作模式：  {work_mode}", ""),
-                    ]
-                )
-            lines.extend(
-                [
-                    (f"工作目录：  {cwd}", ""),
-                    (f"当前会话：  {session}", ""),
-                ]
-            )
             self._card(lines)
             self._write("\n")
 
@@ -171,15 +161,15 @@ class ProcessCliUI:
     def status(
         self,
         *,
+        model_name: str,
         mode: str,
-        work_mode: str,
         cwd: str,
         session_id: str | None,
     ) -> None:
         session = (
             f"会话 {self.short_session(session_id)}" if session_id else "尚未创建会话"
         )
-        content = f"  {mode} · {work_mode} · {session} · {cwd}"
+        content = f"  {model_name or '未配置'} · {mode} · {session} · {cwd}"
         self._write(
             self._styled(_truncate(content, max(self.columns - 1, 1)), _ANSI_DIM)
         )

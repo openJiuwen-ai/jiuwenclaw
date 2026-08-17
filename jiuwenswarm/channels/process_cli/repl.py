@@ -14,6 +14,12 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jiuwenswarm.channels.process_cli.display_context import (
+    resolve_configured_model_name as _resolve_configured_model_name,
+)
+from jiuwenswarm.channels.process_cli.display_context import (
+    resolve_display_mode as _resolve_display_mode,
+)
 from jiuwenswarm.channels.process_cli.ui import ProcessCliUI, resolved_cwd
 
 if TYPE_CHECKING:
@@ -134,16 +140,18 @@ async def run_repl(args: argparse.Namespace) -> int:
     ui = ProcessCliUI()
     session_id = args.session
     cwd = resolved_cwd(args.cwd)
+    model_name = _resolve_configured_model_name()
+    display_mode = _resolve_display_mode(args.mode, args.work_mode)
     ui.startup(
-        mode=args.mode,
-        work_mode=args.work_mode,
+        model_name=model_name,
+        mode=display_mode,
         cwd=cwd,
         session_id=session_id,
     )
     while True:
         ui.status(
-            mode=args.mode,
-            work_mode=args.work_mode,
+            model_name=model_name,
+            mode=display_mode,
             cwd=cwd,
             session_id=session_id,
         )
