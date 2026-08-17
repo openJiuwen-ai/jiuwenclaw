@@ -411,17 +411,8 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     # Step 3: Deduplication - filter recently sent artifacts
     new_artifacts = [
         a for a in existing_artifacts 
-        # if not _is_recently_sent(a.get("path", ""))
     ]
 
-    # send_file_to_user is a delivery-stage fallback; avoid re-emitting files
-    # that were already emitted earlier in this same session.
-    # if tool_name == "send_file_to_user":
-    #    new_artifacts = [
-    #        a for a in new_artifacts
-    #        if not _already_emitted_in_session(session_id, a.get("path", ""))
-    #    ]
-    
     if not new_artifacts:
         skipped_paths = [a.get("name", "") for a in existing_artifacts]
         logger.debug(
