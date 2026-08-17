@@ -57,6 +57,11 @@ class _ScriptedAdapter:
     async def process_interrupt(self, *_args: Any, **_kwargs: Any) -> Any:
         return None
 
+    async def reconcile_session_mcp(self, *_args: Any, **_kwargs: Any) -> None:
+        # Session-level MCP reconcile is a no-op for this scripted adapter
+        # (goal-history tests don't exercise MCP selection).
+        return None
+
     async def handle_user_answer(self, *_args: Any, **_kwargs: Any) -> Any:
         return None
 
