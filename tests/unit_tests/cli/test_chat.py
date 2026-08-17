@@ -1070,6 +1070,7 @@ class TestExternalDirs:
         from ruamel.yaml import YAML
         yaml = YAML()
         yaml.dump({"permissions": {"external_directory": {"*": "ask"}}}, cfg_path)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: cfg_path)
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         assert _get_persisted_external_dirs() == []
 
@@ -1091,6 +1092,7 @@ class TestExternalDirs:
             },
             cfg_path,
         )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: cfg_path)
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         dirs = _get_persisted_external_dirs()
         assert _normalize_dir("/Users/hwz/mcore/foo") in dirs
@@ -1129,6 +1131,7 @@ class TestExternalDirs:
             },
             cfg_path,
         )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: cfg_path)
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         dirs = _get_persisted_external_dirs()
         assert _normalize_dir("/trusted/a") in dirs
@@ -1151,6 +1154,7 @@ class TestExternalDirs:
             },
             cfg_path,
         )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: save_cfg_path)
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", save_cfg_path)
         assert _remove_dir_from_config("/Users/hwz/mcore/foo") is True
         assert _get_persisted_external_dirs() == []
@@ -1178,6 +1182,7 @@ class TestExternalDirs:
             },
             cfg_path,
         )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: cfg_path)
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         assert _remove_dir_from_config("/trusted/a") is True
         assert _get_persisted_external_dirs() == []
@@ -1191,7 +1196,7 @@ class TestExternalDirs:
             {"permissions": {"external_directory": {"*": "ask"}}},
             cfg_path,
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: cfg_path)
         assert _remove_dir_from_config("/nonexistent") is False
 
 

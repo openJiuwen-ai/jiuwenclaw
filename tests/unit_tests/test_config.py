@@ -123,7 +123,7 @@ class TestConfigFunctions:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_setup_guide_enabled_in_config(False)
 
@@ -354,7 +354,7 @@ symphony:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_skill_retrieval_in_config(
             {
@@ -514,7 +514,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], enable_permissions=True))
 
@@ -634,7 +634,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True))
 
@@ -664,7 +664,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"] = []
 
@@ -682,7 +682,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team"]))
 
@@ -696,7 +696,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         with pytest.raises(ValueError, match="duplicate team_name"):
             replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "alpha_team"]))
@@ -706,7 +706,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["agent_key"] = "missing_agent"
 
@@ -718,7 +718,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"], include_teammate=True)
         payload["team"][0]["teammate"]["agent_key"] = "missing_agent"
 
@@ -730,7 +730,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         replace_teams_in_config(TestTeamModesConfig._front_payload(["alpha_team", "beta_team"]))
         replace_teams_in_config(TestTeamModesConfig._front_payload(["gamma_team"]))
@@ -743,7 +743,7 @@ modes:
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
     ):
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["team"][0]["predefined_members"][1]["member_name"] = "analyst"
 
@@ -767,7 +767,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         # 空 team 数组应该删除 modes.team 配置项
         replace_teams_in_config({"agents": {}, "team": []})
@@ -791,7 +791,7 @@ modes:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         # 空 team 数组，且 modes.team 不存在，不应报错
         replace_teams_in_config({"agents": {}, "team": []})
@@ -825,7 +825,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_xiaoyi_runtime_in_config(
             {
@@ -862,7 +862,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         update_xiaoyi_runtime_in_config(
             {"last_session_id": "sess-2"},
@@ -894,7 +894,7 @@ channels:
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
 
         token = "88062548d4436ba6b6bfb573c641ad5d2a3f10a649dae5f52ad6f31f851cad64"
         update_xiaoyi_runtime_in_config(

@@ -1,4 +1,4 @@
-﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from __future__ import annotations
 
@@ -107,13 +107,13 @@ def test_get_config_cache_bypasses_when_task_overlay_bound(monkeypatch):
 
     config_module.clear_config_cache()
     calls = {"count": 0}
-    original_read = config_module._read_with_retry
+    original_read = config_module.get_merged_config_dict
 
-    def _counting_read(path):
+    def _counting_read():
         calls["count"] += 1
-        return original_read(path)
+        return original_read()
 
-    monkeypatch.setattr(config_module, "_read_with_retry", _counting_read)
+    monkeypatch.setattr(config_module, "get_merged_config_dict", _counting_read)
     apply_env_overrides_to_active(
         {"MODEL_NAME": "cached-model"},
         service_id="default",

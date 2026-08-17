@@ -520,17 +520,9 @@ def test_get_model_names_skips_empty_name_entries(tmp_path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg, raising=False,
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.common.config._CONFIG_YAML_PATH", cfg, raising=False,
-    )
-
     import jiuwenswarm.common.config as cfg_mod
 
-    monkeypatch.setattr(cfg_mod, "CONFIG_YAML_PATH", cfg)
-    monkeypatch.setattr(cfg_mod, "_CONFIG_YAML_PATH", cfg)
+    monkeypatch.setattr(cfg_mod, "get_config_file", lambda: cfg)
 
     for var in ("API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
