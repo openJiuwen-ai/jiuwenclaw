@@ -1865,6 +1865,43 @@ async def test_graph_status_repairs_interrupted_build_log(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_service_graph_status_does_not_bind_freshness_to_current_default_model(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    captured = {}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+
+    def fake_graph_status(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {"success": True, "exists": True, "stale": False}
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        fake_graph_status,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("default model must not affect graph status")
+        ),
+    )
+
+    result = await SwarmSymphonyService().graph_status()
+
+    assert result["stale"] is False
+    assert captured.get("llm_config") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_path):
     config = _config(tmp_path)
 

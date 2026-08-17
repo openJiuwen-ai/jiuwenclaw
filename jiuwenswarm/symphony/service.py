@@ -55,16 +55,15 @@ class SwarmSymphonyService:
         skills_root = config.paths.skills_root
         graph_dir = config.paths.graph_dir
         await self._repair_interrupted_build_state(graph_dir)
-        try:
-            llm_config = LLMConfig.from_default_model()
-        except (RuntimeError, ValueError):
-            llm_config = None
 
         def status() -> dict[str, Any]:
             payload = graph_status(
                 skills_root,
                 graph_dir,
-                llm_config=llm_config,
+                # Freshness follows the model identity captured by the published
+                # graph. The current default model is an online planning concern
+                # and must not make that graph stale merely because it changed.
+                llm_config=None,
                 symphony_config=config,
             ).to_dict()
             payload.update(_build_log_payload(graph_dir))
