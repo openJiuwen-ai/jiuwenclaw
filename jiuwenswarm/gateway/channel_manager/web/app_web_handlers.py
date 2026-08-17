@@ -200,24 +200,43 @@ class _ConfigChangeSet:
 class _ConfigApplyResult:
     env_updates: dict[str, str]
     yaml_updated: list[str]
-    codex_dependency_install: dict[str, Any] | None = None
+    external_cli_dependency_installs: dict[str, dict[str, Any]] | None = None
 
 
-_CODEX_DEPENDENCY_INSTALL_LOCK = threading.Lock()
-_CODEX_DEPENDENCY_INSTALL_STATUS: dict[str, Any] = {
-    "status": "idle",
-    "phase": "idle",
-    "error": "",
-    "last_log": "",
-    "log_tail": [],
-    "started_at": 0.0,
-    "finished_at": 0.0,
-    "updated_at": 0.0,
+def _external_cli_dependency_install_status_template() -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "phase": "idle",
+        "error": "",
+        "last_log": "",
+        "log_tail": [],
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "updated_at": 0.0,
+    }
+
+
+_EXTERNAL_CLI_DEPENDENCY_MODULES = {
+    "claude": "claude_agent_sdk",
+    "codex": "openai_codex",
 }
-_CODEX_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT = 8
-_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR = (
-    "this desktop package does not include Codex support; rebuild it after running `uv sync --extra codex`"
-)
+_EXTERNAL_CLI_DEPENDENCY_EXTRAS = {
+    "claude": "claude",
+    "codex": "codex",
+}
+_EXTERNAL_CLI_DEPENDENCY_DISPLAY_NAMES = {
+    "claude": "Claude",
+    "codex": "Codex",
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS = {
+    cli_agent: threading.Lock()
+    for cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS: dict[str, dict[str, Any]] = {
+    cli_agent: _external_cli_dependency_install_status_template()
+    for cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT = 8
 
 
 _PROJECT_ROOT = get_root_dir()
@@ -767,7 +786,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.disable",
     "agents.tools_list",
     "external_cli.detect",
-    "external_cli.codex_install_status",
+    "external_cli.install_status",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -1336,10 +1355,11 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
     return flat
 
 
-def _team_payload_requests_codex(params: dict[str, Any]) -> bool:
+def _team_payload_requested_external_cli_agents(params: dict[str, Any]) -> set[str]:
     teams_raw = params.get("team")
+    requested: set[str] = set()
     if not isinstance(teams_raw, list):
-        return False
+        return requested
     for team_item in teams_raw:
         if not isinstance(team_item, dict):
             continue
@@ -1347,11 +1367,10 @@ def _team_payload_requests_codex(params: dict[str, Any]) -> bool:
         if not isinstance(external_cli_agents, list):
             continue
         for item in external_cli_agents:
-            if item == "codex":
-                return True
-            if isinstance(item, dict) and item.get("cli_agent") == "codex":
-                return True
-    return False
+            cli_agent = item if isinstance(item, str) else item.get("cli_agent") if isinstance(item, dict) else ""
+            if cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES:
+                requested.add(cli_agent)
+    return requested
 
 
 def _team_item_requests_codex(team_item: dict[str, Any]) -> bool:
@@ -1380,6 +1399,42 @@ def _inject_external_cli_publish_url(params: dict[str, Any]) -> dict[str, Any]:
             item["external_cli_publish_url"] = publish_url
             teams.append(item)
             changed = True
+        else:
+            teams.append(team_item)
+
+    if not changed:
+        return params
+    return {**params, "team": teams}
+
+
+def _remove_external_cli_agents_from_team_payload(params: dict[str, Any], cli_agents: set[str]) -> dict[str, Any]:
+    teams_raw = params.get("team")
+    if not cli_agents or not isinstance(teams_raw, list):
+        return params
+
+    teams: list[Any] = []
+    changed = False
+    for team_item in teams_raw:
+        if not isinstance(team_item, dict):
+            teams.append(team_item)
+            continue
+        external_cli_agents = team_item.get("external_cli_agents")
+        if not isinstance(external_cli_agents, list):
+            teams.append(team_item)
+            continue
+        filtered_agents: list[Any] = []
+        item_changed = False
+        for item in external_cli_agents:
+            cli_agent = item if isinstance(item, str) else item.get("cli_agent") if isinstance(item, dict) else ""
+            if cli_agent in cli_agents:
+                item_changed = True
+                changed = True
+                continue
+            filtered_agents.append(item)
+        if item_changed:
+            item = dict(team_item)
+            item["external_cli_agents"] = filtered_agents
+            teams.append(item)
         else:
             teams.append(team_item)
 
@@ -1437,48 +1492,64 @@ def _build_external_cli_publish_url() -> str:
     return f"ws://{host}:{port}{_EXTERNAL_CLI_PUBLISH_PATH}"
 
 
-def _ensure_codex_dependency_available() -> None:
-    if importlib.util.find_spec("openai_codex") is not None:
-        return
-    if _is_frozen_runtime():
-        raise RuntimeError(_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR)
-    _install_codex_dependency()
+def _external_cli_dependency_module(cli_agent: str) -> str:
+    module = _EXTERNAL_CLI_DEPENDENCY_MODULES.get(cli_agent)
+    if module is None:
+        raise ValueError(f"unsupported external cli agent: {cli_agent}")
+    return module
+
+
+def _external_cli_dependency_display_name(cli_agent: str) -> str:
+    return _EXTERNAL_CLI_DEPENDENCY_DISPLAY_NAMES.get(cli_agent, cli_agent)
+
+
+def _external_cli_desktop_missing_dependency_error(cli_agent: str) -> str:
+    display_name = _external_cli_dependency_display_name(cli_agent)
+    extra = _EXTERNAL_CLI_DEPENDENCY_EXTRAS[cli_agent]
+    return (
+        f"this desktop package does not include {display_name} support; "
+        f"rebuild it after running `uv sync --extra {extra}`"
+    )
 
 
 def _is_frozen_runtime() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def _snapshot_codex_dependency_install_status() -> dict[str, Any]:
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        snapshot = dict(_CODEX_DEPENDENCY_INSTALL_STATUS)
-        snapshot["log_tail"] = list(_CODEX_DEPENDENCY_INSTALL_STATUS.get("log_tail") or [])
+def _snapshot_external_cli_dependency_install_status(cli_agent: str) -> dict[str, Any]:
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]
+        snapshot = dict(status)
+        snapshot["cli_agent"] = cli_agent
+        snapshot["log_tail"] = list(status.get("log_tail") or [])
         return snapshot
 
 
-def _update_codex_dependency_install_status(updates: dict[str, Any]) -> None:
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        _CODEX_DEPENDENCY_INSTALL_STATUS.update(updates)
-        _CODEX_DEPENDENCY_INSTALL_STATUS["updated_at"] = time.time()
+def _update_external_cli_dependency_install_status(cli_agent: str, updates: dict[str, Any]) -> None:
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].update(updates)
+        _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]["updated_at"] = time.time()
 
 
-def _append_codex_dependency_install_log(line: str) -> None:
+def _append_external_cli_dependency_install_log(cli_agent: str, line: str) -> None:
     stripped = line.strip()
     if not stripped:
         return
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        log_tail = list(_CODEX_DEPENDENCY_INSTALL_STATUS.get("log_tail") or [])
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]
+        log_tail = list(status.get("log_tail") or [])
         log_tail.append(stripped)
-        _CODEX_DEPENDENCY_INSTALL_STATUS.update({
+        status.update({
             "last_log": stripped,
-            "log_tail": log_tail[-_CODEX_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT:],
+            "log_tail": log_tail[-_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT:],
             "updated_at": time.time(),
         })
 
 
-def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | None:
-    if importlib.util.find_spec("openai_codex") is not None:
-        _update_codex_dependency_install_status({
+def _ensure_external_cli_dependency_available_or_start_install(cli_agent: str) -> dict[str, Any] | None:
+    module = _external_cli_dependency_module(cli_agent)
+    if importlib.util.find_spec(module) is not None:
+        _update_external_cli_dependency_install_status(cli_agent, {
             "status": "succeeded",
             "phase": "succeeded",
             "error": "",
@@ -1487,23 +1558,23 @@ def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | No
         return None
 
     if _is_frozen_runtime():
-        _update_codex_dependency_install_status({
+        _update_external_cli_dependency_install_status(cli_agent, {
             "status": "failed",
             "phase": "failed",
-            "error": _CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR,
+            "error": _external_cli_desktop_missing_dependency_error(cli_agent),
             "last_log": "",
             "log_tail": [],
             "started_at": 0.0,
             "finished_at": time.time(),
         })
-        return _snapshot_codex_dependency_install_status()
+        return _snapshot_external_cli_dependency_install_status(cli_agent)
 
-    with _CODEX_DEPENDENCY_INSTALL_LOCK:
-        if _CODEX_DEPENDENCY_INSTALL_STATUS.get("status") == "running":
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        if _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].get("status") == "running":
             already_running = True
         else:
             already_running = False
-            _CODEX_DEPENDENCY_INSTALL_STATUS.update({
+            _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].update({
                 "status": "running",
                 "phase": "preparing",
                 "error": "",
@@ -1514,24 +1585,40 @@ def _ensure_codex_dependency_available_or_start_install() -> dict[str, Any] | No
                 "updated_at": time.time(),
             })
     if already_running:
-        return _snapshot_codex_dependency_install_status()
+        return _snapshot_external_cli_dependency_install_status(cli_agent)
 
     thread = threading.Thread(
-        target=_run_codex_dependency_install_background,
-        name="codex-dependency-install",
+        target=_run_external_cli_dependency_install_background,
+        args=(cli_agent,),
+        name=f"{cli_agent}-dependency-install",
         daemon=True,
     )
     thread.start()
-    return _snapshot_codex_dependency_install_status()
+    return _snapshot_external_cli_dependency_install_status(cli_agent)
 
 
-def _run_codex_dependency_install_background() -> None:
+def _ensure_external_cli_dependencies_available_or_start_install(
+    cli_agents: set[str],
+) -> dict[str, dict[str, Any]]:
+    installs: dict[str, dict[str, Any]] = {}
+    for cli_agent in sorted(cli_agents):
+        snapshot = _ensure_external_cli_dependency_available_or_start_install(cli_agent)
+        if snapshot is not None:
+            installs[cli_agent] = snapshot
+    return installs
+
+
+def _run_external_cli_dependency_install_background(cli_agent: str) -> None:
     try:
-        _install_codex_dependency()
+        _install_external_cli_dependency(cli_agent)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[config.set] Codex dependency installation failed: %s", exc)
-        _append_codex_dependency_install_log(str(exc))
-        _update_codex_dependency_install_status({
+        logger.warning(
+            "[config.set] %s dependency installation failed: %s",
+            _external_cli_dependency_display_name(cli_agent),
+            exc,
+        )
+        _append_external_cli_dependency_install_log(cli_agent, str(exc))
+        _update_external_cli_dependency_install_status(cli_agent, {
             "status": "failed",
             "phase": "failed",
             "error": str(exc),
@@ -1539,7 +1626,7 @@ def _run_codex_dependency_install_background() -> None:
         })
         return
 
-    _update_codex_dependency_install_status({
+    _update_external_cli_dependency_install_status(cli_agent, {
         "status": "succeeded",
         "phase": "succeeded",
         "error": "",
@@ -1547,13 +1634,14 @@ def _run_codex_dependency_install_background() -> None:
     })
 
 
-def _install_codex_dependency() -> None:
+def _install_external_cli_dependency(cli_agent: str) -> None:
     if _is_frozen_runtime():
-        raise RuntimeError(_CODEX_DESKTOP_MISSING_DEPENDENCY_ERROR)
-    package = _resolve_openjiuwen_codex_package()
+        raise RuntimeError(_external_cli_desktop_missing_dependency_error(cli_agent))
+    module = _external_cli_dependency_module(cli_agent)
+    package = _resolve_openjiuwen_extra_package(_EXTERNAL_CLI_DEPENDENCY_EXTRAS[cli_agent])
     args = _build_optional_dependency_install_args(package)
     output_lines: list[str] = []
-    _update_codex_dependency_install_status({
+    _update_external_cli_dependency_install_status(cli_agent, {
         "phase": "installing",
     })
     try:
@@ -1569,7 +1657,7 @@ def _install_codex_dependency() -> None:
             env=env,
         )
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"failed to install codex dependency: {exc}") from exc
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {exc}") from exc
 
     output_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -1583,7 +1671,7 @@ def _install_codex_dependency() -> None:
         finally:
             output_queue.put(None)
 
-    reader = threading.Thread(target=read_output, name="codex-dependency-install-output", daemon=True)
+    reader = threading.Thread(target=read_output, name=f"{cli_agent}-dependency-install-output", daemon=True)
     reader.start()
     deadline = time.monotonic() + 600
     reader_done = False
@@ -1599,30 +1687,30 @@ def _install_codex_dependency() -> None:
                 line = item.rstrip()
                 if line:
                     output_lines.append(line)
-                    _append_codex_dependency_install_log(line)
+                    _append_external_cli_dependency_install_log(cli_agent, line)
 
         if process.poll() is not None and reader_done:
             break
         if time.monotonic() > deadline:
             process.kill()
-            raise RuntimeError("failed to install codex dependency: timed out")
+            raise RuntimeError(f"failed to install {cli_agent} dependency: timed out")
 
     reader.join(timeout=1)
     returncode = process.wait()
     if returncode != 0:
         output = "\n".join(output_lines[-20:])
-        raise RuntimeError(f"failed to install codex dependency: {output}")
-    _update_codex_dependency_install_status({
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {output}")
+    _update_external_cli_dependency_install_status(cli_agent, {
         "phase": "verifying",
     })
-    if importlib.util.find_spec("openai_codex") is None:
-        raise RuntimeError("failed to install codex dependency: openai_codex is still unavailable")
+    if importlib.util.find_spec(module) is None:
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {module} is still unavailable")
 
 
-def _resolve_openjiuwen_codex_package() -> str:
+def _resolve_openjiuwen_extra_package(extra: str) -> str:
     spec = importlib.util.find_spec("openjiuwen")
     if spec is None:
-        return "openjiuwen[codex]"
+        return f"openjiuwen[{extra}]"
 
     candidate_paths: list[Path] = []
     if spec.origin:
@@ -1634,9 +1722,9 @@ def _resolve_openjiuwen_codex_package() -> str:
         package_root = candidate_path if candidate_path.is_dir() else candidate_path.parent
         project_root = package_root.parent if package_root.name == "openjiuwen" else package_root
         if (project_root / "pyproject.toml").is_file() and (project_root / "openjiuwen").is_dir():
-            return f"{project_root}[codex]"
+            return f"{project_root}[{extra}]"
 
-    return "openjiuwen[codex]"
+    return f"openjiuwen[{extra}]"
 
 
 def _build_optional_dependency_install_args(package: str) -> list[str]:
@@ -2313,8 +2401,26 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         result = _detect_external_cli_agent(cli_agent, cli_path)
         await channel.send_response(ws, req_id, ok=True, payload=result)
 
-    async def _external_cli_codex_install_status(ws, req_id, params, session_id):
-        await channel.send_response(ws, req_id, ok=True, payload=_snapshot_codex_dependency_install_status())
+    async def _external_cli_install_status(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        cli_agent = str(params.get("cli_agent") or "").strip().lower()
+        if cli_agent not in _EXTERNAL_CLI_DEPENDENCY_MODULES:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"unsupported external cli agent: {cli_agent}",
+                code="BAD_REQUEST",
+            )
+            return
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload=_snapshot_external_cli_dependency_install_status(cli_agent),
+        )
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
         """把已更新的环境变量写回 .env（仅覆盖或追加对应 KEY=value 行）。"""
@@ -2435,7 +2541,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
-        codex_dependency_install: dict[str, Any] | None = None
+        external_cli_dependency_installs: dict[str, dict[str, Any]] = {}
         available_model_providers = [provider.value for provider in ProviderType]
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
@@ -2461,16 +2567,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         if "agents" in params or "team" in params:
             try:
-                skip_team_update = False
-                if _team_payload_requests_codex(params):
-                    codex_dependency_install = _ensure_codex_dependency_available_or_start_install()
-                    if codex_dependency_install is not None:
-                        skip_team_update = True
-                if "team" in params and not skip_team_update:
+                requested_cli_agents = _team_payload_requested_external_cli_agents(params)
+                external_cli_dependency_installs.update(
+                    _ensure_external_cli_dependencies_available_or_start_install(requested_cli_agents)
+                )
+                params_to_save = _remove_external_cli_agents_from_team_payload(
+                    params,
+                    set(external_cli_dependency_installs),
+                )
+                if "team" in params:
                     _preserve_deleted_team_entities(params)
-                if not skip_team_update:
-                    replace_teams_in_config(_inject_external_cli_publish_url(params))
-                    yaml_updated.append("modes.team")
+                replace_teams_in_config(_inject_external_cli_publish_url(params_to_save))
+                yaml_updated.append("modes.team")
             except ValueError as exc:
                 raise _ConfigBadRequest(str(exc)) from exc
             except _ConfigInternalError:
@@ -2509,12 +2617,20 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                             external_cli_agents = _external_cli_agents_from_switches(raw, params)
                         except ValueError as exc:
                             raise _ConfigBadRequest(str(exc)) from exc
-                        if any(item.get("cli_agent") == "codex" for item in external_cli_agents):
-                            codex_dependency_install = _ensure_codex_dependency_available_or_start_install()
-                            if codex_dependency_install is not None:
-                                external_cli_agents = [
-                                    item for item in external_cli_agents if item.get("cli_agent") != "codex"
-                                ]
+                        requested_cli_agents = {
+                            item.get("cli_agent", "")
+                            for item in external_cli_agents
+                            if item.get("cli_agent") in _EXTERNAL_CLI_DEPENDENCY_MODULES
+                        }
+                        external_cli_dependency_installs.update(
+                            _ensure_external_cli_dependencies_available_or_start_install(requested_cli_agents)
+                        )
+                        if external_cli_dependency_installs:
+                            external_cli_agents = [
+                                item
+                                for item in external_cli_agents
+                                if item.get("cli_agent") not in external_cli_dependency_installs
+                            ]
                         update_external_cli_agents_in_config(
                             external_cli_agents,
                             _build_external_cli_publish_url(),
@@ -2593,7 +2709,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "KV cache affinity saved but not applied: " + "; ".join(failures)
                 )
 
-        return _ConfigApplyResult(env_updates, yaml_updated, codex_dependency_install)
+        return _ConfigApplyResult(env_updates, yaml_updated, external_cli_dependency_installs or None)
 
     async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
         """Synchronously apply only the runtime scope affected by a saved config change."""
@@ -2729,8 +2845,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
-        if apply_result.codex_dependency_install is not None:
-            payload["codex_dependency_install"] = apply_result.codex_dependency_install
+        if apply_result.external_cli_dependency_installs is not None:
+            payload["external_cli_dependency_installs"] = apply_result.external_cli_dependency_installs
         await channel.send_response(
             ws, req_id, ok=True,
             payload=payload,
@@ -3066,8 +3182,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "applied_without_restart": applied_without_restart,
                 "models_count": models_count,
             }
-            if apply_result.codex_dependency_install is not None:
-                payload["codex_dependency_install"] = apply_result.codex_dependency_install
+            if apply_result.external_cli_dependency_installs is not None:
+                payload["external_cli_dependency_installs"] = apply_result.external_cli_dependency_installs
 
             await channel.send_response(
                 ws,
@@ -6664,7 +6780,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("config.save_all", _config_save_all)
     channel.register_method("config.validate_model", _config_validate_model)
     channel.register_method("external_cli.detect", _external_cli_detect)
-    channel.register_method("external_cli.codex_install_status", _external_cli_codex_install_status)
+    channel.register_method("external_cli.install_status", _external_cli_install_status)
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)

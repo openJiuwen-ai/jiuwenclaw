@@ -323,7 +323,7 @@
     "skillsManage": "技能管理",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
-    "recentTasks": "最近任务",
+    "recentTasks": "任务规划",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -925,12 +925,12 @@
       "teamSpawnMode": "团队启动/拉起成员的方式。",
       "teamEnablePermissions": "是否对该 Team 启用工具安全护栏（permissions）。",
       "teamExternalCliAgents": "允许 Leader 拉起的三方 Agent 类型。Claude 使用内置 SDK 工具绑定；Codex 会额外配置外部 MCP 发布通道。",
-      "teamExternalCliClaude": "允许 Leader 拉起 Claude SDK 成员。",
-      "teamExternalCliCodex": "允许 Leader 拉起 Codex SDK 成员；保存时会按需安装 Codex Python 依赖。",
-      "externalCliAgentClaude": "启用后可在 Team 模式中使用 Claude。",
+      "teamExternalCliClaude": "允许 Leader 拉起 Claude SDK 成员；保存时会按需安装 Python 依赖。",
+      "teamExternalCliCodex": "允许 Leader 拉起 Codex SDK 成员；保存时会按需安装 Python 依赖。",
+      "externalCliAgentClaude": "启用后可在 Team 模式中使用 Claude；保存时会按需安装 Python 依赖。",
       "externalCliAgentUseBuiltin": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。",
       "externalCliAgentCliPath": "指定 Claude/Codex 可执行文件路径。",
-      "externalCliAgentCodex": "启用后可在 Team 模式中使用 Codex；保存时会按需安装 Codex Python 依赖。",
+      "externalCliAgentCodex": "启用后可在 Team 模式中使用 Codex；保存时会按需安装 Python 依赖。",
       "teamMemberName": "成员内部 ID：须以小写字母开头，仅含小写字母、数字或连字符。",
       "teamPersona": "角色人设与职责描述，影响该成员的行为风格与分工。",
       "teamPromptHint": "额外提示词片段，会注入该成员的系统提示中。",
@@ -1185,14 +1185,15 @@
       "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
       "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
       "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
-      "codexDependencyInstalling": "正在后台安装 Codex 依赖。安装期间 Codex 暂未启用；安装完成后，请再次启用 Codex 并保存配置。",
-      "codexDependencyInstalled": "请再次启用 Codex 并保存配置。",
-      "codexInstallPhasePreparing": "准备安装 Codex 依赖",
-      "codexInstallPhaseInstalling": "正在安装 Codex 依赖",
-      "codexInstallPhaseVerifying": "正在校验 Codex 依赖",
-      "codexInstallPhaseSucceeded": "Codex 依赖已安装",
-      "codexInstallPhaseFailed": "Codex 依赖安装失败",
-      "codexInstallRecentOutput": "安装日志"
+      "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
+      "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+      "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
+      "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
+      "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
+      "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
+      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
+      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+      "dependencyInstallRecentOutput": "安装日志"
     },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
@@ -1291,7 +1292,7 @@
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
     "pageTitle": "定时任务",
-    "pageSubtitle": "配置和管理自动化任务，Jiuwen 将按计划执行。",
+    "pageSubtitle": "配置和管理按计划执行的自动化任务。",
     "actions": {
       "confirm": "确定"
     },
@@ -1776,7 +1777,8 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行成功率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
         "toggleLabel": "启用技能编排",
@@ -1784,10 +1786,12 @@
       },
       "stats": {
         "skillsSuffix": "技能",
-        "edgesSuffix": "边"
+        "edgesSuffix": "关联"
       },
       "searchPlaceholder": "搜索技能",
-      "minConfidence": "最小置信度 {{percent}}%",
+      "minConfidence": "最小关联强度 {{percent}}%",
+      "minConfidenceHelp": "拖动滑块，调整右侧视图中的最小关联强度；数值越高，可显示的关联越少；数值越低，可显示的关联越多。",
+      "linkStrength": "关联强度 {{percent}}%",
       "buildLogFallback": "构建日志",
       "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
@@ -1799,15 +1803,21 @@
       "outDegree": "出度",
       "description": "描述",
       "tasks": "任务",
-      "relatedEdges": "相关边",
-      "noRelatedEdges": "暂无相关边。",
-      "selectSkillHint": "选择一个技能查看指纹",
+      "relatedEdges": "关联技能",
+      "noRelatedEdges": "暂无关联技能。",
+      "selectSkillHint": "选择一个技能查看详情",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",
         "cancelBuild": "取消构建",
-        "fullRebuild": "全量重新构建",
-        "fitView": "适配视图"
+        "fullRebuild": "全量构建",
+        "fitView": "调整视图"
+      },
+      "actionHelp": {
+        "incrementalBuild": "增量构建：更新新增或变更的技能，适合日常维护。",
+        "cancelBuild": "取消构建：停止当前增量或全量构建。",
+        "fullRebuild": "全量构建：扫描全部已安装技能，首次使用或重建图谱时使用。",
+        "fitView": "调整视图：自动调整右侧视图，使图谱居中并完整显示。"
       },
       "status": {
         "refreshing": "正在刷新技能图谱",
@@ -2424,7 +2434,7 @@
   },
   "multiSession": {
     "title": "工作",
-    "conversations": "对话",
+    "conversations": "任务",
     "newConversation": "新建任务",
     "empty": "暂无对话",
     "untitled": "未命名对话",

@@ -27,6 +27,12 @@ from logging.handlers import RotatingFileHandler
 
 import webview
 
+from jiuwenswarm.common._build_config import (
+    APP_BUNDLE_NAME,
+    BUNDLE_IDENTIFIER,
+    DISPLAY_NAME,
+    EXECUTABLE_NAME,
+)
 from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
 from jiuwenswarm.instance_manager.config import (
     BASE_PORTS,
@@ -198,12 +204,12 @@ ATTACHMENT_DIALOG_EXTENSIONS: tuple[str, ...] = (
     ".flv",
 )
 UPDATE_CLEANUP_PATTERNS = (
-    "WorkSwarm-setup-*.exe",
-    "WorkSwarm-*.dmg",
-    "WorkSwarm-*.tar.gz",
-    "WorkSwarm-*.exe.part",
-    "WorkSwarm-*.dmg.part",
-    "WorkSwarm-*.tar.gz.part",
+    "*.exe",
+    "*.dmg",
+    "*.tar.gz",
+    "*.exe.part",
+    "*.dmg.part",
+    "*.tar.gz.part",
     "_install_helper.ps1",
     "_install_helper.sh",
 )
@@ -1617,7 +1623,7 @@ class DesktopRuntime:
 
         # Derive the .app bundle path from the frozen executable.
         # sys.executable is typically:
-        #   /Applications/WorkSwarm.app/Contents/MacOS/workswarm
+        #   /Applications/<configured app bundle>/Contents/MacOS/<configured executable>
         # so the bundle is three levels up. Prefer replacing the exact bundle
         # the user launched, but fall back to /Applications when running from a
         # read-only DMG mount or from a non-bundled development executable.
@@ -1627,7 +1633,7 @@ class DesktopRuntime:
         elif app_bundle.suffix == ".app":
             install_target = f"/Applications/{app_bundle.name}"
         else:
-            install_target = "/Applications/WorkSwarm.app"
+            install_target = f"/Applications/{APP_BUNDLE_NAME}"
 
         log_file = get_logs_dir() / "update_helper.log"
         backend_port = self.backend_port
@@ -1647,7 +1653,7 @@ set -e
 LOG_FILE={q_log_file}
 exec >>"$LOG_FILE" 2>&1
 
-echo "=== WorkSwarm macOS install helper: $(date) ==="
+echo "=== {DISPLAY_NAME} macOS install helper: $(date) ==="
 echo "[helper] dmg={q_target}"
 echo "[helper] install_target={q_install_target}"
 echo "[helper] parent_pid={parent_pid}"
@@ -1785,7 +1791,7 @@ echo "=== install helper finished: $(date) ==="
         q_target = shlex.quote(str(target))
         q_install_dir = shlex.quote(install_dir)
         q_backup_dir = shlex.quote(backup_dir)
-        q_executable = shlex.quote(f"{install_dir}/workswarm")
+        q_executable = shlex.quote(f"{install_dir}/{EXECUTABLE_NAME}")
 
         helper_content = f"""#!/bin/bash
 set -e
@@ -1883,7 +1889,7 @@ nohup {q_executable} >/dev/null 2>&1 &
         """
         if sys.platform != "darwin":
             return
-        cache_dir = Path.home() / "Library" / "Caches" / "com.workswarm.desktop"
+        cache_dir = Path.home() / "Library" / "Caches" / BUNDLE_IDENTIFIER
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
             logger.info("[desktop] cleared WKWebView HTTP cache: %s", cache_dir)
@@ -1991,7 +1997,7 @@ transition:opacity .4s ease,transform .4s ease}
 <body>
 <div class="root">
 <div class="logo">__LOGO_SVG__</div>
-<div class="app-name">WorkSwarm</div>
+<div class="app-name">__APP_DISPLAY_NAME__</div>
 <div class="spinner"></div>
 <div class="tip-area">
     <div class="tip-label">专属智能AI Agent助理</div>
@@ -2031,7 +2037,7 @@ showTip();
 setInterval(showTip,3500);
 </script>
 </body>
-</html>""".replace("__LOGO_SVG__", logo_svg)
+</html>""".replace("__LOGO_SVG__", logo_svg).replace("__APP_DISPLAY_NAME__", DISPLAY_NAME)
 
     def _on_loaded_first(self) -> None:
         if self.window is not None:
@@ -2105,8 +2111,8 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch WorkSwarm desktop window.")
-    parser.add_argument("--title", default="WorkSwarm", help="Desktop window title.")
+    parser = argparse.ArgumentParser(description=f"Launch {DISPLAY_NAME} desktop window.")
+    parser.add_argument("--title", default=DISPLAY_NAME, help="Desktop window title.")
     parser.add_argument("--width", type=int, default=1440, help="Initial window width.")
     parser.add_argument(
         "--height", type=int, default=960, help="Initial window height."
@@ -2138,17 +2144,17 @@ def _setup_tui_path() -> None:
         return
     # Prefer /Applications path over /Volumes (DMG mount) path
     tui_dir = str(tui_binary.parent)
-    apps_dir = "/Applications/WorkSwarm.app/Contents/MacOS"
+    apps_dir = f"/Applications/{APP_BUNDLE_NAME}/Contents/MacOS"
     if Path(apps_dir).is_dir():
         tui_dir = apps_dir
-    marker = "WorkSwarm.app/Contents/MacOS"
+    marker = f"{APP_BUNDLE_NAME}/Contents/MacOS"
     zshrc = Path.home() / ".zshrc"
     try:
         existing = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
         if marker in existing:
             return
         with open(zshrc, "a", encoding="utf-8") as f:
-            f.write(f"\n# Added by WorkSwarm - jiuwenswarm-tui CLI\n")
+            f.write(f"\n# Added by {DISPLAY_NAME} - jiuwenswarm-tui CLI\n")
             f.write(f'export PATH="{tui_dir}:$PATH"\n')
         logger.info("[desktop] added TUI to PATH in ~/.zshrc")
     except OSError as exc:

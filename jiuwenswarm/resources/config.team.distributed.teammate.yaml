@@ -641,8 +641,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenclaw
   release_api_url: ""
-  asset_name_pattern: "JiuwenSwarm-setup-{version}.exe"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
+  asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 
 extensions:

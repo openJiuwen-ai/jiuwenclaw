@@ -9,13 +9,10 @@ import {
 } from 'react';
 import {
   AlertTriangle,
-  Focus,
-  GitBranch,
+  CircleStop,
   Loader2,
-  RefreshCw,
-  RotateCcw,
+  Plus,
   Search,
-  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { webRequest } from '../../services/webClient';
@@ -154,21 +151,39 @@ type DetailListItem = {
   meta: string;
 };
 
-const NODE_COLORS: Record<string, string> = {
-  skill: '#4db6ac',
-  input: '#6aa9ff',
-  output: '#d6a35d',
-  artifact: '#b985f4',
-  task: '#f26d7d',
-  slot: '#8bd17c',
-  type: '#9aa4b2',
-  unknown: '#7f8a99',
-};
+const GRAPH_NODE_DEFAULT = '#3f8ff3';
+const GRAPH_NODE_HIGHLIGHT = '#0868f7';
+const GRAPH_NODE_DIMMED = '#b2d1fb';
+const GRAPH_EDGE_DEFAULT = '#c2c7ce';
+const GRAPH_EDGE_HIGHLIGHT = '#1677ff';
+const GRAPH_LABEL_DEFAULT = '#6b7280';
+const GRAPH_LABEL_DIMMED = '#adb3bc';
+const GRAPH_LABEL_ACTIVE = '#111827';
 
 const DEFAULT_MIN_CONFIDENCE = 0.7;
 
 type SymphonyBuildMode = 'incremental' | 'full';
 type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+function FullBuildIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2.5 20 7v10l-8 4.5L4 17V7l8-4.5Z" />
+      <path d="M12 16v-6m0 0L9 8m3 2 3-2" />
+    </svg>
+  );
+}
+
+function ArrangeGraphIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="4" r="2" />
+      <circle cx="5" cy="17" r="2" />
+      <circle cx="19" cy="17" r="2" />
+      <path d="M9.5 5.2a8.5 8.5 0 0 0-5.8 8.7M7.6 19.2a8.5 8.5 0 0 0 8.8 0m3.9-5.3a8.5 8.5 0 0 0-5.8-8.7" />
+    </svg>
+  );
+}
 
 const BUILD_STAGE_TRANSLATION_KEYS: Record<string, string> = {
   idle: 'idle',
@@ -401,8 +416,8 @@ function isSkillNode(node: GraphNode): boolean {
 }
 
 function nodeRadius(node: GraphNode): number {
-  const base = node.type === 'skill' ? 7 : 5;
-  return Math.min(22, base + Math.sqrt(Math.max(0, node.degree)) * 2.1);
+  const base = node.type === 'skill' ? 9 : 7;
+  return Math.min(24, base + Math.sqrt(Math.max(0, node.degree)) * 2.1);
 }
 
 function truncate(value: string, limit: number): string {
@@ -447,6 +462,7 @@ function buildLogSummary(entry: BuildLogEntry, t: Translate): string {
     asString(entry.label || entry.stage, t('skills.graph.buildLogFallback')),
     t,
   );
+  if (entry.stage === 'update.done') return label;
   const countKeys: Array<[string, string?]> = [
     ['current', 'total'],
     ['skill_count', undefined],
@@ -1235,16 +1251,24 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           })
           .map((node) => node.id),
       );
-      const focusId = selectedRef.current?.id || hoveredRef.current?.id;
+      const selectedId = selectedRef.current?.id;
+      const focusId = selectedId || hoveredRef.current?.id;
+      const relatedNodeIds = new Set<string>();
+      if (focusId) {
+        visibleRef.current.edges.forEach((edge) => {
+          if (edge.source === focusId) relatedNodeIds.add(edge.target);
+          if (edge.target === focusId) relatedNodeIds.add(edge.source);
+        });
+      }
       visibleRef.current.edges.forEach((edge) => {
         if (!drawableNodeIds.has(edge.source) || !drawableNodeIds.has(edge.target)) return;
         const source = nodeById.get(edge.source);
         const target = nodeById.get(edge.target);
         if (!source || !target) return;
         const active = Boolean(focusId && (edge.source === focusId || edge.target === focusId));
-        ctx.strokeStyle = active ? '#111827' : edge.type === 'can_feed' ? '#4b5563' : '#9ca3af';
-        ctx.globalAlpha = active ? 0.82 : 0.38;
-        ctx.lineWidth = active ? 2.2 : 1.1;
+        ctx.strokeStyle = active ? GRAPH_EDGE_HIGHLIGHT : GRAPH_EDGE_DEFAULT;
+        ctx.globalAlpha = active ? 0.9 : focusId ? 0.5 : 0.72;
+        ctx.lineWidth = active ? 1.8 : 1;
         ctx.beginPath();
         ctx.moveTo(source.x, source.y);
         ctx.lineTo(target.x, target.y);
@@ -1255,7 +1279,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         const radius = nodeRadius(target);
         const x = target.x - Math.cos(angle) * radius;
         const y = target.y - Math.sin(angle) * radius;
-        ctx.globalAlpha = active ? 0.85 : 0.35;
+        ctx.globalAlpha = active ? 0.92 : focusId ? 0.48 : 0.68;
         ctx.fillStyle = ctx.strokeStyle;
         ctx.beginPath();
         ctx.moveTo(x, y);
@@ -1268,23 +1292,56 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
       visibleRef.current.nodes.forEach((node) => {
         if (!drawableNodeIds.has(node.id)) return;
-        const selected = selectedRef.current?.id === node.id;
+        const selected = selectedId === node.id;
         const hovered = hoveredRef.current?.id === node.id;
         const radius = nodeRadius(node);
-        ctx.fillStyle = NODE_COLORS[node.type] || NODE_COLORS.unknown;
-        ctx.strokeStyle = selected ? '#111827' : hovered ? '#374151' : 'rgba(17, 24, 39, .22)';
-        ctx.lineWidth = selected ? 3 : hovered ? 2.4 : 1.2;
+        const focused = focusId === node.id;
+        const highlighted = Boolean(focusId && (focused || relatedNodeIds.has(node.id)) && !selected);
+        const dimmed = Boolean(focusId && !focused && !relatedNodeIds.has(node.id));
+        const displayRadius = selected ? radius + 2 : radius;
+        ctx.save();
+        if (selected) {
+          const fill = ctx.createRadialGradient(
+            node.x - displayRadius * 0.35,
+            node.y - displayRadius * 0.4,
+            displayRadius * 0.08,
+            node.x,
+            node.y,
+            displayRadius * 1.15,
+          );
+          fill.addColorStop(0, '#78b5ff');
+          fill.addColorStop(0.52, '#2b8cff');
+          fill.addColorStop(1, '#0668f7');
+          ctx.fillStyle = fill;
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2.6;
+          ctx.shadowColor = 'rgba(22, 119, 255, 0.32)';
+          ctx.shadowBlur = 16;
+        } else {
+          ctx.fillStyle = dimmed
+            ? GRAPH_NODE_DIMMED
+            : highlighted || hovered
+              ? GRAPH_NODE_HIGHLIGHT
+              : GRAPH_NODE_DEFAULT;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.72)';
+          ctx.lineWidth = 1;
+        }
         ctx.beginPath();
-        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+        ctx.arc(node.x, node.y, displayRadius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        ctx.restore();
 
         if (transformRef.current.scale > 0.42 || selected || hovered) {
-          ctx.font = `${selected ? 13 : 11}px Inter, system-ui, sans-serif`;
-          ctx.fillStyle = selected || hovered ? '#111827' : '#4b5563';
+          ctx.font = `${selected ? 700 : highlighted || hovered ? 600 : 400} ${selected ? 13 : 12}px Inter, system-ui, sans-serif`;
+          ctx.fillStyle = dimmed
+            ? GRAPH_LABEL_DIMMED
+            : selected || highlighted || hovered
+              ? GRAPH_LABEL_ACTIVE
+              : GRAPH_LABEL_DEFAULT;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
-          ctx.fillText(truncate(node.label, 26), node.x, node.y + radius + 5);
+          ctx.fillText(truncate(node.label, 26), node.x, node.y + displayRadius + 5);
         }
       });
 
@@ -1432,13 +1489,13 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                 setMinConfidence(Number(event.target.value));
               }}
             />
+            <small data-testid="skill-graph-panel-min-confidence-help" className="skill-graph-panel__filter-help">
+              {t('skills.graph.minConfidenceHelp')}
+            </small>
           </label>
         </div>
 
         <div data-testid="skill-graph-panel-actions" className="skill-graph-panel__actions">
-          <button type="button" onClick={() => void loadGraph(true)} disabled={isBusy} data-testid="skill-graph-panel-action-read" title={t('skills.graph.actions.read')}>
-            {loading ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
-          </button>
           <button
             type="button"
             onClick={() => void rebuildGraph('incremental').catch(() => undefined)}
@@ -1446,7 +1503,8 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-incremental-build"
             title={t('skills.graph.actions.incrementalBuild')}
           >
-            {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <GitBranch size={16} aria-hidden="true" />}
+            {isIncrementalBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}
+            <span>{t('skills.graph.actions.incrementalBuild')}</span>
           </button>
           <button
             type="button"
@@ -1455,7 +1513,8 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-cancel-build"
             title={t('skills.graph.actions.cancelBuild')}
           >
-            {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <X size={16} aria-hidden="true" />}
+            {cancellingBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <CircleStop size={16} aria-hidden="true" />}
+            <span>{t('skills.graph.actions.cancelBuild')}</span>
           </button>
           <button
             type="button"
@@ -1464,12 +1523,22 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             data-testid="skill-graph-panel-action-full-rebuild"
             title={t('skills.graph.actions.fullRebuild')}
           >
-            {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <RotateCcw size={16} aria-hidden="true" />}
+            {isFullBuild ? <Loader2 size={16} className="skill-graph-panel__spin" aria-hidden="true" /> : <FullBuildIcon />}
+            <span>{t('skills.graph.actions.fullRebuild')}</span>
           </button>
           <button type="button" onClick={fitView} disabled={!visible.nodes.length} data-testid="skill-graph-panel-action-fit-view" title={t('skills.graph.actions.fitView')}>
-            <Focus size={16} aria-hidden="true" />
+            <ArrangeGraphIcon />
+            <span>{t('skills.graph.actions.fitView')}</span>
           </button>
         </div>
+        <section data-testid="skill-graph-panel-actions-help" className="skill-graph-panel__actions-help">
+          <ul>
+            <li data-testid="skill-graph-panel-actions-help-item-incremental">{t('skills.graph.actionHelp.incrementalBuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-cancel">{t('skills.graph.actionHelp.cancelBuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-full">{t('skills.graph.actionHelp.fullRebuild')}</li>
+            <li data-testid="skill-graph-panel-actions-help-item-fit">{t('skills.graph.actionHelp.fitView')}</li>
+          </ul>
+        </section>
 
         {(updating || showBuildLogPanel) ? (
           <div data-testid="skill-graph-panel-build-log" className="skill-graph-panel__build-log">
@@ -1524,7 +1593,6 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                   onClick={() => selectNode(node)}
                 >
                   <span>{node.label}</span>
-                  <small>{t('skills.graph.degreeSummary', { inDegree: node.inDegree, outDegree: node.outDegree })}</small>
                 </button>
               ))
           )}
@@ -1595,7 +1663,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             </div>
             {asString(selectedNode.properties.description) ? (
               <section data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
-                <h4>{t('skills.graph.description')}</h4>
+                <h4 className="skill-graph-panel__detail-section-title">{t('skills.graph.description')}</h4>
                 <p data-testid="skill-graph-panel-detail-description-content" className="skill-graph-panel__description-content">
                   {asString(selectedNode.properties.description)}
                 </p>
@@ -1617,7 +1685,9 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
               ) : null}
             </div>
             <div data-testid="skill-graph-panel-related" className="skill-graph-panel__related">
-              <h4 data-testid="skill-graph-panel-related-title">{t('skills.graph.relatedEdges')}</h4>
+              <h4 data-testid="skill-graph-panel-related-title" className="skill-graph-panel__detail-section-title">
+                {t('skills.graph.relatedEdges')}
+              </h4>
               {relatedEdges.length === 0 ? (
                 <div data-testid="skill-graph-panel-related-empty" className="skill-graph-panel__empty">{t('skills.graph.noRelatedEdges')}</div>
               ) : (
@@ -1635,11 +1705,10 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
                     >
                       <span>{edge.source === selectedNode.id ? '→' : '←'} {other?.label || labelFromId(otherId)}</span>
                       <small>
-                        {edge.type}
+                        {t('skills.graph.linkStrength', { percent: Math.round(edge.confidence * 100) })}
                         {edge.runtimeWeight === undefined
                           ? ''
                           : ` · runtime_weight ${edge.runtimeWeight.toFixed(2)}`}
-                        {' · '}{Math.round(edge.confidence * 100)}%
                       </small>
                     </button>
                   );

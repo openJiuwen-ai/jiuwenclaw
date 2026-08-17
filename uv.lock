@@ -5272,7 +5272,7 @@ dependencies = [
     { name = "lxml" },
     { name = "mutagen" },
     { name = "numpy" },
-    { name = "openjiuwen", extra = ["claude"] },
+    { name = "openjiuwen" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -5300,6 +5300,9 @@ dependencies = [
 [package.optional-dependencies]
 a2a = [
     { name = "a2a-sdk", extra = ["http-server"] },
+]
+claude = [
+    { name = "openjiuwen", extra = ["claude"] },
 ]
 codex = [
     { name = "openjiuwen", extra = ["codex"] },
@@ -5442,8 +5445,9 @@ requires-dist = [
     { name = "mutagen", specifier = ">=1.47.0" },
     { name = "mutagen", marker = "extra == 'harmony'", specifier = ">=1.47.0" },
     { name = "numpy", specifier = ">=1.24.0" },
+    { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", marker = "extra == 'harmony'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
-    { name = "openjiuwen", extras = ["claude"], git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
+    { name = "openjiuwen", extras = ["claude"], marker = "extra == 'claude'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", extras = ["codex"], marker = "extra == 'codex'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'", git = "https://gitcode.com/openJiuwen/agent-core.git?branch=develop" },
     { name = "opentelemetry-api", specifier = ">=1.28.0" },
@@ -5495,7 +5499,7 @@ requires-dist = [
     { name = "wecom-aibot-sdk", marker = "extra == 'harmony'", specifier = ">=1.0.5" },
     { name = "workswarm-tui", marker = "extra == 'tui'", directory = "packages/jiuwenswarm-tui" },
 ]
-provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "codex", "shell-ast", "test"]
+provides-extras = ["harmony", "a2a", "ssh", "desktop", "dev", "tui", "distribute", "claude", "codex", "shell-ast", "test"]
 
 [package.metadata.requires-dev]
 dev = [

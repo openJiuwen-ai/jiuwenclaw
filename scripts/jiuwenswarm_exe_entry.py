@@ -10,6 +10,8 @@ import subprocess
 import traceback
 from pathlib import Path
 
+from jiuwenswarm.common._build_config import DISPLAY_NAME, ERROR_LOG_NAME
+
 # frozen（PyInstaller 打包）模式下，macOS 双击 .app 启动时 cwd 为 "/"，
 # 导致 openjiuwen 的默认日志路径 "./logs/" 解析为 "/logs/"（只读）。
 # 在任何业务 import 之前，将 cwd 切换到用户数据目录 ~/.jiuwenswarm，
@@ -116,12 +118,21 @@ _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
         _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
 
-# Inno Setup checks these named mutexes before install/uninstall. Every
-# frozen Windows process that can keep files under {app} open holds both
-# mutexes for its entire lifetime, so an orphaned desktop child still blocks
-# uninstall. The detached update helper is intentionally exempt: after the
-# desktop process tree exits it must be able to launch the next installer.
-_WINDOWS_APP_MUTEX_NAMES = ("JiuwenSwarm.App", r"Global\JiuwenSwarm.App")
+# Inno Setup checks these named mutexes before install/uninstall. The legacy
+# names are a stable upgrade protocol: installers using the existing AppId must
+# still detect a running JiuwenSwarm process after the product rename. Every
+# new frozen process holds both legacy and current names for its entire lifetime.
+# The detached update helper is intentionally exempt: after the desktop process
+# tree exits it must be able to launch the next installer.
+_LEGACY_WINDOWS_APP_MUTEX_NAMES = (
+    "JiuwenSwarm.App",
+    r"Global\JiuwenSwarm.App",
+)
+_WINDOWS_APP_MUTEX_NAMES = (
+    *_LEGACY_WINDOWS_APP_MUTEX_NAMES,
+    f"{DISPLAY_NAME}.App",
+    rf"Global\{DISPLAY_NAME}.App",
+)
 _WINDOWS_APP_MUTEX_HANDLES: list[int] = []
 
 
@@ -268,8 +279,8 @@ def _release_single_instance_lock() -> None:
 
 
 def _show_already_running_message() -> None:
-    msg = "WorkSwarm is already running. Please use the existing window."
-    title = "WorkSwarm"
+    msg = f"{DISPLAY_NAME} is already running. Please use the existing window."
+    title = DISPLAY_NAME
     try:
         if os.name == "nt":
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
@@ -290,7 +301,7 @@ def _write_child_error(exc: BaseException) -> None:
     try:
         log_dir = Path(os.environ.get("JIUWENSARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "workswarm_exe_error.log"
+        log_file = log_dir / ERROR_LOG_NAME
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{'=' * 60}\n")
             f.write(f"argv: {sys.argv}\n")
