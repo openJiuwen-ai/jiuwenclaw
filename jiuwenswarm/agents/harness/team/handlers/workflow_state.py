@@ -944,7 +944,7 @@ class WorkflowRunState(BaseModel):
                 _reuse_existing(existing)
             else:
                 child_phase.agents.append(agent_state)
-            if self._is_terminal_status(child_phase.status):
+            if self._is_terminal_status(child_phase.status) or child_phase.status == "paused":
                 child_phase.status = "running"
                 logger.info("[WF_DBG child] reactivated child phase=%s (new agent arrived)", child_phase.name)
             self._refresh_phase_counts(child_phase)
@@ -952,7 +952,7 @@ class WorkflowRunState(BaseModel):
             if child_phase.parent_phase:
                 parent = self._find_parent_author_phase(name=child_phase.parent_phase)
                 if parent is not None:
-                    if self._is_terminal_status(parent.status):
+                    if self._is_terminal_status(parent.status) or parent.status == "paused":
                         parent.status = "running"
                         logger.info("[WF_DBG parent] reactivated parent=%s (new agent on child=%s)",
                                     parent.name, child_phase.name)
