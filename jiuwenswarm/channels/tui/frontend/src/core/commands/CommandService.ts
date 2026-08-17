@@ -166,7 +166,12 @@ export class CommandService {
       // 注：/<skill> 已在 app-screen.handleSubmit 的行首分流里落到普通消息分支
       //（content 原样发送 + 提取 skills_to_use），不再改写成 /skills use。
       // 能走到这里的说明第一个 token 既非注册命令也非已装 skill → 未知命令。
-      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: /${parsed.name || ""}`));
+      // 展示时保留用户原样的「/」与首 token（含斜杠后空格），避免 `/ skill-creator`
+      // 被显示成 `/skill-creator` 而误读成「技能不存在」。
+      const trimmedRaw = raw.trim();
+      const display =
+        trimmedRaw.match(/^\/\s*\S+/)?.[0] ?? `/${parsed.name || ""}`;
+      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: ${display}`));
       return;
     }
     try {

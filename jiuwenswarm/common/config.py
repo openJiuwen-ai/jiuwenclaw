@@ -39,6 +39,9 @@ EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY = "external_cli_publish_url"
 EXTERNAL_CLI_AGENTS_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_cli_agents")
 EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_transport")
 _ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
+# Keep progressive tool search enabled by default for existing user workspaces
+# whose config.yaml predates this switch.
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -259,6 +262,24 @@ def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
 def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     """Return the canonical ``react.evolution.skill_evolution`` switch."""
     return _get_evolution_config(config).get("skill_evolution") is True
+
+
+def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether the ProgressiveToolRail is enabled for an agent.
+
+    The switch is the top-level ``progressive_tool_enabled`` key in
+    ``config.yaml``.  A missing key keeps the historical enabled-by-default
+    behavior for workspaces initialized before this setting was introduced.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_PROGRESSIVE_TOOL_ENABLED
+
+    value = config.get("progressive_tool_enabled", DEFAULT_PROGRESSIVE_TOOL_ENABLED)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:

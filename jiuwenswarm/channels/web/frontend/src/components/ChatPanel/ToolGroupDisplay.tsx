@@ -159,9 +159,9 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const toolNameLabel = toolCall.name?.trim() || result?.toolName || 'tool';
 
   return (
-    <div className="tool-tree-item__detail">
-      <div className="tool-tree-item__detail-block">
-        <div className="tool-tree-item__detail-label">
+    <div className="tool-tree-item__detail" data-testid="chat-panel-tool-execution-details">
+      <div className="tool-tree-item__detail-block" data-testid="chat-panel-tool-execution-details-name">
+        <div className="tool-tree-item__detail-label" data-testid="chat-panel-tool-execution-details-label">
           {t('chatUi.toolResult.toolName')}
         </div>
         <pre className="tool-tree-item__detail-pre tool-tree-item__detail-pre--name">
@@ -170,7 +170,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
       </div>
 
       {hasArguments && (
-        <div className="tool-tree-item__detail-block">
+        <div className="tool-tree-item__detail-block" data-testid="chat-panel-tool-execution-details-arguments">
           <div className="tool-tree-item__detail-label">
             {t('chatUi.toolResult.arguments')}
           </div>
@@ -181,11 +181,13 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
       )}
 
       {result && (
-        <div className="tool-tree-item__detail-block">
+        <div className="tool-tree-item__detail-block" data-testid="chat-panel-tool-execution-details-result">
           <div className="tool-tree-item__detail-label">
             {t('chatUi.toolResult.result')}
             {failed && (
               <span
+                data-testid="chat-panel-tool-execution-details-badge"
+                data-variant={isTimeout ? 'timeout' : 'failed'}
                 className={clsx(
                   'tool-tree-item__detail-badge',
                   'is-error',
@@ -196,7 +198,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
               </span>
             )}
             {resultSuccess && (
-              <span className="tool-tree-item__detail-badge is-success">
+              <span className="tool-tree-item__detail-badge is-success" data-testid="chat-panel-tool-execution-details-badge" data-variant="success">
                 {t('chatUi.toolResult.success')}
               </span>
             )}
@@ -217,14 +219,14 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
       )}
 
       {!result && isTimeout && (
-        <div className="tool-tree-item__detail-status is-error">
+        <div className="tool-tree-item__detail-status is-error" data-testid="chat-panel-tool-execution-details-status" data-variant="timeout">
           <ToolStatusIcon tone="error" />
           <span>{t('chatUi.toolResult.timeout')}</span>
         </div>
       )}
 
       {!result && !isTimeout && (
-        <div className="tool-tree-item__detail-status is-pending">
+        <div className="tool-tree-item__detail-status is-pending" data-testid="chat-panel-tool-execution-details-status" data-variant="running">
           <ToolStatusIcon tone="pending" />
           <span>{t('chatUi.toolResult.running')}</span>
         </div>
@@ -292,7 +294,7 @@ function buildGroupLines(
 /** 五类任务各自的图标（file/search/code/system/other）。 */
 function CategoryIcon({ category }: { category: ToolCategory }) {
   return (
-    <span className="tool-tree__cat-icon" aria-hidden="true">
+    <span className="tool-tree__cat-icon" aria-hidden="true" data-testid="chat-panel-tool-tree-cat-icon" data-variant={category}>
       {category === 'file' ? (
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M5.5 3.5h5L15 8v8a.9.9 0 0 1-.9.9H5.5a.9.9 0 0 1-.9-.9V4.4a.9.9 0 0 1 .9-.9z" />
@@ -367,19 +369,19 @@ export function ToolGroupDisplay({
         'tool-group-frame',
         teamLayout && 'tool-group-frame--team'
       )}
-      data-testid="tool-group"
+      data-testid="chat-panel-tool-group"
     >
-      <div className="pt-0.5 tool-group-frame__avatar">
+      <div className="pt-0.5 tool-group-frame__avatar" data-testid="chat-panel-tool-group-avatar">
         {showAvatar ? (
           <TeamMemberAvatar member="team_leader" />
         ) : null}
       </div>
       <div className="min-w-0">
-        <div className="tool-tree">
+        <div className="tool-tree" data-testid="chat-panel-tool-tree">
           {notices.length > 0 && (
-            <div className="tool-tree__notices">
+            <div className="tool-tree__notices" data-testid="chat-panel-tool-tree-notices">
               {notices.map((notice) => (
-                <div key={notice} className="tool-tree__notice">
+                <div key={notice} className="tool-tree__notice" data-testid="chat-panel-tool-tree-notice" data-variant={notice}>
                   {notice}
                 </div>
               ))}
@@ -388,14 +390,15 @@ export function ToolGroupDisplay({
           {headerLines.map((line) => {
             const open = Boolean(openKeys[line.key]);
             return (
-              <div key={line.key} className="tool-tree__section">
+              <div key={line.key} className="tool-tree__section" data-testid="chat-panel-tool-tree-section" data-variant={line.key}>
                 <button
                   type="button"
                   className="tool-tree__header"
                   onClick={() => toggleLine(line.key)}
                   aria-expanded={open}
+                  data-testid="chat-panel-tool-tree-header"
                 >
-                  <span className="tool-tree__header-line">
+                  <span className="tool-tree__header-line" data-testid="chat-panel-tool-tree-header-line">
                     <CategoryIcon category={line.category} />
                     <span
                       className={clsx(
@@ -403,6 +406,8 @@ export function ToolGroupDisplay({
                         line.running && 'is-running',
                         line.failed && 'is-failed'
                       )}
+                      data-testid="chat-panel-tool-tree-header-line-text"
+                      data-variant={line.running ? 'running' : line.failed ? 'failed' : 'completed'}
                     >
                       {line.text}
                     </span>
@@ -417,7 +422,7 @@ export function ToolGroupDisplay({
                   </span>
                 </button>
 
-                <div className={clsx('tool-tree-item__collapse', open && 'is-open')}>
+                <div className={clsx('tool-tree-item__collapse', open && 'is-open')} data-testid="chat-panel-tool-tree-item-collapse">
                   <div className="tool-tree-item__collapse-inner">
                     {line.executions[0] ? (
                       <div className="tool-tree-item__detail-wrap">

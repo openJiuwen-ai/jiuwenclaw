@@ -21,6 +21,48 @@ def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
     return {"modes": {"team": team_mapping}}
 
 
+@pytest.mark.parametrize(
+    ("global_enabled", "legacy_team_enabled", "expected"),
+    [
+        (True, False, True),
+        (True, True, True),
+        (False, False, False),
+        (False, True, False),
+    ],
+)
+def test_global_permission_switch_controls_team_runtime(
+    global_enabled: bool,
+    legacy_team_enabled: bool,
+    expected: bool,
+):
+    """Legacy Team values must not override the global permission switch."""
+    config = {
+        "permissions": {"enabled": global_enabled},
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-test",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "enable_permissions": legacy_team_enabled,
+                    "agents": {"leader": {}},
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    assert spec["enable_permissions"] is expected
+
+
 def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkeypatch):
     """Repository config template should provide the default team model from models.defaults."""
     repo_config = Path(__file__).resolve().parents[3] / "jiuwenswarm" / "resources" / "config.yaml"

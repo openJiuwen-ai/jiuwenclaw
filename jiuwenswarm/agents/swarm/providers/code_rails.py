@@ -322,7 +322,6 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
     try:
         from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
             create_coding_memory_rail,
-            _set_workspace_coding_memory_directory,
         )
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
@@ -331,11 +330,6 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
         # The build workspace identifies the project. Persistent Coding Memory
         # belongs to the agent-owned system workspace instead.
         agent_workspace_dir = str(get_agent_workspace_dir())
-        _set_workspace_coding_memory_directory(
-            ctx.workspace,
-            project_dir=effective_project_dir,
-            agent_workspace_dir=agent_workspace_dir,
-        )
         rail = create_coding_memory_rail(
             project_dir=effective_project_dir,
             agent_workspace_dir=agent_workspace_dir,

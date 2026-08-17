@@ -102,7 +102,7 @@ class SkillRetrievalToolkit:
                     "When the result contains a 'skills' section, those entries are installed skills, not branch ids; "
                     "shortlist by Name and Description, then read a returned SKILL.md only after the skill "
                     "looks likely useful. "
-                    "To guide Symphony composition, pass shortlisted skill worker_id values to "
+                    "To guide Skill orchestration, pass shortlisted skill worker_id values to "
                     "symphony_compose_graph.candidate_skill_ids. "
                     "Do not read every skill or explore skill names as branch ids. "
                     "This is not an execution tool or a full execution plan. If the index is missing or stale, "
