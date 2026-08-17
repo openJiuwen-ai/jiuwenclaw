@@ -104,6 +104,30 @@ def test_style_id_from_label() -> None:
 
 
 @pytest.mark.unit
+def test_p24_research_depth_prompt_follows_pptx_craft_stage4() -> None:
+    prompt = rc._P24_SYSTEM_PROMPT
+    assert "force_search" in prompt
+    assert "L2（默认）" in prompt
+    assert "专家级" in prompt
+    assert "尽量全" in prompt
+    assert "page_count / content_page_count 不决定研究级别" in prompt
+    assert "force_search 单独不等于 L3" in prompt
+    assert "page_count > 15" not in prompt
+    assert "page_count 在 8~15" not in prompt
+
+
+@pytest.mark.unit
+def test_build_p24_prompt_does_not_let_page_count_decide_depth() -> None:
+    prompt = rc._build_p24_prompt(
+        {"topic": "新能源", "page_count": 20, "has_documents": False},
+        "做一份专家级行业分析",
+        "",
+    )
+    assert "page_count 不决定 research_depth" in prompt
+    assert "专家级" in prompt
+
+
+@pytest.mark.unit
 def test_parse_derive_params_response() -> None:
     parsed = rc._parse_derive_params_response(_DERIVE_RESPONSE)
     assert parsed["search_mode"] == "force_search"
@@ -681,3 +705,20 @@ def test_is_auto_skip_helpers() -> None:
     assert rc._is_auto_skip("answered", [{"custom_input": "abc"}]) is False
     assert rc._is_auto_skip("skipped", [{"selected_options": []}]) is False
     assert rc._is_auto_skip("answered", []) is False
+
+
+@pytest.mark.unit
+def test_p21_slot_prompt_aligns_agenda_and_section() -> None:
+    prompt = rc._P21_SLOT_SYSTEM_PROMPT
+    assert "agenda+section" in prompt
+    assert "目录页/议程页" in prompt
+    assert "再扣除这些结构页" in prompt
+    assert "由大纲规划阶段自动选择" not in prompt
+    assert "禁止填写 auto" not in prompt
+
+
+@pytest.mark.unit
+def test_coerce_structural_page_request_maps_auto_to_section() -> None:
+    assert rc._coerce_structural_page_request("auto") == "section"
+    assert rc._coerce_structural_page_request("agenda+chapter") == "agenda+chapter"
+    assert rc._coerce_structural_page_request("") == "none"

@@ -26,6 +26,7 @@ _OUTLINE_FIELD_PATTERN = re.compile(
     re.MULTILINE,
 )
 _P4_MAX_ATTEMPTS = 2
+_P43_MAX_ATTEMPTS = 2  # 对齐 pptx-craft Stage 3：门禁失败附原因重试 1 次
 _INSUFFICIENT_INFO_MARKER = "[INSUFFICIENT_INFO]"
 _QUERY_BOUNDS_NO_MATERIAL = (5, 8)
 _QUERY_BOUNDS_WITH_MATERIAL = (3, 5)
@@ -97,7 +98,7 @@ _P43_COMMON_RULES = """大纲格式要求（必须严格遵守）：
    - **研究查询**：✅ 页 2-4 个精准查询；❌ 页填 `-`
    - **数据需求**：✅ 页写具体数据类型和维度，数据需求必须具体化；❌ 页填 `-`
 4. 内容页数（研究需求：✅）必须等于 page_count。封面（cover）、结束页（ending）及用户明确要求的结构页（section/agenda/chapter 等）标 ❌，其余页必须标 ✅。
-   中间结构页的添加规则见下方「中间结构页」指令（由系统根据用户需求动态注入）。
+   中间结构页的添加规则见下方「中间结构页」指令（由系统按用户需求注入）。
    **页面顺序**：cover 必须是 P1（首页），ending 必须是末页（P{总页数}）。
    **ending 页约束**：标题优先「感谢聆听」或 ≤16 字简短收束语；全文总结、数据回响、趋势展望必须放在最后一个内容页（✅），不得把长总结句写入 ending 页标题；ending 页内容概要只描述结束页展示（感谢语、可选一句总结语、汇报人/日期），不得复制正文页大纲。
    **agenda 页内容**：内容概要只列内容页（✅）章节标题与导航，不得列入 cover/ending/agenda 等结构页本身。
@@ -657,56 +658,71 @@ def _has_no_image_source(inputs: dict[str, Any]) -> bool:
 def _build_structural_page_directive(inputs: dict[str, Any]) -> str:
     """根据 structural_page_request 构建中间结构页指令，注入 P4.3 prompt。
 
-    与 pptx-craft outline-planner 的「中间结构页触发与默认数量规则」对齐：
-    - none: 禁止自行添加任何中间结构页
-    - agenda/section/chapter: 按指定类型生成，数量由 structural_page_count 或默认规则决定
-    - auto: 用户要求章节页但未指定类型，由 LLM 根据语境选择 section 或 chapter
+    只陈述 pptx-craft outline-planner 已算出的类型、数量和落位，不追加标题措辞禁令。
     """
-    spr = str(inputs.get("structural_page_request") or "none").strip().lower()
-    spc = inputs.get("structural_page_count")
+    plan = PptCommon.resolve_structural_page_plan(
+        inputs.get("structural_page_request"),
+        inputs.get("structural_page_count"),
+        inputs.get("page_count"),
+    )
     page_count = inputs.get("page_count")
 
-    if spr == "none":
+    if plan.request == "none":
         return (
             "- 中间结构页：用户未要求任何中间结构页（目录页/章节页/分隔页）。"
-            "禁止自行添加 section/chapter/transition/agenda/conclusion 等结构页。"
+            "不得主动生成 section/chapter/transition/agenda/conclusion。"
             "即使内容有章节结构，也通过内容页标题、页内分组和视觉层级承接，不单独占用一页过渡。"
             "总页数 = page_count + 2。\n"
         )
 
-    # 用户要求了中间结构页
-    type_hint = {
-        "agenda": "agenda（目录页）",
-        "section": "section（章节页/章节分隔页）",
-        "chapter": "chapter（PART 页/章首页）",
-        "auto": "section 或 chapter（根据用户语境自动选择：用户说'PART/章首页'用 chapter，其余用 section）",
-    }.get(spr, "section")
+    header_bits = [f"类型需求={plan.request}"]
+    if plan.need_agenda:
+        header_bits.append(f"agenda {plan.agenda_count} 页")
+    if plan.divider_type:
+        header_bits.append(f"{plan.divider_type} {plan.divider_count} 页")
+    lines = [
+        "- 中间结构页："
+        + "，".join(header_bits)
+        + f"，总页数 = page_count + 2 + {plan.total_middle}。"
+        "中间结构页「研究需求」标 ❌，不计入 page_count；"
+        "总结页/回顾页并入 ending。\n",
+    ]
 
-    # 数量计算
-    if isinstance(spc, int) and spc > 0:
-        count_str = f"{spc} 页（用户指定数量）"
-        total_structural = spc
-    elif isinstance(page_count, int) and page_count > 0:
-        if page_count <= 5:
-            default_count = 1
+    if plan.need_agenda:
+        lines.append(
+            f"  目录页：类型=agenda，数量={plan.agenda_count}。"
+            "落位为 cover → agenda →（后续页面）。\n"
+        )
+
+    if plan.divider_type:
+        if plan.divider_count_mode == "specified":
+            count_reason = "用户指定数量"
         else:
-            default_count = -(-page_count // 4)  # ceil(page_count / 4)
-        count_str = f"{default_count} 页（用户未指定数量，按默认规则：page_count={page_count} -> {default_count} 页）"
-        total_structural = default_count
-    else:
-        count_str = "1 页（无法确定 page_count，默认 1 页）"
-        total_structural = 1
+            count_reason = (
+                "用户只说需要章节页但未指定数量，"
+                f"page_count={page_count} → 默认 {plan.divider_count} 页"
+            )
+        if plan.need_agenda:
+            placement = (
+                "cover → agenda → 结构页 1 → 内容组 1 → "
+                "结构页 2 → 内容组 2 → ... → ending"
+            )
+        else:
+            placement = (
+                "cover → 结构页 1 → 内容组 1 → 结构页 2 → 内容组 2 → ... → ending"
+            )
+        lines.append(
+            f"  章节页：类型={plan.divider_type}，数量={plan.divider_count}（{count_reason}）。\n"
+            f"  结构页放在每个内容组之前：{placement}\n"
+            "  每组 2–4 个内容页，每组至少含 2 个内容页，最后一组不得仅含 1 页。"
+            "结构页必须有明确的章节编号、章节标题或转场目的。\n"
+        )
+    elif plan.need_agenda:
+        lines.append(
+            "  未要求章节页：cover → agenda → 内容页 → ending。\n"
+        )
 
-    return (
-        f"- 中间结构页：用户已明确要求中间结构页，类型={type_hint}，数量={count_str}。\n"
-        f"  规则：\n"
-        f"  1. 中间结构页的「研究需求」标 ❌，不计入 page_count 内容页配额\n"
-        f"  2. 总页数 = page_count + 2 + {total_structural}（内容页 + 封面/结束页 + 结构页）\n"
-        f"  3. 结构页放在每个内容组之前：cover ->（可选 agenda）-> 结构页 1 -> 内容组 1 -> 结构页 2 -> 内容组 2 -> ... -> ending\n"
-        f"  4. 每组至少含 2 个内容页，最后一组不得仅含 1 页\n"
-        f"  5. 结构页必须有明确的章节编号、章节标题或转场目的；不得为了填页数生成空泛页面\n"
-        f"  6. conclusion/transition 不再支持；如需总结页，并入最后的 ending 页\n"
-    )
+    return "".join(lines)
 
 
 def _build_p43_prompt(
@@ -859,6 +875,7 @@ def _validate_outline_markdown_basic(
         _struct_pages,
         structural_page_request=structural_page_request,
         structural_page_count=structural_page_count,
+        page_count=page_count,
     )
 
     required_fields = ("**类型**", "**研究需求**", "**标题**", "**内容概要**", "**研究查询**", "**数据需求**")
@@ -876,61 +893,67 @@ def _validate_structural_pages(
     *,
     structural_page_request: str = "none",
     structural_page_count: Any = None,
+    page_count: Any = None,
 ) -> None:
-    """校验中间结构页合法性，与 pptx-craft outline-planner Stage 3 对齐。
+    """校验中间结构页合法性，与 pptx-craft outline-planner Stage 3 对齐。"""
+    plan = PptCommon.resolve_structural_page_plan(
+        structural_page_request,
+        structural_page_count,
+        page_count,
+    )
 
-    - structural_page_request="none": 不允许任何中间结构页（仅 cover/ending）
-    - structural_page_request="agenda"/"section"/"chapter"/"auto": 允许对应类型的结构页，
-      数量校验见下方逻辑
-    """
-    spr = str(structural_page_request or "none").strip().lower()
-
-    # 收集所有中间结构页（排除首尾的 cover/ending）
     if not pages:
         return
-    middle_pages = pages[1:-1]  # 去掉首尾
-    found_structural: list[tuple[int, str]] = []  # (page_num, page_type)
+    middle_pages = pages[1:-1]
+    found_structural: list[tuple[int, str, str]] = []
     for page_num, blk in middle_pages:
         ptype = _extract_outline_field(blk, "类型").strip().lower()
         if ptype in _STRUCTURAL_PAGE_TYPES:
-            found_structural.append((page_num, ptype))
+            found_structural.append((page_num, ptype, blk))
 
-    if spr == "none":
+    if plan.request == "none":
         if found_structural:
-            page_list = ", ".join(f"P{n}({t})" for n, t in found_structural)
+            page_list = ", ".join(f"P{n}({t})" for n, t, _ in found_structural)
             raise ContentPlanError(
                 f"P4.3 outline 用户未要求中间结构页，但出现了结构页：{page_list}"
             )
         return
 
-    # 用户要求了结构页，校验类型和数量
-    allowed_types: set[str]
-    if spr == "agenda":
-        allowed_types = {"agenda"}
-    elif spr == "section":
-        allowed_types = {"section"}
-    elif spr == "chapter":
-        allowed_types = {"chapter"}
-    elif spr == "auto":
-        allowed_types = {"section", "chapter"}
-    else:
-        allowed_types = _STRUCTURAL_PAGE_TYPES
+    allowed_types: set[str] = set()
+    if plan.need_agenda:
+        allowed_types.add("agenda")
+    if plan.divider_type:
+        allowed_types.add(plan.divider_type)
 
-    # 检查是否有不允许的结构页类型
-    for page_num, ptype in found_structural:
+    for page_num, ptype, _blk in found_structural:
         if ptype not in allowed_types:
             raise ContentPlanError(
                 f"P4.3 outline 结构页类型不匹配：P{page_num} 类型为 {ptype}，"
-                f"用户要求 structural_page_request={spr}，允许类型为 {allowed_types}"
+                f"用户要求 {plan.request}，允许类型为 {allowed_types}"
             )
 
-    # 数量校验（仅当用户明确指定数量时校验，默认规则生成的数量不严格校验）
-    if isinstance(structural_page_count, int) and structural_page_count > 0:
-        expected = structural_page_count
-        actual = len(found_structural)
-        if actual != expected:
+    found_agendas = [(n, blk) for n, t, blk in found_structural if t == "agenda"]
+    found_dividers = [
+        (n, t) for n, t, _blk in found_structural if t in {"section", "chapter"}
+    ]
+
+    if len(found_agendas) != plan.agenda_count:
+        raise ContentPlanError(
+            f"P4.3 outline 目录页（agenda）数量应为 {plan.agenda_count}，"
+            f"实际 {len(found_agendas)}"
+        )
+    if len(found_dividers) != plan.divider_count:
+        raise ContentPlanError(
+            f"P4.3 outline 章节页数量应为 {plan.divider_count}，"
+            f"实际 {len(found_dividers)}"
+        )
+
+    if plan.need_agenda and plan.agenda_count == 1 and found_agendas:
+        agenda_num = found_agendas[0][0]
+        first_middle_num = middle_pages[0][0] if middle_pages else agenda_num
+        if agenda_num != first_middle_num:
             raise ContentPlanError(
-                f"P4.3 outline 中间结构页数量应为 {expected}，实际 {actual}"
+                f"P4.3 outline 目录页应位于 cover 之后，实际为 P{agenda_num}"
             )
 
 
@@ -1082,13 +1105,8 @@ def _check_insufficient_info(outline_text: str, inputs: dict[str, Any]) -> None:
     )
 
 
-async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
-    _require_p4_prerequisites(inputs)
-
+async def _generate_outline_once(node: PlanNode, inputs: dict[str, Any]) -> None:
     source_type = str(inputs.get("source_type") or "topic").strip()
-    if source_type not in _VALID_SOURCE_TYPES:
-        raise ContentPlanError(f"P4.3 无效的 source_type: {source_type!r}")
-
     source_material = await PptCommon.read_file(
         node,
         inputs.get("doc_raw_path"),
@@ -1131,6 +1149,30 @@ async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
     inputs["outline_path"] = str(outline_path)
     inputs["p4_outline_gen_status"] = "completed"
     inputs["content_plan_status"] = "outline_generated"
+
+
+async def _run_p43_outline_gen(node: PlanNode, inputs: dict[str, Any]) -> None:
+    """生成 outline.md；门禁失败时附原因同节点再试 1 次（对齐 Stage 3）。"""
+    _require_p4_prerequisites(inputs)
+
+    source_type = str(inputs.get("source_type") or "topic").strip()
+    if source_type not in _VALID_SOURCE_TYPES:
+        raise ContentPlanError(f"P4.3 无效的 source_type: {source_type!r}")
+
+    last_error: str | None = None
+    for attempt in range(_P43_MAX_ATTEMPTS):
+        if last_error:
+            inputs["failure_reason"] = last_error
+            logger.info("[P4.3] outline 校验失败，附失败原因重试 1 次")
+        try:
+            await _generate_outline_once(node, inputs)
+            return
+        except ContentPlanError as exc:
+            last_error = str(exc)
+            if attempt + 1 >= _P43_MAX_ATTEMPTS:
+                raise
+
+    raise ContentPlanError(last_error or "P4.3 失败")
 
 
 class P41NormalizeNode(PlanNode):
@@ -1275,8 +1317,8 @@ class P43OutlineGenNode(PlanNode):
                 f"{_P43_COMMON_RULES}\n"
                 "\n"
                 "### 失败兜底\n"
-                "- LLM 生成空内容: raise ContentPlanError\n"
-                "- write_file 失败: raise ContentPlanError\n"
+                "- 门禁失败: 附失败原因同节点再生成 1 次；仍失败则 raise ContentPlanError\n"
+                "- LLM 生成空内容 / write_file 失败: raise ContentPlanError\n"
             ),
         )
 
@@ -1355,7 +1397,7 @@ class ContentPlanNode(PlanNode):
     预期输出（P4.4 校验通过后）:
         p4_validate_status=passed, content_plan_status=completed
 
-    重试：P4 整体最多 2 次（初始 + 1 次重试，从 P4.1 重跑），失败时写入 failure_reason。
+    重试：P4.3 门禁失败同节点再生成 1 次；P4 整体最多 2 次（初始 + 1 次重试，从 P4.1 重跑）。
     """
 
     def __init__(self) -> None:
@@ -1411,6 +1453,7 @@ class ContentPlanNode(PlanNode):
                 "4. P4.4: read_file 读取 outline.md → 规则校验结构与内容\n"
                 "\n"
                 "### 失败兜底\n"
+                "- P4.3 门禁失败: 同节点附失败原因再生成 1 次（不重跑 P4.2）\n"
                 "- P4.4 校验失败: raise ContentPlanError，触发 P4 整体重试（最多 1 次重试）\n"
                 "- 2 次均失败: 写入 failure_reason，由根节点决定后续处理\n"
             ),

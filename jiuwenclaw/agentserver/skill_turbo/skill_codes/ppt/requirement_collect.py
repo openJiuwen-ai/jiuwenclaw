@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skill_turbo.plan_node import AbortError, PlanNode
-from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import PptCommon
+from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.ppt_common import (
+    PAGE_COUNT_STRUCTURAL_HINT,
+    STRUCTURAL_PAGE_SLOT_PROMPT,
+    PptCommon,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,14 @@ _VALID_SEARCH_MODES = frozenset({"auto", "no_search", "force_search"})
 _VALID_SOURCE_TYPES = frozenset({"topic", "outline", "description"})
 _VALID_RESEARCH_DEPTHS = frozenset({"L1", "L2", "L3"})
 _VALID_STRUCTURAL_REQUESTS = frozenset(
-    {"none", "agenda", "section", "chapter", "auto"}
+    {
+        "none",
+        "agenda",
+        "section",
+        "chapter",
+        "agenda+section",
+        "agenda+chapter",
+    }
 )
 
 _STYLE_LABEL_TO_ID: dict[str, str] = {
@@ -65,6 +76,9 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
   判断规则：①用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"/"不大于N页"等未特指内容页的表达 → N 表示总页数 → page_count = max(N - 2, 1)；
   ②用户明确说"N个内容页"/"N页正文"，或正在回答"需要多少页内容页"时 → page_count = N。
   示例："10页以内"→8, "总页数严格为8页"→6, "8页"→6, "做8页PPT"→6
+"""
+    + PAGE_COUNT_STRUCTURAL_HINT
+    + """
 - audience: 目标受众（字符串；未知则 ""）
 - presentation_purpose: 汇报目的，如「工作汇报」「产品展示」「教学分享」「auto」；未知则 ""
 - style_id: 用户明确提及风格时填写：business-classic / tech-minimal / elegant-narrative / industrial-tech / custom；“自由发挥”统一填写 custom；未知则 ""
@@ -74,16 +88,9 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
   当用户在消息中提到"用 XX 模板""用模板包""template pack"等，且给出了目录路径时提取该路径。
   路径可能是 Windows 格式（如 D:\\path\\to\\pack）或 Unix 格式（/path/to/pack）。
   仅提取用户明确给出的路径，不要编造。
-- structural_page_request: 用户是否要求中间结构页（目录页/章节页/分隔页）。字符串，取值：
-  "none"（默认，未要求任何中间结构页）；
-  "agenda"（用户要求目录页/议程页）；
-  "section"（用户要求章节页/章节分隔页/分节页）；
-  "chapter"（用户要求 PART 页/章首页/Chapter）；
-  "auto"（用户要求章节页但未指定类型，由大纲规划阶段自动选择 section 或 chapter）。
-  提取规则：仅当用户明确表达时才提取，例如"加章节页""每章一个章节页""加 3 页章节分隔""需要目录页""保留我大纲里的章节页""加 PART 页""加章首页"。
-  普通章节结构、素材中的标题层级、模型自己觉得需要分节，都不构成触发条件 -> "none"。
-  用户指定数量时（如"加 2 页章节页"），数量信息保留在 structural_page_count 中。
-- structural_page_count: 用户指定的中间结构页数量（整数；未指定或"每章一个"等需自动计算时为 null）。
+"""
+    + STRUCTURAL_PAGE_SLOT_PROMPT
+    + """
 - missing_fields: 仍缺失且需用户补充的字段名数组，取值限于 topic / page_count / audience / presentation_purpose / style_id
 - need_ask_style: 用户未明确风格时为 true，否则 false
 
@@ -94,8 +101,9 @@ _P21_SLOT_SYSTEM_PROMPT = ("""你是 PPT 需求槽位分析助手。从用户消
 4. 不要输出 search_mode / source_type。
 5. topic 缺失时由下游 LLM 生成 4 个主题候选并 ask 用户选择，不要生成询问文案。
 6. pack_dir 存在时 style_id 填 "custom"（模板包优先于预设风格），need_ask_style 设 false。
-7. page_count 为内容页数（不含封面/结束页），系统会在此基础上自动加 2 页（封面+结束页）。
+7. page_count 为内容页数（不含封面/结束页和用户明确要求的中间结构页），系统会在此基础上自动加封面、结束页和这些结构页。
    用户说"生成N页PPT"/"做N页汇报"/"PPT共N页"/"总页数N页"/"总共N页"/"一共N页"/"N页"/"做N页PPT"/"N页以内"/"不超过N页"/"最多N页"等未特指内容页的表达 → N 表示总页数，page_count = max(N - 2, 1)；
+   用户明确要求目录/章节页时，再扣除这些结构页。
    用户明确说"N个内容页"/"N页正文"或正在回答"需要多少页内容页"时，page_count = N。
 
 必须只输出 JSON："""
@@ -130,11 +138,12 @@ source_type 规则（核心判据：用户对每页内容的指导深度）：
 - 用户给出宽泛主题、简短描述，或主要依赖上传文档 → topic
 注意：不要仅凭"是否有编号列表"来判断 outline。关键看每个列表项的内容深度——只给出页面主题/标题的为 outline，已包含具体内容指导的为 description。
 
-research_depth 规则（与 search_mode、page_count 联动；L1/L2/L3 含义见下游 research-writer）：
+research_depth 规则（对齐 pptx-craft Stage 4；L1/L2/L3 含义见下游 research-writer）：
 - search_mode 为 no_search → L1
-- search_mode 为 force_search，或 page_count > 15 → L3
-- page_count 在 8~15 → L2
-- 其余（含 auto 且页数 ≤7）→ L1
+- search_mode 为 auto 且用户文档已覆盖数据需求 → L1
+- search_mode 为 auto 且文档未覆盖数据需求，或 search_mode 为 force_search → L2（默认）
+- search_mode 为 auto 或 force_search，且用户原文明确要求「深度 / 详实 / 专家级 / 尽量全」→ L3
+注意：page_count / content_page_count 不决定研究级别；force_search 单独不等于 L3。
 
 need_imagegen 规则：用户 query 明确要求 AI 生图/生成配图 → true，否则 → false
 
@@ -279,15 +288,6 @@ def _set_requirement_artifact(ctx: dict[str, Any]) -> None:
     }
 
 
-def _apply_slot_defaults(inputs: dict[str, Any]) -> None:
-    if not inputs.get("audience"):
-        inputs["audience"] = _DEFAULT_AUDIENCE
-    if not inputs.get("presentation_purpose"):
-        inputs["presentation_purpose"] = _DEFAULT_PRESENTATION_PURPOSE
-    if inputs.get("page_count") is None:
-        inputs["page_count"] = _DEFAULT_PAGE_COUNT
-
-
 def _batch_field_is_satisfied(inputs: dict[str, Any], field: str) -> bool:
     if field == "page_count":
         return inputs.get("page_count") is not None
@@ -385,13 +385,13 @@ def _merge_slot_payload(
 
     # 结构页需求提取
     spr = payload.get("structural_page_request")
-    if isinstance(spr, str) and spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS:
-        inputs["structural_page_request"] = spr.strip().lower()
+    if isinstance(spr, str) and spr.strip():
+        inputs["structural_page_request"] = _coerce_structural_page_request(spr)
     else:
         inputs.setdefault("structural_page_request", "none")
 
-    spc = payload.get("structural_page_count")
-    if isinstance(spc, int) and spc > 0:
+    spc = PptCommon.parse_positive_int(payload.get("structural_page_count"))
+    if spc is not None:
         inputs["structural_page_count"] = spc
     else:
         inputs.setdefault("structural_page_count", None)
@@ -401,6 +401,13 @@ def _merge_slot_payload(
         inputs["need_ask_style"] = need_ask_style
     elif "need_ask_style" not in inputs:
         inputs["need_ask_style"] = not bool(inputs.get("style_id"))
+
+
+def _coerce_structural_page_request(raw: Any) -> str:
+    normalized = PptCommon.normalize_structural_page_request(raw)
+    if normalized in _VALID_STRUCTURAL_REQUESTS:
+        return normalized
+    return "none"
 
 
 def _build_p21_slot_prompt(
@@ -463,6 +470,7 @@ def _build_p24_prompt(inputs: dict[str, Any], user_text: str, doc_excerpt: str) 
         parts.append(f"用户原文：\n{user_text}\n")
     if doc_excerpt:
         parts.append(f"文档摘要：\n{doc_excerpt}\n")
+    parts.append("注意：page_count 不决定 research_depth。")
     parts.append("按 JSON 返回 search_mode、source_type、research_depth、need_imagegen。")
     return "\n".join(parts)
 
@@ -1529,15 +1537,12 @@ class RequirementCollectNode(PlanNode):
                     ctx[slot] = v
             # 结构页需求透传
             _spr = pre_slots.get("structural_page_request")
-            if (
-                isinstance(_spr, str)
-                and _spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS
-            ):
-                ctx["structural_page_request"] = _spr.strip().lower()
+            if isinstance(_spr, str) and _spr.strip():
+                ctx["structural_page_request"] = _coerce_structural_page_request(_spr)
             else:
                 ctx.setdefault("structural_page_request", "none")
-            _spc = pre_slots.get("structural_page_count")
-            if isinstance(_spc, int) and _spc > 0:
+            _spc = PptCommon.parse_positive_int(pre_slots.get("structural_page_count"))
+            if _spc is not None:
                 ctx["structural_page_count"] = _spc
             else:
                 ctx.setdefault("structural_page_count", None)
@@ -1565,16 +1570,15 @@ class RequirementCollectNode(PlanNode):
             # 结构页需求透传
             if not ctx.get("structural_page_request"):
                 _spr = pre_slots.get("structural_page_request")
-                if (
-                    isinstance(_spr, str)
-                    and _spr.strip().lower() in _VALID_STRUCTURAL_REQUESTS
-                ):
-                    ctx["structural_page_request"] = _spr.strip().lower()
+                if isinstance(_spr, str) and _spr.strip():
+                    ctx["structural_page_request"] = _coerce_structural_page_request(_spr)
                 else:
                     ctx.setdefault("structural_page_request", "none")
             if not ctx.get("structural_page_count"):
-                _spc = pre_slots.get("structural_page_count")
-                if isinstance(_spc, int) and _spc > 0:
+                _spc = PptCommon.parse_positive_int(
+                    pre_slots.get("structural_page_count")
+                )
+                if _spc is not None:
                     ctx["structural_page_count"] = _spc
                 else:
                     ctx.setdefault("structural_page_count", None)

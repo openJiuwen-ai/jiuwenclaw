@@ -29,6 +29,7 @@ def _extract_designer_section(
     *,
     include_charts: bool = False,
     for_content_template_fill: bool = False,
+    for_custom_content_fill: bool = False,
 ) -> str:
     """从新版 references/designer.md 提取当前生成链路需要的关键章节。
 
@@ -51,28 +52,38 @@ def _extract_designer_section(
         end = min(candidates) if candidates else len(text)
         return text[start:end].rstrip()
 
-    sections = [
-        _extract_bounded_section(
-            "### 页面内容预算契约",
-            ("\n### 阶段 4：交付",),
-        ),
-        _extract_bounded_section(
-            "## 弹性布局模式",
-            ("\n## HTML 代码规范",),
-        ),
-        _extract_bounded_section(
-            "## 页面布局规范",
-            ("\n## 视觉设计规范",),
-        ),
-        _extract_bounded_section(
-            "## 视觉设计规范",
-            ("\n## 图表与数据可视化",),
-        ),
-        _extract_bounded_section(
-            "## 关键原则",
-            ("\n## 质量控制清单",),
-        ),
-    ]
+    # custom 内容页只注入官方要求的预算契约与按需图表章，
+    # 不注入「页面布局规范」里 section/chapter 的 PART 示例，避免内容页误用。
+    if for_custom_content_fill:
+        sections = [
+            _extract_bounded_section(
+                "### 页面内容预算契约",
+                ("\n### 阶段 4：交付",),
+            ),
+        ]
+    else:
+        sections = [
+            _extract_bounded_section(
+                "### 页面内容预算契约",
+                ("\n### 阶段 4：交付",),
+            ),
+            _extract_bounded_section(
+                "## 弹性布局模式",
+                ("\n## HTML 代码规范",),
+            ),
+            _extract_bounded_section(
+                "## 页面布局规范",
+                ("\n## 视觉设计规范",),
+            ),
+            _extract_bounded_section(
+                "## 视觉设计规范",
+                ("\n## 图表与数据可视化",),
+            ),
+            _extract_bounded_section(
+                "## 关键原则",
+                ("\n## 质量控制清单",),
+            ),
+        ]
     if include_charts:
         chart_section = _extract_bounded_section(
             "## 图表与数据可视化",
@@ -95,7 +106,7 @@ def _extract_designer_section(
         logger.warning("[P8.0] designer.md 未匹配到新版关键章节")
         return ""
 
-    if for_content_template_fill:
+    if for_content_template_fill or for_custom_content_fill:
         return "\n\n".join(selected)
 
     return (
@@ -158,6 +169,43 @@ _FOOTER_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _P_INNER_TEXT_RE = re.compile(r"(<p\b[^>]*>)(.*?)(</p>)", re.IGNORECASE | re.DOTALL)
+_CSS_FENCE_RE = re.compile(r"```css\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_THEME_CONTRACT_STYLE_RE = re.compile(
+    r'<style\b[^>]*id=["\']theme-contract["\'][^>]*>.*?</style>',
+    re.IGNORECASE | re.DOTALL,
+)
+_THEME_RULES_STYLE_RE = re.compile(
+    r'<style\b[^>]*id=["\']theme-rules["\'][^>]*>.*?</style>',
+    re.IGNORECASE | re.DOTALL,
+)
+_CSS_CUSTOM_PROP_RE = re.compile(r"(--[A-Za-z0-9-]+)\s*:\s*([^;]+);")
+_SLOT_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_CHART_SCAFFOLD_BLOCK_RE = re.compile(
+    r"<!--\s*CHART_SCAFFOLD((?:_\d+)?)_BEGIN\b(.*?)CHART_SCAFFOLD\1_END\s*-->",
+    re.DOTALL,
+)
+_OPTION_NULL_RE = re.compile(r"const\s+option\s*=\s*null\s*;")
+_CHART_FONT_FAMILY_CONST_RE = re.compile(
+    r'(const\s+CHART_FONT_FAMILY\s*=\s*)(["\'])(.*?)\2'
+)
+_ECHARTS_INIT_RE = re.compile(r"echarts\s*\.\s*init\s*\(", re.IGNORECASE)
+_OFFICIAL_FORMATTER_STRING_RE = re.compile(
+    r'("formatter"\s*:\s*)"(format(?:AxisNumber|AxisPercent|LabelNumber|LabelPercent))"'
+)
+_FRONTMATTER_FONT_LIST_RE = re.compile(
+    r"(?m)^font-family:\s*\n((?:^[ \t]+-[ \t].+\n?)+)"
+)
+_FRONTMATTER_FONT_LINE_RE = re.compile(
+    r'(?m)^font-family:\s*["\']?(.+?)["\']?\s*$'
+)
+_HTML_DOCUMENT_RE = re.compile(
+    r"^\s*(?:<!--.*?-->\s*)*(?:<!DOCTYPE\s+html|<html[\s>])",
+    re.IGNORECASE | re.DOTALL,
+)
+_SLIDE_DESIGNER_THINKING_OFF = (
+    "本任务使用 `off` 思考模式：优先速度，不过度展开推导。"
+    "直接给出填槽 JSON，禁止复述模板 HTML 或逐步论证骨架。\n"
+)
 
 
 def _normalize_template_whitespace(text: str) -> str:
@@ -173,8 +221,11 @@ def _outline_needs_research(outline_page: str) -> bool:
 
 
 def _uses_content_template_fill(style_id: str, page_type: str, outline_page: str) -> bool:
-    """预设四风格内容页：官方 content-template 预铺后仅填槽。"""
-    if style_id not in _PRESET_STYLE_IDS:
+    """普通分支内容页：官方 content-template 预铺后仅填槽。
+
+    预设四风格走 Stage 6 §3.5；custom 走 Stage 6 §3.6。结构页不走此路径。
+    """
+    if style_id not in _PRESET_STYLE_IDS and style_id != "custom":
         return False
     if page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES:
         return False
@@ -187,11 +238,6 @@ def _uses_structural_template_fill(style_id: str, page_type: str) -> bool:
         page_type in _STRUCTURAL_TEMPLATE_PAGE_TYPES
         and style_id in _AGENDA_TEMPLATE_FILL_STYLE_IDS
     )
-
-
-def _uses_agenda_template_fill(style_id: str, page_type: str) -> bool:
-    """普通分支下 agenda 是否走官方 agenda-template 预铺填槽。"""
-    return _uses_structural_template_fill(style_id, page_type) and page_type == "agenda"
 
 
 def _resolve_style_page_template_path(
@@ -350,6 +396,7 @@ def _build_structural_template_fill_prompt(
         f"style_id=`{style_id}`，模板=`{template_page_type}-template.html`。"
         "你是模板填充师，不是自由排版设计师。\n\n"
         f"{fill_rules}\n"
+        f"{_VISIBLE_PAGE_NUMBER_RULE}"
         "## 风格文件（配色/字体权威；不得把风格元数据写成观众可见装饰）\n"
         f"{style_text}\n\n"
         f"### 大纲 — 本页规划（{page_type_label}）\n"
@@ -357,30 +404,6 @@ def _build_structural_template_fill_prompt(
         f"{outline_full_section}"
         "### 预铺模板 HTML（只填槽，勿重写）\n"
         f"{seed_html}\n"
-    )
-
-
-def _build_agenda_template_fill_prompt(
-    *,
-    page_number: int,
-    style_id: str,
-    style_text: str,
-    outline_page: str,
-    outline_full: str,
-    seed_html: str,
-    user_query: str = "",
-) -> str:
-    """构造 agenda 官方模板填槽 prompt（仅替换 {{}}，不重写骨架）。"""
-    return _build_structural_template_fill_prompt(
-        page_number=page_number,
-        page_type="agenda",
-        template_page_type="agenda",
-        style_id=style_id,
-        style_text=style_text,
-        outline_page=outline_page,
-        outline_full=outline_full,
-        seed_html=seed_html,
-        user_query=user_query,
     )
 
 
@@ -439,6 +462,229 @@ def _has_placeholder_slop(text: str) -> bool:
     return normalized in _PLACEHOLDER_SLOP_VALUES
 
 
+def _normalize_slot_name(key: Any) -> str:
+    name = str(key or "").strip().strip("{}").strip()
+    return name if _SLOT_NAME_RE.fullmatch(name) else ""
+
+
+def _looks_like_html_document(text: str) -> bool:
+    return bool(_HTML_DOCUMENT_RE.match(text or ""))
+
+
+def _parse_fill_slots(raw: str) -> dict[str, Any] | None:
+    """解析填槽 JSON。官方占位符为 {{NAME}}；完整 HTML 文档不走此路径。"""
+    payload = PptCommon.parse_json_payload(raw)
+    if not isinstance(payload, dict) or not payload:
+        return None
+    slots: dict[str, Any] = {}
+    for key, value in payload.items():
+        name = _normalize_slot_name(key)
+        if name:
+            slots[name] = value
+    return slots or None
+
+
+def _slot_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _apply_template_slots(seed_html: str, slots: dict[str, Any]) -> str:
+    """把 JSON 槽值写入预铺模板，不改占位符以外的骨架。"""
+    html = seed_html or ""
+    for name, value in slots.items():
+        if name.startswith("CHART_"):
+            continue
+        html = html.replace("{{" + name + "}}", _slot_text(value))
+    return html
+
+
+def _revive_official_formatter_refs(js_literal: str) -> str:
+    """把 JSON 里的官方 formatter 字符串还原为骨架内置函数引用。"""
+    return _OFFICIAL_FORMATTER_STRING_RE.sub(r"\1\2", js_literal)
+
+
+def _style_frontmatter_font_stack(style_text: str) -> str:
+    """读取 style.md / style-custom.md frontmatter 的完整字体栈。"""
+    text = style_text or ""
+    list_match = _FRONTMATTER_FONT_LIST_RE.search(text)
+    if list_match:
+        fonts = [
+            item.strip().strip("\"'")
+            for item in re.findall(r"^[ \t]+-[ \t]+(.+)$", list_match.group(1), re.M)
+            if item.strip()
+        ]
+        return ", ".join(fonts)
+    line_match = _FRONTMATTER_FONT_LINE_RE.search(text)
+    if line_match:
+        return line_match.group(1).strip().strip("\"'")
+    return ""
+
+
+def _chart_option_literal(value: Any) -> str | None:
+    if value is None or value is False:
+        return None
+    if isinstance(value, (dict, list)):
+        dumped = json.dumps(value, ensure_ascii=False)
+        if dumped in {"{}", "[]", "null"}:
+            return None
+        return _revive_official_formatter_refs(dumped)
+    text = str(value).strip()
+    if not text or text.casefold() in {"null", "none", "undefined", "{}", "[]"}:
+        return None
+    return _revive_official_formatter_refs(text)
+
+
+def _option_assignment(value: Any) -> str | None:
+    literal = _chart_option_literal(value)
+    if not literal:
+        return None
+    stripped = literal.strip()
+    if stripped.startswith("const ") or stripped.startswith("let ") or stripped.startswith("var "):
+        return stripped if stripped.endswith(";") else f"{stripped};"
+    return f"const option = {stripped};"
+
+
+def _chart_option_for_suffix(slots: dict[str, Any], suffix: str) -> Any:
+    aliases = ["CHART_OPTION", "CHART_OPTION_1"] if suffix == "" else [f"CHART_OPTION{suffix}"]
+    for key in aliases:
+        if key in slots:
+            return slots[key]
+    return None
+
+
+def _activate_chart_scaffolds(html: str, slots: dict[str, Any]) -> str:
+    """Stage 6 §3.5 唯一骨架例外：成对去掉 CHART_SCAFFOLD 注释定界符并填 option。"""
+    if not html or not slots:
+        return html
+    visible = _HTML_COMMENT_RE.sub("", html)
+    if _ECHARTS_INIT_RE.search(visible):
+        return html
+
+    def _replace(match: re.Match[str]) -> str:
+        suffix = match.group(1) or ""
+        inner = match.group(2) or ""
+        assignment = _option_assignment(_chart_option_for_suffix(slots, suffix))
+        if not assignment:
+            return match.group(0)
+        if _OPTION_NULL_RE.search(inner):
+            inner = _OPTION_NULL_RE.sub(lambda _m: assignment, inner, count=1)
+        elif "const option" not in inner:
+            return match.group(0)
+        font = str(slots.get("CHART_FONT_FAMILY") or "").strip()
+        if font and font.casefold() not in {"null", "none"}:
+            inner = _CHART_FONT_FAMILY_CONST_RE.sub(
+                lambda m: f"{m.group(1)}{m.group(2)}{font}{m.group(2)}",
+                inner,
+                count=1,
+            )
+        return inner.strip()
+
+    return _CHART_SCAFFOLD_BLOCK_RE.sub(_replace, html)
+
+
+_GETELEMENTBYID_LITERAL_RE = re.compile(
+    r"document\.getElementById\(\s*(['\"])([^'\"]+)\1\s*\)",
+    re.IGNORECASE,
+)
+_CHART_CONTAINER_ID_ATTR_RE = re.compile(
+    r"(<div\b[^>]*\bid\s*=\s*)(['\"])([^'\"]*chart[^'\"]*)\2",
+    re.IGNORECASE,
+)
+
+
+def _chart_lookup_ids(html: str) -> list[str]:
+    """已激活骨架里 getElementById 的入参；忽略 HTML / JS 块注释中的说明文字。"""
+    visible = _CSS_COMMENT_RE.sub("", _HTML_COMMENT_RE.sub("", html or ""))
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for match in _GETELEMENTBYID_LITERAL_RE.finditer(visible):
+        lookup_id = match.group(2).strip()
+        if not lookup_id or "chart" not in lookup_id.casefold():
+            continue
+        if lookup_id in seen:
+            continue
+        seen.add(lookup_id)
+        ordered.append(lookup_id)
+    return ordered
+
+
+def _visible_has_element_id(html: str, element_id: str) -> bool:
+    visible = _HTML_COMMENT_RE.sub("", html or "")
+    return bool(
+        re.search(
+            rf"\bid\s*=\s*(['\"]){re.escape(element_id)}\1",
+            visible,
+        )
+    )
+
+
+def _chart_host_is_empty(html: str, open_match: re.Match[str]) -> bool:
+    tag_end = html.find(">", open_match.start())
+    if tag_end < 0:
+        return False
+    return bool(re.match(r"\s*</div\b", html[tag_end + 1:], re.IGNORECASE))
+
+
+def _align_chart_container_ids_to_lookups(html: str) -> str:
+    """容器 id 必须等于已激活骨架 getElementById 入参；不改冻结的骨架 JS。"""
+    if not html:
+        return html
+    lookup_ids = _chart_lookup_ids(html)
+    if not lookup_ids:
+        return html
+    result = html
+    lookup_set = set(lookup_ids)
+    for lookup_id in lookup_ids:
+        if _visible_has_element_id(result, lookup_id):
+            continue
+        comment_spans = [(m.start(), m.end()) for m in _HTML_COMMENT_RE.finditer(result)]
+        chosen: re.Match[str] | None = None
+        for match in _CHART_CONTAINER_ID_ATTR_RE.finditer(result):
+            if any(start <= match.start() < end for start, end in comment_spans):
+                continue
+            current_id = match.group(3)
+            if current_id == lookup_id:
+                continue
+            if current_id in lookup_set and _visible_has_element_id(result, current_id):
+                continue
+            if not _chart_host_is_empty(result, match):
+                continue
+            chosen = match
+            break
+        if chosen is None:
+            continue
+        quote = chosen.group(2)
+        replacement = f"{chosen.group(1)}{quote}{lookup_id}{quote}"
+        result = result[: chosen.start()] + replacement + result[chosen.end():]
+    return result
+
+
+def _materialize_template_fill(
+    seed_html: str,
+    llm_raw: str,
+    extra_slots: dict[str, Any] | None = None,
+) -> str:
+    """内容页填槽：优先 JSON 槽值拼进 seed；完整 HTML 仍按旧路径验收，避免效果回退。"""
+    text = _strip_html_fence(llm_raw or "")
+    if _looks_like_html_document(text):
+        return _align_chart_container_ids_to_lookups(text)
+    slots = _parse_fill_slots(text)
+    if not slots:
+        return text
+    if extra_slots:
+        merged = dict(extra_slots)
+        merged.update(slots)
+        slots = merged
+    filled = _activate_chart_scaffolds(_apply_template_slots(seed_html, slots), slots)
+    return _align_chart_container_ids_to_lookups(filled)
+
+
 def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> tuple[bool, str]:
     """Stage 6 软门禁：内容页必须基于 seed 填槽，不能改 chrome。"""
     if not _is_valid_html(filled_html):
@@ -485,8 +731,177 @@ def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> 
     if _has_placeholder_slop(footer_text):
         return False, "footer_invalid"
 
-    if not _validate_slide_dom(filled_html):
-        return False, "invalid_dom"
+    if not _validate_chart_height_chain(filled_html):
+        return False, "invalid_chart_height_chain"
+    return True, ""
+
+
+def _css_custom_properties(css_text: str) -> str:
+    props = [
+        f"{name.strip()}: {value.strip()};"
+        for name, value in _CSS_CUSTOM_PROP_RE.findall(css_text or "")
+    ]
+    return "\n      ".join(props)
+
+
+def _extract_theme_css_slots(style_text: str) -> tuple[str, str]:
+    """从 style-custom.md 提取 Stage 5 的变量块与可选全局规则块。"""
+    fences = [block.strip() for block in _CSS_FENCE_RE.findall(style_text or "") if block.strip()]
+    if not fences:
+        return "", ""
+    variables = _css_custom_properties(fences[0])
+    rules = ""
+    if len(fences) > 1:
+        rules = fences[1]
+    else:
+        leftover = _CSS_CUSTOM_PROP_RE.sub("", fences[0])
+        leftover = re.sub(r":root\s*\{|\}\s*$", "", leftover).strip()
+        leftover = re.sub(r"\n{3,}", "\n\n", leftover).strip()
+        if leftover and "{" in leftover:
+            rules = leftover
+    return variables, rules
+
+
+def _apply_custom_theme_slots(seed_html: str, style_text: str) -> str:
+    """按 Stage 6 §3.6 从风格文件逐字填入主题槽；仅用于 custom 内容页脚手架。"""
+    variables, rules = _extract_theme_css_slots(style_text)
+    html = seed_html or ""
+    html = html.replace("{{THEME_CSS_VARIABLES}}", variables)
+    html = html.replace("{{THEME_CSS_RULES}}", rules)
+    return html
+
+
+def _style_block_text(html: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(html or "")
+    return match.group(0) if match else ""
+
+
+def _css_props_map(css_text: str) -> dict[str, str]:
+    return {
+        name.strip(): re.sub(r"\s+", " ", value.strip())
+        for name, value in _CSS_CUSTOM_PROP_RE.findall(css_text or "")
+    }
+
+
+def _theme_contract_vars_preserved(seed_html: str, filled_html: str) -> bool:
+    """官方硬约束：theme-contract 插槽仍在，且预填变量名+值未被改写。"""
+    seed_block = _style_block_text(seed_html, _THEME_CONTRACT_STYLE_RE)
+    filled_block = _style_block_text(filled_html, _THEME_CONTRACT_STYLE_RE)
+    if not seed_block or not filled_block:
+        return False
+    seed_props = _css_props_map(seed_block)
+    if not seed_props:
+        return True
+    filled_props = _css_props_map(filled_block)
+    return all(filled_props.get(name) == value for name, value in seed_props.items())
+
+
+def _theme_rules_core_preserved(seed_html: str, filled_html: str) -> bool:
+    """§3.6：已逐字填入的 THEME_CSS_RULES 必须仍在；未提供规则时空槽不是硬门禁。"""
+    seed_block = _style_block_text(seed_html, _THEME_RULES_STYLE_RE)
+    seed_inner = ""
+    if seed_block:
+        seed_inner = re.sub(
+            r"^<style\b[^>]*>|</style>$",
+            "",
+            seed_block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        seed_inner = _CSS_COMMENT_RE.sub("", seed_inner).strip()
+    if not seed_inner:
+        return True
+    filled_block = _style_block_text(filled_html, _THEME_RULES_STYLE_RE)
+    if not filled_block:
+        return False
+    filled_norm = _normalize_template_whitespace(_CSS_COMMENT_RE.sub("", filled_block))
+    return _normalize_template_whitespace(seed_inner) in filled_norm
+
+
+def _custom_slide_inner_markup(inner_html: str) -> str:
+    text = re.sub(r"<!--.*?-->", "", inner_html or "", flags=re.DOTALL)
+    text = re.sub(r"<script\b[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
+def _custom_slide_has_page_content(html: str) -> bool:
+    """§3.6：页面全部内容在 .ppt-slide 的 PAGE_CONTENT 内；不要求预设 h1/字数。"""
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return False
+    return bool(_custom_slide_inner_markup(html[bounds[0]:bounds[1]]))
+
+
+_CUSTOM_ORPHAN_MAIN_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+
+
+def _relocate_orphan_main_into_custom_slide(html: str) -> str:
+    """custom 内容页专用：slide 内无内容且唯一 main 在 slide 外时，把 main 子节点搬进 slide。"""
+    if not html or _custom_slide_has_page_content(html):
+        return html
+    mains = list(_CUSTOM_ORPHAN_MAIN_RE.finditer(html))
+    if len(mains) != 1:
+        return html
+    main = mains[0]
+    bounds = _ppt_slide_bounds(html)
+    if bounds is None:
+        return html
+    start, end = bounds
+    if start <= main.start() < end:
+        return html
+    main_inner = re.sub(
+        r"^<main\b[^>]*>|</main\s*>$",
+        "",
+        main.group(0),
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    if not main_inner:
+        return html
+    html_wo_main = html[: main.start()] + html[main.end():]
+    relocated = _ppt_slide_bounds(html_wo_main)
+    if relocated is None:
+        return html
+    return html_wo_main[: relocated[0]] + main_inner + html_wo_main[relocated[1]:]
+
+
+def _validate_custom_content_slide_dom(html: str) -> str:
+    """custom 内容页：只拦官方「PAGE_CONTENT 为空」。
+
+    畸形 token / `.ppt-slide` 边界解析失败不是 Stage 6 硬门禁；
+    解析不到边界时不得误判为空，交给 P8.2 `cli.js fix`。
+    """
+    bounds = _ppt_slide_bounds(html or "")
+    if bounds is None:
+        return ""
+    if not _custom_slide_inner_markup(html[bounds[0]:bounds[1]]):
+        return "empty_slide_content"
+    return ""
+
+
+def _validate_custom_content_template_fill_output(
+    seed_html: str,
+    filled_html: str,
+) -> tuple[bool, str]:
+    """Stage 6 §3.6：官方脚手架语义硬约束，不另加标题文案黑名单。"""
+    if not _is_valid_html(filled_html):
+        return False, "invalid_html"
+    if _has_unfilled_placeholders(filled_html):
+        return False, "unfilled_placeholders"
+    if _normalize_template_whitespace(seed_html) == _normalize_template_whitespace(filled_html):
+        return False, "seed_not_modified"
+    if "{{PAGE_CONTENT}}" in (filled_html or ""):
+        return False, "page_content_unfilled"
+    if not _theme_contract_vars_preserved(seed_html, filled_html):
+        return False, "theme_contract_changed"
+    if not _theme_rules_core_preserved(seed_html, filled_html):
+        return False, "theme_rules_changed"
+    if "@layer utilities" in (seed_html or "") and "@layer utilities" not in (filled_html or ""):
+        return False, "utilities_layer_missing"
+    dom_reason = _validate_custom_content_slide_dom(filled_html)
+    if dom_reason:
+        return False, dom_reason
+    if not _ppt_slide_has_flex_col(filled_html):
+        return False, "ppt_slide_not_flex_col"
     if not _validate_chart_height_chain(filled_html):
         return False, "invalid_chart_height_chain"
     return True, ""
@@ -537,11 +952,7 @@ def _build_content_template_fill_prompt(
             f"{outline_full}\n\n"
         )
     page_type = _detect_page_type(outline_page)
-    page_number_rule = _build_visible_page_number_rule(
-        user_query,
-        page_number,
-        total_pages or page_number,
-    )
+    page_number_rule = _VISIBLE_PAGE_NUMBER_RULE
     designer_section = ""
     if designer_md_text:
         designer_md = _extract_designer_section(
@@ -565,8 +976,16 @@ def _build_content_template_fill_prompt(
         "5. `{{PAGE_CONTENT}}` 必须替换为一个且仅一个首层根容器，根容器必须带 `w-full flex-1 min-h-0`\n"
         "6. 不得修改预铺模板 `<main>` 的 class；所有布局变化仅在 `{{PAGE_CONTENT}}` 内完成\n"
         "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
-        "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
-        "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`：PAGE_CONTENT 只放图表容器，"
+        "`CHART_OPTION` 填写 option 对象；由系统按模板注释成对去掉定界符并替换 `const option = null`。"
+        "option 中的 formatter 只引用骨架内置函数，写成字符串 "
+        "`formatAxisNumber` / `formatAxisPercent` / `formatLabelNumber` / `formatLabelPercent`，"
+        "禁止内联函数体。禁止在 PAGE_CONTENT 内手写第二套 `echarts.init`；"
+        "非图表页 `CHART_OPTION` 为 null，保留注释\n"
+        "9. 禁止输出完整 HTML、禁止回显预铺骨架（标题栏/页脚结构/CSS/`@layer`/装饰/SVG）。"
+        "只输出一个 JSON 对象，键名与占位符一致：`PAGE_TITLE`、`PAGE_CONTENT`、`PAGE_FOOTER`，"
+        "图表页另给 `CHART_OPTION`（对象或 null）\n"
+        f"{_SLIDE_DESIGNER_THINKING_OFF}\n"
         "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
@@ -583,12 +1002,104 @@ def _build_content_template_fill_prompt(
         f"{seed_html}\n"
     )
 
+
+def _build_custom_content_template_fill_prompt(
+    *,
+    page_number: int,
+    style_text: str,
+    outline_page: str,
+    research_page: str,
+    outline_full: str,
+    seed_html: str,
+    image_map_page: str = "",
+    designer_md_text: str = "",
+    user_query: str = "",
+) -> str:
+    """custom 内容页：对齐 Stage 6 §3.6 与 generate-slide-designer-tasks 通用规范。"""
+    user_query_section = ""
+    if user_query:
+        user_query_section = (
+            "## 用户原始 query（用于指导内容方向和视觉风格要求）\n"
+            f"{user_query}\n"
+            f"⚠️ 用户 query 中的页数/总量要求已由大纲规划完成，本步骤**仅填充第 {page_number} 页内容页**。\n\n"
+        )
+    outline_full_section = ""
+    if outline_full.strip() and outline_full.strip() != outline_page.strip():
+        outline_full_section = (
+            "### 大纲全文（仅用于核对本页章节与上下文，不得混入其他页内容）\n"
+            f"{outline_full}\n\n"
+        )
+    page_type = _detect_page_type(outline_page)
+    designer_section = ""
+    if designer_md_text:
+        designer_md = _extract_designer_section(
+            designer_md_text,
+            include_charts=page_type in _CHART_CANDIDATE_TYPES,
+            for_custom_content_fill=True,
+        )
+        if designer_md:
+            designer_section = (
+                "\n## skill designer 约束（写 HTML 前先完成页面内容预算；"
+                "图表候选页另读图表章节）\n"
+                f"{designer_md}\n"
+            )
+    return (
+        f"{user_query_section}"
+        f"## 任务：填充第 {page_number} 页 custom 内容页官方脚手架\n"
+        "style_id=`custom`，模板=`references/styles/custom/content-template.html`。\n"
+        "对齐 Stage 6 §3.6。\n\n"
+        "## 填充规则（Stage 6 §3.6）\n"
+        "1. 已预铺 `custom/content-template.html`：逐字保留 `@layer utilities` 安全块"
+        "（`.ppt-slide` 1280×720、`overflow: hidden`）与 `theme-contract` 插槽。"
+        "画布容器须为 `generate-slide-designer-tasks` 强制的 "
+        "`<div class=\"ppt-slide flex flex-col\" type=\"...\">`"
+        "（系统写盘时补上 `flex flex-col`；禁止改 `@layer` 中的 `.ppt-slide` 规则）\n"
+        "2. `{{THEME_CSS_VARIABLES}}` 与 `{{THEME_CSS_RULES}}` 已从风格文件逐字填入"
+        "（风格文件未提供规则块时该槽为空）；不得逐页重新选择全局颜色或字体，"
+        "不得改写已注入的变量名与取值\n"
+        "3. `{{PAGE_TITLE}}` 填写本页大纲标题；页面全部内容（含标题、正文、页脚）"
+        "在 `{{PAGE_CONTENT}}` 内依据风格文件设计；全部可见内容必须写在 `.ppt-slide` 内，"
+        "若使用 `<main>` 必须放在该容器内部。"
+        "header / main / footer 必须参与同一个纵向 flex 布局"
+        "（`generate-slide-designer-tasks` 页面纵向结构）\n"
+        "4. 新增样式只引用风格文件已定义变量，不得另立视觉权威，不得覆盖 `@layer utilities`，"
+        "不得用 `*`、`body` 或根 `:root` 重定义颜色/字体\n"
+        "5. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`：PAGE_CONTENT 只放图表容器，"
+        "`CHART_OPTION` 填写 option 对象；由系统按脚手架注释激活。"
+        "option 中的 formatter 只引用骨架内置函数（写成对应函数名字符串），禁止内联函数体。"
+        "禁止额外手写第二套 `echarts.init`；非图表页保留注释。"
+        "`CHART_FONT_FAMILY` 由系统写入风格文件 frontmatter 完整字体栈，无需在 JSON 中改脚手架代码。"
+        "容器高度链须遵从 designer.md / 脚手架注释："
+        "`div.flex.flex-col` → `div.flex-1.min-h-0` → `div#chart-1.w-full.h-full`"
+        "（可读高度建议 ≥300px 由页面预算保证；模板 CSS 已兜底 min-height:160px）\n"
+        "6. 完成后不得残留任何 `{{[A-Z][A-Z0-9_]*}}`\n"
+        "7. 禁止输出完整 HTML、禁止回显脚手架骨架。只输出一个 JSON 对象，"
+        "键为 `PAGE_TITLE`、`PAGE_CONTENT`，图表页另给 `CHART_OPTION`（对象或 null）\n"
+        f"{_SLIDE_DESIGNER_THINKING_OFF}\n"
+        "## 可见文字来源契约（generate-slide-designer-tasks）\n"
+        "所有观众可见文字只能来自用户原始需求、outline.md、本页 research-P{N}.md "
+        "或已批准模板的固定文案。"
+        "禁止为营造氛围自行添加与叙事无关的英文、随机数字或制作编号。\n\n"
+        "## 风格文件（本次演示唯一视觉权威）\n"
+        f"{style_text}\n\n"
+        "## 大纲 — 本页规划\n"
+        f"{outline_page}\n\n"
+        f"{outline_full_section}"
+        "## 研究报告 — 本页素材\n"
+        f"{research_page}\n"
+        f"{_build_image_section(image_map_page)}\n"
+        f"{designer_section}"
+        f"{_VISIBLE_PAGE_NUMBER_RULE}"
+        "## 预铺模板 HTML（主题槽已按风格文件填入，只填 PAGE_TITLE / PAGE_CONTENT）\n"
+        f"{seed_html}\n"
+    )
+
+
 _VISIBLE_PAGE_NUMBER_RULE = (
-    "- 可见运行页码禁令（所有页型）：页码只用于文件名、任务定位和完整性校验，"
-    "不得成为观众可见文字；禁止在 header、footer、封面、结束页或其他 Page Chrome 中"
-    "生成 `P3`、`P03 / 10`、`Page 3`、`3 / 10`、`第 3 页 / 共 10 页` 等运行页码。"
-    "用户要求“生成 N 页”只表示页数，不等于要求显示页码；agenda 正文中的章节目标页码"
-    "属于导航内容，可以保留。\n"
+    "- 禁止页脚出现页码（所有页型）：所有页面（content / cover / agenda / section / "
+    "chapter / ending）的页脚一律禁止「第 N 页」「Page N」「N / M」「P N」等任何页码表述；"
+    "唯一允许的是数据来源/备注/日期。"
+    "agenda 正文中的章节目标页码属于导航内容，可以保留。\n"
 )
 
 _EDITABLE_LAYERING_RULES = (
@@ -609,119 +1120,6 @@ _EDITABLE_LAYERING_RULES = (
     "`echarts.graphic.LinearGradient/RadialGradient`，这些写法会使图表在 PPTX 中转成位图；"
     "需要透明面积色时使用当前风格允许的纯色 `rgba(...)`。\n"
 )
-
-
-@dataclass(frozen=True)
-class _PageNumberPolicy:
-    """用户显式可见页码要求；默认关闭。"""
-
-    enabled: bool
-    position: str = "bottom-right"
-    format_kind: str = "fraction"
-    zero_pad: bool = False
-
-
-_PAGE_NUMBER_NEGATIVE_RE = re.compile(
-    r"(?:不(?:要|需要|显示|生成|添加|保留)|无需|无须|禁止|取消|去掉|移除|删除|隐藏|关闭)"
-    r".{0,8}(?:页码|页面编号)"
-    r"|(?:页码|页面编号).{0,8}(?:不要|无需|无须|禁止|取消|去掉|移除|删除|隐藏|关闭)"
-    r"|\b(?:no|without|hide|remove)\s+(?:page|slide)\s+numbers?\b",
-    re.IGNORECASE,
-)
-_PAGE_NUMBER_POSITIVE_RE = re.compile(
-    r"(?:显示|生成|添加|加上|加入|带上?|保留|标注|放置|设置).{0,10}(?:页码|页面编号)"
-    r"|(?:页码|页面编号).{0,12}(?:显示|生成|添加|加上|加入|保留|标注|放在|放到|位于|置于|设置)"
-    r"|(?:右下角|左下角|右上角|左上角).{0,8}(?:页码|页面编号)"
-    r"|(?:页码|页面编号).{0,8}(?:右下角|左下角|右上角|左上角)"
-    r"|\b(?:show|add|include|display)\s+(?:page|slide)\s+numbers?\b",
-    re.IGNORECASE,
-)
-
-
-def _resolve_page_number_policy(user_query: str) -> _PageNumberPolicy:
-    """仅把明确的可见页码请求识别为开启；“生成 N 页”不触发。"""
-    query = str(user_query or "").strip()
-    if not query or _PAGE_NUMBER_NEGATIVE_RE.search(query):
-        return _PageNumberPolicy(enabled=False)
-    if not _PAGE_NUMBER_POSITIVE_RE.search(query):
-        return _PageNumberPolicy(enabled=False)
-
-    if "左下" in query:
-        position = "bottom-left"
-    elif "右上" in query:
-        position = "top-right"
-    elif "左上" in query:
-        position = "top-left"
-    else:
-        # 未指定位置时使用稳定默认值；也覆盖用户常见的“右下角页码”要求。
-        position = "bottom-right"
-
-    if re.search(r"第\s*(?:N|\d+)\s*页.{0,8}(?:共|总共|总页)", query, re.IGNORECASE):
-        format_kind = "chinese-total"
-    elif re.search(r"第\s*(?:N|\d+)\s*页", query, re.IGNORECASE):
-        format_kind = "chinese"
-    elif re.search(r"(?:格式|样式).{0,8}\bPage\s*(?:N|\d+)", query, re.IGNORECASE):
-        format_kind = "english"
-    elif re.search(r"(?:格式|样式).{0,8}\bP\s*(?:N|\d+)\b", query, re.IGNORECASE):
-        format_kind = "p-prefix"
-    elif re.search(r"(?:仅|只).{0,6}(?:当前页|数字)|不显示.{0,4}总页数", query):
-        format_kind = "current"
-    else:
-        format_kind = "fraction"
-
-    zero_pad = bool(re.search(r"两位|2\s*位|补零|零填充|(?:^|\D)0[1-9](?:\D|$)", query))
-    return _PageNumberPolicy(
-        enabled=True,
-        position=position,
-        format_kind=format_kind,
-        zero_pad=zero_pad,
-    )
-
-
-def _format_visible_page_number(
-    policy: _PageNumberPolicy,
-    page_number: int,
-    total_pages: int,
-) -> str:
-    total = max(int(total_pages or 0), int(page_number or 0), 1)
-    width = max(2, len(str(total))) if policy.zero_pad else 1
-    current_text = str(page_number).zfill(width)
-    total_text = str(total).zfill(width)
-    if policy.format_kind == "chinese-total":
-        return f"第 {current_text} 页 / 共 {total_text} 页"
-    if policy.format_kind == "chinese":
-        return f"第 {current_text} 页"
-    if policy.format_kind == "english":
-        return f"Page {current_text}"
-    if policy.format_kind == "p-prefix":
-        return f"P{current_text}"
-    if policy.format_kind == "current":
-        return current_text
-    return f"{current_text} / {total_text}"
-
-
-def _build_visible_page_number_rule(
-    user_query: str,
-    page_number: int,
-    total_pages: int,
-) -> str:
-    policy = _resolve_page_number_policy(user_query)
-    if not policy.enabled:
-        return _VISIBLE_PAGE_NUMBER_RULE
-    marker = _format_visible_page_number(policy, page_number, total_pages)
-    position_label = {
-        "bottom-right": "右下角",
-        "bottom-left": "左下角",
-        "top-right": "右上角",
-        "top-left": "左上角",
-    }[policy.position]
-    return (
-        "- 用户显式页码要求（优先于默认禁令）：最终页面必须且只能显示 1 个运行页码，"
-        f"固定在{position_label}，文字逐字为 `{marker}`。当前页面生成阶段不得自行创建页码，"
-        "避免产生重复或格式漂移；"
-        "agenda 正文中的章节目标页码仍属于导航内容，不计入这个运行页码。"
-        "SkillTurbo 会在写盘前插入统一的可编辑文本页码，禁止用图片或透明罩模拟页码。\n"
-    )
 
 
 # 页面类型 → 模板 ID 默认映射（当 manifest 无 page_intents 时兜底）
@@ -791,8 +1189,10 @@ _DESIGN_RULES_DIGEST = (
     "4.2 图表最小高度（强制）：图表容器实际渲染高度必须 ≥ 160px（防塌缩下限），"
     "用 `min-h-[160px]` 或 `flex-1` 确保图表区域能初始化渲染；"
     "建议图表可读高度 ≥ 300px，由页面预算保证\n"
-    "4.2.1 图表高度链（强制）：图表外层卡片须 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`），"
-    "内层 `#xxx-chart` 用 `flex-1 min-h-0 w-full`；禁止在无 `min-h-0`/`flex-1` 的 flex-col 父容器内单独给 chart div 加 `flex-1`\n"
+    "4.2.1 图表高度链（强制，对齐 designer.md CHART_SCAFFOLD）："
+    "`flex flex-col`（父）→ `flex-1 min-h-0`（包装器）→ `w-full h-full`（chart）；"
+    "也允许等价合并为外层卡片 `flex-1 min-h-0 flex flex-col`（或 `flex-[N] min-h-0 flex flex-col`）直接包住 chart；"
+    "禁止外层仅有 `flex flex-col` 且无中间高度包装时直接挂 chart\n"
     "4.3 图表颜色（强制）：图表数据系列颜色必须来自风格文件的图表配色表，禁止使用相近色；"
     "坐标轴标签用深色，分割线用浅色\n"
     "4.4 图表标签防重叠：建议为 ECharts series 设置 `labelLayout:{moveOverlap:'shiftY'}` 防止同系列标签重叠；"
@@ -879,7 +1279,7 @@ _DESIGN_RULES_DIGEST = (
     "`.text-grayDeep`、`.border-gray3`、`.bg-gray4` 等），色值从风格规范文件中取；"
     "缺少这些类定义会导致品牌色和灰度色全部失效，页面退化为白底黑字\n"
     "12. 页脚：底部必须有数据来源汇总条（如'数据来源：央行、财政部、...'），即使卡片内已有来源标注也必须保留页脚；"
-    "禁止在页脚追加任何运行页码；页数只用于任务定位和文件完整性校验\n"
+    "禁止在页脚追加任何运行页码\n"
     "13. 布局实现：仅 main、图表或图片等需要承接剩余空间的区域使用 `flex-1 min-h-0`；"
     "纯文字卡片按内容自适应高度，禁止为了等高而制造大片空白；"
     "禁止使用 `overflow-hidden` 隐藏核心内容（标题/正文/图表/数据卡片等）\n"
@@ -1192,9 +1592,51 @@ _MALFORMED_HTML_RE = re.compile(
     re.IGNORECASE,
 )
 _PPT_SLIDE_OPEN_RE = re.compile(
-    r'<div\b[^>]*\bclass="[^"]*\bppt-slide\b',
+    r"<div\b[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
     re.IGNORECASE,
 )
+_PPT_SLIDE_CLASS_RE = re.compile(
+    r"(<div\b[^>]*\bclass\s*=\s*)([\"'])([^\"']*\bppt-slide\b[^\"']*)\2",
+    re.IGNORECASE,
+)
+
+
+def _ppt_slide_class_tokens(class_value: str) -> set[str]:
+    return {token.casefold() for token in (class_value or "").split() if token}
+
+
+def _ppt_slide_has_flex_col(html: str) -> bool:
+    """generate-slide-designer-tasks：画布须为 `ppt-slide flex flex-col`。"""
+    match = _PPT_SLIDE_CLASS_RE.search(html or "")
+    if not match:
+        return False
+    tokens = _ppt_slide_class_tokens(match.group(3))
+    return "flex" in tokens and "flex-col" in tokens
+
+
+def _ensure_ppt_slide_flex_col(html: str) -> str:
+    """custom seed 不带纵向 flex；写盘时补官方强制容器 class，不改 @layer。"""
+    if not html:
+        return html
+    match = _PPT_SLIDE_CLASS_RE.search(html)
+    if not match:
+        return html
+    tokens = match.group(3).split()
+    lower = _ppt_slide_class_tokens(match.group(3))
+    if "flex-row" in lower:
+        return html
+    changed = False
+    if "flex" not in lower:
+        tokens.append("flex")
+        changed = True
+    if "flex-col" not in lower:
+        tokens.append("flex-col")
+        changed = True
+    if not changed:
+        return html
+    quote = match.group(2)
+    replacement = f"{match.group(1)}{quote}{' '.join(tokens)}{quote}"
+    return html[: match.start()] + replacement + html[match.end():]
 
 
 def _ppt_slide_bounds(html: str) -> tuple[int, int] | None:
@@ -1237,11 +1679,15 @@ def _main_inside_ppt_slide(html: str) -> bool:
     return start <= main_match.start() < end
 
 
-def _validate_slide_dom(html: str) -> bool:
-    """P8.1 写盘前校验：拦截 LLM 畸形片段与 main 滑出 slide。"""
-    if _MALFORMED_HTML_RE.search(html):
-        return False
-    return _main_inside_ppt_slide(html)
+def _slide_dom_soft_issue(html: str) -> str:
+    """返回 Stage 6 不作为写盘硬拒的 DOM 问题，供日志与 P8.2 fix。"""
+    if _MALFORMED_HTML_RE.search(html or ""):
+        return "malformed_tokens"
+    if _ppt_slide_bounds(html or "") is None:
+        return "ppt_slide_unparsed"
+    if not _main_inside_ppt_slide(html or ""):
+        return "main_outside_slide"
+    return ""
 
 
 def _is_slide_exportable(html: str) -> bool:
@@ -1268,11 +1714,28 @@ def _chart_wrapper_has_height_chain(wrapper_tag: str) -> bool:
     return bool(_CHART_WRAPPER_HEIGHT_RE.search(wrapper_tag))
 
 
-def _validate_chart_height_chain(html: str) -> bool:
-    """P8.1 写盘前校验：ECharts 图表外层 flex-col 卡片须具备高度分配类。
+_CHART_HEIGHT_DIV_OPEN_RE = re.compile(
+    r'<div\b[^>]*\bclass="[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
 
-    仅拦截高置信坏案（如 page-5：包装器只有 flex flex-col、无 min-h-0/flex-1）；
-    无法定位包装器时不拦截，避免误伤。
+
+def _segment_has_height_wrapper(segment: str) -> bool:
+    """flex-col 与 chart 之间是否存在带高度分配类的中间包装 div。"""
+    for match in _CHART_HEIGHT_DIV_OPEN_RE.finditer(segment or ""):
+        if _chart_wrapper_has_height_chain(match.group(0)):
+            return True
+    return False
+
+
+def _validate_chart_height_chain(html: str) -> bool:
+    """P8.1 写盘前校验：对齐 designer.md / CHART_SCAFFOLD 高度链。
+
+    官方契约：`flex flex-col`（父）→ `flex-1 min-h-0`（包装器）→ `w-full h-full`（chart）。
+    等价合并写法：`flex-1 min-h-0 flex flex-col` 直接包住 chart 也通过。
+
+    仅拦截高置信坏案：最近 flex-col 自身无高度类，且与 chart 之间也无高度包装；
+    无法定位 flex-col 时不拦截，避免误伤。
     """
     if "echarts.init" not in html.lower():
         return True
@@ -1281,8 +1744,14 @@ def _validate_chart_height_chain(html: str) -> bool:
         wrappers = list(_FLEX_COL_DIV_RE.finditer(before))
         if not wrappers:
             continue
-        if not _chart_wrapper_has_height_chain(wrappers[-1].group(0)):
-            return False
+        nearest = wrappers[-1]
+        if _chart_wrapper_has_height_chain(nearest.group(0)):
+            continue
+        # 官方三层：高度类在 flex-col 与 chart 之间的中间包装上，不要求写在 flex-col 自身。
+        between = before[nearest.end():]
+        if _segment_has_height_wrapper(between):
+            continue
+        return False
     return True
 
 
@@ -1305,7 +1774,14 @@ _VISIBLE_TEXT_LEAF_RE = re.compile(
     r"(?P<text>[^<>]*)</(?P=tag)>",
     re.IGNORECASE,
 )
-_MAIN_BLOCK_RE = re.compile(r"<main\b[^>]*>.*?</main\s*>", re.IGNORECASE | re.DOTALL)
+_FOOTER_OPEN_RE = re.compile(
+    r"<(?P<tag>footer|div|section|p|span)\b(?P<attrs>[^>]*)>",
+    re.IGNORECASE,
+)
+_FOOTER_ROLE_ATTR_RE = re.compile(
+    r"\bdata-pptx-role\s*=\s*['\"]footer['\"]",
+    re.IGNORECASE,
+)
 _PAGE_MARKER_SPACE_ENTITY_RE = re.compile(
     r"&(?:nbsp|#0*(?:32|160)|#x0*(?:20|a0));",
     re.IGNORECASE,
@@ -1323,20 +1799,60 @@ def _normalize_page_marker_text(text: str) -> str:
     return normalized.replace("\xa0", " ").strip()
 
 
+def _find_matching_close(html_text: str, inner_start: int, tag: str) -> int | None:
+    """从 inner_start 起按标签名做括号匹配，返回闭合标签之后的下标。"""
+    open_re = re.compile(rf"<{re.escape(tag)}\b[^>]*>", re.IGNORECASE)
+    close_re = re.compile(rf"</{re.escape(tag)}\s*>", re.IGNORECASE)
+    depth = 1
+    pos = inner_start
+    while pos < len(html_text):
+        open_match = open_re.search(html_text, pos)
+        close_match = close_re.search(html_text, pos)
+        if close_match is None:
+            return None
+        if open_match is not None and open_match.start() < close_match.start():
+            depth += 1
+            pos = open_match.end()
+            continue
+        depth -= 1
+        pos = close_match.end()
+        if depth == 0:
+            return pos
+    return None
+
+
+def _footer_ranges(html_text: str) -> tuple[tuple[int, int], ...]:
+    """官方页脚范围：`<footer>` 或 `data-pptx-role="footer"`。"""
+    ranges: list[tuple[int, int]] = []
+    for match in _FOOTER_OPEN_RE.finditer(html_text):
+        tag = match.group("tag")
+        attrs = match.group("attrs") or ""
+        is_footer_tag = tag.lower() == "footer"
+        is_footer_role = bool(_FOOTER_ROLE_ATTR_RE.search(attrs))
+        if not (is_footer_tag or is_footer_role):
+            continue
+        if any(start <= match.start() < end for start, end in ranges):
+            continue
+        end = _find_matching_close(html_text, match.end(), tag)
+        if end is None:
+            continue
+        ranges.append((match.start(), end))
+    return tuple(ranges)
+
+
 def _strip_visible_page_markers(html_text: str) -> str:
-    """移除 Page Chrome 中的可见运行页码，保留 main 内的导航/业务内容。"""
+    """仅移除页脚内的运行页码，对齐 designer.md；header / 角标页码不删。"""
     if not html_text:
         return html_text
 
-    main_ranges = tuple(
-        (match.start(), match.end())
-        for match in _MAIN_BLOCK_RE.finditer(html_text)
-    )
+    footer_ranges = _footer_ranges(html_text)
+    if not footer_ranges:
+        return html_text
+
     removed_markers: list[str] = []
 
     def _replace_marker(match: re.Match[str]) -> str:
-        # agenda 章节目标页码和可能的业务型号位于 main，不能按运行页码误删。
-        if any(start <= match.start() < end for start, end in main_ranges):
+        if not any(start <= match.start() < end for start, end in footer_ranges):
             return match.group(0)
         marker = _normalize_page_marker_text(match.group("text"))
         if not _VISIBLE_PAGE_MARKER_RE.fullmatch(marker):
@@ -1346,7 +1862,7 @@ def _strip_visible_page_markers(html_text: str) -> str:
 
     normalized = _VISIBLE_TEXT_LEAF_RE.sub(_replace_marker, html_text)
     if removed_markers:
-        logger.info("[P8.1] 已移除可见运行页码 markers=%s", removed_markers)
+        logger.info("[P8.1] 已移除页脚运行页码 markers=%s", removed_markers)
     return normalized
 
 
@@ -1355,91 +1871,6 @@ _PPT_SLIDE_DIV_RE = re.compile(
     r"<div[^>]*\bclass\s*=\s*(?:\"[^\"]*\bppt-slide\b[^\"]*\"|'[^']*\bppt-slide\b[^']*')",
     re.IGNORECASE,
 )
-_DIV_TAG_RE = re.compile(r"<div\b[^>]*>|</div\s*>", re.IGNORECASE)
-_PAGE_NUMBER_POSITION_CSS = {
-    "bottom-right": "right:30px;bottom:16px;text-align:right;",
-    "bottom-left": "left:30px;bottom:16px;text-align:left;",
-    "top-right": "right:30px;top:16px;text-align:right;",
-    "top-left": "left:30px;top:16px;text-align:left;",
-}
-_PAGE_NUMBER_STYLE = {
-    "business-classic": ("#898989", 12),
-    "tech-minimal": ("rgba(0,0,0,0.8)", 12),
-    "industrial-tech": ("#898989", 14),
-    "elegant-narrative": ("#87867f", 14),
-}
-
-
-def _insert_visible_page_marker(
-    html_text: str,
-    marker_text: str,
-    policy: _PageNumberPolicy,
-    style_id: str,
-) -> str:
-    """在 ppt-slide 根容器末尾插入一个普通、可编辑的页码文本元素。"""
-    root_match = _PPT_SLIDE_DIV_RE.search(html_text)
-    if root_match is None:
-        logger.warning("[P8.1] 可见页码插入失败：未找到 ppt-slide 根容器")
-        return html_text
-
-    depth = 0
-    insertion_index: int | None = None
-    for tag_match in _DIV_TAG_RE.finditer(html_text, root_match.start()):
-        if tag_match.group(0).lower().startswith("</div"):
-            depth -= 1
-            if depth == 0:
-                insertion_index = tag_match.start()
-                break
-        else:
-            depth += 1
-    if insertion_index is None:
-        logger.warning("[P8.1] 可见页码插入失败：未找到 ppt-slide 闭合标签")
-        return html_text
-
-    position_css = _PAGE_NUMBER_POSITION_CSS[policy.position]
-    color, font_size = _PAGE_NUMBER_STYLE.get(style_id, ("#666666", 12))
-    marker = (
-        "\n<span data-skill-turbo-page-number=\"true\" "
-        f"data-position=\"{policy.position}\" "
-        'style="position:absolute;z-index:30;min-width:48px;'
-        f"{position_css}font-family:inherit;font-size:{font_size}px;"
-        f"line-height:1;font-weight:400;color:{color};white-space:nowrap;"
-        'background:transparent;border:0;padding:0;margin:0;">'
-        # marker_text 仅由固定格式文字和整数页码组成，不包含用户原始 HTML。
-        f"{marker_text}</span>\n"
-    )
-    return html_text[:insertion_index] + marker + html_text[insertion_index:]
-
-
-def _apply_visible_page_number_policy(
-    html_text: str,
-    *,
-    user_query: str,
-    page_number: int,
-    total_pages: int,
-    style_id: str,
-) -> str:
-    """默认移除运行页码；用户明确要求时确定性统一为一个可编辑页码。"""
-    policy = _resolve_page_number_policy(user_query)
-    normalized = _strip_visible_page_markers(html_text)
-    if not policy.enabled:
-        return normalized
-    marker_text = _format_visible_page_number(policy, page_number, total_pages)
-    normalized = _insert_visible_page_marker(
-        normalized,
-        marker_text,
-        policy,
-        style_id,
-    )
-    if 'data-skill-turbo-page-number="true"' in normalized:
-        logger.info(
-            "[P8.1] 已统一可见页码 page=%d total=%d position=%s format=%s",
-            page_number,
-            total_pages,
-            policy.position,
-            policy.format_kind,
-        )
-    return normalized
 
 
 def _truncate_to_single_slide(html: str) -> str:
@@ -1554,50 +1985,6 @@ def _fix_echarts_svg_renderer(html: str) -> str:
     return _ECHARTS_INIT_NO_SVG_RE.sub(_replacer, html)
 
 
-# 匹配 echarts-static-svg 容器块（用于检测空 SVG）
-# 约定：容器内有且仅有一个 <svg> 根元素，且其后紧跟容器闭合 </div>
-# 这样可避免容器内嵌套 <div>（图例/标题/布局包装等）导致 .*?</div> 提前截断真实 SVG 内容
-_STATIC_SVG_BLOCK_RE = re.compile(
-    r'<div class="echarts-static-svg"[^>]*>.*?</svg>\s*</div>',
-    re.IGNORECASE | re.DOTALL,
-)
-# SVG 内有实际图形内容的元素
-_SVG_CONTENT_TAGS = re.compile(
-    r'<(?:path|rect|circle|ellipse|line|polyline|polygon|text|tspan|image|use)\b',
-    re.IGNORECASE,
-)
-
-
-def _has_empty_chart_svg(html: str) -> bool:
-    """检测是否存在空的 echarts-static-svg（有容器但 SVG 内无图形元素）。"""
-    for m in _STATIC_SVG_BLOCK_RE.finditer(html):
-        svg_block = m.group(0)
-        if not _SVG_CONTENT_TAGS.search(svg_block):
-            return True
-    return False
-
-
-# --- ECharts 图表容器缺少 echarts.init 初始化检测（P8.1 阶段，P8.2 fix 之前） ---
-# 场景：LLM 生成了 <div id="xxxChart"> + echarts 脚本引用，但遗漏 echarts.init 调用，
-# 导致 P8.2 cli.js fix 将未初始化图表转为空 SVG（页面出现大片空白）。
-# 仅检测"有 ECharts 库但完全没有 echarts.init 调用"——这是最可靠的信号，
-# 不依赖容器 id 命名约定或 init 调用格式，避免误报。
-_ECHARTS_LIB_RE = re.compile(r'<script[^>]*echarts[\w.-]*\.js', re.IGNORECASE)
-_ECHARTS_INIT_RE = re.compile(r'echarts\.init\s*\(', re.IGNORECASE)
-
-
-def _has_chart_without_init(html: str) -> bool:
-    """检测 ECharts 图表容器缺少 echarts.init 初始化脚本。
-
-    在 P8.1 密度检查阶段（P8.2 cli.js fix 之前）运行。
-    检测条件：HTML 引入了 ECharts 库脚本但完全没有 echarts.init 调用。
-    不依赖容器 id 命名或 init 调用格式，避免误报。
-    """
-    if not _ECHARTS_LIB_RE.search(html):
-        return False
-    return not _ECHARTS_INIT_RE.search(html)
-
-
 # --- 图表卡片头部 HTML 写单位检测（与 ECharts 轴名称形成双单位） ---
 # 场景：LLM 在图表标题行右上角 span 又写了一遍「单位：克/日」，与 setOption 中
 # yAxis.name 形成左上角轴名 + 右上角 HTML 单位的双单位。单位唯一来源应为
@@ -1657,134 +2044,10 @@ def _strip_chart_header_unit(html: str) -> str:
     return new_html
 
 
-# 检测 CSS Grid 布局使用（html-to-pptx 不支持 Grid）
-_GRID_USAGE_RE = re.compile(r'\bgrid\s+grid-cols-\S+', re.IGNORECASE)
-
-
-def _has_grid_layout(html: str) -> bool:
-    """检测是否使用了 CSS Grid 布局（html-to-pptx 转换器不支持 Grid）。"""
-    return bool(_GRID_USAGE_RE.search(html))
-
-
-# 检测核心内容容器上的 overflow-hidden（不应裁切核心内容）
-_OVERFLOW_HIDDEN_RE = re.compile(
-    r'<(?:div|section|main|article|aside|header|footer)[^>]*\boverflow-hidden\b[^>]*>',
-    re.IGNORECASE,
-)
-
-
-def _has_overflow_hidden_on_content(html: str) -> bool:
-    """检测核心内容容器（div/section/main 等）上是否使用了 overflow-hidden。
-
-    overflow-hidden 仅允许用于 .ppt-slide 画布边界，不应用于核心内容容器。
-    """
-    # 排除 .ppt-slide 容器本身（画布边界 overflow-hidden 是允许的）
-    matches = _OVERFLOW_HIDDEN_RE.findall(html)
-    for m in matches:
-        if 'ppt-slide' not in m.lower():
-            return True
-    return False
-
-
-# 检测字号一致性：提取所有 text-[Npx] 值
-_FONT_SIZE_RE = re.compile(r'text-\[(\d+)px\]')
-
-
-def _check_font_size_consistency(html: str) -> bool:
-    """检测同页字号是否一致。返回 True 表示不一致。
-
-    规则：同级别的卡片/模块应使用相同字号。
-    如果同页出现 >3 种不同正文字号，判定为不一致。
-    """
-    sizes = [int(m) for m in _FONT_SIZE_RE.findall(html)]
-    if not sizes:
-        return False
-    # 过滤出正文字号范围（14-24px），标题字号（37px+）不参与一致性检查
-    body_sizes = [s for s in sizes if 14 <= s <= 24]
-    if len(set(body_sizes)) > 3:
-        return True
-    return False
-
-
-_LIST_BLOCK_RE = re.compile(
-    r"<(?P<tag>ul|ol)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-_CLASS_ATTR_RE = re.compile(
-    r"\bclass\s*=\s*(?P<quote>[\"'])(?P<classes>.*?)(?P=quote)",
-    re.IGNORECASE | re.DOTALL,
-)
-_LIST_ITEM_RE = re.compile(r"<li\b[^>]*>(.*?)</li\s*>", re.IGNORECASE | re.DOTALL)
-_NON_TEXT_VISUAL_RE = re.compile(
-    r"<(?:img|picture|table|svg|canvas)\b|echarts(?:-static-svg|\.init)",
-    re.IGNORECASE,
-)
-_HTML_TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
-
-
-def _has_sparse_flex_text_list(html: str) -> bool:
-    """检测高置信度的稀疏 flex-1 文字列表，避免把正常长列表误判为空白风险。"""
-    for match in _LIST_BLOCK_RE.finditer(html):
-        class_match = _CLASS_ATTR_RE.search(match.group("attrs"))
-        if not class_match:
-            continue
-        classes = set(class_match.group("classes").split())
-        if "flex-1" not in classes:
-            continue
-
-        body = match.group("body")
-        if _NON_TEXT_VISUAL_RE.search(body):
-            continue
-        items = _LIST_ITEM_RE.findall(body)
-        if not 1 <= len(items) <= 5:
-            continue
-
-        visible_items = [
-            re.sub(r"\s+", "", _HTML_TAG_RE.sub(" ", item)).replace("&nbsp;", "")
-            for item in items
-        ]
-        if (
-            all(visible_items)
-            and max(map(len, visible_items)) <= 80
-            and sum(map(len, visible_items)) <= 240
-        ):
-            return True
-    return False
-
-
-@dataclass
-class _ConstrainedCardState:
-    """高度受限 Flex 卡片的解析状态。"""
-
-    tag: str
-    depth: int
-    has_fixed_table: bool = False
-
-
-_HTML_TAG_TOKEN_RE = re.compile(
-    r"<(?P<closing>/)?(?P<tag>[a-zA-Z][\w:-]*)(?P<attrs>[^>]*)>",
-    re.DOTALL,
-)
 _HTML_CLASS_RE = re.compile(
     r"\bclass\s*=\s*(?P<quote>[\"'])(?P<classes>.*?)(?P=quote)",
     re.IGNORECASE | re.DOTALL,
 )
-_HTML_VOID_TAGS = {
-    "area",
-    "base",
-    "br",
-    "col",
-    "embed",
-    "hr",
-    "img",
-    "input",
-    "link",
-    "meta",
-    "param",
-    "source",
-    "track",
-    "wbr",
-}
 
 
 def _classes_from_tag_attrs(attrs: str) -> set[str]:
@@ -1792,134 +2055,12 @@ def _classes_from_tag_attrs(attrs: str) -> set[str]:
     return set(match.group("classes").split()) if match else set()
 
 
-def _is_constrained_flex_card(classes: set[str]) -> bool:
-    if "flex-col" not in classes or "min-h-0" not in classes:
-        return False
-    return "flex-1" in classes or any(
-        cls.startswith("flex-[") and cls.endswith("]")
-        for cls in classes
-    )
-
-
-def _has_risky_trailing_content_in_constrained_card(html: str) -> bool:
-    """检测本次坏例对应的高置信度卡片越界结构。"""
-    tag_stack: list[str] = []
-    card_stack: list[_ConstrainedCardState] = []
-
-    for match in _HTML_TAG_TOKEN_RE.finditer(html):
-        tag = match.group("tag").lower()
-        if match.group("closing"):
-            current_depth = len(tag_stack) - 1
-            if (
-                card_stack
-                and card_stack[-1].tag == tag
-                and card_stack[-1].depth == current_depth
-            ):
-                card_stack.pop()
-            if tag_stack:
-                tag_stack.pop()
-            continue
-
-        attrs = match.group("attrs") or ""
-        classes = _classes_from_tag_attrs(attrs)
-        if card_stack:
-            card = card_stack[-1]
-            if tag == "table" and "flex-shrink-0" in classes:
-                card.has_fixed_table = True
-            elif (
-                card.has_fixed_table
-                and tag in {"div", "p", "span", "aside"}
-                and "flex-shrink-0" in classes
-            ):
-                return True
-            if "mt-auto" in classes and "flex-shrink-0" in classes:
-                return True
-
-        is_void = tag in _HTML_VOID_TAGS or attrs.rstrip().endswith("/")
-        if is_void:
-            continue
-        tag_stack.append(tag)
-        if _is_constrained_flex_card(classes):
-            card_stack.append(
-                _ConstrainedCardState(tag=tag, depth=len(tag_stack) - 1)
-            )
-    return False
-
-
 _HTML_STYLE_RE = re.compile(
     r"\bstyle\s*=\s*(?P<quote>[\"'])(?P<style>.*?)(?P=quote)",
     re.IGNORECASE | re.DOTALL,
 )
-_DECORATION_ROLE_RE = re.compile(
-    r"\bdata-pptx-role\s*=\s*([\"'])decoration\1",
-    re.IGNORECASE,
-)
-_DECORATION_CLASS_RE = re.compile(
-    r"^(?:bg[-_])?(?:deco|decoration)(?:[-_].*)?$",
-    re.IGNORECASE,
-)
-_NEGATIVE_EDGE_STYLE_RE = re.compile(
-    r"(?:^|[;{])\s*(?:top|right|bottom|left)\s*:\s*"
-    r"-\s*(?:\d+(?:\.\d+)?|\.\d+)\s*(?:px|%|rem|em)\b",
-    re.IGNORECASE,
-)
-_NEGATIVE_EDGE_CLASS_RE = re.compile(
-    r"^(?:top|right|bottom|left)-\[-(?:\d+(?:\.\d+)?|\.\d+)(?:px|%|rem|em)\]$",
-    re.IGNORECASE,
-)
 _STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(?P<css>.*?)</style>", re.IGNORECASE | re.DOTALL)
 _CSS_RULE_RE = re.compile(r"(?P<selectors>[^{}]+)\{(?P<body>[^{}]*)\}", re.DOTALL)
-
-
-def _is_explicit_decoration(attrs: str, classes: set[str]) -> bool:
-    """仅识别明确标注的背景装饰，避免误判普通绝对定位内容。"""
-    return bool(_DECORATION_ROLE_RE.search(attrs)) or any(
-        _DECORATION_CLASS_RE.fullmatch(cls)
-        for cls in classes
-    )
-
-
-def _has_negative_edge_in_css(html: str, classes: set[str]) -> bool:
-    """检查装饰类对应 CSS 规则是否将图形部分移出画布。"""
-    if not classes:
-        return False
-    for style_match in _STYLE_BLOCK_RE.finditer(html):
-        css = style_match.group("css")
-        for rule_match in _CSS_RULE_RE.finditer(css):
-            selectors = rule_match.group("selectors")
-            if not any(
-                re.search(
-                    rf"(?<![\w-])\.{re.escape(cls)}(?![\w-])",
-                    selectors,
-                )
-                for cls in classes
-            ):
-                continue
-            if _NEGATIVE_EDGE_STYLE_RE.search("{" + rule_match.group("body")):
-                return True
-    return False
-
-
-def _has_off_canvas_decoration(html: str) -> bool:
-    """检测内容页中依赖负坐标和画布裁切的明确背景装饰。"""
-    for match in _HTML_TAG_TOKEN_RE.finditer(html):
-        if match.group("closing"):
-            continue
-        attrs = match.group("attrs") or ""
-        classes = _classes_from_tag_attrs(attrs)
-        if not _is_explicit_decoration(attrs, classes):
-            continue
-        if any(_NEGATIVE_EDGE_CLASS_RE.fullmatch(cls) for cls in classes):
-            return True
-        style_match = _HTML_STYLE_RE.search(attrs)
-        if style_match and _NEGATIVE_EDGE_STYLE_RE.search("{" + style_match.group("style")):
-            return True
-        decoration_classes = {
-            cls for cls in classes if _DECORATION_CLASS_RE.fullmatch(cls)
-        }
-        if _has_negative_edge_in_css(html, decoration_classes):
-            return True
-    return False
 
 
 # --- 全页栅格化装饰遮罩（“透明罩”）修复 ---
@@ -2004,627 +2145,6 @@ def _strip_unsupported_fullpage_overlays(html: str) -> str:
     if removed:
         logger.info("[P8.1] 移除全页栅格化装饰遮罩 %d 个（透明罩修复）", removed)
     return result
-
-
-_JS_DELIMITER_PAIRS = {"(": ")", "[": "]", "{": "}"}
-_SET_OPTION_RE = re.compile(r"\.setOption\s*\(", re.IGNORECASE)
-_SERIES_ARRAY_RE = re.compile(r"\bseries\s*:\s*\[", re.IGNORECASE)
-_LABEL_OBJECT_RE = re.compile(r"\blabel\s*:\s*\{", re.IGNORECASE)
-_SERIES_TYPE_RE = re.compile(r"\btype\s*:\s*([\"'])(?P<type>bar|line)\1", re.IGNORECASE)
-_LABEL_SHOW_RE = re.compile(r"\bshow\s*:\s*true\b", re.IGNORECASE)
-_LABEL_POSITION_RE = re.compile(
-    r"\bposition\s*:\s*([\"'])(?P<position>[^\"']+)\1",
-    re.IGNORECASE,
-)
-_LABEL_OFFSET_RE = re.compile(r"\boffset\s*:\s*(?P<value>\[[^\]]*\])", re.IGNORECASE)
-_LABEL_DISTANCE_RE = re.compile(
-    r"\bdistance\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
-_LABEL_FONT_SIZE_RE = re.compile(
-    r"\bfontSize\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
-_LABEL_LINE_HEIGHT_RE = re.compile(
-    r"\blineHeight\s*:\s*(?P<value>-?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
-_NON_PRIMARY_Y_AXIS_RE = re.compile(r"\byAxisIndex\s*:\s*[1-9]\d*\b", re.IGNORECASE)
-_NUMBER_LITERAL = r"-?(?:\d+(?:\.\d+)?|\.\d+)"
-_Y_AXIS_INDEX_RE = re.compile(r"\byAxisIndex\s*:\s*(?P<value>\d+)\b", re.IGNORECASE)
-_CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX = 300.0
-_CHART_LABEL_MIN_GAP_PX = 12.0
-_CHART_TOP_LANE_MIN_GAP_PX = 18.0
-
-
-@dataclass(frozen=True)
-class _ChartLabelPlacement:
-    """ECharts 数据标签的垂直几何参数。"""
-
-    position: str
-    offset_x: float
-    offset_y: float
-    distance: float
-    font_size: float
-    line_height: float
-
-
-def _find_matching_js_delimiter(text: str, start: int) -> int:
-    """返回 JS 对象/数组/调用的闭合位置；忽略字符串和注释中的括号。"""
-    if start >= len(text) or text[start] not in _JS_DELIMITER_PAIRS:
-        return -1
-    stack = [text[start]]
-    quote = ""
-    escaped = False
-    line_comment = False
-    block_comment = False
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-        if line_comment:
-            if char in "\r\n":
-                line_comment = False
-            index += 1
-            continue
-        if block_comment:
-            if char == "*" and next_char == "/":
-                block_comment = False
-                index += 2
-            else:
-                index += 1
-            continue
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = ""
-            index += 1
-            continue
-        if char == "/" and next_char == "/":
-            line_comment = True
-            index += 2
-            continue
-        if char == "/" and next_char == "*":
-            block_comment = True
-            index += 2
-            continue
-        if char in {"'", '"', "`"}:
-            quote = char
-            index += 1
-            continue
-        if char in _JS_DELIMITER_PAIRS:
-            stack.append(char)
-        elif char in _JS_DELIMITER_PAIRS.values():
-            if not stack or _JS_DELIMITER_PAIRS[stack[-1]] != char:
-                return -1
-            stack.pop()
-            if not stack:
-                return index
-        index += 1
-    return -1
-
-
-def _extract_set_option_blocks(html: str) -> list[str]:
-    blocks: list[str] = []
-    for match in _SET_OPTION_RE.finditer(html):
-        open_index = match.end() - 1
-        close_index = _find_matching_js_delimiter(html, open_index)
-        if close_index != -1:
-            blocks.append(html[open_index + 1:close_index])
-    return blocks
-
-
-def _extract_named_js_array(text: str, pattern: re.Pattern[str]) -> str:
-    match = pattern.search(text)
-    if not match:
-        return ""
-    array_start = match.end() - 1
-    array_end = _find_matching_js_delimiter(text, array_start)
-    if array_end == -1:
-        return ""
-    return text[array_start:array_end + 1]
-
-
-def _extract_named_js_object(text: str, name: str) -> str:
-    pattern = re.compile(rf"\b{re.escape(name)}\s*:\s*\{{", re.IGNORECASE)
-    match = pattern.search(text)
-    if not match:
-        return ""
-    object_start = match.end() - 1
-    object_end = _find_matching_js_delimiter(text, object_start)
-    if object_end == -1:
-        return ""
-    return text[object_start:object_end + 1]
-
-
-def _extract_string_property(text: str, name: str) -> str:
-    match = re.search(
-        rf"\b{re.escape(name)}\s*:\s*([\"'])(?P<value>.*?)\1",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    return match.group("value") if match else ""
-
-
-def _extract_top_level_js_objects(array_text: str) -> list[str]:
-    if not array_text.startswith("["):
-        return []
-    objects: list[str] = []
-    index = 1
-    array_end = len(array_text) - 1
-    while index < array_end:
-        if array_text[index] != "{":
-            index += 1
-            continue
-        object_end = _find_matching_js_delimiter(array_text, index)
-        if object_end == -1 or object_end > array_end:
-            return []
-        objects.append(array_text[index:object_end + 1])
-        index = object_end + 1
-    return objects
-
-
-def _extract_series_objects(option_block: str) -> list[str]:
-    return _extract_top_level_js_objects(
-        _extract_named_js_array(option_block, _SERIES_ARRAY_RE)
-    )
-
-
-def _extract_numeric_property(text: str, name: str) -> float | None:
-    match = re.search(
-        rf"\b{re.escape(name)}\s*:\s*(?P<value>{_NUMBER_LITERAL})\b",
-        text,
-        re.IGNORECASE,
-    )
-    return float(match.group("value")) if match else None
-
-
-def _extract_series_data(series: str) -> list[float | None]:
-    data_pattern = re.compile(r"\bdata\s*:\s*\[", re.IGNORECASE)
-    array_text = _extract_named_js_array(series, data_pattern)
-    if not array_text:
-        return []
-    values: list[float | None] = []
-    index = 1
-    array_end = len(array_text) - 1
-    while index < array_end:
-        while index < array_end and (array_text[index].isspace() or array_text[index] == ","):
-            index += 1
-        if index >= array_end:
-            break
-        if array_text[index] == "{":
-            object_end = _find_matching_js_delimiter(array_text, index)
-            if object_end == -1:
-                return []
-            value = _extract_numeric_property(array_text[index:object_end + 1], "value")
-            values.append(value)
-            index = object_end + 1
-            continue
-        item_end = array_text.find(",", index, array_end)
-        if item_end == -1:
-            item_end = array_end
-        token = array_text[index:item_end].strip()
-        if token.lower() == "null":
-            values.append(None)
-        elif re.fullmatch(_NUMBER_LITERAL, token):
-            values.append(float(token))
-        else:
-            return []
-        index = item_end + 1
-    return values
-
-
-def _extract_y_axis_bounds(option_block: str) -> list[tuple[float, float]]:
-    y_axis_pattern = re.compile(r"\byAxis\s*:\s*\[", re.IGNORECASE)
-    axis_objects = _extract_top_level_js_objects(
-        _extract_named_js_array(option_block, y_axis_pattern)
-    )
-    bounds: list[tuple[float, float]] = []
-    for axis in axis_objects:
-        maximum = _extract_numeric_property(axis, "max")
-        minimum = _extract_numeric_property(axis, "min")
-        if maximum is None or re.search(r"\bscale\s*:\s*true\b", axis, re.IGNORECASE):
-            return []
-        minimum = 0.0 if minimum is None else minimum
-        if maximum <= minimum:
-            return []
-        bounds.append((minimum, maximum))
-    return bounds
-
-
-def _label_placement_signature(series: str) -> _ChartLabelPlacement | None:
-    """提取启用标签的定位参数，用于估算跨系列文字框。"""
-    for match in _LABEL_OBJECT_RE.finditer(series):
-        object_start = match.end() - 1
-        object_end = _find_matching_js_delimiter(series, object_start)
-        if object_end == -1:
-            continue
-        label = series[object_start:object_end + 1]
-        if not _LABEL_SHOW_RE.search(label):
-            continue
-        position_match = _LABEL_POSITION_RE.search(label)
-        if not position_match:
-            continue
-        offset_match = _LABEL_OFFSET_RE.search(label)
-        distance_match = _LABEL_DISTANCE_RE.search(label)
-        font_size_match = _LABEL_FONT_SIZE_RE.search(label)
-        line_height_match = _LABEL_LINE_HEIGHT_RE.search(label)
-        offset_values = (
-            [float(value) for value in re.findall(_NUMBER_LITERAL, offset_match.group("value"))]
-            if offset_match
-            else []
-        )
-        font_size = float(font_size_match.group("value")) if font_size_match else 12.0
-        line_height = (
-            float(line_height_match.group("value"))
-            if line_height_match
-            else font_size * 1.2
-        )
-        return _ChartLabelPlacement(
-            position=position_match.group("position").lower(),
-            offset_x=offset_values[0] if offset_values else 0.0,
-            offset_y=offset_values[1] if len(offset_values) > 1 else 0.0,
-            distance=float(distance_match.group("value")) if distance_match else 5.0,
-            font_size=font_size,
-            line_height=line_height,
-        )
-    return None
-
-
-def _label_vertical_interval(
-    anchor_height: float,
-    placement: _ChartLabelPlacement,
-) -> tuple[float, float] | None:
-    """按300px参考绘图区估算标签文字框的归一化垂直区间。"""
-    plot_height = _CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX
-    anchor = anchor_height - placement.offset_y / plot_height
-    distance = max(0.0, placement.distance) / plot_height
-    label_height = max(placement.font_size, placement.line_height) / plot_height
-    if placement.position == "top":
-        return anchor + distance, anchor + distance + label_height
-    if placement.position in {"insidetop", "bottom"}:
-        return anchor - distance - label_height, anchor - distance
-    if placement.position in {"left", "right"}:
-        half_height = label_height / 2
-        return anchor - half_height, anchor + half_height
-    return None
-
-
-def _vertical_interval_gap(
-    first: tuple[float, float],
-    second: tuple[float, float],
-) -> float:
-    if first[1] < second[0]:
-        return second[0] - first[1]
-    if second[1] < first[0]:
-        return first[0] - second[1]
-    return 0.0
-
-
-def _has_dual_axis_combo_label_collision_risk(html: str) -> bool:
-    """检测同一双轴柱线图中安全距离不足的数据标签。"""
-    for option_block in _extract_set_option_blocks(html):
-        series_objects = _extract_series_objects(option_block)
-        if not series_objects or not any(
-            _NON_PRIMARY_Y_AXIS_RE.search(series)
-            for series in series_objects
-        ):
-            continue
-        axis_bounds = _extract_y_axis_bounds(option_block)
-        if len(axis_bounds) < 2:
-            continue
-        entries: dict[
-            str,
-            list[tuple[_ChartLabelPlacement, int, list[float | None]]],
-        ] = {
-            "bar": [],
-            "line": [],
-        }
-        for series in series_objects:
-            type_match = _SERIES_TYPE_RE.search(series)
-            if not type_match:
-                continue
-            placement = _label_placement_signature(series)
-            data = _extract_series_data(series)
-            if not placement or not data:
-                continue
-            axis_match = _Y_AXIS_INDEX_RE.search(series)
-            axis_index = int(axis_match.group("value")) if axis_match else 0
-            if axis_index >= len(axis_bounds):
-                continue
-            entries[type_match.group("type").lower()].append(
-                (placement, axis_index, data)
-            )
-        for bar_placement, bar_axis, bar_data in entries["bar"]:
-            for line_placement, line_axis, line_data in entries["line"]:
-                bar_min, bar_max = axis_bounds[bar_axis]
-                line_min, line_max = axis_bounds[line_axis]
-                for bar_value, line_value in zip(bar_data, line_data):
-                    if bar_value is None or line_value is None:
-                        continue
-                    bar_height = (bar_value - bar_min) / (bar_max - bar_min)
-                    line_height = (line_value - line_min) / (line_max - line_min)
-                    bar_interval = _label_vertical_interval(bar_height, bar_placement)
-                    line_interval = _label_vertical_interval(line_height, line_placement)
-                    if not bar_interval or not line_interval:
-                        continue
-                    gap_px = _vertical_interval_gap(bar_interval, line_interval) * (
-                        _CHART_LABEL_REFERENCE_PLOT_HEIGHT_PX
-                    )
-                    if gap_px < _CHART_LABEL_MIN_GAP_PX:
-                        return True
-    return False
-
-
-def _has_chart_top_lane_collision_risk(html: str) -> bool:
-    """检测顶部横向图例与双Y轴名称之间的垂直安全距离。"""
-    y_axis_pattern = re.compile(r"\byAxis\s*:\s*\[", re.IGNORECASE)
-    for option_block in _extract_set_option_blocks(html):
-        axis_objects = _extract_top_level_js_objects(
-            _extract_named_js_array(option_block, y_axis_pattern)
-        )
-        named_axes = [axis for axis in axis_objects if _extract_string_property(axis, "name")]
-        if len(axis_objects) < 2 or not named_axes:
-            continue
-        legend = _extract_named_js_object(option_block, "legend")
-        grid = _extract_named_js_object(option_block, "grid")
-        if not legend or not grid:
-            continue
-        if _extract_string_property(legend, "orient").lower() == "vertical":
-            continue
-        legend_top = _extract_numeric_property(legend, "top")
-        grid_top = _extract_numeric_property(grid, "top")
-        if legend_top is None or grid_top is None:
-            continue
-        legend_text_style = _extract_named_js_object(legend, "textStyle")
-        legend_font_size = _extract_numeric_property(legend_text_style, "fontSize") or 12.0
-        axis_font_sizes = []
-        for axis in named_axes:
-            name_style = _extract_named_js_object(axis, "nameTextStyle")
-            axis_font_sizes.append(
-                _extract_numeric_property(name_style, "fontSize") or 12.0
-            )
-        axis_name_font_size = max(axis_font_sizes)
-        available_gap = grid_top - axis_name_font_size - (
-            legend_top + legend_font_size
-        )
-        if available_gap < _CHART_TOP_LANE_MIN_GAP_PX:
-            return True
-    return False
-
-
-def _post_check_data_viz(html: str, failed_items: list[str], search_mode: str) -> list[str]:
-    """程序化后置校验：对 LLM 判定的'缺数据可视化'做二次确认，移除误判。"""
-    if "缺数据可视化" not in failed_items:
-        return failed_items
-    has_echarts = "echarts" in html.lower()
-    # 改进卡片计数：只匹配 class 属性中的 card，不匹配文本内容
-    card_count = len(re.findall(r'class="[^"]*\bcard\b[^"]*"', html, re.IGNORECASE))
-    threshold = 2 if search_mode == "no_search" else 3
-    if has_echarts or card_count >= threshold:
-        failed_items = [x for x in failed_items if x != "缺数据可视化"]
-    return failed_items
-
-
-def _post_check_layout_issues(html: str, failed_items: list[str]) -> list[str]:
-    """程序化后置校验：检测 Grid、裁切、字号、边界和碰撞风险等布局问题。
-
-    leading-loose（line-height:2）使文字高度翻倍，在 PPTX 导出时极易导致内容超出卡片边界。
-    高度受限卡片中的固定表格后追加不可收缩标签，也会把标签挤出父卡片。
-    PPTX 不尊重 overflow-hidden，超出边界的内容会直接溢出。
-    """
-    # 检测 CSS Grid 使用
-    if _has_grid_layout(html) and "使用了不支持的Grid布局" not in failed_items:
-        failed_items.append("使用了不支持的Grid布局")
-    # 检测核心内容容器上的 overflow-hidden
-    if _has_overflow_hidden_on_content(html) and "核心内容被overflow-hidden裁切" not in failed_items:
-        failed_items.append("核心内容被overflow-hidden裁切")
-    # 检测字号不一致
-    if _check_font_size_consistency(html) and "字号不一致" not in failed_items:
-        failed_items.append("字号不一致")
-    # 只检测高置信度场景：1-5 个短条目的纯文字列表自身使用 flex-1 拉满高度。
-    # 该结果进入现有重试/low_density 兜底，不新增硬阻断。
-    if _has_sparse_flex_text_list(html) and "局部空白失衡" not in failed_items:
-        failed_items.append("局部空白失衡")
-    # 检测溢出风险：行高翻倍，或固定表格后追加不可收缩尾部内容。
-    if "内容溢出" not in failed_items and (
-        "leading-loose" in html
-        or _has_risky_trailing_content_in_constrained_card(html)
-    ):
-        failed_items.append("内容溢出")
-    if _has_off_canvas_decoration(html) and "装饰元素越界" not in failed_items:
-        failed_items.append("装饰元素越界")
-    if (
-        _has_dual_axis_combo_label_collision_risk(html)
-        and "图表数据标签重叠风险" not in failed_items
-    ):
-        failed_items.append("图表数据标签重叠风险")
-    if (
-        _has_chart_top_lane_collision_risk(html)
-        and "图例与轴标题重叠" not in failed_items
-    ):
-        failed_items.append("图例与轴标题重叠")
-    return failed_items
-
-
-_SEARCH_NEEDED_ITEMS = frozenset({"缺数据可视化", "缺案例", "缺数据来源"})
-
-_SEARCH_QUERY_TEMPLATES: dict[str, list[str]] = {
-    "缺数据可视化": [
-        "{topic} 市场规模 数据",
-        "{topic} 增长率 百分比 统计",
-        "{topic} 渗透率 市场份额 报告",
-    ],
-    "缺案例": [
-        "{topic} 应用案例 实践",
-        "{topic} 成功案例 最佳实践",
-    ],
-    "缺数据来源": [
-        "{topic} 行业报告",
-        "{topic} 研究 数据 来源",
-    ],
-}
-
-
-_REWRITE_ACTIONS = {
-    "缺数据可视化": (
-        "在页面底部（footer 之前）插入一个 ECharts 图表，按以下规则选择图表类型："
-        "时间序列数据用折线图，占比/构成数据用饼图，对比/排名数据用柱状图。"
-        "直接使用页面中已有的数字作为数据点，不要修改现有卡片和布局结构。"
-        "如果页面已存在图表容器（如 <div id=\"xxxChart\">）但缺少初始化脚本，"
-        "必须在该容器之后紧邻 </body> 补充完整的"
-        " echarts.init(document.getElementById('xxx'), null, {renderer:'svg'}).setOption({...}) 初始化代码"
-    ),
-    "核心要点不足": "将段落拆分为 6-10 个列表项或卡片，每条 1-2 行加图标",
-    "缺装饰图标": "为每个核心要点/卡片添加相关 FontAwesome 图标（class 含 fa-）",
-    "空白率过高": (
-        "优先重排并放大已有图表、表格、图片或数据卡片的有效展示区域，"
-        "其次添加包含 1-2 句真实结论的总结框或引用块；"
-        "禁止用背景装饰、空容器或 spacer 冒充内容占用"
-    ),
-    "局部空白失衡": (
-        "优先重排已有语义内容（第一选择）：同时移除短文字卡片组及卡片本身不必要的 flex-1，"
-        "改为 flex-shrink-0 按内容自适应高度；1-5 个短条目可改为 2×2/分组布局，"
-        "或用明确 Flex 权重、justify-between 合理分布真实条目；"
-        "同栏已有图表、图片或表格时，将剩余高度分配给这些主区域，或减少等高行数、缩小该区域占比；"
-        "禁止插入空 spacer、空容器或纯装饰元素冒充内容占用\n"
-        "若必须补充内容（第二选择）：在卡片内追加 1-2 行精简描述即可，"
-        "但禁止使用 leading-loose（line-height:2 会翻倍高度导致溢出），"
-        "禁止添加 mt-auto 底部子元素（色块标签/badge 行等，会增加总高度），"
-        "禁止增加已有文字的行高；"
-        "注意：PPTX 导出时不尊重 overflow-hidden，卡片内容超出边界会直接溢出"
-    ),
-    "缺数据来源": "在页脚标注'数据来源：XXX'（机构名或资料名）",
-    "大段文字": "拆分为多个列表项/小节，添加小标题",
-    "视觉层级混乱": "调整字号梯度，建立明确的标题→副标题→正文→注释层级",
-    "布局错误": "main 改为 `flex gap-3`，恰好 2 个 `<section>` 子元素；header/footer 放在 main 外部的 content-safe 内",
-    "内容被隐藏": "移除 line-clamp、text-overflow:ellipsis、overflow:auto/scroll、max-height 限制等隐藏手段，确保核心内容完整可见",
-    "核心内容缺失": "检查标题、正文、图表标签、数据来源和数据卡片是否全部完整显示，补充缺失的内容元素",
-    "使用了不支持的Grid布局": "将所有 `grid grid-cols-*` 改为 Flexbox 布局（`flex` + `flex-[N]` 比例分配），因为 html-to-pptx 转换器不支持 CSS Grid",
-    "核心内容被overflow-hidden裁切": (
-        "移除核心内容容器（div/section/main 等）上的 `overflow-hidden` 类，"
-        "仅保留 `.ppt-slide` 画布边界上的 overflow-hidden"
-    ),
-    "字号不一致": "统一同级别卡片/模块的字号，使用风格文件定义的字号值，确保同级元素字号一致",
-    "图例与轴标题重叠": (
-        "同时按图例项数量和文字长度处理：任一中文标签超过 6 个字或总长度超过 12 个字时，"
-        "优先在不改变含义的前提下缩短标签，或改为 `legend:{orient:'vertical'}`；"
-        "若仍横排，将 `itemGap` 调到至少 24；"
-        "增大 `grid.top` 或移动图例分开两条通道，"
-        "确保图例文字框底边与轴名称文字框顶边至少相隔 18px；不得缩小字号掩盖"
-    ),
-    "图表数据标签重叠风险": (
-        "仅调整同一双轴柱线图的数据标签定位，不改变数据、坐标轴或图表尺寸："
-        "按各自 yAxis min/max 比较同一分类的数据点视觉高度，并结合 fontSize、lineHeight、"
-        "position、distance、offset 确保两个标签文字框上下/左右至少相隔 12px；"
-        "即使柱形为 `insideTop`、折线为 `top` 也必须验算；"
-        "优先只移动碰撞系列或碰撞数据点，必要时仅隐藏次要点标签；"
-        "保留原字号，`labelLayout` 仅作为补充"
-    ),
-    "装饰元素越界": (
-        "只处理明确的背景装饰节点，不改标题、图表、卡片和正文："
-        "若风格文件没有定义该角落装饰，直接删除；若风格明确要求保留，"
-        "将其重绘为完整位于 1280×720 画布内、相应边角坐标为 0 的角形，"
-        "禁止负 top/right/bottom/left、负 margin 或依赖 overflow-hidden 裁切，"
-        "也不得引入风格文件禁止的渐变或随机形状"
-    ),
-    "内容溢出": (
-        "移除 `leading-loose`（改为 `leading-snug` 或 `leading-normal`），"
-        "禁止仅删除 `mt-auto` 后把同一标签留在卡片尾部；"
-        "若受限卡片内已有表格/多行正文，将尾部标签移入所属卡片的标题行"
-        "（使用 `justify-between`）或合并为表格摘要行，确保标签四边都在父卡片边框内；"
-        "随后按需减小卡片内部 padding/gap 或调整同栏卡片 Flex 比例，"
-        "精简每张卡片的文字行数使其不超过容器可容纳行数；"
-        "若内容确实需要更多空间，将 `flex-col` 改为更少的子元素或改为 `flex-shrink-0` 自适应高度；"
-        "不得用绝对定位、负 margin 或 `overflow-hidden` 掩盖越界"
-    ),
-}
-
-
-def _build_rewrite_hint(failed_items: list[str]) -> str:
-    if not failed_items:
-        return ""
-    lines = ["不通过项与补救动作："]
-    for item in failed_items:
-        action = _REWRITE_ACTIONS.get(item, "针对性优化该项")
-        lines.append(f"- {item} → {action}")
-    return "\n".join(lines)
-
-
-def _extract_page_keywords(research_page: str) -> list[str]:
-    if not research_page:
-        return []
-    keywords: list[str] = []
-    for line in research_page.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            header = stripped.lstrip("#").strip()
-            if ":" in header:
-                header = header.split(":", 1)[1].strip()
-            if header and len(header) <= 30:
-                keywords.append(header)
-            continue
-        if any(stripped.startswith(prefix) for prefix in ("- 核心论点", "- 关键数据", "- 案例", "- 标题")):
-            content = stripped.lstrip("- ").split("：", 1)[-1].strip()
-            if content and len(content) <= 30:
-                keywords.append(content)
-    if keywords:
-        return keywords[:3]
-    if len(research_page) > 20:
-        first_line = research_page.splitlines()[0].strip().lstrip("#").strip()
-        if first_line and len(first_line) <= 30:
-            return [first_line]
-    return []
-
-
-def _build_search_queries(
-    templates: list[str],
-    *,
-    topic: str,
-    page_keywords: list[str],
-) -> list[str]:
-    queries: list[str] = []
-    if page_keywords:
-        for kw in page_keywords[:2]:
-            for tpl in templates[:1]:
-                queries.append(tpl.format(topic=kw))
-    if topic:
-        for tpl in templates[:1]:
-            q = tpl.format(topic=topic)
-            if q not in queries:
-                queries.append(q)
-    return queries
-
-
-def _extract_search_text(result: Any) -> str:
-    if result is None:
-        return ""
-    if isinstance(result, str):
-        return result[:2000]
-    if isinstance(result, list):
-        parts: list[str] = []
-        for item in result[:5]:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                for key in ("snippet", "content", "text", "title"):
-                    v = item.get(key)
-                    if isinstance(v, str) and v.strip():
-                        parts.append(v)
-                        break
-        return "\n".join(parts)[:2000]
-    if isinstance(result, dict):
-        for key in ("results", "items", "data"):
-            v = result.get(key)
-            if isinstance(v, list):
-                return _extract_search_text(v)
-        content = result.get("content") or result.get("text") or ""
-        if isinstance(content, str):
-            return content[:2000]
-    return str(result)[:2000]
 
 
 _PAGE_HEADING_RE = re.compile(r"^###\s+P(\d+)\s*:", re.MULTILINE)
@@ -2867,11 +2387,7 @@ def _build_page_prompt(
         )
 
     layout_template = _PAGE_LAYOUT_TEMPLATES.get(page_type, "")
-    page_number_rule = _build_visible_page_number_rule(
-        user_query,
-        page_number,
-        total_pages or page_number,
-    )
+    page_number_rule = _VISIBLE_PAGE_NUMBER_RULE
 
     density_checklist = _STRUCTURAL_DENSITY_CHECKLIST if is_structural else _DENSITY_CHECKLIST_DIGEST
     design_rules = _STRUCTURAL_DESIGN_RULES if is_structural else _DESIGN_RULES_DIGEST
@@ -3169,18 +2685,20 @@ class PageWorkerNode(PlanNode):
                 "\n"
                 "### 执行流程（N 页 asyncio.gather 并发）\n"
                 "对每一页独立执行：\n"
-                "1. 若 style_id ∈ 预设四风格∪custom 且页型为 agenda：读取官方 "
-                "`references/styles/{style_id}/agenda-template.html` 预铺，LLM 仅替换 `{{}}` "
-                "占位符；残留占位符判失败；不走整页自由生成\n"
-                "2. 其余页：用该页 outline 片段 + research 片段 + 风格规范 + 视觉与布局硬约束构造 prompt，"
-                "调 LLM 生成 HTML；剥 ```html 包裹 → 校验（含 <!DOCTYPE> + ppt-slide 容器）→ write_file 落盘\n"
+                "1. 若 style_id ∈ 预设四风格∪custom 且页型为 agenda/cover/ending/section："
+                "读取官方结构页模板预铺，LLM 仅替换 `{{}}`；残留占位符判失败\n"
+                "2. 若为内容页且 style_id ∈ 预设四风格∪custom：读取官方 content-template 预铺填槽"
+                "（custom 先按风格文件逐字填入 THEME_CSS 槽，再只填 PAGE_TITLE/PAGE_CONTENT）\n"
+                "3. 其余页：用该页 outline 片段 + research 片段 + 风格规范构造 prompt 生成 HTML\n"
+                "   - 剥 ```html 包裹 → 校验 → write_file 落盘\n"
                 "   - 失败按 gen_retry_round 重试（仅本页）\n"
                 "   - 重试后仍失败 → 进 missing_pages\n"
-                "3. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
+                "4. 成功页只保留一个 ppt-slide 容器并直接落盘；生成后不再调用 LLM 核查、搜索或整页重写\n"
                 "\n"
                 "### 失败兜底\n"
                 "- 生成 LLM 调用 raise / 返回空 / HTML 校验失败：进 missing_pages\n"
                 "- agenda 模板缺失或填槽后残留 `{{...}}`：进 missing_pages\n"
+                "- 畸形 token / main 滑出 slide：软警告并仍落盘，交 P8.2 fix，不进 missing_pages\n"
                 "- 首次落盘 write_file 异常：进 missing_pages\n"
                 "- 重试后仍缺失：透传给根节点\n"
             ),
@@ -3437,20 +2955,17 @@ class PageWorkerNode(PlanNode):
             )
             return ""
 
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
-        )
-        if not _validate_slide_dom(html):
+        html = _strip_visible_page_markers(html)
+        if ctx.style_id == "custom":
+            html = _ensure_ppt_slide_flex_col(html)
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
             logger.warning(
-                "[P8.1] 结构页 DOM 校验失败 page=%d type=%s",
+                "[P8.1] 结构页 DOM 软警告 page=%d type=%s issue=%s，仍落盘交 P8.2 fix",
                 ctx.page_num,
                 page_type,
+                dom_issue,
             )
-            return ""
         logger.info(
             "[P8.1] 结构页官方模板填槽完成 page=%d style=%s type=%s",
             ctx.page_num,
@@ -3459,12 +2974,8 @@ class PageWorkerNode(PlanNode):
         )
         return html
 
-    async def _generate_agenda_template_fill(self, ctx: PageGenContext) -> str:
-        """预设/custom agenda：官方模板预铺 + 仅填 {{}}。"""
-        return await self._generate_structural_template_fill(ctx, "agenda")
-
     async def _generate_content_template_fill(self, ctx: PageGenContext) -> str:
-        """预设四风格内容页：官方 content-template 预铺 + 仅填三处占位符。"""
+        """普通分支内容页：官方 content-template 预铺后填槽。"""
         if not ctx.pptx_root:
             logger.error("[P8.1] 内容页填槽缺少 pptx_root page=%d", ctx.page_num)
             return ""
@@ -3484,25 +2995,47 @@ class PageWorkerNode(PlanNode):
             )
             return ""
 
+        is_custom = ctx.style_id == "custom"
+        if is_custom:
+            seed_html = _apply_custom_theme_slots(seed_html, ctx.style_text)
+            prompt = _build_custom_content_template_fill_prompt(
+                page_number=ctx.page_num,
+                style_text=ctx.style_text,
+                outline_page=ctx.outline_page,
+                research_page=ctx.research_page,
+                outline_full=ctx.outline_full,
+                seed_html=seed_html,
+                image_map_page=ctx.image_map_page,
+                designer_md_text=ctx.designer_md_text,
+                user_query=ctx.user_query,
+            )
+            system_prompt = (
+                "你是 PPT custom 内容页脚手架填充师。主题 CSS 已按风格文件填入；"
+                "只替换 PAGE_TITLE 与 PAGE_CONTENT，只输出 JSON，禁止回显完整 HTML。"
+            )
+        else:
+            prompt = _build_content_template_fill_prompt(
+                page_number=ctx.page_num,
+                style_id=ctx.style_id,
+                style_text=ctx.style_text,
+                outline_page=ctx.outline_page,
+                research_page=ctx.research_page,
+                outline_full=ctx.outline_full,
+                seed_html=seed_html,
+                image_map_page=ctx.image_map_page,
+                designer_md_text=ctx.designer_md_text,
+                user_query=ctx.user_query,
+                total_pages=ctx.total_pages,
+            )
+            system_prompt = (
+                "你是 PPT 内容页模板填充师。只替换 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
+                "只输出 JSON，禁止回显或重写预铺骨架。"
+            )
+
         try:
             result = await self.stream_llm_collect(
-                prompt=_build_content_template_fill_prompt(
-                    page_number=ctx.page_num,
-                    style_id=ctx.style_id,
-                    style_text=ctx.style_text,
-                    outline_page=ctx.outline_page,
-                    research_page=ctx.research_page,
-                    outline_full=ctx.outline_full,
-                    seed_html=seed_html,
-                    image_map_page=ctx.image_map_page,
-                    designer_md_text=ctx.designer_md_text,
-                    user_query=ctx.user_query,
-                    total_pages=ctx.total_pages,
-                ),
-                system_prompt=(
-                    "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
-                    "直接输出完整 HTML 原文，不输出任何解释。"
-                ),
+                prompt=prompt,
+                system_prompt=system_prompt,
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
             )
@@ -3512,19 +3045,23 @@ class PageWorkerNode(PlanNode):
             logger.warning("[P8.1] 内容页填槽 LLM 失败 page=%d: %s", ctx.page_num, e)
             return ""
 
-        html = _strip_html_fence(result or "")
+        extra_slots: dict[str, Any] = {}
+        if is_custom:
+            font_stack = _style_frontmatter_font_stack(ctx.style_text)
+            if font_stack:
+                extra_slots["CHART_FONT_FAMILY"] = font_stack
+        html = _materialize_template_fill(seed_html, result or "", extra_slots or None)
         html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
-        )
+        html = _strip_visible_page_markers(html)
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
-        ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if is_custom:
+            html = _relocate_orphan_main_into_custom_slide(html)
+            html = _ensure_ppt_slide_flex_col(html)
+            ok, reason = _validate_custom_content_template_fill_output(seed_html, html)
+        else:
+            ok, reason = _validate_content_template_fill_output(seed_html, html)
         if not ok:
             logger.warning(
                 "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
@@ -3533,6 +3070,14 @@ class PageWorkerNode(PlanNode):
                 reason,
             )
             return ""
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
+            logger.warning(
+                "[P8.1] 内容页 DOM 软警告 page=%d style=%s issue=%s，仍落盘交 P8.2 fix",
+                ctx.page_num,
+                ctx.style_id,
+                dom_issue,
+            )
         logger.info(
             "[P8.1] 内容页官方模板填槽完成 page=%d style=%s",
             ctx.page_num,
@@ -3578,19 +3123,17 @@ class PageWorkerNode(PlanNode):
             return ""
         # 后置校验：替换「第X页」标题占位符为 outline 中的实际标题
         html = _replace_placeholder_headings(html, ctx.outline_page)
-        html = _apply_visible_page_number_policy(
-            html,
-            user_query=ctx.user_query,
-            page_number=ctx.page_num,
-            total_pages=ctx.total_pages,
-            style_id=ctx.style_id,
-        )
+        html = _strip_visible_page_markers(html)
         html = _fix_echarts_svg_renderer(html)
         html = _strip_unsupported_fullpage_overlays(html)
         html = _strip_chart_header_unit(html)
-        if not _validate_slide_dom(html):
-            logger.warning("[P8.1] 页面 %d DOM 结构校验失败", ctx.page_num)
-            return ""
+        dom_issue = _slide_dom_soft_issue(html)
+        if dom_issue:
+            logger.warning(
+                "[P8.1] 页面 %d DOM 软警告 issue=%s，仍落盘交 P8.2 fix",
+                ctx.page_num,
+                dom_issue,
+            )
         if not _validate_chart_height_chain(html):
             logger.warning("[P8.1] 页面 %d 图表容器高度链校验失败", ctx.page_num)
             return ""
@@ -3984,16 +3527,6 @@ class QAFixNode(PlanNode):
             "status": status_map.get(result.get("qa_status", ""), "warning"),
             "message": f"QA 完成 status={result.get('qa_status')}",
         }
-
-
-def _extract_page_number(filename: str) -> int:
-    m = re.search(r"page-(\d+)\.pptx\.html$", filename)
-    if not m:
-        return 0
-    try:
-        return int(m.group(1))
-    except ValueError:
-        return 0
 
 
 class PPTPageGenNode(PlanNode):

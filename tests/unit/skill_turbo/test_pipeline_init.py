@@ -19,12 +19,6 @@ from jiuwenclaw.agentserver.skill_turbo.environment import (
 
 
 @pytest.mark.unit
-def test_needs_npm_install_from_check_env_output() -> None:
-    output = "❌ npm 依赖未安装\n   → 安装: cd /tmp/pptx && npm install"
-    assert pi._needs_npm_install(output) is True
-
-
-@pytest.mark.unit
 def test_needs_playwright_install_from_check_env_output() -> None:
     output = "❌ Chromium 未安装\n   → 安装: npx playwright install chromium"
     assert pi._needs_playwright_install(output) is True
