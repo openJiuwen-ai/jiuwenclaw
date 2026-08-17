@@ -171,6 +171,9 @@ class UserTurn:
         target_skill = str(self.metadata.get("target_skill") or "").strip()
         if target_skill:
             fields["target_skill"] = target_skill
+        target_skill_type = str(self.metadata.get("target_skill_type") or "").strip()
+        if target_skill_type:
+            fields["target_skill_type"] = target_skill_type
         return fields
 
     def _interaction_prefix(self) -> str:

@@ -611,6 +611,55 @@ def _update_skills_state_for_builtin(
         logger.error(f"保存技能状态文件失败: {e}")
 
 
+def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
+    """一次性迁移：skill-creator-router → skill-creator，旧 skill-creator → skill-creator-normal.
+
+    避免用户目录已有旧 ``skill-creator`` 时跳过安装，导致装不上新的路由入口。
+    迁移后删除旧 router 目录，由后续默认安装从内置资源拷贝新的 ``skill-creator``。
+    """
+    old_router = user_skills_dir / "skill-creator-router"
+    old_creator = user_skills_dir / "skill-creator"
+    normal = user_skills_dir / "skill-creator-normal"
+
+    def _looks_like_legacy_monadic_creator(skill_dir: Path) -> bool:
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return False
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        # 新路由 / 旧 router 文案
+        if (
+            "Routes skill creation" in text
+            or "Unified entry point" in text
+            or "统一入口" in text
+            or "创建/修改的**路由**" in text
+            or "创建/修改的**分发器**" in text
+        ):
+            return False
+        return "name: skill-creator" in text or "name: skill-creator-normal" in text
+
+    try:
+        if old_router.is_dir():
+            if old_creator.is_dir() and not normal.exists():
+                old_creator.rename(normal)
+                logger.info("已迁移默认技能: skill-creator -> skill-creator-normal")
+            elif old_creator.is_dir() and normal.exists():
+                shutil.rmtree(old_creator)
+                logger.info("已移除冲突的旧 skill-creator，将安装新的路由 skill-creator")
+            shutil.rmtree(old_router)
+            logger.info("已移除旧 skill-creator-router，将安装新的路由 skill-creator")
+            return
+
+        # 仅有旧单体 skill-creator、尚无 skill-creator-normal
+        if old_creator.is_dir() and not normal.exists() and _looks_like_legacy_monadic_creator(old_creator):
+            old_creator.rename(normal)
+            logger.info("已迁移默认技能: skill-creator -> skill-creator-normal（无 router 目录）")
+    except OSError as exc:
+        logger.warning(f"skill-creator 重命名迁移失败，将尝试按默认列表安装: {exc}")
+
+
 def _install_default_builtin_skills(
     builtin_dir: Path,
     user_skills_dir: Path,
@@ -620,10 +669,10 @@ def _install_default_builtin_skills(
     """安装默认的内置技能到用户技能目录.
 
     默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
-    - skill-omni-creation: 链接/多模态技能创建助手
-    - skill-creator-router: 创建/修改 Skill 分发器
+    - skill-creator: 所有 Skill Creator 的统一入口（创建/修改路由）
+    - skill-creator-normal: 单体技能创建助手（由 skill-creator 路由选中）
+    - swarmskill-creator: Swarm技能创建助手（由 skill-creator 路由选中）
+    - skill-omni-creation: 链接/网页/视频技能创建助手（由 skill-creator 路由选中）
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -634,9 +683,9 @@ def _install_default_builtin_skills(
     # 定义默认安装的技能列表
     default_skills = [
         "skill-creator",
+        "skill-creator-normal",
         "swarmskill-creator",
         "skill-omni-creation",
-        "skill-creator-router",
     ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
@@ -644,6 +693,7 @@ def _install_default_builtin_skills(
         return
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)
+    _migrate_skill_creator_router_rename(user_skills_dir)
 
     # 记录成功安装的技能，用于后续更新状态文件
     installed_skills = []

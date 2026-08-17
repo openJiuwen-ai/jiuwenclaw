@@ -1761,7 +1761,7 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
-        // 迁移 'new' 会话的 metadata 到新会话（skill-creator-router 等场景）
+        // 迁移 'new' 会话的 metadata 到新会话（skill-creator 统一入口等场景）
         const pendingMetadata = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.metadata;
         if (pendingMetadata) {
           useSessionStore.getState().setSessionMetadata(newSid, pendingMetadata);

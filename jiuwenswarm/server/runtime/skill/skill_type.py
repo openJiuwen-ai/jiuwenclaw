@@ -1,20 +1,26 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""根据 Skill 目录结构识别 skill_type.
+"""根据 Skill frontmatter / 资源识别 skill_type.
 
 优先级固定：swarm_skill > multimodal_skill > skill。
-扫描时排除根级 ``.archive/``。
+swarm 判定依据 frontmatter ``kind: swarm-skill``。
+扫描多媒体时排除根级 ``.archive/``。
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import yaml
 
 from jiuwenswarm.server.runtime.skill.archive_store import ARCHIVE_DIRNAME
 
 SKILL_TYPE_SKILL = "skill"
 SKILL_TYPE_SWARM = "swarm_skill"
 SKILL_TYPE_MULTIMODAL = "multimodal_skill"
+
+_SWARM_KIND = "swarm-skill"
 
 _MULTIMEDIA_SUFFIXES = frozenset(
     {
@@ -30,20 +36,66 @@ _MULTIMEDIA_SUFFIXES = frozenset(
     }
 )
 
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
 
 def detect_skill_type(skill_dir: Path | None) -> str:
     """识别 Skill 类型；目录无效时返回普通 ``skill``."""
     if skill_dir is None or not skill_dir.is_dir():
         return SKILL_TYPE_SKILL
 
-    if (skill_dir / "workflow.md").is_file():
-        return SKILL_TYPE_SWARM
-    if (skill_dir / "role").is_dir() or (skill_dir / "roles").is_dir():
+    if _frontmatter_kind_is_swarm(skill_dir):
         return SKILL_TYPE_SWARM
 
     if _has_multimedia_asset(skill_dir):
         return SKILL_TYPE_MULTIMODAL
     return SKILL_TYPE_SKILL
+
+
+def _frontmatter_kind_is_swarm(skill_dir: Path) -> bool:
+    """SKILL.md frontmatter 的 kind 是否为 ``swarm-skill``."""
+    return _read_frontmatter_kind(skill_dir) == _SWARM_KIND
+
+
+def _read_frontmatter_kind(skill_dir: Path) -> str:
+    skill_md = None
+    for name in ("SKILL.md", "skill.md"):
+        candidate = skill_dir / name
+        if candidate.is_file():
+            skill_md = candidate
+            break
+    if skill_md is None:
+        return ""
+
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return ""
+
+    fm_text = match.group(1)
+    try:
+        loaded = yaml.safe_load(fm_text)
+    except Exception:
+        loaded = None
+
+    if isinstance(loaded, dict):
+        return str(loaded.get("kind") or "").strip()
+
+    # 回退：逐行解析 kind
+    for line in fm_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        if key.strip() == "kind":
+            return value.strip().strip("\"'")
+    return ""
 
 
 def _has_multimedia_asset(skill_dir: Path) -> bool:

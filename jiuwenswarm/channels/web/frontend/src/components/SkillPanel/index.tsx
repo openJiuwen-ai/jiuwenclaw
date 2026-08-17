@@ -1451,23 +1451,27 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
     }));
   }, []);
 
-  // 新建会话：skill-creator-router chip + "帮我修改这个技能" + 该技能 chip
-  const handleEditSkill = useCallback((skillName: string) => {
+  // 新建会话：skill-creator（所有 Skill Creator 统一入口）chip + "帮我修改这个技能" + 该技能 chip
+  const handleEditSkill = useCallback((skillName: string, skillType?: string) => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
-        skillName: 'skill-creator-router',
+        skillName: 'skill-creator',
         suffixText: '帮我修改这个技能',
         secondSkillName: skillName,
-        metadata: { scene: 'edit_skill', target_skill: skillName }
+        metadata: {
+          scene: 'edit_skill',
+          target_skill: skillName,
+          ...(skillType ? { target_skill_type: skillType } : {}),
+        }
       }
     }));
   }, []);
 
-  // 通过聊天创建：新建会话，选中 skill-creator-router 技能并在 chip 后追加创建提示文字
+  // 通过聊天创建：新建会话，选中 skill-creator（统一入口）并在 chip 后追加创建提示文字
   const handleCreateViaChat = useCallback(() => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
-        skillName: 'skill-creator-router',
+        skillName: 'skill-creator',
         suffixText: '请帮我创建一个可以实现xxx功能的技能/团队技能/多模态技能',
         metadata: { scene: 'create_skill' }
       }
@@ -2617,7 +2621,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                             <button
                               onClick={() => {
                                 setDetailMenuOpen(false);
-                                handleEditSkill(selectedSkill.name);
+                                handleEditSkill(selectedSkill.name, selectedSkill.skill_type);
                               }}
                               className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                             >
@@ -3066,7 +3070,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig, isActive = false }: 
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               setOpenMenuSkillName(null);
-                                              handleEditSkill(skill.name);
+                                              handleEditSkill(skill.name, skill.skill_type);
                                             }}
                                             className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                                           >

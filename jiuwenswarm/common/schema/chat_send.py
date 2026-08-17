@@ -40,12 +40,13 @@ class ChatSendParams(TypedDict, total=False):
     - 语义：当前为 prompt 提示（塞入 user_message_context["skills_to_use"]），
             模型可见但非强制。真正强制生效需 A3 阶段（SkillSelectionRail）。
     - 空列表或缺失：不指定 skill，agent 自主判断。
-    - 创建/修改 Skill：固定传 ``["skill-creator-router"]``。
+    - 创建/修改 Skill：固定传 ``["skill-creator"]``（所有 Skill Creator 的统一入口）。
     """
 
     metadata: NotRequired[dict]
-    """请求级元数据。创建/修改 Skill 时含 ``scene``（create_skill|edit_skill）
-    与可选 ``target_skill``。
+    """请求级元数据。创建/修改 Skill 时含 ``scene``（create_skill|edit_skill）、
+    可选 ``target_skill``，以及编辑场景可选 ``target_skill_type``
+    （``skill`` / ``swarm_skill`` / ``multimodal_skill``）。
     """
 
     mode: NotRequired[str]
