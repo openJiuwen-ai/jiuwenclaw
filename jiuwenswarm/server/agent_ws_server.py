@@ -102,7 +102,9 @@ from jiuwenswarm.common.config import (
     get_sandbox_runtime,
     get_sandbox_startup_mode,
     get_sandbox_startup_mode_explicit,
+    reject_files_for_jiuwenbox_conch,
     remove_mcp_server_in_config,
+    require_jiuwenbox_conch_template_id,
     resolve_preserve_file_sharing_mode_default,
     resolve_sandbox_policy_path,
     remove_subagent_from_config,
@@ -1116,12 +1118,16 @@ class AgentWebSocketServer:
             url = endpoint.get("url") or "http://127.0.0.1:8321"
             sandbox_type = endpoint.get("type") or "jiuwenbox"
             # yuanrong 不需要本机 jiuwenbox 进程; 仅通过 config 启用 SysOperation。
+            # jiuwenbox-conch 仍走 jiuwenbox-server (Conch runtime 在该进程内)。
             if str(sandbox_type).strip().lower() == "yuanrong":
                 logger.info(
                     "[AgentWebSocketServer] sandbox.type=yuanrong, skipping "
                     "jiuwenbox auto-start (YuanRong uses YR_* env + yr.init)"
                 )
                 return
+            if str(sandbox_type).strip().lower() == "jiuwenbox-conch":
+                require_jiuwenbox_conch_template_id(endpoint.get("template_id"))
+                reject_files_for_jiuwenbox_conch(get_sandbox_runtime().get("files"))
             raw_policy = endpoint.get("policy_file") or ""
             effective_policy_file = raw_policy or DEFAULT_SANDBOX_POLICY_FILE
             policy_path = resolve_sandbox_policy_path(effective_policy_file)
@@ -1170,11 +1176,16 @@ class AgentWebSocketServer:
             # 的 url 落盘, 这样 (a) 后续会话/agent 重建直接读到正确端点,
             # (b) /sandbox status 显示也是真实值, 不再是 config 里旧的 8321。
             try:
+                persist_kwargs: dict[str, Any] = {
+                    "startup_mode": "internal",
+                    "policy_file": effective_policy_file,
+                }
+                if str(sandbox_type).strip().lower() == "jiuwenbox-conch":
+                    persist_kwargs["template_id"] = endpoint.get("template_id")
                 update_sandbox_endpoint(
                     url,
                     sandbox_type,
-                    startup_mode="internal",
-                    policy_file=effective_policy_file,
+                    **persist_kwargs,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -6279,8 +6290,14 @@ class AgentWebSocketServer:
                 )
             else:
                 validate_sandbox_files_runtime(get_sandbox_runtime().get("files"))
+                if sandbox_type == "jiuwenbox-conch" and sub.startswith("files."):
+                    raise ValueError(
+                        "sandbox.type=jiuwenbox-conch does not support "
+                        "/sandbox files; use type=jiuwenbox for write-permission "
+                        "allow/deny"
+                    )
                 if sub == "status":
-                    payload = {"runtime": get_sandbox_runtime()}
+                    payload = {"runtime": get_sandbox_runtime(), "endpoint": endpoint}
                 elif sub == "enable":
                     payload = await self._handle_sandbox_enable(channel_id)
                 elif sub == "disable":
@@ -6344,6 +6361,10 @@ class AgentWebSocketServer:
         endpoint = get_sandbox_endpoint()
         url = endpoint.get("url") or "http://127.0.0.1:8321"
         sandbox_type = endpoint.get("type") or "jiuwenbox"
+        normalized_type = str(sandbox_type).strip().lower()
+        if normalized_type == "jiuwenbox-conch":
+            require_jiuwenbox_conch_template_id(endpoint.get("template_id"))
+            reject_files_for_jiuwenbox_conch(get_sandbox_runtime().get("files"))
 
         # startup_mode:
         # - internal: agent-server 通过 JiuwenBoxRunner 拉起 jiuwenbox (默认行为);
@@ -6416,13 +6437,18 @@ class AgentWebSocketServer:
         # 4. 把 endpoint 写回 config.yaml, 保证 agent 重建 / agent-server 重启后能直接读到。
         # url 此时已是端口分配后的最终值; startup_mode / policy_file / preserve_file_sharing_mode 一并落盘。
         preserve_mode = resolve_preserve_file_sharing_mode_default()
+        persist_kwargs: dict[str, Any] = {
+            "startup_mode": startup_mode,
+            "policy_file": effective_policy_file,
+            "preserve_file_sharing_mode": preserve_mode,
+        }
+        if normalized_type == "jiuwenbox-conch":
+            persist_kwargs["template_id"] = endpoint.get("template_id")
         try:
             update_sandbox_endpoint(
                 url,
                 sandbox_type,
-                startup_mode=startup_mode,
-                policy_file=effective_policy_file,
-                preserve_file_sharing_mode=preserve_mode,
+                **persist_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[command.sandbox] persist sandbox endpoint failed: %s", exc)
@@ -6430,15 +6456,19 @@ class AgentWebSocketServer:
         runtime = update_sandbox_runtime({"enabled": True})
         await self._agent_manager.recreate_agent(channel_id, immediate=True)
 
+        endpoint_view: dict[str, Any] = {
+            "url": url,
+            "type": sandbox_type,
+            "preserve_file_sharing_mode": preserve_mode,
+            "startup_mode": startup_mode,
+            "policy_file": effective_policy_file,
+        }
+        if normalized_type == "jiuwenbox-conch":
+            endpoint_view["template_id"] = endpoint.get("template_id")
+
         return {
             "runtime": runtime,
-            "endpoint": {
-                "url": url,
-                "type": sandbox_type,
-                "preserve_file_sharing_mode": preserve_mode,
-                "startup_mode": startup_mode,
-                "policy_file": effective_policy_file,
-            },
+            "endpoint": endpoint_view,
             "jiuwenbox": {
                 "host": host,
                 "port": port,
@@ -6539,6 +6569,12 @@ class AgentWebSocketServer:
         self, channel_id: str, params: dict[str, Any], *, bucket: str
     ) -> dict[str, Any]:
         _reject_extra_sandbox_files_params(params)
+        endpoint = get_sandbox_endpoint()
+        if str(endpoint.get("type") or "").strip().lower() == "jiuwenbox-conch":
+            raise ValueError(
+                "sandbox.type=jiuwenbox-conch does not support sandbox.files; "
+                "use type=jiuwenbox for write-permission allow/deny"
+            )
         path = str(params.get("path") or "").strip()
         if not path:
             raise ValueError("path is required")
@@ -6616,6 +6652,12 @@ class AgentWebSocketServer:
         self, channel_id: str, params: dict[str, Any]
     ) -> dict[str, Any]:
         _reject_extra_sandbox_files_params(params)
+        endpoint = get_sandbox_endpoint()
+        if str(endpoint.get("type") or "").strip().lower() == "jiuwenbox-conch":
+            raise ValueError(
+                "sandbox.type=jiuwenbox-conch does not support sandbox.files; "
+                "use type=jiuwenbox for write-permission allow/deny"
+            )
         path = str(params.get("path") or "").strip()
         if not path:
             raise ValueError("path is required")

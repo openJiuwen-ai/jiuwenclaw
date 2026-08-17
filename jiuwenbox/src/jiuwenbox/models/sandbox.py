@@ -10,6 +10,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from jiuwenbox.server.runtime.errors import InvalidJobIdError, InvalidSandboxIdError
+
 SANDBOX_ID_MIN_LEN = 4
 SANDBOX_ID_MAX_LEN = 40
 CUSTOM_SANDBOX_ID_RE = re.compile(
@@ -22,11 +24,6 @@ SANDBOX_ID_FORMAT_MESSAGE = (
     "(e.g. my-sb_01)"
 )
 
-
-class InvalidSandboxIdError(Exception):
-    """Raised when a user-supplied sandbox_id fails format validation."""
-
-
 JOB_ID_MIN_LEN = 4
 JOB_ID_MAX_LEN = 40
 CUSTOM_JOB_ID_RE = re.compile(
@@ -37,10 +34,6 @@ JOB_ID_FORMAT_MESSAGE = (
     f"job_id must be {JOB_ID_MIN_LEN}-{JOB_ID_MAX_LEN} characters and contain "
     "only lowercase letters, digits, hyphens, and underscores (e.g. http-srv)"
 )
-
-
-class InvalidJobIdError(Exception):
-    """Raised when a user-supplied job_id fails format validation."""
 
 
 def generate_sandbox_id() -> str:
@@ -83,6 +76,7 @@ class SandboxSpec(BaseModel):
 
     env: dict[str, str] = Field(default_factory=dict)
     sandbox_id: str | None = None
+    sandbox_runtime: str | None = None
 
 
 class SandboxRef(BaseModel):
@@ -90,7 +84,7 @@ class SandboxRef(BaseModel):
 
     id: str
     phase: SandboxPhase = SandboxPhase.PROVISIONING
-    runtime: str = "process"
+    sandbox_runtime: str = "process"
     pid: int | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     started_at: datetime | None = None
