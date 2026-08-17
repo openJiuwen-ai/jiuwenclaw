@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -43,7 +44,8 @@ class SelectorSet:
                 loc = page.locator(sel).first
                 if loc.is_visible():
                     return loc
-            except Exception:
+            except Exception as e:
+                logging.warning("first_visible selector %s failed: %s", sel, e)
                 continue
         # 退化到文本选择器
         for txt in self.text_patterns:
@@ -51,7 +53,8 @@ class SelectorSet:
                 loc = page.locator(f"text={txt}").first
                 if loc.is_visible():
                     return loc
-            except Exception:
+            except Exception as e:
+                logging.warning("first_visible text %s failed: %s", txt, e)
                 continue
         return None
 
@@ -68,7 +71,8 @@ class SelectorSet:
                 loc = page.locator(sel).first
                 loc.wait_for(state="visible", timeout=timeout_ms)
                 return loc
-            except Exception:
+            except Exception as e:
+                logging.warning("wait_first selector %s failed: %s", sel, e)
                 continue
         # 退化到文本选择器
         for txt in self.text_patterns:
@@ -76,7 +80,8 @@ class SelectorSet:
                 loc = page.locator(f"text={txt}").first
                 loc.wait_for(state="visible", timeout=timeout_ms)
                 return loc
-            except Exception:
+            except Exception as e:
+                logging.warning("wait_first text %s failed: %s", txt, e)
                 continue
         return None
 
@@ -409,9 +414,11 @@ def extract_api_key_from_dialog(page: Page) -> str:
                     val = loc.nth(i).input_value(timeout=1_000)
                     if val and len(val) >= 30:
                         return val.strip()
-                except Exception:
+                except Exception as e:
+                    logging.warning("input_value read failed: %s", e)
                     continue
-        except Exception:
+        except Exception as e:
+            logging.warning("extract selector %s failed: %s", selector, e)
             continue
 
     # 策略 2：evaluate 遍历弹窗 DOM（Ti3 / copy-key-modal）
@@ -443,8 +450,8 @@ def extract_api_key_from_dialog(page: Page) -> str:
         )
         if key and len(key) >= 30:
             return key
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("extract_api_key evaluate failed: %s", e)
 
     return ""
 
@@ -572,10 +579,10 @@ def detect_realname_status(page: Page, timeout_ms: int = 5_000) -> bool:
                     emit("realname", f"myRoleTags={tags} → 未实名认证")
                     return False
                 # tags 存在且不含 restricted/unverified → 已认证
-                emit("realname", f"myRoleTags={tags} → 已实名认证")
+                emit("realname", f"myRoleTags={tags} -> 已实名认证")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("realname JS check failed: %s", e)
 
         # 策略 2：DOM 提醒条（JS 变量尚未就绪时的兜底）
         try:
@@ -587,10 +594,10 @@ def detect_realname_status(page: Page, timeout_ms: int = 5_000) -> bool:
                     return False
                 # 提醒条存在但不含实名认证关键词 → 可能已认证
                 if text.strip():
-                    emit("realname", f"DOM 提醒条不含'实名认证' → 可能已认证")
+                    emit("realname", f"DOM 提醒条不含'实名认证' -> 可能已认证")
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("realname DOM check failed: %s", e)
 
         _time.sleep(0.5)
 

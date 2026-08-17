@@ -25,13 +25,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+    sys.path.append(str(_SCRIPT_DIR))
 
 from lib.cdp_client import (  # noqa: E402
     connect_page,
@@ -77,8 +78,8 @@ def _detect_auth_warning(page) -> bool:
         if container.count() > 0 and container.is_visible():
             text = container.inner_text(timeout=1_000) or ""
             return any(k in text for k in _AUTH_WARNING_KEYWORDS) and len(text.strip()) > 0
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("检测授权警告容器失败: %s", e)
     # 容器缺失/不可见：按警告选择器做一次即时快照
     try:
         warning = SELECTOR_AUTH_WARNING.first_visible(page, timeout_ms=1_000)
@@ -89,8 +90,8 @@ def _detect_auth_warning(page) -> bool:
                     return True
             except Exception:
                 return True
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("检测授权警告选择器失败: %s", e)
     return False
 
 
@@ -207,8 +208,8 @@ def auto_authorize(cdp_url: str, timeout_s: int = 45) -> dict:
     finally:
         try:
             pw.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("停止 playwright 失败: %s", e)
 
 
 def main(argv: list[str] | None = None) -> int:

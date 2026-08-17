@@ -42,11 +42,11 @@ def detect_browser_kind(value: str) -> Optional[str]:
     lowered = raw.replace("\\", "/").lower()
     name = Path(lowered).name
 
+    is_edge_path = "/microsoft/edge/" in lowered or "microsoft edge.app" in lowered
     if (
         "msedge" in name
         or name in {"microsoft edge", "microsoft-edge", "microsoft-edge-stable"}
-        or "/microsoft/edge/" in lowered
-        or "microsoft edge.app" in lowered
+        or is_edge_path
     ):
         return BROWSER_KIND_MSEDGE
 
@@ -479,8 +479,8 @@ class ManagedBrowserDriver:
         except Exception:
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("process.kill failed: %s", e)
 
     def clear(self):
         # Reap a Chrome child that exited (e.g. user closed the window) but

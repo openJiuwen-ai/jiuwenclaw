@@ -27,12 +27,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
 
 # 当以脚本方式直接运行时，sys.path[0] 是脚本所在目录。优先把源码根
 # 放到 sys.path 最前，避免命中 site-packages 中可能存在的旧版 jiuwenswarm。
@@ -43,7 +47,7 @@ def _ensure_jiuwenswarm_on_path() -> None:
     root_str = str(root)
     if root_str in sys.path:
         sys.path.remove(root_str)
-    sys.path.insert(0, root_str)
+    sys.path.append(root_str)
 
 
 _ensure_jiuwenswarm_on_path()
@@ -79,7 +83,7 @@ def _is_env_key(line: str, key: str) -> bool:
     if not stripped or stripped.startswith("#"):
         return False
     if stripped.startswith("export "):
-        stripped = stripped[len("export ") :].lstrip()
+        stripped = stripped[len("export "):].lstrip()
     if "=" not in stripped:
         return False
     lhs = stripped.split("=", 1)[0].strip()
@@ -312,19 +316,19 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 models = [_parse_model_spec(s) for s in args.model]
             except ValueError as exc:
-                print(f"[FAIL] {exc}", file=sys.stderr)
+                logging.error(f"[FAIL] {exc}")
                 return 2
         else:
             models = _load_models_from_file(args.models_file)
             if not models:
-                print(f"[FAIL] 未从 {args.models_file} 加载到模型", file=sys.stderr)
+                logging.error(f"[FAIL] 未从 {args.models_file} 加载到模型")
                 return 2
 
         # 校验 alias 不重复
         aliases = [m["alias"] for m in models]
         dup = {a for a in aliases if aliases.count(a) > 1}
         if dup:
-            print(f"[FAIL] --model 中存在重复 alias: {sorted(dup)}", file=sys.stderr)
+            logging.error(f"[FAIL] --model 中存在重复 alias: {sorted(dup)}")
             return 2
 
         result = add_models(
@@ -337,13 +341,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             masked_key = args.api_key[:4] + "****" + args.api_key[-4:] if len(args.api_key) > 8 else "****"
-            print("[OK] 配置写入成功：")
-            print(f"  .env:       {result['env_path']}")
-            print(f"  API Base:   {result['api_base']}")
-            print(f"  API Key:    {masked_key}")
-            print(f"  新增模型:   {', '.join(result['models'])}")
-            print(f"  别名:       {', '.join(result['written_aliases'])}")
-            print("  默认模型:   未调整（仅追加）")
+            logging.info("[OK] 配置写入成功：")
+            logging.info(f"  .env:       {result['env_path']}")
+            logging.info(f"  API Base:   {result['api_base']}")
+            logging.info(f"  API Key:    {masked_key}")
+            logging.info(f"  新增模型:   {', '.join(result['models'])}")
+            logging.info(f"  别名:       {', '.join(result['written_aliases'])}")
+            logging.info("  默认模型:   未调整（仅追加）")
         return 0
 
     parser.print_help()

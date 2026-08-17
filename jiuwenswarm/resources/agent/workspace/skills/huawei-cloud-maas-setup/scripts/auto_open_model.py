@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+    sys.path.append(str(_SCRIPT_DIR))
 
 from lib.cdp_client import (  # noqa: E402
     connect_page,
@@ -106,7 +107,8 @@ def _dismiss_satisfaction_popup(page, timeout_s: float = 3.0) -> bool:
                 if not modal.is_visible(timeout=500):
                     continue
                 text = modal.inner_text(timeout=800) or ""
-            except Exception:
+            except Exception as e:
+                logging.debug("读取 modal 文本失败: %s", e)
                 continue
             if not any(k in text for k in _DISTRACTOR_KEYWORDS):
                 continue
@@ -123,19 +125,20 @@ def _dismiss_satisfaction_popup(page, timeout_s: float = 3.0) -> bool:
                         btn.click(timeout=1_500)
                         closed = True
                         break
-                except Exception:
+                except Exception as e:
+                    logging.debug("点击关闭按钮失败: %s", e)
                     continue
             if not closed:
                 try:
                     modal.press("Escape")
                     closed = True
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.debug("按 Escape 关闭干扰浮层失败: %s", e)
             time.sleep(0.5)
             emit("model", "已自动关闭干扰浮层（满意度评价等）")
             return closed
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("关闭干扰浮层异常: %s", e)
     # 兜底：直接按 Escape
     try:
         page.keyboard.press("Escape")
@@ -175,7 +178,8 @@ def _wait_for_dialog(page, timeout_s: float = 15.0, poll_s: float = 0.8):
                     # 命中的是干扰浮层 -> 关闭后继续等待
                     _close_dialog(page, loc)
                     continue
-            except Exception:
+            except Exception as e:
+                logging.debug("等待弹窗选择器失败: %s", e)
                 continue
         # 内容信号兜底（容器类名未渲染但内容已出现）
         try:
@@ -189,8 +193,8 @@ def _wait_for_dialog(page, timeout_s: float = 15.0, poll_s: float = 0.8):
                 if modal.count() > 0:
                     return modal
                 return page.locator("body").first
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("内容信号兜底检测失败: %s", e)
         time.sleep(poll_s)
     return None
 
@@ -204,8 +208,8 @@ def _close_dialog(page, dialog) -> bool:
                 btn.click(timeout=2_000)
                 time.sleep(0.5)
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("点击弹窗关闭按钮失败: %s", e)
     try:
         page.keyboard.press("Escape")
         time.sleep(0.5)
@@ -289,8 +293,23 @@ def _scroll_dialog_down(page) -> None:
             _DIALOG_SELECTOR_JS,
         )
         time.sleep(0.4)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("滚动弹窗失败: %s", e)
+
+
+def _is_single_model_dialog(fragment: str, model_name: str) -> bool:
+    """判断弹窗是否为单模型弹窗（含一键开通与模型名，且无批量勾选特征）。"""
+    if "一键开通" not in fragment:
+        return False
+    if model_name not in fragment:
+        return False
+    if "全选模型服务" in fragment:
+        return False
+    if "全选" in fragment:
+        return False
+    if "commercialServiceList" in fragment:
+        return False
+    return True
 
 
 def _ensure_model_checked(page, dialog, model_name: str,
@@ -312,21 +331,18 @@ def _ensure_model_checked(page, dialog, model_name: str,
         dialog_fragment = dialog.inner_text(timeout=1_000) or ""
     except Exception:
         dialog_fragment = ""
-    if not any(s in dialog_fragment for s in (
-        "开通预置模型服务", "一键开通", "我已阅读并同意"
-    )):
+    _has_open_signal = False
+    for _signal_text in ("开通预置模型服务", "一键开通", "我已阅读并同意"):
+        if _signal_text in dialog_fragment:
+            _has_open_signal = True
+            break
+    if not _has_open_signal:
         emit("model", f"{model_name} 弹窗缺少开通信号，视为非开通弹窗")
         return False
     # 短路 2：单模型弹窗（弹窗正文含模型名 + "一键开通"按钮，且无 checkbox 勾选列表）
     # 注意：批量列表弹窗正文同样含"一键开通"和模型名，必须再排除"全选模型服务"
     # 等 checkbox 组特征，避免把需逐个勾选的批量弹窗误判为单模型弹窗而跳过勾选。
-    if (
-        "一键开通" in dialog_fragment
-        and model_name in dialog_fragment
-        and "全选模型服务" not in dialog_fragment
-        and "全选" not in dialog_fragment
-        and "commercialServiceList" not in dialog_fragment
-    ):
+    if _is_single_model_dialog(dialog_fragment, model_name):
         emit("model", f"{model_name} 弹窗正文含模型名与一键开通，视为单模型弹窗")
         return True
 
@@ -348,8 +364,8 @@ def _ensure_model_checked(page, dialog, model_name: str,
                         if inp.is_disabled():
                             emit("model", f"{model_name} 的 checkbox 为禁用态，无法勾选")
                             return False
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.debug("读取 checkbox 状态失败: %s", e)
                 # 点击 checkbox 的行元素（label.ti3-checkbox），避免点 input 抖动
                 row_label = group.locator("label.ti3-checkbox").first
                 try:
@@ -361,8 +377,8 @@ def _ensure_model_checked(page, dialog, model_name: str,
                     group.click(timeout=1_500)
                 time.sleep(0.3)
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("定位模型勾选项失败: %s", e)
         _scroll_dialog_down(page)
 
     return False
@@ -376,8 +392,8 @@ def _wait_table_ready(page, timeout_s: float = 15.0) -> bool:
             row = page.locator(MAAS_DEPLOYMENT_ROWS).first
             if row.is_visible(timeout=1_500):
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("等待表格数据行失败: %s", e)
         time.sleep(0.8)
     return False
 
@@ -444,8 +460,8 @@ def _row_open_button(row):
         ).first
         if btn.is_visible(timeout=1_500):
             return btn
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("查找开通服务按钮失败: %s", e)
     return None
 
 
@@ -477,8 +493,8 @@ def _find_model_row(page, model_name: str):
     # 兜底：刷新页面恢复完整列表，扫描当前第一页
     try:
         page.reload(wait_until="domcontentloaded", timeout=20_000)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("刷新页面失败: %s", e)
     if not _wait_table_ready(page):
         return None
     return _scan_rows_for_name(page, model_name)
@@ -647,8 +663,8 @@ def auto_open_models(
                             if page.locator("#subscribe-button").count() == 0:
                                 success = True
                                 break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.debug("检测订阅按钮消失失败: %s", e)
                         try:
                             if not dialog.is_visible(timeout=1_000):
                                 success = True
@@ -664,8 +680,8 @@ def auto_open_models(
                             if success_msg.is_visible(timeout=800):
                                 success = True
                                 break
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.debug("检测开通成功提示失败: %s", e)
 
                     if success:
                         opened.extend(checked_models)
@@ -712,8 +728,8 @@ def auto_open_models(
     finally:
         try:
             pw.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.debug("停止 playwright 失败: %s", e)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -30,15 +30,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+    sys.path.append(str(_SCRIPT_DIR))
 
 from lib.cdp_client import (  # noqa: E402
     connect_page,
@@ -74,7 +75,7 @@ def _unique_suffix() -> str:
 
     追加到标签和描述末尾，避免标签重复导致华为云拒绝创建 API Key。
     """
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _is_plausible_key(text: str) -> bool:
@@ -98,8 +99,8 @@ def _detect_insufficient_balance(page, timeout_ms: int = 3_000,
                 if keyword in error_text:
                     emit("apikey", f"检测到欠费提示: {error_text[:100]}")
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"读取欠费提示元素文本失败: {e}")
     # 兜底：检查整页文本（开销较大，轮询时可关闭）
     if include_body:
         try:
@@ -108,8 +109,8 @@ def _detect_insufficient_balance(page, timeout_ms: int = 3_000,
                 if keyword in body_text:
                     emit("apikey", f"页面文本中检测到欠费关键词: {keyword}")
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"读取页面文本检测欠费失败: {e}")
     return False
 
 
@@ -129,8 +130,8 @@ def _detect_realname_required(page, timeout_ms: int = 3_000,
                 if keyword in error_text:
                     emit("apikey", f"检测到未实名认证提示: {error_text[:100]}")
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"读取未实名认证提示元素文本失败: {e}")
     if include_body:
         try:
             body_text = page.locator("body").inner_text(timeout=2_000) or ""
@@ -139,8 +140,8 @@ def _detect_realname_required(page, timeout_ms: int = 3_000,
                 if keyword in body_text:
                     emit("apikey", f"页面文本中检测到未实名认证关键词: {keyword}")
                     return True
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"读取页面文本检测未实名认证失败: {e}")
     return False
 
 
@@ -163,7 +164,8 @@ def _select_permission_all(page) -> bool:
                 loc.click(timeout=2_000)
                 emit("apikey", "已选择权限范围: 全部")
                 return True
-        except Exception:
+        except Exception as e:
+            logging.warning(f"选择权限范围失败: {e}")
             continue
 
     # 策略2：点击权限下拉框触发器，打开选项面板后再选"全部"
@@ -184,7 +186,8 @@ def _select_permission_all(page) -> bool:
                         loc.click(timeout=2_000)
                         emit("apikey", "已通过下拉选择权限范围: 全部")
                         return True
-                except Exception:
+                except Exception as e:
+                    logging.warning(f"下拉选择权限范围失败: {e}")
                     continue
         except Exception as exc:
             emit("apikey", f"点击权限下拉框失败: {exc}")
@@ -269,8 +272,8 @@ def auto_create_apikey(
                 try:
                     tag_input.click()
                     page.keyboard.type(tag)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning(f"键盘输入标签失败: {e}")
         else:
             emit("apikey", "未找到标签输入框，跳过")
 
@@ -370,8 +373,8 @@ def auto_create_apikey(
     finally:
         try:
             pw.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"停止 playwright 失败: {e}")
 
 
 def main(argv: list[str] | None = None) -> int:

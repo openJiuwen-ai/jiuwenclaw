@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -28,7 +29,7 @@ from typing import Any, Optional
 # 确保可 import lib
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+    sys.path.append(str(_SCRIPT_DIR))
 
 from lib.cdp_client import (  # noqa: E402
     emit,
@@ -104,6 +105,8 @@ def _kill_browser_by_user_data_dir(user_data_dir: str) -> int:
     normalized = str(Path(user_data_dir).expanduser().resolve()).lower().replace("\\", "/")
     killed = 0
     if os.name == "nt":
+        powershell = shutil.which("powershell") or "powershell"
+        taskkill = shutil.which("taskkill") or "taskkill"
         for proc_name in ("chrome.exe", "msedge.exe"):
             ps_script = (
                 f"Get-WmiObject Win32_Process -Filter \"name='{proc_name}'\" "
@@ -112,7 +115,7 @@ def _kill_browser_by_user_data_dir(user_data_dir: str) -> int:
             )
             try:
                 result = subprocess.run(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    [powershell, "-NoProfile", "-NonInteractive", "-Command", ps_script],
                     capture_output=True, text=True, timeout=15,
                 )
                 if result.returncode == 0 and result.stdout.strip():
@@ -125,26 +128,28 @@ def _kill_browser_by_user_data_dir(user_data_dir: str) -> int:
                         if not pid or normalized not in cmdline:
                             continue
                         subprocess.run(
-                            ["taskkill", "/F", "/PID", str(pid)],
+                            [taskkill, "/F", "/PID", str(pid)],
                             capture_output=True, timeout=10,
                         )
                         killed += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"结束 Windows 浏览器进程失败: {e}")
     else:
+        pgrep = shutil.which("pgrep") or "pgrep"
+        kill = shutil.which("kill") or "kill"
         for proc_name in ("chrome", "chromium", "msedge"):
             try:
                 result = subprocess.run(
-                    ["pgrep", "-f", f"{proc_name}.*--user-data-dir={user_data_dir}"],
+                    [pgrep, "-f", f"{proc_name}.*--user-data-dir={user_data_dir}"],
                     capture_output=True, text=True, timeout=10,
                 )
                 if result.returncode == 0:
                     for line in result.stdout.strip().splitlines():
                         if line.strip().isdigit():
-                            subprocess.run(["kill", "-9", line.strip()], capture_output=True, timeout=5)
+                            subprocess.run([kill, "-9", line.strip()], capture_output=True, timeout=5)
                             killed += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"结束 Linux 浏览器进程失败: {e}")
     return killed
 
 
@@ -291,8 +296,8 @@ def ensure_browser(timeout_s: float = 20.0) -> dict[str, Any]:
 
     try:
         proc.terminate()
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"终止浏览器进程失败: {e}")
     return make_failure(
         "cdp_timeout",
         f"CDP 端口在 {timeout_s:.1f}s 内未就绪: {cdp_url}",

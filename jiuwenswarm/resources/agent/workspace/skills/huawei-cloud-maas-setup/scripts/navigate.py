@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
+    sys.path.append(str(_SCRIPT_DIR))
 
 from lib.cdp_client import (  # noqa: E402
     connect_page,
@@ -61,8 +62,8 @@ def navigate(url: str, cdp_url: str, wait_until: str = "domcontentloaded",
         title = ""
         try:
             title = page.title()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("page title fetch failed: %s", e)
         emit_progress(2, 3, f"已打开: {current_url}")
         emit_progress(3, 3, "导航完成")
         return make_success(
@@ -82,8 +83,8 @@ def navigate(url: str, cdp_url: str, wait_until: str = "domcontentloaded",
         # 不关闭浏览器！只关 Playwright 进程
         try:
             pw.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning("pw.stop failed: %s", e)
 
 
 def main(argv: list[str] | None = None) -> int:

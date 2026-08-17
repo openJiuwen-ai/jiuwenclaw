@@ -54,6 +54,7 @@ dependencies = [
     "numpy>=1.24.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

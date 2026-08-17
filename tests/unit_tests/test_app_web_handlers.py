@@ -259,7 +259,7 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     )
 
     assert saved_configs == [
-        {"chrome_path": "C:\\Chrome\\chrome.exe", "headless": False}
+        {"chrome_path": "C:\\Chrome\\chrome.exe", "browser_type": "auto", "headless": False}
     ]
     assert lifecycle_calls == [
         ("reload", agent_client),
@@ -277,6 +277,7 @@ async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
         "ok": True,
         "payload": {
             "chrome_path": "C:\\Chrome\\chrome.exe",
+            "browser_type": "auto",
             "headless": False,
         },
         "error": None,

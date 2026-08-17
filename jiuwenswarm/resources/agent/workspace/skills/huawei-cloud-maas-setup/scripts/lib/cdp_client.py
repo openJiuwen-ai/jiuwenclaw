@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -26,12 +27,12 @@ def _ensure_utf8_stdout() -> None:
     """
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("stdout reconfigure failed: %s", e)
     try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("stderr reconfigure failed: %s", e)
 
 
 # 模块加载即尝试切到 UTF-8，保证后续所有 print（stdout/stderr）不受 GBK 限制
@@ -44,11 +45,7 @@ def emit(step: str, message: str) -> None:
     Skill 编排层可通过 grep ``[step]`` 提取进度。
     """
     _ensure_utf8_stdout()
-    try:
-        print(f"[step] {step} {message}", file=sys.stderr, flush=True)
-    except UnicodeEncodeError:
-        print(f"[step] {step} {message}".encode("utf-8", "replace").decode("utf-8"),
-              file=sys.stderr, flush=True)
+    print(f"[step] {step} {message}", file=sys.stderr, flush=True)
 
 
 def emit_progress(current: int, total: int, message: str) -> None:
@@ -56,11 +53,7 @@ def emit_progress(current: int, total: int, message: str) -> None:
     _ensure_utf8_stdout()
     pct = int(round(current / max(total, 1) * 100))
     line = f"[step] {current}/{total} ({pct}%) {message}"
-    try:
-        print(line, file=sys.stderr, flush=True)
-    except UnicodeEncodeError:
-        print(line.encode("utf-8", "replace").decode("utf-8"),
-              file=sys.stderr, flush=True)
+    print(line, file=sys.stderr, flush=True)
 
 
 def output_json(payload: dict[str, Any]) -> None:
@@ -71,8 +64,8 @@ def output_json(payload: dict[str, Any]) -> None:
         sys.stdout.buffer.write((data + "\n").encode("utf-8"))
         sys.stdout.buffer.flush()
     except Exception:
-        # 极端兜底：直接 print ASCII JSON，保证 stdout 始终有可解析内容
-        print(json.dumps(payload, ensure_ascii=True), flush=True)
+        # 极端兜底：直接输出 ASCII JSON，保证 stdout 始终有可解析内容
+        print(json.dumps(payload, ensure_ascii=True))
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +172,7 @@ def is_cdp_ready(cdp_url: str, timeout_s: float = 1.5) -> bool:
             data = json.loads(payload)
             if isinstance(data, dict):
                 return bool(data.get("webSocketDebuggerUrl") or data.get("Browser"))
-    except (URLError, TimeoutError, OSError, ValueError):
+    except (URLError, TimeoutError, ValueError):
         return False
     return False
 

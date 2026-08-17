@@ -10,8 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import sys
 import urllib.request
+from urllib.parse import urljoin
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
 def check_config_exists() -> tuple[bool, dict[str, str]]:
@@ -19,7 +24,7 @@ def check_config_exists() -> tuple[bool, dict[str, str]]:
     try:
         from jiuwenswarm.common.config import get_config
     except ImportError:
-        print("错误: 无法导入 jiuwenswarm 模块，请确保在 jiuwenswarm 环境中运行", file=sys.stderr)
+        logging.error("错误: 无法导入 jiuwenswarm 模块，请确保在 jiuwenswarm 环境中运行")
         return False, {}
 
     config = get_config()
@@ -56,7 +61,7 @@ def check_config_exists() -> tuple[bool, dict[str, str]]:
 def test_connectivity(api_base: str, api_key: str, model_name: str) -> tuple[bool, str]:
     """向华为云 MaaS API 发送测试请求，验证连通性。"""
     # 构建请求 URL（OpenAI 兼容接口）
-    url = api_base.rstrip("/") + "/chat/completions"
+    url = urljoin(api_base.rstrip("/") + "/", "chat/completions")
 
     payload = json.dumps(
         {
@@ -90,8 +95,8 @@ def test_connectivity(api_base: str, api_key: str, model_name: str) -> tuple[boo
         error_body = ""
         try:
             error_body = e.read().decode("utf-8")[:300]
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning(f"读取错误响应体失败: {exc}")
         if e.code == 401:
             return False, "认证失败：API Key 无效或尚未生效（创建后需等待几分钟）"
         if e.code == 404:
@@ -111,8 +116,8 @@ def main() -> int:
     is_valid, config = check_config_exists()
 
     if not is_valid:
-        print("[FAIL] 未找到有效的 API 配置")
-        print("  请先运行 config_writer.py 写入配置，或通过配置面板手动填写。")
+        logging.error("[FAIL] 未找到有效的 API 配置")
+        logging.info("  请先运行 config_writer.py 写入配置，或通过配置面板手动填写。")
         return 1
 
     masked_key = (
@@ -120,26 +125,26 @@ def main() -> int:
         if len(config["api_key"]) > 8
         else "****"
     )
-    print("[OK] 配置已存在:")
-    print(f"  API 地址: {config['api_base']}")
-    print(f"  API Key:  {masked_key}")
-    print(f"  模型名称: {config['model_name']}")
-    print(f"  接入方式: {config['model_provider']}")
+    logging.info("[OK] 配置已存在:")
+    logging.info(f"  API 地址: {config['api_base']}")
+    logging.info(f"  API Key:  {masked_key}")
+    logging.info(f"  模型名称: {config['model_name']}")
+    logging.info(f"  接入方式: {config['model_provider']}")
 
     if args.check_only:
         return 0
 
-    print("\n正在测试 API 连通性...")
+    logging.info("\n正在测试 API 连通性...")
     success, message = test_connectivity(
         config["api_base"], config["api_key"], config["model_name"]
     )
 
     if success:
-        print(f"[OK] {message}")
+        logging.info(f"[OK] {message}")
         return 0
     else:
-        print(f"[FAIL] {message}")
-        print("\n提示: API Key 创建后可能需要几分钟生效，请稍后重试。")
+        logging.error(f"[FAIL] {message}")
+        logging.info("\n提示: API Key 创建后可能需要几分钟生效，请稍后重试。")
         return 1
 
 
