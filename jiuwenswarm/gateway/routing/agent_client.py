@@ -225,6 +225,18 @@ class WebSocketAgentServerClient(AgentServerClient):
                 try:
                     raw = await self._ws.recv()
                     data = json.loads(raw)
+                    # 迟到的 connection.ack（connect 等待首帧 5s 超时后才到达）：
+                    # 补置就绪状态。connect 只 recv 一次首帧，超时后该 ack 只能由
+                    # 接收循环收到；若不补置，server_ready 永久为 False，会令
+                    # e2a_proxy 等依赖 server_ready 的入口（如 Web session.list）
+                    # 永久返回 SERVICE_UNAVAILABLE，即使连接实际已建立。
+                    if data.get("type") == "event" and data.get("event") == "connection.ack":
+                        if not self._server_ready:
+                            self._server_ready = True
+                            logger.info(
+                                "[WebSocketAgentServerClient] 接收循环收到迟到的 connection.ack，AgentServer 已就绪"
+                            )
+                        continue
                     meta = data.get("metadata")
                     if isinstance(meta, dict) and meta.get(E2A_WIRE_SERVER_PUSH_KEY):
                         if self._on_server_push is not None:

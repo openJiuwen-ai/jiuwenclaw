@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_EXPIRES_SECONDS = 600
 _SECRET_ENV_KEY = "JIUWENSWARM_FILE_DOWNLOAD_SECRET"
 _SECRET_FILE_NAME = ".file_download_secret"
+_DOWNLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_DOWNLOAD_HTTP_BASE"
+_UPLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE"
+_LEGACY_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_HTTP_BASE"
 
 
 def _get_secret_file_path() -> Path:
@@ -90,12 +93,21 @@ class WebFileDownloadManager:
         file_path: str,
         session_id: str = "",
         expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+        *,
+        agent_http_base: str | None = None,
+        agent_http_base_key: str = "",
     ) -> str:
         payload = {
             "path": file_path,
             "exp": int(time.time()) + expires_in,
             "sid": session_id,
         }
+        # AgentOS 下 token 由目标 AgentServer 签发。将部署注入的、可访问该
+        # sandbox 的 HTTP bridge 基址随 token 返回，使独立运行的 Web 静态进程
+        # 不必持有用户态目录或 AgentOS Router 对象也能代理到正确用户。
+        base = str(agent_http_base or "").strip()
+        if base and agent_http_base_key:
+            payload[agent_http_base_key] = base.rstrip("/")
         payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         payload_b64 = base64.urlsafe_b64encode(
             payload_json.encode("utf-8")
@@ -141,7 +153,92 @@ def generate_file_download_token(
     expires_in: int = _DEFAULT_EXPIRES_SECONDS,
 ) -> str:
     return WebFileDownloadManager.get_instance().generate_token(
-        file_path, session_id, expires_in
+        file_path,
+        session_id,
+        expires_in,
+        agent_http_base=(
+            os.getenv(_DOWNLOAD_HTTP_BASE_ENV_KEY)
+            or os.getenv(_LEGACY_HTTP_BASE_ENV_KEY)
+        ),
+        agent_http_base_key="download_http_base",
+    )
+
+
+def _resolve_user_dirs() -> list[Path]:
+    """返回用户态业务目录根（注入目录 workspace / sessions / agent workspace + 项目目录）。
+
+    项目目录（``project_store``）可位于注入目录之外（如 code 模式下用户自选的工作目录），
+    ``send_file`` 等工具会把项目目录内的文件作为下载目标；若仅按注入目录三个根校验，
+    会误拒绝这些合法下载。故把已登记项目（含隐藏）的 ``project_dir`` 一并纳入边界。
+    """
+    from jiuwenswarm.common.utils import (
+        get_agent_sessions_dir,
+        get_agent_workspace_dir,
+        get_user_workspace_dir,
+    )
+
+    roots: list[Path] = []
+    for factory in (get_user_workspace_dir, get_agent_sessions_dir, get_agent_workspace_dir):
+        try:
+            root = Path(factory()).resolve(strict=False)
+        except Exception:  # noqa: BLE001
+            continue
+        roots.append(root)
+
+    # 已登记项目目录同样属于合法下载边界。project_store 依赖注入目录内的
+    # projects.json，读盘失败/尚未初始化时仅影响项目目录回退，不影响上面的三根。
+    try:
+        from jiuwenswarm.server.runtime.session import project_store
+
+        for project in project_store.list_projects(include_hidden=True):
+            project_dir = str(project.project_dir or "").strip()
+            if not project_dir:
+                continue
+            try:
+                roots.append(Path(project_dir).resolve(strict=False))
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return roots
+
+
+def is_path_within_user_dirs(path_str: str) -> bool:
+    """判断路径是否位于用户态业务目录内（Phase 2 下载/上传边界校验）。
+
+    下载与上传端点只允许访问注入目录内的用户数据；越界路径一律拒绝。
+    """
+    if not path_str or not str(path_str).strip():
+        return False
+    try:
+        candidate = Path(str(path_str)).resolve(strict=False)
+    except OSError:
+        return False
+    for root in _resolve_user_dirs():
+        if candidate == root or root in candidate.parents:
+            return True
+    return False
+
+
+def generate_file_upload_token(
+    target_rel_path: str,
+    session_id: str = "",
+    expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+) -> str:
+    """生成文件上传令牌（Phase 2 HTTP bridge 上传端点）。
+
+    payload 的 ``path`` 为**相对用户目录根**（``get_user_workspace_dir()``）
+    的目标路径（如 ``agent/workspace/upload.txt`` / ``agent/sessions/<sid>/uploads/x.png``）；
+    上传端点校验令牌后按相对路径落盘注入目录，并做目录边界校验。
+    """
+    return WebFileDownloadManager.get_instance().generate_token(
+        str(target_rel_path),
+        session_id,
+        expires_in,
+        # Uploads use a dedicated listener (normally WS port + 1).  The
+        # download/WS base must never be embedded as an upload target.
+        agent_http_base=os.getenv(_UPLOAD_HTTP_BASE_ENV_KEY),
+        agent_http_base_key="upload_http_base",
     )
 
 

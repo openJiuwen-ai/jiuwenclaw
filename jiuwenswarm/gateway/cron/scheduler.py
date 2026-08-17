@@ -28,7 +28,6 @@ from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
-from jiuwenswarm.server.runtime.session.session_history import append_history_record
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +271,7 @@ class CronSchedulerService:
         self._runs: dict[str, CronRunState] = {}  # run_id -> state
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._last_store_mtime: float = 0.0
+        self._last_store_signature: tuple[int, int, int] = (0, 0, 0)
         self._store_poll_interval: float = 5.0  # seconds
 
     def _get_store_mtime(self) -> float:
@@ -281,22 +281,39 @@ class CronSchedulerService:
         except OSError:
             return 0.0
 
+    def _get_store_signature(self) -> tuple[int, int, int]:
+        """Return a high-resolution change signature for the job store.
+
+        Windows may report the same float ``st_mtime`` for two rapid atomic
+        writes.  Include nanosecond mtime, ctime and size so an external write
+        cannot be missed merely because it lands in that coarse timestamp tick.
+        """
+        try:
+            stat = self._store.path.stat()
+            return (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+        except OSError:
+            return (0, 0, 0)
+
     def _sync_store_mtime(self) -> None:
         """Snapshot current store file mtime to avoid redundant reloads."""
         self._last_store_mtime = self._get_store_mtime()
+        self._last_store_signature = self._get_store_signature()
 
     async def _check_store_changed(self) -> bool:
         """If cron_jobs.json was modified or deleted externally, reload and return True."""
-        mtime = self._get_store_mtime()
-        # Detect: file modified (mtime changed, both nonzero),
-        #         file deleted (mtime became 0.0 from nonzero),
-        #         file recreated (mtime became nonzero from 0.0).
-        # Skip: no change (mtime == last), or both 0.0 (never had a file).
-        if mtime != self._last_store_mtime and (mtime or self._last_store_mtime):
+        signature = self._get_store_signature()
+        # Detect: file modified (signature changed, both nonzero),
+        #         file deleted (signature became (0,0,0) from nonzero),
+        #         file recreated (signature became nonzero from (0,0,0)).
+        # Skip: no change (signature == last), or both (0,0,0) (never had a file).
+        if (
+            signature != self._last_store_signature
+            and (signature != (0, 0, 0) or self._last_store_signature != (0, 0, 0))
+        ):
             logger.info(
-                "[Cron] store file changed (mtime %.3f -> %.3f), reloading",
-                self._last_store_mtime,
-                mtime,
+                "[Cron] store file changed (signature %s -> %s), reloading",
+                self._last_store_signature,
+                signature,
             )
             await self.reload()
             return True
@@ -570,7 +587,6 @@ class CronSchedulerService:
         job: CronJob,
         *,
         mode: str,
-        project_dir: str,
         run_id: str,
     ) -> str:
         cron_user_id = str(job.user_id or "").strip()
@@ -583,7 +599,6 @@ class CronSchedulerService:
                 "mode": mode,
                 "is_swarm": False,
                 "project_id": job.project_id or "",
-                "project_dir": project_dir,
                 "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
                 "model_name": job.model_name or None,
                 "cron_id": job.id,
@@ -959,20 +974,14 @@ class CronSchedulerService:
                     channel_id, exec_session_id = self._make_execution_context(job)
                     state.exec_channel_id = channel_id
                     state.exec_session_id = exec_session_id
-                # 解析 project_dir 供 AgentServer 写入会话归属（与 project_id 联动）
-                try:
-                    from jiuwenswarm.server.runtime.session import project_store as _ps
-                    exec_project_dir = _ps.get_project_dir_by_id(job.project_id)
-                except Exception as pdir_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[Cron] resolve project_dir failed job=%s: %s", job.id, pdir_exc,
-                    )
-                    exec_project_dir = ""
+                # Phase 4：project_id → project_dir 归属解析不在 Gateway 本地项目表执行。
+                # 目录分离后 Gateway 反查会得到空值或错误归属；改为只传 project_id，
+                # 由目标 AgentServer 在其注入目录内按 project_id 解析 project_dir
+                # （resolve_session_project_binding 规则2：仅传 project_id → 自动补齐）。
                 if not is_team_cron_mode(mode):
                     exec_session_id = await self._allocate_single_agent_session(
                         job,
                         mode=mode,
-                        project_dir=exec_project_dir,
                         run_id=run_id,
                     )
                     state.exec_channel_id = "__cron__"
@@ -992,7 +1001,6 @@ class CronSchedulerService:
                     "cron": cron_meta,
                     "cron_id": job.id,
                     "project_id": job.project_id or "",
-                    "project_dir": exec_project_dir,
                     "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
                 }
                 if job.model_name:
@@ -1055,14 +1063,12 @@ class CronSchedulerService:
                 if not state.result_text and state.error and not is_cancelled_ghost:
                     state.result_text = f"[cron] 任务执行失败: {state.error}"
                 if state.result_text and not ok and not is_cancelled_ghost:
-                    append_history_record(
+                    await self._append_failure_history_on_agentserver(
+                        job=job,
                         session_id=exec_session_id,
                         request_id=getattr(envelope, "request_id", ""),
                         channel_id=job.targets or channel_id,
-                        role="assistant",
-                        event_type="chat.final",
                         content=state.result_text,
-                        timestamp=self._now_fn(),
                         mode=mode,
                     )
                 if not state.pushed_final and state.result_text and not is_cancelled_ghost:
@@ -1083,6 +1089,50 @@ class CronSchedulerService:
 
         task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
+
+    async def _append_failure_history_on_agentserver(
+        self,
+        *,
+        job: CronJob,
+        session_id: str,
+        request_id: str,
+        channel_id: str,
+        content: str,
+        mode: str,
+    ) -> None:
+        """Persist cron failure history in the routed user's AgentServer directory."""
+        envelope = e2a_from_agent_fields(
+            request_id=f"cron-history-{request_id or int(self._now_fn() * 1000)}",
+            channel_id="__cron__",
+            session_id=session_id,
+            req_method=ReqMethod.HISTORY_APPEND_RECORD,
+            params={
+                "request_id": request_id,
+                "channel_id": channel_id,
+                "role": "assistant",
+                "event_type": "chat.final",
+                "content": content,
+                "timestamp": self._now_fn(),
+                "mode": mode,
+            },
+            is_stream=False,
+            timestamp=self._now_fn(),
+            user_id=str(job.user_id or "").strip() or None,
+        )
+        try:
+            response = await self._agent_client.send_request(envelope)
+            if not response.ok:
+                logger.warning(
+                    "[Cron] AgentServer rejected failure-history append: job=%s payload=%s",
+                    job.id,
+                    response.payload,
+                )
+        except Exception as exc:  # noqa: BLE001 - delivery must still continue
+            logger.warning(
+                "[Cron] AgentServer failure-history append failed: job=%s error=%s",
+                job.id,
+                exc,
+            )
 
     async def _mark_last_session_ready(self, job: CronJob, exec_session_id: str) -> None:
         """Record the execution session after the agent request has accepted it."""
@@ -1399,6 +1449,9 @@ class CronSchedulerService:
         )
         payload_extra = {
             "content": broadcast_text,
+            # WebChannel uses this to route AgentOS cron output to the owning
+            # browser connection.  Empty preserves legacy single-user fanout.
+            "user_id": str(job.user_id or "").strip(),
             "cron": {
                 "job_id": job.id,
                 "job_name": job.name,

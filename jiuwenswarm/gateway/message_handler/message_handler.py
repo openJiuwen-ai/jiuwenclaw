@@ -211,6 +211,9 @@ class MessageHandler(ABC):
         self._stream_channels: dict[str, str] = {}  # request_id -> channel_id
         self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
+        # AgentServer server_push frames only carry request_id. Keep the
+        # authenticated owner so cron mutations and reverse E2A stay routed.
+        self._stream_user_ids: dict[str, str] = {}
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
         # request_id -> req_method value（如 chat.send / command.goal / history.get）。
@@ -311,10 +314,17 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+        self._register_agent_server_push_handler()
 
-        if isinstance(self.agent_client, WebSocketAgentServerClient):
-            self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+    def _register_agent_server_push_handler(self) -> None:
+        """Attach the side-channel callback for local and routed clients."""
+        # Both the local WebSocket client and AgentOSRouterClient expose this
+        # callback.  Restricting registration to WebSocketAgentServerClient
+        # silently discarded AgentOS AgentServer ``send_push`` frames, so cron
+        # tool mutations never reached the Gateway-owned store.
+        setter = getattr(self.agent_client, "set_server_push_handler", None)
+        if callable(setter):
+            setter(self._handle_agent_server_push)
 
     def update_evolution_auto_save(self, config_payload: dict[str, Any] | None) -> None:
         """Refresh the in-memory evolution auto-save flag from a config snapshot.
@@ -866,6 +876,7 @@ class MessageHandler(ABC):
         self._stream_channels.pop(rid, None)
         self._stream_sessions.pop(rid, None)
         self._stream_metadata.pop(rid, None)
+        self._stream_user_ids.pop(rid, None)
         self._stream_emits_processing_status.pop(rid, None)
         self._stream_methods.pop(rid, None)
         self._stream_app_ids.pop(rid, None)
@@ -2850,12 +2861,32 @@ class MessageHandler(ABC):
         if chunk.channel_id == _ACP_CHANNEL_ID:
             session_id = self._resolve_acp_external_session_id(session_id, bus_metadata)
         if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "cron.response":
+            # Cron tool mutations are server-push frames.  They may be handled
+            # after the chat stream finalizer has removed ``_stream_user_ids``.
+            # CronTools therefore carries this internal value from the
+            # authenticated AgentServer request context.  Prefer the live
+            # Gateway mapping when it still exists; reject a disagreement rather
+            # than letting a stale/malformed frame cross user boundaries.
+            mapped_owner = str(self._stream_user_ids.get(rid) or "").strip()
+            wire_metadata = wire.get("metadata")
+            pushed_owner = (
+                str(wire_metadata.get("_jiuwenswarm_cron_owner_user_id") or "").strip()
+                if isinstance(wire_metadata, dict)
+                else ""
+            )
+            if mapped_owner and pushed_owner and mapped_owner != pushed_owner:
+                logger.warning(
+                    "[MessageHandler] discard cron push with mismatched owner: request_id=%s",
+                    rid,
+                )
+                return
             await self._handle_cron_push_payload(
                 payload=dict(chunk.payload),
                 request_id=rid,
                 channel_id=chunk.channel_id,
                 session_id=session_id,
                 metadata=bus_metadata,
+                user_id=mapped_owner or pushed_owner or None,
             )
             return
         if self._is_terminal_stream_chunk(chunk):
@@ -2904,39 +2935,109 @@ class MessageHandler(ABC):
         channel_id: str,
         session_id: str | None,
         metadata: dict[str, Any] | None,
+        user_id: str | None = None,
     ) -> None:
         cc = self._cron_controller
         if cc is None:
             return
         action = str(payload.get("action") or "").strip()
+        command_id = str(payload.get("command_id") or "").strip()
         params = payload.get("data") or {}
         if not isinstance(params, dict):
             params = {}
+        from jiuwenswarm.gateway.routing.e2a_proxy import is_agentos_routing_client
+
+        is_agentos = is_agentos_routing_client(self.agent_client)
+        owner_user_id = str(user_id or "").strip()
+
+        async def _get_owned_job(job_id: str) -> dict[str, Any] | None:
+            job = await cc.get_job(job_id)
+            if job is None:
+                return None
+            job_owner = (
+                job.get("user_id", "")
+                if isinstance(job, dict)
+                else getattr(job, "user_id", "")
+            )
+            if owner_user_id and str(job_owner or "").strip() != owner_user_id:
+                return None
+            return job
+
         try:
             if action == "list":
                 data = await cc.list_jobs()
+                if owner_user_id:
+                    data = [
+                        job
+                        for job in data
+                        if str(job.get("user_id") or "").strip() == owner_user_id
+                    ]
             elif action == "get":
-                data = await cc.get_job(str(params.get("job_id") or ""))
+                data = await _get_owned_job(str(params.get("job_id") or ""))
+                if data is None:
+                    raise KeyError("job not found")
             elif action == "create":
+                # Gateway, rather than an AgentServer payload, is authoritative
+                # for the authenticated owner in AgentOS.
+                if owner_user_id:
+                    params["user_id"] = owner_user_id
                 # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
                 request_mode = self._stream_modes.get(request_id)
                 if request_mode:
                     params["mode"] = request_mode
+                # project 已在 AgentServer 的用户目录中完成解析；Gateway 侧目录
+                # 与用户目录隔离时，允许 controller 跳过其本地反查。
+                if is_agentos:
+                    params["_agentos_project_binding_verified"] = True
                 data = await cc.create_job(params)
             elif action == "update":
-                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+                job_id = str(params.get("job_id") or "")
+                if await _get_owned_job(job_id) is None:
+                    raise KeyError("job not found")
+                patch = dict(params.get("patch") or {})
+                if is_agentos:
+                    patch["_agentos_project_binding_verified"] = True
+                data = await cc.update_job(job_id, patch)
             elif action == "delete":
-                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+                job_id = str(params.get("job_id") or "")
+                if await _get_owned_job(job_id) is None:
+                    raise KeyError("job not found")
+                data = {"deleted": await cc.delete_job(job_id)}
             elif action == "toggle":
-                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+                job_id = str(params.get("job_id") or "")
+                if await _get_owned_job(job_id) is None:
+                    raise KeyError("job not found")
+                data = await cc.toggle_job(job_id, bool(params.get("enabled")))
             elif action == "preview":
-                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+                job_id = str(params.get("job_id") or "")
+                if await _get_owned_job(job_id) is None:
+                    raise KeyError("job not found")
+                data = await cc.preview_job(job_id, int(params.get("count", 5)))
             elif action == "run_now":
-                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+                job_id = str(params.get("job_id") or "")
+                if await _get_owned_job(job_id) is None:
+                    raise KeyError("job not found")
+                data = {"run_id": await cc.run_now(job_id)}
+                # P2：把 Gateway 生成的 run_id 经 E2A 回传目标 AgentServer，让
+                # CronTools.run_now 能拿到非空 run_id（异步确认；失败不影响下方
+                # 面向 web 的 chat.tool_result 推送，AgentServer 侧等待方超时降级）。
+                await self._push_cron_run_now_ack(
+                    request_id=request_id,
+                    job_id=str(params.get("job_id") or ""),
+                    run_id=str(data.get("run_id") or ""),
+                    user_id=owner_user_id or None,
+                )
             else:
                 data = {"error": f"unknown cron action: {action}"}
         except Exception as exc:  # noqa: BLE001
             data = {"error": str(exc)}
+
+        if command_id:
+            await self._push_cron_command_ack(
+                command_id=command_id,
+                data=data,
+                user_id=owner_user_id or None,
+            )
 
         from jiuwenswarm.common.schema.message import EventType, Message
         out = Message(
@@ -2957,6 +3058,63 @@ class MessageHandler(ABC):
             enable_streaming=False,  # 工具结果不开启流式，避免被发送到群聊
         )
         await self.publish_robot_messages(out)
+
+    async def _push_cron_command_ack(
+        self, *, command_id: str, data: Any, user_id: str | None = None
+    ) -> None:
+        """Return a Gateway cron command result to the waiting Agent tool."""
+        try:
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+
+            env = e2a_from_agent_fields(
+                request_id=f"cron-command-ack-{command_id}", channel_id="",
+                req_method=ReqMethod.CRON_COMMAND_ACK,
+                params={"command_id": command_id, "data": data},
+                is_stream=False, timestamp=time.time(), user_id=user_id,
+            )
+            await send_agent_request_with_timeout(
+                self.agent_client, env, label="cron.command.ack"
+            )
+        except Exception:
+            logger.warning("[Cron] command ack delivery failed: command_id=%s", command_id, exc_info=True)
+
+    async def _push_cron_run_now_ack(
+        self, *, request_id: str, job_id: str, run_id: str, user_id: str | None = None
+    ) -> None:
+        """把 Gateway 生成的 run_id 经 E2A 回传目标 AgentServer（P2）。
+
+        AgentServer 侧 ``CronTools.run_now`` 按 request_id 等待该确认；回传失败
+        时 AgentServer 侧等待方超时降级，不影响本方法调用方（web 推送）。
+        """
+        if not request_id:
+            return
+        try:
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+
+            env = e2a_from_agent_fields(
+                request_id=f"cron-run-ack-{request_id}",
+                channel_id="",
+                req_method=ReqMethod.CRON_RUN_NOW_ACK,
+                params={
+                    "ack_request_id": request_id,
+                    "job_id": job_id,
+                    "run_id": run_id,
+                },
+                is_stream=False,
+                timestamp=time.time(),
+                user_id=user_id,
+            )
+            await send_agent_request_with_timeout(
+                self.agent_client,
+                env,
+                label="cron.run_now.ack",
+            )
+        except Exception as exc:  # noqa: BLE001 - ack failure degrades to timeout
+            logger.warning(
+                "[Cron] run_now ack push failed: request_id=%s error=%s", request_id, exc
+            )
 
     @staticmethod
     def _chunk_to_message(
@@ -3505,6 +3663,11 @@ class MessageHandler(ABC):
                 msg.channel_id,
             )
             return None
+        finally:
+            # A non-stream AgentServer call can still emit cron server_push
+            # frames while it is awaited.  Release its owner mapping only after
+            # the request completes.
+            self._stream_user_ids.pop(env.request_id or "", None)
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -3963,6 +4126,9 @@ class MessageHandler(ABC):
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
                 stream_rid = env.request_id or msg.id
+                # Keep this for both streaming and unary requests: cron tools
+                # can emit an asynchronous server_push on either transport.
+                self._stream_user_ids[stream_rid] = str(env.user_id or "").strip()
                 try:
                     if env.is_stream:
                         # 取消同一 channel 上已有的流式任务，避免会话孤岛
@@ -4044,6 +4210,7 @@ class MessageHandler(ABC):
             rid, channel_id, session_id,
         )
         try:
+            await self._sync_agentos_cron_jobs(env)
             async for chunk in self.agent_client.send_request_stream(env):
                 _proc_count += 1
                 if _proc_count <= 3:
@@ -4195,6 +4362,67 @@ class MessageHandler(ABC):
                         session_id,
                     )
 
+    async def _sync_agentos_cron_jobs(self, env: "E2AEnvelope") -> None:
+        """Provide the routed AgentServer an ephemeral view of Gateway cron jobs.
+
+        Gateway remains the sole persistent job-store owner.  This one-way E2A
+        request occurs before an Agent turn so cron tools can list/update jobs
+        after an AgentServer restart without reading a user-local cron file.
+        Failure is non-fatal for ordinary chat; mutation attempts will still
+        report their Gateway delivery failure through the existing path.
+        """
+        from jiuwenswarm.gateway.routing.e2a_proxy import is_agentos_routing_client
+
+        if not is_agentos_routing_client(self.agent_client):
+            return
+        controller = self._cron_controller
+        if controller is None:
+            return
+        user_id = str(getattr(env, "user_id", "") or "").strip()
+        if not user_id:
+            logger.warning(
+                "[Cron] skip AgentOS cron snapshot without user_id: request_id=%s",
+                env.request_id,
+            )
+            return
+        try:
+            jobs = await controller.list_jobs()
+            user_jobs = [
+                job
+                for job in jobs
+                if str(job.get("user_id") or "").strip() == user_id
+            ]
+            from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+            from jiuwenswarm.common.schema.message import ReqMethod
+
+            snapshot_env = e2a_from_agent_fields(
+                request_id=f"cron-jobs-sync-{env.request_id}",
+                channel_id=env.channel or "web",
+                session_id=env.session_id,
+                req_method=ReqMethod.CRON_JOBS_SYNC,
+                params={"jobs": user_jobs},
+                is_stream=False,
+                timestamp=time.time(),
+                user_id=user_id,
+            )
+            response = await send_agent_request_with_timeout(
+                self.agent_client,
+                snapshot_env,
+                label="cron.jobs.sync",
+            )
+            if not response.ok:
+                logger.warning(
+                    "[Cron] AgentOS cron snapshot rejected: request_id=%s payload=%s",
+                    env.request_id,
+                    response.payload,
+                )
+        except Exception as exc:  # noqa: BLE001 - must not block normal chat
+            logger.warning(
+                "[Cron] AgentOS cron snapshot sync failed: request_id=%s error=%s",
+                env.request_id,
+                exc,
+            )
+
     async def _send_stream_cancelled_notification(
         self, request_id: str | None, channel_id: str, session_id: str | None
     ) -> None:
@@ -4260,6 +4488,7 @@ class MessageHandler(ABC):
         self._stream_channels[stream_rid] = msg.channel_id
         self._stream_sessions[stream_rid] = msg.session_id
         self._stream_metadata[stream_rid] = msg.metadata
+        self._stream_user_ids[stream_rid] = str(env.user_id or "").strip()
         self._stream_app_ids[stream_rid] = msg.app_id or ""
         logger.info(
             "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s "
@@ -4488,6 +4717,7 @@ class MessageHandler(ABC):
         self._stream_channels.clear()
         self._stream_sessions.clear()
         self._stream_metadata.clear()
+        self._stream_user_ids.clear()
         self._stream_emits_processing_status.clear()
         self._stream_methods.clear()
         self._stream_modes.clear()

@@ -546,6 +546,9 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         // 优先信任显式 project_id，只传 project_dir 需要多一层反查（见 CronTaskFormValue.projectId 注释）。
         // 未选项目（projectId 为 null）时不传这个 key，走 project_dir 空串的既有归默认项目逻辑。
         ...(value.projectId ? { project_id: value.projectId } : {}),
+        // 一并带上 work_mode：AgentOS 多用户下 Gateway 不再本地反查项目表，work_mode
+        // 需由前端（project.list 已含 work_mode）随 project_id 下发，保证归属/展示正确。
+        ...(value.projectId && value.workMode ? { work_mode: value.workMode } : {}),
         ...(value.modelName ? { model_name: value.modelName } : {}),
         mode: value.mode,
         session_id: sessionId,

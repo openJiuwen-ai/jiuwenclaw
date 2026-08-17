@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
-from jiuwenswarm.gateway.upload_storage import (
+from jiuwenswarm.server.runtime.attachments.upload_storage import (
     safe_session_dirname,
     safe_upload_filename,
     unique_upload_path,
@@ -25,6 +26,16 @@ _SUPPORTED_IMAGE_MIME_TYPES = {
 }
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_COUNT = 8
+
+
+def image_suffix_for_mime(mime_type: str) -> str | None:
+    """返回受支持图片 MIME 类型对应的扩展名（含点，如 ``.png``），不支持返回 ``None``。"""
+    return _SUPPORTED_IMAGE_MIME_TYPES.get(mime_type)
+
+
+def supported_image_suffixes() -> frozenset[str]:
+    """返回全部受支持图片扩展名集合（含点，如 ``{".png", ".jpg"}``）。"""
+    return frozenset(_SUPPORTED_IMAGE_MIME_TYPES.values())
 
 
 def normalize_chat_media_attachments(params: dict[str, Any], session_id: str | None) -> None:
@@ -74,6 +85,28 @@ def _store_image_item(item: dict[str, Any], *, session_id: str | None, index: in
     mime_type = str(item.get("mimeType") or item.get("mime_type") or "").lower().strip()
     suffix = _SUPPORTED_IMAGE_MIME_TYPES.get(mime_type)
     if suffix is None:
+        return None
+
+    # Gateway 侧已经通过受认证 HTTP bridge 落盘到注入目录的大图（Phase 2 传输
+    # 取舍：超内部 WS 帧限制的 base64 不压 E2A 链路）：直接透传落盘记录，不重复
+    # 解码/写盘。路径必须存在，否则视为无效项丢弃。
+    if item.get("_persisted"):
+        path = item.get("path")
+        if isinstance(path, str) and path.strip():
+            try:
+                exists = os.path.isfile(path)
+                size = os.path.getsize(path) if exists else 0
+            except OSError:
+                exists = False
+                size = 0
+            if exists:
+                return {
+                    "type": "image",
+                    "filename": Path(path).name,
+                    "mime_type": mime_type,
+                    "path": path,
+                    "size_bytes": size,
+                }
         return None
 
     raw_base64 = item.get("base64Data") or item.get("base64_data")

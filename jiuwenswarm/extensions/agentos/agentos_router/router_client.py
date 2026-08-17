@@ -58,12 +58,12 @@ from jiuwenswarm.extensions.yuanrong_frontend_client import (
 from jiuwenswarm.extensions.agentos.auth.ssh_key_issuer import SshKeyIssuer
 from jiuwenswarm.gateway import ChannelManager
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
-from jiuwenswarm.gateway.document_attachments import is_forbidden_document
+from jiuwenswarm.server.runtime.attachments.document_attachments import is_forbidden_document
 from jiuwenswarm.gateway.routing.agent_client import (
     AgentServerClient,
     WebSocketAgentServerClient,
 )
-from jiuwenswarm.gateway.upload_storage import safe_upload_filename
+from jiuwenswarm.server.runtime.attachments.upload_storage import safe_upload_filename
 
 
 logger = logging.getLogger(__name__)

@@ -70,6 +70,80 @@ class FakeAgentClient:
             self.reload_finished.set()
 
 
+class _CapturingSessionListAgentClient:
+    """捕获 E2A 信封并返回标准 session.list 响应（供 Web 转发断言）。"""
+
+    def __init__(self):
+        self.server_ready = True
+        self.envelopes: list = []
+
+    async def send_request(self, envelope):
+        self.envelopes.append(envelope)
+        if str(getattr(envelope, "method", "") or "") == "project.cron.resolve_binding":
+            # AgentOS cron 绑定解析：返回用户侧项目绑定（与 ProjectAdapter 契约一致）。
+            return type(
+                "Resp",
+                (),
+                {"ok": True, "payload": {"project_id": "user-proj-1", "work_mode": "code"}},
+            )()
+        return type(
+            "Resp",
+            (),
+            {
+                "ok": True,
+                "payload": {
+                    "sessions": [
+                        {
+                            "session_id": "sess-team-1",
+                            "mode": "team",
+                            "team_name": "dev-team-swarm_sess-team-1",
+                            "title": "team task",
+                        }
+                    ],
+                    "total": 1,
+                    "limit": 20,
+                    "offset": 0,
+                },
+            },
+        )()
+
+
+class WebSocketAgentServerClient:
+    server_ready = False
+
+
+WebSocketAgentServerClient.__module__ = "jiuwenswarm.gateway.routing.agent_client"
+
+
+class _OfflineRemoteAgentClient:
+    server_ready = False
+
+
+_OfflineRemoteAgentClient.__module__ = "jiuwenswarm.extensions.yuanrong.agent_client"
+
+
+class _CapturingCronController:
+    def __init__(self) -> None:
+        self.params = None
+
+    async def create_job(self, params):
+        self.params = dict(params)
+        return {"id": "cron-1"}
+
+
+class _OwnedCronController:
+    def __init__(self) -> None:
+        self.job = SimpleNamespace(id="cron-owner", user_id="user-owner")
+        self.update_calls = 0
+
+    async def get_job(self, job_id):
+        return self.job if job_id == self.job.id else None
+
+    async def update_job(self, job_id, patch):
+        self.update_calls += 1
+        return {"id": job_id, **patch}
+
+
 class FakeMessageHandler:
     def __init__(self):
         self.disconnected_websockets: list[tuple[str, str]] = []
@@ -181,46 +255,238 @@ async def test_path_select_file_returns_cancelled(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_session_list_preserves_team_name_in_projected_metadata(
+async def test_session_list_forwards_via_e2a_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
-        lambda **_kwargs: (
-            [
-                {
-                    "session_id": "sess-team-1",
-                    "mode": "team",
-                    "team_name": "dev-team-swarm_sess-team-1",
-                    "title": "team task",
-                    "delivery_context": {"channel_id": "internal"},
-                }
-            ],
-            1,
-        ),
-    )
+    """Web session.list 经统一薄代理 E2A 转发目标 AgentServer（Phase 1）。
+
+    投影（to_session_info）已随迁移移入 AgentServer SessionAdapter，
+    本用例验证 Gateway 侧转发契约：method / channel / user_id / params。
+    """
+    agent_client = _CapturingSessionListAgentClient()
     channel = FakeWebChannel()
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=agent_client)
+    )
 
     await channel.methods["session.list"](
         object(),
         "req-session-list",
-        {},
+        {"limit": 5},
         "current-session",
+        "user-42",
     )
 
-    payload = channel.responses[-1]["payload"]
-    assert payload["sessions"][0]["mode"] == "team"
-    assert payload["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
-    assert "delivery_context" not in payload["sessions"][0]
+    assert len(agent_client.envelopes) == 1
+    env = agent_client.envelopes[0]
+    assert env.method == "session.list"
+    assert env.channel == "web"
+    assert env.user_id == "user-42"
+    assert env.params == {"limit": 5}
+    assert env.is_stream is False
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
+
+
+@pytest.mark.asyncio
+async def test_session_list_keeps_single_user_shared_directory_fallback(monkeypatch) -> None:
+    """A local AgentServer restart must not hide legacy sessions from Web."""
+    channel = FakeWebChannel()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=WebSocketAgentServerClient())
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
+        lambda *, limit, offset: ([{"session_id": "legacy", "mode": "agent"}], 1),
+    )
+
+    await channel.methods["session.list"](object(), "req-offline", {"limit": 5}, "current")
+
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["sessions"][0]["session_id"] == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_session_list_does_not_fallback_for_offline_remote_client(monkeypatch) -> None:
+    """Only the local shared-directory client may use Gateway's data directory."""
+    channel = FakeWebChannel()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=_OfflineRemoteAgentClient())
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_all_sessions_metadata",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not read Gateway state")),
+    )
+
+    await channel.methods["session.list"](object(), "req-offline-remote", {}, "current")
+
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "SERVICE_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_cron_job_update_rejects_a_different_authenticated_owner() -> None:
+    channel = FakeWebChannel()
+    cron = _OwnedCronController()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, cron_controller=cron))
+
+    await channel.methods["cron.job.update"](
+        object(), "req-cron-owner", {"id": "cron-owner", "patch": {"name": "changed"}}, None, "user-other"
+    )
+
+    assert cron.update_calls == 0
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "NOT_FOUND"
+
+
+class _DictOwnedCronController:
+    """Mimics the real ``CronController.get_job`` which returns ``to_dict()``."""
+
+    def __init__(self) -> None:
+        self.job = {"id": "cron-dict-owner", "user_id": "user-owner"}
+        self.run_now_calls = 0
+
+    async def get_job(self, job_id):
+        return self.job if job_id == self.job["id"] else None
+
+    async def run_now_info(self, job_id):
+        self.run_now_calls += 1
+        return {"run_id": "run-1", "session_id": "sess-1"}
+
+
+@pytest.mark.asyncio
+async def test_cron_job_run_now_accepts_matching_owner_with_dict_job() -> None:
+    """dict-shaped job (real controller output) must pass owner check for run_now."""
+    channel = FakeWebChannel()
+    cron = _DictOwnedCronController()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, cron_controller=cron))
+
+    await channel.methods["cron.job.run_now"](
+        object(), "req-cron-run", {"id": "cron-dict-owner"}, None, "user-owner"
+    )
+
+    assert cron.run_now_calls == 1
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["run_id"] == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_cron_job_run_now_rejects_dict_job_with_different_owner() -> None:
+    channel = FakeWebChannel()
+    cron = _DictOwnedCronController()
+    _register_web_handlers(WebHandlersBindParams(channel=channel, cron_controller=cron))
+
+    await channel.methods["cron.job.run_now"](
+        object(), "req-cron-run", {"id": "cron-dict-owner"}, None, "user-other"
+    )
+
+    assert cron.run_now_calls == 0
+    assert channel.responses[-1]["ok"] is False
+    assert channel.responses[-1]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_agentos_cron_create_does_not_read_gateway_session_metadata(monkeypatch) -> None:
+    """AgentOS project binding must stay in the routed user AgentServer directory."""
+    channel = FakeWebChannel()
+    cron = _CapturingCronController()
+    client = _CapturingSessionListAgentClient()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=client, cron_controller=cron)
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.e2a_proxy.is_agentos_routing_client",
+        lambda _client: True,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not read Gateway metadata")),
+    )
+
+    await channel.methods["cron.job.create"](
+        object(), "req-cron", {"name": "job", "cron_expr": "* * * * *"}, "user-session", "user-1"
+    )
+
+    assert channel.responses[-1]["ok"] is True
+    assert cron.params["_agentos_project_binding_verified"] is True
+    assert "project_dir" not in cron.params
+
+
+@pytest.mark.asyncio
+async def test_agentos_cron_update_project_fields_with_dict_job(monkeypatch) -> None:
+    """AgentOS update with project fields must work with dict-shaped jobs.
+
+    The real ``CronController.get_job`` returns ``to_dict()`` (a plain dict);
+    the AgentOS binding branch must read ``work_mode`` / ``session_id`` with
+    dict access instead of attribute access.
+    """
+
+    class _AgentOSClient:
+        server_ready = True
+
+    class _DictUpdateCronController:
+        def __init__(self) -> None:
+            self.job = {
+                "id": "cron-dict-1",
+                "user_id": "user-1",
+                "work_mode": "work",
+                "session_id": "sess-1",
+            }
+            self.update_calls: list[tuple[str, dict]] = []
+
+        async def get_job(self, job_id):
+            return dict(self.job) if job_id == self.job["id"] else None
+
+        async def update_job(self, job_id, patch):
+            self.update_calls.append((job_id, dict(patch)))
+            return {"id": job_id, **patch}
+
+    channel = FakeWebChannel()
+    cron = _DictUpdateCronController()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=_AgentOSClient(), cron_controller=cron)
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.e2a_proxy.is_agentos_routing_client",
+        lambda _client: True,
+    )
+
+    async def _fake_resolve_agent_cron_project_binding(**kwargs):
+        return True, {"project_id": "user-proj-1", "work_mode": "code"}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.routing.e2a_proxy.resolve_agent_cron_project_binding",
+        _fake_resolve_agent_cron_project_binding,
+    )
+
+    await channel.methods["cron.job.update"](
+        object(),
+        "req-cron-update",
+        {"id": "cron-dict-1", "patch": {"project_id": "user-proj-1"}},
+        None,
+        "user-1",
+    )
+
+    assert channel.responses[-1]["ok"] is True, channel.responses[-1]
+    assert cron.update_calls, "controller.update_job must be invoked"
+    patch = cron.update_calls[0][1]
+    assert patch["project_id"] == "user-proj-1"
+    assert patch["work_mode"] == "code"
+    assert patch["_agentos_project_binding_verified"] is True
 
 
 @pytest.mark.asyncio
 async def test_path_set_reloads_config_and_resets_agent_browser_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+
     channel = FakeWebChannel()
-    agent_client = object()
+    # Match the default single-user transport so path.set follows the local
+    # shared-directory branch rather than the AgentOS/remote proxy branch.
+    agent_client = WebSocketAgentServerClient()
     saved_configs: list[dict] = []
     lifecycle_calls: list[tuple[str, object]] = []
 
@@ -2287,3 +2553,85 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     assert len(saved["channels"]["feishu"]["apps"]) == 1
     assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
     assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"
+
+
+# ── media.persist 大图 HTTP bridge 分流（Phase 2 传输取舍） ──────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upload_succeeds", [True, False])
+async def test_pre_persist_large_media_splits_or_keeps_oversized_images(
+    monkeypatch, upload_succeeds,
+):
+    """超预算（>4MB）的 base64 图片：HTTP 上传成功时转 ``_persisted``（不再携带
+    base64，由 AgentServer 透传落盘记录）；上传失败时保留原 base64 项（由下游
+    链路返回可重试错误），不静默丢图。小图始终保留 base64 走 E2A。"""
+    import base64
+
+    from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
+        _pre_persist_large_media,
+    )
+    from jiuwenswarm.gateway.routing.agent_http_bridge import E2A_PAYLOAD_MAX_BYTES
+
+    big_b64 = base64.b64encode(b"x" * (E2A_PAYLOAD_MAX_BYTES + 1)).decode("ascii")
+    small_b64 = base64.b64encode(b"small-image-bytes").decode("ascii")
+    uploaded = {}
+
+    async def fake_upload(item, data, *, session_id, index, agent_client, user_id):
+        if not upload_succeeds:
+            return None
+        uploaded[index] = data
+        return {
+            "type": "image",
+            "filename": "big.png",
+            "mime_type": "image/png",
+            "path": f"/tmp/uploads/big-{index}.png",
+            "size_bytes": len(data),
+            "_persisted": True,
+        }
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._upload_media_item_via_http",
+        fake_upload,
+    )
+
+    params = await _pre_persist_large_media(
+        {
+            "content": "x",
+            "media_items": [
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "filename": "big.png",
+                    "base64Data": big_b64,
+                },
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "filename": "small.png",
+                    "base64Data": small_b64,
+                },
+            ],
+        },
+        session_id="sess-1",
+        agent_client=None,
+        user_id=None,
+    )
+
+    items = params["media_items"]
+    assert len(items) == 2
+    if upload_succeeds:
+        # 大图已转 HTTP 上传，不再携带 base64
+        assert items[0]["_persisted"] is True
+        assert "base64Data" not in items[0] and "base64_data" not in items[0]
+        assert items[0]["path"] == "/tmp/uploads/big-0.png"
+        assert 0 in uploaded
+    else:
+        # 上传失败：保留原 base64，交由下游链路返回可重试错误
+        assert items[0]["base64Data"] == big_b64
+        assert "_persisted" not in items[0]
+        assert 0 not in uploaded
+    # 小图始终保留 base64 走 E2A
+    assert "_persisted" not in items[1]
+    assert items[1]["base64Data"] == small_b64
+    assert 1 not in uploaded

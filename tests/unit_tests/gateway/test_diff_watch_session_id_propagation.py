@@ -4,8 +4,8 @@
 
 P2 修复:首次快照路径与轮询路径(``_compute_and_push``)语义对齐。
 只在 ``include_last_turn`` 或 ``source == "last_turn"`` 时传 session_id 给
-``get_project_diff_status``,避免 current-only 订阅因 file_ops 历史读取异常
-而首次订阅失败(异常会向上抛触发 ``remove_watch``)。
+diff 状态获取器(经 E2A 转发到目标 AgentServer 的 ``PROJECT_GIT_DIFF_STATUS``),
+避免 current-only 订阅因 file_ops 历史读取异常而首次订阅失败。
 
 覆盖场景:
   - summary + include_last_turn=False  → session_id=None
@@ -69,7 +69,6 @@ class FakeRegistry:
             session_id=session_id,
             ws=ws,
             scope=scope,
-            # 与真实 registry 一致:空 session_id 时强制关闭 include_last_turn
             include_last_turn=bool(include_last_turn) and bool(session_id),
         )
         if on_initial is not None:
@@ -89,7 +88,7 @@ class FakeRegistry:
         watch = SimpleNamespace(
             watch_id=watch_id,
             project_id=expected_project_id or "proj-A",
-            session_id="sess-1",  # 模拟已有 watcher
+            session_id="sess-1",
             ws=expected_ws,
             files_source=source,
         )
@@ -136,58 +135,51 @@ def _make_handler(channel, registry):
     return GitDiffWebSocketHandler(channel=channel, registry=registry)
 
 
-def _make_project(project_id="proj-A", project_dir="/tmp/proj"):
-    return SimpleNamespace(
-        project_id=project_id,
-        project_dir=project_dir,
-        work_mode="code",
-        git=SimpleNamespace(enabled=True),
-    )
+def _make_fake_fetcher(fail_when_session_id=False):
+    """构造 fake diff 状态获取器,记录调用参数并返回 (ok, status_dict)。
 
-
-def _make_fake_status_factory():
-    """构造 fake DiffStatusService.get_project_diff_status,记录调用参数。
-
-    返回 (service, status_calls)。service 适配 handler 调用签名
-    (keyword-only project/session_id/include_files/include_hunks)。
+    ``fail_when_session_id=True`` 时,任何非空 session_id 请求返回失败,
+    用于模拟 current-only 订阅在 file_ops 历史读取异常时仍成功。
     """
-    status_calls: list[dict] = []
+    fetch_calls: list[dict] = []
 
-    def fake_get_project_diff_status(
-        *, project, session_id, include_files, include_hunks, hunk_paths=None,
+    async def fake_fetch(
+        self, ws, project_id, session_id, *, include_files, include_hunks,
+        hunk_paths=None,
     ):
-        status_calls.append({
-            "project_id": project.project_id,
+        del self
+        fetch_calls.append({
+            "project_id": project_id,
             "session_id": session_id,
             "include_files": include_files,
             "include_hunks": include_hunks,
             "hunk_paths": hunk_paths,
         })
-        return SimpleNamespace(
-            to_dict=lambda include_hunks=False: {
-                "project_id": project.project_id,
-                "session_id": session_id,
-                "repo": {
-                    "is_git": True,
-                    "repo_root": "/tmp/proj",
-                    "branch": "main",
-                    "head": "abc123",
-                    "transient": False,
-                },
-                "current": {"files": {"a.py": {"status": "M"}}},
-                "last_turn": None,
-            }
-        )
+        if fail_when_session_id and session_id is not None:
+            return False, {"error": "broken file_ops / change_set", "code": "INTERNAL_ERROR"}
+        return True, {
+            "project_id": project_id,
+            "session_id": session_id,
+            "repo": {
+                "is_git": True,
+                "repo_root": "/tmp/proj",
+                "branch": "main",
+                "head": "abc123",
+                "transient": False,
+            },
+            "current": {"files": {"a.py": {"status": "M"}}},
+            "last_turn": None,
+        }
 
-    service = SimpleNamespace(get_project_diff_status=fake_get_project_diff_status)
-    return service, status_calls
+    return fake_fetch, fetch_calls
 
 
-def _patch_get_diff_status_service(service):
-    """patch handler 内部 import 的 get_diff_status_service。"""
+def _patch_fetcher(fake_fetch):
+    """patch handler 的 _fetch_diff_status_via_e2a。"""
     return patch(
-        "jiuwenswarm.server.runtime.session.git_diff_status.get_diff_status_service",
-        return_value=service,
+        "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
+        "GitDiffWebSocketHandler._fetch_diff_status_via_e2a",
+        fake_fetch,
     )
 
 
@@ -197,23 +189,12 @@ def _patch_get_diff_status_service(service):
 
 @pytest.mark.asyncio
 async def test_summary_include_last_turn_false_passes_no_session_id():
-    """include_last_turn=False 时不应传 session_id 给 get_project_diff_status。
-
-    current-only 订阅场景:file_ops 历史读取异常不应阻断首次订阅。
-    """
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_watch(
             ws=None, req_id="r1",
             params={
@@ -223,29 +204,20 @@ async def test_summary_include_last_turn_false_passes_no_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    # 修复后:include_last_turn=False 不传 session_id
-    assert status_calls[0]["session_id"] is None
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] is None
     resp = channel.responses[0]
     assert resp["ok"] is True
 
 
 @pytest.mark.asyncio
 async def test_summary_include_last_turn_true_passes_session_id():
-    """include_last_turn=True 时正常传 session_id,语义不变。"""
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_watch(
             ws=None, req_id="r1",
             params={
@@ -255,8 +227,8 @@ async def test_summary_include_last_turn_true_passes_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    assert status_calls[0]["session_id"] == "sess-1"
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] == "sess-1"
 
 
 # ---------------------------------------------------------------------------
@@ -265,20 +237,12 @@ async def test_summary_include_last_turn_true_passes_session_id():
 
 @pytest.mark.asyncio
 async def test_files_source_current_passes_no_session_id():
-    """source="current" 时不应传 session_id 给 get_project_diff_status。"""
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_files_watch(
             ws=None, req_id="r1",
             params={
@@ -289,30 +253,21 @@ async def test_files_source_current_passes_no_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    # 修复后:source="current" 不传 session_id
-    assert status_calls[0]["session_id"] is None
-    assert status_calls[0]["hunk_paths"] is None
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] is None
+    assert fetch_calls[0]["hunk_paths"] is None
     resp = channel.responses[0]
     assert resp["ok"] is True
 
 
 @pytest.mark.asyncio
 async def test_files_source_last_turn_passes_session_id():
-    """source="last_turn" 时正常传 session_id,语义不变。"""
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_files_watch(
             ws=None, req_id="r1",
             params={
@@ -323,9 +278,9 @@ async def test_files_source_last_turn_passes_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    assert status_calls[0]["session_id"] == "sess-1"
-    assert status_calls[0]["hunk_paths"] is None
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] == "sess-1"
+    assert fetch_calls[0]["hunk_paths"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -334,20 +289,12 @@ async def test_files_source_last_turn_passes_session_id():
 
 @pytest.mark.asyncio
 async def test_detail_source_current_passes_no_session_id():
-    """source="current" 时不应传 session_id 给 get_project_diff_status。"""
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_detail_watch(
             ws=None, req_id="r1",
             params={
@@ -359,30 +306,21 @@ async def test_detail_source_current_passes_no_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    # 修复后:source="current" 不传 session_id
-    assert status_calls[0]["session_id"] is None
-    assert status_calls[0]["hunk_paths"] == ["a.py"]
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] is None
+    assert fetch_calls[0]["hunk_paths"] == ["a.py"]
     resp = channel.responses[0]
     assert resp["ok"] is True
 
 
 @pytest.mark.asyncio
 async def test_detail_source_last_turn_passes_session_id():
-    """source="last_turn" 时正常传 session_id,语义不变。"""
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
-    fake_service, status_calls = _make_fake_status_factory()
+    fake_fetch, fetch_calls = _make_fake_fetcher()
 
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_detail_watch(
             ws=None, req_id="r1",
             params={
@@ -394,8 +332,8 @@ async def test_detail_source_last_turn_passes_session_id():
             },
         )
 
-    assert len(status_calls) == 1
-    assert status_calls[0]["session_id"] == "sess-1"
+    assert len(fetch_calls) == 1
+    assert fetch_calls[0]["session_id"] == "sess-1"
 
 
 # ---------------------------------------------------------------------------
@@ -404,53 +342,12 @@ async def test_detail_source_last_turn_passes_session_id():
 
 @pytest.mark.asyncio
 async def test_current_only_subscription_survives_file_ops_failure():
-    """current-only summary 订阅,file_ops 历史读取异常时不应失败。
-
-    修复前:``get_project_diff_status(session_id="sess-1")`` 内部会调
-    ``get_turn_diff_summaries`` 且异常向上抛,导致 add_watch 失败 →
-    watcher 被回滚,前端拿不到 watch_id。
-
-    修复后:include_last_turn=False 时不传 session_id,绕过 file_ops 读取,
-    current-only 订阅不受影响。
-    """
     channel = FakeWebChannel()
     registry = FakeRegistry()
     handler = _make_handler(channel, registry)
+    fake_fetch, fetch_calls = _make_fake_fetcher(fail_when_session_id=True)
 
-    def fake_get_project_diff_status(
-        *, project, session_id, include_files, include_hunks, hunk_paths=None,
-    ):
-        if session_id is not None:
-            # 模拟 file_ops 历史读取失败
-            raise RuntimeError("broken file_ops / change_set")
-        return SimpleNamespace(
-            to_dict=lambda include_hunks=False: {
-                "project_id": project.project_id,
-                "session_id": None,
-                "repo": {
-                    "is_git": True,
-                    "repo_root": "/tmp/proj",
-                    "branch": "main",
-                    "head": "abc123",
-                    "transient": False,
-                },
-                "current": None,
-                "last_turn": None,
-            }
-        )
-
-    fake_service = SimpleNamespace(
-        get_project_diff_status=fake_get_project_diff_status,
-    )
-
-    with (
-        patch(
-            "jiuwenswarm.gateway.channel_manager.web.git_ws_handler."
-            "GitDiffWebSocketHandler._resolve_git_project",
-            return_value=(_make_project(), None, None),
-        ),
-        _patch_get_diff_status_service(fake_service),
-    ):
+    with _patch_fetcher(fake_fetch):
         await handler._handle_diff_watch(
             ws=None, req_id="r1",
             params={
@@ -460,9 +357,96 @@ async def test_current_only_subscription_survives_file_ops_failure():
             },
         )
 
-    # 修复后:ok=True,前端拿到 watch_id
     resp = channel.responses[0]
     assert resp["ok"] is True
     assert resp["payload"]["watch_id"] == "wid-summary"
-    # 响应里 last_turn=None(因 include_last_turn=False)
     assert resp["payload"]["snapshot"]["last_turn"] is None
+
+
+# ---------------------------------------------------------------------------
+# 首次快照失败时结构化错误码保留
+# 修复回归:AgentServer 返回 {error, code} 时不得退化为 INTERNAL_ERROR
+# ---------------------------------------------------------------------------
+
+def _make_failing_fetcher(error: str, code: str | None):
+    async def fake_fetch(
+        self, ws, project_id, session_id, *, include_files, include_hunks,
+        hunk_paths=None,
+    ):
+        del self
+        status: dict = {"error": error}
+        if code is not None:
+            status["code"] = code
+        return False, status
+
+    return fake_fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,expected_code",
+    [
+        ("PROJECT_NOT_FOUND", "PROJECT_NOT_FOUND"),
+        ("FORBIDDEN", "FORBIDDEN"),
+    ],
+)
+async def test_summary_first_snapshot_failure_preserves_error_code(code, expected_code):
+    channel = FakeWebChannel()
+    registry = FakeRegistry()
+    handler = _make_handler(channel, registry)
+
+    with _patch_fetcher(_make_failing_fetcher("project not found", code)):
+        await handler._handle_diff_watch(
+            ws=None, req_id="r1",
+            params={"project_id": "proj-A", "session_id": "sess-1"},
+        )
+
+    resp = channel.responses[0]
+    assert resp["ok"] is False
+    assert resp["code"] == expected_code
+    assert resp["error"] == "project not found"
+    # GitError 结构化明细随 payload.detail 下发（与 Git RPC 错误契约一致）
+    assert resp["payload"]["detail"]["code"] == expected_code
+
+
+@pytest.mark.asyncio
+async def test_files_first_snapshot_failure_without_code_degrades_to_internal_error():
+    channel = FakeWebChannel()
+    registry = FakeRegistry()
+    handler = _make_handler(channel, registry)
+
+    with _patch_fetcher(_make_failing_fetcher("transport broken", None)):
+        await handler._handle_diff_files_watch(
+            ws=None, req_id="r1",
+            params={
+                "project_id": "proj-A",
+                "watch_id": "wid-summary",
+                "source": "current",
+            },
+        )
+
+    resp = channel.responses[0]
+    assert resp["ok"] is False
+    assert resp["code"] == "INTERNAL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_detail_first_snapshot_failure_preserves_error_code():
+    channel = FakeWebChannel()
+    registry = FakeRegistry()
+    handler = _make_handler(channel, registry)
+
+    with _patch_fetcher(_make_failing_fetcher("project not found", "PROJECT_NOT_FOUND")):
+        await handler._handle_diff_detail_watch(
+            ws=None, req_id="r1",
+            params={
+                "project_id": "proj-A",
+                "watch_id": "wid-summary",
+                "source": "current",
+                "files": ["a.py"],
+            },
+        )
+
+    resp = channel.responses[0]
+    assert resp["ok"] is False
+    assert resp["code"] == "PROJECT_NOT_FOUND"

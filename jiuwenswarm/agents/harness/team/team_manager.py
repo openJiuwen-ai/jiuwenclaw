@@ -738,6 +738,7 @@ class TeamManager:
         project_dir: str | None = None,
         trusted_dirs: list[str] | None = None,
         request_id: str | None = None,
+        user_id: str | None = None,
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
@@ -780,6 +781,7 @@ class TeamManager:
             project_dir=project_dir,
             trusted_dirs=trusted_dirs,
             request_id=request_id,
+            user_id=user_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
         )

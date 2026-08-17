@@ -12,6 +12,9 @@ import math
 import os
 import shutil
 import sys
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -59,6 +62,15 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
+from jiuwenswarm.server.runtime.gateway_adapter import (
+    AdapterRegistry,
+    ConfigAdapter,
+    HarmonyOSAdapter,
+    MemoryAdapter,
+    ProjectAdapter,
+    SessionAdapter,
+    WorkspaceFileAdapter,
+)
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
@@ -686,6 +698,180 @@ def _apply_resolved_mode_to_request(
     return resolved.manager_mode, resolved.sub_mode
 
 
+def _req_method_value(method: Any) -> str:
+    """ReqMethod 枚举或字符串 → method 值（适配器注册表查询键）。"""
+    if hasattr(method, "value"):
+        return method.value
+    return str(method or "")
+
+
+def _parse_single_byte_range(
+    range_header: str,
+    file_size: int,
+) -> tuple[int, int] | None:
+    """Parse one HTTP byte range, returning inclusive start and end offsets.
+
+    与迁移前 Gateway ``app_web`` 旧实现语义一致（单字节范围，不支持多段）。
+    非法范围返回 ``None``（调用方按 416 处理）。
+    """
+    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
+        return None
+
+    range_value = range_header[6:]
+    if "-" not in range_value:
+        return None
+
+    start_text, end_text = range_value.split("-", 1)
+    if not start_text:
+        if not end_text.isascii() or not end_text.isdecimal():
+            return None
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            return None
+        return max(0, file_size - suffix_length), file_size - 1
+
+    if not start_text.isascii() or not start_text.isdecimal():
+        return None
+    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
+        return None
+
+    start = int(start_text)
+    end = int(end_text) if end_text else file_size - 1
+    if start >= file_size or end < start:
+        return None
+    return start, min(end, file_size - 1)
+
+
+def _read_file_range(path: str, start: int, length: int) -> bytes:
+    """分块读取文件 ``[start, start+length)`` 区间（避免一次性读入全量）。"""
+    if length <= 0:
+        return b""
+    chunks: list[bytes] = []
+    with open(path, "rb") as f:
+        f.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = f.read(min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+class _AgentHttpUploadHandler(BaseHTTPRequestHandler):
+    """AgentServer 进程内轻量 HTTP 上传端点（Phase 2 HTTP bridge）。
+
+    仅绑定 localhost，接收 Gateway 转发的文件内容（大文件不压 WebSocket 帧）：
+    ``POST /file-api/upload?token=<upload_token>``，body 为文件字节。token 由
+    ``generate_file_upload_token`` 签发（payload 为相对用户目录根的目标路径），
+    校验后按注入目录落盘并做目录边界校验。
+    """
+
+    def do_POST(self) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        from urllib.parse import parse_qs, urlsplit
+
+        from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+            is_path_within_user_dirs,
+            validate_file_download_token,
+        )
+        from jiuwenswarm.common.utils import get_user_workspace_dir
+
+        if urlsplit(self.path).path != "/file-api/upload":
+            self._write_json(404, {"error": "not_found"})
+            return
+        query = parse_qs(urlsplit(self.path).query)
+        token = (query.get("token") or [""])[0]
+        if not token:
+            self._write_json(400, {"error": "missing_token"})
+            return
+        payload = validate_file_download_token(token)
+        if payload is None:
+            self._write_json(403, {"error": "invalid_or_expired_token"})
+            return
+        rel_path = str(payload.get("path") or "").strip().replace("\\", "/")
+        if not rel_path or rel_path.startswith("/") or ".." in rel_path.split("/"):
+            self._write_json(400, {"error": "invalid_target_path"})
+            return
+        target = (get_user_workspace_dir() / rel_path).resolve(strict=False)
+        if not is_path_within_user_dirs(str(target)):
+            self._write_json(403, {"error": "path_outside_workspace"})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._write_json(400, {"error": "invalid_content_length"})
+            return
+        if content_length <= 0:
+            self._write_json(400, {"error": "empty_body"})
+            return
+        try:
+            body = self.rfile.read(content_length)
+        except OSError as exc:
+            logger.warning("[AgentHttpUpload] 读取上传 body 失败: %s", exc)
+            self._write_json(500, {"error": "read_failed"})
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # 与 E2A 落盘路径（IM_FILE_PERSIST / media.persist）一致：同名文件
+            # 去重（``-1``/``-2`` 后缀），避免大附件重复上传时覆盖既有文件。
+            from jiuwenswarm.server.runtime.attachments.upload_storage import (
+                unique_upload_path,
+            )
+
+            target = unique_upload_path(target)
+            target.write_bytes(body)
+        except OSError as exc:
+            logger.warning("[AgentHttpUpload] 落盘失败: %s error=%s", target, exc)
+            self._write_json(500, {"error": "write_failed"})
+            return
+        self._write_json(200, {"path": str(target), "size": len(body)})
+
+    def _write_json(self, status: int, payload: dict[str, Any]) -> None:
+        import json as _json
+
+        body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        logger.debug("[AgentHttpUpload] %s", fmt % args)
+
+
+def _start_http_upload_server(ws_port: int) -> Any:
+    """启动 localhost 上传 HTTP 服务（失败仅告警，不阻塞 AgentServer 启动）。"""
+    import os as _os
+
+    from http.server import ThreadingHTTPServer
+
+    port = int(
+        _os.getenv("JIUWENSWARM_AGENT_HTTP_PORT")
+        or (ws_port + 1 if ws_port else 0)
+        or 18093
+    )
+    try:
+        http_server = ThreadingHTTPServer(("127.0.0.1", port), _AgentHttpUploadHandler)
+    except OSError as exc:
+        logger.warning(
+            "[AgentWebSocketServer] 上传 HTTP 端点启动失败（不影响 WS 服务）: %s",
+            exc,
+        )
+        return None
+    thread = threading.Thread(
+        target=http_server.serve_forever,
+        kwargs={"poll_interval": 0.5},
+        daemon=True,
+        name="agent-http-upload",
+    )
+    thread.start()
+    logger.info("[AgentWebSocketServer] 上传 HTTP 端点已启动: http://127.0.0.1:%s", port)
+    return http_server
+
+
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
     """将 Gateway 发送的 JSON 载荷解析为 AgentRequest."""
     req_method = data.get("req_method")
@@ -897,12 +1083,23 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        # Phase 2 HTTP bridge：localhost 文件上传端点（独立线程，不阻塞 WS 事件循环）
+        self._http_upload_server: Any = None
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # Gateway 用户业务适配器注册表（Phase 1 渐进式接入：首批 SessionAdapter.session.list；
+        # Phase 2 扩展 SessionAdapter 会话小操作 + WorkspaceFileAdapter 工作区/文件域）
+        self._adapter_registry = AdapterRegistry()
+        self._adapter_registry.register(SessionAdapter())
+        self._adapter_registry.register(WorkspaceFileAdapter())
+        self._adapter_registry.register(MemoryAdapter())
+        self._adapter_registry.register(ProjectAdapter())
+        self._adapter_registry.register(HarmonyOSAdapter())
+        self._adapter_registry.register(ConfigAdapter())
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1030,6 +1227,9 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+
+        # Phase 2 HTTP bridge：启动 localhost 上传端点（失败不阻塞 WS 服务）
+        self._http_upload_server = _start_http_upload_server(self._port)
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
@@ -1239,8 +1439,17 @@ class AgentWebSocketServer:
                 unpin(previous)
 
     async def _process_request(self, *args: Any) -> Any:
-        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
+        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。
+
+        Phase 2 HTTP bridge：非 WebSocket 的 ``/file-api/download`` 请求在
+        握手前直接返回 HTTP 响应（与 WebSocket 同端口），路径与内容判定
+        基于本进程注入目录执行（决策 D3 / 方案 §10.5）。
+        """
         path, request_headers = extract_handshake_request(args)
+        if path.split("?", 1)[0] == "/file-api/download":
+            return self._build_http_file_download_response(
+                path, args, request_headers
+            )
         origin = get_header_value(request_headers, "Origin")
         enable_origin_check = is_origin_check_enabled()
         if not enable_origin_check:
@@ -1270,6 +1479,135 @@ class AgentWebSocketServer:
             origin,
         )
         return forbidden_origin_response(args)
+
+    def _build_http_file_download_response(
+        self,
+        path: str,
+        process_request_args: tuple[Any, ...],
+        request_headers: Any = None,
+    ) -> Any:
+        """处理 ``/file-api/download`` HTTP 下载请求（Phase 2 HTTP bridge）。
+
+        - token 由本进程（AgentServer）自己的 secret 校验（``web_file_download``）；
+        - 保持历史 ``send_file`` 下载范围；有效 token 可指向用户显式给出的文件；
+        - ``inline`` 查询参数（``1``/``true``）→ ``Content-Disposition: inline``，
+          否则 ``attachment``（与迁移前 Web 行为一致）；filename 使用 RFC 5987
+          ``filename*=UTF-8''...`` 编码，非 ASCII 文件名不产生乱码；
+        - 支持单字节 Range（``bytes=``/``bytes=-n``/``bytes=n-``）→ 206 +
+          ``Content-Range`` + ``Accept-Ranges``；非法 Range → 416；仅读取
+          请求区间，避免全量读入内存；
+        - 返回 (status, headers, body) 元组或 websockets HTTP Response，
+          与既有 ``forbidden_origin_response`` 的 legacy/modern 双形态一致。
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+            validate_file_download_token,
+        )
+        query = parse_qs(urlsplit(path).query)
+        token = (query.get("token") or [""])[0]
+        if not token:
+            return self._http_plain_response(
+                400, b"missing_token", process_request_args
+            )
+        payload = validate_file_download_token(token)
+        if payload is None:
+            return self._http_plain_response(
+                403, b"invalid_or_expired_token", process_request_args
+            )
+        file_path = str(payload.get("path") or "")
+        if not file_path or not os.path.isfile(file_path):
+            return self._http_plain_response(
+                404, b"file_not_found", process_request_args
+            )
+        import mimetypes
+
+        file_size = os.path.getsize(file_path)
+        mime_type, _ = mimetypes.guess_type(os.path.basename(file_path))
+        if not mime_type:
+            mime_type = "application/octet-stream"
+
+        # inline/attachment 与 RFC 5987 filename 编码（与迁移前 Web 行为一致）
+        raw_inline = query.get("inline")
+        if isinstance(raw_inline, list):
+            raw_inline = raw_inline[0] if raw_inline else ""
+        disposition = (
+            "inline"
+            if str(raw_inline or "").strip().lower() in {"1", "true"}
+            else "attachment"
+        )
+        from urllib.parse import quote
+
+        encoded_name = quote(os.path.basename(file_path), safe="")
+        content_disposition = f"{disposition}; filename*=UTF-8''{encoded_name}"
+
+        # 单字节 Range 支持（与迁移前 Web 行为一致）
+        range_header = get_header_value(request_headers, "Range")
+        byte_range: tuple[int, int] | None = None
+        if range_header:
+            byte_range = _parse_single_byte_range(range_header, file_size)
+            if byte_range is None:
+                return self._http_plain_response(
+                    416,
+                    b"",
+                    process_request_args,
+                    extra_headers=[
+                        ("Content-Range", f"bytes */{file_size}"),
+                    ],
+                )
+        start, end = byte_range or (0, max(0, file_size - 1))
+        content_length = 0 if file_size == 0 else end - start + 1
+        try:
+            body = _read_file_range(file_path, start, content_length)
+        except OSError as exc:
+            logger.warning(
+                "[AgentWebSocketServer] /file-api/download 读取失败: %s error=%s",
+                file_path,
+                exc,
+            )
+            return self._http_plain_response(
+                500, b"read_failed", process_request_args
+            )
+        headers = [
+            ("Content-Type", mime_type),
+            ("Content-Length", str(len(body))),
+            ("Content-Disposition", content_disposition),
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "no-store"),
+        ]
+        if byte_range is not None:
+            headers.append(
+                ("Content-Range", f"bytes {start}-{end}/{file_size}")
+            )
+        return self._http_plain_response(
+            206 if byte_range is not None else 200,
+            body,
+            process_request_args,
+            extra_headers=headers,
+        )
+
+    @staticmethod
+    def _http_plain_response(
+        status: int,
+        body: bytes,
+        process_request_args: tuple[Any, ...],
+        *,
+        extra_headers: list[tuple[str, str]] | None = None,
+    ) -> Any:
+        """构造 legacy/new websockets process_request 兼容的 HTTP 响应。"""
+        from http import HTTPStatus
+
+        reason = HTTPStatus(status).phrase
+        headers = [("Content-Type", "text/plain; charset=utf-8")] if not extra_headers else extra_headers
+        if "Content-Length" not in {name for name, _ in headers}:
+            headers.append(("Content-Length", str(len(body))))
+
+        if process_request_args and not isinstance(process_request_args[0], str):
+            from websockets.datastructures import Headers
+            from websockets.http11 import Response
+
+            return Response(status, reason, Headers(headers), body)
+        return status, headers, body
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
@@ -1302,6 +1640,18 @@ class AgentWebSocketServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+
+        # Phase 2 HTTP bridge：关闭 localhost 上传端点
+        http_upload_server = self._http_upload_server
+        self._http_upload_server = None
+        if http_upload_server is not None:
+            try:
+                http_upload_server.shutdown()
+                http_upload_server.server_close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] 上传 HTTP 端点关闭失败: %s", exc
+                )
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
             cancel_pending_tasks,
@@ -1480,8 +1830,28 @@ class AgentWebSocketServer:
 
             await self._trigger_before_chat_request_hook(request)
 
-            if request.req_method == ReqMethod.SESSION_LIST:
-                await self._handle_session_list(ws, request, send_lock)
+            # Gateway 用户业务适配器：注册表命中则走适配器通用执行路径（渐进式）。
+            # SESSION_DELETE 是例外：SessionAdapter 仅为 Gateway 离线共享目录
+            # fallback 提供文件级删除；在线 AgentServer 必须走下面既有 handler，
+            # 才能清理 Team runtime / Runner / binding 等进程态资源。
+            # SESSION_RENAME 同样保留给离线 fallback：在线请求走下方既有
+            # handler，保持迁移前的失败 code 语义（无 code 而非 BAD_REQUEST）。
+            adapter = (
+                None
+                if request.req_method in (ReqMethod.SESSION_DELETE, ReqMethod.SESSION_RENAME)
+                else self._adapter_registry.get(_req_method_value(request.req_method))
+            )
+            if adapter is not None:
+                await self._dispatch_adapter_request(adapter, ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.CRON_JOBS_SYNC:
+                await self._handle_cron_jobs_sync(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.CRON_COMMAND_ACK:
+                await self._handle_cron_command_ack(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.CRON_RUN_NOW_ACK:
+                await self._handle_cron_run_now_ack(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_RENAME:
                 await self._handle_session_rename(ws, request, send_lock)
@@ -1506,6 +1876,15 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.SESSION_REWIND_CONTEXT:
                 await self._handle_session_rewind_context(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HISTORY_LIST_TURNS:
+                await self._handle_history_list_turns(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HISTORY_APPEND_RECORD:
+                await self._handle_history_append_record(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SESSION_RESTORE_FILES:
+                await self._handle_session_restore_files(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.TEAM_TEMPLATES_LIST:
                 await self._handle_team_templates_list(ws, request, send_lock)
@@ -1638,6 +2017,12 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
                 await self._handle_harness_packages_delete(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_IMPORT:
+                await self._handle_harness_packages_import(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_EXPORT:
+                await self._handle_harness_packages_export(ws, request, send_lock)
                 return
             # Schedule task management
             if request.req_method == ReqMethod.SCHEDULE_CHECK_CONFIG:
@@ -2815,54 +3200,50 @@ class AgentWebSocketServer:
             chunk_count,
         )
 
-    async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """处理 session.list 请求：返回历史会话基础信息列表。
+    async def _dispatch_adapter_request(
+        self,
+        adapter: Any,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """适配器通用执行：调用 adapter.handle，异常映射，响应编码并发送。
 
-        响应格式与 Web fallback ``_session_list`` 保持一致:
-        ``{"sessions": [...], "total": int, "limit": int, "offset": int}``,
-        确保按新接口接入分页的 Web 前端能拿到分页元信息。
+        适配器只实现纯业务契约（handle(request) -> AgentResponse），
+        ws / send_lock / 响应编码等传输层细节在此统一处理。
         """
-        # 解析 limit/offset(与 Web fallback 一致的宽松解析)
-        params = request.params if isinstance(request.params, dict) else {}
-        limit = 20
-        offset = 0
-        raw_limit = params.get("limit")
-        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool):
-            limit = raw_limit
-        elif isinstance(raw_limit, float) and raw_limit.is_integer():
-            limit = int(raw_limit)
-        elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
-            limit = int(raw_limit.strip())
-
-        raw_offset = params.get("offset")
-        if isinstance(raw_offset, int) and not isinstance(raw_offset, bool):
-            offset = raw_offset
-        elif isinstance(raw_offset, float) and raw_offset.is_integer():
-            offset = int(raw_offset)
-        elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
-            offset = int(raw_offset.strip())
-
-        limit = max(1, min(limit, 200))
-        offset = max(0, offset)
-
         try:
-            sessions, total = get_all_sessions_metadata(limit=limit, offset=offset)
-        except Exception as exc:
-            logger.warning("[AgentWebSocketServer] 获取会话列表失败: %s", exc)
-            sessions, total = [], 0
+            resp = await adapter.handle(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[Adapter] %s handle failed: request_id=%s",
+                type(adapter).__name__,
+                request.request_id,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
+                metadata=request.metadata,
+            )
+        if resp.ok and bool((resp.metadata or {}).get("config_changed")):
+            try:
+                await self._agent_manager.reload_agents_config(get_config(), {})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Adapter] config reload failed: %s", exc)
+                payload = dict(resp.payload or {})
+                payload["applied_without_restart"] = False
+                resp.payload = payload
+        if resp.ok and bool((resp.metadata or {}).get("browser_runtime_restart")):
+            try:
+                from openjiuwen.harness.tools import browser_move
 
-        resp = AgentResponse(
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            ok=True,
-            payload={
-                "sessions": sessions,
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            },
-            metadata=request.metadata,
-        )
+                browser_move.restart_local_browser_runtime_server()
+            except Exception as exc:  # noqa: BLE001
+                # Match the former Gateway behavior: persisting the user config
+                # succeeds even when an already-running browser cannot be reset.
+                logger.warning("[Adapter] browser runtime reset after config update failed: %s", exc)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
@@ -4301,6 +4682,197 @@ class AgentWebSocketServer:
                 metadata=request.metadata,
             )
 
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_history_list_turns(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """List rewindable turns in the current AgentServer user directory."""
+        from jiuwenswarm.agents.harness.common.session_ops_service import list_session_turns
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        if not session_id:
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        else:
+            try:
+                resp = AgentResponse(
+                    request_id=request.request_id, channel_id=request.channel_id, ok=True,
+                    payload=list_session_turns(session_id=session_id), metadata=request.metadata,
+                )
+            except Exception as exc:  # noqa: BLE001
+                resp = AgentResponse(
+                    request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                    payload={"error": str(exc), "code": "INTERNAL_ERROR"},
+                    metadata=request.metadata,
+                )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_history_append_record(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Append a Gateway-owned cron result in this AgentServer's user directory."""
+        from jiuwenswarm.server.runtime.session.session_history import append_history_record
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        try:
+            if not session_id:
+                raise ValueError("session_id is required")
+            append_history_record(
+                session_id=session_id,
+                request_id=str(params.get("request_id") or request.request_id),
+                channel_id=str(params.get("channel_id") or request.channel_id),
+                role=str(params.get("role") or "assistant"),
+                event_type=str(params.get("event_type") or "") or None,
+                content=params.get("content") or "",
+                timestamp=float(params.get("timestamp") or time.time()),
+                mode=str(params.get("mode") or "") or None,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=True, payload={"session_id": session_id}, metadata=request.metadata,
+            )
+        except (TypeError, ValueError) as exc:
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": str(exc), "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[AgentWS] history.append_record failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": str(exc), "code": "INTERNAL_ERROR"},
+                metadata=request.metadata,
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_cron_jobs_sync(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Install Gateway's per-user cron snapshot without writing local state."""
+        from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import (
+            install_gateway_jobs_snapshot,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        raw_jobs = params.get("jobs")
+        snapshot_user_id = str(request.user_id or "").strip()
+        if not isinstance(raw_jobs, list):
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "jobs must be a list", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        elif not snapshot_user_id:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "user_id is required", "code": "BAD_REQUEST"},
+                metadata=request.metadata,
+            )
+        else:
+            accepted = install_gateway_jobs_snapshot(raw_jobs, user_id=snapshot_user_id)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"count": accepted},
+                metadata=request.metadata,
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_cron_command_ack(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import (
+            resolve_gateway_cron_command_ack,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        command_id = str(params.get("command_id") or "").strip()
+        # ``list`` and ``preview`` legitimately return lists.  Keep the
+        # Gateway result opaque here; this handler only correlates the command
+        # response with the waiting CronTools call.
+        data = params.get("data")
+        if command_id:
+            resolve_gateway_cron_command_ack(command_id, {"data": data})
+        resp = AgentResponse(
+            request_id=request.request_id, channel_id=request.channel_id,
+            ok=True, payload={}, metadata=request.metadata,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_cron_run_now_ack(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Wake the waiting CronTools.run_now with Gateway's run_id (P2)."""
+        from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import (
+            resolve_gateway_run_ack,
+        )
+
+        params = request.params if isinstance(request.params, dict) else {}
+        ack_request_id = str(params.get("ack_request_id") or "").strip()
+        run_id = str(params.get("run_id") or "").strip()
+        if ack_request_id:
+            resolve_gateway_run_ack(ack_request_id, run_id)
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={"acknowledged": True},
+            metadata=request.metadata,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_session_restore_files(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Restore session files in the current AgentServer user directory."""
+        from jiuwenswarm.agents.harness.common.session_ops_service import restore_session_files
+
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        turn_index = params.get("turn_index")
+        try:
+            if not session_id or turn_index is None:
+                raise ValueError("session_id and turn_index required")
+            payload = restore_session_files(session_id=session_id, turn_index=int(turn_index))
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=True,
+                payload=payload, metadata=request.metadata,
+            )
+        except (TypeError, ValueError) as exc:
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": str(exc), "code": "BAD_REQUEST"}, metadata=request.metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[AgentWS] session.restore_files failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id, ok=False,
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"}, metadata=request.metadata,
+            )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
@@ -7863,7 +8435,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -7873,7 +8445,7 @@ class AgentWebSocketServer:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            return False
 
         try:
             wire = build_server_push_wire(msg)
@@ -7884,7 +8456,7 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
                     msg.get("channel_id", ""),
                 )
-                return
+                return False
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
@@ -7897,8 +8469,10 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 已发送(E2A wire): channel_id=%s",
                     msg.get("channel_id", ""),
                 )
+            return True
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
+            return False
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""
@@ -8110,6 +8684,25 @@ class AgentWebSocketServer:
                         params["project_id"] = project.project_id
                         params["project_dir"] = project.project_dir
                         params["work_mode"] = project.work_mode
+            # Phase 3: TUI code-project resolution. The Gateway no longer
+            # pre-resolves the code project from cwd; AgentServer resolves or
+            # creates it in this process's injected user directory. Mirrors the
+            # external-TUI branch above but for the non-``--session`` case.
+            if (
+                channel_id.strip().lower() == "tui"
+                and not external_tui_session
+                and not str(params.get("project_id") or "").strip()
+            ):
+                from jiuwenswarm.server.runtime.session.project_store import (
+                    find_or_create_code_project_for_tui_params,
+                )
+
+                project = find_or_create_code_project_for_tui_params(params)
+                if project is not None:
+                    params["project_id"] = project.project_id
+                    params["project_dir"] = project.project_dir
+                    params["work_mode"] = project.work_mode
+
             # Step 1: 归一化 work_mode / project_id / project_dir 三元组
             # (与 web _session_create 共用同一 helper，保持主路径/fallback 一致)
             from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
@@ -8806,6 +9399,105 @@ class AgentWebSocketServer:
                 payload={"error": str(exc), "code": "INTERNAL_ERROR"},
             )
 
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_harness_packages_import(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Import a Web-uploaded harness archive in this AgentServer directory."""
+        import base64
+        from jiuwenswarm.common.utils import get_user_workspace_dir
+
+        params = request.params if isinstance(request.params, dict) else {}
+        raw = params.get("file_content")
+        uploaded_path = str(params.get("uploaded_path") or "").strip()
+        try:
+            temp_dir = get_user_workspace_dir() / "auto-harness" / "temp" / "uploads"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            if uploaded_path:
+                temp_path = Path(uploaded_path).resolve(strict=False)
+                temp_root = temp_dir.resolve(strict=False)
+                if temp_path.parent != temp_root or temp_path.suffix.lower() != ".zip":
+                    raise ValueError("invalid uploaded_path")
+                if not temp_path.is_file():
+                    raise ValueError("uploaded archive not found")
+                if temp_path.stat().st_size > 50 * 1024 * 1024:
+                    raise ValueError("File exceeds 50MB limit")
+            else:
+                if not isinstance(raw, str) or not raw:
+                    raise ValueError("Missing file_content")
+                content = base64.b64decode(raw, validate=True)
+                if len(content) > 50 * 1024 * 1024:
+                    raise ValueError("File exceeds 50MB limit")
+                temp_path = temp_dir / f"upload_{request.request_id or uuid.uuid4().hex}.zip"
+                await asyncio.to_thread(temp_path.write_bytes, content)
+            try:
+                service = AutoHarnessService(rail=None, agent=None)
+                package = await asyncio.to_thread(service.import_package, temp_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=True, payload={"ok": True, "package": package, "message": "Package imported successfully"},
+            )
+        except ValueError as exc:
+            message = str(exc)
+            code = "CONFLICT" if "already exists" in message.lower() else "BAD_REQUEST"
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": message, "code": code},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[AgentServer] harness.packages.import failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": f"Import failed: {exc}", "code": "INTERNAL_ERROR"},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_harness_packages_export(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Export a harness package and issue a token for this AgentServer's file bridge."""
+        from jiuwenswarm.agents.harness.common.tools.web_file_download import build_file_download_info
+
+        params = request.params if isinstance(request.params, dict) else {}
+        package_id = str(params.get("package_id") or "").strip()
+        try:
+            if not package_id:
+                raise ValueError("Missing package_id")
+            service = AutoHarnessService(rail=None, agent=None)
+            zip_path = await asyncio.to_thread(service.export_package, package_id)
+            info = build_file_download_info(str(zip_path), zip_path.name, request.session_id or "", expires_in=600)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "ok": True,
+                    "download_url": info["download_url"],
+                    "download_token": info["download_token"],
+                    "filename": info["name"],
+                    "file_size": info["size"],
+                    "message": "Package exported successfully",
+                },
+            )
+        except ValueError as exc:
+            message = str(exc)
+            code = "NOT_FOUND" if "not found" in message.lower() else "BAD_REQUEST"
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": message, "code": code},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[AgentServer] harness.packages.export failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id, channel_id=request.channel_id,
+                ok=False, payload={"error": f"Export failed: {exc}", "code": "INTERNAL_ERROR"},
+            )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)

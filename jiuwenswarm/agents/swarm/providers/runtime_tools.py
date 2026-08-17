@@ -60,6 +60,9 @@ class CronToolsInput(ConstructionInput):
         attr="request_metadata",
         description="Request metadata mapping.",
     )
+    user_id: str | None = context_field(
+        attr="user_id", description="Authenticated request owner for routed tools."
+    )
     language: str = context_field(
         attr="language", default="cn", description="Member language code."
     )
@@ -93,6 +96,7 @@ def build_cron_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any
         channel_id=inp.channel_id or "web",
         session_id=inp.session_id,
         metadata=inp.request_metadata,
+        user_id=inp.user_id,
         mode="team",
     )
     try:
