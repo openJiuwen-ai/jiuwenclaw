@@ -416,8 +416,8 @@ function isSkillNode(node: GraphNode): boolean {
 }
 
 function nodeRadius(node: GraphNode): number {
-  const base = node.type === 'skill' ? 7 : 5;
-  return Math.min(22, base + Math.sqrt(Math.max(0, node.degree)) * 2.1);
+  const base = node.type === 'skill' ? 9 : 7;
+  return Math.min(24, base + Math.sqrt(Math.max(0, node.degree)) * 2.1);
 }
 
 function truncate(value: string, limit: number): string {
@@ -1333,7 +1333,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         ctx.restore();
 
         if (transformRef.current.scale > 0.42 || selected || hovered) {
-          ctx.font = `${selected ? 700 : highlighted || hovered ? 600 : 400} ${selected ? 12 : 11}px Inter, system-ui, sans-serif`;
+          ctx.font = `${selected ? 700 : highlighted || hovered ? 600 : 400} ${selected ? 13 : 12}px Inter, system-ui, sans-serif`;
           ctx.fillStyle = dimmed
             ? GRAPH_LABEL_DIMMED
             : selected || highlighted || hovered
