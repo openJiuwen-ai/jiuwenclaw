@@ -405,8 +405,14 @@ def _normalize_tool_args(raw: Any) -> dict | None:
 
 def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
     tool_name = str(_read_value_field(value_obj, "tool_name", "") or "").strip()
-    if tool_name == "ask_user":
-        return True
+    # Prefer the explicit tool identity whenever it is available.  Many tools
+    # (for example memory_search) have a plain ``query`` argument, so treating
+    # every query-only interrupt as ask_user misroutes permission responses.
+    if tool_name:
+        return tool_name == "ask_user"
+
+    # Legacy ask_user interrupt payloads may not carry tool_name.  Keep the
+    # structural fallbacks below only for those identity-less payloads.
     if hasattr(value_obj, "payload_schema") and hasattr(value_obj, "questions"):
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
