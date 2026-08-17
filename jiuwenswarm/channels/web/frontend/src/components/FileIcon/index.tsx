@@ -46,7 +46,7 @@ export function FileIcon(props: FileIconProps) {
   const dimensionStyle: CSSProperties = { width: size, height: size, display: 'block', flexShrink: 0 };
 
   return (
-    <img src={FILE_ICON_ASSETS[iconType]} alt="" aria-hidden="true" draggable={false} width={size} height={size} className={className} style={dimensionStyle} />
+    <img src={FILE_ICON_ASSETS[iconType]} alt="" aria-hidden="true" draggable={false} width={size} height={size} data-testid="file-icon" data-variant={iconType} className={className} style={dimensionStyle} />
   );
 }
 

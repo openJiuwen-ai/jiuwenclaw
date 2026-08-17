@@ -148,6 +148,8 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+        # AgentOSRouterClient for same-port HTTP container file APIs (set by handlers).
+        self.container_file_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -360,13 +362,17 @@ class WebChannel(BaseWsChannel):
         return connection_user_id
 
     @staticmethod
-    def _connection_user_id(ws: Any) -> str | None:
+    def connection_user_id(ws: Any) -> str | None:
         """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
         uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
         if uid is None:
             return None
         text = str(uid).strip()
         return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        return WebChannel.connection_user_id(ws)
 
     def _extract_ws_user_id(self, ws: Any) -> str:
         """WebChannel: 从 ws 提取连接级 user_id。"""
@@ -701,7 +707,13 @@ class WebChannel(BaseWsChannel):
                 "session_id": msg.session_id,
                 "content": content,
             }
-            for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
+            for _key in (
+                "role", "member_name", "member_action", "source_channel", "user_id", "display_name",
+                # 主动推荐标记需透传到所有 chunk 事件（chat.delta/chat.reasoning/…），
+                # 否则前端无法按 source 短路：proactive 的 chat.reasoning 会被当作
+                # 用户轮思考流追加进 reasoningSegments，污染上一条消息的思考状态。
+                "source", "proactive_type", "proactive_target",
+            ):
                 _val = msg.payload.get(_key)
                 if _val is not None:
                     payload[_key] = _val
@@ -710,16 +722,12 @@ class WebChannel(BaseWsChannel):
                 if isinstance(cron_extra, dict):
                     payload["cron"] = cron_extra
                 source = msg.payload.get("source")
-                if source:
-                    payload["source"] = source
-                ptype = msg.payload.get("proactive_type")
-                if ptype:
-                    payload["proactive_type"] = ptype
                 if source == "proactive_recommendation":
                     logger.info(
                         "[WebChannel] proactive push frame: source=%s proactive_type=%s "
                         "content_len=%d payload_keys=%s",
-                        source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        source, msg.payload.get("proactive_type"),
+                        len(str(payload.get("content", ""))), list(payload.keys()),
                     )
             return payload
 

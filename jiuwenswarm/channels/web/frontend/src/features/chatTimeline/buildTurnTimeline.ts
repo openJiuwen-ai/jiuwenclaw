@@ -274,6 +274,16 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
   };
 
   const pushMessage = (item: Extract<TimelineItem, { type: 'message' }>) => {
+    // 主动推荐消息是系统后台触发的主 agent 话术，不是用户这一轮的回复。
+    // assistant 消息默认沿用 currentTurnId（与上一轮同 turn），会让推荐消息并入
+    // 上一轮 turn——既存 proactive 补丁（buildTurnWorkMeta）据此把该 turn 的
+    // hasWork 置 false，误伤上一轮：上一轮 reasoning 从折叠的 turn chip
+    // （「已完成」）变成展开的 ReasoningBlock（「已完成思考」+ team_leader avatar）。
+    // 给 proactive 消息推进一个独立 turnId，自成一块。insertTurnSummaries 里
+    // 对 proactive 消息做了同样的 flush+turnId+1，两者保持同步。
+    if (item.message.role !== 'user' && item.message.isProactiveRecommendation) {
+      currentTurnId += 1;
+    }
     renderItems.push({
       type: 'message',
       key: item.key,
@@ -338,7 +348,13 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
     if (isAssistantReply) {
       const inRunningTurn = isProcessing && renderItem.turnId === activeTurnId;
       renderItem.hideMeta = laterAssistantInTurn || inRunningTurn;
-      laterAssistantInTurn = true;
+      // 主动推荐消息是系统后台插入的推荐卡片，不是用户这一轮的后续回复。
+      // 若让它置 laterAssistantInTurn=true，会把它前面的上一轮回复当成「中间文字」
+      // 折叠进 turn chip，导致上一轮 agent 回复正文被整个收起（只剩「已完成」）。
+      // proactive 消息自成一块，不影响其前方回复的折叠判定。
+      if (!renderItem.message.isProactiveRecommendation) {
+        laterAssistantInTurn = true;
+      }
     }
   }
 
@@ -473,6 +489,17 @@ function insertTurnSummaries(items: RenderItem[], isProcessing: boolean): Render
       acc(toTimestampMs(item.message.timestamp), false);
       out.push(item);
       continue;
+    }
+    // 主动推荐消息自成一块（与 buildRenderItems 里推进 currentTurnId 对齐）：
+    // 先 flush 掉上一轮，再 +1 进入新 turn，避免推荐消息并入上一轮导致
+    // buildTurnWorkMeta 的 proactive 补丁误把上一轮 hasWork 置 false。
+    if (
+      item.type === 'message' &&
+      item.message.role !== 'user' &&
+      item.message.isProactiveRecommendation
+    ) {
+      flush(false);
+      turnId += 1;
     }
     if (item.type === 'toolGroup') {
       hasActivity = true;

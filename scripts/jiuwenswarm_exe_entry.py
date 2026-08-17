@@ -10,6 +10,8 @@ import subprocess
 import traceback
 from pathlib import Path
 
+from jiuwenswarm.common._build_config import DISPLAY_NAME, ERROR_LOG_NAME
+
 # frozen（PyInstaller 打包）模式下，macOS 双击 .app 启动时 cwd 为 "/"，
 # 导致 openjiuwen 的默认日志路径 "./logs/" 解析为 "/logs/"（只读）。
 # 在任何业务 import 之前，将 cwd 切换到用户数据目录 ~/.jiuwenswarm，
@@ -41,6 +43,17 @@ if getattr(sys, "frozen", False):
             ctypes.windll.kernel32.SetConsoleCP(65001)
         except Exception:  # noqa: BLE001
             pass
+
+    _frozen_exe_dir = Path(sys.executable).resolve().parent
+    _frozen_internal_dir = Path(getattr(sys, "_MEIPASS", _frozen_exe_dir / "_internal")).resolve()
+    _path_prefixes = [
+        str(path)
+        for path in (_frozen_exe_dir, _frozen_internal_dir)
+        if path.exists()
+    ]
+    if _path_prefixes:
+        _old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join([*_path_prefixes, _old_path] if _old_path else _path_prefixes)
 
     # macOS：把 .app 内置的 node-runtime/bin 前置到 PATH，使 shutil.which("npx")
     # 与 playwright_runtime 默认的 "npx" 命令命中内置 Node（> v18），
@@ -105,6 +118,115 @@ _DESKTOP_INSTALL_UPDATE = "--desktop-install-update"
 _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
         _DESKTOP_RUN_AGENT, _DESKTOP_RUN_GATEWAY, _DESKTOP_INSTALL_UPDATE}
 
+# Inno Setup checks these named mutexes before install/uninstall. The legacy
+# names are a stable upgrade protocol: installers using the existing AppId must
+# still detect a running JiuwenSwarm process after the product rename. Every
+# new frozen process holds both legacy and current names for its entire lifetime.
+# The detached update helper is intentionally exempt: after the desktop process
+# tree exits it must be able to launch the next installer.
+_LEGACY_WINDOWS_APP_MUTEX_NAMES = (
+    "JiuwenSwarm.App",
+    r"Global\JiuwenSwarm.App",
+)
+_WINDOWS_APP_MUTEX_NAMES = (
+    *_LEGACY_WINDOWS_APP_MUTEX_NAMES,
+    f"{DISPLAY_NAME}.App",
+    rf"Global\{DISPLAY_NAME}.App",
+)
+_WINDOWS_APP_MUTEX_HANDLES: list[int] = []
+
+
+def _should_hold_windows_app_mutex() -> bool:
+    return (
+        os.name == "nt"
+        and getattr(sys, "frozen", False)
+        and _DESKTOP_INSTALL_UPDATE not in sys.argv
+    )
+
+
+def _acquire_windows_app_mutexes() -> None:
+    """Advertise frozen Windows processes to Setup/Uninstall via AppMutex."""
+    if _WINDOWS_APP_MUTEX_HANDLES or not _should_hold_windows_app_mutex():
+        return
+
+    try:
+        from ctypes import wintypes
+
+        class _SecurityAttributes(ctypes.Structure):
+            _fields_ = [
+                ("nLength", wintypes.DWORD),
+                ("lpSecurityDescriptor", wintypes.LPVOID),
+                ("bInheritHandle", wintypes.BOOL),
+            ]
+
+        class _SecurityDescriptor(ctypes.Structure):
+            _fields_ = [
+                ("Revision", wintypes.BYTE),
+                ("Sbz1", wintypes.BYTE),
+                ("Control", wintypes.WORD),
+                ("Owner", wintypes.LPVOID),
+                ("Group", wintypes.LPVOID),
+                ("Sacl", wintypes.LPVOID),
+                ("Dacl", wintypes.LPVOID),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        initialize_security_descriptor = advapi32.InitializeSecurityDescriptor
+        initialize_security_descriptor.argtypes = [wintypes.LPVOID, wintypes.DWORD]
+        initialize_security_descriptor.restype = wintypes.BOOL
+        set_security_descriptor_dacl = advapi32.SetSecurityDescriptorDacl
+        set_security_descriptor_dacl.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.LPVOID,
+            wintypes.BOOL,
+        ]
+        set_security_descriptor_dacl.restype = wintypes.BOOL
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = [
+            ctypes.POINTER(_SecurityAttributes),
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        create_mutex.restype = wintypes.HANDLE
+
+        # A null DACL lets an elevated uninstaller, or an uninstaller launched
+        # from another user session, open the Global mutex for detection.
+        security_descriptor = _SecurityDescriptor()
+        security_attributes = None
+        if initialize_security_descriptor(ctypes.byref(security_descriptor), 1):
+            if set_security_descriptor_dacl(
+                ctypes.byref(security_descriptor),
+                True,
+                None,
+                False,
+            ):
+                security_attributes = _SecurityAttributes(
+                    ctypes.sizeof(_SecurityAttributes),
+                    ctypes.cast(
+                        ctypes.pointer(security_descriptor),
+                        wintypes.LPVOID,
+                    ),
+                    False,
+                )
+
+        security_attributes_ptr = (
+            ctypes.byref(security_attributes) if security_attributes else None
+        )
+        for mutex_name in _WINDOWS_APP_MUTEX_NAMES:
+            handle = create_mutex(security_attributes_ptr, False, mutex_name)
+            if handle:
+                # Intentionally keep each handle open for the process lifetime.
+                # Windows closes process handles during final process teardown,
+                # so Inno Setup cannot proceed while Python is still unloading
+                # modules or running exit handlers.
+                _WINDOWS_APP_MUTEX_HANDLES.append(int(handle))
+    except (AttributeError, OSError, ValueError):
+        # Mutex registration must never stop the application from starting.
+        # The session-local mutex is attempted first, so it normally remains
+        # available even if creation of the Global mutex is restricted.
+        pass
 # ── 单实例锁（在重量级 import 之前执行） ──────────────────────────
 _SINGLE_INSTANCE_LOCK_FD: int | None = None
 
@@ -157,8 +279,8 @@ def _release_single_instance_lock() -> None:
 
 
 def _show_already_running_message() -> None:
-    msg = "JiuwenSwarm is already running. Please use the existing window."
-    title = "JiuwenSwarm"
+    msg = f"{DISPLAY_NAME} is already running. Please use the existing window."
+    title = DISPLAY_NAME
     try:
         if os.name == "nt":
             ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)
@@ -179,7 +301,7 @@ def _write_child_error(exc: BaseException) -> None:
     try:
         log_dir = Path(os.environ.get("JIUWENSARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "jiuwenswarm_exe_error.log"
+        log_file = log_dir / ERROR_LOG_NAME
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:
             f.write(f"{'=' * 60}\n")
             f.write(f"argv: {sys.argv}\n")
@@ -201,6 +323,7 @@ def _pop_flag(flag: str) -> bool:
 
 
 def main() -> None:
+    _acquire_windows_app_mutexes()
     try:
         _dispatch()
     except SystemExit:

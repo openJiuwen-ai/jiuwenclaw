@@ -353,3 +353,9 @@ cd jiuwenswarm
 停止 JiuwenSwarm 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
 
 > ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

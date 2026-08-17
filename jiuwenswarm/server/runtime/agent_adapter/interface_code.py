@@ -86,6 +86,9 @@ from jiuwenswarm.common.coding_memory_paths import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.common.task_loop_config import (
+    resolve_task_loop_completion_timeout,
+)
 from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
@@ -95,12 +98,42 @@ from jiuwenswarm.common.utils import (
 logger = logging.getLogger(__name__)
 
 
+class _CodingMemoryToolWorkspace:
+    """Expose the app-owned Coding Memory path to its dedicated tools only.
+
+    ``Workspace.directories`` is materialized below the project root by
+    openJiuwen's ``DirectoryBuilder`` and therefore only accepts relative
+    project paths. Coding Memory is intentionally outside that tree. The
+    dedicated tools only need ``get_node_path`` for path validation, so this
+    narrow adapter keeps their storage path independent from the project
+    workspace without widening filesystem access for command tools.
+    """
+
+    def __init__(self, coding_memory_dir: str) -> None:
+        self._coding_memory_dir = coding_memory_dir
+
+    def get_node_path(self, node_name: str) -> str | None:
+        if node_name in {"memory", "coding_memory"}:
+            return self._coding_memory_dir
+        return None
+
+
 class CodingMemoryRail(_BaseCodingMemoryRail):
     """Keep Coding Memory cold-start indexing out of the request path."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._manager_init_task: asyncio.Task[None] | None = None
+
+    def _register_coding_memory_tools(self, agent: Any) -> None:
+        """Bind Coding Memory tools to their system-owned storage directory."""
+
+        workspace = self.workspace
+        self.workspace = _CodingMemoryToolWorkspace(self._coding_memory_dir)
+        try:
+            super()._register_coding_memory_tools(agent)
+        finally:
+            self.workspace = workspace
 
     async def before_invoke(self, ctx: Any) -> None:
         """Start manager initialization without delaying the user request."""
@@ -310,56 +343,6 @@ def _resolve_coding_memory_dir(
     )
 
 
-def _build_coding_memory_directory_node(
-    coding_memory_path: str,
-    *,
-    description: str,
-) -> dict[str, Any]:
-    return {
-        "name": "coding_memory",
-        "description": description,
-        "path": coding_memory_path,
-        "children": [
-            {
-                "name": "MEMORY.md",
-                "description": "Coding 记忆索引",
-                "path": "MEMORY.md",
-                "children": [],
-                "is_file": True,
-                "default_content": "",
-            },
-        ],
-    }
-
-
-def _set_workspace_coding_memory_directory(
-    workspace: Any,
-    *,
-    project_dir: str | None,
-    agent_workspace_dir: str,
-    description: str = "Coding Agent memory",
-) -> None:
-    set_directory = getattr(workspace, "set_directory", None)
-    if not callable(set_directory):
-        return
-
-    # CodingMemoryRail uses this same app-owned directory for MEMORY.md.  The
-    # coding-memory tools resolve individual memory files through the workspace
-    # node, so the node must point at the absolute storage directory as well;
-    # a project-relative node would split memory files and their index across
-    # two locations.
-    coding_memory_path = resolve_project_coding_memory_dir(
-        agent_workspace_dir=agent_workspace_dir,
-        project_dir=project_dir,
-    )
-    set_directory(
-        _build_coding_memory_directory_node(
-            coding_memory_path,
-            description=description,
-        )
-    )
-
-
 def create_coding_memory_rail(
     *,
     project_dir: str | None,
@@ -557,12 +540,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             root_path=self._workspace_dir or "./",
             language=self._resolve_runtime_language(),
         )
-        _set_workspace_coding_memory_directory(
-            workspace,
-            project_dir=self._project_dir or self._workspace_dir,
-            agent_workspace_dir=self._agent_workspace_dir,
-            description="Coding Agent 记忆模块",
-        )
 
         self._instance = create_deep_agent(
             model=model,
@@ -581,7 +558,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             auto_create_workspace=False,
-            completion_timeout=config.get("completion_timeout", 3600.0),
+            completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
         # 改动3：让 agent 初始化（ensure_initialized）在独立线程 + 独立事件循环里跑，
@@ -643,6 +620,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         await self._register_mcp_servers_from_config(config_base, tag="code")
         logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
+        # 恢复已激活的 harness packages（skills, rails, tools）——与 DeepAdapter
+        # create_instance 对齐，否则 code 模式新建实例时不携带已激活扩展。
+        await self._load_active_packages()
         await self.load_user_rails()
 
     # ─── Rails 构建 ──────────────────────────
@@ -1598,12 +1578,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         tool_cards = self.build_code_tool_cards(agent_id)
         added_tools = _merge_tool_cards(agent, tool_cards)
 
-        _set_coding_memory_directory(
-            agent,
-            initial_workspace,
-            self._agent_workspace_dir,
-        )
-
         rails = self._build_agent_rails(react_config, config_base, mode="code")
         added_rails = sum(1 for rail in rails if _queue_rail_if_missing(agent, rail))
 
@@ -1734,21 +1708,6 @@ def _resolve_member_workspace_root(agent: Any) -> str | None:
     if root_path:
         return str(root_path)
     return None
-
-
-def _set_coding_memory_directory(
-    agent: Any,
-    project_dir: str | None,
-    agent_workspace_dir: str,
-) -> None:
-    deep_config = getattr(agent, "deep_config", None)
-    workspace = getattr(deep_config, "workspace", None)
-    _set_workspace_coding_memory_directory(
-        workspace,
-        project_dir=project_dir,
-        agent_workspace_dir=agent_workspace_dir,
-        description="Coding Agent memory",
-    )
 
 
 def configure_code_team_member_agent(

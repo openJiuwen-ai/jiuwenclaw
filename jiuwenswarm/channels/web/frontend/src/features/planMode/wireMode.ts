@@ -11,7 +11,8 @@
  * ```
  *
  * `work` / `code` 由请求里的 `work_mode` 单独表达，后端据此决定使用 Deep 还是
- * Code profile。前端不需要拼 `code.normal` / `code.plan` / `code.team`。
+ * Code profile；其中 `team + code` 会在后端归一为与 TUI `team.code` 相同的
+ * `code.team` runtime。前端不需要自行拼接 canonical mode。
  */
 
 /** UI 层的基础模式。只有单 agent 支持 Plan。 */

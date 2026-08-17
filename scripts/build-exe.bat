@@ -1,15 +1,21 @@
 @echo off
-REM JiuwenSwarm build-exe script
+REM Windows build-exe script
 REM Usage: scripts\build-exe.bat  or double-click to run
 
 REM Project root = parent of this bat's own dir. Path-relative, survives relocation.
 cd /d "%~dp0\.."
 
-echo === JiuwenSwarm build-exe ===
+echo === Windows build-exe ===
 echo.
 
-echo [1/3] Installing Python deps (uv sync --extra dev)...
-call uv sync --extra dev
+set "BUILD_DISPLAY_NAME="
+for /f "usebackq delims=" %%L in (`uv run --no-project --python 3.11 python scripts\build_config.py --sync --emit-batch`) do %%L
+if not defined BUILD_DISPLAY_NAME exit /b 1
+echo Build identity: %BUILD_DISPLAY_NAME% %BUILD_VERSION%
+echo.
+
+echo [1/3] Installing Python deps (uv sync --extra dev --extra claude --extra codex)...
+call uv sync --extra dev --extra claude --extra codex
 if errorlevel 1 exit /b 1
 
 echo.
@@ -34,13 +40,13 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo Verifying frozen A2UI v0.8 bundle...
-start "" /wait "%cd%\dist\jiuwenswarm\jiuwenswarm.exe" "%cd%\scripts\verify_a2ui_bundle.py"
+start "" /wait "%cd%\dist\%BUILD_DIST_DIR_NAME%\%BUILD_EXECUTABLE_NAME_WINDOWS%" "%cd%\scripts\verify_a2ui_bundle.py"
 if errorlevel 1 exit /b 1
 
 echo.
 echo === Build complete ===
-echo Desktop dir: %cd%\dist\jiuwenswarm
-echo Main exe:    %cd%\dist\jiuwenswarm\jiuwenswarm.exe
+echo Desktop dir: %cd%\dist\%BUILD_DIST_DIR_NAME%
+echo Main exe:    %cd%\dist\%BUILD_DIST_DIR_NAME%\%BUILD_EXECUTABLE_NAME_WINDOWS%
 pause
 exit /b 0
 

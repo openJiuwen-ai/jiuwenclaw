@@ -326,3 +326,9 @@ SignalDetector 基于规则工作，不需要调用 LLM，因此响应速度快�
 其中：
 - `applied: false` 表示待固化状态
 - `applied: true` 表示已固化到 SKILL.md
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

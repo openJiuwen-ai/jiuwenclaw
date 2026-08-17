@@ -78,10 +78,14 @@ def build_web_channel_app(channel: WebChannel) -> FastAPI:
 def register_http_routes(app: FastAPI, channel: WebChannel) -> None:
     """Register optional HTTP routes on the WebChannel port.
 
-    Intentionally empty in Phase 1. Future uploads/downloads should be added here
-    (or via included routers) so ``/ws`` remains unchanged.
+    Container file APIs are mounted when ``channel.container_file_client`` is an
+    ``AgentOSRouterClient`` (wired during web handler registration).
     """
-    _ = (app, channel)
+    from jiuwenswarm.gateway.channel_manager.web.container_file_http import (
+        attach_container_file_routes,
+    )
+
+    attach_container_file_routes(app, channel)
 
 
 async def _serve_channel_websocket(channel: WebChannel, websocket: WebSocket) -> None:

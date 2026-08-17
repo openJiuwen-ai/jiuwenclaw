@@ -415,31 +415,31 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   const renderVersionInfo = () => {
     if (isSelectedNative) {
       return (
-        <div className="harness-package-panel__info">
-          <div className="harness-package-panel__info-title">
+        <div className="harness-package-panel__info" data-testid="harness-package-panel-info" data-variant="native">
+          <div className="harness-package-panel__info-title" data-testid="harness-package-panel-info-title" data-variant="native">
             {t('harnessPackage.versionInfo')}
           </div>
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="native_version_type">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="native_version_type">
               {t('harnessPackage.versionType')}
             </span>
-            <span className="harness-package-panel__info-badge">
+            <span className="harness-package-panel__info-badge" data-testid="harness-package-panel-info-badge" data-variant="native_version_type">
               {t('harnessPackage.nativeVersion')}
             </span>
           </div>
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="native_status">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="native_status">
               {t('harnessPackage.status')}
             </span>
-            <span className={`harness-package-panel__info-badge ${nativeVersion?.is_active ? 'harness-package-panel__info-badge--active' : ''}`}>
+            <span className={`harness-package-panel__info-badge ${nativeVersion?.is_active ? 'harness-package-panel__info-badge--active' : ''}`} data-testid="harness-package-panel-info-badge" data-variant="native_status">
               {nativeVersion?.is_active ? t('harnessPackage.active') : t('harnessPackage.inactive')}
             </span>
           </div>
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="native_description">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="native_description">
               {t('harnessPackage.description')}
             </span>
-            <span className="harness-package-panel__info-value">
+            <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="native_description">
               {t('harnessPackage.nativeDescription')}
             </span>
           </div>
@@ -454,76 +454,76 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
     const isActive = isPackageActive(selectedPackage.id);
 
     return (
-      <div className="harness-package-panel__info">
-        <div className="harness-package-panel__info-title">
+      <div className="harness-package-panel__info" data-testid="harness-package-panel-info" data-variant="package">
+        <div className="harness-package-panel__info-title" data-testid="harness-package-panel-info-title" data-variant="package">
           {t('harnessPackage.versionInfo')}
         </div>
-        <div className="harness-package-panel__info-item">
-          <span className="harness-package-panel__info-label">
+        <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_extension_name">
+          <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_extension_name">
             {t('harnessPackage.extensionName')}
           </span>
-          <span className="harness-package-panel__info-value">
+          <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="package_extension_name">
             {selectedPackage.extension_name}
           </span>
         </div>
-        <div className="harness-package-panel__info-item">
-          <span className="harness-package-panel__info-label">
+        <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_version_type">
+          <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_version_type">
             {t('harnessPackage.versionType')}
           </span>
-          <span className="harness-package-panel__info-badge">
+          <span className="harness-package-panel__info-badge" data-testid="harness-package-panel-info-badge" data-variant="package_version_type">
             {t('harnessPackage.harnessVersion')}
           </span>
         </div>
-        <div className="harness-package-panel__info-item">
-          <span className="harness-package-panel__info-label">
+        <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_status">
+          <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_status">
             {t('harnessPackage.status')}
           </span>
-          <span className={`harness-package-panel__info-badge ${isActive ? 'harness-package-panel__info-badge--active' : ''}`}>
+          <span className={`harness-package-panel__info-badge ${isActive ? 'harness-package-panel__info-badge--active' : ''}`} data-testid="harness-package-panel-info-badge" data-variant="package_status">
             {isActive ? t('harnessPackage.active') : t('harnessPackage.inactive')}
           </span>
         </div>
-        <div className="harness-package-panel__info-item">
-          <span className="harness-package-panel__info-label">
+        <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_created_at">
+          <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_created_at">
             {t('harnessPackage.createdAt')}
           </span>
-          <span className="harness-package-panel__info-value">
+          <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="package_created_at">
             {formatDate(selectedPackage.created_at)}
           </span>
         </div>
         {isActive && selectedPackage.activated_at && (
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_activated_at">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_activated_at">
               {t('harnessPackage.activatedAt')}
             </span>
-            <span className="harness-package-panel__info-value">
+            <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="package_activated_at">
               {formatDate(selectedPackage.activated_at)}
             </span>
           </div>
         )}
         {selectedPackage.version_label && (
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_version_label">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_version_label">
               {t('harnessPackage.versionLabel')}
             </span>
-            <span className="harness-package-panel__info-value">
+            <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="package_version_label">
               {selectedPackage.version_label}
             </span>
           </div>
         )}
-        <div className="harness-package-panel__info-item">
-          <span className="harness-package-panel__info-label">
+        <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_runtime_path">
+          <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_runtime_path">
             {t('harnessPackage.runtimePath')}
           </span>
-          <span className="harness-package-panel__info-value harness-package-panel__info-value--mono">
+          <span className="harness-package-panel__info-value harness-package-panel__info-value--mono" data-testid="harness-package-panel-info-value" data-variant="package_runtime_path">
             {selectedPackage.runtime_path}
           </span>
         </div>
         {selectedPackage.description && (
-          <div className="harness-package-panel__info-item">
-            <span className="harness-package-panel__info-label">
+          <div className="harness-package-panel__info-item" data-testid="harness-package-panel-info-item" data-variant="package_description">
+            <span className="harness-package-panel__info-label" data-testid="harness-package-panel-info-label" data-variant="package_description">
               {t('harnessPackage.description')}
             </span>
-            <span className="harness-package-panel__info-value">
+            <span className="harness-package-panel__info-value" data-testid="harness-package-panel-info-value" data-variant="package_description">
               {selectedPackage.description}
             </span>
           </div>
@@ -534,10 +534,10 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
   if (loadingPackages) {
     return (
-      <div className="harness-package-panel">
-        <div className="harness-package-panel__loading">
+      <div className="harness-package-panel" data-testid="harness-package-panel-loading">
+        <div className="harness-package-panel__loading" data-testid="harness-package-panel-loading-body">
           <div className="harness-package-panel__spinner" />
-          <span>{t('harnessPackage.loading')}</span>
+          <span data-testid="harness-package-panel-loading-text">{t('harnessPackage.loading')}</span>
         </div>
       </div>
     );
@@ -545,13 +545,14 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
   if (loadError) {
     return (
-      <div className="harness-package-panel">
-        <div className="harness-package-panel__error">
-          <span>{loadError}</span>
+      <div className="harness-package-panel" data-testid="harness-package-panel-error">
+        <div className="harness-package-panel__error" data-testid="harness-package-panel-error-body">
+          <span data-testid="harness-package-panel-error-text">{loadError}</span>
           <button
             type="button"
             onClick={fetchPackages}
             className="harness-package-panel__retry-btn"
+            data-testid="harness-package-panel-error-retry-btn"
           >
             {t('harnessPackage.retry')}
           </button>
@@ -561,16 +562,17 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   }
 
   return (
-    <div className="harness-package-panel">
+    <div className="harness-package-panel" data-testid="harness-package-panel">
       {/* Header */}
-      <div className="harness-package-panel__header">
-        <h3>{t('harnessPackage.title')}</h3>
-        <div className="harness-package-panel__header-actions">
+      <div className="harness-package-panel__header" data-testid="harness-package-panel-header">
+        <h3 data-testid="harness-package-panel-title">{t('harnessPackage.title')}</h3>
+        <div className="harness-package-panel__header-actions" data-testid="harness-package-panel-header-actions">
           <button
             type="button"
             onClick={scanPackages}
             className="harness-package-panel__refresh-btn"
             disabled={loadingPackages}
+            data-testid="harness-package-panel-refresh-btn"
           >
             {loadingPackages ? t('common.refreshing') : t('harnessPackage.refresh')}
           </button>
@@ -580,6 +582,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
               onClick={handleDeactivateAll}
               className="harness-package-panel__deactivate-all-btn"
               disabled={deactivatingAll}
+              data-testid="harness-package-panel-deactivate-all-btn"
             >
               {deactivatingAll ? t('harnessPackage.deactivating') : t('harnessPackage.deactivateAll')}
             </button>
@@ -589,6 +592,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
             onClick={handleImportClick}
             className="harness-package-panel__import-btn"
             disabled={importing}
+            data-testid="harness-package-panel-import-btn"
           >
             {importing ? t('harnessPackage.importing') : t('harnessPackage.import')}
           </button>
@@ -597,6 +601,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
             onClick={handleExport}
             className="harness-package-panel__export-btn"
             disabled={isSelectedNative || exporting || !selectedPackage}
+            data-testid="harness-package-panel-export-btn"
           >
             {exporting ? t('harnessPackage.exporting') : t('harnessPackage.export')}
           </button>
@@ -608,21 +613,23 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
           ref={fileInputRef}
           onChange={handleFileSelect}
           style={{ display: 'none' }}
+          data-testid="harness-package-panel-import-file-input"
         />
       </div>
 
       {/* Main content - Left: selector & info, Right: file tree */}
-      <div className="harness-package-panel__main">
+      <div className="harness-package-panel__main" data-testid="harness-package-panel-main">
         {/* Left side */}
-        <div className="harness-package-panel__left">
+        <div className="harness-package-panel__left" data-testid="harness-package-panel-left">
           {/* Version Selector */}
-          <div className="harness-package-panel__selector">
-            <label htmlFor="version-select">{t('harnessPackage.versionSelector')}</label>
+          <div className="harness-package-panel__selector" data-testid="harness-package-panel-selector">
+            <label htmlFor="version-select" data-testid="harness-package-panel-selector-label">{t('harnessPackage.versionSelector')}</label>
             <select
               id="version-select"
               value={selectedPackageId || 'native'}
               onChange={handleVersionChange}
               className="harness-package-panel__select"
+              data-testid="harness-package-panel-select"
             >
               {buildVersionOptions()}
             </select>
@@ -633,8 +640,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         </div>
 
         {/* Right side - File Tree */}
-        <div className="harness-package-panel__right">
-          <div className="harness-package-panel__tree">
+        <div className="harness-package-panel__right" data-testid="harness-package-panel-right">
+          <div className="harness-package-panel__tree" data-testid="harness-package-panel-tree">
             {selectedPackage ? (
               <HarnessExtensionTree
                 key={selectedPackage.id}
@@ -643,7 +650,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
                 showExport={false}
               />
             ) : (
-              <div className="harness-package-panel__no-extension">
+              <div className="harness-package-panel__no-extension" data-testid="harness-package-panel-no-extension">
                 {t('harnessPackage.selectToViewFiles')}
               </div>
             )}
@@ -652,8 +659,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
       </div>
 
       {/* Footer - Activate/Deactivate Section */}
-      <div className="harness-package-panel__footer">
-        <div className="harness-package-panel__actions">
+      <div className="harness-package-panel__footer" data-testid="harness-package-panel-footer">
+        <div className="harness-package-panel__actions" data-testid="harness-package-panel-actions">
           {/* Toggle Active Button - changes based on status */}
           {!isSelectedNative && (
             <button
@@ -661,6 +668,8 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
               onClick={handleToggleActive}
               className={isSelectedActive ? 'harness-package-panel__deactivate-btn' : 'harness-package-panel__activate-btn'}
               disabled={activatingPackage || deactivatingPackage}
+              data-testid="harness-package-panel-toggle-active-btn"
+              data-variant={isSelectedActive ? 'deactivate' : 'activate'}
             >
               {activatingPackage
                 ? t('harnessPackage.activating')
@@ -678,6 +687,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
             onClick={handleDeleteClick}
             className="harness-package-panel__delete-btn"
             disabled={isSelectedNative || deletingPackage || !selectedPackage}
+            data-testid="harness-package-panel-delete-btn"
           >
             {deletingPackage
               ? t('harnessPackage.deleting')
@@ -686,54 +696,54 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         </div>
 
         {/* Status Messages */}
-        <div className="harness-package-panel__status">
+        <div className="harness-package-panel__status" data-testid="harness-package-panel-status">
           {activateSuccess && (
-            <div className="harness-package-panel__success">
+            <div className="harness-package-panel__success" data-testid="harness-package-panel-success-message" data-variant="activate_result">
               {activateSuccess}
             </div>
           )}
           {activateError && (
-            <div className="harness-package-panel__error-msg">
+            <div className="harness-package-panel__error-msg" data-testid="harness-package-panel-error-message" data-variant="activate_result">
               {activateError}
             </div>
           )}
           {deactivateSuccess && (
-            <div className="harness-package-panel__success">
+            <div className="harness-package-panel__success" data-testid="harness-package-panel-success-message" data-variant="deactivate_result">
               {deactivateSuccess}
             </div>
           )}
           {deactivateError && (
-            <div className="harness-package-panel__error-msg">
+            <div className="harness-package-panel__error-msg" data-testid="harness-package-panel-error-message" data-variant="deactivate_result">
               {deactivateError}
             </div>
           )}
           {deleteSuccess && (
-            <div className="harness-package-panel__success">
+            <div className="harness-package-panel__success" data-testid="harness-package-panel-success-message" data-variant="delete_result">
               {deleteSuccess}
             </div>
           )}
           {deleteError && (
-            <div className="harness-package-panel__error-msg">
+            <div className="harness-package-panel__error-msg" data-testid="harness-package-panel-error-message" data-variant="delete_result">
               {deleteError}
             </div>
           )}
           {importSuccess && (
-            <div className="harness-package-panel__success">
+            <div className="harness-package-panel__success" data-testid="harness-package-panel-success-message" data-variant="import_result">
               {importSuccess}
             </div>
           )}
           {importError && (
-            <div className="harness-package-panel__error-msg">
+            <div className="harness-package-panel__error-msg" data-testid="harness-package-panel-error-message" data-variant="import_result">
               {importError}
             </div>
           )}
           {exportSuccess && (
-            <div className="harness-package-panel__success">
+            <div className="harness-package-panel__success" data-testid="harness-package-panel-success-message" data-variant="export_result">
               {exportSuccess}
             </div>
           )}
           {exportError && (
-            <div className="harness-package-panel__error-msg">
+            <div className="harness-package-panel__error-msg" data-testid="harness-package-panel-error-message" data-variant="export_result">
               {exportError}
             </div>
           )}
@@ -742,29 +752,30 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
 
       {/* Delete Confirmation Modal */}
       {deleteConfirmOpen && selectedPackage && (
-        <div className="harness-package-panel__modal-overlay" onClick={handleDeleteCancel}>
-          <div className="harness-package-panel__modal" onClick={e => e.stopPropagation()}>
-            <div className="harness-package-panel__modal-header">
-              <h4>{t('harnessPackage.deleteConfirmTitle')}</h4>
+        <div className="harness-package-panel__modal-overlay" onClick={handleDeleteCancel} data-testid="harness-package-panel-delete-confirm-overlay">
+          <div className="harness-package-panel__modal" onClick={e => e.stopPropagation()} data-testid="harness-package-panel-delete-confirm-panel">
+            <div className="harness-package-panel__modal-header" data-testid="harness-package-panel-delete-confirm-header">
+              <h4 data-testid="harness-package-panel-delete-confirm-title">{t('harnessPackage.deleteConfirmTitle')}</h4>
             </div>
-            <div className="harness-package-panel__modal-body">
-              <p>
+            <div className="harness-package-panel__modal-body" data-testid="harness-package-panel-delete-confirm-body">
+              <p data-testid="harness-package-panel-delete-confirm-message">
                 {t('harnessPackage.deleteConfirmMessage', {
                   extensionName: selectedPackage.extension_name,
                 })}
               </p>
               {isPackageActive(selectedPackage.id) && (
-                <p className="harness-package-panel__modal-warning">
+                <p className="harness-package-panel__modal-warning" data-testid="harness-package-panel-delete-confirm-warning">
                   {t('harnessPackage.deleteActiveWarning')}
                 </p>
               )}
             </div>
-            <div className="harness-package-panel__modal-footer">
+            <div className="harness-package-panel__modal-footer" data-testid="harness-package-panel-delete-confirm-footer">
               <button
                 type="button"
                 onClick={handleDeleteCancel}
                 className="harness-package-panel__modal-cancel-btn"
                 disabled={deletingPackage}
+                data-testid="harness-package-panel-delete-confirm-cancel-btn"
               >
                 {t('common.cancel')}
               </button>
@@ -773,6 +784,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
                 onClick={handleDeleteConfirm}
                 className="harness-package-panel__modal-confirm-btn"
                 disabled={deletingPackage}
+                data-testid="harness-package-panel-delete-confirm-btn"
               >
                 {deletingPackage ? t('harnessPackage.deleting') : t('common.confirm')}
               </button>

@@ -502,6 +502,25 @@ class TestConfirmAndPermissionInterrupts:
         assert result["questions"][0]["header"].startswith("权限审批")
 
     @staticmethod
+    def test_query_tool_permission_interrupt_is_not_ask_user():
+        """A query argument does not make a non-ask_user tool an ask-user interrupt."""
+        message = "**工具 `memory_search` 需要授权才能执行**\n\n请确认是否允许该操作。"
+        result = convert_interactions_to_ask_user_question([
+            {
+                "id": "req_memory_search",
+                "value": {
+                    "tool_name": "memory_search",
+                    "message": message,
+                    "tool_args": {"query": "篮球"},
+                },
+            }
+        ])
+        assert result is not None
+        assert result["source"] == "permission_interrupt"
+        assert "memory_search" in result["questions"][0]["question"]
+        assert result["questions"][0]["header"].startswith("权限审批")
+
+    @staticmethod
     def test_extract_question_falls_back_for_generic_confirm_copy():
         question = extract_question_from_interaction({
             "id": "req_generic",

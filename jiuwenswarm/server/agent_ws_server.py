@@ -271,6 +271,7 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _collapse_oversized_history_record,
     _minimal_history_record_for_wire,
     _sanitize_history_record_for_wire,
+    split_history_record_for_stream,
     _select_history_record_page,
     _is_waiting_human_agent,
     _extract_waiting_human_prompts,
@@ -676,6 +677,10 @@ def _apply_resolved_mode_to_request(
     *,
     work_mode: Any = None,
 ) -> tuple[str, str | None]:
+    if not hasattr(request, "_original_mode") and isinstance(request.params, dict):
+        raw_mode = request.params.get("mode")
+        if isinstance(raw_mode, str) and raw_mode.strip():
+            setattr(request, "_original_mode", canonicalize_mode_text(raw_mode))
     resolved = resolve_request_runtime_mode(request, work_mode=work_mode)
     if isinstance(request.params, dict):
         request.params["mode"] = resolved.canonical_mode
@@ -2251,7 +2256,7 @@ class AgentWebSocketServer:
                 from jiuwenswarm.server.runtime.session.work_mode import (
                     default_work_mode_for_channel,
                 )
-                channel_id_for_default = request.channel_id or "web"
+                channel_id_for_default = channel_id or request.channel_id or "web"
                 runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
                 logger.warning(
                     "[_prepare_code_mode_chat_turn] work_mode missing in both session "
@@ -3736,6 +3741,18 @@ class AgentWebSocketServer:
             get_team_entity_store,
         )
 
+        def delete_team_directory_best_effort(team_name: str) -> None:
+            try:
+                entity_store.delete_team_directory(team_name)
+            except TeamEntityStoreError as exc:
+                logger.warning(
+                    "[AgentWebSocketServer] failed to delete local team directory; "
+                    "continuing team delete: team_name=%s code=%s error=%s",
+                    team_name,
+                    getattr(exc, "code", "DELETE_FAILED"),
+                    exc,
+                )
+
         params = request.params if isinstance(request.params, dict) else {}
         is_team = is_team_params(params)
         team_name = str(params.get("team_name") or "").strip()
@@ -3775,7 +3792,7 @@ class AgentWebSocketServer:
                             metadata=request.metadata,
                         )
                     else:
-                        entity_store.delete_team_directory(team_name)
+                        delete_team_directory_best_effort(team_name)
                         binding_store.delete(team_name)
                         resp = AgentResponse(
                             request_id=request.request_id,
@@ -3857,7 +3874,7 @@ class AgentWebSocketServer:
                             else:
                                 # agent-core normally removes team_home; retry here because it logs and
                                 # suppresses filesystem cleanup failures.
-                                entity_store.delete_team_directory(team_name)
+                                delete_team_directory_best_effort(team_name)
                                 binding_store.delete(team_name)
                                 resp = AgentResponse(
                                     request_id=request.request_id,
@@ -4430,6 +4447,17 @@ class AgentWebSocketServer:
                 payload={"error": "invalid page_idx or session history not found"},
             )
         else:
+            # 非流式整页塞进单个 wire 帧（AgentResponse.payload=data），没法像流式那样
+            # 按 channel_id 分片流——这里所有通道统一走 _sanitize_history_record_for_wire
+            # 把每条 record 裁剪到 16KB + 64KB collapse 之内，保证 wire 帧有界。
+            # 流式路径在 _handle_history_get_stream 里按 channel_id 分流（web 走 split，
+            # 其他走 sanitize），与此处无关。
+            if isinstance(data.get("messages"), list):
+                data["messages"] = [
+                    _sanitize_history_record_for_wire(record)
+                    for record in data["messages"]
+                    if isinstance(record, dict)
+                ]
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -4959,39 +4987,49 @@ class AgentWebSocketServer:
         messages = data.get("messages", [])
         total_pages = data.get("total_pages")
         page = data.get("page_idx")
+        sequence = 0
+        # 仅 web 通道走分片流（前端 HistoryRecordReassembler 重组）。
+        # 其他通道（tui/acp/...）不认 _part 字段，走旧 _sanitize_history_record_for_wire
+        # 单帧 + collapse 路径，维持现状，零回归。
+        use_split = request.channel_id == "web"
         if isinstance(messages, list):
-            for seq, item in enumerate(messages):
-                chunk = AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={
-                        "event_type": "history.message",
-                        "message": item,
-                        "session_id": str(session_id or ""),
-                        "total_pages": total_pages,
-                        "page_idx": page,
-                    },
-                    is_complete=False,
-                )
-                wire = encode_agent_chunk_for_wire(
-                    chunk,
-                    response_id=request.request_id,
-                    sequence=seq,
-                )
-                sent_original = False
-                async with send_lock:
-                    sent_original = await send_wire_payload(ws, wire)
-                if not sent_original:
-                    logger.warning(
-                        "[AgentWebSocketServer] history 流式响应因单个 chunk 超限而停止: "
-                        "request_id=%s seq=%s",
-                        request.request_id,
-                        seq,
+            for item in messages:
+                if use_split:
+                    chunks_for_record = split_history_record_for_stream(item)
+                else:
+                    chunks_for_record = [_sanitize_history_record_for_wire(item)]
+                for chunk_record in chunks_for_record:
+                    chunk = AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={
+                            "event_type": "history.message",
+                            "message": chunk_record,
+                            "session_id": str(session_id or ""),
+                            "total_pages": total_pages,
+                            "page_idx": page,
+                        },
+                        is_complete=False,
                     )
-                    return
+                    wire = encode_agent_chunk_for_wire(
+                        chunk,
+                        response_id=request.request_id,
+                        sequence=sequence,
+                    )
+                    sequence += 1
+                    sent_chunk = False
+                    async with send_lock:
+                        sent_chunk = await send_wire_payload(ws, wire)
+                    if not sent_chunk:
+                        logger.warning(
+                            "[AgentWebSocketServer] history 流式响应因 chunk 超限而停止: "
+                            "request_id=%s sequence=%s",
+                            request.request_id,
+                            sequence,
+                        )
+                        return
 
-        done_seq = len(messages) if isinstance(messages, list) else 0
-        next_seq = done_seq
+        next_seq = sequence
 
         # Session open / refresh: push full todo snapshot before history "done"
         # so the frontend todo panel restores without reading workspace files.
@@ -5296,7 +5334,9 @@ class AgentWebSocketServer:
             session_id = request.session_id or "default"
             params = request.params or {}
             channel_id = request.channel_id or "default"
-            mode, sub_mode, _ = resolve_agent_request_mode(params.get("mode", "agent"))
+            mode, sub_mode, canonical_mode = resolve_agent_request_mode(
+                params.get("mode", "agent")
+            )
             agent_mode = "agent" if mode == "auto_harness" else mode
 
             agent = await self._agent_manager.get_agent(
@@ -5309,7 +5349,10 @@ class AgentWebSocketServer:
             if agent is None:
                 raise ValueError("Failed to get agent")
 
-            result_data = await agent.generate_recap(session_id=session_id)
+            result_data = await agent.generate_recap(
+                session_id=session_id,
+                current_mode=canonical_mode,
+            )
 
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -7935,10 +7978,10 @@ class AgentWebSocketServer:
         ordered = list(reversed(restorable))
         start = (page_idx - 1) * page_size
         end = start + page_size
-        page_messages = [
-            _sanitize_history_record_for_wire(item)
-            for item in ordered[start:end]
-        ]
+        # 不在此处 sanitize：split_history_record_for_stream（在 _handle_history_get_stream
+        # 里调）需要拿到原文 content 才能正确切片；先 sanitize 会把 content 砍到 16KB，
+        # 切片器拿到的就只剩 16KB，分片就失去意义。
+        page_messages = list(ordered[start:end])
         logger.debug(
             "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,
@@ -8204,13 +8247,17 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
-            is_swarm = bool(params.get("is_swarm")) or is_team_mode(canonical_mode)
-            if not is_swarm:
-                mode, _, canonical_mode = resolve_agent_request_mode(
-                    canonical_mode,
-                    work_mode=final_work_mode,
-                )
-                params["mode"] = canonical_mode
+            # Resolve after the final work_mode is known. This is important for Web
+            # Team sessions: mode=team + work_mode=code must enter the same
+            # code.team runtime as the TUI team.code mode.
+            resolved = resolve_request_runtime_mode(
+                request,
+                work_mode=final_work_mode,
+            )
+            mode = resolved.manager_mode
+            canonical_mode = resolved.canonical_mode
+            params["mode"] = canonical_mode
+            is_swarm = bool(params.get("is_swarm")) or resolved.is_team
             prewarm_eligible = (
                 not is_swarm
                 and canonical_mode in {"agent", "code", "code.normal"}

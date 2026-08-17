@@ -267,8 +267,8 @@
     "placeholderTeamMode": "集群模式，输入新指令会并行执行...",
     "placeholderTeamModeProcessing": "集群模式处理中，输入新指令会并行执行...",
     "placeholderVoice": "正在听取语音...",
-    "welcomeLogoAlt": "JiuwenSwarm 标志",
-    "welcomeHeading": "你好，我是JiuwenSwarm，很高兴认识你！",
+    "welcomeLogoAlt": "WorkSwarm 标志",
+    "welcomeHeading": "你好，我是WorkSwarm，很高兴认识你！",
     "welcomeSuggestions": {
       "journey": "让我们开启一段新的旅程吧！",
       "skills": "能告诉我你有哪些技能吗？"
@@ -323,7 +323,7 @@
     "skillsManage": "技能管理",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
-    "recentTasks": "最近任务",
+    "recentTasks": "任务规划",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -348,10 +348,14 @@
         "singleAgent": "单Agent模式"
       },
       "permission": {
+        "auto": "默认权限",
+        "autoDesc": "编辑工作目录外的文件、执行高风险命令时请求您的审批",
         "default": "默认权限",
-        "defaultDesc": "编辑外部文件和使用互联网时始终询问",
+        "defaultDesc": "编辑工作目录外的文件、执行高风险命令时请求您的审批",
         "fullAccess": "完全访问权限",
         "fullAccessDesc": "可不受限制地访问互联网和您电脑上的任何文件",
+        "strict": "严格审批",
+        "strictDesc": "编辑任意文件、读取工作目录外的文件、执行命令时始终请求您的审批",
         "fullAccessWarning": {
           "title": "告警",
           "body1": "在完全访问模式下，Jiuwen无需你的批准即可编辑你电脑上的任何文件，并执行可联网的命令。",
@@ -603,7 +607,7 @@
     "skillnet": {
       "usageNoticeTitle": "提示",
       "usageNotice1": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
-      "usageNotice2": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenSwarm 的环境能访问 GitHub</strong>（网络、代理等）。",
+      "usageNotice2": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 WorkSwarm 的环境能访问 GitHub</strong>（网络、代理等）。",
       "usageNotice3": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
       "configPageLinkAria": "前往配置页面"
     }
@@ -767,7 +771,6 @@
     "clickMore": "点击「更多」继续",
     "acknowledge": "我知道了",
     "skip": "跳过",
-    "open": "配置指引",
     "steps": {
       "0": {
         "title": "欢迎使用 jiuwenswarm",
@@ -856,7 +859,11 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-      "swarmflowEnabled": "启用 SwarmFlow",
+        "swarmflowEnabled": "启用 SwarmFlow",
+        "externalCliAgentClaudeEnabled": "启用 Claude",
+        "externalCliAgentUseBuiltin": "使用内置",
+        "externalCliAgentCliPath": "CLI 路径",
+        "externalCliAgentCodexEnabled": "启用 Codex",
       "kvCacheReleaseEnabled": "旧链路（KV 释放）",
       "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
@@ -870,6 +877,7 @@
       "teamTeammateMode": "成员模式",
       "teamSpawnMode": "启动模式",
       "teamEnablePermissions": "安全护栏",
+      "teamExternalCliAgents": "三方 Agent",
       "teamLeaderMemberName": "成员名称",
       "teamLeaderDisplayName": "显示名称",
       "teamLeaderPersona": "人设",
@@ -945,6 +953,13 @@
       "teamTeammateMode": "成员协作模式：构建（build_mode）或计划（plan_mode）。",
       "teamSpawnMode": "团队启动/拉起成员的方式。",
       "teamEnablePermissions": "是否对该 Team 启用工具安全护栏（permissions）。",
+      "teamExternalCliAgents": "允许 Leader 拉起的三方 Agent 类型。Claude 使用内置 SDK 工具绑定；Codex 会额外配置外部 MCP 发布通道。",
+      "teamExternalCliClaude": "允许 Leader 拉起 Claude SDK 成员；保存时会按需安装 Python 依赖。",
+      "teamExternalCliCodex": "允许 Leader 拉起 Codex SDK 成员；保存时会按需安装 Python 依赖。",
+      "externalCliAgentClaude": "启用后可在 Team 模式中使用 Claude；保存时会按需安装 Python 依赖。",
+      "externalCliAgentUseBuiltin": "不指定本机 CLI 路径，由 SDK 使用默认查找方式。",
+      "externalCliAgentCliPath": "指定 Claude/Codex 可执行文件路径。",
+      "externalCliAgentCodex": "启用后可在 Team 模式中使用 Codex；保存时会按需安装 Python 依赖。",
       "teamMemberName": "成员内部 ID：须以小写字母开头，仅含小写字母、数字或连字符。",
       "teamPersona": "角色人设与职责描述，影响该成员的行为风格与分工。",
       "teamPromptHint": "额外提示词片段，会注入该成员的系统提示中。",
@@ -1057,6 +1072,8 @@
       "lifecycleTemporary": "临时 (temporary)",
       "teammateModeBuild": "构建模式 (build_mode)",
       "teammateModePlan": "计划模式 (plan_mode)",
+      "externalCliClaude": "Claude",
+      "externalCliCodex": "Codex",
       "untitled": "未命名",
       "deleteConfirmTitle": "确认删除Team？",
       "deleteConfirmMessage": "确定要删除 Team \"{{teamName}}\" 吗？",
@@ -1084,6 +1101,7 @@
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "a2ui": { "label": "A2UI", "hint": "开启或关闭生成式界面渲染与 A2UI 运行时提示词" },
       "swarmflow": { "label": "SwarmFlow", "hint": "控制 Team 模式是否启用 SwarmFlow 流程视图与监控" },
+      "externalCliAgents": { "label": "三方 Agent", "hint": "配置 Team 模式可用的三方 Agent" },
       "symphony": { "label": "技能交响乐", "hint": "控制技能交响乐" },
       "skillRetrieval": { "label": "技能交响乐", "hint": "控制技能交响乐" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },
@@ -1098,8 +1116,42 @@
       "enabled": "启用",
       "dynamicGraph": "启用动态图谱",
       "kvCacheRelease": "旧链路（KV 释放）",
-      "kvCacheAffinity": "新链路（Ascend 亲和）"
-    },
+      "kvCacheAffinity": "新链路（Ascend 亲和）",
+        "externalCliClaude": "启用 Claude",
+        "externalCliCodex": "启用 Codex",
+        "externalCliUseBuiltin": "使用内置"
+      },
+      "externalCli": {
+        "claude": "Claude",
+        "codex": "Codex",
+        "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
+        "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
+        "useBuiltin": "使用内置",
+        "detect": "检测",
+        "selectFile": "选择文件",
+        "selectFileTitle": "选择 {{agent}} 命令",
+        "selectFileFailed": "选择文件失败",
+        "cliPathPlaceholder": "自动检测 {{agent}} 路径，或手动填写可执行文件路径",
+        "statusUnknown": "未检测",
+        "statusOk": "可用",
+        "statusWarning": "可能不兼容",
+        "statusMissing": "未找到",
+        "statusUnsupported": "路径不可用",
+        "statusUnavailable": "不可用",
+        "version": "版本 {{version}}",
+        "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
+        "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
+        "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
+        "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
+        "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+        "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
+        "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
+        "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
+        "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
+        "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
+        "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+        "dependencyInstallRecentOutput": "安装日志"
+      },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
       "subtitle": "按工具名设置 allow / ask / deny，立即写入配置并热更新；不含基于 pattern 的规则。",
@@ -1188,7 +1240,7 @@
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
     "autoManagedToggleDisabled": "自动维护任务的开关由设置→主动推荐控制，不可在此切换。",
     "pageTitle": "定时任务",
-    "pageSubtitle": "配置和管理自动化任务，Jiuwen 将按计划执行。",
+    "pageSubtitle": "配置和管理按计划执行的自动化任务。",
     "actions": {
       "confirm": "确定"
     },
@@ -1196,7 +1248,7 @@
       "trigger": "创建",
       "manual": "手动创建",
       "viaChat": "通过聊天创建",
-      "viaChatPrompt": "我们一起来设置一个定时任务吧。首先，说明定时任务在 JiuwenSwarm 中的工作方式。然后询问我需要安排什么，以及应该在什么时候运行。"
+      "viaChatPrompt": "我们一起来设置一个定时任务吧。首先，说明定时任务在 WorkSwarm 中的工作方式。然后询问我需要安排什么，以及应该在什么时候运行。"
     },
     "stats": {
       "total": "任务总数（{{count}}）"
@@ -1684,7 +1736,8 @@
     },
     "graph": {
       "orchestration": {
-        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱，并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行成功率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "description": "开启后，JiuwenSwarm 会为已安装的技能构建技能图谱（消耗Token），并在执行任务时基于图谱自动选择、组合和编排技能，提高任务执行效率；关闭后将不再进行技能编排，已构建的技能图谱不会删除。",
+        "graphDefinition": "技能图谱就像一张技能关系地图：每个点代表一个技能，点之间的线表示它们可以配合使用。",
         "saving": "正在保存…",
         "saveFailed": "技能编排开关保存失败，请稍后重试。",
         "toggleLabel": "启用技能编排",
@@ -1692,10 +1745,12 @@
       },
       "stats": {
         "skillsSuffix": "技能",
-        "edgesSuffix": "边"
+        "edgesSuffix": "关联"
       },
       "searchPlaceholder": "搜索技能",
-      "minConfidence": "最小置信度 {{percent}}%",
+      "minConfidence": "最小关联强度 {{percent}}%",
+      "minConfidenceHelp": "拖动滑块，调整右侧视图中的最小关联强度；数值越高，可显示的关联越少；数值越低，可显示的关联越多。",
+      "linkStrength": "关联强度 {{percent}}%",
       "buildLogFallback": "构建日志",
       "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
@@ -1705,20 +1760,23 @@
       "updatedAt": "更新时间 {{time}}",
       "inDegree": "入度",
       "outDegree": "出度",
-      "inputs": "输入",
-      "noInputs": "暂无输入",
-      "outputs": "输出",
-      "noOutputs": "暂无输出",
+      "description": "描述",
       "tasks": "任务",
-      "relatedEdges": "相关边",
-      "noRelatedEdges": "暂无相关边。",
-      "selectSkillHint": "选择一个技能查看指纹",
+      "relatedEdges": "关联技能",
+      "noRelatedEdges": "暂无关联技能。",
+      "selectSkillHint": "选择一个技能查看详情",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",
         "cancelBuild": "取消构建",
-        "fullRebuild": "全量重新构建",
-        "fitView": "适配视图"
+        "fullRebuild": "全量构建",
+        "fitView": "调整视图"
+      },
+      "actionHelp": {
+        "incrementalBuild": "增量构建：更新新增或变更的技能，适合日常维护。",
+        "cancelBuild": "取消构建：停止当前增量或全量构建。",
+        "fullRebuild": "全量构建：扫描全部已安装技能，首次使用或重建图谱时使用。",
+        "fitView": "调整视图：自动调整右侧视图，使图谱居中并完整显示。"
       },
       "status": {
         "refreshing": "正在刷新技能图谱",
@@ -1844,7 +1902,7 @@
       "url": "地址",
       "installTimeout": "SkillNet 安装超时（后台可能仍在进行），请稍后刷新技能列表",
       "usageNoticeTitle": "提示",
-      "usageNotice1": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenSwarm 的环境能访问 GitHub</strong>（网络、代理等）。",
+      "usageNotice1": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 WorkSwarm 的环境能访问 GitHub</strong>（网络、代理等）。",
       "usageNotice2": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
       "configPageLinkAria": "前往配置页面",
       "usageNotice3": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
@@ -2139,7 +2197,7 @@
     "shareButton": "邀请成员",
     "waiting": "已加入 {{joined}}/{{total}}，不阻塞团队继续运行",
     "allJoined": "{{count}} 个人类成员已全部加入",
-    "instructionHint": "成员将会通过配置有JiuwenSwarm的平台，以被分配的身份参与团队任务。",
+    "instructionHint": "成员将会通过配置有WorkSwarm的平台，以被分配的身份参与团队任务。",
     "copy": "复制",
     "copied": "已复制",
     "joinedNote": "该成员已加入，无需再次发送加入指令",
@@ -2242,7 +2300,7 @@
   },
   "version": "版本 {{version}}",
   "app": {
-    "title": "JiuwenSwarm",
+    "title": "WorkSwarm",
     "subtitle": "AI Assistant",
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",
@@ -2335,7 +2393,7 @@
   },
   "multiSession": {
     "title": "工作",
-    "conversations": "对话",
+    "conversations": "任务",
     "newConversation": "新建任务",
     "empty": "暂无对话",
     "untitled": "未命名对话",
