@@ -6247,11 +6247,26 @@ export class AppScreen implements Component, Focusable {
     const state = this.swarmWorkflowsViewState;
     if (!state) return;
     const action = resolveAction("SwarmWorkflows", data);
-    if (action === "swarm:budget") {
+    // Fallback: resolveAction's matchesKey doesn't match shift+letter on some
+    // terminals (Windows Terminal). Check the raw data for the uppercase letter
+    // that a shifted key produces in legacy terminal mode. Same systemic issue
+    // affects shift+b (budget, shipped in SDD-0010) — it never fires either.
+    let effectiveAction = action;
+    if (effectiveAction === null) {
+      const lower = data.toLowerCase();
+      if (data === "P" || lower === "shift+p") {
+        effectiveAction = "swarm:pauseResume";
+      } else if (data === "S" || lower === "shift+s") {
+        effectiveAction = "swarm:stop";
+      } else if (data === "B" || lower === "shift+b") {
+        effectiveAction = "swarm:budget";
+      }
+    }
+    if (effectiveAction === "swarm:budget") {
       void this.openSwarmWorkflowBudget();
       return;
     }
-    if (action === "swarm:back" || action === "swarm:left") {
+    if (effectiveAction === "swarm:back" || effectiveAction === "swarm:left") {
       if (state.phase === "pending-list") {
         this.restoreFromPendingList(state.previous_phase);
         this.tui.requestRender();
@@ -6297,7 +6312,7 @@ export class AppScreen implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (action === "swarm:nextFocus") {
+    if (effectiveAction === "swarm:nextFocus") {
       if (state.phase === "list") {
         const item = state.list.getSelectedItem();
         if (item) {
@@ -6326,17 +6341,17 @@ export class AppScreen implements Component, Focusable {
       }
       return;
     }
-    if (state.phase === "workflow" && action === "swarm:logs") {
+    if (state.phase === "workflow" && effectiveAction === "swarm:logs") {
       this.openSwarmWorkflowLogs(state.workflowId);
       return;
     }
-    if (action === "swarm:pauseResume" || action === "swarm:stop") {
+    if (effectiveAction === "swarm:pauseResume" || effectiveAction === "swarm:stop") {
       if (state.phase !== "workflow") return;
       const workflow = this.state
         .getSnapshot()
         .workflowRuns.find((item) => item.id === state.workflowId);
       if (!workflow) return;
-      if (action === "swarm:stop") {
+      if (effectiveAction === "swarm:stop") {
         if (workflow.status === "running" || workflow.status === "paused") {
           this.sendSwarmWorkflowControl(state.workflowId, "stop");
         } else {
@@ -6367,7 +6382,7 @@ export class AppScreen implements Component, Focusable {
       );
       const isHuman = lookup?.agent.kind === "human";
 
-      if (action === "swarm:viewPrompt" || (!isHuman && matchesKey(data, "p"))) {
+      if (effectiveAction === "swarm:viewPrompt" || (!isHuman && matchesKey(data, "p"))) {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "prompt");
         return;
       }
@@ -6379,11 +6394,11 @@ export class AppScreen implements Component, Focusable {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "human_reply");
         return;
       }
-      if (!isHuman && action === "swarm:viewOutcome") {
+      if (!isHuman && effectiveAction === "swarm:viewOutcome") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "outcome");
         return;
       }
-      if (action === "swarm:viewError") {
+      if (effectiveAction === "swarm:viewError") {
         this.openSwarmWorkflowAgentText(state.workflowId, state.agentId, "error");
         return;
       }
@@ -6498,7 +6513,7 @@ export class AppScreen implements Component, Focusable {
         return;
       }
     }
-    if (action === "swarm:refresh") {
+    if (effectiveAction === "swarm:refresh") {
       if (
         state.phase === "session-detail" ||
         state.phase === "agent" ||
