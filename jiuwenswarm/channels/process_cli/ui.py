@@ -255,9 +255,7 @@ class HumanRunUI:
         self._assistant_visible = False
 
     def start(self) -> None:
-        if not self.enhanced:
-            return
-        self._set_status("正在启动本地 Runtime……")
+        """Keep Runtime initialization silent until request processing begins."""
 
     def working(self) -> None:
         if not self.enhanced:

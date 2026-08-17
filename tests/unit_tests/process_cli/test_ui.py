@@ -116,7 +116,7 @@ def test_human_renderer_shows_chinese_runtime_states(monkeypatch) -> None:
     renderer.finish(session_id="runtime-session", request_id="request-1")
 
     text = output.getvalue()
-    assert "正在启动本地 Runtime" in text
+    assert "正在启动本地 Runtime" not in text
     assert "正在处理" in text
     assert "• JiuwenSwarm" in text
     assert "你好" in text
@@ -132,14 +132,14 @@ async def test_human_run_ui_animates_spinner_on_color_tty(monkeypatch) -> None:
     ui = HumanRunUI(output, output)
 
     ui.start()
-    await asyncio.sleep(0.14)
+    assert output.getvalue() == ""
     ui.working()
     await asyncio.sleep(0.14)
     ui.clear_status()
     await asyncio.sleep(0)
 
     text = output.getvalue()
-    assert "正在启动本地 Runtime" in text
+    assert "正在启动本地 Runtime" not in text
     assert "正在处理" in text
     assert "⠋" in text
     assert any(frame in text for frame in "⠙⠹⠸⠼⠴⠦⠧⠇⠏")
