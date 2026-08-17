@@ -2971,13 +2971,18 @@ class JiuWenSwarm:
             raise ValueError("Agent adapter not available")
         return await adapter.get_context_usage(session_id=session_id)
 
-    async def generate_recap(self, session_id: str) -> dict[str, Any]:
+    async def generate_recap(
+        self,
+        session_id: str,
+        current_mode: str | None = None,
+    ) -> dict[str, Any]:
         """生成会话快速回顾（read-only，不修改对话历史）。
 
         取最近30条消息 → fast model → 1-2句摘要。
 
         Args:
             session_id: 会话ID
+            current_mode: 触发 recap 时的 canonical runtime mode。
 
         Returns:
             包含 recap 结果的字典:
@@ -2988,7 +2993,10 @@ class JiuWenSwarm:
         adapter = self._adapter
         if adapter is None:
             raise ValueError("Agent adapter not available")
-        return await adapter.generate_recap(session_id=session_id)
+        return await adapter.generate_recap(
+            session_id=session_id,
+            current_mode=current_mode,
+        )
 
     async def compact_partial(
         self,
