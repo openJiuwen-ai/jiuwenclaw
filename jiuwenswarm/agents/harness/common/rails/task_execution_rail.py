@@ -579,6 +579,11 @@ class TaskExecutionRail(DeepAgentRail):
 
         - pending -> in_progress  => task.start
         - in_progress -> completed => task.complete
+        - pending -> completed (skipped in_progress) => task.start then
+          task.complete. Frontend hidePending hides pending rows, and the
+          left task list falls back to task.start segments while streaming;
+          without start/complete the stage is invisible until the frozen
+          completed snapshot appears after the run finishes.
         Always emits task.update (full snapshot) at the end.
         """
         if ctx.session is None:
@@ -622,24 +627,33 @@ class TaskExecutionRail(DeepAgentRail):
                 and prev_status != "completed"
             ):
                 completed_in_batch.append(task_id)
-                if prev_status == "in_progress":
-                    await self._emit_task_complete_event(
+                if (
+                    prev_status != "in_progress"
+                    and task_id not in self._todo_started
+                ):
+                    logger.info(
+                        "[TaskExecutionRail] pending→completed: "
+                        "emit task.start+task.complete: %s "
+                        "prev_status=%r session_id=%s",
+                        task_id,
+                        prev_status,
+                        session_id,
+                    )
+                    await self._emit_task_start_event(
                         ctx.session,
                         task_id,
                         current,
-                        status="succeeded",
-                        parent_request_id=parent_request_id,
+                        parent_request_id,
+                        source="todo",
                     )
-                else:
-                    logger.info(
-                        "[TaskExecutionRail] skip task.complete "
-                        "(gate1): %s prev_status=%r "
-                        "curr_status=%r session_id=%s",
-                        task_id,
-                        prev_status,
-                        curr_status,
-                        session_id,
-                    )
+                    self._todo_started.add(task_id)
+                await self._emit_task_complete_event(
+                    ctx.session,
+                    task_id,
+                    current,
+                    status="succeeded",
+                    parent_request_id=parent_request_id,
+                )
 
         self._todo_map = current_map
         self._todo_map_before_tool = {}

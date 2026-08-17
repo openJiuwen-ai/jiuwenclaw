@@ -404,6 +404,7 @@ from jiuwenswarm.common.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
     get_agent_workspace_dir,
+    collapse_nested_agent_workspace_dir,
     get_checkpoint_dir,
     get_default_project_session_workspace_dir,
     get_env_file,
@@ -1848,9 +1849,13 @@ class JiuWenSwarmDeepAdapter:
         # 企业多租户：AGENT_RUNTIME 下可用外部传入的隔离 workspace / 租户 ID
         enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
         if workspace_dir and enterprise:
-            self._workspace_dir: str = workspace_dir
+            self._workspace_dir: str = str(
+                collapse_nested_agent_workspace_dir(workspace_dir)
+            )
         else:
-            self._workspace_dir: str = str(get_agent_workspace_dir())
+            self._workspace_dir: str = str(
+                collapse_nested_agent_workspace_dir(get_agent_workspace_dir())
+            )
         self._agent_id = agent_id if enterprise else None
         self._service_id = service_id if enterprise else None
         self._agent_name: str = "main_agent"
@@ -8416,13 +8421,16 @@ class JiuWenSwarmDeepAdapter:
         unset, falls back to the agent's instance-level workspace.
         """
         workspace_root = str(
-            workspace or self._workspace_dir or self._project_dir or os.getcwd()
+            collapse_nested_agent_workspace_dir(
+                workspace or self._workspace_dir or self._project_dir or os.getcwd()
+            )
         )
         runtime_cwd = str(cwd or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = str(self._project_dir or "").strip()
         if not runtime_cwd or not os.path.isdir(runtime_cwd):
             runtime_cwd = workspace_root
+        runtime_cwd = str(collapse_nested_agent_workspace_dir(runtime_cwd))
         init_cwd(runtime_cwd, project_root=workspace_root, workspace=workspace_root)
 
     @dataclass
@@ -14399,6 +14407,46 @@ class JiuWenSwarmDeepAdapter:
                 if chunk_type == "todo.updated":
                     todos = payload.get("todos", []) if isinstance(payload, dict) else []
                     return {"event_type": "todo.updated", "todos": todos}
+
+                if chunk_type == "task.start":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.start",
+                            "task_id": payload.get("task_id"),
+                            "task_content": payload.get("task_content"),
+                            "task_index": payload.get("task_index"),
+                            "total_tasks": payload.get("total_tasks"),
+                            "parent_request_id": payload.get("parent_request_id"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
+
+                if chunk_type == "task.update":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.update",
+                            "tasks": payload.get("tasks", []),
+                            "total_tasks": payload.get("total_tasks", 0),
+                            "completed_tasks": payload.get("completed_tasks", 0),
+                            "in_progress_tasks": payload.get("in_progress_tasks", 0),
+                            "pending_tasks": payload.get("pending_tasks", 0),
+                            "parent_request_id": payload.get("parent_request_id"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
+
+                if chunk_type == "task.complete":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.complete",
+                            "task_id": payload.get("task_id"),
+                            "task_content": payload.get("task_content"),
+                            "status": payload.get("status"),
+                            "duration_ms": payload.get("duration_ms"),
+                            "error": payload.get("error"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
 
                 if chunk_type == "context.usage":
                     if isinstance(payload, dict):

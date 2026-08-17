@@ -487,7 +487,7 @@ function devFileContentApi(): Plugin {
 
         const jsonlHistoryPath = path.resolve(sessionDir, 'history.jsonl')
         const legacyHistoryPath = path.resolve(sessionDir, 'history.json')
-        const historyPath = fs.existsSync(jsonlHistoryPath) ? jsonlHistoryPath : legacyHistoryPath
+        const historyPath = fs.existsSync(legacyHistoryPath) ? legacyHistoryPath : jsonlHistoryPath
         if (!fs.existsSync(sessionDir) || !fs.existsSync(historyPath)) {
           writeJson(404, { error: 'history_not_found' })
           return
@@ -495,13 +495,16 @@ function devFileContentApi(): Plugin {
 
         try {
           const historyText = fs.readFileSync(historyPath, 'utf-8')
-          const historyRaw = historyPath.endsWith('.jsonl')
-            ? historyText
-                .split(/\r?\n/)
-                .map((line) => line.trim())
-                .filter(Boolean)
-                .map((line) => JSON.parse(line) as unknown)
-            : (JSON.parse(historyText) as unknown)
+          const trimmedHistory = historyText.trim()
+          const historyRaw = !trimmedHistory
+            ? []
+            : trimmedHistory.startsWith('[')
+              ? (JSON.parse(trimmedHistory) as unknown)
+              : historyText
+                  .split(/\r?\n/)
+                  .map((line) => line.trim())
+                  .filter(Boolean)
+                  .map((line) => JSON.parse(line) as unknown)
           if (!Array.isArray(historyRaw)) {
             writeJson(400, { error: 'invalid_history_shape' })
             return
