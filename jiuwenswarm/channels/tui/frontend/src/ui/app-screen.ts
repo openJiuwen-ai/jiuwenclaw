@@ -6444,14 +6444,18 @@ export class AppScreen implements Component, Focusable {
       return;
     }
     if (effectiveAction === "swarm:pauseResume" || effectiveAction === "swarm:stop") {
-      if (state.phase !== "workflow") return;
+      const workflowId = this.workflowIdForBudgetView();
+      if (!workflowId) {
+        this.showTransientNotice("Select a workflow first.");
+        return;
+      }
       const workflow = this.state
         .getSnapshot()
-        .workflowRuns.find((item) => item.id === state.workflowId);
+        .workflowRuns.find((item) => item.id === workflowId);
       if (!workflow) return;
       if (effectiveAction === "swarm:stop") {
         if (workflow.status === "running" || workflow.status === "paused") {
-          this.sendSwarmWorkflowControl(state.workflowId, "stop");
+          this.sendSwarmWorkflowControl(workflowId, "stop");
         } else {
           this.showTransientNotice(
             `This workflow is ${workflow.status} and cannot be stopped.`,
@@ -6461,9 +6465,9 @@ export class AppScreen implements Component, Focusable {
       }
       // swarm:pauseResume toggles: running -> pause, paused -> resume.
       if (workflow.status === "paused") {
-        this.sendSwarmWorkflowControl(state.workflowId, "resume");
+        this.sendSwarmWorkflowControl(workflowId, "resume");
       } else if (workflow.status === "running") {
-        this.sendSwarmWorkflowControl(state.workflowId, "pause");
+        this.sendSwarmWorkflowControl(workflowId, "pause");
       } else {
         this.showTransientNotice(
           `This workflow is ${workflow.status} and cannot be paused or resumed.`,
