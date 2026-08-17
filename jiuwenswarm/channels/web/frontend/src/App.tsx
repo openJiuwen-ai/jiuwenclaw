@@ -170,10 +170,13 @@ type ConfigSaveResult = {
   updated?: string[];
   applied_without_restart?: boolean;
   models_count?: number | null;
-  codex_dependency_install?: CodexDependencyInstallStatus;
+  external_cli_dependency_installs?: Partial<Record<ExternalCliAgentKind, ExternalCliDependencyInstallStatus>>;
 };
 
-type CodexDependencyInstallStatus = {
+type ExternalCliAgentKind = "claude" | "codex";
+
+type ExternalCliDependencyInstallStatus = {
+  cli_agent?: ExternalCliAgentKind;
   status?: string;
   phase?: string;
   error?: string;
@@ -183,6 +186,35 @@ type CodexDependencyInstallStatus = {
   finished_at?: number;
   updated_at?: number;
 };
+
+function externalCliDependencyInstallAgents(result: ConfigSaveResult | void): Set<ExternalCliAgentKind> {
+  const installs = result?.external_cli_dependency_installs ?? {};
+  return new Set(
+    Object.entries(installs)
+      .filter((entry): entry is [ExternalCliAgentKind, ExternalCliDependencyInstallStatus] => {
+        const [cliAgent, status] = entry;
+        return (cliAgent === "claude" || cliAgent === "codex") && !!status?.status;
+      })
+      .map(([cliAgent]) => cliAgent),
+  );
+}
+
+function hasExternalCliDependencyInstallResult(result: ConfigSaveResult | void): boolean {
+  return externalCliDependencyInstallAgents(result).size > 0;
+}
+
+function removeExternalCliAgentsFromTeamPayload(
+  team: AgentsTeamsSavePayload["team"],
+  cliAgents: Set<ExternalCliAgentKind>,
+): AgentsTeamsSavePayload["team"] {
+  if (cliAgents.size === 0) {
+    return team;
+  }
+  return team.map((item) => ({
+    ...item,
+    external_cli_agents: item.external_cli_agents?.filter((agent) => !cliAgents.has(agent.cli_agent)),
+  }));
+}
 
 function getWorkContextForSession(sessionId: string): {
   project_id?: string;
@@ -1091,9 +1123,9 @@ function AppContent() {
     }
   }, [request, setAvailableModels]);
 
-  const detectExternalCli = useCallback(async (cliAgent: "claude" | "codex", cliPath?: string) => {
+  const detectExternalCli = useCallback(async (cliAgent: ExternalCliAgentKind, cliPath?: string) => {
     return request<{
-      cli_agent: "claude" | "codex";
+      cli_agent: ExternalCliAgentKind;
       status: "ok" | "warning" | "missing" | "unsupported" | "unavailable";
       path?: string;
       version?: string;
@@ -1105,7 +1137,7 @@ function AppContent() {
     });
   }, [request]);
 
-  const selectExternalCliPath = useCallback(async (cliAgent: "claude" | "codex", initialPath?: string) => {
+  const selectExternalCliPath = useCallback(async (cliAgent: ExternalCliAgentKind, initialPath?: string) => {
     const desktopPicker = window.pywebview?.api?.select_local_file_path;
     const title = t("config.externalCli.selectFileTitle", { agent: cliAgent });
     if (typeof desktopPicker === "function") {
@@ -1127,21 +1159,24 @@ function AppContent() {
     return payload.path;
   }, [request, t]);
 
-  const getCodexDependencyInstallStatus = useCallback(async (): Promise<CodexDependencyInstallStatus> => {
-    return request<CodexDependencyInstallStatus>(
-      "external_cli.codex_install_status",
-      {},
-      { timeoutMs: 10 * 1000 },
-    );
-  }, [request]);
+  const getExternalCliDependencyInstallStatus = useCallback(
+    async (cliAgent: ExternalCliAgentKind): Promise<ExternalCliDependencyInstallStatus> => {
+      return request<ExternalCliDependencyInstallStatus>(
+        "external_cli.install_status",
+        { cli_agent: cliAgent },
+        { timeoutMs: 10 * 1000 },
+      );
+    },
+    [request],
+  );
 
   const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
     const payload = await request<ConfigSaveResult>(
       'config.set',
       updates
     );
-    const codexDependencyInstalling = payload.codex_dependency_install?.status === "running";
-    const effectiveUpdates = codexDependencyInstalling
+    const hasExternalCliDependencyInstall = hasExternalCliDependencyInstallResult(payload);
+    const effectiveUpdates = hasExternalCliDependencyInstall
       ? Object.fromEntries(
           Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
         )
@@ -1158,7 +1193,7 @@ function AppContent() {
       }
       return next;
     });
-    if (codexDependencyInstalling) {
+    if (hasExternalCliDependencyInstall) {
       return payload;
     }
     setConfigError(null);
@@ -1300,11 +1335,12 @@ function AppContent() {
       'config.save_all',
       payload as unknown as Record<string, unknown>
     );
-    const codexDependencyInstalling = result.codex_dependency_install?.status === "running";
+    const pendingExternalCliAgents = externalCliDependencyInstallAgents(result);
+    const hasExternalCliDependencyInstall = pendingExternalCliAgents.size > 0;
     setServerConfig((prev) => {
       const next: Record<string, unknown> = { ...(prev ?? {}) };
       if (payload.config) {
-        const effectiveConfig = codexDependencyInstalling
+        const effectiveConfig = hasExternalCliDependencyInstall
           ? Object.fromEntries(
               Object.entries(payload.config).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
             )
@@ -1323,7 +1359,7 @@ function AppContent() {
       }
       if (payload.agents !== undefined || payload.team !== undefined) {
         const agents = payload.agents || {};
-        const team = payload.team || [];
+        const team = removeExternalCliAgentsFromTeamPayload(payload.team || [], pendingExternalCliAgents);
         Object.assign(next, buildAgentsTeamsFlatConfig({
           agents,
           team,
@@ -1331,7 +1367,7 @@ function AppContent() {
       }
       return next;
     });
-    if (codexDependencyInstalling) {
+    if (hasExternalCliDependencyInstall) {
       return result;
     }
     if (isA2UIChange) {
@@ -2570,7 +2606,7 @@ function AppContent() {
               onHasChangesChange={handleHasChangesChange}
               onDetectExternalCli={detectExternalCli}
               onSelectExternalCliPath={selectExternalCliPath}
-              onGetCodexDependencyInstallStatus={getCodexDependencyInstallStatus}
+              onGetExternalCliDependencyInstallStatus={getExternalCliDependencyInstallStatus}
             />
           </div>
         )}

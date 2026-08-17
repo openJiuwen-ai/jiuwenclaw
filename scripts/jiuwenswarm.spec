@@ -2,7 +2,7 @@
 r"""JiuwenSwarm PyInstaller 打包配置。
 
 构建前请先：
-1. 安装依赖: uv sync --extra dev --extra codex
+1. 安装依赖: uv sync --extra dev --extra claude --extra codex
 2. 构建前端: cd jiuwenswarm/channels/web/frontend && npm run build
 3. 执行平台 wrapper: .\scripts\build-exe.ps1 或 bash scripts/build-macos.sh
 """
@@ -280,10 +280,12 @@ _bundled_binaries = _bundled_binaries + _pytest_binaries + _pa_binaries + _py_bi
 
 # Bundle external CLI SDKs. The Python modules may live in the PYZ archive, but
 # their bundled CLI executables must be present as real files for SDK path
-# discovery. Codex is required for desktop builds because frozen executables do
-# not ship pip and cannot install optional dependencies after release.
+# discovery. External CLI SDKs are required for desktop builds because frozen
+# executables do not ship pip and cannot install optional dependencies after
+# release.
 _desktop_external_cli_hint = (
-    "Run `scripts\\build-exe.ps1`, or run `uv sync --extra dev --extra codex` before invoking PyInstaller directly."
+    "Run `scripts\\build-exe.ps1`, or run `uv sync --extra dev --extra claude --extra codex` "
+    "before invoking PyInstaller directly."
 )
 _claude_datas, _claude_binaries, _claude_hidden = collect_required_all(
     "claude_agent_sdk",

@@ -793,7 +793,7 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 @pytest.mark.asyncio
 async def test_config_set_installs_codex_dependency_before_team_save(monkeypatch):
     channel = FakeWebChannel()
-    dependency_checks: list[None] = []
+    dependency_checks: list[set[str]] = []
     recorded: list[dict] = []
 
     _register_web_handlers(WebHandlersBindParams(channel=channel))
@@ -803,8 +803,9 @@ async def test_config_set_installs_codex_dependency_before_team_save(monkeypatch
     monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
                         lambda: {"modes": {"team": {}}})
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: dependency_checks.append(None) or None,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: dependency_checks.append(cli_agents) or {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
@@ -825,15 +826,15 @@ async def test_config_set_installs_codex_dependency_before_team_save(monkeypatch
         "sess-codex",
     )
 
-    assert dependency_checks == [None]
+    assert dependency_checks == [{"codex"}]
     assert recorded and recorded[0]["team"][0]["external_cli_agents"] == [{"cli_agent": "codex"}]
     assert channel.responses[-1]["ok"] is True
 
 
 @pytest.mark.asyncio
-async def test_config_set_does_not_install_codex_for_claude_only(monkeypatch):
+async def test_config_set_installs_claude_dependency_for_claude_only(monkeypatch):
     channel = FakeWebChannel()
-    dependency_checks: list[None] = []
+    dependency_checks: list[set[str]] = []
 
     _register_web_handlers(WebHandlersBindParams(channel=channel))
 
@@ -842,8 +843,9 @@ async def test_config_set_does_not_install_codex_for_claude_only(monkeypatch):
     monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
                         lambda: {"modes": {"team": {}}})
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: dependency_checks.append(None) or None,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: dependency_checks.append(cli_agents) or {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
@@ -864,14 +866,14 @@ async def test_config_set_does_not_install_codex_for_claude_only(monkeypatch):
         "sess-claude",
     )
 
-    assert dependency_checks == []
+    assert dependency_checks == [{"claude"}]
     assert channel.responses[-1]["ok"] is True
 
 
 @pytest.mark.asyncio
 async def test_config_set_updates_external_cli_switches_without_team_save(monkeypatch):
     channel = FakeWebChannel()
-    dependency_checks: list[None] = []
+    dependency_checks: list[set[str]] = []
     updates: list[tuple[list[str], str | None]] = []
 
     monkeypatch.setenv("WEB_PORT", "19000")
@@ -886,8 +888,9 @@ async def test_config_set_updates_external_cli_switches_without_team_save(monkey
         lambda: {"modes": {"team": {}}},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: dependency_checks.append(None) or None,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: dependency_checks.append(cli_agents) or {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
@@ -908,7 +911,7 @@ async def test_config_set_updates_external_cli_switches_without_team_save(monkey
         "sess-external-cli",
     )
 
-    assert dependency_checks == [None]
+    assert dependency_checks == [{"codex"}]
     assert updates == [([{"cli_agent": "codex"}], "ws://127.0.0.1:19000/ws")]
     assert channel.responses[-1]["ok"] is True
 
@@ -939,6 +942,11 @@ async def test_config_set_saves_external_cli_path_after_detection(monkeypatch):
             "reference_version": "1.2.3",
             "message": "",
         },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
@@ -991,8 +999,9 @@ async def test_config_set_uses_builtin_codex_without_validating_stale_windows_sc
         lambda cli_agent, cli_path="": pytest.fail("built-in mode must not validate cli_path"),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: None,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
@@ -1096,7 +1105,8 @@ async def test_config_set_rejects_unavailable_external_cli_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_config_set_starts_codex_dependency_install_without_saving_codex(monkeypatch):
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+async def test_config_set_starts_external_cli_dependency_install_without_saving_agent(monkeypatch, cli_agent: str):
     channel = FakeWebChannel()
     updates: list[tuple[list[str], str | None]] = []
 
@@ -1112,8 +1122,11 @@ async def test_config_set_starts_codex_dependency_install_without_saving_codex(m
         lambda: {"modes": {"team": {}}},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0},
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: {
+            cli_agent: {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0}
+        },
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
@@ -1122,17 +1135,17 @@ async def test_config_set_starts_codex_dependency_install_without_saving_codex(m
 
     await channel.methods["config.set"](
         object(),
-        "req-codex-installing",
+        f"req-{cli_agent}-installing",
         {
-            "external_cli_agent_codex_enabled": "true",
-            "external_cli_agent_codex_use_builtin": "true",
+            f"external_cli_agent_{cli_agent}_enabled": "true",
+            f"external_cli_agent_{cli_agent}_use_builtin": "true",
         },
-        "sess-codex-installing",
+        f"sess-{cli_agent}-installing",
     )
 
     assert updates == [([], "ws://127.0.0.1:19000/ws")]
     assert channel.responses[-1]["ok"] is True
-    assert channel.responses[-1]["payload"]["codex_dependency_install"]["status"] == "running"
+    assert channel.responses[-1]["payload"]["external_cli_dependency_installs"][cli_agent]["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -1152,8 +1165,11 @@ async def test_config_set_saves_claude_while_codex_dependency_is_installing(monk
         lambda: {"modes": {"team": {}}},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._ensure_codex_dependency_available_or_start_install",
-        lambda: {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0},
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers."
+        "_ensure_external_cli_dependencies_available_or_start_install",
+        lambda cli_agents: {
+            "codex": {"status": "running", "error": "", "started_at": 1.0, "finished_at": 0.0}
+        },
     )
     monkeypatch.setattr(
         "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_external_cli_agents_in_config",
@@ -1174,7 +1190,7 @@ async def test_config_set_saves_claude_while_codex_dependency_is_installing(monk
 
     assert updates == [([{"cli_agent": "claude"}], "ws://127.0.0.1:19000/ws")]
     assert channel.responses[-1]["ok"] is True
-    assert channel.responses[-1]["payload"]["codex_dependency_install"]["status"] == "running"
+    assert channel.responses[-1]["payload"]["external_cli_dependency_installs"]["codex"]["status"] == "running"
 
 
 def test_build_external_cli_publish_url_uses_web_channel_env(monkeypatch):
@@ -1205,8 +1221,8 @@ def test_codex_dependency_install_is_not_started_twice(monkeypatch):
     release_install = threading.Event()
     install_calls: list[None] = []
 
-    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
-        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+    with app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS["codex"]:
+        app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS["codex"].update({
             "status": "idle",
             "error": "",
             "started_at": 0.0,
@@ -1225,13 +1241,13 @@ def test_codex_dependency_install_is_not_started_twice(monkeypatch):
         release_install.wait(timeout=5)
 
     monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._install_codex_dependency",
-        install_once,
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers._install_external_cli_dependency",
+        lambda cli_agent: install_once(),
     )
 
-    first = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+    first = app_web_handlers._ensure_external_cli_dependency_available_or_start_install("codex")
     assert install_started.wait(timeout=5)
-    second = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+    second = app_web_handlers._ensure_external_cli_dependency_available_or_start_install("codex")
     release_install.set()
 
     assert first and first["status"] == "running"
@@ -1240,8 +1256,8 @@ def test_codex_dependency_install_is_not_started_twice(monkeypatch):
 
 
 def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
-    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
-        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+    with app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS["codex"]:
+        app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS["codex"].update({
             "status": "idle",
             "phase": "idle",
             "error": "",
@@ -1263,7 +1279,7 @@ def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
 
     monkeypatch.setattr(app_web_handlers.threading, "Thread", fail_thread_start)
 
-    snapshot = app_web_handlers._ensure_codex_dependency_available_or_start_install()
+    snapshot = app_web_handlers._ensure_external_cli_dependency_available_or_start_install("codex")
 
     assert snapshot and snapshot["status"] == "failed"
     assert snapshot["phase"] == "failed"
@@ -1272,11 +1288,11 @@ def test_codex_dependency_install_is_not_started_in_frozen_desktop(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_external_cli_codex_install_status_returns_snapshot():
+async def test_external_cli_install_status_returns_snapshot():
     channel = FakeWebChannel()
     _register_web_handlers(WebHandlersBindParams(channel=channel))
-    with app_web_handlers._CODEX_DEPENDENCY_INSTALL_LOCK:
-        app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS.update({
+    with app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS["codex"]:
+        app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS["codex"].update({
             "status": "running",
             "phase": "installing",
             "error": "",
@@ -1287,19 +1303,20 @@ async def test_external_cli_codex_install_status_returns_snapshot():
             "updated_at": 2.0,
         })
 
-    await channel.methods["external_cli.codex_install_status"](
+    await channel.methods["external_cli.install_status"](
         object(),
         "req-codex-install-status",
-        {},
+        {"cli_agent": "codex"},
         "sess-codex-install-status",
     )
 
     payload = channel.responses[-1]["payload"]
     assert channel.responses[-1]["ok"] is True
+    assert payload["cli_agent"] == "codex"
     assert payload["status"] == "running"
     assert payload["phase"] == "installing"
     assert payload["log_tail"] == ["Collecting openjiuwen"]
-    assert payload["log_tail"] is not app_web_handlers._CODEX_DEPENDENCY_INSTALL_STATUS["log_tail"]
+    assert payload["log_tail"] is not app_web_handlers._EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS["codex"]["log_tail"]
 
 
 @pytest.mark.asyncio
