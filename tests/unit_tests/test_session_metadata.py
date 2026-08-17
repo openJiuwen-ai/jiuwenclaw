@@ -405,6 +405,40 @@ class TestGetSessionMetadata:
         assert data == {}
 
     @staticmethod
+    def test_traversal_session_id_cannot_read_outside_sessions_root(sessions_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "metadata.json").write_text(
+            json.dumps({"session_id": "outside", "title": "secret"}),
+            encoding="utf-8",
+        )
+
+        data = get_session_metadata(
+            "../outside",
+            cache_bust=True,
+            enable_writeback=False,
+            sessions_root=sessions_dir,
+        )
+
+        assert data == {}
+
+    @staticmethod
+    def test_traversal_session_id_cannot_write_outside_sessions_root(sessions_dir, tmp_path):
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+        outside_dir = tmp_path / "outside-write"
+
+        with pytest.raises(ValueError, match="invalid session_id"):
+            init_session_metadata(
+                session_id="../outside-write",
+                sessions_root=sessions_dir,
+            )
+
+        assert not outside_dir.exists()
+
+    @staticmethod
     def test_explicit_sessions_root_does_not_fallback_to_global_metadata(
         sessions_dir,
         tmp_path,

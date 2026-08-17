@@ -3062,7 +3062,10 @@ class AgentWebSocketServer:
         *,
         sessions_root: str | Path | None = None,
     ) -> list[str]:
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            resolve_session_subdir,
+        )
 
         sessions_dir = Path(sessions_root) if sessions_root is not None else get_agent_sessions_dir()
         if not sessions_dir.exists():
@@ -3074,6 +3077,8 @@ class AgentWebSocketServer:
                 continue
 
             session_id = session_dir.name
+            if resolve_session_subdir(session_id, sessions_root=sessions_dir) is None:
+                continue
             if sessions_root is None:
                 metadata = get_session_metadata(session_id)
             else:
@@ -3747,6 +3752,7 @@ class AgentWebSocketServer:
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
             resolve_session_runtime_team_name,
+            resolve_session_subdir,
         )
 
         params = request.params if isinstance(request.params, dict) else {}
@@ -3870,7 +3876,18 @@ class AgentWebSocketServer:
                         else:
                             failed_session_ids: list[str] = []
                             for team_session_id in team_session_ids:
-                                session_dir = sessions_root / team_session_id
+                                session_dir = resolve_session_subdir(
+                                    team_session_id,
+                                    sessions_root=sessions_root,
+                                )
+                                if session_dir is None:
+                                    logger.error(
+                                        "[AgentWebSocketServer] refusing to delete unsafe team session path: "
+                                        "session_id=%s",
+                                        team_session_id,
+                                    )
+                                    failed_session_ids.append(team_session_id)
+                                    continue
                                 if session_dir.exists():
                                     try:
                                         shutil.rmtree(session_dir)
@@ -8250,8 +8267,20 @@ class AgentWebSocketServer:
 
             # 会话目录已存在则拒绝,避免覆盖既有会话元数据(与 web 本地 handler 一致)
             sessions_root = _sessions_dir_for_request(request)
-            session_dir = sessions_root / session_id
-            legacy_meta = get_agent_sessions_dir() / session_id / "metadata.json"
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                resolve_session_subdir,
+            )
+            session_dir = resolve_session_subdir(
+                session_id,
+                sessions_root=sessions_root,
+            )
+            legacy_session_dir = resolve_session_subdir(
+                session_id,
+                sessions_root=get_agent_sessions_dir(),
+            )
+            if session_dir is None or legacy_session_dir is None:
+                raise ValueError("invalid session_id")
+            legacy_meta = legacy_session_dir / "metadata.json"
             if (session_dir / "metadata.json").is_file() or legacy_meta.is_file():
                 self._agent_manager.activate_session_prewarm(session_id)
                 if create_token:
@@ -8287,7 +8316,9 @@ class AgentWebSocketServer:
                 return
 
             # 初始化会话元数据(同步写盘),将 project_dir/project_id 等字段落盘
-            from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                init_session_metadata,
+            )
             init_session_metadata(
                 session_id=session_id,
                 channel_id=channel_id,

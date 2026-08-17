@@ -45,6 +45,7 @@ from jiuwenswarm.common.config import (
     get_config,
     get_config_raw,
     get_default_models,
+    resolve_legacy_team_model_ref,
     replace_teams_in_config,
     update_default_models_in_config,
     update_heartbeat_in_config,
@@ -1046,6 +1047,9 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         if model_cfg.get("ref") is not None:
             return str(model_cfg.get("ref") or "")
         if model_cfg.get("model") is not None:
+            migrated_ref = resolve_legacy_team_model_ref(model_cfg, raw)
+            if migrated_ref is not None:
+                return migrated_ref
             return str(model_cfg.get("model") or "")
         request_cfg = model_cfg.get("model_request_config")
         if isinstance(request_cfg, dict) and request_cfg.get("model") is not None:

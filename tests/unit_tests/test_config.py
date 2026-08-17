@@ -545,6 +545,81 @@ modes:
         assert "custom_headers" not in saved_text
 
     @staticmethod
+    def test_replace_teams_in_config_migrates_legacy_inline_model_to_ref(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: gpt-4.1
+        client_provider: OpenAI
+        api_base: https://api.openai.com/v1
+        api_key: server-secret
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "OpenAI",
+            "api_base": "https://api.openai.com/v1",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["agents"]["leader"]["model"] == {"ref": "gpt-4.1#0"}
+        assert "legacy-secret" not in temp_config_file.read_text(encoding="utf-8")
+
+    @staticmethod
+    def test_replace_teams_in_config_resolves_env_before_legacy_model_migration(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setenv("MODEL_NAME", "gpt-4.1")
+        monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+        monkeypatch.setenv("API_BASE", "https://api.openai.com/v1")
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: ${MODEL_NAME}
+        client_provider: ${MODEL_PROVIDER}
+        api_base: ${API_BASE}
+        api_key: ${API_KEY}
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "openai",
+            "api_base": "https://api.openai.com/v1/",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["modes"]["team"]["alpha_team"]["agents"]["leader"]["model"] == {
+            "ref": "gpt-4.1#0",
+        }
+
+    @staticmethod
     def test_replace_teams_in_config_expands_reused_agent_specs_without_yaml_aliases(
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,

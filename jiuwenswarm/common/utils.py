@@ -1645,7 +1645,10 @@ def resolve_tenant_env_ns(
     agent_id: str | None = None,
 ) -> tuple[str, str]:
     """Resolve ``(service_id, agent_id)``: explicit pair > bound env_ns > TypeError."""
-    from jiuwenswarm.common.local_env_config import get_bound_agent_env_ns
+    from jiuwenswarm.common.local_env_config import (
+        get_bound_agent_env_ns,
+        normalize_env_ns_id,
+    )
 
     if service_id is not None or agent_id is not None:
         if service_id is None or agent_id is None:
@@ -1656,10 +1659,10 @@ def resolve_tenant_env_ns(
         aid = str(agent_id).strip()
         if not sid or not aid:
             raise TypeError("tenant service_id/agent_id must be non-empty strings")
-        return sid, aid
+        return normalize_env_ns_id(sid), normalize_env_ns_id(aid)
     bound = get_bound_agent_env_ns()
     if bound is not None:
-        return bound
+        return normalize_env_ns_id(bound[0]), normalize_env_ns_id(bound[1])
     raise TypeError(
         "tenant scope is required: pass service_id=... and agent_id=..., "
         "or bind_agent_env_ns before resolving tenant paths"

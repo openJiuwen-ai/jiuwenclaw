@@ -68,6 +68,18 @@ export function preserveConfiguredModelName(
     .find(Boolean) ?? "";
 }
 
+export function resolveConfiguredModelIndex(models: ModelEntry[], modelRef: string): number {
+  const separatorIndex = modelRef.lastIndexOf('#');
+  if (separatorIndex >= 0) {
+    const modelName = modelRef.slice(0, separatorIndex);
+    const modelIndex = Number(modelRef.slice(separatorIndex + 1));
+    return Number.isInteger(modelIndex) && modelIndex >= 0 && modelIndex < models.length && models[modelIndex].model_name === modelName ? modelIndex : -1;
+  }
+
+  const matchingIndexes = models.map((model, index) => (model.model_name === modelRef ? index : -1)).filter(index => index >= 0);
+  return matchingIndexes.length === 1 ? matchingIndexes[0] : -1;
+}
+
 export function syncAgentsWithModelChanges<T extends AgentWithModelBinding>(
   agents: T[],
   previousModels: ModelEntry[],

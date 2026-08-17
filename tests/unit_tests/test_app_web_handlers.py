@@ -826,6 +826,80 @@ def test_config_panel_flatten_reads_standalone_agent_registry():
     assert flat["agent_completion_timeout_0"] == "34"
 
 
+def test_config_panel_flatten_migrates_legacy_model_with_resolved_defaults(monkeypatch):
+    monkeypatch.setenv("MODEL_NAME", "gpt-4.1")
+    monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+    monkeypatch.setenv("API_BASE", "https://api.openai.com/v1")
+    raw = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "other-model",
+                        "client_provider": "OpenAI",
+                        "api_base": "https://example.com/v1",
+                    },
+                },
+                {
+                    "model_client_config": {
+                        "model_name": "${MODEL_NAME}",
+                        "client_provider": "${MODEL_PROVIDER}",
+                        "api_base": "${API_BASE}",
+                    },
+                },
+            ],
+        },
+        "web_config_panel": {
+            "agent_team_agents": {
+                "agent_1": {
+                    "model": {
+                        "provider": "${MODEL_PROVIDER}",
+                        "api_base": "${API_BASE}/",
+                        "api_key": "legacy-secret",
+                        "model": "${MODEL_NAME}",
+                    },
+                },
+            },
+        },
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["agent_model_0"] == "gpt-4.1#1"
+
+
+def test_config_panel_flatten_keeps_ambiguous_legacy_model_unresolved():
+    raw = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "model_name": "gpt-4.1",
+                        "client_provider": "OpenAI",
+                        "api_base": "https://one.example/v1",
+                    },
+                },
+                {
+                    "model_client_config": {
+                        "model_name": "gpt-4.1",
+                        "client_provider": "OpenAI",
+                        "api_base": "https://two.example/v1",
+                    },
+                },
+            ],
+        },
+        "web_config_panel": {
+            "agent_team_agents": {
+                "agent_1": {"model": {"model": "gpt-4.1"}},
+            },
+        },
+    }
+
+    flat = _flatten_modes_team_for_config_panel(raw)
+
+    assert flat["agent_model_0"] == "gpt-4.1"
+
+
 @pytest.mark.parametrize(
     ("enabled", "expected"),
     [

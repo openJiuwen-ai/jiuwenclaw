@@ -10,6 +10,7 @@ import {
   modelEntriesEqual,
   patchModelSnapshot,
   preserveConfiguredModelName,
+  resolveConfiguredModelIndex,
   shouldContinueOpenAIAccountLoginPoll,
   syncAgentsWithModelChanges,
   type ModelIdentity,
@@ -3785,13 +3786,9 @@ export function ConfigPanel({
       if (!name) continue;
       const modelRef = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
       const separatorIndex = modelRef.lastIndexOf("#");
-      const referencedIndex = separatorIndex >= 0 ? Number(modelRef.slice(separatorIndex + 1)) : -1;
       const referencedName = separatorIndex >= 0 ? modelRef.slice(0, separatorIndex) : modelRef;
-      const indexedModel = Number.isInteger(referencedIndex) ? storeAvailableModels[referencedIndex] : undefined;
-      const matchedModel = separatorIndex >= 0
-        ? (indexedModel?.model_name === referencedName ? indexedModel : undefined)
-        : storeAvailableModels.find((m) => m.model_name === referencedName);
-      const matchedIndex = matchedModel ? storeAvailableModels.indexOf(matchedModel) : -1;
+      const matchedIndex = resolveConfiguredModelIndex(storeAvailableModels, modelRef);
+      const matchedModel = matchedIndex >= 0 ? storeAvailableModels[matchedIndex] : undefined;
       agents.push({
         name,
         model: matchedModel ? {

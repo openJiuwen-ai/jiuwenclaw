@@ -5,9 +5,22 @@ import {
   canAutoSaveOpenAIAccountModel,
   patchModelSnapshot,
   preserveConfiguredModelName,
+  resolveConfiguredModelIndex,
   shouldContinueOpenAIAccountLoginPoll,
   syncAgentsWithModelChanges,
 } from "../node_modules/.cache/openai-account-model-state/components/ConfigPanel/openaiAccountModelState.js";
+
+test('resolveConfiguredModelIndex only resolves a bare model name when it is unique', () => {
+  const models = [
+    { model_name: 'gpt-4.1', model_provider: 'OpenAI', api_base: 'https://one.example/v1', api_key: '' },
+    { model_name: 'gpt-4.1', model_provider: 'OpenAI', api_base: 'https://two.example/v1', api_key: '' },
+    { model_name: 'o3', model_provider: 'OpenAI', api_base: 'https://api.openai.com/v1', api_key: '' },
+  ];
+
+  assert.equal(resolveConfiguredModelIndex(models, 'gpt-4.1'), -1);
+  assert.equal(resolveConfiguredModelIndex(models, 'o3'), 2);
+  assert.equal(resolveConfiguredModelIndex(models, 'gpt-4.1#1'), 1);
+});
 
 const persistedModels = [
   {

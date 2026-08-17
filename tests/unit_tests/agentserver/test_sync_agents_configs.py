@@ -41,6 +41,7 @@ from jiuwenswarm.common.local_env_config import (
     set_os_environ,
     stage_env_overrides,
 )
+from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
 
 
 def _full_env(**overrides: str | None) -> dict[str, str | None]:
@@ -118,6 +119,21 @@ class TestEnvNsKeyHelpers:
     def test_id_with_double_underscore_raises():
         with pytest.raises(EnvNsIdError, match="__"):
             normalize_env_ns_id("bad__id")
+
+    @staticmethod
+    @pytest.mark.parametrize("value", ["../escape", "..\\escape", "/absolute", "\\absolute", "bad\x00id"])
+    def test_id_with_path_syntax_raises(value: str):
+        with pytest.raises(EnvNsIdError, match="path"):
+            normalize_env_ns_id(value)
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        ("service_id", "agent_id"),
+        [("../escape", "agent"), ("service", "..\\escape")],
+    )
+    def test_tenant_sessions_dir_rejects_path_syntax(service_id: str, agent_id: str):
+        with pytest.raises(EnvNsIdError, match="path"):
+            resolve_tenant_sessions_dir(service_id, agent_id)
 
     @staticmethod
     def test_logical_key_with_double_underscore_raises():

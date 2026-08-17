@@ -2395,7 +2395,7 @@ async def test_handle_session_switch_serializes_reentrant_requests(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch):
+async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch, tmp_path):
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
     delete_calls = []
@@ -2426,23 +2426,9 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
         assert team_name == "jiuwen_team"
         return ["team_sess_001", "team_sess_002"]
 
-    class FakeSessionDir:
-        def __init__(self, session_id: str):
-            self.session_id = session_id
-            self.path = session_id
-
-        @staticmethod
-        def exists() -> bool:
-            return True
-
-    class FakeSessionsRoot:
-        def __init__(self) -> None:
-            self._prefix = "sessions/"
-
-        def __truediv__(self, session_id: str):
-            session_dir = FakeSessionDir(session_id)
-            session_dir.path = f"{self._prefix}{session_id}"
-            return session_dir
+    sessions_root = tmp_path / "sessions"
+    (sessions_root / "team_sess_001").mkdir(parents=True)
+    (sessions_root / "team_sess_002").mkdir()
 
     monkeypatch.setattr(
         agent_ws_server_module,
@@ -2470,12 +2456,12 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
     monkeypatch.setattr(
         agent_ws_server_module,
         "_sessions_dir_for_request",
-        lambda _request: FakeSessionsRoot(),
+        lambda _request: sessions_root,
     )
     monkeypatch.setattr(
         agent_ws_server_module.shutil,
         "rmtree",
-        lambda path: removed_dirs.append(path.session_id),
+        lambda path: removed_dirs.append(path.name),
     )
     monkeypatch.setattr(
         agent_ws_server_module,

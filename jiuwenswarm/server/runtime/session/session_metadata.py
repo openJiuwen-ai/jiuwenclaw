@@ -297,14 +297,24 @@ def _safe_session_subdir(
 ) -> Path | None:
     """解析 sessions 根下安全子目录；非法 session_id 返回 None（不 mkdir）。"""
     stripped = (session_id or "").strip()
-    if not stripped or stripped in {".", ".."}:
+    if not stripped or "\x00" in stripped:
         return None
-    if ".." in stripped or "/" in stripped or "\\" in stripped:
+    from jiuwenswarm.server.runtime.prompt_attachment_loader import sanitize_session_id
+
+    if sanitize_session_id(stripped) != stripped:
         return None
     root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
     try:
         base = root.resolve()
-        target = (base / stripped).resolve()
+        candidate = base / stripped
+        if candidate.is_symlink():
+            return None
+        try:
+            if candidate.lstat().st_file_attributes & 0x400:
+                return None
+        except (AttributeError, FileNotFoundError):
+            pass
+        target = candidate.resolve()
     except OSError:
         return None
     if target == base or not _is_relative_to(target, base):
@@ -463,7 +473,10 @@ def _peek_project_dir_from_root(session_id: str, sessions_root: Path) -> str | N
         if isinstance(pd, str) and pd.strip():
             return pd.strip()
 
-    fpath = sessions_root / session_id / "metadata.json"
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return None
+    fpath = session_dir / "metadata.json"
     if not fpath.is_file():
         return None
     try:
@@ -531,8 +544,9 @@ def get_resolved_project_dir(
 
 def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
     """获取会话元数据文件路径"""
-    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
-    session_dir = root / session_id
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "metadata.json"
 
@@ -556,8 +570,10 @@ def _read_metadata(
             cached = _METADATA_CACHE.get(cache_key)
             if cached is not None:
                 return cached.copy()
-    root = Path(root_s) if root_s is not None else get_agent_sessions_dir()
-    fpath = root / session_id / "metadata.json"
+    session_dir = resolve_session_subdir(session_id, sessions_root=root_s)
+    if session_dir is None:
+        return {}
+    fpath = session_dir / "metadata.json"
     if not fpath.exists():
         return {}
     try:
@@ -637,8 +653,10 @@ def _merge_pin_fields_from_disk(
     sessions_root: str | None = None,
 ) -> dict[str, Any]:
     """Preserve latest disk pin state for async writes that do not own pin fields."""
-    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
-    fpath = root / session_id / "metadata.json"
+    session_dir = resolve_session_subdir(session_id, sessions_root=sessions_root)
+    if session_dir is None:
+        return metadata
+    fpath = session_dir / "metadata.json"
     if not fpath.exists():
         return metadata
     try:
@@ -1191,11 +1209,9 @@ def get_session_metadata(
         session_id, cache_bust, sessions_root=root_s
     )
     if isinstance(metadata, dict) and metadata:
-        session_dir = (
-            Path(root_s) / session_id
-            if root_s is not None
-            else get_agent_sessions_dir() / session_id
-        )
+        session_dir = resolve_session_subdir(session_id, sessions_root=root_s)
+        if session_dir is None:
+            return {}
         metadata = _apply_metadata_defaults_with_inference(
             session_id,
             metadata,
