@@ -180,14 +180,18 @@ sys.stdin.read(1)
                 process.wait(timeout=10)
 
 
-def test_installer_blocks_running_app_and_preserves_user_data():
+def test_installer_blocks_running_app_and_preserves_user_data(exe_entry):
     script = INSTALLER_PATH.read_text(encoding="utf-8")
     uninstall_delete = script.split("[UninstallDelete]", maxsplit=1)[1].split(
         "[Run]",
         maxsplit=1,
     )[0]
 
-    assert "AppMutex=JiuwenSwarm.App,Global\\JiuwenSwarm.App" in script
+    assert exe_entry._WINDOWS_APP_MUTEX_NAMES == (
+        "WorkSwarm.App",
+        r"Global\WorkSwarm.App",
+    )
+    assert "AppMutex={#MyAppName}.App,Global\\{#MyAppName}.App" in script
     assert "CloseApplications=yes" in script
     assert "CloseApplications=force" not in script
     assert 'Name: "{app}\\_internal"' in uninstall_delete

@@ -123,7 +123,10 @@ _CHILD_FLAGS = {"--desktop-run-app", "--desktop-run-web",
 # mutexes for its entire lifetime, so an orphaned desktop child still blocks
 # uninstall. The detached update helper is intentionally exempt: after the
 # desktop process tree exits it must be able to launch the next installer.
-_WINDOWS_APP_MUTEX_NAMES = ("JiuwenSwarm.App", r"Global\JiuwenSwarm.App")
+_WINDOWS_APP_MUTEX_NAMES = (
+    f"{DISPLAY_NAME}.App",
+    rf"Global\{DISPLAY_NAME}.App",
+)
 _WINDOWS_APP_MUTEX_HANDLES: list[int] = []
 
 

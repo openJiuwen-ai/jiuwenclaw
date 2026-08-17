@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from urllib.parse import urljoin
 
+from jiuwenswarm.common._build_config import PACKAGE_NAME
 from jiuwenswarm.common.config import get_config_raw
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.upgrade_executor import create_executor
@@ -33,6 +34,7 @@ DEFAULT_SOURCE_CONFIG: dict[str, Any] = {
     "desktop_release_api_type": "gitcode",
     "repo_owner": "openJiuwen",
     "repo_name": "jiuwenswarm",
+    "package_name": PACKAGE_NAME,
     "release_api_url": "",
     "pypi_mirror": "https://mirrors.aliyun.com/pypi",
     "asset_name_pattern": "",
@@ -286,7 +288,7 @@ class UpdaterService:
                 timeout_seconds=timeout,
             ),
             "pypi": lambda: PyPIVersionSource(
-                package=config["repo_name"],
+                package=config["package_name"],
                 mirror=config["pypi_mirror"],
                 timeout_seconds=timeout,
             ),
@@ -452,6 +454,7 @@ class UpdaterService:
             api_type = "pypi"
         owner = str(updater.get("repo_owner") or "openJiuwen").strip()
         repo = str(updater.get("repo_name") or "jiuwenswarm").strip()
+        package = PACKAGE_NAME
         release_api_url = str(updater.get("release_api_url") or "").strip()
         if not release_api_url:
             if api_type == "github":
@@ -459,9 +462,9 @@ class UpdaterService:
             elif api_type == "pypi":
                 pypi_mirror = str(updater.get("pypi_mirror") or "").strip()
                 if pypi_mirror:
-                    release_api_url = urljoin(pypi_mirror, f"simple/{repo}/")
+                    release_api_url = urljoin(pypi_mirror, f"simple/{package}/")
                 else:
-                    release_api_url = DEFAULT_RELEASE_API_PYPI.format(package=repo)
+                    release_api_url = DEFAULT_RELEASE_API_PYPI.format(package=package)
             else:
                 release_api_url = DEFAULT_RELEASE_API_GITCODE.format(owner=owner, repo=repo)
         timeout_seconds = updater.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
@@ -479,6 +482,7 @@ class UpdaterService:
             "install_mode": _detect_install_mode(),
             "repo_owner": owner,
             "repo_name": repo,
+            "package_name": package,
             "release_api_url": release_api_url,
             "asset_name_pattern_windows": str(
                 updater.get("asset_name_pattern_windows")

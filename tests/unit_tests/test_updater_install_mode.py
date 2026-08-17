@@ -3,6 +3,7 @@ import sys
 import pytest
 
 from jiuwenswarm.common import updater
+from jiuwenswarm.common.upgrade_executor import PipExecutor
 
 
 def test_desktop_env_forces_desktop_install_mode(monkeypatch):
@@ -37,6 +38,58 @@ def test_desktop_env_keeps_gitcode_release_source(monkeypatch):
     assert config["release_api_url"] == (
         "https://api.gitcode.com/api/v5/repos/openJiuwen/jiuwenswarm/releases/latest"
     )
+
+
+def test_pip_mode_uses_canonical_package_identity(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_DESKTOP", raising=False)
+    monkeypatch.setattr(
+        updater,
+        "get_config_raw",
+        lambda: {
+            "updater": {
+                "repo_name": "jiuwenswarm",
+                "pypi_mirror": "https://mirrors.aliyun.com/pypi",
+            }
+        },
+    )
+
+    config = updater.UpdaterService._load_config()
+    source = updater.UpdaterService._create_version_source(config)
+    executor = PipExecutor(config, lambda updates: None)
+    monkeypatch.setattr(executor, "_resolve_uv_command", lambda: None)
+
+    assert config["package_name"] == "workswarm"
+    assert config["repo_name"] == "jiuwenswarm"
+    assert config["release_api_url"].endswith("/simple/workswarm/")
+    assert source._name == "workswarm"
+    assert "workswarm" in executor._build_install_args(
+        config["package_name"], config["timeout_seconds"]
+    )
+
+
+def test_pip_executor_installs_canonical_package_name(monkeypatch):
+    checked_packages = []
+    statuses = []
+    executor = PipExecutor(
+        {
+            "package_name": "workswarm",
+            "repo_name": "jiuwenswarm",
+            "timeout_seconds": 20,
+        },
+        statuses.append,
+    )
+
+    def reject_editable(package):
+        checked_packages.append(package)
+        return "editable test stop"
+
+    monkeypatch.setattr(executor, "_check_editable_install", reject_editable)
+
+    executor.install()
+
+    assert checked_packages == ["workswarm"]
+    assert statuses[-1]["error"] == "pip install failed: editable test stop"
 
 
 def test_global_asset_name_pattern_applies_to_all_platforms(monkeypatch):
