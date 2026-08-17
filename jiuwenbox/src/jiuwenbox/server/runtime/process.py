@@ -189,10 +189,19 @@ def _python_fastpath_candidate(command: list[str]) -> bool:
     imports live on. Marking a request merely lets the daemon consider it;
     the daemon still falls back on anything it does not fully understand.
 
-    Recognised shapes (Phase 6B):
-      * ``python3 [flags] -c CODE``                    (as released)
+    Recognised shapes (Phase 6B / 6C-1):
+      * ``python|python3 -c CODE``                    (bare ``-c`` only)
       * ``python|python3 <script>.py [args]``          (direct script)
       * ``bash -lc|-c '<small payload>'``              (real EDPA wrapper)
+
+    Only a *bare* ``-c`` right after the interpreter is offered: any
+    interpreter flag (``-I``/``-S``/``-E``/``-u``/``-B``) changes ``sys.flags``
+    or startup the warm worker cannot reproduce, so the daemon would reject it
+    anyway -- skipping the candidate mark sends it straight to ``subprocess``.
+    The daemon is still authoritative: for ``python -c`` it applies the
+    interpreter-identity check (``python`` must resolve to the worker), and it
+    re-checks the bare-``-c`` shape, so this pre-filter never causes a wrong
+    conversion on its own.
     """
     if not command:
         return False
@@ -200,9 +209,9 @@ def _python_fastpath_candidate(command: list[str]) -> bool:
     if head in (PYTHON_EXECUTABLE, "python"):
         if len(command) < 2:
             return False
-        for i, tok in enumerate(command[:-1]):
-            if tok == "-c":
-                return head == PYTHON_EXECUTABLE and i + 1 < len(command)
+        # Bare ``-c`` right after the interpreter: offer to the daemon.
+        if command[1] == "-c":
+            return len(command) >= 3
         # Direct script form: first token after the interpreter is a .py file.
         return not command[1].startswith("-") and command[1].endswith(".py")
     if head == "bash" and len(command) == 3 and command[1] in ("-lc", "-c"):

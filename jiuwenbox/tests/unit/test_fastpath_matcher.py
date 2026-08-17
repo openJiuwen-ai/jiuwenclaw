@@ -178,11 +178,11 @@ def test_absolute_script_path_hits(stub_host, workdir):
 
 
 def test_released_dash_c_shape_is_unchanged(stub_host):
-    """The already-released ``python3 -c`` path must not regress."""
-    plan = _plan(["python3", "-c", "print(1)"])
-    assert plan == {"mode": "code", "code": "print(1)"}
-    plan = _plan(["python3", "-S", "-I", "-c", "print(1)"])
-    assert plan == {"mode": "code", "code": "print(1)"}
+    """The ``python3 -c`` path must keep hitting; ``python -c`` now hits too."""
+    assert _plan(["python3", "-c", "print(1)"]) == {"mode": "code",
+                                                    "code": "print(1)"}
+    assert _plan(["python", "-c", "print(1)"]) == {"mode": "code",
+                                                   "code": "print(1)"}
 
 
 def test_dash_c_hits_even_when_script_mode_is_disabled(stub_host, monkeypatch):
@@ -190,8 +190,64 @@ def test_dash_c_hits_even_when_script_mode_is_disabled(stub_host, monkeypatch):
     monkeypatch.setenv(sd.FASTPATH_SCRIPT_ENV, "0")
     assert _plan(["python3", "-c", "print(1)"]) == {"mode": "code",
                                                    "code": "print(1)"}
+    assert _plan(["python", "-c", "print(1)"]) == {"mode": "code",
+                                                   "code": "print(1)"}
     assert _plan(["python3", "app.py"]) is None
+    assert _plan(["python", "app.py"]) is None
     assert _plan(["bash", "-lc", "python app.py"]) is None
+
+
+# Phase 6C-1: the ForkServer worker is a warm ``python3 -c`` interpreter whose
+# ``sys.flags`` and startup are fixed; it cannot reproduce any interpreter
+# flag a per-request ``-c`` might carry. Each of these flags changes
+# observable ``sys.flags`` (``-I``/``-S``/``-E``/``-B``) or stdout buffering
+# (``-u``), so the request must fall back to a fresh ``subprocess`` rather
+# than be silently run with the flag dropped. ``-c`` after a script token
+# belongs to the script's argv, not to the interpreter, so it must not take
+# the code fast path either.
+@pytest.mark.parametrize("command", [
+    ["python3", "-I", "-c", "print(1)"],
+    ["python3", "-S", "-c", "print(1)"],
+    ["python3", "-E", "-c", "print(1)"],
+    ["python3", "-u", "-c", "print(1)"],
+    ["python3", "-B", "-c", "print(1)"],
+    ["python3", "-S", "-I", "-c", "print(1)"],
+    ["python", "-I", "-c", "print(1)"],
+    ["python", "-S", "-c", "print(1)"],
+    ["python", "-E", "-c", "print(1)"],
+    ["python", "-u", "-c", "print(1)"],
+    ["python", "-B", "-c", "print(1)"],
+    ["python3", "-c"],                # bare -c, no code
+    ["python", "-c"],                 # bare -c, no code
+])
+def test_flagged_or_non_bare_dash_c_falls_back(stub_host, workdir, command):
+    assert _plan(command, workdir=workdir) is None, command
+
+
+def test_dash_c_as_script_argv_runs_the_script(stub_host, workdir):
+    """A ``-c`` after a script token is the script's argv, not the interp's.
+
+    Real ``python3 app.py -c x`` runs ``app.py`` with ``sys.argv`` including
+    ``-c``; the previous greedy matcher misread this as ``-c x`` code. The
+    bare-``-c`` rule leaves it to script mode, which runs the script.
+    """
+    plan = _plan(["python3", "app.py", "-c", "x"], workdir=workdir)
+    assert plan is not None
+    assert plan["mode"] == "script"
+    assert plan["argv"] == ["app.py", "-c", "x"]
+
+
+def test_python_dash_c_requires_identity_match(stub_host, monkeypatch):
+    """``python -c`` runs in the python3 worker; only safe if python IS it."""
+    # identity matches -> hits (the stub resolves every name to the worker).
+    assert _plan(["python", "-c", "print(1)"]) == {"mode": "code",
+                                                   "code": "print(1)"}
+    # identity mismatch -> must not convert (would run python2/venv code
+    # under python3). python3 -c is unaffected: it is the worker itself.
+    monkeypatch.setattr(sd, "_fastpath_interp_path", lambda name: None)
+    assert _plan(["python", "-c", "print(1)"]) is None
+    assert _plan(["python3", "-c", "print(1)"]) == {"mode": "code",
+                                                    "code": "print(1)"}
 
 
 # --------------------------------------------------------------------------
@@ -221,8 +277,6 @@ def test_dash_c_hits_even_when_script_mode_is_disabled(stub_host, monkeypatch):
     ["bash", "-lc", "/usr/bin/python app.py"],
     ["/usr/bin/python3", "app.py"],
     ["bash", "-lc", "python3.11 app.py"],
-    # -- ``python`` with -c: the released path is python3-only --------------
-    ["python", "-c", "print(1)"],
     # -- wrapper arity: only the exact 3-token bash form is considered ------
     ["bash", "-c"],
     ["bash", "-lc", "python app.py", "extra"],

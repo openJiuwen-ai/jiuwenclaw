@@ -707,24 +707,49 @@ def _fastpath_plan(
         return None
     base_cwd = header.get("workdir") or os.getcwd()
 
-    # --- shape 1: the already-released ``python3 [flags] -c CODE`` ---------
-    if command[0] == "python3":
-        for i, tok in enumerate(command[:-1]):
-            if tok == "-c":
-                if i + 1 < len(command):
-                    return {"mode": "code", "code": command[i + 1]}
-                return None
+    # --- shape 1: the ``python[3] -c CODE`` fast path ----------------------
+    # The ForkServer worker is itself a warm ``python3 -c`` interpreter: it
+    # runs the user's ``-c`` source by ``exec()``-ing it in its own already-
+    # initialised process, so the interpreter name does not select a different
+    # binary -- the worker IS the interpreter that runs the code. Two rules
+    # follow from that, both measured against the real interpreter in-sandbox:
+    #
+    #   * ``python3 -c`` is equivalent by construction (the worker is the
+    #     daemon's ``python3``). ``python -c`` is equivalent only when the
+    #     bare ``python`` on PATH resolves to that same interpreter; if
+    #     ``python`` were python2 / a venv / a wrapper, the fast path would
+    #     silently run its code under python3, so it must fall back (the same
+    #     identity check the script path uses). ``python3 -c`` keeps its
+    #     released behaviour and is not identity-checked (no regression).
+    #   * The worker's ``sys.flags`` and startup are fixed at worker spawn
+    #     and cannot be changed per request. Any interpreter flag before
+    #     ``-c`` (``-I`` / ``-S`` / ``-E`` / ``-u`` / ``-B`` ...) changes
+    #     observable ``sys.flags`` or buffering/startup that the worker
+    #     cannot reproduce, so a flagged ``-c`` must not take the code fast
+    #     path. (Phase 6C-1: previously every flag was silently dropped and
+    #     the request still hit -- e.g. ``python3 -I -c`` ran with
+    #     ``sys.flags.isolated == 0``.)
+    #
+    # Code mode is therefore exactly the bare ``python[3] -c CODE``: ``-c``
+    # must be the first token after the interpreter. A ``-c`` that appears
+    # later belongs to a script's argv, not to the interpreter, and a flag
+    # before it is not preservable -- both fall through to script mode,
+    # which rejects flagged and non-.py shapes of its own accord (so they
+    # end up on the normal ``subprocess.Popen`` path).
+    if command[0] in ("python3", "python"):
+        interp = command[0]
+        if len(command) >= 2 and command[1] == "-c":
+            if len(command) < 3:
+                return None  # bare ``-c`` with no code -> let it error
+            if interp == "python" and _fastpath_interp_path("python") is None:
+                return None  # ``python`` is not the worker interpreter
+            return {"mode": "code", "code": command[2]}
         if not _fastpath_script_enabled():
             return None
-        # --- shape 2: direct ``python3 <script>.py [args]`` ---------------
+        # --- shape 2: direct ``python[3] <script>.py [args]`` --------------
         if len(command) >= 2:
-            return _fastpath_script_plan(command, base_cwd, "python3")
+            return _fastpath_script_plan(command, base_cwd, interp)
         return None
-
-    if command[0] == "python":
-        if not _fastpath_script_enabled() or len(command) < 2:
-            return None
-        return _fastpath_script_plan(command, base_cwd, "python")
 
     # --- shape 3: the real EDPA wrapper -----------------------------------
     #   bash -lc 'cd <dir> && python <script>.py [args]'
