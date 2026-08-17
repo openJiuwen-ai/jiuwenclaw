@@ -685,7 +685,9 @@ interface PendingContextCompressionStart {
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent';
   const normalized = rawMode.trim().toLowerCase();
-  if (normalized === 'team') return 'team';
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent';
 }

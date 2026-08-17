@@ -60,7 +60,10 @@ from openjiuwen.harness import (
     DeepAgentConfig,
     VisionModelConfig,
 )
-from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.factory import (
+    _inject_general_purpose_subagent,
+    create_deep_agent,
+)
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
     ModelAnomalyDetectionRail,
@@ -311,6 +314,7 @@ from jiuwenswarm.common.config import (
     get_config,
     get_default_models,
     get_evolution_auto_save_enabled,
+    get_progressive_tool_enabled,
     get_skill_evolution_enabled,
     get_sandbox_endpoint,
     get_sandbox_runtime,
@@ -5057,6 +5061,20 @@ class JiuWenSwarmDeepAdapter:
             tool.card if hasattr(tool, "card") else tool for tool in (tool_cards or [])
         ]
         configured_subagents, should_add_general_agent = self._build_configured_subagents(model, config, config_base)
+        # Hot reload uses configure(); factory inject does not run again.
+        configured_subagents = _inject_general_purpose_subagent(
+            configured_subagents,
+            add_general_purpose_agent=should_add_general_agent,
+            resolved_language=resolved_language,
+            rails=rails,
+            system_prompt=build_agent_identity_prompt(
+                language=self._resolve_prompt_language(),
+            ),
+            tools=normalized_tool_cards,
+            mcps=None,
+            model=model,
+            skills=None,
+        ) or None
         return DeepAgentConfig(
             model=model,
             card=agent_card,
@@ -5083,6 +5101,7 @@ class JiuWenSwarmDeepAdapter:
             language=resolved_language,
             prompt_mode=None,
             rails=rails,
+            progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
@@ -5590,6 +5609,9 @@ class JiuWenSwarmDeepAdapter:
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
+            # Expose only tool_search initially; ordinary tools are marked
+            # deferred and indexed by ProgressiveToolRail at startup.
+            progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),
@@ -5620,8 +5642,6 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
-        await asyncio.sleep(0)
-        await self._instance.ensure_initialized()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
@@ -5645,6 +5665,11 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+        # All host-level startup providers have now registered their tools.
+        # Initialize the DeepAgent only after that point; its normal startup
+        # path builds the initial BM25 snapshot after all pending rails.
+        await self._instance.ensure_initialized()
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -11042,16 +11067,27 @@ class JiuWenSwarmDeepAdapter:
             "context_occupancy": context_occupancy,
         }
 
-    async def generate_recap(self, session_id: str) -> dict[str, Any]:
+    async def generate_recap(
+        self,
+        session_id: str,
+        current_mode: str | None = None,
+    ) -> dict[str, Any]:
         """生成会话快速回顾（read-only，不修改对话历史）。
 
         取最近30条消息 → fast model → 1-3句摘要。
+
+        Args:
+            session_id: 会话 ID。
+            current_mode: 触发 recap 时的 canonical runtime mode。
         """
         if not self._is_session_scoped_adapter:
             session_adapter = self._get_cached_session_adapter(session_id)
             if session_adapter is not None:
                 try:
-                    return await session_adapter.generate_recap(session_id=session_id)
+                    return await session_adapter.generate_recap(
+                        session_id=session_id,
+                        current_mode=current_mode,
+                    )
                 finally:
                     await self._evict_idle_session_adapters()
 
@@ -11067,7 +11103,11 @@ class JiuWenSwarmDeepAdapter:
         # 透传主 agent tools schema 保 cache key（工具执行由单轮 + tool_use 丢弃禁止）
         tools = await self._get_agent_tools(session_id)
 
-        prompt = build_recap_prompt(memory=None, language=self._resolve_prompt_language())
+        prompt = build_recap_prompt(
+            memory=None,
+            language=self._resolve_prompt_language(),
+            current_mode=current_mode,
+        )
         summary_text = await self._call_model_for_recap(messages, prompt, tools=tools or None)
         if not summary_text:
             return {"status": "failed", "error": "Model returned empty response"}

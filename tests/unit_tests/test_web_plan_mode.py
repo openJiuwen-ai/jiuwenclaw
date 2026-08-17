@@ -35,12 +35,14 @@ def test_web_work_mode_drives_adapter_choice(mode, work_mode, expected_adapter):
     assert JiuWenSwarm._adapter_mode_for_request(request) == expected_adapter
 
 
-@pytest.mark.parametrize("work_mode", ["work", "code"])
-def test_web_cluster_adapter_is_not_affected_by_work_mode(work_mode):
-    """集群不参与 work_mode 选型：``team`` 始终是 DeepAdapter，与改造前一致。"""
+@pytest.mark.parametrize(
+    ("work_mode", "expected_adapter"), [("work", "agent"), ("code", "code")]
+)
+def test_web_cluster_adapter_follows_work_mode(work_mode, expected_adapter):
+    """Web 的 ``team + code`` 与 TUI ``team.code`` 使用同一 CodeAdapter。"""
     request = _request({"mode": "team", "work_mode": work_mode})
 
-    assert JiuWenSwarm._adapter_mode_for_request(request) == "agent"
+    assert JiuWenSwarm._adapter_mode_for_request(request) == expected_adapter
 
 
 @pytest.mark.parametrize(

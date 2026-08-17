@@ -460,14 +460,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        JiuwenSwarm 轻松解决工作每个问题！
+        WorkSwarm 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      JiuwenSwarm makes work easier!
+      WorkSwarm makes work easier!
     </>
   );
 }
