@@ -171,11 +171,12 @@ def normalize_ask_user_response(
     if original_request is not None and not isinstance(original_request, str):
         raise AskUserResponseError("original_request must be a string when provided")
 
-    normalized_answers = tuple(
-        answer
-        for index, item in enumerate(answers)
-        if (answer := _normalize_answer(item, index)) is not None
-    )
+    normalized_answer_items: list[AskUserAnswer] = []
+    for index, item in enumerate(answers):
+        answer = _normalize_answer(item, index)
+        if answer is not None:
+            normalized_answer_items.append(answer)
+    normalized_answers = tuple(normalized_answer_items)
     if normalized_status == "skipped" and normalized_answers:
         raise AskUserResponseError("skipped response must not contain user input")
 
