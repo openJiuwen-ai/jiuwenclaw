@@ -2813,3 +2813,27 @@ def test_build_context_assemble_rail_returns_context_assemble_rail_instance(monk
     rail = adapter.build_context_assemble_rail_for_test()
 
     assert isinstance(rail, FakeContextAssembleRail)
+
+
+@pytest.mark.parametrize(
+    "parser",
+    [
+        parse_stream_chunk,
+        interface_deep_module.JiuWenSwarmDeepAdapter._parse_stream_chunk,
+    ],
+    ids=["shared", "deep-adapter"],
+)
+def test_parse_stream_chunk_emits_empty_final_marker_after_streamed_content(parser):
+    chunk = types.SimpleNamespace(
+        type="answer",
+        payload={
+            "output": {
+                "output": "final answer",
+                "chunked": False,
+            }
+        },
+    )
+
+    parsed = parser(chunk, _has_streamed_content=True)
+
+    assert parsed == {"event_type": "chat.final", "content": ""}
