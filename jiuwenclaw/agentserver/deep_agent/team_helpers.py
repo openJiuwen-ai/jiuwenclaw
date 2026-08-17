@@ -1399,6 +1399,62 @@ async def _start_team_stream_round(
     return request_queue
 
 
+def _build_team_model_config(model_config_dict: dict[str, Any]) -> Any:
+    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    from openjiuwen.harness.schema.deep_agent_spec import ModelClientConfig, ModelRequestConfig
+
+    mcc = ModelClientConfig.model_validate(
+        model_config_dict.get("model_client_config", {})
+    )
+    mrc_raw = model_config_dict.get("model_request_config")
+    mrc = ModelRequestConfig.model_validate(mrc_raw) if mrc_raw else None
+    return TeamModelConfig(model_client_config=mcc, model_request_config=mrc)
+
+
+async def _apply_resolved_model_to_team(
+    team_name: str,
+    model_config_dict: dict[str, Any],
+) -> None:
+    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+    from jiuwenclaw.agentserver.team.team_manager import _runner_team_runtime_manager
+
+    team_model = _build_team_model_config(model_config_dict)
+
+    runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+    active_team = await runtime_mgr.pool.get(team_name)
+    if active_team is None or active_team.agent is None:
+        logger.warning(
+            '[TeamHelpers] _apply_resolved_model_to_team: no active team: team=%s',
+            team_name,
+        )
+        return
+
+    team_agent = active_team.agent
+
+    leader_harness = getattr(team_agent, 'harness', None)
+    if leader_harness is not None and hasattr(leader_harness, 'apply_model_config'):
+        leader_harness.apply_model_config(team_model)
+
+    spawn_mgr = getattr(team_agent, 'spawn_manager', None)
+    if spawn_mgr is not None:
+        handles = getattr(spawn_mgr, 'spawned_handles', {}) or {}
+        for member_name in list(handles.keys()):
+            handle = handles[member_name]
+            member_agent = getattr(handle, 'agent_ref', None)
+            if member_agent is None:
+                continue
+            member_harness = getattr(member_agent, 'harness', None)
+            if member_harness is not None and hasattr(member_harness, 'apply_model_config'):
+                member_harness.apply_model_config(team_model)
+
+    logger.info(
+        '[TeamHelpers] model applied to team: team=%s model_name=%s',
+        team_name,
+        team_model.model_request_config.model_name
+        if team_model.model_request_config else None,
+    )
+
+
 async def process_team_message_stream(request: Any,
                                       inputs: dict[str,
                                                    Any],
@@ -1549,6 +1605,10 @@ async def process_team_message_stream(request: Any,
         params_obj = getattr(request, 'params', None)
         requested_model_name = (str(params_obj.get('model_name') or '').strip()
                                 if isinstance(params_obj, dict) else '') or None
+        _resolved_model_config = (
+            params_obj.get('_resolved_model_config')
+            if isinstance(params_obj, dict) else None
+        )
         # Bound expert team: relay chat.send params.team_name → modes.team template key.
         # Without this, load_team_spec_dict always picks the first modes.team entry
         # (often a preset), ignoring the thread-bound user team.
@@ -1573,6 +1633,67 @@ async def process_team_message_stream(request: Any,
             template_id=requested_team_name,
         )
         _persist_team_file_monitor_roots(session_id, team_spec)
+
+        if _resolved_model_config is not None:
+            team_model = _build_team_model_config(_resolved_model_config)
+            model_name = (
+                team_model.model_request_config.model_name
+                if team_model.model_request_config else ''
+            )
+            leader_spec = getattr(team_spec, 'leader', None)
+            if leader_spec is not None and model_name:
+                leader_spec.model_name = model_name
+            leader_agent_spec = (
+                team_spec.agents.get('leader')
+                if isinstance(getattr(team_spec, 'agents', None), dict)
+                else None
+            )
+            if leader_agent_spec is not None:
+                leader_agent_spec.model = team_model
+                logger.info(
+                    '[TeamHelpers] leader model set from request: model_name=%s session_id=%s',
+                    model_name,
+                    session_id,
+                )
+            existing_pool = list(getattr(team_spec, 'model_pool', None) or [])
+            already_in_pool = any(
+                getattr(e, 'model_name', '') == model_name
+                for e in existing_pool
+                if isinstance(e, object)
+            )
+            if not already_in_pool and model_name:
+                from openjiuwen.agent_teams.schema.team import ModelPoolEntry
+                mcc = _resolved_model_config.get("model_client_config", {})
+                mco = _resolved_model_config.get("model_request_config") or {}
+                _raw_provider = mcc.get('client_provider', '')
+                _provider_str = (
+                    getattr(_raw_provider, 'value', None)
+                    if _raw_provider is not None and not isinstance(_raw_provider, str)
+                    else (str(_raw_provider) if _raw_provider is not None else '')
+                )
+                pool_entry = ModelPoolEntry(
+                    model_name=model_name,
+                    api_key=mcc.get('api_key', ''),
+                    api_base_url=mcc.get('api_base', ''),
+                    api_provider=_provider_str,
+                    metadata={
+                        'client': {
+                            k: v for k, v in mcc.items()
+                            if k not in ('model_name', 'api_key', 'api_base', 'client_provider')
+                            and v is not None
+                        },
+                        'request': dict(mco) if isinstance(mco, dict) else {},
+                    },
+                )
+                existing_pool.append(pool_entry)
+                team_spec.model_pool = existing_pool
+                if not getattr(team_spec, 'model_pool_strategy', ''):
+                    team_spec.model_pool_strategy = 'by_model_name'
+                logger.info(
+                    '[TeamHelpers] model injected into pool: model_name=%s pool_size=%d',
+                    model_name,
+                    len(existing_pool),
+                )
     except Exception as exc:
         logger.exception('[TeamHelpers] TeamAgent create failed: %s', exc)
         yield AgentResponseChunk(
@@ -1624,6 +1745,18 @@ async def process_team_message_stream(request: Any,
                         resume_from_pause,
                     )
                 else:
+                    if _resolved_model_config is not None and team_name:
+                        try:
+                            await _apply_resolved_model_to_team(
+                                team_name, _resolved_model_config,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                '[TeamHelpers] runtime model switch failed: '
+                                'session_id=%s error=%s',
+                                session_id,
+                                exc,
+                            )
                     success, reason = await team_manager.interact(session_id, query)
                     first_request_ready = False
                     boundary_resume = False

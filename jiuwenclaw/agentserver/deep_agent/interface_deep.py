@@ -9253,9 +9253,18 @@ class JiuWenClawDeepAdapter:
                     is_complete=True,
                 )
                 return
-            self._apply_model_to_react_agent(resolved_model)
+            self._model_request_config = resolved_model.model_config
+            self._model_client_config = resolved_model.model_client_config
+            if isinstance(request.params, dict):
+                request.params["_resolved_model_config"] = {
+                    "model_client_config": resolved_model.model_client_config.model_dump(mode="json"),
+                    "model_request_config": (
+                        resolved_model.model_config.model_dump(mode="json")
+                        if resolved_model.model_config else None
+                    ),
+                }
             if self._runtime_prompt_rail:
-                self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+                self._runtime_prompt_rail.set_model_name(resolved_model.model_config.model_name)
                 self._runtime_prompt_rail.set_mode(mode)
                 self._runtime_prompt_rail.set_session_id(session_id)
 
