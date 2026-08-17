@@ -321,7 +321,7 @@
     "skillsManage": "Skill Management",
     "skillsAdd": "Add to composer",
     "skillsRemove": "Remove",
-    "recentTasks": "Recent Tasks",
+    "recentTasks": "Task Planning",
     "teamPause": "Pause",
     "teamPauseHint": "After pausing a team, send the next message to continue",
     "teamBroadcastTarget": "@all",
@@ -2345,7 +2345,7 @@
   },
   "multiSession": {
     "title": "Work",
-    "conversations": "Conversations",
+    "conversations": "Tasks",
     "newConversation": "New task",
     "empty": "No chat yet",
     "untitled": "Untitled conversation",

@@ -322,7 +322,7 @@
     "skillsManage": "技能管理",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
-    "recentTasks": "最近任务",
+    "recentTasks": "任务规划",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "teamBroadcastTarget": "@所有人",
@@ -2346,7 +2346,7 @@
   },
   "multiSession": {
     "title": "工作",
-    "conversations": "对话",
+    "conversations": "任务",
     "newConversation": "新建任务",
     "empty": "暂无对话",
     "untitled": "未命名对话",
