@@ -9,12 +9,16 @@ import io
 import json
 import logging
 import os
-import stat
 import sys
 import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import BinaryIO
+
+try:
+    from .path_safety import is_direct_regular_file, private_mode_is_compatible
+except ImportError:  # Executed as a standalone script by runtime.py.
+    from path_safety import is_direct_regular_file, private_mode_is_compatible
 
 BRIDGE_INPUT_MAX_BYTES = 64 * 1024 * 1024
 BRIDGE_ARCHIVE_MAX_BYTES = 128 * 1024 * 1024
@@ -158,10 +162,9 @@ def write_convert_content(output: str | Path, convert_content: object) -> None:
     except OSError as exc:
         raise BridgeError("bridge_output_invalid") from exc
     invalid_target = (
-        not stat.S_ISREG(before.st_mode)
-        or stat.S_ISLNK(before.st_mode)
+        not is_direct_regular_file(before)
         or before.st_nlink != 1
-        or stat.S_IMODE(before.st_mode) != 0o600
+        or not private_mode_is_compatible(before, 0o600)
         or before.st_size != 0
     )
     if invalid_target:
@@ -175,9 +178,9 @@ def write_convert_content(output: str | Path, convert_content: object) -> None:
     try:
         opened = os.fstat(descriptor)
         invalid_open_file = (
-            not stat.S_ISREG(opened.st_mode)
+            not is_direct_regular_file(opened)
             or opened.st_nlink != 1
-            or stat.S_IMODE(opened.st_mode) != 0o600
+            or not private_mode_is_compatible(opened, 0o600)
             or opened.st_size != 0
             or not _same_unchanged_file(before, opened)
         )
@@ -193,10 +196,11 @@ def write_convert_content(output: str | Path, convert_content: object) -> None:
         os.fsync(descriptor)
         after = os.fstat(descriptor)
         invalid_written_file = (
-            not _same_file(opened, after)
+            not is_direct_regular_file(after)
+            or not _same_file(opened, after)
             or after.st_size != len(archive)
             or after.st_nlink != 1
-            or stat.S_IMODE(after.st_mode) != 0o600
+            or not private_mode_is_compatible(after, 0o600)
         )
         if invalid_written_file:
             raise BridgeError("bridge_output_invalid")

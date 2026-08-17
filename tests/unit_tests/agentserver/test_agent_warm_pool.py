@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 
@@ -150,7 +151,7 @@ def test_warm_key_normalizes_project_directory(tmp_path: Path) -> None:
         work_mode="CODE",
     )
     assert key.channel_id == "web"
-    assert key.project_dir == str(tmp_path.resolve()).lower()
+    assert key.project_dir == os.path.normcase(str(tmp_path.resolve()))
     assert key.agent_mode == "code"
     assert key.agent_sub_mode == "normal"
 
