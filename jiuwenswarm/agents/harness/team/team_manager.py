@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams import observability as team_observability
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
@@ -73,11 +74,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
     get_default_model_name,
 )
-from jiuwenswarm.agents.harness.observability_runtime import (
-    acquire_observability_demand,
-    build_observability_config,
-    release_observability_demand,
-)
+from jiuwenswarm.agents.harness.observability_runtime import build_observability_config
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -154,10 +151,7 @@ def sync_team_observability() -> None:
             service_name="jiuwenswarm",
             traces_dir=traces_dir,
         )
-        provider_existed = acquire_observability_demand(
-            "team",
-            observability_config=obs_cfg,
-        )
+        provider_existed = team_observability.acquire_observability(obs_cfg)
         was_active = _observability_active
         _observability_active = True
         if not was_active and not provider_existed:
@@ -188,7 +182,7 @@ def shutdown_team_observability() -> None:
     if not _observability_active:
         return
     try:
-        release_observability_demand("team")
+        team_observability.release_observability()
         _observability_active = False
         logger.info("[TeamObservability] disabled")
     except Exception as exc:

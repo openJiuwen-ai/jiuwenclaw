@@ -6399,7 +6399,7 @@ class JiuWenSwarmDeepAdapter:
         """Build SkillEvolutionRail."""
         if not get_skill_evolution_enabled(config):
             return None
-        from jiuwenswarm.agents.harness.observability_runtime import (
+        from openjiuwen.extensions.observability.demand import (
             get_trajectory_span_processor,
         )
 
@@ -6444,7 +6444,7 @@ class JiuWenSwarmDeepAdapter:
             if self._skill_manager is not None
             else []
         )
-        from jiuwenswarm.agents.harness.observability_runtime import (
+        from openjiuwen.extensions.observability.demand import (
             get_trajectory_span_processor,
         )
 
@@ -6548,7 +6548,7 @@ class JiuWenSwarmDeepAdapter:
                 logger.debug("[JiuWenSwarmDeepAdapter] SkillCreateRail disabled by config")
                 return None
 
-            from jiuwenswarm.agents.harness.observability_runtime import (
+            from openjiuwen.extensions.observability.demand import (
                 get_trajectory_span_processor,
             )
 
@@ -11608,10 +11608,13 @@ class JiuWenSwarmDeepAdapter:
         # 提前 import 观测 span 工具：原 import 在 try 内 _sync_prompt_attachments
         # 之后，若该处抛异常，finally 的 close_agent_run_span 会因名字未绑定
         # 抛 UnboundLocalError，掩盖真因。提前到函数顶部规避（见 traceback 8111）。
-        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+        from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
             mark_single_agent_team,
             open_agent_run_span,
+        )
+
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
         try:
@@ -12262,10 +12265,13 @@ class JiuWenSwarmDeepAdapter:
         # 提前 import 观测 span 工具（同 7382 处理由）：原 import 在 try 内
         # _sync_prompt_attachments 之后，该处异常会让 finally 的
         # close_agent_run_span 因名字未绑定抛 UnboundLocalError，掩盖真因。
-        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
+        from openjiuwen.harness.observability import (  # noqa: E402
             close_agent_run_span,
             mark_single_agent_team,
             open_agent_run_span,
+        )
+
+        from jiuwenswarm.agents.harness.agent_observability import (  # noqa: E402
             sync_agent_observability,
         )
         try:

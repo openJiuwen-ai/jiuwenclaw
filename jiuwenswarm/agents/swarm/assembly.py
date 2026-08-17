@@ -46,7 +46,7 @@ from jiuwenswarm.agents.swarm.context import (
     get_heartbeat_job_service,
 )
 from jiuwenswarm.agents.swarm.registry import register_swarm_providers
-from jiuwenswarm.agents.harness.observability_runtime import get_trajectory_span_processor
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import (
     build_enabled_mcp_server_configs,

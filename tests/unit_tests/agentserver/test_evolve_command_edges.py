@@ -7,7 +7,7 @@ import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.agents.harness.observability_runtime import (
+from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module

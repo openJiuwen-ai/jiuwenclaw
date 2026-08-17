@@ -216,9 +216,7 @@ apply_task_tool_debug_patch()
 # 让所有分发路径创建的 subagent 都带上 OTel 观测 rail（内置 task_tool、自定义
 # agent 工具、后台 subagent），这样子 agent 的 llm/tool span 归属自己的
 # agent.<type>.invoke span，而不是挂到派发它的 agent 身上。
-from jiuwenswarm.agents.harness.agent_observability import (
-    install_subagent_observability_hook,
-)
+from openjiuwen.harness.observability import install_subagent_observability_hook
 
 install_subagent_observability_hook()
 

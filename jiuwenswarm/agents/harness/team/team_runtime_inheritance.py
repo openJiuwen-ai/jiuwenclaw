@@ -43,7 +43,7 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.agents.harness.observability_runtime import (
+from openjiuwen.extensions.observability.demand import (
     get_trajectory_span_processor,
 )
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
