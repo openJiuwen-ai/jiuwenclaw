@@ -56,6 +56,8 @@ export interface ModelEntry {
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
+  /** agentos 备份模型标记：与 defaults 并列可选可切换，但不抢启动默认 */
+  is_agentos?: boolean;
   /** 可选别名，用于快捷切换模型（如 "gpt" → "gpt-4o"） */
   alias?: string;
   /** 用于原子性重命名操作，指定原模型名 */

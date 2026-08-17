@@ -2623,6 +2623,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         for idx, item in enumerate(raw_models):
             if not isinstance(item, dict):
                 raise _ConfigBadRequest(f"models[{idx}] must be object")
+            # agentos 备份模型条目不参与 defaults 替换：前端置灰只读展示 agentos，
+            # 提交的列表里不应含 agentos；此防御性过滤确保即便误传也不会把
+            # agentos 当 defaults 写回 models.defaults（污染 config 结构、丢 _source 标记）
+            if item.get("is_agentos") is True:
+                continue
             model_name = str(item.get("model_name") or "").strip()
             if not model_name:
                 raise _ConfigBadRequest(f"models[{idx}].model_name is required")
@@ -2921,6 +2926,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "temperature": mco.get("temperature", 0.95),
                     "reasoning_level": "off" if mco.get("reasoning_level") is False else mco.get("reasoning_level", ""),
                     "is_default": is_default,
+                    # agentos 备份模型标记：由 get_default_models 经 _source=="agentos"
+                    # 注入。前端据此区分 defaults / agentos，置灰只读展示 agentos、
+                    # 并让 agentos 进 ModelSelector 下拉（is_default!==false || is_agentos）
+                    "is_agentos": bool(mco.get("_source") == "agentos"),
                     "alias": entry.get("alias", ""),
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,

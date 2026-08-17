@@ -290,7 +290,11 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
-  # ---- AgentOS 模型（备份切换用，不参与主对话）----
+  # ---- AgentOS 备份模型（可选，不预置；需手动添加）----
+  # 此处不预置任何 agentos 条目：jiuwenswarm-init 生成的 config.yaml 不含 agentos 字段。
+  # 如需启用备份模型，请手动在 config.yaml 添加 models.agentos 列表段（见文档）。
+  # 配置后 AgentServer 启动/热重载时自动检测加载，与 defaults 同等可选可切换，
+  # 但 is_default 始终为 false，不抢启动主对话默认。
   # 列表结构，可配多个备份模型，凭证直接填在 YAML，无环境变量。
   # 每个元素一个模型；model_name 为空 = 该条未配置，跳过不入缓存。
   # 填入后通过 models.list 可见、可按名切换，但不带 is_default，
@@ -304,17 +308,17 @@ models:
   #   _agentos_ctx_window（随选中 Model 带入缓存），并从输出侧 kwargs 里 pop 掉，
   #   绝不作为输出 token 上限发往厂商。_deep_agent_context_engine_config 从选中
   #   Model 读该 extra 做覆盖，因此同名条目也能精确"选中哪个用哪个的 max_tokens"。
-  agentos:
-    - model_client_config:
-        api_base: ""
-        api_key: ""
-        model_name: ""
-        client_provider: ""
-        verify_ssl: true
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.95
-        max_tokens: 131072
+  # agentos:
+  #   - model_client_config:
+  #       api_base: ""
+  #       api_key: ""
+  #       model_name: ""
+  #       client_provider: ""
+  #       verify_ssl: true
+  #       timeout: 1800
+  #     model_config_obj:
+  #       temperature: 0.95
+  #       max_tokens: 131072
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:

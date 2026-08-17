@@ -2896,6 +2896,103 @@ function MultiModelSection({
   );
 }
 
+/**
+ * AgentOS 备份模型只读展示区。与 defaults 的 MultiModelSection 并列，但：
+ * - 全字段只读（disabled + opacity-60），无增删/设默认按钮
+ * - 仅提供"切换使用此模型"按钮，走请求级 model_name 注入（setSelectedModelName）
+ * - 数据来源：availableModels 中 is_agentos===true 的条目（由后端 _source=agentos 标记）
+ */
+function AgentosModelSection({
+  models,
+  isConnected,
+  activeSessionId,
+  setSelectedModelName,
+  onSwitched,
+  t,
+}: {
+  models: ModelEntry[];
+  isConnected: boolean;
+  activeSessionId: string | null;
+  setSelectedModelName: (sessionId: string, name: string) => void;
+  onSwitched?: () => void;
+  t: (key: string) => string;
+}) {
+  if (models.length === 0) return null;
+  return (
+    <div className="space-y-2 opacity-60">
+      {models.map((model, idx) => {
+        const displayName = model.alias || model.model_name;
+        return (
+          <div
+            key={`${model.model_name}-${idx}`}
+            className="rounded-lg border border-border bg-secondary/30 p-3"
+            data-testid="config-panel-agentos-model-item"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="inline-flex items-center justify-center rounded-md border w-7 h-7 text-amber-500 bg-amber-500/10 border-amber-500/20 shrink-0">
+                  <span className="text-xs">⚙</span>
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-text-strong truncate flex items-center gap-1">
+                    {displayName}
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border">{t("config.agentos.backupBadge")}</span>
+                  </div>
+                  <div className="text-[11px] text-text-muted truncate">{t("config.agentos.readonly")}</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={!isConnected || !activeSessionId}
+                onClick={() => {
+                  if (activeSessionId) {
+                    setSelectedModelName(activeSessionId, model.alias || model.model_name);
+                    onSwitched?.();
+                  }
+                }}
+                className="btn !px-2.5 !py-1 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                data-testid="config-panel-agentos-model-switch"
+              >
+                {t("config.agentos.switchToThis")}
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+              <label className="text-text-muted">{t("config.modelList.modelName")}</label>
+              <input
+                type="text"
+                value={model.model_name || ""}
+                disabled
+                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
+              />
+              <label className="text-text-muted">{t("config.modelList.provider")}</label>
+              <input
+                type="text"
+                value={model.model_provider || ""}
+                disabled
+                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
+              />
+              <label className="text-text-muted">{t("config.modelList.apiBase")}</label>
+              <input
+                type="text"
+                value={model.api_base || ""}
+                disabled
+                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
+              />
+              <label className="text-text-muted">{t("config.modelList.alias")}</label>
+              <input
+                type="text"
+                value={model.alias || ""}
+                disabled
+                className="bg-secondary/30 border border-border rounded px-2 py-0.5 text-text-muted"
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** 多Agent管理（受控组件，编辑状态由父组件持有） */
 function MultiAgentSection({
   agents,
@@ -4049,6 +4146,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
+  const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const configSaveBlocked = isProcessing || globalTaskRunning;
   const storeAvailableModels = availableModels;
   const storeAvailableModelsRef = useRef(storeAvailableModels);
@@ -4061,7 +4159,7 @@ export function ConfigPanel({
     }
     return next;
   });
-  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
+  const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m })));
 
   const [draftAgents, setDraftAgents] = useState<AgentEntry[]>([]);
   const [draftTeams, setDraftTeams] = useState<TeamEntry[]>([]);
@@ -4343,7 +4441,9 @@ export function ConfigPanel({
   }, [normalizedConfig]);
 
   useEffect(() => {
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    // draftModels 仅承载 defaults 主对话模型；agentos 备份模型走独立只读页签，
+    // 不进入 MultiModelSection，避免在默认模型页签重复展示。
+    setDraftModels(storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m, alias: m.alias || "" })));
     setModelError(null);
   }, [storeAvailableModels]);
 
@@ -4580,9 +4680,14 @@ export function ConfigPanel({
   }, [draftValues, normalizedConfig]);
   const hasConfigChanges = Object.keys(configUpdates).length > 0;
   const hasModelChanges = useMemo(() => {
-    if (draftModels.length !== storeAvailableModels.length) return true;
+    // 比较基准与 draftModels 同口径：仅 defaults（过滤掉 is_agentos）。
+    // agentos 备份模型走独立只读页签，不参与 defaults 编辑态判定；
+    // 否则配了 agentos 时 storeAvailableModels.length > draftModels.length，
+    // 长度不等会恒返 true，导致"有改动"恒脏（保存按钮永远可点）。
+    const persistedDefaults = storeAvailableModels.filter((m) => m.is_agentos !== true);
+    if (draftModels.length !== persistedDefaults.length) return true;
     return draftModels.some((draftModel, index) => {
-      const persistedModel = storeAvailableModels[index];
+      const persistedModel = persistedDefaults[index];
       return !persistedModel || !modelEntriesEqual(draftModel, persistedModel);
     });
   }, [draftModels, storeAvailableModels]);
@@ -4825,7 +4930,7 @@ export function ConfigPanel({
   const handleCancel = () => {
     if (!hasChanges) return;
     setDraftValues(normalizedConfig);
-    setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setDraftModels(storeAvailableModels.filter((m) => m.is_agentos !== true).map((m) => ({ ...m, alias: m.alias || "" })));
     setDraftAgents(initialAgents);
     setDraftTeams(initialTeams);
     setAgentsTeamsEdited(false);
@@ -5193,6 +5298,36 @@ export function ConfigPanel({
                       />
                     </div>
                   </div>
+                  {(() => {
+                    // agentos 备份模型只读卡片：仅当 config.yaml 手动配置了 models.agentos
+                    // 且条目 model_name 非空时由后端返回（is_agentos=true）。无则不渲染。
+                    const agentosModels = availableModels.filter((m) => m.is_agentos === true);
+                    if (agentosModels.length === 0) return null;
+                    return (
+                      <div
+                        id="config-group-agentos"
+                        className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                        data-testid="config-panel-group-agentos"
+                      >
+                        <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                          <span className="block text-sm font-medium text-text-strong">{t("config.groups.agentos.label")}</span>
+                          <span className="block text-xs text-text-muted mt-0.5">{t("config.groups.agentos.hint")}</span>
+                        </div>
+                        <div className="p-3">
+                          <AgentosModelSection
+                            models={agentosModels}
+                            isConnected={isConnected}
+                            activeSessionId={activeSessionId}
+                            setSelectedModelName={setSelectedModelName}
+                            onSwitched={() => {
+                              window.dispatchEvent(new CustomEvent<string>('jiuwen:nav', { detail: 'chat' }));
+                            }}
+                            t={t}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {yamlModelGroups.map((group) => (
                     <GroupSection
                       key={group.tag}
