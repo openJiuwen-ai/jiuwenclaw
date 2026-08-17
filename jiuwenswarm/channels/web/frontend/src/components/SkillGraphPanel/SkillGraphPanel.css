@@ -121,13 +121,23 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   font-size: 12px;
+}
+
+.skill-graph-panel__filters label > span {
+  font-weight: 600;
 }
 
 .skill-graph-panel__filters input[type="range"] {
   width: 100%;
   accent-color: var(--color-action-primary);
+}
+
+.skill-graph-panel small.skill-graph-panel__filter-help {
+  color: var(--color-text-secondary);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .skill-graph-panel__actions {
@@ -136,15 +146,28 @@
 }
 
 .skill-graph-panel__actions button {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
+  display: flex;
+  min-width: 0;
+  height: 52px;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-sm);
   background: var(--color-surface-page);
   color: var(--color-text-primary);
   cursor: pointer;
+}
+
+.skill-graph-panel__actions button span {
+  max-width: 100%;
+  color: inherit;
+  font-size: 10px;
+  line-height: 1.1;
+  text-align: center;
+  white-space: normal;
 }
 
 .skill-graph-panel__actions button:hover:not(:disabled) {
@@ -154,6 +177,26 @@
 .skill-graph-panel__actions button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.skill-graph-panel__actions-help {
+  margin-top: -6px;
+  color: var(--color-text-secondary);
+}
+
+.skill-graph-panel__actions-help ul {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-graph-panel__actions-help li {
+  font-size: 9px;
+  line-height: 1.45;
+  white-space: nowrap;
 }
 
 .skill-graph-panel__error {
@@ -287,6 +330,10 @@
   flex: 1;
 }
 
+.skill-graph-panel__node-list h3 {
+  font-weight: 600;
+}
+
 .skill-graph-panel__related {
   display: flex;
   flex: 0 0 auto;
@@ -311,10 +358,15 @@
 }
 
 .skill-graph-panel__node-list button:hover,
-.skill-graph-panel__node-list button.is-active,
 .skill-graph-panel__related button:hover {
   border-color: var(--color-border-accent);
   background: var(--color-surface-hover);
+}
+
+.skill-graph-panel__node-list button.is-active {
+  border-color: var(--color-action-primary);
+  background: var(--color-surface-page);
+  box-shadow: inset 0 0 0 1px var(--color-action-primary);
 }
 
 .skill-graph-panel__node-list span,
@@ -420,10 +472,25 @@
 }
 
 .skill-graph-panel__description {
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-page);
-  padding: 10px;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skill-graph-panel__detail-section-title {
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.skill-graph-panel__description-content {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  min-width: 0;
 }
 
 .skill-graph-panel__io-sections {
@@ -442,14 +509,6 @@
   border-radius: var(--radius-sm);
   background: var(--color-surface-page);
   padding: 9px;
-}
-
-.skill-graph-panel__io-section--input {
-  border-left-color: #6aa9ff;
-}
-
-.skill-graph-panel__io-section--output {
-  border-left-color: #d6a35d;
 }
 
 .skill-graph-panel__io-section--task {

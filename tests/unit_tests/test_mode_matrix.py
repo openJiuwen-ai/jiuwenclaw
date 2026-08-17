@@ -30,7 +30,7 @@ def test_request_preserves_original_mode_when_web_composition_rewrites_it():
     assert getattr(request, "_original_mode") == "agent.plan"
 
 
-# ── Web 组合：只覆盖单 agent，work_mode 决定 profile，mode 决定是否 plan ─────
+# ── Web 组合：work_mode 决定 profile，mode 决定是否 plan / team ─────────────
 
 
 @pytest.mark.parametrize(
@@ -40,9 +40,11 @@ def test_request_preserves_original_mode_when_web_composition_rewrites_it():
         ("agent.plan", "work", ("agent", "plan", "agent.plan")),
         ("agent", "code", ("code", "normal", "code.normal")),
         ("agent.plan", "code", ("code", "plan", "code.plan")),
+        ("team", "work", ("team", None, "team")),
+        ("team", "code", ("code", "team", "code.team")),
     ],
 )
-def test_web_composition_covers_all_single_agent_combinations(mode, work_mode, expected):
+def test_web_composition_covers_all_supported_combinations(mode, work_mode, expected):
     resolved = _resolve({"mode": mode, "work_mode": work_mode})
 
     assert (resolved.manager_mode, resolved.sub_mode, resolved.canonical_mode) == expected
@@ -65,22 +67,21 @@ def test_web_composition_plan_flag(mode, work_mode, expected_plan):
     assert resolved.is_team is False
 
 
-@pytest.mark.parametrize("work_mode", ["work", "code"])
-def test_web_team_is_not_composable(work_mode):
-    """集群不参与组合：``work_mode`` 不得改变集群的 Adapter 选型。
-
-    Web 集群必须与改造前完全一致——``team`` 走历史解析，manager_mode 保持
-    ``team``（即 DeepAdapter），不会因为 ``work_mode=code`` 变成 ``code.team``。
-    """
+@pytest.mark.parametrize(
+    ("work_mode", "expected_manager", "expected_canonical"),
+    [("work", "team", "team"), ("code", "code", "code.team")],
+)
+def test_web_team_uses_matching_profile(work_mode, expected_manager, expected_canonical):
     resolved = _resolve({"mode": "team", "work_mode": work_mode})
 
-    assert resolved.from_web_composition is False
+    assert resolved.from_web_composition is True
     assert (resolved.manager_mode, resolved.sub_mode, resolved.canonical_mode) == (
-        "team",
-        None,
-        "team",
+        expected_manager,
+        None if work_mode == "work" else "team",
+        expected_canonical,
     )
     assert resolved.is_team is True
+    assert resolved.is_code_profile is (work_mode == "code")
 
 
 @pytest.mark.parametrize(
@@ -121,6 +122,7 @@ def test_web_team_plan_is_not_composable(work_mode):
         ("code.normal", ("code", "normal", "code.normal")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
+        ("team.code", ("code", "team", "code.team")),
         ("team", ("team", None, "team")),
         ("team.plan", ("team", "plan", "team.plan.normal")),
         ("team.plan.normal", ("team", "plan", "team.plan.normal")),

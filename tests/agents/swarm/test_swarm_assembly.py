@@ -2297,11 +2297,11 @@ def test_code_extra_tools_gated_by_config() -> None:
     assert isinstance(tools.build_code_extra_tools({}, enabled), list)
 
 
-def test_code_coding_memory_provider_mounts_workspace_node(
+def test_code_coding_memory_provider_keeps_storage_outside_workspace_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The declarative coding-memory provider must also mount the workspace node."""
+    """The provider stores memory globally without creating project workspace nodes."""
     register_swarm_providers()
 
     import jiuwenswarm.server.runtime.agent_adapter.interface_code as interface_code
@@ -2357,26 +2357,7 @@ def test_code_coding_memory_provider_mounts_workspace_node(
         "agent_workspace_dir": str(workspace_root),
         "config": {"embed": {}},
     }
-    assert workspace.directories == [
-        {
-            "name": "coding_memory",
-            "description": "Coding Agent memory",
-            "path": resolve_project_coding_memory_dir(
-                agent_workspace_dir=str(workspace_root),
-                project_dir=str(project_dir),
-            ),
-            "children": [
-                {
-                    "name": "MEMORY.md",
-                    "description": "Coding 记忆索引",
-                    "path": "MEMORY.md",
-                    "children": [],
-                    "is_file": True,
-                    "default_content": "",
-                }
-            ],
-        }
-    ]
+    assert workspace.directories == []
 
 
 def test_code_coding_memory_provider_falls_back_to_workspace_root(
@@ -2433,10 +2414,7 @@ def test_code_coding_memory_provider_falls_back_to_workspace_root(
         "project_dir": str(workspace_root),
         "agent_workspace_dir": str(agent_workspace),
     }
-    assert workspace.directories[0]["path"] == resolve_project_coding_memory_dir(
-        agent_workspace_dir=agent_workspace,
-        project_dir=workspace_root,
-    )
+    assert workspace.directories == []
 
 
 def test_code_member_builds_declaratively_without_post_processing(
@@ -2489,7 +2467,13 @@ def test_code_member_builds_declaratively_without_post_processing(
         trajectory_span_processor=object(),
         config=config,
     )
-    monkeypatch.setattr(code_rails, "get_agent_workspace_dir", lambda: tmp_path)
+    agent_workspace_dir = tmp_path / "agent-workspace"
+    agent_workspace_dir.mkdir()
+    monkeypatch.setattr(
+        code_rails,
+        "get_agent_workspace_dir",
+        lambda: agent_workspace_dir,
+    )
     agent = spec.build(context=ctx)
 
     rails = list(getattr(agent, "_pending_rails", [])) + list(
@@ -2513,30 +2497,15 @@ def test_code_member_builds_declaratively_without_post_processing(
     # CodingMemoryRail materializes through the derived build context.
     assert "CodingMemoryRail" in rail_types
     coding_memory_dir = resolve_project_coding_memory_dir(
-        agent_workspace_dir=str(tmp_path),
+        agent_workspace_dir=str(agent_workspace_dir),
         project_dir=str(tmp_path),
     )
-    coding_memory_node = next(
-        node
-        for node in agent.deep_config.workspace.directories
-        if node.get("name") == "coding_memory"
-    )
-    assert coding_memory_node["path"] == coding_memory_dir
-    assert Path(coding_memory_node["path"]).is_absolute() is True
-    assert agent.deep_config.workspace.get_node_path("coding_memory") == Path(
-        coding_memory_dir
-    )
     assert Path(coding_memory_dir).is_dir()
-    assert coding_memory_node["children"] == [
-        {
-            "name": "MEMORY.md",
-            "description": "Coding 记忆索引",
-            "path": "MEMORY.md",
-            "children": [],
-            "is_file": True,
-            "default_content": "",
-        }
-    ]
+    assert not (tmp_path / "coding_memory").exists()
+    assert not any(
+        node.get("name") == "coding_memory"
+        for node in agent.deep_config.workspace.directories
+    )
     logger.info("code member declarative build rail types: %s", sorted(rail_types))
 
 

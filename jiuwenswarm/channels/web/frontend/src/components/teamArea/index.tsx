@@ -166,12 +166,14 @@ function ExpandedTeamArea({
   ];
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
+    <div className="flex h-full flex-col overflow-hidden bg-card" data-testid="team-area-expanded-root">
+      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border" data-testid="team-area-tab-bar">
         <div className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
+              data-testid="team-area-tab-button"
+              data-variant={tab.key}
               className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
                 resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
@@ -187,6 +189,7 @@ function ExpandedTeamArea({
 
         <button
           onClick={onCollapse}
+          data-testid="team-area-collapse-button"
           className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
@@ -194,7 +197,7 @@ function ExpandedTeamArea({
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden" data-testid="team-area-expanded-body">
         {resolvedTab === 'planning' ? (
           <TaskPlanningPanel
             variant="expanded"

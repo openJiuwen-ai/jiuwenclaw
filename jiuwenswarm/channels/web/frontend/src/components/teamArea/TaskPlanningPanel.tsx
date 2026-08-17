@@ -108,15 +108,20 @@ export function TaskPlanningPanel({
     const allTasks = tasks;
 
     return (
-      <div className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}>
-        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
+      <div
+        className={`flex flex-[2] flex-col overflow-hidden min-h-0 px-3 pb-3${hideBorder ? '' : ' border-b border-border'}`}
+        data-testid="team-area-task-planning-panel"
+        data-variant="compact"
+      >
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3" data-testid="team-area-task-planning-header">
           <div className="flex items-center gap-2">
             <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
-            <span className="text-sm font-medium text-text">{title ?? t('team.taskOverview')}</span>
+            <span className="text-sm font-medium text-text" data-testid="team-area-task-planning-title">{title ?? t('team.taskOverview')}</span>
           </div>
           {hideExpandButton ? null : (
             <button
               onClick={onExpand}
+              data-testid="team-area-task-planning-expand-button"
               className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
               title={t('team.expand')}
             >
@@ -124,19 +129,20 @@ export function TaskPlanningPanel({
             </button>
           )}
         </div>
-        <div className="px-4 py-3 shrink-0">
+        <div className="px-4 py-3 shrink-0" data-testid="team-area-task-planning-progress">
           {allTasks.length > 0 && (
             <div className="mb-4">
               <div className="flex items-center justify-start mb-2">
                 <div className="flex items-baseline gap-1">
-                  <span className="text-lg font-semibold text-text-strong">{completedTasks}</span>
-                  <span className="text-sm text-text-muted">/ {totalTasks}</span>
+                  <span className="text-lg font-semibold text-text-strong" data-testid="team-area-task-planning-completed-count">{completedTasks}</span>
+                  <span className="text-sm text-text-muted" data-testid="team-area-task-planning-total-count">/ {totalTasks}</span>
                 </div>
               </div>
-              <div className="h-2 bg-secondary rounded-full overflow-hidden">
+              <div className="h-2 bg-secondary rounded-full overflow-hidden" data-testid="team-area-task-planning-progress-track">
                 <div
                   className="h-full bg-accent rounded-full  "
                   style={{ width: `${progressPercent}%` }}
+                  data-testid="team-area-task-planning-progress-fill"
                 />
               </div>
             </div>
@@ -145,17 +151,19 @@ export function TaskPlanningPanel({
             {BOARD_COLUMNS.map((column) => (
               <div
                 key={column.key}
+                data-testid="team-area-task-planning-column-stat"
+                data-variant={column.key}
                 className={`flex-1 flex flex-col items-center justify-center py-2 rounded-md`}
               >
-                <span className="text-sm font-normal text-text-strong">{groupedTasks[column.key].length}</span>
-                <span className="text-xs mt-1 text-text-muted">{t(column.labelKey)}</span>
+                <span className="text-sm font-normal text-text-strong" data-testid="team-area-task-planning-column-count">{groupedTasks[column.key].length}</span>
+                <span className="text-xs mt-1 text-text-muted" data-testid="team-area-task-planning-column-label">{t(column.labelKey)}</span>
               </div>
             ))}
           </div>
         </div>
         <div className="flex-1 overflow-y-auto px-4 pb-3">
           {allTasks.length === 0 ? (
-            <div className="text-center py-8 text-sm text-text-muted">
+            <div className="text-center py-8 text-sm text-text-muted" data-testid="team-area-task-planning-empty">
               {t('team.noTasks')}
             </div>
           ) : (
@@ -167,8 +175,16 @@ export function TaskPlanningPanel({
                 const columnKey = getTaskColumnKey(task);
                 const seq = globalIndexMap.get(task.task_id) ?? 0;
                 return (
-                  <div key={task.task_id} className="flex items-center gap-3 px-3 py-2 rounded-md">
-                    <span className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[var(--color-task-index-surface)]">
+                  <div
+                    key={task.task_id}
+                    data-testid="team-area-task-planning-task-row"
+                    data-variant={task.task_id}
+                    className="flex items-center gap-3 px-3 py-2 rounded-md"
+                  >
+                    <span
+                      className="inline-flex items-center justify-center w-[20px] h-[20px] text-xs font-medium text-muted rounded-[16px] bg-[var(--color-task-index-surface)]"
+                      data-testid="team-area-task-planning-task-seq"
+                    >
                       {String(seq).padStart(2, '0')}
                     </span>
                     {!hideAssignee && (
@@ -183,11 +199,12 @@ export function TaskPlanningPanel({
                         <UnassignedTeamAvatar className="h-4 w-4 rounded-full shrink-0" />
                       )
                     )}
-                    <span className="flex-1 text-xs text-text truncate">{title}</span>
+                    <span className="flex-1 text-xs text-text truncate" data-testid="team-area-task-planning-task-title">{title}</span>
                     <img
                       src={compactStatusIcons[columnKey]}
                       className={`h-4 w-4 shrink-0 ${columnKey === 'running' ? 'animate-spin' : ''}`}
                       aria-hidden="true"
+                      data-testid="team-area-task-planning-task-status-icon"
                     />
                   </div>
                 );
@@ -200,10 +217,11 @@ export function TaskPlanningPanel({
   }
 
   const viewSwitcher = (
-    <div className="flex items-center gap-1" role="group" aria-label={t('team.planning.progressTitle')}>
+    <div className="flex items-center gap-1" role="group" aria-label={t('team.planning.progressTitle')} data-testid="team-area-task-planning-view-switcher">
       <button
         type="button"
         onClick={() => setView('list')}
+        data-testid="team-area-task-planning-view-list-button"
         className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'list' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
         aria-label={t('team.planning.views.list')}
         title={t('team.planning.views.list')}
@@ -214,6 +232,7 @@ export function TaskPlanningPanel({
       <button
         type="button"
         onClick={() => setView('board')}
+        data-testid="team-area-task-planning-view-board-button"
         className={`flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-card ${view === 'board' ? 'bg-secondary text-text' : 'text-text-muted hover:bg-secondary/50 hover:text-text'}`}
         aria-label={t('team.planning.views.board')}
         title={t('team.planning.views.board')}
@@ -225,11 +244,11 @@ export function TaskPlanningPanel({
   );
 
   return (
-    <div className="flex-1 overflow-hidden bg-card">
+    <div className="flex-1 overflow-hidden bg-card" data-testid="team-area-task-planning-panel" data-variant="expanded">
       {view === 'list' ? (
-        <div className="flex h-full flex-col px-6 pb-6">
+        <div className="flex h-full flex-col px-6 pb-6" data-testid="team-area-task-planning-list-view">
           <div className="flex h-8 items-center gap-3">
-            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            <h2 className="text-sm font-medium leading-5 text-text-strong" data-testid="team-area-task-planning-view-title">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
           </div>
           <ExpandedTaskList
@@ -242,15 +261,16 @@ export function TaskPlanningPanel({
       ) : (
         <div className="flex h-full flex-col px-6 pb-6">
           <div className="mb-5 flex h-8 items-center gap-3">
-            <h2 className="text-sm font-medium leading-5 text-text-strong">{t('team.planning.progressTitle')}</h2>
+            <h2 className="text-sm font-medium leading-5 text-text-strong" data-testid="team-area-task-planning-view-title">{t('team.planning.progressTitle')}</h2>
             {viewSwitcher}
-            <span className="text-sm font-medium text-text-strong">{progressPercent}%</span>
+            <span className="text-sm font-medium text-text-strong" data-testid="team-area-task-planning-progress-percent">{progressPercent}%</span>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6">
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-lg bg-secondary p-6" data-testid="team-area-task-planning-board">
             <div
               className="grid min-w-[920px] gap-5"
               style={{ gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))' }}
+              data-testid="team-area-task-planning-board-columns"
             >
               {BOARD_COLUMNS.map((column) => (
                 <BoardColumn
@@ -285,34 +305,40 @@ function ExpandedTaskList({
 
   return (
     <>
-      <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2">
+      <div className="mt-2 flex min-h-7 flex-wrap items-baseline gap-x-8 gap-y-2" data-testid="team-area-task-planning-list-metrics">
         <div className="flex shrink-0 items-baseline gap-2">
-          <span className="text-sm leading-5 text-text-muted">{t('team.planning.metrics.progress')}</span>
-          <span className="text-base font-semibold leading-6 text-text">{progressPercent}%</span>
+          <span className="text-sm leading-5 text-text-muted" data-testid="team-area-task-planning-list-metrics-progress-label">{t('team.planning.metrics.progress')}</span>
+          <span className="text-base font-semibold leading-6 text-text" data-testid="team-area-task-planning-list-metrics-progress-value">{progressPercent}%</span>
         </div>
         {BOARD_COLUMNS.map((column) => (
-          <div key={column.key} className="flex shrink-0 items-baseline gap-2">
-            <span className="text-sm leading-5 text-text-muted">{t(column.labelKey)}</span>
-            <span className="text-base font-semibold leading-6 text-text">{groupedTasks[column.key].length}</span>
+          <div key={column.key} className="flex shrink-0 items-baseline gap-2" data-testid="team-area-task-planning-list-metrics-column" data-variant={column.key}>
+            <span className="text-sm leading-5 text-text-muted" data-testid="team-area-task-planning-list-metrics-column-label">{t(column.labelKey)}</span>
+            <span className="text-base font-semibold leading-6 text-text" data-testid="team-area-task-planning-list-metrics-column-count">{groupedTasks[column.key].length}</span>
           </div>
         ))}
       </div>
-      <div className="h-1 overflow-hidden rounded-full bg-secondary">
+      <div className="h-1 overflow-hidden rounded-full bg-secondary" data-testid="team-area-task-planning-list-progress-track">
         <div
           className={`h-full rounded-full transition-all duration-300 ${tasks.length > 0 && groupedTasks.completed.length === tasks.length ? 'bg-ok' : 'bg-accent'}`}
           style={{ width: `${progressPercent}%` }}
+          data-testid="team-area-task-planning-list-progress-fill"
         />
       </div>
-      <div className="mt-3 min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+      <div className="mt-3 min-h-0 flex-1 overflow-x-hidden overflow-y-auto" data-testid="team-area-task-planning-list-task-list">
         {tasks.length === 0 ? (
-          <div className="py-8 text-center text-sm text-text-muted">{t('team.noTasks')}</div>
+          <div className="py-8 text-center text-sm text-text-muted" data-testid="team-area-task-planning-list-empty">{t('team.noTasks')}</div>
         ) : tasks.map((task) => {
           const columnKey = getTaskColumnKey(task);
           const seq = globalIndexMap.get(task.task_id) ?? 0;
           const title = getBoardTaskTitle(task);
 
           return (
-            <div key={task.task_id} className="flex h-12 items-center">
+            <div
+              key={task.task_id}
+              className="flex h-12 items-center"
+              data-testid="team-area-task-planning-list-task-row"
+              data-variant={task.task_id}
+            >
               <span className="mr-4 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-medium leading-4 text-muted">
                 {String(seq).padStart(2, '0')}
               </span>
@@ -346,12 +372,15 @@ function BoardColumn({
   const { t } = useTranslation();
 
   return (
-    <section className="min-w-0">
-      <div className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[var(--effect-task-column-pill-shadow)] ${column.pillClassName}`}>
+    <section className="min-w-0" data-testid="team-area-task-planning-board-column" data-variant={column.key}>
+      <div
+        className={`mb-3 inline-flex h-7 items-center rounded-full px-4 text-sm font-medium shadow-[var(--effect-task-column-pill-shadow)] ${column.pillClassName}`}
+        data-testid="team-area-task-planning-board-column-title"
+      >
         <span className={`mr-2 h-1.5 w-1.5 rounded-full ${column.dotClassName}`} />
         {t(column.labelKey)} {tasks.length}
       </div>
-      <div className="space-y-3">
+      <div className="space-y-3" data-testid="team-area-task-planning-board-column-task-list">
         {tasks.map((task) => {
           const seq = globalIndexMap.get(task.task_id) ?? 0;
           return (
@@ -386,21 +415,29 @@ function BoardTaskCard({
   const content = getBoardTaskContent(task);
 
   return (
-    <article className="rounded-2xl border border-border bg-[var(--color-task-card-surface)] p-1 shadow-sm">
+    <article
+      className="rounded-2xl border border-border bg-[var(--color-task-card-surface)] p-1 shadow-sm"
+      data-testid="team-area-task-planning-board-task-card"
+      data-variant={task.task_id}
+    >
       <div className="rounded-2xl border border-border bg-card px-4 py-4">
-        <h3 className="truncate text-base font-medium leading-[18px] text-text-strong" title={title}>
+        <h3 className="truncate text-base font-medium leading-[18px] text-text-strong" title={title} data-testid="team-area-task-planning-board-task-title">
           {title}
         </h3>
         {content ? (
-          <p className="mt-2 line-clamp-2 text-sm leading-5 text-text-muted" title={content}>
+          <p className="mt-2 line-clamp-2 text-sm leading-5 text-text-muted" title={content} data-testid="team-area-task-planning-board-task-content">
             {content}
           </p>
         ) : null}
         <TaskResourcePanel skills={task.skills} files={task.files} />
       </div>
-      <div className="mt-3 flex h-8 items-center bg-[var(--color-task-card-surface)] px-1 pb-1">
+      <div className="mt-3 flex h-8 items-center bg-[var(--color-task-card-surface)] px-1 pb-1" data-testid="team-area-task-planning-board-task-footer">
         {hideAssignee ? (
-          <span className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[var(--color-task-index-surface)] text-xs font-medium text-muted">
+          <span
+            className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[16px] bg-[var(--color-task-index-surface)] text-xs font-medium text-muted"
+            data-testid="team-area-task-planning-board-task-footer-seq"
+            data-variant="seq"
+          >
             {String(index).padStart(2, '0')}
           </span>
         ) : assigneeExists ? (
@@ -465,8 +502,8 @@ function TaskResourcePanel({
   const activeItems = resolvedActiveTab === 'skills' ? skills : files;
 
   return (
-    <div className="mt-4 rounded-lg bg-secondary px-3 py-3">
-      <div className="flex h-6 items-center gap-4 border-b border-border" role="tablist" aria-label={t('team.planning.resources')}>
+    <div className="mt-4 rounded-lg bg-secondary px-3 py-3" data-testid="team-area-task-planning-board-task-resources">
+      <div className="flex h-6 items-center gap-4 border-b border-border" role="tablist" aria-label={t('team.planning.resources')} data-testid="team-area-task-planning-resources-tabs">
         {hasSkills && (
           <ResourceTab
             label={t('team.planning.skills')}
@@ -535,7 +572,9 @@ function ResourceLine({
   label: string;
 }) {
   return (
-    <div className="mb-2 flex items-center gap-1 text-xs text-text last:mb-0">
+    <div
+      className="mb-2 flex items-center gap-1 text-xs text-text last:mb-0"
+    >
       {icon}
       <span className="truncate">{label}</span>
     </div>

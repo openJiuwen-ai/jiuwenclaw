@@ -103,12 +103,12 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   };
 
   return (
-    <div className="flex-1 min-h-0">
+    <div className="flex-1 min-h-0" data-testid="browser-panel">
       <div className="card main-panel-card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('browser.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">
+            <h2 className="text-lg font-semibold" data-testid="browser-panel-title">{t('browser.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="browser-panel-subtitle">
               {t('browser.subtitle')}
             </p>
           </div>
@@ -118,6 +118,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
               onClick={() => void loadPath()}
               disabled={saving || loading}
               className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              data-testid="browser-panel-refresh-btn"
             >
               {loading ? t('common.refreshing') : t('browser.refreshPath')}
             </button>
@@ -125,23 +126,23 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
         </div>
 
         {error ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-[var(--color-border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger" data-testid="browser-panel-error">
             {error}
           </div>
         ) : null}
         {success ? (
-          <div className="mb-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok">
+          <div className="mb-4 rounded-md border border-[var(--color-border-success)] bg-ok-subtle px-3 py-2 text-sm text-ok" data-testid="browser-panel-success">
             {success}
           </div>
         ) : null}
 
-        <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm">
+        <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm" data-testid="browser-panel-config">
           <div className="px-4 py-3 border-b border-border bg-secondary/30">
-            <span className="text-xs text-text-muted tracking-wider font-medium">{t('browser.pathConfigHelp')}</span>
+            <span className="text-xs text-text-muted tracking-wider font-medium" data-testid="browser-panel-config-help">{t('browser.pathConfigHelp')}</span>
           </div>
           <div className="p-4 space-y-4">
-            <label className="block space-y-1.5">
-              <span className="text-xs uppercase tracking-wide text-text-muted">chrome_path</span>
+            <label className="block space-y-1.5" data-testid="browser-panel-field-chrome-path">
+              <span className="text-xs uppercase tracking-wide text-text-muted" data-testid="browser-panel-field-chrome-path-label">chrome_path</span>
               <input
                 type="text"
                 value={chromePath}
@@ -152,13 +153,14 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 placeholder={t('browser.examplePath')}
                 className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
                 disabled={loading || saving}
+                data-testid="browser-panel-field-chrome-path-input"
               />
             </label>
 
-            <div className="flex items-center justify-between gap-4 py-1">
+            <div className="flex items-center justify-between gap-4 py-1" data-testid="browser-panel-field-headless">
               <div>
-                <span className="text-xs uppercase tracking-wide text-text-muted">{t('browser.showBrowser')}</span>
-                <p className="text-xs text-text-muted mt-0.5">{t('browser.showBrowserDesc')}</p>
+                <span className="text-xs uppercase tracking-wide text-text-muted" data-testid="browser-panel-field-headless-label">{t('browser.showBrowser')}</span>
+                <p className="text-xs text-text-muted mt-0.5" data-testid="browser-panel-field-headless-hint">{t('browser.showBrowserDesc')}</p>
               </div>
               <Switch
                 checked={!headless}
@@ -177,6 +179,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                   clearFeedback();
                 }}
                 disabled={!hasChanges || saving}
+                data-testid="browser-panel-cancel-btn"
               >
                 {t('common.cancel')}
               </button>
@@ -185,6 +188,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => void handleSave()}
                 disabled={!isConnected || !hasChanges || saving || loading}
+                data-testid="browser-panel-save-btn"
               >
                 {saving ? t('common.saving') : t('browser.savePath')}
               </button>

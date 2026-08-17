@@ -201,19 +201,21 @@ export function CodeCommitPushControl({
           onClick={() => setOpen(true)}
           disabled={triggerDisabled}
           title={disabledReason}
+          data-testid="code-mode-publish-trigger"
+          data-variant="environment"
         >
           <Upload size={15} />
           <span>提交或推送</span>
         </button>
       ) : (
-        <button type="button" className="code-review__publish-button" onClick={() => setOpen(true)} disabled={triggerDisabled} title={disabledReason}>
+        <button type="button" className="code-review__publish-button" onClick={() => setOpen(true)} disabled={triggerDisabled} title={disabledReason} data-testid="code-mode-publish-trigger" data-variant="review">
           提交或推送
         </button>
       )}
 
       {notice
         ? createPortal(
-            <div className="code-publish-toast" role="status" aria-live="polite">
+            <div className="code-publish-toast" role="status" aria-live="polite" data-testid="code-mode-publish-toast">
               <CheckCircle2 size={17} aria-hidden="true" />
               <span>{notice}</span>
             </div>,
@@ -227,6 +229,7 @@ export function CodeCommitPushControl({
               className="code-publish-backdrop"
               role="presentation"
               onMouseDown={event => event.target === event.currentTarget && !submitting && setOpen(false)}
+              data-testid="code-mode-publish-dialog-backdrop"
             >
               <form
                 className="code-publish-dialog"
@@ -237,22 +240,23 @@ export function CodeCommitPushControl({
                   event.preventDefault();
                   void submit();
                 }}
+                data-testid="code-mode-publish-dialog"
               >
-                <header className="code-publish-dialog__header">
-                  <h3 id="code-publish-title">提交或推送</h3>
-                  <button type="button" onClick={() => setOpen(false)} disabled={submitting || creatingBranch} aria-label="关闭">
+                <header className="code-publish-dialog__header" data-testid="code-mode-publish-dialog-header">
+                  <h3 id="code-publish-title" data-testid="code-mode-publish-dialog-title">提交或推送</h3>
+                  <button type="button" onClick={() => setOpen(false)} disabled={submitting || creatingBranch} aria-label="关闭" data-testid="code-mode-publish-dialog-close">
                     <X size={18} />
                   </button>
                 </header>
 
                 {loading ? (
-                  <div className="code-publish-dialog__loading">
+                  <div className="code-publish-dialog__loading" data-testid="code-mode-publish-dialog-loading">
                     <LoaderCircle className="code-mode-spin" size={18} />
                     <span>正在加载 Git 状态…</span>
                   </div>
                 ) : (
-                  <div className="code-publish-dialog__fields">
-                    <div className="code-publish-field">
+                  <div className="code-publish-dialog__fields" data-testid="code-mode-publish-dialog-fields">
+                    <div className="code-publish-field" data-testid="code-mode-publish-field-branch">
                       <span>目标分支</span>
                       <div className="code-publish-branch-picker">
                         <select
@@ -263,9 +267,10 @@ export function CodeCommitPushControl({
                           }}
                           disabled={submitting || creatingBranch || includesCommit}
                           aria-label="目标分支"
+                          data-testid="code-mode-publish-field-branch-select"
                         >
                           {localBranches.map(localBranch => (
-                            <option key={localBranch} value={localBranch}>
+                            <option key={localBranch} value={localBranch} data-testid="code-mode-publish-field-branch-option" data-variant={localBranch}>
                               {localBranch}
                             </option>
                           ))}
@@ -279,13 +284,14 @@ export function CodeCommitPushControl({
                           }}
                           disabled={submitting || creatingBranch || Boolean(status?.repo.transient) || isUnbornHead}
                           title={isUnbornHead ? '空仓库需要完成首次提交后才能创建其他分支' : '创建并检出新分支'}
+                          data-testid="code-mode-publish-branch-create-trigger"
                         >
                           <Plus size={15} />
                           <span>新建分支</span>
                         </button>
                       </div>
                       {branchCreateOpen ? (
-                        <div className="code-publish-branch-create">
+                        <div className="code-publish-branch-create" data-testid="code-mode-publish-branch-create">
                           <input
                             value={branchDraft}
                             onChange={event => setBranchDraft(event.target.value)}
@@ -300,6 +306,7 @@ export function CodeCommitPushControl({
                             disabled={creatingBranch || submitting}
                             aria-label="新分支名称"
                             autoFocus
+                            data-testid="code-mode-publish-branch-create-input"
                           />
                           <button
                             type="button"
@@ -309,6 +316,7 @@ export function CodeCommitPushControl({
                               setBranchDraft('');
                             }}
                             disabled={creatingBranch}
+                            data-testid="code-mode-publish-branch-create-cancel"
                           >
                             取消
                           </button>
@@ -317,6 +325,7 @@ export function CodeCommitPushControl({
                             className="code-mode-button code-mode-button--primary"
                             onClick={() => void createBranch()}
                             disabled={!branchDraft.trim() || creatingBranch || submitting}
+                            data-testid="code-mode-publish-branch-create-submit"
                           >
                             {creatingBranch ? <LoaderCircle className="code-mode-spin" size={14} /> : null}
                             {creatingBranch ? '创建中' : '创建'}
@@ -326,11 +335,11 @@ export function CodeCommitPushControl({
                     </div>
 
                     {includesPush ? (
-                      <label className="code-publish-field">
+                      <label className="code-publish-field" data-testid="code-mode-publish-field-remote">
                         <span>远程仓库</span>
-                        <select value={remote} onChange={event => setRemote(event.target.value)} disabled={submitting}>
+                        <select value={remote} onChange={event => setRemote(event.target.value)} disabled={submitting} data-testid="code-mode-publish-field-remote-select">
                           {remotes.map(remoteName => (
-                            <option key={remoteName} value={remoteName}>
+                            <option key={remoteName} value={remoteName} data-testid="code-mode-publish-field-remote-option" data-variant={remoteName}>
                               {remoteName}
                             </option>
                           ))}
@@ -339,7 +348,7 @@ export function CodeCommitPushControl({
                     ) : null}
 
                     {includesCommit ? (
-                      <label className="code-publish-field code-publish-field--message">
+                      <label className="code-publish-field code-publish-field--message" data-testid="code-mode-publish-field-message">
                         <span>提交信息</span>
                         <textarea
                           value={message}
@@ -347,13 +356,14 @@ export function CodeCommitPushControl({
                           placeholder={`留空将自动使用：${defaultCommitMessage(filesChanged)}`}
                           maxLength={200}
                           disabled={submitting}
+                          data-testid="code-mode-publish-field-message-input"
                         />
-                        <small>{message.length}/200</small>
+                        <small data-testid="code-mode-publish-field-message-count">{message.length}/200</small>
                       </label>
                     ) : null}
 
-                    <fieldset className="code-publish-operations">
-                      <legend>操作类型</legend>
+                    <fieldset className="code-publish-operations" data-testid="code-mode-publish-operations">
+                      <legend data-testid="code-mode-publish-operations-legend">操作类型</legend>
                       {(
                         [
                           ['commit', '提交'],
@@ -361,7 +371,7 @@ export function CodeCommitPushControl({
                           ['push', '推送'],
                         ] as const
                       ).map(([value, label]) => (
-                        <label key={value}>
+                        <label key={value} data-testid="code-mode-publish-operation" data-variant={value}>
                           <input
                             type="radio"
                             name="git-publish-operation"
@@ -369,21 +379,23 @@ export function CodeCommitPushControl({
                             checked={operation === value}
                             onChange={() => setOperation(value)}
                             disabled={submitting || (value !== 'push' && !repositoryHasChanges)}
+                            data-testid="code-mode-publish-operation-input"
+                            data-variant={value}
                           />
                           <span>{label}</span>
                         </label>
                       ))}
                     </fieldset>
 
-                    <div className="code-publish-options">
+                    <div className="code-publish-options" data-testid="code-mode-publish-options">
                       {includesCommit ? (
-                        <label>
+                        <label data-testid="code-mode-publish-option-include-unstaged">
                           <input type="checkbox" checked={includeUnstaged} onChange={event => setIncludeUnstaged(event.target.checked)} disabled={submitting} />
                           <span>包含未暂存的更改</span>
                         </label>
                       ) : null}
                       {includesPush ? (
-                        <label>
+                        <label data-testid="code-mode-publish-option-set-upstream">
                           <input type="checkbox" checked={setUpstream} onChange={event => setSetUpstream(event.target.checked)} disabled={submitting} />
                           <span>设置为上游分支</span>
                         </label>
@@ -393,16 +405,16 @@ export function CodeCommitPushControl({
                 )}
 
                 {error ? (
-                  <div className="code-publish-dialog__error" role="alert">
+                  <div className="code-publish-dialog__error" role="alert" data-testid="code-mode-publish-dialog-error">
                     {error}
                   </div>
                 ) : null}
 
-                <footer className="code-publish-dialog__actions">
-                  <button type="button" className="code-mode-button" onClick={() => setOpen(false)} disabled={submitting || creatingBranch}>
+                <footer className="code-publish-dialog__actions" data-testid="code-mode-publish-dialog-actions">
+                  <button type="button" className="code-mode-button" onClick={() => setOpen(false)} disabled={submitting || creatingBranch} data-testid="code-mode-publish-dialog-cancel">
                     取消
                   </button>
-                  <button type="submit" className="code-mode-button code-mode-button--primary" disabled={!canSubmit}>
+                  <button type="submit" className="code-mode-button code-mode-button--primary" disabled={!canSubmit} data-testid="code-mode-publish-dialog-submit">
                     {submitting ? <LoaderCircle className="code-mode-spin" size={15} /> : null}
                     {submitting ? (operation === 'push' ? '推送中' : '处理中') : '确定'}
                   </button>

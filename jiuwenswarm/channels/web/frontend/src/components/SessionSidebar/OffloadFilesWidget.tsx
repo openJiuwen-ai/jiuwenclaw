@@ -101,10 +101,12 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
     <div
       className="mt-4 pt-4 border-t border-border px-2.5"
       style={{ borderColor: 'var(--color-border-default)' }}
+      data-testid="session-sidebar-offload-files-widget"
     >
       <div
         className="flex items-center justify-between cursor-pointer"
         onClick={() => setIsExpanded((prev) => !prev)}
+        data-testid="session-sidebar-offload-files-header"
       >
         <div className="flex items-center gap-2">
           <div
@@ -128,10 +130,10 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
             </svg>
           </div>
           <div>
-            <div className="text-xs font-semibold text-text-strong">
+            <div className="text-xs font-semibold text-text-strong" data-testid="session-sidebar-offload-files-title">
               {t('offloadFiles.title')}
             </div>
-            <div className="text-[11px] text-text-muted">
+            <div className="text-[11px] text-text-muted" data-testid="session-sidebar-offload-files-count" data-variant={isSessionReady ? 'count' : 'disconnected'}>
               {isSessionReady ? t('offloadFiles.count', { count: files.length }) : t('offloadFiles.notConnected')}
             </div>
           </div>
@@ -140,6 +142,8 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
           className="w-6 h-6 rounded-md flex items-center justify-center"
           style={{ backgroundColor: 'var(--color-surface-elevated)' }}
           aria-label="toggle offload files"
+          aria-pressed={isExpanded}
+          data-testid="session-sidebar-offload-files-toggle"
         >
           <svg
             className={`w-3.5 h-3.5  ${
@@ -164,18 +168,19 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
             borderColor: 'var(--color-border-default)',
             backgroundColor: 'var(--color-surface-panel-strong)',
           }}
+          data-testid="session-sidebar-offload-files-body"
         >
-          <div className="max-h-40 overflow-y-auto">
+          <div className="max-h-40 overflow-y-auto" data-testid="session-sidebar-offload-files-list">
             {isLoading && (
-              <div className="px-3 py-2 text-xs text-text-muted">
+              <div className="px-3 py-2 text-xs text-text-muted" data-testid="session-sidebar-offload-files-loading">
                 {t('common.loading')}
               </div>
             )}
             {!isLoading && loadError && (
-              <div className="px-3 py-2 text-xs text-danger">{loadError}</div>
+              <div className="px-3 py-2 text-xs text-danger" data-testid="session-sidebar-offload-files-error">{loadError}</div>
             )}
             {!isLoading && !loadError && files.length === 0 && (
-              <div className="px-3 py-2 text-xs text-text-muted">
+              <div className="px-3 py-2 text-xs text-text-muted" data-testid="session-sidebar-offload-files-empty">
                 {t('offloadFiles.empty')}
               </div>
             )}
@@ -196,6 +201,8 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
                   onMouseOut={(event) => {
                     event.currentTarget.style.backgroundColor = 'transparent';
                   }}
+                  data-testid="session-sidebar-offload-file-item"
+                  data-variant={filename}
                 >
                   <div className="flex items-center gap-2">
                     <svg
@@ -255,14 +262,15 @@ function OffloadFileModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" data-testid="session-sidebar-offload-file-modal">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} data-testid="session-sidebar-offload-file-modal-backdrop" />
       <div
         className="relative w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-xl animate-rise"
         style={{
           backgroundColor: 'var(--color-surface-card)',
           boxShadow: 'var(--effect-shadow-xl)',
         }}
+        data-testid="session-sidebar-offload-file-modal-panel"
       >
         <div
           className="px-6 py-4 flex items-center gap-4"
@@ -295,10 +303,11 @@ function OffloadFileModal({
             <h2
               className="text-lg font-semibold truncate"
               style={{ color: 'var(--color-text-strong)' }}
+              data-testid="session-sidebar-offload-file-modal-title"
             >
               {filename || t('offloadFiles.previewFallback')}
             </h2>
-            <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+            <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }} data-testid="session-sidebar-offload-file-modal-subtitle">
               {t('offloadFiles.previewTitle')}
             </p>
           </div>
@@ -312,15 +321,16 @@ function OffloadFileModal({
           }}
         >
           {isLoading && (
-            <div className="text-sm text-text-muted">{t('common.loading')}</div>
+            <div className="text-sm text-text-muted" data-testid="session-sidebar-offload-file-modal-loading">{t('common.loading')}</div>
           )}
           {!isLoading && errorMessage && (
-            <div className="text-sm text-danger">{errorMessage}</div>
+            <div className="text-sm text-danger" data-testid="session-sidebar-offload-file-modal-error">{errorMessage}</div>
           )}
           {!isLoading && !errorMessage && (
             <pre
               className="text-sm whitespace-pre-wrap break-words"
               style={{ color: 'var(--color-text-primary)' }}
+              data-testid="session-sidebar-offload-file-modal-content"
             >
               {content || t('offloadFiles.emptyContent')}
             </pre>
@@ -349,6 +359,7 @@ function OffloadFileModal({
               event.currentTarget.style.backgroundColor = 'transparent';
               event.currentTarget.style.color = 'var(--color-text-secondary)';
             }}
+            data-testid="session-sidebar-offload-file-modal-close"
           >
             {t('common.close')}
           </button>
