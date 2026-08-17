@@ -26,6 +26,7 @@ class PromptPriority(IntEnum):
 
     IDENTITY = 10
     SKILLS = 40
+    SKILL_PROTOCOL = 45
     MEMORY = 55
     RESPONSE = 60
     A2UI = 61

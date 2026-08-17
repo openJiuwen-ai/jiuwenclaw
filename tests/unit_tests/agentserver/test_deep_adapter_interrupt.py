@@ -8,7 +8,7 @@ import asyncio
 import contextvars
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -16,6 +16,9 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
+    SKILL_TURBO_RESUME_CTX_KEY,
+)
 
 
 def _build_cancel_request(session_id: str = "tui_sess_1") -> AgentRequest:
@@ -121,7 +124,10 @@ async def test_interaction_supplement_clears_pending_ask_user_state() -> None:
 
     response = await adapter.process_interrupt(_build_supplement_request())
 
-    loop_session.update_state.assert_called_once_with({INTERRUPTION_KEY: None})
+    assert loop_session.update_state.call_args_list == [
+        call({INTERRUPTION_KEY: None}),
+        call({SKILL_TURBO_RESUME_CTX_KEY: None}),
+    ]
     context.pop_messages.assert_called_once_with(1, with_history=True)
     context_engine.save_contexts.assert_awaited_once_with(loop_session)
     assert response.payload["intent"] == "supplement"
