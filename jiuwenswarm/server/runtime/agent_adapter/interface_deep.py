@@ -8867,7 +8867,15 @@ class JiuWenSwarmDeepAdapter:
             card=getattr(self._instance, "card", None),
         )
         await session.pre_run(inputs={})
-        await self._instance.start(session=session)
+        # Bind env overlay so the DeepAgent supervisor task (created by
+        # start() via asyncio.create_task) inherits the correct namespace.
+        # Without this, the supervisor task's context copy lacks the overlay
+        # and reads env from the wrong namespace (default/default).
+        ns_token, overlay_token = self._bind_request_env_overlay()
+        try:
+            await self._instance.start(session=session)
+        finally:
+            self._reset_request_env_bindings(ns_token, overlay_token)
         if getattr(self._instance, "_interaction_started", True) is not True:
             raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
         logger.info(
