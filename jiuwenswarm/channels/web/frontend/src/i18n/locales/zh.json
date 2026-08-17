@@ -310,7 +310,7 @@
       "configured": "已配置模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型",
-      "backup": "备份"
+      "backup": "AgentOS"
     },
     "modeSwitchDisabledProcessing": "当前对话运行中，请新建对话后选择模式",
     "configLockedHistory": "会话已有消息，请新建会话后更改配置",
@@ -1148,8 +1148,8 @@
         "hint": "自动分析用户需求，主动提供建议；调度频率请在定时任务面板调整"
       },
       "agentos": {
-        "label": "AgentOS 备份模型",
-        "hint": "手动添加的备份模型；只读且可切换，不抢占启动默认"
+        "label": "AgentOS 模型",
+        "hint": "手动添加的 AgentOS 模型；只读且可切换，不抢占启动默认"
       }
     },
     "booleanLabels": {
@@ -1263,7 +1263,7 @@
       "proactiveIntOutOfRange": "{{field}} 需为 {{lo}}-{{hi}} 的正整数，当前：{{value}}"
     },
     "agentos": {
-      "backupBadge": "备份",
+      "backupBadge": "AgentOS",
       "switchToThis": "切换使用此模型",
       "readonly": "只读（config.yaml 中定义）"
     }
