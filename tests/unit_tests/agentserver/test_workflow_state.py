@@ -940,8 +940,8 @@ def test_workflow_paused_does_not_stamp_terminal_fields():
     assert state.duration_ms is None
 
 
-def test_workflow_paused_marks_running_agents_stopped():
-    """pause stops the in-flight agents: running agents flip to stopped (spec: agent-level pause/stop both show stopped)."""
+def test_workflow_paused_marks_running_agents_paused():
+    """pause marks in-flight agents paused (non-terminal, no completed_at) — matches workflow/phase paused."""
     state = WorkflowRunState()
     state.apply(_make_progress("workflow_started", workflow_name="test"))
     state.apply(_make_progress("phase", phase="Phase 1"))
@@ -949,7 +949,9 @@ def test_workflow_paused_marks_running_agents_stopped():
     assert state.phases[0].agents[0].status == "running"
     state.apply(_make_progress("workflow_paused"))
     assert state.status == "paused"
-    assert state.phases[0].agents[0].status == "stopped"
+    assert state.phases[0].status == "paused"
+    assert state.phases[0].agents[0].status == "paused"
+    assert state.phases[0].agents[0].completed_at is None
 
 
 def test_workflow_stopped_marks_terminal_without_error():
@@ -1038,11 +1040,10 @@ def test_resume_workflow_started_does_not_duplicate_phases():
 
 
 def test_workflow_paused_flips_running_phase_to_paused():
-    """A running phase flips to paused on workflow_paused (its agents stop).
+    """A running phase flips to paused on workflow_paused (its agents pause too).
 
-    The phase stays non-terminal so a resume can continue; only the in-flight
-    agent status shows ``stopped`` (spec: agent-level pause/stop both show
-    stopped while the phase card shows the control state ``paused``).
+    The phase stays non-terminal so a resume can continue; both the phase and
+    its in-flight agents show ``paused`` (matching the workflow control state).
     """
     state = WorkflowRunState()
     state.apply(_make_progress("workflow_started", workflow_name="test"))
@@ -1053,7 +1054,7 @@ def test_workflow_paused_flips_running_phase_to_paused():
     state.apply(_make_progress("workflow_paused"))
     assert state.status == "paused"
     assert state.phases[0].status == "paused"
-    assert state.phases[0].agents[0].status == "stopped"
+    assert state.phases[0].agents[0].status == "paused"
     assert state.phases[0].agent_count == 1
 
 
@@ -1072,7 +1073,7 @@ def test_resume_agent_started_reuses_same_agent_id():
     assert len(state.phases[0].agents) == 1
     assert state.phases[0].agents[0].status == "running"
     state.apply(_make_progress("workflow_paused"))
-    assert state.phases[0].agents[0].status == "stopped"
+    assert state.phases[0].agents[0].status == "paused"
     # Resume relaunch re-emits workflow_started + agent_started for the same node.
     state.apply(_make_progress("workflow_started", workflow_name="test"))
     delta = state.apply(_make_progress("agent_started", phase="Phase 1", label="agent-a", agent_id="c:1"))
