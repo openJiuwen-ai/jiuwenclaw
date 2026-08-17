@@ -1,9 +1,9 @@
 /**
- * HistoryPanel —— Web Pod 本地会话历史浏览（只读）。
+ * HistoryPanel —— 企业 Web 会话历史浏览（只读）。
  *
  * 列表态：GET /api/sessions，展示标题 / 预览 / 时间 / 消息数。
  * 详情态：GET /api/sessions/{id}，复用 MessageItem 渲染完整对话。
- * 数据源为 Web Pod 本地 SQLite，独立于 WS（AgentServer）链路。
+ * 数据源为企业 MySQL 库 web，独立于 WS（AgentServer）链路。
  */
 
 import { useCallback, useEffect, useState } from 'react';
