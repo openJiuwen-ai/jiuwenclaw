@@ -85,26 +85,30 @@ team-skill-name/
 ---
 name: medical-consultation-team
 version: 1.0.0
-author: jiuwenclaw-team
+author: jiuwenswarm-team
 description: |
   Multi-disciplinary medical expert consultation team skill, organizing specialists for parallel evaluation and opinion integration via a coordinator.
   Use when multiple specialist experts need to jointly evaluate a complex case and output structured treatment recommendations.
   Do NOT use for simple cases that a single specialty can independently judge.
-kind: team-skill
+kind: swarm-skill
 roles:
   - id: coordinator
+    kind: ai_agent
     purpose: Organize experts, consolidate opinions, output treatment recommendations
     skills: []
     tools: []
   - id: internist
+    kind: ai_agent
     purpose: Evaluate cases from an internal medicine perspective
     skills: []
     tools: []
   - id: surgeon
+    kind: ai_agent
     purpose: Evaluate cases from a surgical perspective
     skills: []
     tools: []
   - id: radiologist
+    kind: ai_agent
     purpose: Analyze cases from a radiology perspective
     skills: []
     tools: []
@@ -145,10 +149,12 @@ This swarm skill uses a specialization pipeline pattern (Pattern C) to organize 
 
 **Key field descriptions**:
 
-- **`name`**: Unique skill identifier; must match the directory name (kebab-case, conventionally ending with `-team`).
-- **`kind`**: Must be `team-skill` (note: not `type`), distinguishing Swarm Skills from regular Agent Skills.
-- **`roles`**: Role list; **at least 2 roles required**, each role must include `id` (role identifier), `purpose` (one-line responsibility description, ≤150 characters), `skills` (dependent skill list), and `tools` (dependent tool list).
+- **`name`**: Unique skill identifier; must match the directory name (kebab-case, conventionally ending with `-team`. kebab-case uses hyphen-separated lowercase words, e.g., `medical-consultation-team`).
+- **`kind`**: Must be `swarm-skill` (note: not `type`), distinguishing Swarm Skills from regular Agent Skills.
+- **`roles`**: Role list; **at least 2 roles required**, each role must include `id` (role identifier), `kind` (role type, `ai_agent` or `human_agent`), `purpose` (one-line responsibility description, ≤150 characters), `skills` (dependent skill list), and `tools` (dependent tool list).
 - **`description`**: Skill description following conciseness principles (≤4 lines, recommended ≤500 characters, hard limit 1024), using WHAT / WHEN / NOT three-line structure.
+
+> **Role Concept Reference**: Leader is responsible for receiving user requests and dispatching teammates; Teammates execute specific assigned tasks. For detailed role definitions and team collaboration mechanisms, see [Agent Team](AgentTeam.md).
 
 #### roles/\*.md — Role Definitions
 
@@ -378,6 +384,14 @@ tools:
 ## 3. Usage Guide
 
 ### 3.1 Getting Started with Swarm Skills
+
+**Prerequisites: Start Cluster / Team Mode**
+
+Swarm Skills must run in Agent Team (Cluster) mode. Before using, ensure you have switched to Team mode:
+
+- **Web UI**: Switch to "Cluster Mode (Agent Team)" in the top or sidebar mode selector
+- **TUI Terminal**: Type and execute `/mode team` in the input prompt
+- **Command Line**: Specify the mode when launching, e.g., `python -m jiuwenswarm.app --mode team` or `jiuwenswarm-tui --mode team`
 
 Users typically begin using Swarm Skills through the following steps:
 
@@ -842,6 +856,8 @@ In JiuwenSwarm's "Skills" panel:
 2. Select the Swarm Skill to publish
 3. Click "Upload"
 4. First-time use requires authentication (enter your Team Skills Hub Token)
+
+> **Token Acquisition**: Visit [Swarm Skills Hub](https://swarmskills.openjiuwen.com), register/login to your account, and generate your API Token in User Settings.
 
 You can also publish via command line:
 
