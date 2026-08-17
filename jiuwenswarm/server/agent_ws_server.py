@@ -1524,6 +1524,9 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.TEAM_DELETE:
                 await self._handle_team_delete(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.TEAM_SESSION_RESET:
+                await self._handle_team_session_reset(ws, request, send_lock)
+                return
             if request.req_method in get_permissions_config_req_methods():
                 await self._handle_permissions_config(ws, request, send_lock)
                 return
@@ -3926,6 +3929,99 @@ class AgentWebSocketServer:
                     payload={"error": str(exc), "code": getattr(exc, "code", "DELETE_FAILED")},
                     metadata=request.metadata,
                 )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_team_session_reset(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """Reset a single team session: drop its task board + release its
+        checkpoint, KEEP team_info / roster / team_home / session binding.
+
+        Session-scoped counterpart to ``_handle_team_delete``: explicitly
+        keyed by a single ``session_id`` (no cross-thread scan), skips the
+        ``team_info`` delete, ``team_home`` rmtree, ``session_dir`` rmtree
+        and binding/entity teardown that ``_handle_team_delete`` performs.
+        Next chat.send on the same session_id -> ``NEW_TEAM_IN_SESSION``
+        (fresh empty board, members re-dispatched from the preserved roster).
+        """
+        from openjiuwen.core.runner import Runner
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            resolve_session_runtime_team_name,
+        )
+        from jiuwenswarm.agents.harness.team import get_team_manager
+
+        params = request.params if isinstance(request.params, dict) else {}
+        team_name = str(params.get("team_name") or "").strip()
+        session_id = str(params.get("session_id") or "").strip()
+
+        if not team_name or not session_id:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error": "team.session.reset requires team_name + session_id",
+                    "code": "BAD_REQUEST",
+                },
+                metadata=request.metadata,
+            )
+        else:
+            sessions_root = _sessions_dir_for_request(request)
+            metadata = get_session_metadata(
+                session_id,
+                sessions_root=sessions_root,
+            )
+            runtime_team_name = (
+                resolve_session_runtime_team_name(metadata) or team_name
+            )
+            team_manager = get_team_manager(
+                str(metadata.get("channel_id") or request.channel_id or "")
+            )
+            # 1) Clear shell-side runtime tracking + first-request flag first.
+            #    stop_runner=False: the Runner-owned runtime is stopped below by
+            #    reset_session itself, mirroring delete_team's force-stop.
+            try:
+                await team_manager.stop_session_runtime(
+                    session_id,
+                    reason="team.session.reset",
+                    stop_runner=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] stop_session_runtime (reset) failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+            team_manager.clear_session_initialized(session_id)
+            # 2) openjiuwen session-scoped reset: drop session tables + release
+            #    checkpoint + remove session worktrees, keep team_info/roster/binding.
+            try:
+                ok = await Runner.reset_agent_team_session(
+                    team_name=runtime_team_name,
+                    session_id=session_id,
+                    force=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] team.session.reset failed: team=%s session=%s error=%s",
+                    runtime_team_name,
+                    session_id,
+                    exc,
+                )
+                ok = False
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=bool(ok),
+                payload={
+                    "reset": bool(ok),
+                    "session_id": session_id,
+                    "team_name": team_name,
+                },
+                metadata=request.metadata,
+            )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
