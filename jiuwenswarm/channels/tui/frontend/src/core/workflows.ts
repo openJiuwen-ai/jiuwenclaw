@@ -197,12 +197,19 @@ export function workflowStatusIcon(status: WorkflowStatus): string {
 /** Fixed user-facing status lines — avoid showing raw engine narration (e.g. result payload). */
 export const WORKFLOW_STATUS_BANNER: Partial<Record<WorkflowStatus, string>> = {
   running: "Workflow running",
+  paused: "Workflow paused",
   completed: "Workflow completed",
+  stopped: "Workflow stopped",
 };
 
 export function runningWorkflowsBannerText(count: number): string {
   if (count <= 0) return "";
   return count === 1 ? "1 workflow running" : `${count} workflows running`;
+}
+
+export function pausedWorkflowsBannerText(count: number): string {
+  if (count <= 0) return "";
+  return count === 1 ? "1 workflow paused" : `${count} workflows paused`;
 }
 
 /** Format an ISO timestamp for workflow started-at display (local time). */
@@ -260,7 +267,7 @@ export function formatWorkflowRunningTime(workflow: WorkflowRun, now = Date.now(
   return formatDurationMs(Math.max(0, now - startedMs));
 }
 
-function formatWorkflowDurationLabel(status: WorkflowStatus): string {
+export function formatWorkflowDurationLabel(status: WorkflowStatus): string {
   switch (status) {
     case "completed":
       return "completed";
@@ -268,6 +275,8 @@ function formatWorkflowDurationLabel(status: WorkflowStatus): string {
       return "failed";
     case "stopped":
       return "stopped";
+    case "paused":
+      return "paused";
     case "running":
     case "pending":
     case "planned":
