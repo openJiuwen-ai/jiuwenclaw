@@ -369,6 +369,20 @@ class WorkflowRunState(BaseModel):
                 self._stamp_agent_terminal(agent, terminal_status)
         self._refresh_phase_counts(phase)
 
+    def _pause_running_agents(self, phase: WorkflowPhaseState) -> None:
+        """Pause still-running agents in ``phase`` to ``paused`` (non-terminal).
+
+        Unlike :meth:`_finalize_running_agents`, this does NOT stamp
+        ``completed_at`` / ``duration_ms`` — a paused agent is not finished, it
+        will be reactivated on resume. ``waiting_for_human`` nodes are also
+        paused (their pending reply is cancelled by the pause's abort), so the
+        frontend does not spin forever.
+        """
+        for agent in phase.agents:
+            if agent.status in ("running", "waiting_for_human"):
+                agent.status = "paused"
+        self._refresh_phase_counts(phase)
+
     def _finalize_running_phases(self, terminal_status: str) -> None:
         """Mark all running phases and their running agents as terminal.
 
@@ -1082,7 +1096,7 @@ class WorkflowRunState(BaseModel):
         for phase in self.phases:
             if phase.status == "running":
                 phase.status = "paused"
-            self._finalize_running_agents(phase, "stopped")
+            self._pause_running_agents(phase)
         return self._build_top_level_delta()
 
     def _on_workflow_stopped(self, progress: WorkflowProgress) -> dict[str, Any]:
