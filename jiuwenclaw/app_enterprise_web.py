@@ -36,6 +36,7 @@ from jiuwenclaw.history_store import (
     get_session_detail_sync,
     list_sessions_sync,
     make_history_callback,
+    set_default_store,
 )
 from jiuwenclaw.utils import get_logs_dir, get_multi_tenant_user_workspace_dir, get_user_workspace_dir
 
@@ -81,7 +82,7 @@ class EnterpriseWebWsServer:
         self._browser_query: dict[str, dict[str, list[str]]] = {}
         # 会话历史采集回调：(direction, raw, conn_id)；None 表示不采集。由 _run_ws_server 注入。
         self.on_frame: Callable[[str, str, str | None], Awaitable[None]] | None = None
-        # 历史存储实例（由 _run_ws_server 注入；HTTP 端用 history_store.list_sessions_sync 读同一 db）。
+        # 历史存储实例（由 _run_ws_server 注入；HTTP 端读同一 MySQL web 库）。
         self._history_store: ChatHistoryStore | None = None
 
     def set_history_store(self, store: ChatHistoryStore) -> None:
@@ -547,12 +548,12 @@ def _run_http_server(
     workspace_root: Path,
     logs_root: Path,
     log_level: str,
-    history_db: str = "",
+    history_enabled: bool = False,
 ) -> None:
     file_logger = _setup_logger(logs_root, log_level)
 
     class _ConfiguredHandler(_SpaStaticHandler):
-        history_db: str = ""
+        history_enabled: bool = False
 
         def do_GET(self) -> None:  # noqa: N802
             if self._handle_history_api():
@@ -561,8 +562,6 @@ def _run_http_server(
 
         def _handle_history_api(self) -> bool:
             """处理 GET /api/sessions 与 /api/sessions/{id}；未命中返回 False。"""
-            if not self.history_db:
-                return False
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/api/sessions":
@@ -576,7 +575,7 @@ def _run_http_server(
                 offset = max(0, offset)
                 user = (qs.get("user", [None])[0]) or None
                 body = json.dumps(
-                    {"sessions": list_sessions_sync(self.history_db, limit=limit, offset=offset, user=user)},
+                    {"sessions": list_sessions_sync(limit=limit, offset=offset, user=user)},
                     ensure_ascii=False,
                 ).encode("utf-8")
                 self._respond_json(body)
@@ -584,7 +583,7 @@ def _run_http_server(
             if path.startswith("/api/sessions/"):
                 session_id = path[len("/api/sessions/"):]
                 user = (parse_qs(parsed.query).get("user", [None])[0]) or None
-                detail = get_session_detail_sync(self.history_db, session_id, user=user)
+                detail = get_session_detail_sync(session_id, user=user)
                 if detail is None:
                     self._respond_json(json.dumps({"error": "not_found"}).encode("utf-8"), status=404)
                 else:
@@ -606,7 +605,7 @@ def _run_http_server(
     _ConfiguredHandler.workspace_root = workspace_root
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = file_logger
-    _ConfiguredHandler.history_db = history_db
+    _ConfiguredHandler.history_enabled = history_enabled
 
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((host, port), handler)
@@ -633,7 +632,7 @@ async def _run_ws_server(
     port: int,
     browser_path: str,
     gateway_path: str,
-    history_db: str = "",
+    history_store: ChatHistoryStore | None = None,
 ) -> None:
     ws_server = EnterpriseWebWsServer(
         host=host,
@@ -641,11 +640,31 @@ async def _run_ws_server(
         browser_path=browser_path,
         gateway_path=gateway_path,
     )
-    if history_db:
-        store = ChatHistoryStore(history_db)
-        ws_server.set_history_store(store)
-        ws_server.on_frame = make_history_callback(store)
-        logger.info("[jiuwenclaw-enterprise-web] history db: %s", history_db)
+    if history_store is not None and history_store.available:
+        ws_server.set_history_store(history_store)
+        ws_server.on_frame = make_history_callback(history_store)
+        backend = history_store.backend
+        if backend == "sqlite":
+            logger.info(
+                "[jiuwenclaw-enterprise-web] history backend=sqlite db=%s",
+                history_store.db_path,
+            )
+        elif backend == "mysql":
+            settings = history_store.mysql_settings
+            if settings is not None:
+                logger.info(
+                    "[jiuwenclaw-enterprise-web] history backend=mysql %s:%s/%s",
+                    settings.host, settings.port, settings.database,
+                )
+            else:
+                logger.info("[jiuwenclaw-enterprise-web] history backend=mysql (unconfigured)")
+        else:
+            logger.info("[jiuwenclaw-enterprise-web] history backend=%s", backend)
+    else:
+        logger.error(
+            "[jiuwenclaw-enterprise-web] 会话历史不可用（MySQL 缺 WEB_DB_HOST 或库类型不支持），"
+            "不会落盘；聊天不受影响（不回退 SQLite）"
+        )
     try:
         await ws_server.start()
     except asyncio.CancelledError:
@@ -716,7 +735,25 @@ def main() -> None:
     project_root = get_user_workspace_dir()
     workspace_root = get_multi_tenant_user_workspace_dir(workspace_key="default")
     logs_root = get_logs_dir().resolve()
-    history_db = str(workspace_root / "web_history.db")
+    history_store = ChatHistoryStore.from_env()
+    set_default_store(history_store)
+    if history_store.available:
+        if history_store.backend == "sqlite":
+            logger.info(
+                "[jiuwenclaw-enterprise-web] history backend=sqlite db=%s",
+                history_store.db_path,
+            )
+        elif history_store.backend == "mysql" and history_store.mysql_settings is not None:
+            s = history_store.mysql_settings
+            logger.info(
+                "[jiuwenclaw-enterprise-web] history backend=mysql %s:%s/%s",
+                s.host, s.port, s.database,
+            )
+    else:
+        logger.error(
+            "[jiuwenclaw-enterprise-web] 会话历史不可用（MySQL 缺 WEB_DB_HOST 或库类型不支持），"
+            "不回退 SQLite"
+        )
 
     if not args.relay_only:
         http_thread = threading.Thread(
@@ -732,7 +769,7 @@ def main() -> None:
                 "workspace_root": workspace_root,
                 "logs_root": logs_root,
                 "log_level": args.log_level,
-                "history_db": history_db,
+                "history_enabled": history_store.available,
             },
             name="enterprise-web-http",
             daemon=True,
@@ -747,7 +784,7 @@ def main() -> None:
             port=relay_port,
             browser_path=args.relay_browser_path,
             gateway_path=args.relay_gateway_path,
-            history_db=history_db,
+            history_store=history_store if history_store.available else None,
         ),
         name="enterprise-web-ws",
     )
