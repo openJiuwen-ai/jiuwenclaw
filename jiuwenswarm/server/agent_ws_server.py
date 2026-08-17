@@ -2255,7 +2255,7 @@ class AgentWebSocketServer:
                 from jiuwenswarm.server.runtime.session.work_mode import (
                     default_work_mode_for_channel,
                 )
-                channel_id_for_default = request.channel_id or "web"
+                channel_id_for_default = channel_id or request.channel_id or "web"
                 runtime_work_mode = default_work_mode_for_channel(channel_id_for_default)
                 logger.warning(
                     "[_prepare_code_mode_chat_turn] work_mode missing in both session "
@@ -8220,13 +8220,17 @@ class AgentWebSocketServer:
             params["project_dir"] = project_dir
             params["work_mode"] = final_work_mode
 
-            is_swarm = bool(params.get("is_swarm")) or is_team_mode(canonical_mode)
-            if not is_swarm:
-                mode, _, canonical_mode = resolve_agent_request_mode(
-                    canonical_mode,
-                    work_mode=final_work_mode,
-                )
-                params["mode"] = canonical_mode
+            # Resolve after the final work_mode is known. This is important for Web
+            # Team sessions: mode=team + work_mode=code must enter the same
+            # code.team runtime as the TUI team.code mode.
+            resolved = resolve_request_runtime_mode(
+                request,
+                work_mode=final_work_mode,
+            )
+            mode = resolved.manager_mode
+            canonical_mode = resolved.canonical_mode
+            params["mode"] = canonical_mode
+            is_swarm = bool(params.get("is_swarm")) or resolved.is_team
             prewarm_eligible = (
                 not is_swarm
                 and canonical_mode in {"agent", "code", "code.normal"}

@@ -7,10 +7,10 @@
 - ``work_mode``：``work`` / ``code``，表示工作环境（项目归属、Git 上下文）。
 - ``mode``：决定 Adapter（Deep / Code）、单 agent 还是集群、以及是否 plan。
 
-Web 前端只表达 ``agent`` / ``team`` / ``agent.plan`` 三个值。其中单 agent 的两个
-由 ``work_mode`` 决定使用 work profile 还是 code profile，本模块负责把这两个字段
-组合成后端既有的 manager mode / sub_mode / canonical mode。Plan 只在单 agent 上
-开放，``team`` 不参与组合、走历史解析，集群行为保持原样。
+Web 前端只表达 ``agent`` / ``team`` / ``agent.plan`` 三个值。其中 ``work_mode``
+决定使用 work profile 还是 code profile，本模块负责把这两个字段组合成后端既有的
+manager mode / sub_mode / canonical mode。Web 的 ``team + code`` 组合归一为
+``code.team``（TUI 对外显示为 ``team.code``）。
 
 TUI、CLI、IM、cron 等客户端可以直接发送完整模式串。本模块同时负责将正式别名
 ``team.plan`` 归一为 ``team.plan.normal``，并把两个 Team Plan profile 分别路由到
@@ -24,16 +24,14 @@ from typing import Any, Callable, Mapping
 
 from jiuwenswarm.common.work_mode import SUPPORTED_WORK_MODES
 
-# Web 组合模式只覆盖单 agent。其余取值一律按历史完整模式处理。
-#
-# 集群刻意不在这里：Plan 只对单 agent 开放，而集群的 Adapter 选型沿用历史规则
-# （``team`` → DeepAdapter），不随 ``work_mode`` 变化。把 ``team`` 交给
-# legacy 分支，Web 集群的行为就与改造前逐字节一致。
+# Web 组合模式覆盖单 agent 和 Team 的 work/code profile。其余取值一律按历史完整
+# 模式处理。Team 不支持独立的 Web Plan，但 ``team + code`` 必须进入与 TUI
+# ``team.code`` 相同的 code-team profile。
 WEB_BASE_AGENT: str = "agent"
 WEB_PLAN_AGENT: str = "agent.plan"
 
 WEB_COMPOSABLE_MODES: frozenset[str] = frozenset(
-    {WEB_BASE_AGENT, WEB_PLAN_AGENT}
+    {WEB_BASE_AGENT, WEB_PLAN_AGENT, "team"}
 )
 
 # Team plan 的规范模式与兼容别名。
@@ -41,6 +39,8 @@ TEAM_PLAN_NORMAL_MODE: str = "team.plan.normal"
 TEAM_PLAN_CODE_MODE: str = "team.plan.code"
 MODE_ALIASES: dict[str, str] = {
     "team.plan": TEAM_PLAN_NORMAL_MODE,
+    # TUI 的用户-facing 名称；运行时沿用历史 canonical ID。
+    "team.code": "code.team",
 }
 
 # 所有表示"集群"的 canonical 模式。
@@ -67,6 +67,8 @@ _WEB_MODE_TABLE: dict[tuple[str, str], tuple[str, str | None, str]] = {
     (WEB_PLAN_AGENT, "work"): ("agent", "plan", "agent.plan"),
     (WEB_BASE_AGENT, "code"): ("code", "normal", "code.normal"),
     (WEB_PLAN_AGENT, "code"): ("code", "plan", "code.plan"),
+    ("team", "work"): ("team", None, "team"),
+    ("team", "code"): ("code", "team", "code.team"),
 }
 
 
@@ -192,9 +194,8 @@ def resolve_request_mode(
     """解析一次请求的运行模式。
 
     优先走 Web 组合分支；只有当请求同时满足"存在合法 ``work_mode``"和
-    "mode 是 ``agent`` / ``agent.plan``"时才生效。其余取值（``team`` 以及
-    ``code.plan`` / ``code.team`` / ``team.plan.*`` / ``agent.fast`` 等完整模式串）
-    都交给 *legacy_resolver*。
+    "mode 是 Web 支持的基础模式"时才生效。其余取值（``code.plan`` / ``code.team`` /
+    ``team.plan.*`` / ``agent.fast`` 等完整模式串）都交给 *legacy_resolver*。
 
     Args:
         params: 请求 params。
