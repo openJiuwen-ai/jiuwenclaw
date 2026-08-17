@@ -26,6 +26,7 @@ VALID_DEPLOYMENT_MODES: tuple[str, ...] = (
 )
 
 SessionStorageBackend = Literal["local", "redis"]
+HistoryStorageBackend = Literal["sqlite", "mysql"]
 
 
 def normalize_deployment_mode(raw: object) -> str:
@@ -34,6 +35,13 @@ def normalize_deployment_mode(raw: object) -> str:
     if mode in VALID_DEPLOYMENT_MODES:
         return mode
     return MODE_STANDALONE
+
+
+def history_storage_backend(mode: str) -> HistoryStorageBackend:
+    """会话历史存储后端：standalone 用本机 SQLite；企业模式（主备/分布式）用 MySQL。"""
+    if normalize_deployment_mode(mode) == MODE_STANDALONE:
+        return "sqlite"
+    return "mysql"
 
 
 def uses_gateway_redis(mode: str) -> bool:

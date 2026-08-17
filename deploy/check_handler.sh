@@ -217,6 +217,20 @@ check_if_db_up() {
             error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
         fi
     fi
+
+    # 企业 Web 会话历史库
+    if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["GATEWAY_DB_USER"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["DB_USER"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}
+    fi
+    if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
+        DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]:-}
+    fi
 }
 
 check_if_obs_up() {

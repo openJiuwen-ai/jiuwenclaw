@@ -44,6 +44,14 @@ spec:
               value: "<<WS_ALLOWED_ORIGINS>>"
             - name: TZ
               value: "<<TIMEZONE>>"
+            - name: WEB_DB_HOST
+              value: "<<DB_HOST>>"
+            - name: WEB_DB_PORT
+              value: "<<DB_PORT>>"
+            - name: WEB_DB_USER
+              value: "<<WEB_DB_USER>>"
+            - name: WEB_DB_NAME
+              value: "<<WEB_DB_NAME>>"
 
 ---
 # 集群内部访问： 提供稳定 DNS 域名

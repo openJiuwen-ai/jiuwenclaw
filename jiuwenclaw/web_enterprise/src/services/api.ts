@@ -1,5 +1,5 @@
 /**
- * HTTP API 客户端：会话历史（Web Pod 本地 SQLite）。
+ * HTTP API 客户端：会话历史（企业 MySQL 库 web）。
  *
  * 与 webClient（WS 通道）并列；仅用于读取 Web Pod 落库的会话历史：
  * GET /api/sessions（列表）、GET /api/sessions/{id}（详情）。
