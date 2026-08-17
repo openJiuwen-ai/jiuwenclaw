@@ -15,6 +15,15 @@ OTEL_REQUIREMENTS = {
 }
 
 
+def test_offline_html_runtime_dependency_includes_python_markdown():
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
+    requirements = {
+        Requirement(raw).name for raw in pyproject["project"]["dependencies"]
+    }
+
+    assert "markdown" in requirements
+
+
 def test_opentelemetry_dependencies_exclude_protobuf4_only_proto_versions():
     pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
     requirements = {

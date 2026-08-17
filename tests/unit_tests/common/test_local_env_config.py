@@ -1,12 +1,18 @@
 import os
-import pytest
 from unittest.mock import MagicMock, patch
 from jiuwenswarm.common.local_env_config import (
+    BUSINESS_MIRROR_KEYS,
     get_local_config,
+    is_sensitive_env_name,
     set_local_config,
     decrypt,
     encrypt,
     ENV_CONFIG_DICT,
+    SPAWN_ENV_KEYS,
+    bind_task_env_overlay,
+    read_env,
+    reset_task_env_overlay,
+    set_os_environ,
 )
 
 
@@ -106,3 +112,40 @@ class TestLocalEnvConfig:
             result = encrypt("NON_SENSITIVE_KEY", "plain_text")
             assert result == "plain_text"
             mock_crypto.encrypt.assert_not_called()
+
+    def test_deepresearch_python_executable_is_not_a_runtime_config_source(self):
+        key = "DEEPRESEARCH_PYTHON_EXECUTABLE"
+        assert key not in BUSINESS_MIRROR_KEYS
+        assert key not in SPAWN_ENV_KEYS
+        assert is_sensitive_env_name(key) is False
+
+    def test_export_spawn_environ_keeps_process_path_without_tenant_credentials(self):
+        from jiuwenswarm.common.local_env_config import export_spawn_environ
+
+        with patch.dict(os.environ, {"PATH": "/process/bin"}, clear=True):
+            set_os_environ(
+                "LLM_API_KEY",
+                "tenant-secret",
+                service_id="svc",
+                agent_id="agent",
+            )
+            set_os_environ(
+                "API_KEY",
+                "global-tenant-secret",
+                service_id="svc",
+                agent_id="agent",
+            )
+            set_os_environ(
+                "PETAL_SEARCH_HEADERS",
+                '{"Authorization":"tenant-secret"}',
+                service_id="svc",
+                agent_id="agent",
+            )
+
+            exported = export_spawn_environ()
+
+        assert exported["PATH"] == "/process/bin"
+        assert "LLM_API_KEY" not in exported
+        assert "API_KEY" not in exported
+        assert "PETAL_SEARCH_HEADERS" not in exported
+        assert "tenant-secret" not in repr(exported)

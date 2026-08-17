@@ -45,6 +45,7 @@ from jiuwenswarm.server.utils.utils import is_team_params
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.extensions.registry import ExtensionRegistry
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.ask_user import normalize_ask_user_response
 from jiuwenswarm.common.chat_final import ensure_final_mode_inplace
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.extensions.hooks_context import MemoryHookContext
@@ -1364,15 +1365,20 @@ class JiuWenSwarm:
                 if stripped:
                     supplementary = stripped
             answers = params.get("answers", [])
-            if answers:
+            source = params.get("source", "")
+            status = params.get("status", "")
+            is_explicit_ask_user_response = (
+                source == "ask_user_interrupt" and "status" in params
+            )
+            if answers or is_explicit_ask_user_response:
                 request_id = params.get("request_id", "")
-                source = params.get("source", "")
                 raw_original_request = params.get("original_request") if source == "ask_user_interrupt" else ""
                 original_request = raw_original_request.strip() if isinstance(raw_original_request, str) else ""
                 interactive_input = self._build_interactive_input_from_answers(
                     request_id,
                     answers,
                     source,
+                    status=status,
                     original_request=original_request,
                 )
                 if interactive_input is not None:
@@ -1621,6 +1627,7 @@ class JiuWenSwarm:
             answers: list[dict],
             source: str = "",
             *,
+            status: str = "",
             original_request: str = "",
     ) -> Any:
         """从用户答案构建 InteractiveInput.
@@ -1629,6 +1636,7 @@ class JiuWenSwarm:
             request_id: 工具调用 ID
             answers: 用户答案列表，每个答案对应一个问题
             source: 中断来源，用于区分 PermissionRail 和 AskUserRail
+            status: AskUserRail 显式交互状态；缺失时由回答内容推导
 
         Returns:
             InteractiveInput 实例
@@ -1638,65 +1646,19 @@ class JiuWenSwarm:
         interactive_input = InteractiveInput()
 
         if source == "ask_user_interrupt":
-            answers_dict = {}
-            free_text_answer = ""
-            for answer in answers:
-                if isinstance(answer, dict):
-                    question_text = str(answer.get("question", "") or "").strip()
-                    selected_options = answer.get("selected_options", [])
-                    custom_input = str(answer.get("custom_input", "") or "").strip()
-                    if selected_options and isinstance(selected_options, list):
-                        # Normalize each option to a stripped string, drop empties.
-                        cleaned_options = [
-                            str(raw_option or "").strip()
-                            for raw_option in selected_options
-                            if str(raw_option or "").strip()
-                        ]
-                        if custom_input:
-                            # "Other" is only a UI placeholder. Preserve normal
-                            # multi-select choices and append the user's text.
-                            normal_options = [
-                                option for option in cleaned_options if option != "Other"
-                            ]
-                            if normal_options:
-                                answer_value: Any = [*normal_options, custom_input]
-                            else:
-                                answer_value = custom_input
-                        elif len(cleaned_options) == 1:
-                            # Bare "Other" without custom text is incomplete (#2330).
-                            sole = cleaned_options[0]
-                            answer_value = "" if sole == "Other" else sole
-                        elif cleaned_options:
-                            # Multi-select: preserve real choices; drop placeholder-only Other.
-                            normal_options = [
-                                option for option in cleaned_options if option != "Other"
-                            ]
-                            answer_value = normal_options if normal_options else ""
-                        else:
-                            answer_value = ""
-                    elif custom_input:
-                        answer_value = custom_input
-                    else:
-                        answer_value = ""
-                    if question_text and answer_value:
-                        answers_dict[question_text] = answer_value
-                    elif answer_value:
-                        free_text_answer = (
-                            answer_value
-                            if isinstance(answer_value, str)
-                            else ", ".join(answer_value)
-                        )
-            if not answers_dict and free_text_answer:
-                answers_dict["__free_text__"] = free_text_answer
-            payload: dict[str, Any] = {"answers": answers_dict}
-            if isinstance(original_request, str) and original_request.strip():
-                payload["original_request"] = original_request.strip()
+            response = normalize_ask_user_response(
+                status=status,
+                answers=answers,
+                original_request=original_request,
+            )
+            payload = response.to_dict()
             interactive_input.update(request_id, payload)
             logger.info(
                 "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s "
-                "answer_count=%s has_original_request=%s",
+                "status=%s answer_count=%s has_original_request=%s",
                 request_id,
-                len(answers_dict),
+                response.status,
+                len(response.answers),
                 "original_request" in payload,
             )
             return interactive_input

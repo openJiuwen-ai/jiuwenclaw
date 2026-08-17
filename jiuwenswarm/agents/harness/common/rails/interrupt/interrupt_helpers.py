@@ -421,10 +421,6 @@ def _is_ask_user_interrupt_value(value_obj: Any) -> bool:
         return True
     if isinstance(value_obj, dict) and "payload_schema" in value_obj and "questions" in value_obj:
         return True
-    tool_args = _normalize_tool_args(_read_value_field(value_obj, "tool_args", None))
-    if isinstance(tool_args, dict) and str(tool_args.get("query") or "").strip():
-        if not tool_args.get("questions"):
-            return True
     return False
 
 
@@ -699,6 +695,9 @@ def _build_multi_questions(questions_data: list) -> list:
             "options": options,
             "multi_select": q.get("multi_select", False),
         }
+        preview = _normalize_question_preview(q.get("preview"))
+        if preview is not None:
+            question_payload["preview"] = preview
         questions.append(question_payload)
     return questions
 
@@ -736,6 +735,29 @@ def _normalize_question_option(option: dict[str, Any]) -> dict[str, Any]:
     preview = option.get("preview")
     if isinstance(preview, str) and preview.strip():
         normalized["preview"] = preview
+    return normalized
+
+
+def _normalize_question_preview(preview: Any) -> dict[str, Any] | None:
+    if not isinstance(preview, dict):
+        return None
+    text = preview.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+
+    normalized: dict[str, Any] = {"text": text}
+    for field in ("title", "outline_ref"):
+        value = preview.get(field)
+        if isinstance(value, str):
+            normalized[field] = value
+    if preview.get("format") == "markdown":
+        normalized["format"] = "markdown"
+    editable = preview.get("editable")
+    if isinstance(editable, bool):
+        normalized["editable"] = editable
+    meta = preview.get("meta")
+    if isinstance(meta, dict):
+        normalized["meta"] = dict(meta)
     return normalized
 
 

@@ -65,6 +65,7 @@ class InvokeToolTool(Tool):
                 "目标工具不在当前 tools schema 中时，须通过本工具间接执行。"
             ),
             input_params=_model_schema(InvokeToolInput),
+            properties={"resilience": {"timeout_s": None}},
         )
         if scope_id:
             card.id = qualify_tool_id(card, scope_id)

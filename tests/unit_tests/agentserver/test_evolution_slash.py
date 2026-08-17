@@ -193,7 +193,7 @@ async def test_agent_plan_evolve_simplify_no_records_returns_answer(tmp_path, mo
 
 
 @pytest.mark.anyio
-async def test_agent_plan_evolve_rebuild_returns_removed_message(tmp_path):
+async def test_agent_plan_evolve_rebuild_returns_rebuild_request(tmp_path):
     skills_dir = _write_skill(tmp_path, "research-team", kind="swarm-skill")
 
     result = await handle_evolution_slash_command(
@@ -207,13 +207,33 @@ async def test_agent_plan_evolve_rebuild_returns_removed_message(tmp_path):
     )
 
     assert result is not None
+    assert result["result_type"] == "rebuild_request"
+    assert result["action"] == "run_rebuild_inline"
+    assert result["skill_name"] == "research-team"
+    assert result["user_intent"] == "optimize"
+
+
+@pytest.mark.anyio
+async def test_agent_plan_evolve_rebuild_requires_skill_name(tmp_path):
+    skills_dir = _write_skill(tmp_path, "regular-skill")
+
+    result = await handle_evolution_slash_command(
+        "/evolve_rebuild",
+        EvolutionSlashContext(
+            mode="agent.plan",
+            session_id="sess-agent-plan",
+            skills_dir=skills_dir,
+            evolution_enabled=True,
+        ),
+    )
+
+    assert result is not None
     assert result["result_type"] == "error"
-    assert "skills.evolution.rebuild" in result["output"]
     assert "/evolve_rebuild" in result["output"]
 
 
 @pytest.mark.anyio
-async def test_agent_plan_evolve_rebuild_no_longer_archives(tmp_path):
+async def test_agent_plan_evolve_rebuild_validate_does_not_archive(tmp_path):
     skills_dir = _write_skill(tmp_path, "regular-skill")
     skill_dir = tmp_path / "skills" / "regular-skill"
     skill_dir.joinpath("evolutions.json").write_text(
@@ -234,7 +254,10 @@ async def test_agent_plan_evolve_rebuild_no_longer_archives(tmp_path):
     )
 
     assert result is not None
-    assert result["result_type"] == "error"
+    assert result["result_type"] == "rebuild_request"
+    assert result["action"] == "run_rebuild_inline"
+    assert result["skill_name"] == "regular-skill"
+    assert result.get("user_intent") is None
     archive = skill_dir / "archive"
     assert not archive.exists() or not list(archive.glob("SKILL.v*.md"))
     current_log = json.loads(skill_dir.joinpath("evolutions.json").read_text(encoding="utf-8"))

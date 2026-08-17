@@ -1439,6 +1439,77 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 
 
 @pytest.mark.anyio
+async def test_process_team_message_stream_handles_evolve_rebuild(monkeypatch, tmp_path):
+    _write_team_skill(tmp_path, "demo-skill")
+    rebuild_calls: list[dict] = []
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def has_stream_task(session_id: str) -> bool:
+            return False
+
+        @staticmethod
+        async def get_swarm_enriched_team_spec(**kwargs):
+            return SimpleNamespace(
+                team_name="unit-team",
+                workspace=SimpleNamespace(root_path=str(tmp_path / "team-workspace")),
+            )
+
+    async def _fake_handler(query: str, context: object) -> dict[str, object]:
+        assert query == "/evolve_rebuild demo-skill tighten examples"
+        assert getattr(context, "mode") == "team"
+        return {
+            "result_type": "rebuild_request",
+            "action": "run_rebuild_inline",
+            "skill_name": "demo-skill",
+            "user_intent": "tighten examples",
+        }
+
+    async def _fake_rebuild(params: dict) -> dict:
+        rebuild_calls.append(dict(params))
+        return {
+            "success": True,
+            "name": "demo-skill",
+            "new_version": "2.0.0",
+            "cleared": True,
+        }
+
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(team_helpers, "handle_evolution_slash_command", _fake_handler)
+
+    request = SimpleNamespace(
+        session_id="sess-team-rebuild",
+        request_id="req-team-rebuild",
+        channel_id="web",
+        metadata=None,
+    )
+    inputs = {"query": "/evolve_rebuild demo-skill tighten examples"}
+
+    chunks = []
+    async for chunk in team_helpers.process_team_message_stream(
+        request,
+        inputs,
+        object(),
+        rebuild_skill=_fake_rebuild,
+    ):
+        chunks.append(chunk)
+
+    assert len(chunks) == 3
+    assert chunks[0].payload is not None
+    assert chunks[0].payload["event_type"] == "chat.final"
+    assert "2.0.0" in chunks[0].payload["content"]
+    assert chunks[0].payload.get("slash_command") == "evolve_rebuild"
+    assert chunks[2].is_complete is True
+    assert rebuild_calls == [
+        {
+            "name": "demo-skill",
+            "user_intent": "tighten examples",
+            "skills_dirs": [str(tmp_path / "team-workspace" / "skills")],
+        }
+    ]
+
+
+@pytest.mark.anyio
 async def test_process_team_message_stream_followup_owns_waiter_until_team_completed(monkeypatch):
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
         interact_calls: list[tuple[str, str]] = []

@@ -34,10 +34,6 @@ _COMMANDS = (
     "evolve_list",
 )
 _DEFAULT_REVIEW_AGENT_NAME = "evolution_reviewer"
-_EVOLVE_REBUILD_REMOVED_MESSAGE = (
-    "`/evolve_rebuild` 已移除。请使用控制面接口 `skills.evolution.rebuild` 采纳经验并生成新版本；"
-    "若技能 `selfEvolution=auto`，经验落盘后会自动生成版本。"
-)
 
 
 @dataclass(frozen=True)
@@ -344,8 +340,36 @@ async def _handle_evolve_rebuild(
     store: EvolutionStore,
     context: EvolutionSlashContext,
 ) -> dict[str, Any]:
-    _ = query, store, context
-    return _error(_EVOLVE_REBUILD_REMOVED_MESSAGE)
+    """Parse/validate `/evolve_rebuild`; adapter runs the shared merge pipeline."""
+    parts = query.split(maxsplit=2)
+    skill_name = parts[1].strip() if len(parts) > 1 else ""
+    user_intent = parts[2].strip() if len(parts) > 2 else None
+    if user_intent is not None:
+        user_intent = user_intent or None
+
+    if not skill_name:
+        return _error("请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`")
+
+    subject = _subject(store, skill_name)
+    validation_error = _validate_skill(
+        store,
+        skill_name,
+        require_skill_md=True,
+        context=context,
+        subject=subject,
+    )
+    if validation_error is not None:
+        return _error(validation_error)
+    writable_error = validate_evolution_log_writable(store, skill_name)
+    if writable_error is not None:
+        return _error(writable_error)
+
+    return {
+        "result_type": "rebuild_request",
+        "action": "run_rebuild_inline",
+        "skill_name": skill_name,
+        "user_intent": user_intent,
+    }
 
 
 async def _handle_evolve_rollback(

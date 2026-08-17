@@ -1,0 +1,535 @@
+"""Contract tests for the isolated report-style SDK bridge."""
+
+from __future__ import annotations
+
+import base64
+import asyncio
+import io
+import json
+import os
+import sys
+import types
+import zipfile
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.agents.harness.common.tools.deepresearch import sdk_bridge as bridge
+from jiuwenswarm.agents.harness.common.tools.deepresearch import runtime
+
+
+def _zip_bytes() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr("report_bundle/report.html", "ok")
+    return output.getvalue()
+
+
+def _private_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+
+
+def _request() -> dict:
+    return {
+        "schema_version": 1,
+        "final_result": {"response_content": "report"},
+        "llm_config": {"general": {"api_key": "secret", "model_name": "m"}},
+        "tls": {"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": True},
+    }
+
+
+def test_bridge_rejects_oversized_input_without_importing_sdk(monkeypatch):
+    imported = []
+    real_import = __import__
+
+    def guarded(name, *args, **kwargs):
+        if name.startswith("openjiuwen_deepsearch"):
+            imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", guarded)
+    payload = io.BytesIO(b"x" * (bridge.BRIDGE_INPUT_MAX_BYTES + 1))
+    with pytest.raises(bridge.BridgeError, match="bridge_input_too_large"):
+        bridge.read_request(payload)
+    assert imported == []
+
+
+def test_bridge_streaming_reader_handles_short_reads():
+    encoded = json.dumps(_request()).encode()
+
+    class ShortReader:
+        def __init__(self, payload):
+            self.payload = bytearray(payload)
+
+        def read(self, size):
+            take = min(size, 3, len(self.payload))
+            chunk = bytes(self.payload[:take])
+            del self.payload[:take]
+            return chunk
+
+    assert bridge.read_request(ShortReader(encoded)) == _request()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda request: request.update(extra=True),
+        lambda request: request.update(schema_version=2),
+        lambda request: request.update(tls={"LLM_SSL_VERIFY": False}),
+        lambda request: request.update(tls={"LLM_SSL_VERIFY": "false", "TOOL_SSL_VERIFY": True}),
+    ],
+)
+def test_request_schema_is_strict(mutation):
+    request = _request()
+    mutation(request)
+    with pytest.raises(bridge.BridgeError, match="bridge_request_invalid"):
+        bridge.read_request(io.BytesIO(json.dumps(request).encode()))
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0, "1", -1])
+def test_request_schema_version_requires_exact_integer(schema_version):
+    request = _request()
+    request["schema_version"] = schema_version
+    with pytest.raises(bridge.BridgeError, match="bridge_request_invalid"):
+        bridge.read_request(io.BytesIO(json.dumps(request).encode()))
+
+
+def test_bridge_writes_only_to_precreated_private_regular_file(tmp_path: Path):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    bridge.write_convert_content(output, base64.b64encode(_zip_bytes()).decode())
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert zipfile.is_zipfile(output)
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "hardlink", "mode", "nonempty"])
+def test_bridge_rejects_unsafe_output(tmp_path: Path, kind: str):
+    output = tmp_path / "styled.zip"
+    if kind == "symlink":
+        source = tmp_path / "source"
+        _private_file(source)
+        output.symlink_to(source)
+    elif kind == "hardlink":
+        source = tmp_path / "source"
+        _private_file(source)
+        os.link(source, output)
+    elif kind == "mode":
+        _private_file(output)
+        output.chmod(0o640)
+    elif kind == "nonempty":
+        _private_file(output)
+        output.write_bytes(b"occupied")
+    with pytest.raises(bridge.BridgeError, match="bridge_output_invalid"):
+        bridge.write_convert_content(output, base64.b64encode(_zip_bytes()).decode())
+
+
+@pytest.mark.parametrize("content", ["%%%", base64.b64encode(b"not zip").decode()])
+def test_bridge_rejects_bad_archive(tmp_path: Path, content: str):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    with pytest.raises(bridge.BridgeError, match="bridge_archive_invalid"):
+        bridge.write_convert_content(output, content)
+    assert output.stat().st_size == 0
+
+
+def test_bridge_rejects_output_path_substitution_before_write(tmp_path: Path, monkeypatch):
+    artifact = runtime._create_bridge_artifact()
+    output = artifact.path
+    original_open = bridge.os.open
+    replaced = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == output and not replaced:
+            replaced = True
+            output.unlink()
+            replacement = original_open(
+                output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+            os.close(replacement)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(bridge.os, "open", swapping_open)
+    try:
+        with pytest.raises(bridge.BridgeError, match="bridge_output_invalid"):
+            bridge.write_convert_content(output, base64.b64encode(_zip_bytes()).decode())
+        assert output.read_bytes() == b""
+    finally:
+        runtime._remove_bridge_artifact(artifact)
+
+
+def test_bridge_file_identity_rejects_reused_inode():
+    original = types.SimpleNamespace(st_dev=1, st_ino=2, st_ctime_ns=3)
+    replacement = types.SimpleNamespace(st_dev=1, st_ino=2, st_ctime_ns=4)
+
+    assert not bridge._same_unchanged_file(original, replacement)
+
+
+def test_parent_keeps_bridge_output_open_until_cleanup():
+    artifact = runtime._create_bridge_artifact()
+    try:
+        opened = os.fstat(artifact.descriptor)
+        assert (opened.st_dev, opened.st_ino) == artifact.file_identity
+    finally:
+        runtime._remove_bridge_artifact(artifact)
+
+    with pytest.raises(OSError):
+        os.fstat(artifact.descriptor)
+
+
+@pytest.mark.asyncio
+async def test_sdk_is_lazy_logs_only_to_stderr_and_restores_tls(tmp_path: Path, monkeypatch, capsys):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    observed = {}
+
+    @asynccontextmanager
+    async def context(config):
+        observed["config"] = config
+        observed["tls"] = (os.environ["LLM_SSL_VERIFY"], os.environ["TOOL_SSL_VERIFY"])
+        print("sdk-context-log")
+        yield {"llm": True}
+
+    async def stylize(final_result, llm):
+        print("sdk-style-log")
+        return types.SimpleNamespace(
+            convert_content=base64.b64encode(_zip_bytes()).decode(),
+            style_applied=True,
+            style_status="applied",
+        )
+
+    modules = {
+        "openjiuwen_deepsearch": types.ModuleType("openjiuwen_deepsearch"),
+        "openjiuwen_deepsearch.algorithm": types.ModuleType("openjiuwen_deepsearch.algorithm"),
+        "openjiuwen_deepsearch.algorithm.report_style": types.ModuleType("openjiuwen_deepsearch.algorithm.report_style"),
+        "openjiuwen_deepsearch.algorithm.report_style.service": types.ModuleType("openjiuwen_deepsearch.algorithm.report_style.service"),
+        "openjiuwen_deepsearch.framework": types.ModuleType("openjiuwen_deepsearch.framework"),
+        "openjiuwen_deepsearch.framework.openjiuwen": types.ModuleType("openjiuwen_deepsearch.framework.openjiuwen"),
+        "openjiuwen_deepsearch.framework.openjiuwen.llm": types.ModuleType("openjiuwen_deepsearch.framework.openjiuwen.llm"),
+        "openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime": types.ModuleType("openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime"),
+    }
+    modules["openjiuwen_deepsearch.algorithm.report_style.service"].stylize_report = stylize
+    modules["openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime"].report_style_llm_context = context
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setenv("LLM_SSL_VERIFY", "parent-llm")
+    monkeypatch.delenv("TOOL_SSL_VERIFY", raising=False)
+
+    result = await bridge.stylize_request(_request(), output)
+    captured = capsys.readouterr()
+    assert result["status"] == "completed"
+    assert captured.out == ""
+    assert "sdk-context-log" in captured.err and "sdk-style-log" in captured.err
+    assert observed["tls"] == ("false", "true")
+    assert observed["config"]["general"]["api_key"] == bytearray(b"secret")
+    assert os.environ["LLM_SSL_VERIFY"] == "parent-llm"
+    assert "TOOL_SSL_VERIFY" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_sdk_exception_is_safe_and_restores_tls(tmp_path: Path, monkeypatch):
+    output = tmp_path / "styled.zip"
+    _private_file(output)
+    service = types.ModuleType("openjiuwen_deepsearch.algorithm.report_style.service")
+    runtime = types.ModuleType("openjiuwen_deepsearch.framework.openjiuwen.llm.report_style_runtime")
+
+    @asynccontextmanager
+    async def context(_config):
+        raise RuntimeError("secret payload")
+        yield
+
+    service.stylize_report = lambda *_: None
+    runtime.report_style_llm_context = context
+    monkeypatch.setitem(sys.modules, service.__name__, service)
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    with pytest.raises(bridge.BridgeError, match="SDK report styling failed") as caught:
+        await bridge.stylize_request(_request(), output)
+    assert "secret" not in str(caught.value)
+
+
+def test_cli_stdout_is_exactly_one_versioned_result_line(tmp_path: Path, monkeypatch, capsys):
+    output = tmp_path / "styled.zip"
+
+    class Input:
+        buffer = io.BytesIO(json.dumps(_request()).encode())
+
+    expected = {
+            "schema_version": 1,
+            "status": "completed",
+            "output_path": str(output),
+            "style_applied": True,
+            "style_status": "applied",
+    }
+
+    async def stylize(_request_value, _output_value):
+        return expected
+
+    def run_without_replacing_process_loop(coroutine):
+        coroutine.close()
+        return expected
+
+    monkeypatch.setattr(bridge.sys, "stdin", Input())
+    monkeypatch.setattr(bridge, "stylize_request", stylize)
+    monkeypatch.setattr(bridge.asyncio, "run", run_without_replacing_process_loop)
+    assert bridge.main([
+        "stylize-report", "--config-stdin", "--output", str(output)
+    ]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    lines = captured.out.splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == expected
+
+
+class _Writer:
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, data):
+        self.data.extend(data)
+
+    async def drain(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        return None
+
+
+class _Reader:
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    async def read(self, _size=-1):
+        payload, self.payload = self.payload, b""
+        return payload
+
+
+class _Process:
+    def __init__(self, stdout=b"", stderr=b"", running=False):
+        self.stdin = _Writer()
+        self.stdout = _Reader(stdout)
+        self.stderr = _Reader(stderr)
+        self.returncode = None if running else 0
+        self.terminated = 0
+        self.killed = 0
+        self.waited = 0
+
+    async def wait(self):
+        self.waited += 1
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return self.returncode
+
+    def terminate(self):
+        self.terminated += 1
+
+    def kill(self):
+        self.killed += 1
+        self.returncode = -9
+
+
+class _BlockingReader:
+    async def read(self, _size=-1):
+        await asyncio.Event().wait()
+        return b""
+
+
+class _CancellationProcess(_Process):
+    def __init__(self):
+        super().__init__(running=True)
+        self.stdout = _BlockingReader()
+        self.release_wait = asyncio.Event()
+
+    async def wait(self):
+        self.waited += 1
+        await self.release_wait.wait()
+        self.returncode = -15 if self.terminated else -9
+        return self.returncode
+
+
+@pytest.mark.asyncio
+async def test_parent_client_tracks_validates_and_cleans_owned_archive(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("python")
+    output_holder = {}
+    manager = types.SimpleNamespace(track_process=lambda *_: None, untrack_process=lambda *_: None)
+
+    async def spawn(*args, **kwargs):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(_zip_bytes())
+        output_holder["path"] = output
+        frame = {
+            "schema_version": 1,
+            "status": "completed",
+            "output_path": str(output),
+            "style_applied": True,
+            "style_status": "applied",
+        }
+        output_holder["env"] = kwargs["env"]
+        return _Process((json.dumps(frame) + "\n").encode(), b"sdk logs")
+
+    monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
+    monkeypatch.setattr(runtime, "build_child_env", lambda _: {
+        "PATH": "/isolated",
+        "LLM_SSL_VERIFY": "ambient",
+        "TOOL_SSL_VERIFY": "ambient",
+    })
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    async with runtime.stylize_report_archive(
+        final_result={"response_content": "r"},
+        llm_config={"general": {"api_key": "secret"}},
+        tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+        manager=manager,
+        session_id="S1",
+    ) as archive:
+        assert archive == output_holder["path"]
+        assert archive.exists()
+    assert not output_holder["path"].exists()
+    assert not output_holder["path"].parent.exists()
+    assert "LLM_SSL_VERIFY" not in output_holder["env"]
+    assert "TOOL_SSL_VERIFY" not in output_holder["env"]
+
+
+@pytest.mark.asyncio
+async def test_parent_client_rejects_stdout_injection_and_cleans(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("python")
+    observed = {}
+    manager = types.SimpleNamespace(track_process=lambda *_: None, untrack_process=lambda *_: None)
+
+    async def spawn(*args, **_kwargs):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(_zip_bytes())
+        observed["output"] = output
+        return _Process(b"noise\n{}\n")
+
+    monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
+    monkeypatch.setattr(runtime, "build_child_env", lambda _: {"PATH": "/isolated"})
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    with pytest.raises(runtime.DeepResearchRuntimeError, match="sdk_bridge_protocol_invalid"):
+        async with runtime.stylize_report_archive(
+            final_result={}, llm_config={},
+            tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+            manager=manager, session_id="S1",
+        ):
+            pass
+    assert not observed["output"].exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema_version", [True, 1.0, "1", -1])
+async def test_parent_client_requires_exact_integer_schema_version(
+    tmp_path: Path,
+    monkeypatch,
+    schema_version,
+):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("python")
+    observed = {}
+    manager = types.SimpleNamespace(track_process=lambda *_: None, untrack_process=lambda *_: None)
+
+    async def spawn(*args, **_kwargs):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(_zip_bytes())
+        observed["output"] = output
+        frame = {
+            "schema_version": schema_version,
+            "status": "completed",
+            "output_path": str(output),
+            "style_applied": True,
+            "style_status": "applied",
+        }
+        return _Process((json.dumps(frame) + "\n").encode())
+
+    monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
+    monkeypatch.setattr(runtime, "build_child_env", lambda _: {"PATH": "/isolated"})
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    with pytest.raises(runtime.DeepResearchRuntimeError, match="sdk_bridge_failed"):
+        async with runtime.stylize_report_archive(
+            final_result={},
+            llm_config={},
+            tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+            manager=manager,
+            session_id="S1",
+        ):
+            pass
+    assert not observed["output"].exists()
+
+
+@pytest.mark.asyncio
+async def test_parent_client_track_failure_reaps_and_does_not_untrack(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("python")
+    process = _Process(running=True)
+    manager = types.SimpleNamespace(
+        track_process=lambda *_: (_ for _ in ()).throw(RuntimeError("closed")),
+        untrack_process=lambda *_: pytest.fail("must not untrack"),
+    )
+    monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
+    monkeypatch.setattr(runtime, "build_child_env", lambda _: {"PATH": "/isolated"})
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    with pytest.raises(RuntimeError, match="closed"):
+        async with runtime.stylize_report_archive(
+            final_result={}, llm_config={},
+            tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+            manager=manager, session_id="S1",
+        ):
+            pass
+    assert process.terminated == 1
+    assert process.waited >= 1
+
+
+@pytest.mark.asyncio
+async def test_parent_client_repeated_cancel_reaps_untracks_and_cleans(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "venv" / "bin" / "python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("python")
+    process = _CancellationProcess()
+    tracked = asyncio.Event()
+    untracked = []
+    manager = types.SimpleNamespace(
+        track_process=lambda *args: tracked.set(),
+        untrack_process=lambda *args: untracked.append(args),
+    )
+    monkeypatch.setattr(runtime, "resolve_python_executable", lambda: executable)
+    monkeypatch.setattr(runtime, "build_child_env", lambda _: {"PATH": "/isolated"})
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+
+    async def invoke():
+        async with runtime.stylize_report_archive(
+            final_result={}, llm_config={},
+            tls={"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False},
+            manager=manager, session_id="S1",
+        ):
+            pass
+
+    task = asyncio.create_task(invoke())
+    await tracked.wait()
+    task.cancel()
+    for _ in range(100):
+        if process.terminated:
+            break
+        await asyncio.sleep(0)
+    task.cancel()
+    process.release_wait.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.waited >= 1
+    assert untracked == [("S1", process)]

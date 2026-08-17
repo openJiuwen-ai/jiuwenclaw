@@ -830,6 +830,22 @@ def export_agent_environ(
     return out
 
 
+def export_spawn_environ() -> dict[str, str]:
+    """Return only process-shared keys that are safe for a child process.
+
+    Values come directly from the real process environment. Tenant Track-B
+    tips are intentionally excluded; callers that need those credentials must
+    use an explicit, narrower export boundary.
+    """
+    out: dict[str, str] = {}
+    for key in SPAWN_ENV_KEYS | PROCESS_UNIQUE_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is not None:
+            out[key] = value
+    _ensure_windows_platform_env(out)
+    return out
+
+
 def _ensure_windows_platform_env(out: dict[str, str]) -> None:
     """Pass through OS-level vars a Windows child process needs to function."""
     if os.name != "nt":
@@ -1121,6 +1137,9 @@ def read_default_headers_raw() -> str:
         raw = read_env(env_key, "")
         if raw.strip():
             return raw.strip()
+    api_key = read_env("API_KEY", "").strip()
+    if api_key and api_key != "huawei-maas-session":
+        return ""
     for env_key in _DEFAULT_HEADERS_FALLBACK_ALIASES:
         raw = read_env(env_key, "")
         text = raw.strip()

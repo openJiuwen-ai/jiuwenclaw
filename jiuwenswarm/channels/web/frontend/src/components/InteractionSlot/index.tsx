@@ -10,14 +10,19 @@
  */
 
 import { useChatStore } from '../../stores';
-import type { UserAnswer } from '../../types';
+import type { UserAnswer, UserAnswerStatus } from '../../types';
 import { AuthorizationPrompt } from './AuthorizationPrompt';
 import { InteractionPrompt } from './InteractionPrompt';
 import { classifyPrompt } from './promptRouting';
 import './InteractionSlot.css';
 
 interface InteractionSlotProps {
-  onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
+  onSubmit: (
+    requestId: string,
+    answers: UserAnswer[],
+    source?: string,
+    status?: UserAnswerStatus,
+  ) => void;
 }
 
 export function InteractionSlot({ onSubmit }: InteractionSlotProps) {

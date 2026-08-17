@@ -14,15 +14,18 @@ import hashlib
 import importlib
 import json
 import logging
+import operator
 import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
+import uuid
 from collections import Counter
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
@@ -102,15 +105,56 @@ from openjiuwen.harness.schema.interaction import (
     InputDispatchMode,
     SendInputRequest,
 )
+from openjiuwen.harness.schema.task import TodoStatus
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+
+from jiuwenswarm.agents.harness.common.tools.deepresearch import (
+    get_deepresearch_tools,
+    push_deepresearch_route,
+    reset_deepresearch_route,
+)
+from jiuwenswarm.agents.harness.common.tools.deepresearch.deepresearch_rewrite_fast_path import (
+    RewriteFastPathResult,
+    run_rewrite_fast_path,
+)
+from jiuwenswarm.agents.harness.common.tools.deepresearch.deepresearch_rewrite_html_followup import (
+    PENDING_HTML_EXPORT_STATE_KEY,
+    RewriteHtmlFollowupResult,
+    RewriteHtmlTarget,
+    decode_html_tool_result,
+    is_html_followup_request,
+    target_from_commit_result,
+    target_from_state,
+)
 
 GOAL_UPDATED_EVENT_TYPE = InteractionEventType.GOAL_UPDATED.value
 _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
-
-from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+_DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
+_DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION = 1
+_DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES = 32
+_DEEPRESEARCH_REWRITE_REQUEST_ID_MAX_LENGTH = 256
+_DEEPRESEARCH_REWRITE_REPLAY_MAX_BYTES = 256 * 1024
+_DEEPRESEARCH_REWRITE_REPLAY_PATH_MAX_BYTES = 4096
+_DEEPRESEARCH_REWRITE_REPLAY_TERMINAL_KINDS = frozenset(
+    {"success", "report_delivery_failed", "publish_uncertain"}
+)
+_DEEPRESEARCH_REWRITE_SUCCESS_MESSAGE = (
+    "本轮改写已完成。若报告已是最终版本，请回复‘生成 HTML’；"
+    "如需继续改写，可直接选择下一处内容。"
+)
+_DEEPRESEARCH_REWRITE_DELIVERY_FAILURE_MESSAGE = (
+    "改写版本已成功保留，但报告文件交付失败。"
+)
+_DEEPRESEARCH_REWRITE_PUBLISH_UNCERTAIN_MESSAGE = (
+    "改写版本状态不确定，请刷新会话后重试。"
+)
+_DEEPRESEARCH_CHECKPOINT_UNCERTAIN = "DEEPRESEARCH_CHECKPOINT_UNCERTAIN"
+_DEEPRESEARCH_CHECKPOINT_UNCERTAIN_MESSAGE = (
+    "会话检查点状态不确定，请重试以重新加载会话。"
+)
 
 from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
     init_a2x_client,
@@ -421,15 +465,21 @@ _REASONING_TRACE_LOG_BATCH = 5
 _LLM_IO_TRACE_PATCH_APPLIED = False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
+class _DeepResearchRouteContextToken:
+    token: Token[dict[str, object] | None] | None
+
+
+@dataclass(slots=True)
 class _RuntimeCronContextTokens:
-    channel: Token[str]
-    session: Token[str | None]
-    metadata: Token[dict[str, Any] | None]
-    mode: Token[str | None]
-    bound: Token[bool]
-    shell: Token[str | None]
-    send_file: Token | None
+    channel: Token[str] | None
+    session: Token[str | None] | None
+    metadata: Token[dict[str, Any] | None] | None
+    mode: Token[str | None] | None
+    bound: Token[bool] | None
+    shell: Token[str | None] | None
+    deepresearch: _DeepResearchRouteContextToken | None
+    send_file: Token | None = None
 
 
 def get_runtime_tool_session_id() -> str | None:
@@ -999,7 +1049,7 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
     "invoke_tool",
     "web_search",
     "fetch_webpage",
-    "ask_user_question",
+    "ask_user",
     "list_files",
     "read_file",
     "write_file",
@@ -1016,6 +1066,9 @@ _DEFAULT_PROGRESSIVE_EAGER_TOOLS = [
 ]
 
 _PROGRESSIVE_META_TOOL_NAMES = frozenset({"tools_search", "invoke_tool"})
+_LEGACY_PROGRESSIVE_EAGER_TOOL_ALIASES = {
+    "ask_user_question": "ask_user",
+}
 
 
 def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[str]:
@@ -1034,6 +1087,22 @@ def _ensure_progressive_meta_tools(eager_tools: list[str]) -> list[str]:
     if "invoke_tool" not in eager_tools:
         eager_tools.insert(1, "invoke_tool")
     return eager_tools
+
+
+def _normalize_progressive_eager_tools(
+    value: Any,
+    default: list[str] | None = None,
+) -> list[str]:
+    """Normalize eager tools and migrate legacy registered names."""
+    eager_tools: list[str] = []
+    for tool_name in _normalize_tool_names(value, default):
+        normalized_name = _LEGACY_PROGRESSIVE_EAGER_TOOL_ALIASES.get(
+            tool_name,
+            tool_name,
+        )
+        if normalized_name not in eager_tools:
+            eager_tools.append(normalized_name)
+    return _ensure_progressive_meta_tools(eager_tools)
 
 
 def is_subagent_tool_lazy_load_enabled(react_config: dict[str, Any] | None) -> bool:
@@ -1058,6 +1127,7 @@ def build_progressive_tool_rail_from_config(
     agent_id: str | None = None,
     agent_card_id: str | None = None,
     subagent_kind: str | None = None,
+    deepresearch_context_provider: Callable[[], dict[str, str]] | None = None,
 ) -> ProgressiveToolRail | None:
     """Build ProgressiveToolRail from react.tool_lazy_load config.
 
@@ -1085,27 +1155,21 @@ def build_progressive_tool_rail_from_config(
         if not sub_cfg.get("enabled", False):
             return None
 
-        main_eager = _ensure_progressive_meta_tools(
-            _normalize_tool_names(
-                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
-                _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
-            )
+        main_eager = _normalize_progressive_eager_tools(
+            lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
         if sub_cfg.get("inherit_parent_eager_tools", False):
             eager_tools = list(main_eager)
         else:
-            eager_tools = _ensure_progressive_meta_tools(
-                _normalize_tool_names(
-                    sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
-                    _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
-                )
-            )
-    else:
-        eager_tools = _ensure_progressive_meta_tools(
-            _normalize_tool_names(
-                lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            eager_tools = _normalize_progressive_eager_tools(
+                sub_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
                 _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
             )
+    else:
+        eager_tools = _normalize_progressive_eager_tools(
+            lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
+            _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
 
     normalized_language = resolve_language(language)
@@ -1127,6 +1191,7 @@ def build_progressive_tool_rail_from_config(
         agent_id=agent_id,
         agent_card_id=agent_card_id,
         enable_for_models=enable_for_models,
+        deepresearch_context_provider=deepresearch_context_provider,
     )
 
 
@@ -1915,6 +1980,10 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_config: dict[str, Any] | None = None
         self._session_instance_mode: str = "agent"
         self._session_instance_sub_mode: str | None = None
+        # Fail closed after a rewrite checkpoint rollback cannot be proven
+        # durable.  The parent evicts this child immediately after the request;
+        # until then, every direct message entry point refuses the stale state.
+        self._deepresearch_rewrite_tx_uncertain: bool = False
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
         self._paid_search_tool: Any | None = None
@@ -2070,6 +2139,12 @@ class JiuWenSwarmDeepAdapter:
     def _new_session_scoped_adapter(self, session_id: str) -> "JiuWenSwarmDeepAdapter":
         """Create a child adapter that owns one DeepAgent for a single session."""
         adapter = type(self)()
+        # Keep subclass constructors polymorphic while preserving the trusted
+        # tenant identity already established on the parent adapter.
+        for attribute in ("_workspace_dir", "_agent_id", "_service_id"):
+            value = getattr(self, attribute, None)
+            if value is not None:
+                setattr(adapter, attribute, value)
         adapter.mark_as_session_scoped(session_id)
         # Session adapters must inherit the parent's tenant env namespace. A fresh
         # adapter defaults to default/default and would read placeholder .env
@@ -2200,8 +2275,15 @@ class JiuWenSwarmDeepAdapter:
         for sid in list(self._session_adapters):
             if evicted >= self.SESSION_ADAPTER_EVICT_BATCH_SIZE:
                 break
+            adapter = self._session_adapters.get(sid)
+            checkpoint_uncertain = bool(
+                getattr(adapter, "_deepresearch_rewrite_tx_uncertain", False)
+            )
             last_used = self._session_adapter_last_used.get(sid, 0.0)
-            if now - last_used < self.SESSION_ADAPTER_IDLE_TTL_SEC:
+            if (
+                not checkpoint_uncertain
+                and now - last_used < self.SESSION_ADAPTER_IDLE_TTL_SEC
+            ):
                 continue
             lock = self._session_adapter_locks.get(sid)
             if lock is not None and (
@@ -6297,12 +6379,34 @@ class JiuWenSwarmDeepAdapter:
             language=self._resolve_runtime_language(),
             agent_id=self._tool_owner_id(),
             agent_card_id=self._tool_owner_id(),
+            deepresearch_context_provider=self._get_deepresearch_tool_context,
         )
         if rail is not None:
             logger.info(
                 "[JiuWenSwarmDeepAdapter] ProgressiveToolRail enabled (fixed schema mode)"
             )
         return rail
+
+    def _get_deepresearch_tool_context(self) -> dict[str, str]:
+        """Return the adapter-owned route that survives runner task boundaries."""
+        context = self._runtime_cron_tool_context
+        metadata = context.metadata if isinstance(context.metadata, dict) else {}
+        scope = RuntimeScopeKey.from_adapter(self, session_id=context.session_id)
+        return {
+            "request_id": str(metadata.get("request_id") or ""),
+            "channel_id": str(context.channel_id or ""),
+            "session_id": scope.session_id,
+            "service_id": scope.service_id,
+            "agent_id": scope.agent_id,
+            "output_dir": self._deepresearch_artifact_output_dir(),
+        }
+
+    def _deepresearch_artifact_output_dir(self) -> str:
+        """Return the tenant-owned root used for immutable report artifacts."""
+        workspace = Path(
+            getattr(self, "_workspace_dir", None) or get_agent_workspace_dir()
+        ).expanduser().resolve()
+        return str(workspace / "projects")
 
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
@@ -6686,12 +6790,14 @@ class JiuWenSwarmDeepAdapter:
 
         self._update_permission_rail(config_base)
 
-        old_progressive_tool_rail = self._progressive_tool_rail
-        progressive_tool_rail = self._build_progressive_tool_rail(config)
-        if progressive_tool_rail is not None:
-            self._progressive_tool_rail = progressive_tool_rail
-        elif old_progressive_tool_rail is not None:
-            rails_to_unregister.append(old_progressive_tool_rail)
+        progressive_tool_rail = None
+        if "tool_lazy_load" in config:
+            old_progressive_tool_rail = self._progressive_tool_rail
+            progressive_tool_rail = self._build_progressive_tool_rail(config)
+            if progressive_tool_rail is not None:
+                self._progressive_tool_rail = progressive_tool_rail
+            elif old_progressive_tool_rail is not None:
+                rails_to_unregister.append(old_progressive_tool_rail)
 
         rails_list = []
         if self._skill_rail is not None:
@@ -6800,6 +6906,14 @@ class JiuWenSwarmDeepAdapter:
                 tool.card.name,
             )
         return register_tool(tool, owner_id)
+
+    def _register_deepresearch_tool_cards(self, tool_cards: list[Any]) -> None:
+        """Register the formal DeepResearch surface as process-shared tools."""
+        registered_cards = [
+            self._register_shared_tool(tool).card
+            for tool in get_deepresearch_tools()
+        ]
+        tool_cards.extend(registered_cards)
 
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
@@ -6997,6 +7111,8 @@ class JiuWenSwarmDeepAdapter:
                 logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
+
+        self._register_deepresearch_tool_cards(tool_cards)
 
         return tool_cards
 
@@ -7715,8 +7831,8 @@ class JiuWenSwarmDeepAdapter:
         finally:
             self._reset_request_env_bindings(ns_token, overlay_token)
 
-    @staticmethod
     def _bind_runtime_cron_context(
+        self,
         *,
         channel_id: str | None,
         session_id: str | None,
@@ -7772,6 +7888,13 @@ class JiuWenSwarmDeepAdapter:
             if isinstance(session_value, str) and session_value.strip():
                 normalized_metadata[key] = session_value.strip()
 
+        channel_token = _CRON_TOOL_CHANNEL_ID.set(normalized_channel)
+        session_token = _CRON_TOOL_SESSION_ID.set(session_id)
+        metadata_token = _CRON_TOOL_METADATA.set(normalized_metadata)
+        mode_token = _CRON_TOOL_MODE.set(normalized_mode)
+        bound_token = _CRON_TOOL_BOUND.set(True)
+        shell_token = set_shell_session_id(session_id)
+
         # 绑定 send_file 专用路由 ContextVar（与 skill_turbo / test 仓对齐）。
         # 默认值为 None，不会像 _CRON_TOOL_CHANNEL_ID 那样在 reset 后回落成 web。
         send_file_token: Token | None = None
@@ -7796,42 +7919,132 @@ class JiuWenSwarmDeepAdapter:
                 exc,
             )
 
+        scope = RuntimeScopeKey.from_adapter(self, session_id=session_id)
+        try:
+            deepresearch_token = push_deepresearch_route(
+                request_id=request_id or "",
+                channel_id=normalized_channel,
+                session_id=scope.session_id,
+                service_id=scope.service_id,
+                agent_id=scope.agent_id,
+                output_dir=self._deepresearch_artifact_output_dir(),
+            )
+        except BaseException:
+            self._reset_runtime_cron_context(
+                _RuntimeCronContextTokens(
+                    channel=channel_token,
+                    session=session_token,
+                    metadata=metadata_token,
+                    mode=mode_token,
+                    bound=bound_token,
+                    shell=shell_token,
+                    deepresearch=None,
+                    send_file=send_file_token,
+                ),
+                suppress_errors=True,
+            )
+            raise
         return _RuntimeCronContextTokens(
-            channel=_CRON_TOOL_CHANNEL_ID.set(normalized_channel),
-            session=_CRON_TOOL_SESSION_ID.set(session_id),
-            metadata=_CRON_TOOL_METADATA.set(normalized_metadata),
-            mode=_CRON_TOOL_MODE.set(normalized_mode),
-            bound=_CRON_TOOL_BOUND.set(True),
-            shell=set_shell_session_id(session_id),
+            channel=channel_token,
+            session=session_token,
+            metadata=metadata_token,
+            mode=mode_token,
+            bound=bound_token,
+            shell=shell_token,
+            deepresearch=_DeepResearchRouteContextToken(deepresearch_token),
             send_file=send_file_token,
         )
 
     @staticmethod
+    def _reset_deepresearch_route_context(tokens: _RuntimeCronContextTokens) -> None:
+        """Reset one DeepResearch route token at most once."""
+        route_token = tokens.deepresearch
+        if route_token is None or route_token.token is None:
+            return
+        token = route_token.token
+        reset_deepresearch_route(token)
+        route_token.token = None
+
+    @staticmethod
+    def _run_cleanup_steps(
+        steps: list[tuple[str, Callable[[], None]]],
+    ) -> BaseException | None:
+        """Run every cleanup step, returning the first failure without secrets."""
+        first_error: BaseException | None = None
+        for label, cleanup in steps:
+            try:
+                cleanup()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] cleanup failed: step=%s error_type=%s",
+                    label,
+                    type(exc).__name__,
+                )
+        return first_error
+
+    @classmethod
     def _reset_runtime_cron_context(
+        cls,
         tokens: _RuntimeCronContextTokens,
+        *,
+        suppress_errors: bool = False,
     ) -> None:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             reset_shell_session_id,
         )
 
-        if tokens.send_file is not None:
-            try:
-                from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
-                    reset_send_file_request_context,
-                )
+        first_error: BaseException | None = None
 
-                reset_send_file_request_context(tokens.send_file)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] reset send_file request context failed: %s",
-                    exc,
-                )
-        reset_shell_session_id(tokens.shell)
-        _CRON_TOOL_BOUND.reset(tokens.bound)
-        _CRON_TOOL_MODE.reset(tokens.mode)
-        _CRON_TOOL_METADATA.reset(tokens.metadata)
-        _CRON_TOOL_SESSION_ID.reset(tokens.session)
-        _CRON_TOOL_CHANNEL_ID.reset(tokens.channel)
+        def _reset(name: str, reset: Callable[[Any], None]) -> None:
+            nonlocal first_error
+            token = getattr(tokens, name)
+            if token is None:
+                return
+            try:
+                reset(token)
+            except BaseException as exc:  # cleanup must continue through cancellation
+                if first_error is None:
+                    first_error = exc
+            else:
+                setattr(tokens, name, None)
+
+        route_token = tokens.deepresearch
+        if route_token is not None and route_token.token is not None:
+            token = route_token.token
+            try:
+                reset_deepresearch_route(token)
+            except BaseException as exc:
+                first_error = exc
+            else:
+                route_token.token = None
+        if tokens.send_file is not None:
+            from jiuwenswarm.agents.harness.common.tools.send_file_to_user import (
+                reset_send_file_request_context,
+            )
+
+            _reset("send_file", reset_send_file_request_context)
+        _reset("shell", reset_shell_session_id)
+        _reset("bound", _CRON_TOOL_BOUND.reset)
+        _reset("mode", _CRON_TOOL_MODE.reset)
+        _reset("metadata", _CRON_TOOL_METADATA.reset)
+        _reset("session", _CRON_TOOL_SESSION_ID.reset)
+        _reset("channel", _CRON_TOOL_CHANNEL_ID.reset)
+        if first_error is not None and not suppress_errors:
+            raise first_error
+
+    def _reset_stream_runtime_context(
+        self,
+        tokens: _RuntimeCronContextTokens,
+        *,
+        stream_consumer_cancelled: bool,
+    ) -> None:
+        """Always release DeepResearch routing without changing legacy cancel cleanup."""
+        if stream_consumer_cancelled:
+            self._reset_deepresearch_route_context(tokens)
+            return
+        self._reset_runtime_cron_context(tokens)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """装配 agent 模式 rails。
@@ -10243,9 +10456,19 @@ class JiuWenSwarmDeepAdapter:
 
         skill_path = params.get("skill_path") or params.get("path")
         resolved_skill_md: str | None = None
+        skills_dirs_param = params.get("skills_dirs")
+        if isinstance(skills_dirs_param, (list, tuple)):
+            store_dirs: list[str] | None = [
+                str(item).strip() for item in skills_dirs_param if str(item).strip()
+            ] or None
+        elif skills_dirs_param is not None and str(skills_dirs_param).strip():
+            store_dirs = [str(skills_dirs_param).strip()]
+        else:
+            store_dirs = None
+        resolve_dirs = store_dirs if store_dirs is not None else self._resolve_skill_dirs()
         if skill_path:
             allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                self._resolve_skill_dirs(),
+                resolve_dirs,
                 str(skill_path),
             )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
@@ -10266,7 +10489,11 @@ class JiuWenSwarmDeepAdapter:
         try:
             if self._instance is None:
                 await self.ensure_instance()
-            store = self._get_disk_evolution_store()
+            store = (
+                evolution_version_ctl.get_disk_evolution_store(store_dirs)
+                if store_dirs is not None
+                else self._get_disk_evolution_store()
+            )
             prepared = await evolution_version_ctl.prepare_rebuild_followup(
                 store,
                 name,
@@ -10496,6 +10723,11 @@ class JiuWenSwarmDeepAdapter:
             ),
         )
         if slash_result is not None:
+            if str(slash_result.get("action") or "").strip() == "run_rebuild_inline":
+                slash_result = await self._execute_slash_rebuild_request(
+                    slash_result,
+                    skills_dirs=slash_dirs or None,
+                )
             return evolution_slash_result(
                 evolution_slash_command_name(stripped),
                 slash_result,
@@ -10503,6 +10735,46 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return None
+
+    async def _execute_slash_rebuild_request(
+        self,
+        slash_result: dict[str, Any],
+        *,
+        skills_dirs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Run shared rebuild pipeline for `/evolve_rebuild` (not a followup turn)."""
+        skill_name = str(slash_result.get("skill_name") or "").strip()
+        user_intent = slash_result.get("user_intent")
+        if user_intent is not None:
+            user_intent = str(user_intent).strip() or None
+        params: dict[str, Any] = {"name": skill_name}
+        if user_intent is not None:
+            params["user_intent"] = user_intent
+        if skills_dirs:
+            params["skills_dirs"] = list(skills_dirs)
+        try:
+            merge = await self.generate_evolution_merge_version(params)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] /evolve_rebuild failed: skill=%s error=%s",
+                skill_name,
+                exc,
+            )
+            return {
+                "result_type": "error",
+                "output": str(exc) or f"Skill '{skill_name}' 重建失败。",
+            }
+        new_version = merge.get("new_version")
+        version_text = f"`{new_version}`" if new_version else "新版本"
+        return {
+            "result_type": "answer",
+            "output": (
+                f"Skill '{skill_name}' 已采纳演进经验并生成版本 {version_text}。"
+            ),
+            "new_version": new_version,
+            "name": skill_name,
+            "cleared": merge.get("cleared"),
+        }
 
     # Goal capability adapter -------------------------------------------------
 
@@ -10939,6 +11211,945 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc)
             return None
 
+    def _active_deepresearch_session(self, session_id: str) -> Any | None:
+        """Return the already-bound product session only for an exact id match."""
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        instance = getattr(self, "_instance", None)
+        session = getattr(instance, "_interaction_session", None)
+        get_session_id = getattr(session, "get_session_id", None)
+        if session is None or not callable(get_session_id):
+            return None
+        try:
+            active_session_id = get_session_id()
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(active_session_id, str) or active_session_id != session_id:
+            return None
+        return session
+
+    async def _load_deepresearch_rewrite_html_target(
+        self,
+        session_id: str,
+    ) -> RewriteHtmlTarget | None:
+        """Restore the trusted HTML target from the active product session."""
+        session = self._active_deepresearch_session(session_id)
+        if session is None:
+            return None
+        try:
+            return target_from_state(
+                session.get_state(PENDING_HTML_EXPORT_STATE_KEY)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[DeepResearchRewriteHtmlFollowup] restore target failed "
+                "session_id=%s error_type=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            return None
+
+    async def _try_deepresearch_rewrite_html_followup(
+        self,
+        query: object,
+        session_id: str,
+    ) -> RewriteHtmlFollowupResult | None:
+        """Handle an explicit HTML follow-up without routing through the model."""
+        if not is_html_followup_request(query):
+            return None
+
+        target = await self._load_deepresearch_rewrite_html_target(session_id)
+        if target is None:
+            return RewriteHtmlFollowupResult(
+                status="error",
+                error_code="TARGET_UNAVAILABLE",
+                message=(
+                    "未找到可生成 HTML 的已完成改写版本。"
+                    "建议先继续改写并生成新的 Markdown 版本，再生成 HTML。"
+                ),
+            )
+
+        from jiuwenswarm.agents.harness.common.tools.deepresearch import rewrite_tools
+
+        try:
+            raw_result = await rewrite_tools.deepresearch_generate_rewrite_html._func(  # pylint: disable=protected-access
+                report_path=target.report_path,
+                revision_id=target.revision_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[DeepResearchRewriteHtmlFollowup] HTML tool failed "
+                "session_id=%s error_type=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            raw_result = None
+        return decode_html_tool_result(raw_result)
+
+    async def _run_deepresearch_rewrite_html_transaction(
+        self,
+        query: object,
+        *,
+        session_id: str,
+    ) -> RewriteHtmlFollowupResult | None:
+        """Linearize trusted-target loading and HTML generation with Core work."""
+        if self._deepresearch_rewrite_tx_uncertain:
+            return None
+        instance = getattr(self, "_instance", None)
+        send_lock = getattr(instance, "_interaction_send_lock", None)
+        control_lock = getattr(instance, "_interaction_control_lock", None)
+        keep_open = getattr(instance, "_should_keep_interaction_open_locked", None)
+        if send_lock is None or control_lock is None or not callable(keep_open):
+            return None
+        async with send_lock:
+            async with control_lock:
+                if keep_open():
+                    return None
+                return await self._try_deepresearch_rewrite_html_followup(
+                    query,
+                    session_id,
+                )
+
+    async def _try_deepresearch_rewrite_fast_path(
+        self,
+        query: object,
+    ) -> RewriteFastPathResult | None:
+        from jiuwenswarm.agents.harness.common.tools.deepresearch import rewrite_tools
+
+        return await run_rewrite_fast_path(
+            query,
+            model_invoke=self._model.invoke,
+            prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
+            commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
+        )
+
+    @staticmethod
+    def _valid_deepresearch_rewrite_request_id(request_id: object) -> bool:
+        return (
+            isinstance(request_id, str)
+            and 0 < len(request_id) <= _DEEPRESEARCH_REWRITE_REQUEST_ID_MAX_LENGTH
+        )
+
+    def _decode_deepresearch_rewrite_replays(
+        self,
+        value: object,
+    ) -> list[tuple[str, str, RewriteFastPathResult, dict[str, object]]]:
+        try:
+            encoded_state = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (RecursionError, TypeError, ValueError):
+            return []
+        invalid_state = (
+            len(encoded_state) > _DEEPRESEARCH_REWRITE_REPLAY_MAX_BYTES
+            or not isinstance(value, dict)
+            or set(value) != {"schema_version", "entries"}
+            or value.get("schema_version")
+            != _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION
+        )
+        if invalid_state:
+            return []
+        raw_entries = value.get("entries")
+        if (
+            not isinstance(raw_entries, list)
+            or len(raw_entries) > _DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES
+        ):
+            return []
+        decoded = []
+        seen_request_ids = set()
+        for entry in raw_entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "request_id",
+                "query_sha256",
+                "terminal_kind",
+                "action",
+                "target",
+            }:
+                return []
+            request_id = entry.get("request_id")
+            query_sha256 = entry.get("query_sha256")
+            terminal_kind = entry.get("terminal_kind")
+            action = entry.get("action")
+            raw_target = entry.get("target")
+            target = target_from_state(raw_target)
+            invalid_entry = (
+                not self._valid_deepresearch_rewrite_request_id(request_id)
+                or not isinstance(query_sha256, str)
+                or len(query_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in query_sha256)
+                or request_id in seen_request_ids
+                or terminal_kind not in _DEEPRESEARCH_REWRITE_REPLAY_TERMINAL_KINDS
+                or (
+                    action not in {"polish", "expand", "shorten"}
+                    and not (terminal_kind == "publish_uncertain" and action is None)
+                )
+                or target is None
+                or len(target.report_path.encode("utf-8"))
+                > _DEEPRESEARCH_REWRITE_REPLAY_PATH_MAX_BYTES
+            )
+            if invalid_entry:
+                return []
+            commit_result = {
+                "status": "completed",
+                "report_delivered": terminal_kind == "success",
+                "report_path": target.report_path,
+                "revision_id": target.revision_id,
+            }
+            delivery_failed = terminal_kind == "report_delivery_failed"
+            publish_uncertain = terminal_kind == "publish_uncertain"
+            decoded.append(
+                (
+                    request_id,
+                    query_sha256,
+                    RewriteFastPathResult(
+                        recognized=True,
+                        status="error" if publish_uncertain else "completed",
+                        action=action,
+                        error_code=(
+                            "PUBLISH_STATE_UNCERTAIN"
+                            if publish_uncertain
+                            else (
+                                "REPORT_DELIVERY_FAILED" if delivery_failed else None
+                            )
+                        ),
+                        message=(
+                            _DEEPRESEARCH_REWRITE_PUBLISH_UNCERTAIN_MESSAGE
+                            if publish_uncertain
+                            else (
+                                _DEEPRESEARCH_REWRITE_DELIVERY_FAILURE_MESSAGE
+                                if delivery_failed
+                                else _DEEPRESEARCH_REWRITE_SUCCESS_MESSAGE
+                            )
+                        ),
+                        usage_metadata=None,
+                        prepare_ms=0.0,
+                        model_ms=0.0,
+                        commit_ms=0.0,
+                        total_ms=0.0,
+                        model_calls=0,
+                        model_output_adjustments=(),
+                        model_output_error_reason=None,
+                        commit_result=commit_result,
+                    ),
+                    target.to_state(),
+                )
+            )
+            seen_request_ids.add(request_id)
+        return decoded
+
+    def _encode_deepresearch_rewrite_replay_entry(
+        self,
+        request_id: str,
+        query_sha256: str,
+        result: RewriteFastPathResult,
+        target: RewriteHtmlTarget,
+    ) -> dict[str, object]:
+        return {
+            "request_id": request_id,
+            "query_sha256": query_sha256,
+            "terminal_kind": self._deepresearch_rewrite_terminal_kind(result),
+            "action": result.action,
+            "target": target.to_state(),
+        }
+
+    @staticmethod
+    def _deepresearch_rewrite_replay_conflict() -> RewriteFastPathResult:
+        return RewriteFastPathResult(
+            recognized=True,
+            status="error",
+            action=None,
+            error_code="REPLAY_CONFLICT",
+            message="无法安全重放改写请求，请重新提交。",
+            usage_metadata=None,
+            prepare_ms=0.0,
+            model_ms=0.0,
+            commit_ms=0.0,
+            total_ms=0.0,
+            model_calls=0,
+            commit_result=None,
+        )
+
+    @staticmethod
+    def _deepresearch_rewrite_publish_uncertain(
+        target: RewriteHtmlTarget | None = None,
+    ) -> RewriteFastPathResult:
+        return RewriteFastPathResult(
+            recognized=True,
+            status="error",
+            action=None,
+            error_code="PUBLISH_STATE_UNCERTAIN",
+            message=_DEEPRESEARCH_REWRITE_PUBLISH_UNCERTAIN_MESSAGE,
+            usage_metadata=None,
+            prepare_ms=0.0,
+            model_ms=0.0,
+            commit_ms=0.0,
+            total_ms=0.0,
+            model_calls=0,
+            commit_result=(
+                {
+                    "status": "completed",
+                    "report_delivered": False,
+                    "report_path": target.report_path,
+                    "revision_id": target.revision_id,
+                }
+                if target is not None
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _deepresearch_rewrite_terminal_kind(
+        result: RewriteFastPathResult,
+    ) -> str | None:
+        commit_result = result.commit_result
+        target = (
+            target_from_commit_result(commit_result)
+            if isinstance(commit_result, dict)
+            else None
+        )
+        publish_uncertain = (
+            result.status == "error"
+            and result.action is None
+            and result.error_code == "PUBLISH_STATE_UNCERTAIN"
+            and result.message == _DEEPRESEARCH_REWRITE_PUBLISH_UNCERTAIN_MESSAGE
+            and isinstance(commit_result, dict)
+            and commit_result.get("status") == "completed"
+            and commit_result.get("report_delivered") is False
+            and target is not None
+        )
+        if publish_uncertain:
+            return "publish_uncertain"
+        invalid_completed_result = (
+            result.status != "completed"
+            or not isinstance(commit_result, dict)
+            or commit_result.get("status") != "completed"
+            or not isinstance(commit_result.get("report_delivered"), bool)
+            or target is None
+        )
+        if invalid_completed_result:
+            return None
+        if commit_result["report_delivered"] is False:
+            return "report_delivery_failed"
+        if result.error_code is None:
+            return "success"
+        return None
+
+    def _load_deepresearch_rewrite_replay(
+        self,
+        session_id: str,
+        request_id: str,
+        query_sha256: str,
+    ) -> tuple[bool, RewriteFastPathResult | None]:
+        session = self._active_deepresearch_session(session_id)
+        if session is None:
+            return False, None
+        try:
+            state = session.get_state(_DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY)
+            current_target = target_from_state(
+                session.get_state(PENDING_HTML_EXPORT_STATE_KEY)
+            )
+        except Exception:  # noqa: BLE001
+            return True, None
+        decoded_replays = self._decode_deepresearch_rewrite_replays(state)
+        if not decoded_replays and state is not None:
+            is_empty_state = (
+                isinstance(state, dict)
+                and set(state) == {"schema_version", "entries"}
+                and state.get("schema_version")
+                == _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION
+                and state.get("entries") == []
+            )
+            if not is_empty_state:
+                return True, None
+        for saved_request_id, saved_query_sha256, result, saved_target in decoded_replays:
+            if saved_request_id == request_id:
+                if (
+                    saved_query_sha256 != query_sha256
+                    or current_target is None
+                    or saved_target != current_target.to_state()
+                ):
+                    return True, None
+                return True, result
+        return False, None
+
+    async def _run_deepresearch_rewrite_fast_path_transaction(
+        self,
+        query: object,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> RewriteFastPathResult | None:
+        """Linearize the irreversible rewrite and its conversation checkpoint."""
+        if (
+            not self._valid_deepresearch_rewrite_request_id(request_id)
+            or self._deepresearch_rewrite_tx_uncertain
+        ):
+            return None
+        instance = getattr(self, "_instance", None)
+        send_lock = getattr(instance, "_interaction_send_lock", None)
+        control_lock = getattr(instance, "_interaction_control_lock", None)
+        keep_open = getattr(instance, "_should_keep_interaction_open_locked", None)
+        if send_lock is None or control_lock is None or not callable(keep_open):
+            return None
+
+        async with send_lock:
+            async with control_lock:
+                if keep_open():
+                    return None
+                if not isinstance(query, str):
+                    return None
+                try:
+                    query_sha256 = hashlib.sha256(
+                        query.encode("utf-8")
+                    ).hexdigest()
+                except UnicodeEncodeError:
+                    return None
+                replay_found, replay = self._load_deepresearch_rewrite_replay(
+                    session_id,
+                    request_id,
+                    query_sha256,
+                )
+                if replay_found:
+                    return replay or self._deepresearch_rewrite_replay_conflict()
+                from jiuwenswarm.agents.harness.common.tools.deepresearch import (
+                    rewrite_tools,
+                )
+
+                published = False
+                published_target = None
+
+                def mark_published(publish_result: dict[str, object]) -> None:
+                    nonlocal published, published_target
+                    published = True
+                    published_target = target_from_commit_result(
+                        {
+                            "status": "completed",
+                            "report_path": publish_result.get("report_path"),
+                            "revision_id": publish_result.get("revision_id"),
+                        }
+                    )
+
+                observe_rewrite_publish = getattr(
+                    rewrite_tools, "_observe_rewrite_publish"
+                )
+                with observe_rewrite_publish(mark_published):
+                    fast_path_task = asyncio.create_task(
+                        self._try_deepresearch_rewrite_fast_path(query)
+                    )
+                consumer_cancellation: asyncio.CancelledError | None = None
+                task_failure: BaseException | None = None
+                result = None
+                try:
+                    result = await asyncio.shield(fast_path_task)
+                except asyncio.CancelledError as exc:
+                    current_task = asyncio.current_task()
+                    inner_task_cancelled = (
+                        fast_path_task.done()
+                        and fast_path_task.cancelled()
+                        and current_task is not None
+                        and current_task.cancelling() == 0
+                    )
+                    if inner_task_cancelled:
+                        fast_path_task.result()
+                    consumer_cancellation = exc
+                    published_when_cancelled = published
+                    if not published_when_cancelled:
+                        fast_path_task.cancel()
+                    while not fast_path_task.done():
+                        try:
+                            await asyncio.shield(fast_path_task)
+                        except asyncio.CancelledError as repeated_exc:
+                            if consumer_cancellation is None:
+                                consumer_cancellation = repeated_exc
+                        except Exception as inner_exc:  # noqa: BLE001
+                            task_failure = inner_exc
+                            break
+                    if task_failure is None:
+                        if fast_path_task.cancelled():
+                            task_failure = asyncio.CancelledError()
+                        else:
+                            try:
+                                result = fast_path_task.result()
+                            except asyncio.CancelledError as inner_exc:
+                                task_failure = inner_exc
+                            except Exception as inner_exc:  # noqa: BLE001
+                                task_failure = inner_exc
+                    if not published_when_cancelled and not published:
+                        raise consumer_cancellation from None
+                except Exception as exc:  # noqa: BLE001
+                    if not published:
+                        raise
+                    task_failure = exc
+
+                if published:
+                    result_target = (
+                        target_from_commit_result(result.commit_result)
+                        if isinstance(result, RewriteFastPathResult)
+                        else None
+                    )
+                    invalid_published_result = (
+                        task_failure is not None
+                        or
+                        not isinstance(result, RewriteFastPathResult)
+                        or result.status != "completed"
+                        or published_target is None
+                        or result_target != published_target
+                    )
+                    if invalid_published_result:
+                        if task_failure is not None:
+                            logger.error(
+                                "[DeepResearchRewriteFastPath] post-publish runner "
+                                "failed session_id=%s error_type=%s",
+                                session_id,
+                                type(task_failure).__name__,
+                            )
+                        result = self._deepresearch_rewrite_publish_uncertain(
+                            published_target
+                        )
+                        if published_target is None:
+                            self._deepresearch_rewrite_tx_uncertain = True
+                            if consumer_cancellation is not None:
+                                raise consumer_cancellation
+                            return result
+                elif task_failure is not None:
+                    if consumer_cancellation is not None:
+                        raise consumer_cancellation
+                    raise task_failure
+                if result is None or result.status != "completed":
+                    if not (
+                        isinstance(result, RewriteFastPathResult)
+                        and result.error_code == "PUBLISH_STATE_UNCERTAIN"
+                    ):
+                        return result
+                persistence_task = asyncio.create_task(
+                    self._persist_deepresearch_rewrite_fast_path_turn(
+                        session_id=session_id,
+                        request_id=request_id,
+                        query_sha256=query_sha256,
+                        query=query,
+                        result=result,
+                    )
+                )
+                while True:
+                    try:
+                        persisted = await asyncio.shield(persistence_task)
+                        break
+                    except asyncio.CancelledError as exc:
+                        if consumer_cancellation is None:
+                            consumer_cancellation = exc
+                        if persistence_task.done():
+                            if persistence_task.cancelled():
+                                self._deepresearch_rewrite_tx_uncertain = True
+                                raise exc
+                            persisted = persistence_task.result()
+                            break
+                if (
+                    not persisted
+                    and result.error_code == "PUBLISH_STATE_UNCERTAIN"
+                ):
+                    self._deepresearch_rewrite_tx_uncertain = True
+                if consumer_cancellation is not None:
+                    raise consumer_cancellation
+                if persisted:
+                    return result
+                return replace(
+                    result,
+                    error_code="CONTEXT_PERSIST_FAILED",
+                    message=(
+                        "改写版本已生成，但无法保存到当前会话上下文。"
+                        "请刷新会话后再继续操作。"
+                    ),
+                )
+
+    async def _persist_deepresearch_rewrite_fast_path_turn(
+        self,
+        *,
+        session_id: str,
+        request_id: str | None = None,
+        query_sha256: str | None = None,
+        query: object,
+        result: RewriteFastPathResult,
+    ) -> bool:
+        """Persist a fast rewrite as one valid tool-call conversation turn."""
+        if not isinstance(query, str):
+            return False
+
+        terminal_kind = self._deepresearch_rewrite_terminal_kind(result)
+        html_target = target_from_commit_result(result.commit_result)
+        if terminal_kind is None or html_target is None:
+            return False
+        replay_request_id = (
+            request_id
+            if self._valid_deepresearch_rewrite_request_id(request_id)
+            and (
+                terminal_kind == "report_delivery_failed"
+                or terminal_kind == "publish_uncertain"
+                or result.error_code is None
+            )
+            else None
+        )
+        session = self._active_deepresearch_session(session_id)
+        instance = getattr(self, "_instance", None)
+        react_agent = getattr(instance, "react_agent", None)
+        init_context = getattr(react_agent, "_init_context", None)
+        context_engine = getattr(react_agent, "context_engine", None)
+        if (
+            session is None
+            or not callable(init_context)
+            or context_engine is None
+        ):
+            return False
+
+        context = None
+        context_messages_before = None
+        owned_messages = ()
+        previous_target = None
+        previous_replay_state = None
+        messages_added = False
+        state_updated = False
+
+        async def rollback() -> bool:
+            restored = True
+            if messages_added and context is not None:
+                try:
+                    current_messages = context.get_messages()
+                    before_count = len(context_messages_before)
+                    owned_tail = current_messages[before_count:]
+                    if (
+                        current_messages[:before_count] != context_messages_before
+                        or len(owned_tail) > len(owned_messages)
+                        or any(
+                            actual != expected
+                            for actual, expected in zip(owned_tail, owned_messages)
+                        )
+                    ):
+                        raise RuntimeError("context ownership cannot be proven")
+                    if owned_tail:
+                        context.pop_messages(len(owned_tail), with_history=True)
+                    if context.get_messages() != context_messages_before:
+                        raise RuntimeError("context rollback cannot be proven")
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] message rollback failed "
+                        "session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+            if state_updated:
+                try:
+                    restored_state = {
+                        PENDING_HTML_EXPORT_STATE_KEY: previous_target,
+                    }
+                    if replay_request_id is not None:
+                        restored_state[_DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY] = (
+                            previous_replay_state
+                        )
+                    session.update_state(restored_state)
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] state rollback failed "
+                        "session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+            if messages_added or state_updated:
+                try:
+                    restored_context_states = await context_engine.save_contexts(session)
+                    if (
+                        not isinstance(restored_context_states, dict)
+                        or session.get_state("context") != restored_context_states
+                    ):
+                        raise RuntimeError(
+                            "context rollback local state was incomplete"
+                        )
+                except asyncio.CancelledError as rollback_exc:
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] context rollback save "
+                        "cancelled session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] context rollback save failed "
+                        "session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+                try:
+                    await session.commit()
+                except asyncio.CancelledError as rollback_exc:
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] checkpoint rollback commit "
+                        "cancelled session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[DeepResearchRewriteFastPath] checkpoint rollback commit "
+                        "failed "
+                        "session_id=%s error_type=%s",
+                        session_id,
+                        type(rollback_exc).__name__,
+                    )
+                    restored = False
+            if not restored:
+                self._deepresearch_rewrite_tx_uncertain = True
+            return restored
+
+        try:
+            previous_target = session.get_state(PENDING_HTML_EXPORT_STATE_KEY)
+            if replay_request_id is not None:
+                if not isinstance(query_sha256, str):
+                    return False
+                previous_replay_state = session.get_state(
+                    _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY
+                )
+            next_state = {
+                PENDING_HTML_EXPORT_STATE_KEY: html_target.to_state(),
+            }
+            if replay_request_id is not None:
+                existing_entries = self._decode_deepresearch_rewrite_replays(
+                    previous_replay_state
+                )
+                encoded_entries = []
+                for (
+                    saved_request_id,
+                    saved_query_sha256,
+                    saved_result,
+                    saved_target,
+                ) in existing_entries:
+                    if saved_request_id == replay_request_id:
+                        continue
+                    encoded_entries.append(
+                        self._encode_deepresearch_rewrite_replay_entry(
+                            saved_request_id,
+                            saved_query_sha256,
+                            saved_result,
+                            RewriteHtmlTarget(
+                                report_path=saved_target["report_path"],
+                                revision_id=saved_target["revision_id"],
+                            ),
+                        )
+                    )
+                encoded_entries.append(
+                    self._encode_deepresearch_rewrite_replay_entry(
+                        replay_request_id,
+                        query_sha256,
+                        result,
+                        html_target,
+                    )
+                )
+                replay_state = {
+                    "schema_version": _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION,
+                    "entries": encoded_entries[
+                        -_DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES:
+                    ],
+                }
+                decoded_entries = self._decode_deepresearch_rewrite_replays(
+                    replay_state
+                )
+                expected_request_ids = [
+                    entry["request_id"] for entry in replay_state["entries"]
+                ]
+                if [entry[0] for entry in decoded_entries] != expected_request_ids:
+                    return False
+                next_state[_DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY] = replay_state
+            context = await init_context(session)
+            context_messages_before = list(context.get_messages())
+            tool_call_id = f"rewrite-fast-path-{uuid.uuid4().hex}"
+
+            from openjiuwen.core.foundation.llm import (
+                AssistantMessage,
+                ToolMessage,
+                UserMessage,
+            )
+            from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+            tool_call = ToolCall(
+                id=tool_call_id,
+                type="function",
+                name="deepresearch_commit_rewrite",
+                arguments="{}",
+            )
+            tool_result = json.dumps(
+                result.commit_result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            owned_messages = (
+                UserMessage(content=query),
+                AssistantMessage(content="", tool_calls=[tool_call]),
+                ToolMessage(content=tool_result, tool_call_id=tool_call_id),
+                AssistantMessage(content=result.message),
+            )
+            messages_added = True
+            await context.add_messages(list(owned_messages))
+            current_messages = list(context.get_messages())
+            before_count = len(context_messages_before)
+            if (
+                current_messages[:before_count] != context_messages_before
+                or tuple(current_messages[before_count:]) != owned_messages
+            ):
+                raise RuntimeError("context message write was incomplete")
+            state_updated = True
+            session.update_state(next_state)
+            if any(
+                session.get_state(key) != expected
+                for key, expected in next_state.items()
+            ):
+                raise RuntimeError("session state write was incomplete")
+            context_states = await context_engine.save_contexts(session)
+            if (
+                not isinstance(context_states, dict)
+                or session.get_state("context") != context_states
+            ):
+                raise RuntimeError("context local state write was incomplete")
+            await session.commit()
+            return True
+        except asyncio.CancelledError:
+            await rollback()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[DeepResearchRewriteFastPath] persist tool result failed "
+                "session_id=%s error_type=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            await rollback()
+            return False
+
+    def _is_stream_rewrite_fast_path_eligible(
+        self,
+        request: AgentRequest,
+        *,
+        pending_goal_op: dict[str, Any] | None,
+        attach_goal_request: bool,
+        goal_stream_request: bool,
+    ) -> bool:
+        """Limit rewrite bypasses to an idle, ordinary single-agent turn."""
+        if pending_goal_op is not None or attach_goal_request or goal_stream_request:
+            return False
+        params = request.params if isinstance(request.params, dict) else {}
+        if "answers" in params:
+            return False
+        if self._should_inject_into_existing_interaction(params):
+            return False
+        instance = getattr(self, "_instance", None)
+        if instance is None or getattr(instance, "active_round", None) is not None:
+            return False
+        return not self._goal_record_is_active()
+
+    @staticmethod
+    def _fast_path_chunks(
+        result: RewriteFastPathResult,
+        *,
+        request_id: str,
+        channel_id: str,
+    ) -> tuple[AgentResponseChunk, ...]:
+        if result.status == "completed":
+            payload = {
+                "event_type": "chat.final",
+                "content": result.message,
+                "status": "completed",
+            }
+            if result.error_code:
+                payload["error_code"] = result.error_code
+        else:
+            code = result.error_code or "INTERNAL_ERROR"
+            payload = {
+                "event_type": "chat.error",
+                "error": f"改写失败（{code}）：{result.message}",
+                "status": "error",
+                "error_code": code,
+            }
+        return (
+            AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload=payload,
+                is_complete=False,
+            ),
+        )
+
+    @staticmethod
+    def _rewrite_html_followup_chunks(
+        result: RewriteHtmlFollowupResult,
+        *,
+        request_id: str,
+        channel_id: str,
+    ) -> tuple[AgentResponseChunk, ...]:
+        return (
+            AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "content": result.message,
+                },
+                is_complete=False,
+            ),
+        )
+
+    @staticmethod
+    def _normalize_deepresearch_usage(value: object) -> dict[str, float] | None:
+        keys = (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cache_tokens",
+            "input_cost",
+            "output_cost",
+            "total_cost",
+        )
+        if isinstance(value, dict):
+            raw = value
+        else:
+            model_dump = getattr(value, "model_dump", None)
+            if callable(model_dump):
+                try:
+                    raw = model_dump()
+                except Exception:  # noqa: BLE001
+                    raw = {}
+            else:
+                raw = {key: getattr(value, key, None) for key in keys}
+        if not isinstance(raw, dict):
+            return None
+        normalized = {}
+        for key in keys:
+            item = raw.get(key)
+            if isinstance(item, (int, float)) and not isinstance(raw.get(key), bool):
+                normalized[key] = operator.getitem(raw, key)
+        return normalized or None
+
+    @staticmethod
+    def _deepresearch_usage_summary(
+        usage: dict[str, float],
+    ) -> dict[str, float | str]:
+        summary: dict[str, float | str] = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        }
+        input_tokens = usage.get("input_tokens", 0)
+        cache_tokens = usage.get("cache_tokens", 0)
+        if input_tokens and cache_tokens:
+            summary["cache_tokens"] = cache_tokens
+            summary["cache_hit_rate"] = f"{cache_tokens / input_tokens:.1%}"
+        for cost in ("input_cost", "output_cost", "total_cost"):
+            if usage.get(cost, 0) > 0:
+                summary[cost] = round(usage[cost], 6)
+        return summary
+
     async def process_message_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AgentResponse:
@@ -10957,6 +12168,18 @@ class JiuWenSwarmDeepAdapter:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
                 await self._evict_idle_session_adapters()
+
+        if self._deepresearch_rewrite_tx_uncertain:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error_code": _DEEPRESEARCH_CHECKPOINT_UNCERTAIN,
+                    "error": _DEEPRESEARCH_CHECKPOINT_UNCERTAIN_MESSAGE,
+                },
+                metadata=request.metadata,
+            )
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -11097,22 +12320,13 @@ class JiuWenSwarmDeepAdapter:
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
             params=request.params if isinstance(request.params, dict) else None,
         )
-        self._runtime_cron_tool_context.remember_current_binding()
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
-        token_perm = setup_permission_context(request)
-        token_perm_sid = setup_permissions_session_scope(session_id)
-        if self._permission_rail is not None:
-            self._permission_rail.update_config(
-                get_effective_permissions_config(session_id=session_id),
-            )
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
-        await self._maybe_apply_pending_reload()
-        ns_token, overlay_token = self._bind_request_env_overlay()
-        self._mark_session_active(session_id)
-        self._register_session_agent_task(session_id)
-        if self._stream_event_rail is not None:
-            self._stream_event_rail.reset_abort(session_id)
+        token_cid = None
+        token_perm = None
+        token_perm_sid = None
+        request_env_tokens = None
+        session_active = False
+        session_task_registered = False
+        perf_context_initialized = False
         image_files_token = None
         _run_span: Any = None
         collected_content: list[str] = []
@@ -11120,14 +12334,78 @@ class JiuWenSwarmDeepAdapter:
         interaction_stream = None
         interaction_stream_abort = True
         first_byte_marked = False
-        set_perf_summary_context(
-            getattr(self, "_request_summary_rail", None),
-            channel_id=request.channel_id or "",
-            session_id=request.session_id or "",
-            request_id=request.request_id or "",
-            mode=mode,
-        )
         perf_summary_status = "ok"
+        try:
+            self._runtime_cron_tool_context.remember_current_binding()
+            token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            token_perm = setup_permission_context(request)
+            token_perm_sid = setup_permissions_session_scope(session_id)
+            if self._permission_rail is not None:
+                self._permission_rail.update_config(
+                    get_effective_permissions_config(session_id=session_id),
+                )
+            resolved_model = self._resolve_model_for_request(request)
+            self._apply_model_to_react_agent(resolved_model)
+            await self._maybe_apply_pending_reload()
+            request_env_tokens = self._bind_request_env_overlay()
+            self._mark_session_active(session_id)
+            session_active = True
+            self._register_session_agent_task(session_id)
+            session_task_registered = True
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.reset_abort(session_id)
+            set_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                mode=mode,
+            )
+            perf_context_initialized = True
+        except BaseException:
+            cleanup_steps: list[Callable[[], None]] = []
+            if perf_context_initialized:
+                cleanup_steps.append(
+                    lambda: clear_perf_summary_context(
+                        getattr(self, "_request_summary_rail", None),
+                        session_id=session_id,
+                        request_id=request.request_id,
+                    )
+                )
+            if session_task_registered:
+                cleanup_steps.append(lambda: self._unregister_session_agent_task(session_id))
+            if session_active:
+                cleanup_steps.append(lambda: self._unmark_session_active(session_id))
+            if request_env_tokens is not None:
+                cleanup_steps.append(
+                    lambda: self._reset_request_env_bindings(*request_env_tokens)
+                )
+            if token_perm_sid is not None:
+                cleanup_steps.append(
+                    lambda: reset_permissions_session_scope(token_perm_sid)
+                )
+            if token_perm is not None:
+                cleanup_steps.append(lambda: cleanup_permission_context(token_perm))
+            if token_cid is not None:
+                cleanup_steps.append(lambda: TOOL_PERMISSION_CHANNEL_ID.reset(token_cid))
+            cleanup_steps.extend(
+                (
+                    lambda: self._reset_runtime_cron_context(
+                        cron_context_tokens,
+                        suppress_errors=True,
+                    ),
+                    lambda: _LLM_TRACE_MODEL_NAME.reset(token_trace_model),
+                    lambda: _LLM_TRACE_ITERATION.reset(token_trace_iter),
+                    lambda: _LLM_TRACE_REQUEST_ID.reset(token_trace_rid),
+                    lambda: _LLM_TRACE_SESSION_ID.reset(token_trace_sid),
+                )
+            )
+            for cleanup_step in cleanup_steps:
+                try:
+                    cleanup_step()
+                except BaseException:
+                    continue
+            raise
         try:
             await self._update_runtime_config(
                 self._RuntimeConfig(
@@ -11146,6 +12424,29 @@ class JiuWenSwarmDeepAdapter:
                     request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
+            html_followup_result = None
+            if self._is_stream_rewrite_fast_path_eligible(
+                request,
+                pending_goal_op=self._structured_goal_op_from_request(request),
+                attach_goal_request=self._wants_attach_goal(request.params),
+                goal_stream_request=False,
+            ):
+                html_followup_result = (
+                    await self._run_deepresearch_rewrite_html_transaction(
+                        query,
+                        session_id=session_id,
+                    )
+                )
+            if html_followup_result is not None:
+                if html_followup_result.status != "completed":
+                    perf_summary_status = "error"
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=html_followup_result.status == "completed",
+                    payload={"content": html_followup_result.message},
+                    metadata=request.metadata,
+                )
             inputs = dict(inputs)
             inputs = self._prepare_multimodal_image_inputs(
                 request,
@@ -11273,44 +12574,124 @@ class JiuWenSwarmDeepAdapter:
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(_run_span, session_id=session_id)
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
-
-                reset_current_multimodal_image_files(image_files_token)
+            active_error = sys.exc_info()[1]
+            cleanup_error: BaseException | None = None
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
                         abort_active_round=interaction_stream_abort,
                     )
-                except Exception:
-                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
-            self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            cleanup_permission_context(token_perm)
-            reset_permissions_session_scope(token_perm_sid)
-            self._reset_runtime_cron_context(cron_context_tokens)
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
-            self._unmark_session_active(session_id)
-            self._reset_request_env_bindings(ns_token, overlay_token)
-            await self._maybe_apply_pending_reload()
+                except BaseException as exc:
+                    cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=interaction_stream error_type=%s",
+                        type(exc).__name__,
+                    )
+            cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+            if _run_span is not None:
+                cleanup_steps.append(
+                    ("run_span", lambda: close_agent_run_span(_run_span, session_id=session_id))
+                )
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+                cleanup_steps.append(
+                    (
+                        "multimodal_images",
+                        lambda: reset_current_multimodal_image_files(image_files_token),
+                    )
+                )
+            if perf_context_initialized:
+                cleanup_steps.extend(
+                    (
+                        (
+                            "perf_finalize",
+                            lambda: finalize_perf_summary_request(
+                                request.request_id,
+                                status=perf_summary_status,
+                            ),
+                        ),
+                        (
+                            "perf_context",
+                            lambda: clear_perf_summary_context(
+                                getattr(self, "_request_summary_rail", None),
+                                session_id=session_id,
+                                request_id=request.request_id,
+                            ),
+                        ),
+                    )
+                )
+            if session_task_registered:
+                cleanup_steps.append(
+                    ("session_task", lambda: self._unregister_session_agent_task(session_id))
+                )
+            if session_active:
+                cleanup_steps.append(
+                    ("session_active", lambda: self._unmark_session_active(session_id))
+                )
+            if request_env_tokens is not None:
+                cleanup_steps.append(
+                    (
+                        "request_env",
+                        lambda: self._reset_request_env_bindings(*request_env_tokens),
+                    )
+                )
+            if token_perm_sid is not None:
+                cleanup_steps.append(
+                    (
+                        "permission_session",
+                        lambda: reset_permissions_session_scope(token_perm_sid),
+                    )
+                )
+            if token_perm is not None:
+                cleanup_steps.append(
+                    ("permission", lambda: cleanup_permission_context(token_perm))
+                )
+            if token_cid is not None:
+                cleanup_steps.append(
+                    ("permission_channel", lambda: TOOL_PERMISSION_CHANNEL_ID.reset(token_cid))
+                )
+            cleanup_steps.extend(
+                (
+                    ("runtime_context", lambda: self._reset_runtime_cron_context(cron_context_tokens)),
+                    ("trace_model", lambda: _LLM_TRACE_MODEL_NAME.reset(token_trace_model)),
+                    ("trace_iteration", lambda: _LLM_TRACE_ITERATION.reset(token_trace_iter)),
+                    ("trace_request", lambda: _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)),
+                    ("trace_session", lambda: _LLM_TRACE_SESSION_ID.reset(token_trace_sid)),
+                )
+            )
+            step_error = self._run_cleanup_steps(cleanup_steps)
+            if cleanup_error is None:
+                cleanup_error = step_error
+            try:
+                await self._maybe_apply_pending_reload()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                    "step=pending_reload error_type=%s",
+                    type(exc).__name__,
+                )
             # [CRON-CTX] 非流式 cron 执行收尾补 commit：对齐流式路径的自动落盘。
             # 根因：cron 走非流式 _inner_invoke，其 commit 挂在 need_cleanup 下，
             # 而 adapter 提前绑定了 session 致 need_cleanup=False，commit 被跳过，
             # cron_* 在 checkpointer 恒为空、web 恢复读不到历史。此处显式补一次。
             if str(session_id).startswith("cron_"):
-                await self._persist_cron_checkpoint(session_id, request.request_id)
-            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
-            clear_perf_summary_context(
-                getattr(self, "_request_summary_rail", None),
-                session_id=session_id,
-                request_id=request.request_id,
-            )
+                try:
+                    await self._persist_cron_checkpoint(session_id, request.request_id)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=cron_checkpoint error_type=%s",
+                        type(exc).__name__,
+                    )
+            if active_error is None and cleanup_error is not None:
+                raise cleanup_error
 
         content = "".join(collected_content) if collected_content else ""
 
@@ -11354,6 +12735,20 @@ class JiuWenSwarmDeepAdapter:
                 return
             finally:
                 await self._evict_idle_session_adapters()
+
+        if self._deepresearch_rewrite_tx_uncertain:
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "chat.error",
+                    "error_code": _DEEPRESEARCH_CHECKPOINT_UNCERTAIN,
+                    "error": _DEEPRESEARCH_CHECKPOINT_UNCERTAIN_MESSAGE,
+                },
+                is_complete=True,
+                metadata=request.metadata or {},
+            )
+            return
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -11468,6 +12863,7 @@ class JiuWenSwarmDeepAdapter:
                         tenant_service_id,
                         tenant_agent_id,
                     ),
+                    rebuild_skill=self.generate_evolution_merge_version,
                 ):
                     maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
                     yield chunk
@@ -11770,21 +13166,14 @@ class JiuWenSwarmDeepAdapter:
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
             params=request.params if isinstance(request.params, dict) else None,
         )
-        self._runtime_cron_tool_context.remember_current_binding()
-        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
-        token_perm = setup_permission_context(request)
-        token_perm_sid = setup_permissions_session_scope(session_id)
-        if self._permission_rail is not None:
-            self._permission_rail.update_config(
-                get_effective_permissions_config(session_id=session_id),
-            )
-        # 按请求选择模型（企业配置已在 create_instance 合并）
-        resolved_model = self._resolve_model_for_request(request)
-        self._apply_model_to_react_agent(resolved_model)
-        await self._maybe_apply_pending_reload()
-        ns_token, overlay_token = self._bind_request_env_overlay()
-        self._mark_session_active(session_id)
-        self._register_session_agent_task(session_id)
+        token_cid = None
+        token_perm = None
+        token_perm_sid = None
+        request_env_tokens = None
+        session_active = False
+        session_task_registered = False
+        perf_context_initialized = False
+        initialization_complete = False
         stream_consumer_cancelled = False
         image_files_token = None
         _run_span: Any = None
@@ -11792,15 +13181,34 @@ class JiuWenSwarmDeepAdapter:
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
         interaction_stream_abort = True
-        set_perf_summary_context(
-            getattr(self, "_request_summary_rail", None),
-            channel_id=request.channel_id or "",
-            session_id=request.session_id or "",
-            request_id=request.request_id or "",
-            mode=mode,
-        )
         perf_summary_status = "ok"
         try:
+            self._runtime_cron_tool_context.remember_current_binding()
+            token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            token_perm = setup_permission_context(request)
+            token_perm_sid = setup_permissions_session_scope(session_id)
+            if self._permission_rail is not None:
+                self._permission_rail.update_config(
+                    get_effective_permissions_config(session_id=session_id),
+                )
+            # 按请求选择模型（企业配置已在 create_instance 合并）
+            resolved_model = self._resolve_model_for_request(request)
+            self._apply_model_to_react_agent(resolved_model)
+            await self._maybe_apply_pending_reload()
+            request_env_tokens = self._bind_request_env_overlay()
+            self._mark_session_active(session_id)
+            session_active = True
+            self._register_session_agent_task(session_id)
+            session_task_registered = True
+            set_perf_summary_context(
+                getattr(self, "_request_summary_rail", None),
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                mode=mode,
+            )
+            perf_context_initialized = True
+            initialization_complete = True
             await self._update_runtime_config(
                 self._RuntimeConfig(
                     session_id=session_id,
@@ -11818,6 +13226,81 @@ class JiuWenSwarmDeepAdapter:
                     request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
+            direct_path_eligible = self._is_stream_rewrite_fast_path_eligible(
+                request,
+                pending_goal_op=pending_goal_op,
+                attach_goal_request=attach_goal_request,
+                goal_stream_request=goal_stream_request,
+            )
+            html_followup_result = None
+            if direct_path_eligible:
+                html_followup_result = (
+                    await self._run_deepresearch_rewrite_html_transaction(
+                        query,
+                        session_id=session_id,
+                    )
+                )
+            if html_followup_result is not None:
+                if html_followup_result.status != "completed":
+                    perf_summary_status = "error"
+                for chunk in self._rewrite_html_followup_chunks(
+                    html_followup_result,
+                    request_id=rid,
+                    channel_id=cid,
+                ):
+                    yield chunk
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=None,
+                    is_complete=True,
+                )
+                interaction_stream_abort = False
+                return
+
+            if direct_path_eligible:
+                fast_path_result = (
+                    await self._run_deepresearch_rewrite_fast_path_transaction(
+                        query,
+                        session_id=session_id,
+                        request_id=rid,
+                    )
+                )
+                if fast_path_result is not None:
+                    if (
+                        fast_path_result.status != "completed"
+                        or fast_path_result.error_code is not None
+                    ):
+                        perf_summary_status = "error"
+                    for chunk in self._fast_path_chunks(
+                        fast_path_result,
+                        request_id=rid,
+                        channel_id=cid,
+                    ):
+                        yield chunk
+                    usage = self._normalize_deepresearch_usage(
+                        fast_path_result.usage_metadata
+                    )
+                    if usage is not None and usage.get("total_tokens", 0) > 0:
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={
+                                "event_type": "chat.usage_summary",
+                                "session_id": session_id,
+                                "usage": self._deepresearch_usage_summary(usage),
+                                "model": self._resolve_model_name(),
+                            },
+                            is_complete=False,
+                        )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=None,
+                        is_complete=True,
+                    )
+                    interaction_stream_abort = False
+                    return
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort(session_id)
             inputs = dict(inputs)
@@ -12426,7 +13909,7 @@ class JiuWenSwarmDeepAdapter:
             interaction_stream_abort = False
         except asyncio.CancelledError:
             perf_summary_status = "cancelled"
-            stream_consumer_cancelled = True
+            stream_consumer_cancelled = initialization_complete
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
                 rid,
@@ -12457,55 +13940,145 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
-            close_agent_run_span(_run_span, session_id=session_id)
-            if _debug_logger is not None:
-                _debug_logger.flush()
-            if _debug_trace_token is not None:
-                from jiuwenswarm.server.runtime.debug_trace.context import (
-                    reset_debug_trace_logger,
-                    unregister_debug_trace_logger,
-                )
-                reset_debug_trace_logger(_debug_trace_token)
-                unregister_debug_trace_logger(session_id)
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
-
-                reset_current_multimodal_image_files(image_files_token)
+            active_error = sys.exc_info()[1]
+            cleanup_error: BaseException | None = None
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
                         abort_active_round=interaction_stream_abort,
                     )
-                except Exception:
-                    logger.debug("[Goal] interaction stream close failed", exc_info=True)
-            self._unregister_session_agent_task(session_id)
-            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            cleanup_permission_context(token_perm)
-            reset_permissions_session_scope(token_perm_sid)
-            if not stream_consumer_cancelled:
-                self._reset_runtime_cron_context(cron_context_tokens)
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+                except BaseException as exc:
+                    cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=interaction_stream error_type=%s",
+                        type(exc).__name__,
+                    )
+            cleanup_steps: list[tuple[str, Callable[[], None]]] = []
+            if _run_span is not None:
+                cleanup_steps.append(
+                    ("run_span", lambda: close_agent_run_span(_run_span, session_id=session_id))
+                )
+            if _debug_logger is not None:
+                cleanup_steps.append(("debug_logger", _debug_logger.flush))
+            if _debug_trace_token is not None:
+                from jiuwenswarm.server.runtime.debug_trace.context import (
+                    reset_debug_trace_logger,
+                    unregister_debug_trace_logger,
+                )
+                cleanup_steps.extend(
+                    (
+                        (
+                            "debug_trace",
+                            lambda: reset_debug_trace_logger(_debug_trace_token),
+                        ),
+                        (
+                            "debug_trace_registry",
+                            lambda: unregister_debug_trace_logger(session_id),
+                        ),
+                    )
+                )
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+                cleanup_steps.append(
+                    (
+                        "multimodal_images",
+                        lambda: reset_current_multimodal_image_files(image_files_token),
+                    )
+                )
+            if perf_context_initialized:
+                cleanup_steps.extend(
+                    (
+                        (
+                            "perf_finalize",
+                            lambda: finalize_perf_summary_request(
+                                request.request_id,
+                                status=perf_summary_status,
+                            ),
+                        ),
+                        (
+                            "perf_context",
+                            lambda: clear_perf_summary_context(
+                                getattr(self, "_request_summary_rail", None),
+                                session_id=session_id,
+                                request_id=request.request_id,
+                            ),
+                        ),
+                    )
+                )
+            if session_task_registered:
+                cleanup_steps.append(
+                    ("session_task", lambda: self._unregister_session_agent_task(session_id))
+                )
             # Always clean up rail state — process_interrupt's
             # _stop_session_interrupt_work sets abort flags but does NOT
             # call cleanup_session(), so skipping cleanup here would leak
             # _abort_requested / _pause_events entries on long-lived adapters.
-            self._unmark_session_active(
-                session_id,
-                cleanup_rail=True,
+            if session_active:
+                cleanup_steps.append(
+                    (
+                        "session_active",
+                        lambda: self._unmark_session_active(
+                            session_id,
+                            cleanup_rail=True,
+                        ),
+                    )
+                )
+            if request_env_tokens is not None:
+                cleanup_steps.append(
+                    (
+                        "request_env",
+                        lambda: self._reset_request_env_bindings(*request_env_tokens),
+                    )
+                )
+            if token_perm_sid is not None:
+                cleanup_steps.append(
+                    (
+                        "permission_session",
+                        lambda: reset_permissions_session_scope(token_perm_sid),
+                    )
+                )
+            if token_perm is not None:
+                cleanup_steps.append(
+                    ("permission", lambda: cleanup_permission_context(token_perm))
+                )
+            if token_cid is not None:
+                cleanup_steps.append(
+                    ("permission_channel", lambda: TOOL_PERMISSION_CHANNEL_ID.reset(token_cid))
+                )
+            cleanup_steps.extend(
+                (
+                    (
+                        "runtime_context",
+                        lambda: self._reset_stream_runtime_context(
+                            cron_context_tokens,
+                            stream_consumer_cancelled=stream_consumer_cancelled,
+                        ),
+                    ),
+                    ("trace_model", lambda: _LLM_TRACE_MODEL_NAME.reset(token_trace_model)),
+                    ("trace_iteration", lambda: _LLM_TRACE_ITERATION.reset(token_trace_iter)),
+                    ("trace_request", lambda: _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)),
+                    ("trace_session", lambda: _LLM_TRACE_SESSION_ID.reset(token_trace_sid)),
+                )
             )
-            finalize_perf_summary_request(request.request_id, status=perf_summary_status)
-            clear_perf_summary_context(
-                getattr(self, "_request_summary_rail", None),
-                session_id=session_id,
-                request_id=request.request_id,
-            )
-            self._reset_request_env_bindings(ns_token, overlay_token)
-            await self._maybe_apply_pending_reload()
+            step_error = self._run_cleanup_steps(cleanup_steps)
+            if cleanup_error is None:
+                cleanup_error = step_error
+            if initialization_complete:
+                try:
+                    await self._maybe_apply_pending_reload()
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] cleanup failed: "
+                        "step=pending_reload error_type=%s",
+                        type(exc).__name__,
+                    )
+            if active_error is None and cleanup_error is not None:
+                raise cleanup_error
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
@@ -13956,11 +15529,17 @@ class JiuWenSwarmDeepAdapter:
                 build_server_push_message,
             )
 
-        async def _cleanup_evolution_rail() -> None:
+        async def _cleanup_evolution_rail(*, cancel: bool = False) -> None:
             if self._skill_evolution_rail is None:
                 return
             try:
-                await self._skill_evolution_rail.cleanup_background_tasks()
+                rail = self._skill_evolution_rail
+                if cancel:
+                    cancel_fn = getattr(rail, "cancel_pending_evolution", None)
+                    if cancel_fn is not None:
+                        await cancel_fn()
+                        return
+                await rail.cleanup_background_tasks()
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] evolution cleanup failed: request_id=%s "
@@ -14002,7 +15581,7 @@ class JiuWenSwarmDeepAdapter:
                                 f"{event_timeout_sec:.0f}s without host events"
                             )
                             await _push_status("end", "hidden", message)
-                        await _cleanup_evolution_rail()
+                        await _cleanup_evolution_rail(cancel=True)
                         return
                     await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
                     continue
@@ -14148,7 +15727,7 @@ class JiuWenSwarmDeepAdapter:
                     return
         except asyncio.CancelledError:
             try:
-                await _cleanup_evolution_rail()
+                await _cleanup_evolution_rail(cancel=True)
             finally:
                 raise
         except Exception as exc:

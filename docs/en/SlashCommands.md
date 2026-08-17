@@ -321,7 +321,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 | `/evolve <skill_name> [user_query]` | Trigger evolution for one skill. `agent.plan` scans the current conversation for tool failures and user corrections; Team mode requires `user_query`. |
 | `/evolve_list <skill_name> [--sort score]` | Show one skill's evolution records with count, average score, usage/feedback stats, section, and content preview. |
 | `/evolve_simplify <skill_name> [user_intent]` | Generate an approval-gated cleanup plan to merge duplicates, split long records, or remove low-value records. Trailing text is passed to the backend as intent. |
-| `/evolve_rebuild <skill_name> [user_intent]` | Generate a rebuild follow-up prompt and continue as a normal Agent / Team task to rebuild `SKILL.md`. |
+| `/evolve_rebuild <skill_name> [user_intent]` | Same as control-plane `skills.evolution.rebuild`: adopt live evolution records and generate a new `SKILL.md` version (prepare → rewrite → finalize). |
 
 #### Approval Flow
 

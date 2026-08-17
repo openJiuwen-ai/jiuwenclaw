@@ -23,6 +23,30 @@ def _rail_plan_adapter() -> JiuWenSwarmDeepAdapter:
     return adapter
 
 
+def test_reload_plan_preserves_progressive_rail_when_config_omits_tool_lazy_load():
+    adapter = _rail_plan_adapter()
+    old_rail = MagicMock(name="old-progressive-tool-rail")
+    adapter._progressive_tool_rail = old_rail
+
+    rails, rails_to_unregister = adapter._get_current_agent_rails({}, {"react": {}})
+
+    adapter._build_progressive_tool_rail.assert_not_called()
+    assert old_rail not in rails
+    assert rails_to_unregister == []
+    assert adapter._progressive_tool_rail is old_rail
+
+
+def test_reload_plan_does_not_create_progressive_rail_when_config_omits_tool_lazy_load():
+    adapter = _rail_plan_adapter()
+
+    rails, rails_to_unregister = adapter._get_current_agent_rails({}, {"react": {}})
+
+    adapter._build_progressive_tool_rail.assert_not_called()
+    assert rails == []
+    assert rails_to_unregister == []
+    assert adapter._progressive_tool_rail is None
+
+
 def test_reload_plan_stages_progressive_rail_when_disabled():
     adapter = _rail_plan_adapter()
     old_rail = MagicMock(name="old-progressive-tool-rail")

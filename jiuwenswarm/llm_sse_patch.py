@@ -70,6 +70,7 @@ def _sanitize_glm_tool_xml_tags(raw: str) -> str:
 
 _PATCH_APPLIED = False
 _AUTH_HEADER_PATCH_APPLIED = False
+_HUAWEI_MAAS_PLACEHOLDER_API_KEY = "huawei-maas-session"
 
 
 def _extract_authorization_header(
@@ -104,6 +105,37 @@ def _restore_authorization_header(
         del headers[existing]
     headers[key] = value
     return headers
+
+
+def _resolve_model_client_authorization(
+    model_client_config: Any,
+) -> tuple[str, str] | None:
+    """Resolve explicit auth, or the scoped Huawei MaaS compatibility fallback."""
+    auth = _extract_authorization_header(
+        getattr(model_client_config, "custom_headers", None)
+    )
+    if auth is not None:
+        return auth
+
+    api_key = str(getattr(model_client_config, "api_key", "") or "").strip()
+    if api_key != _HUAWEI_MAAS_PLACEHOLDER_API_KEY:
+        return None
+
+    try:
+        from jiuwenswarm.common.local_env_config import (
+            is_task_env_overlay_bound,
+            read_default_headers,
+        )
+
+        if not is_task_env_overlay_bound():
+            return None
+        return _extract_authorization_header(read_default_headers())
+    except Exception:
+        logger.warning(
+            "[llm_sse_patch] failed to resolve request-scoped Huawei MaaS Authorization",
+            exc_info=True,
+        )
+        return None
 
 
 def apply_openai_auth_header_patch() -> None:
@@ -188,9 +220,7 @@ def apply_openai_auth_header_patch() -> None:
 
             def _create_async_openai_client_with_auth(self: Any, timeout: Any = None):
                 client = _orig_create(self, timeout=timeout)
-                auth = _extract_authorization_header(
-                    getattr(self.model_client_config, "custom_headers", None)
-                )
+                auth = _resolve_model_client_authorization(self.model_client_config)
                 if auth is None:
                     return client
                 _key, value = auth
