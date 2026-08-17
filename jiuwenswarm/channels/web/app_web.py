@@ -14,6 +14,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import select
 import socket
 import ssl
@@ -535,10 +536,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             )
 
         # 路径改写: /auth-api/v1/auth/login -> /api/v1/auth/login
+        # 用 posixpath 库函数构造 URL 路径段 (G.FIO.05: 避免字符串拼接构造路径,
+        # 用库函数屏蔽 OS 差异; posixpath 跨平台恒为正斜杠, 适合 URL 路径)。
         req_path = urlparse(self.path).path
-        upstream_path = self._AUTH_API_PREFIX + "/"  # 不会命中
-        if req_path.startswith(self._AUTH_API_PREFIX + "/"):
-            upstream_path = "/api/" + req_path[len(self._AUTH_API_PREFIX) + 1:]
+        auth_prefix_dir = posixpath.join(self._AUTH_API_PREFIX, "")  # /auth-api/
+        upstream_path = auth_prefix_dir  # 不会命中
+        if req_path.startswith(auth_prefix_dir):
+            tail = req_path[len(self._AUTH_API_PREFIX) + 1:]
+            upstream_path = posixpath.join("/api", tail)
         if urlparse(self.path).query:
             upstream_path += "?" + urlparse(self.path).query
         is_login = upstream_path.rstrip("/").endswith("/api/v1/auth/login")
