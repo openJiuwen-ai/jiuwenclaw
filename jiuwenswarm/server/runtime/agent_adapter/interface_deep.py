@@ -14941,7 +14941,10 @@ class JiuWenSwarmDeepAdapter:
                         return None
 
                     if _has_streamed_content and not is_chunked:
-                        return {"event_type": "chat.final", "content": content}
+                        # When llm_output has already streamed the full user-facing text,
+                        # keep chat.final as a completion marker only to avoid duplicating
+                        # the final answer block downstream.
+                        return {"event_type": "chat.final", "content": ""}
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
                     return {"event_type": "chat.final", "content": content}
