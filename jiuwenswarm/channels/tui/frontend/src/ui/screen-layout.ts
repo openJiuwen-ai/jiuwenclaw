@@ -159,7 +159,7 @@ function buildStatusLines(
   left.push(`mode:${formatModeForDisplay(snapshot.mode)}`);
   if (isPlanMode(snapshot.mode)) left.push("使用 /mode 退出plan模式");
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
-  // agentos 模型（请求级注入）：非空表示当前对话走的是手动添加的 AgentOS 模型，
+  // agentos 模型：非空表示当前对话走的是手动添加的 AgentOS 模型，
   // 而非启动默认；用户切回 defaults 模型时此字段被清空。
   if (snapshot.selectedAgentosModel) {
     const m = snapshot.selectedAgentosModel;
