@@ -358,10 +358,15 @@
 }
 
 .skill-graph-panel__node-list button:hover,
-.skill-graph-panel__node-list button.is-active,
 .skill-graph-panel__related button:hover {
   border-color: var(--color-border-accent);
   background: var(--color-surface-hover);
+}
+
+.skill-graph-panel__node-list button.is-active {
+  border-color: var(--color-action-primary);
+  background: var(--color-surface-page);
+  box-shadow: inset 0 0 0 1px var(--color-action-primary);
 }
 
 .skill-graph-panel__node-list span,

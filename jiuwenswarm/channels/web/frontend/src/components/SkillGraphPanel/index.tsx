@@ -151,16 +151,14 @@ type DetailListItem = {
   meta: string;
 };
 
-const NODE_COLORS: Record<string, string> = {
-  skill: '#4db6ac',
-  input: '#6aa9ff',
-  output: '#d6a35d',
-  artifact: '#b985f4',
-  task: '#f26d7d',
-  slot: '#8bd17c',
-  type: '#9aa4b2',
-  unknown: '#7f8a99',
-};
+const GRAPH_NODE_DEFAULT = '#3f8ff3';
+const GRAPH_NODE_HIGHLIGHT = '#0868f7';
+const GRAPH_NODE_DIMMED = '#b2d1fb';
+const GRAPH_EDGE_DEFAULT = '#c2c7ce';
+const GRAPH_EDGE_HIGHLIGHT = '#1677ff';
+const GRAPH_LABEL_DEFAULT = '#6b7280';
+const GRAPH_LABEL_DIMMED = '#adb3bc';
+const GRAPH_LABEL_ACTIVE = '#111827';
 
 const DEFAULT_MIN_CONFIDENCE = 0.7;
 
@@ -1253,16 +1251,24 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
           })
           .map((node) => node.id),
       );
-      const focusId = selectedRef.current?.id || hoveredRef.current?.id;
+      const selectedId = selectedRef.current?.id;
+      const focusId = selectedId || hoveredRef.current?.id;
+      const relatedNodeIds = new Set<string>();
+      if (focusId) {
+        visibleRef.current.edges.forEach((edge) => {
+          if (edge.source === focusId) relatedNodeIds.add(edge.target);
+          if (edge.target === focusId) relatedNodeIds.add(edge.source);
+        });
+      }
       visibleRef.current.edges.forEach((edge) => {
         if (!drawableNodeIds.has(edge.source) || !drawableNodeIds.has(edge.target)) return;
         const source = nodeById.get(edge.source);
         const target = nodeById.get(edge.target);
         if (!source || !target) return;
         const active = Boolean(focusId && (edge.source === focusId || edge.target === focusId));
-        ctx.strokeStyle = active ? '#111827' : edge.type === 'can_feed' ? '#4b5563' : '#9ca3af';
-        ctx.globalAlpha = active ? 0.82 : 0.38;
-        ctx.lineWidth = active ? 2.2 : 1.1;
+        ctx.strokeStyle = active ? GRAPH_EDGE_HIGHLIGHT : GRAPH_EDGE_DEFAULT;
+        ctx.globalAlpha = active ? 0.9 : focusId ? 0.5 : 0.72;
+        ctx.lineWidth = active ? 1.8 : 1;
         ctx.beginPath();
         ctx.moveTo(source.x, source.y);
         ctx.lineTo(target.x, target.y);
@@ -1273,7 +1279,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
         const radius = nodeRadius(target);
         const x = target.x - Math.cos(angle) * radius;
         const y = target.y - Math.sin(angle) * radius;
-        ctx.globalAlpha = active ? 0.85 : 0.35;
+        ctx.globalAlpha = active ? 0.92 : focusId ? 0.48 : 0.68;
         ctx.fillStyle = ctx.strokeStyle;
         ctx.beginPath();
         ctx.moveTo(x, y);
@@ -1286,23 +1292,56 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
       visibleRef.current.nodes.forEach((node) => {
         if (!drawableNodeIds.has(node.id)) return;
-        const selected = selectedRef.current?.id === node.id;
+        const selected = selectedId === node.id;
         const hovered = hoveredRef.current?.id === node.id;
         const radius = nodeRadius(node);
-        ctx.fillStyle = NODE_COLORS[node.type] || NODE_COLORS.unknown;
-        ctx.strokeStyle = selected ? '#111827' : hovered ? '#374151' : 'rgba(17, 24, 39, .22)';
-        ctx.lineWidth = selected ? 3 : hovered ? 2.4 : 1.2;
+        const focused = focusId === node.id;
+        const highlighted = Boolean(focusId && (focused || relatedNodeIds.has(node.id)) && !selected);
+        const dimmed = Boolean(focusId && !focused && !relatedNodeIds.has(node.id));
+        const displayRadius = selected ? radius + 2 : radius;
+        ctx.save();
+        if (selected) {
+          const fill = ctx.createRadialGradient(
+            node.x - displayRadius * 0.35,
+            node.y - displayRadius * 0.4,
+            displayRadius * 0.08,
+            node.x,
+            node.y,
+            displayRadius * 1.15,
+          );
+          fill.addColorStop(0, '#78b5ff');
+          fill.addColorStop(0.52, '#2b8cff');
+          fill.addColorStop(1, '#0668f7');
+          ctx.fillStyle = fill;
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2.6;
+          ctx.shadowColor = 'rgba(22, 119, 255, 0.32)';
+          ctx.shadowBlur = 16;
+        } else {
+          ctx.fillStyle = dimmed
+            ? GRAPH_NODE_DIMMED
+            : highlighted || hovered
+              ? GRAPH_NODE_HIGHLIGHT
+              : GRAPH_NODE_DEFAULT;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.72)';
+          ctx.lineWidth = 1;
+        }
         ctx.beginPath();
-        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+        ctx.arc(node.x, node.y, displayRadius, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
+        ctx.restore();
 
         if (transformRef.current.scale > 0.42 || selected || hovered) {
-          ctx.font = `${selected ? 13 : 11}px Inter, system-ui, sans-serif`;
-          ctx.fillStyle = selected || hovered ? '#111827' : '#4b5563';
+          ctx.font = `${selected ? 700 : highlighted || hovered ? 600 : 400} ${selected ? 12 : 11}px Inter, system-ui, sans-serif`;
+          ctx.fillStyle = dimmed
+            ? GRAPH_LABEL_DIMMED
+            : selected || highlighted || hovered
+              ? GRAPH_LABEL_ACTIVE
+              : GRAPH_LABEL_DEFAULT;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'top';
-          ctx.fillText(truncate(node.label, 26), node.x, node.y + radius + 5);
+          ctx.fillText(truncate(node.label, 26), node.x, node.y + displayRadius + 5);
         }
       });
 
