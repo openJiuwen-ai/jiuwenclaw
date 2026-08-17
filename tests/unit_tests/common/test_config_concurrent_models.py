@@ -60,7 +60,7 @@ def _make_entry(name: str) -> dict[str, Any]:
 def patched_config(tmp_path: Path, monkeypatch):
     cfg = tmp_path / "config.yaml"
     _seed_config(cfg)
-    monkeypatch.setattr(cfg_mod, "CONFIG_YAML_PATH", cfg)
+    monkeypatch.setattr(cfg_mod, "get_config_file", lambda: cfg)
     return cfg
 
 

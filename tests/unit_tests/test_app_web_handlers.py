@@ -1459,8 +1459,8 @@ def test_update_channel_subsection_in_config_persists_to_disk(tmp_path, monkeypa
     with open(temp_config, "w", encoding="utf-8") as f:
         yaml.dump(initial_data, f)
 
-    # 2. monkeypatch CONFIG_YAML_PATH 指向临时文件
-    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+    # 2. monkeypatch get_config_file 指向临时文件
+    monkeypatch.setattr(cfg, "get_config_file", lambda: temp_config)
 
     # 3. 调用被测试函数——写入 feishu apps 配置
     feishu_apps = [
@@ -1497,7 +1497,7 @@ def test_update_channel_subsection_in_config_creates_missing_sections(tmp_path, 
     with open(temp_config, "w", encoding="utf-8") as f:
         yaml.dump({"app_version": "2.0.0"}, f)
 
-    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+    monkeypatch.setattr(cfg, "get_config_file", lambda: temp_config)
 
     cfg.update_channel_subsection_in_config("xiaoyi", "apps", [{"name": "默认应用", "ak": "ak_1"}])
 
@@ -1528,7 +1528,7 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     with open(temp_config, "w", encoding="utf-8") as f:
         yaml.dump(initial_data, f)
 
-    monkeypatch.setattr(cfg, "CONFIG_YAML_PATH", temp_config)
+    monkeypatch.setattr(cfg, "get_config_file", lambda: temp_config)
 
     # 写入新数据覆盖
     new_apps = [{"name": "新应用", "app_id": "new_id"}]
