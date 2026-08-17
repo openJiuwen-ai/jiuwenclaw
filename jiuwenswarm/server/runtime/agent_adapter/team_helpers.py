@@ -2393,6 +2393,12 @@ async def _consume_stream_with_query(
                     # （leader 不在 _ROLE_FANOUT 中，落到 [godview]）。
                     parsed = _enrich_leader_event(parsed, chunk)
                 parsed = _truncate_team_tool_result_event(parsed)
+                if parsed.get("event_type") == "chat.ask_user_question":
+                    # 透传事件默认不带 session_id；relay 桥接提问/审批回答时
+                    # 依赖它定位本 session，缺失会退化为哈希兜底、把回答寄到
+                    # 不存在的会话（见 relay-claw docs/architecture/
+                    # team-ask-user-question-lost-answer-analysis.md）。
+                    parsed.setdefault("session_id", session_id)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
                     activation_kind = str(parsed.get("activation_kind") or "").strip()

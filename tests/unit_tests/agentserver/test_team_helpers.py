@@ -4877,3 +4877,106 @@ def test_persist_team_file_monitor_roots_noop_when_unchanged(monkeypatch: pytest
     team_helpers._persist_team_file_monitor_roots("sess-1", team_spec)
 
     assert len(written) == 0
+
+
+@pytest.mark.anyio
+async def test_consume_stream_injects_session_id_into_leader_ask_user_question(monkeypatch):
+    """leader 的 chat.ask_user_question 透传事件必须带 session_id。
+
+    relay 桥接提问/审批回答时优先取 payload.session_id；缺失会退化为
+    sha256(userId+agentId+threadId) 哈希兜底，把回答寄到不存在的会话。
+    """
+    broadcasted: list[dict[str, Any]] = []
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def broadcast_event(session_id: str, event: dict) -> None:
+            broadcasted.append(event)
+
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def clear_active_runtime(session_id: str) -> None:
+            pass
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="__interaction__",
+            role=TeamRole.LEADER,
+            payload={"id": "call_test_ask_1", "value": {}},
+        )
+
+    monkeypatch.setattr(team_helpers, "_run_agent_team_streaming", _fake_stream)
+    monkeypatch.setattr(
+        team_helpers,
+        "parse_stream_chunk",
+        lambda chunk: {
+            "event_type": "chat.ask_user_question",
+            "request_id": "call_test_ask_1",
+            "questions": [{"question": "q1", "options": []}],
+            "source": "ask_user_interrupt",
+        },
+    )
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "officeclaw",
+        "sess-ask-1",
+        SimpleNamespace(team_name="spec-team"),
+        "hello",
+    )
+
+    ask_events = [e for e in broadcasted if e.get("event_type") == "chat.ask_user_question"]
+    assert len(ask_events) == 1
+    assert ask_events[0]["session_id"] == "sess-ask-1"
+
+
+@pytest.mark.anyio
+async def test_consume_stream_does_not_inject_session_id_into_other_events(monkeypatch):
+    """非 chat.ask_user_question 的透传事件不被注入 session_id（控制爆炸半径）。"""
+    broadcasted: list[dict[str, Any]] = []
+
+    class _FakeManager(_InactiveTeamRuntimeManagerMixin):
+        @staticmethod
+        def broadcast_event(session_id: str, event: dict) -> None:
+            broadcasted.append(event)
+
+        @staticmethod
+        def get_monitor_handler(session_id: str):
+            return None
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def clear_active_runtime(session_id: str) -> None:
+            pass
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(type="llm_output", role=TeamRole.LEADER, payload="hi")
+
+    monkeypatch.setattr(team_helpers, "_run_agent_team_streaming", _fake_stream)
+    monkeypatch.setattr(
+        team_helpers,
+        "parse_stream_chunk",
+        lambda chunk: {"event_type": "chat.delta", "content": "hi"},
+    )
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+
+    await _TeamHelpersTestApi.consume_stream_with_query(
+        "officeclaw",
+        "sess-delta-1",
+        SimpleNamespace(team_name="spec-team"),
+        "hello",
+    )
+
+    delta_events = [e for e in broadcasted if e.get("event_type") == "chat.delta"]
+    assert len(delta_events) == 1
+    assert "session_id" not in delta_events[0]
