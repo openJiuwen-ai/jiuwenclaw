@@ -12854,16 +12854,25 @@ class JiuWenSwarmDeepAdapter:
                 tenant_agent_id, tenant_service_id, _workspace_key = (
                     TenantAgentPool.extract_ids(request)
                 )
+                team_stream_kwargs = {
+                    "config_base": self._config_base_cache,
+                    "sessions_root": resolve_tenant_sessions_dir(
+                        tenant_service_id,
+                        tenant_agent_id,
+                    ),
+                }
+                if (
+                    evolution_slash_command_name(str(inputs.get("query") or ""))
+                    == "evolve_rebuild"
+                ):
+                    team_stream_kwargs["rebuild_skill"] = (
+                        self.generate_evolution_merge_version
+                    )
                 async for chunk in process_team_message_stream(
                     request,
                     inputs,
                     self._instance,
-                    config_base=self._config_base_cache,
-                    sessions_root=resolve_tenant_sessions_dir(
-                        tenant_service_id,
-                        tenant_agent_id,
-                    ),
-                    rebuild_skill=self.generate_evolution_merge_version,
+                    **team_stream_kwargs,
                 ):
                     maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
                     yield chunk

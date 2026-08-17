@@ -575,14 +575,12 @@ def _map_member_public_private_fields(
     desc = str(raw.get("desc") or raw.get("persona") or default_desc or "").strip()
     prompt = str(raw.get("prompt") or "").strip()
     if not prompt:
-        prompt = "\n\n".join(
-            part
-            for part in (
-                str(raw.get("persona") or "").strip(),
-                str(raw.get("prompt_hint") or "").strip(),
-            )
-            if part
-        )
+        prompt_parts: list[str] = []
+        for value in (raw.get("persona"), raw.get("prompt_hint")):
+            part = str(value or "").strip()
+            if part:
+                prompt_parts.append(part)
+        prompt = "\n\n".join(prompt_parts)
     rule = _team_member_display_name_rule(language)
     prompt = f"{prompt}\n\n{rule}" if prompt else rule
     return {"desc": desc, "prompt": prompt}

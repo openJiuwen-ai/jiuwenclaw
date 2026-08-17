@@ -166,17 +166,19 @@ def _resolve_snapshot_model_ref(model: dict[str, Any], config_base: dict[str, An
     if not isinstance(matched_client_config, dict):
         return None
     model_ref = build_model_identity_reference(model_name, matched_client_config)
-    owner_count = sum(
-        1
-        for entry in defaults
-        if isinstance(entry, dict)
-        and isinstance(entry.get("model_client_config"), dict)
-        and build_model_identity_reference(
-            entry["model_client_config"].get("model_name"),
-            entry["model_client_config"],
+    owner_count = 0
+    for entry in defaults:
+        if not isinstance(entry, dict):
+            continue
+        candidate_config = entry.get("model_client_config")
+        if not isinstance(candidate_config, dict):
+            continue
+        candidate_ref = build_model_identity_reference(
+            candidate_config.get("model_name"),
+            candidate_config,
         )
-        == model_ref
-    )
+        if candidate_ref == model_ref:
+            owner_count += 1
     return model_ref if owner_count == 1 else None
 
 
