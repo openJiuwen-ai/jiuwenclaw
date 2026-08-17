@@ -46,10 +46,13 @@ from jiuwenswarm.server.runtime.session.session_metadata import (
     update_session_metadata,
 )
 from jiuwenswarm.server.runtime.session.session_history import append_history_record
-from jiuwenswarm.server.request_context import (
-    XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY,
-    build_xiaoyi_model_trace_headers,
+from jiuwenswarm.common.invocation_context import (
+    TRACE_CONTEXT_METADATA_KEY,
+    TRACE_HEADER_EXPORTER_METADATA_KEY,
+    get_current_invocation_context,
+    trace_context_to_dict,
 )
+from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
@@ -277,11 +280,71 @@ class _FollowupInteractBoundaryResult:
     first_request_ready: bool
 
 
+async def _interact_with_request_metadata(
+    team_manager: Any,
+    session_id: str,
+    query: Any,
+    request_metadata: dict[str, Any] | None,
+) -> tuple[bool, str | None]:
+    interact = team_manager.interact
+    try:
+        parameters = inspect.signature(interact).parameters.values()
+        accepts_metadata = any(
+            parameter.name == "request_metadata"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        accepts_metadata = True
+    if accepts_metadata:
+        return await interact(
+            session_id,
+            query,
+            request_metadata=request_metadata,
+        )
+    return await interact(session_id, query)
+
+
+def build_team_request_metadata(request: Any) -> dict[str, Any]:
+    """Build canonical Team metadata, including the current TraceContext."""
+    if request is None:
+        raise TypeError("request must be an AgentRequest")
+
+    metadata = dict(getattr(request, "metadata", None) or {})
+    metadata.pop(TRACE_CONTEXT_METADATA_KEY, None)
+    metadata.pop(TRACE_HEADER_EXPORTER_METADATA_KEY, None)
+    invocation = get_current_invocation_context()
+    if invocation is None:
+        try:
+            invocation = build_invocation_context(request)
+        except TypeError:
+            invocation = None
+    trace = invocation.trace if invocation is not None else None
+    if trace is not None:
+        metadata[TRACE_CONTEXT_METADATA_KEY] = trace_context_to_dict(trace)
+    exporter_name = (
+        invocation.metadata.get(TRACE_HEADER_EXPORTER_METADATA_KEY)
+        if invocation is not None and isinstance(invocation.metadata, dict)
+        else None
+    )
+    if isinstance(exporter_name, str) and exporter_name.strip():
+        metadata[TRACE_HEADER_EXPORTER_METADATA_KEY] = exporter_name.strip()
+    params = getattr(request, "params", None)
+    if isinstance(params, dict):
+        metadata.setdefault("mode", params.get("mode"))
+        metadata.setdefault(
+            "supports_user_interaction",
+            params.get("supports_user_interaction") is not False,
+        )
+    return metadata
+
+
 async def _deliver_followup_interact_across_boundary(
     team_manager: Any,
     session_id: str,
     query: Any,
     *,
+    request_metadata: dict[str, Any] | None = None,
     initial_reason: str | None = None,
     timeout_sec: float = _FOLLOWUP_INTERACT_BOUNDARY_TIMEOUT_SEC,
     poll_interval_sec: float = _FOLLOWUP_INTERACT_POLL_INTERVAL_SEC,
@@ -296,7 +359,12 @@ async def _deliver_followup_interact_across_boundary(
         await asyncio.sleep(sleep_sec)
         if not await _team_session_has_runtime(team_manager, session_id):
             return _FollowupInteractBoundaryResult(success=False, reason=last_reason, first_request_ready=True)
-        success, reason = await team_manager.interact(session_id, query)
+        success, reason = await _interact_with_request_metadata(
+            team_manager,
+            session_id,
+            query,
+            request_metadata,
+        )
         if success:
             return _FollowupInteractBoundaryResult(success=True, reason=None, first_request_ready=False)
         last_reason = reason
@@ -308,6 +376,27 @@ async def _deliver_followup_interact_across_boundary(
         reason=last_reason,
         first_request_ready=first_request_ready,
     )
+
+
+async def _deliver_followup_with_request_metadata(
+    team_manager: Any,
+    session_id: str,
+    query: Any,
+    *,
+    request_metadata: dict[str, Any] | None,
+    initial_reason: str | None,
+) -> _FollowupInteractBoundaryResult:
+    delivery = _deliver_followup_interact_across_boundary
+    parameters = inspect.signature(delivery).parameters.values()
+    accepts_metadata = any(
+        parameter.name == "request_metadata"
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    kwargs: dict[str, Any] = {"initial_reason": initial_reason}
+    if accepts_metadata:
+        kwargs["request_metadata"] = request_metadata
+    return await delivery(team_manager, session_id, query, **kwargs)
 
 
 def _build_team_event_chunk_meta(event: Any) -> tuple[dict | None, dict]:
@@ -1509,16 +1598,7 @@ async def process_team_message_stream(
                 session_id,
                 _safe_query_preview(query),
             )
-        request_metadata.pop(XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY, None)
-        trace_headers = build_xiaoyi_model_trace_headers(request)
-        if trace_headers:
-            request_metadata[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = trace_headers
-        if isinstance(getattr(request, "params", None), dict):
-            request_metadata.setdefault("mode", request.params.get("mode"))
-            request_metadata.setdefault(
-                "supports_user_interaction",
-                request.params.get("supports_user_interaction") is not False,
-            )
+        request_metadata = build_team_request_metadata(request)
         resolved_mode = str(request_metadata.get("mode") or "").strip()
         # Page-selected model name (from chat page model selector). Used as a
         # fallback for team members whose ``modes.team.agents.*.model`` is not
@@ -1642,7 +1722,12 @@ async def process_team_message_stream(
             # 之前 follow-up 也创建 waiter 导致 _broadcast_event 广播到两个 queue，
             # 同一事件被 yield 两次 → Gateway dispatch 两次 → 重复消息。
             if query:
-                success, reason = await team_manager.interact(session_id, query)
+                success, reason = await _interact_with_request_metadata(
+                    team_manager,
+                    session_id,
+                    query,
+                    request_metadata,
+                )
                 if not success:
                     logger.warning(
                         "[TeamHelpers] interact failed: channel_id=%s session_id=%s reason=%s query=%s",
@@ -1653,10 +1738,11 @@ async def process_team_message_stream(
                     )
                     first_request_ready = False
                     if _is_followup_delivery_boundary_reason(reason):
-                        boundary_result = await _deliver_followup_interact_across_boundary(
+                        boundary_result = await _deliver_followup_with_request_metadata(
                             team_manager,
                             session_id,
                             query,
+                            request_metadata=request_metadata,
                             initial_reason=reason,
                         )
                         success = boundary_result.success

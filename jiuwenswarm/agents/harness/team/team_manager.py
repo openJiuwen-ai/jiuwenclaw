@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
@@ -53,7 +54,10 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
 )
 from jiuwenswarm.agents.harness.team.handlers.team_monitor_handler import TeamMonitorHandler
 from jiuwenswarm.agents.harness.team import kv_cache_hooks
-from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
+from jiuwenswarm.agents.harness.team.remote_member_bootstrap import (
+    notify_remote_members_trace_context_update,
+    release_a2x_reservations_for_session,
+)
 from jiuwenswarm.agents.harness.team.team_skill_links import sync_skill_dir_links
 from jiuwenswarm.common.config import (
     get_config,
@@ -71,7 +75,12 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.server.request_context import get_xiaoyi_model_trace_headers
+from jiuwenswarm.common.invocation_context import (
+    TRACE_CONTEXT_METADATA_KEY,
+    TRACE_HEADER_EXPORTER_METADATA_KEY,
+    trace_context_from_dict,
+)
+from jiuwenswarm.common.invocation_context.model_trace import export_trace_headers_for_name
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -732,7 +741,7 @@ class TeamManager:
             channel_id=channel_id,
             request_metadata=request_metadata,
         )
-        self._apply_xiaoyi_model_trace_headers(spec, request_metadata=request_metadata)
+        self._apply_trace_context(spec, request_metadata=request_metadata)
         return spec
 
     @staticmethod
@@ -749,15 +758,26 @@ class TeamManager:
                 object.__setattr__(spec, "enable_team_plan", True)
 
     @staticmethod
-    def _apply_xiaoyi_model_trace_headers(
+    def _apply_trace_context(
         spec: TeamAgentSpec,
         *,
         request_metadata: dict[str, Any] | None,
-    ) -> None:
-        """Attach request-scoped Xiaoyi trace headers to every team model path."""
-        trace_headers = get_xiaoyi_model_trace_headers(request_metadata)
+    ) -> dict[str, str]:
+        """Export a transported TraceContext at each Team model boundary."""
+        payload = (request_metadata or {}).get(TRACE_CONTEXT_METADATA_KEY)
+        if payload is None:
+            return {}
+        try:
+            trace = trace_context_from_dict(payload)
+        except ValueError as exc:
+            logger.warning("[TeamManager] ignored invalid trace context: %s", exc)
+            return {}
+        trace_headers = export_trace_headers_for_name(
+            trace,
+            (request_metadata or {}).get(TRACE_HEADER_EXPORTER_METADATA_KEY),
+        )
         if not trace_headers:
-            return
+            return {}
 
         def merge_headers(metadata: dict[str, Any] | None) -> dict[str, Any]:
             merged_metadata = dict(metadata or {})
@@ -767,16 +787,105 @@ class TeamManager:
             merged_metadata["client"] = client_config
             return merged_metadata
 
+        def merge_serialized_model_configs(value: Any) -> None:
+            """Inject headers into model configs carried by declarative capability specs."""
+            if isinstance(value, dict):
+                client_config = value.get("model_client_config")
+                if isinstance(client_config, dict):
+                    custom_headers = dict(client_config.get("custom_headers") or {})
+                    client_config["custom_headers"] = {
+                        **custom_headers,
+                        **trace_headers,
+                    }
+                for child in value.values():
+                    merge_serialized_model_configs(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    merge_serialized_model_configs(child)
+
+        def merge_agent_capability_model_configs(agent_spec: Any) -> None:
+            for rail_spec in getattr(agent_spec, "rails", None) or ():
+                merge_serialized_model_configs(getattr(rail_spec, "params", None))
+            for subagent_spec in getattr(agent_spec, "subagents", None) or ():
+                merge_agent_capability_model_configs(subagent_spec)
+
         for pool_entry in spec.model_pool:
             pool_entry.metadata = merge_headers(pool_entry.metadata)
         if spec.model_router is not None:
             spec.model_router.metadata = merge_headers(spec.model_router.metadata)
         for agent_spec in spec.agents.values():
-            if agent_spec.model is None:
+            if agent_spec.model is not None:
+                client_config = agent_spec.model.model_client_config
+                custom_headers = dict(client_config.custom_headers or {})
+                client_config.custom_headers = {**custom_headers, **trace_headers}
+            merge_agent_capability_model_configs(agent_spec)
+        return trace_headers
+
+    def _refresh_live_evolution_rail_trace(
+        self,
+        session_id: str,
+        trace_headers: dict[str, str],
+    ) -> None:
+        """Refresh long-lived evolution rails with the current request trace."""
+        if not trace_headers:
+            return
+        rails = [
+            self._team_skill_rails.get(session_id),
+            *self._team_member_skill_evolution_rails.get(session_id, []),
+        ]
+        for rail in rails:
+            if rail is None:
                 continue
-            client_config = agent_spec.model.model_client_config
-            custom_headers = dict(client_config.custom_headers or {})
-            client_config.custom_headers = {**custom_headers, **trace_headers}
+            try:
+                evolver = getattr(rail, "evolver")
+                current_llm = evolver.llm
+                client_config = copy.deepcopy(current_llm.model_client_config)
+                client_config.custom_headers = {
+                    **dict(client_config.custom_headers or {}),
+                    **trace_headers,
+                }
+                update_llm = getattr(rail, "update_llm")
+                update_llm(
+                    Model(
+                        model_client_config=client_config,
+                        model_config=copy.deepcopy(current_llm.model_config),
+                    ),
+                    evolver.model,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] failed to refresh evolution rail trace: %s",
+                    exc,
+                )
+
+    async def _refresh_active_team_trace(
+        self,
+        session_id: str,
+        team_name: str,
+        request_metadata: dict[str, Any] | None,
+    ) -> Any | None:
+        if not request_metadata or TRACE_CONTEXT_METADATA_KEY not in request_metadata:
+            return
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+        runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+        pool = getattr(runtime_mgr, "pool", None) if runtime_mgr is not None else None
+        get_active = getattr(pool, "get", None)
+        if not callable(get_active):
+            return
+        active = await get_active(team_name)
+        team_agent = getattr(active, "agent", None)
+        configurator = getattr(team_agent, "_configurator", None)
+        context = getattr(configurator, "ctx", None)
+        spec = getattr(context, "team_spec", None)
+        if spec is None:
+            return
+        trace_headers = self._apply_trace_context(spec, request_metadata=request_metadata)
+        update_model_pool = getattr(team_agent, "update_model_pool", None)
+        if callable(update_model_pool):
+            update_model_pool(list(spec.model_pool))
+        self._refresh_live_evolution_rail_trace(session_id, trace_headers)
+        return team_agent
 
     async def prepare_runtime_activation(self, session_id: str, team_name: str) -> None:
         if self._is_distributed_mode(get_config()):
@@ -1203,7 +1312,7 @@ class TeamManager:
             channel_id=channel_id,
             request_metadata=request_metadata,
         )
-        self._apply_xiaoyi_model_trace_headers(spec, request_metadata=request_metadata)
+        self._apply_trace_context(spec, request_metadata=request_metadata)
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
 
@@ -1293,7 +1402,13 @@ class TeamManager:
                 request_metadata,
             )
 
-    async def interact(self, session_id: str, user_input: Any) -> tuple[bool, str | None]:
+    async def interact(
+        self,
+        session_id: str,
+        user_input: Any,
+        *,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> tuple[bool, str | None]:
         try:
             if not self.is_runtime_active(session_id):
                 restored = await self.wait_for_resumable_runtime(session_id)
@@ -1312,6 +1427,18 @@ class TeamManager:
                     list(self._active_team_names),
                 )
                 return False, "not_active"
+
+            team_agent = await self._refresh_active_team_trace(
+                session_id,
+                team_name,
+                request_metadata,
+            )
+            if team_agent is not None:
+                await notify_remote_members_trace_context_update(
+                    team_agent,
+                    session_id,
+                    request_metadata=request_metadata,
+                )
 
             # Last stop before the message enters the team runner interact path.
             server_logger.info(

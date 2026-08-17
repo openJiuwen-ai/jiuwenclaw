@@ -19,6 +19,8 @@ from jiuwenswarm.common.reasoning_injector import (
     build_reasoning_model_request_kwargs,
 )
 from jiuwenswarm.common.utils import logger
+from jiuwenswarm.common.invocation_context.model_trace import TraceAwareModel
+from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
 
 from .alarm_tools import create_alarm, delete_alarm, modify_alarm, search_alarms
 from .calendar_tools import create_calendar_event, search_calendar_event
@@ -190,9 +192,10 @@ def _build_default_model() -> Model:
             model_name=model_name,
         )
     )
-    return Model(
+    return TraceAwareModel(
         model_client_config=ModelClientConfig(**model_client_config),
         model_config=request_config,
+        trace_header_exporters=get_xiaoyi_trace_header_exporters(),
     )
 
 

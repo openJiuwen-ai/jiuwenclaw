@@ -22,6 +22,7 @@ from jiuwenswarm.common.gui_rpc.models import (
     GuiRpcResponse,
 )
 from jiuwenswarm.common.invocation_context.models import InvocationContext
+from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_invocation_extension
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def build_gui_rpc_request(
             "INVALID_CONTEXT",
             "xiaoyi_gui_agent can only be used for a Xiaoyi request",
         )
-    xiaoyi = invocation.xiaoyi
+    xiaoyi = get_xiaoyi_invocation_extension(invocation)
     xiaoyi_session_id = _first_text(
         xiaoyi.root_session_id if xiaoyi else None,
         xiaoyi.params_session_id if xiaoyi else None,

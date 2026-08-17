@@ -9,8 +9,9 @@ from typing import Any
 
 from .models import (
     INVOCATION_CONTEXT_VERSION,
+    TRACE_CONTEXT_VERSION,
     InvocationContext,
-    XiaoyiInvocationContext,
+    TraceContext,
 )
 
 
@@ -50,6 +51,51 @@ def _optional_mapping(value: Any, field_name: str) -> dict[str, Any] | None:
     return copy.deepcopy(dict(value))
 
 
+def _trace_context_to_dict(context: TraceContext | None) -> dict[str, Any] | None:
+    if context is None:
+        return None
+    if not isinstance(context, TraceContext):
+        raise TypeError("trace must be a TraceContext or null")
+    return {
+        "version": int(context.version),
+        "trace_id": context.trace_id,
+        "conversation_id": context.conversation_id,
+        "interaction_id": context.interaction_id,
+    }
+
+
+def _trace_context_from_dict(payload: Any) -> TraceContext | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("trace must be an object or null")
+    version = payload.get("version")
+    if version != TRACE_CONTEXT_VERSION:
+        raise ValueError(f"unsupported TraceContext version: {version!r}")
+    return TraceContext(
+        version=TRACE_CONTEXT_VERSION,
+        trace_id=_required_text(payload.get("trace_id"), "trace.trace_id"),
+        conversation_id=_optional_text(
+            payload.get("conversation_id"), "trace.conversation_id"
+        ),
+        interaction_id=_optional_text(
+            payload.get("interaction_id"), "trace.interaction_id"
+        ),
+    )
+
+
+def trace_context_to_dict(context: TraceContext | None) -> dict[str, Any] | None:
+    """Serialize a trace context for request metadata transport."""
+
+    return _trace_context_to_dict(context)
+
+
+def trace_context_from_dict(payload: Any) -> TraceContext | None:
+    """Decode a trace context received through request metadata."""
+
+    return _trace_context_from_dict(payload)
+
+
 def invocation_context_to_dict(context: InvocationContext) -> dict[str, Any]:
     """Encode *context* into a detached, JSON-compatible mapping.
 
@@ -62,18 +108,6 @@ def invocation_context_to_dict(context: InvocationContext) -> dict[str, Any]:
     if not isinstance(context, InvocationContext):
         raise TypeError("context must be an InvocationContext")
 
-    xiaoyi_payload: dict[str, Any] | None = None
-    if context.xiaoyi is not None:
-        xiaoyi_payload = {
-            "root_session_id": context.xiaoyi.root_session_id,
-            "params_session_id": context.xiaoyi.params_session_id,
-            "task_id": context.xiaoyi.task_id,
-            "message_id": context.xiaoyi.message_id,
-            "device_id": context.xiaoyi.device_id,
-            "scheduled_device": copy.deepcopy(context.xiaoyi.scheduled_device),
-            "cron": copy.deepcopy(context.xiaoyi.cron),
-        }
-
     return {
         "version": int(context.version),
         "invocation_id": context.invocation_id,
@@ -81,7 +115,7 @@ def invocation_context_to_dict(context: InvocationContext) -> dict[str, Any]:
         "session_id": context.session_id,
         "channel_id": context.channel_id,
         "chat_id": context.chat_id,
-        "xiaoyi": xiaoyi_payload,
+        "trace": _trace_context_to_dict(context.trace),
         "metadata": copy.deepcopy(dict(context.metadata or {})),
     }
 
@@ -108,30 +142,7 @@ def invocation_context_from_dict(payload: dict[str, Any]) -> InvocationContext:
     session_id = _optional_text(payload.get("session_id"), "session_id")
     chat_id = _optional_text(payload.get("chat_id"), "chat_id")
 
-    xiaoyi_raw = payload.get("xiaoyi")
-    xiaoyi: XiaoyiInvocationContext | None
-    if xiaoyi_raw is None:
-        xiaoyi = None
-    elif isinstance(xiaoyi_raw, Mapping):
-        xiaoyi = XiaoyiInvocationContext(
-            root_session_id=_optional_text(
-                xiaoyi_raw.get("root_session_id"), "xiaoyi.root_session_id"
-            ),
-            params_session_id=_optional_text(
-                xiaoyi_raw.get("params_session_id"), "xiaoyi.params_session_id"
-            ),
-            task_id=_optional_text(xiaoyi_raw.get("task_id"), "xiaoyi.task_id"),
-            message_id=_optional_text(
-                xiaoyi_raw.get("message_id"), "xiaoyi.message_id"
-            ),
-            device_id=_optional_text(xiaoyi_raw.get("device_id"), "xiaoyi.device_id"),
-            scheduled_device=_optional_mapping(
-                xiaoyi_raw.get("scheduled_device"), "xiaoyi.scheduled_device"
-            ),
-            cron=_optional_mapping(xiaoyi_raw.get("cron"), "xiaoyi.cron"),
-        )
-    else:
-        raise ValueError("xiaoyi must be an object or null")
+    trace = _trace_context_from_dict(payload.get("trace"))
 
     metadata_raw = payload.get("metadata")
     if metadata_raw is None:
@@ -148,7 +159,7 @@ def invocation_context_from_dict(payload: dict[str, Any]) -> InvocationContext:
         session_id=session_id,
         channel_id=channel_id,
         chat_id=chat_id,
-        xiaoyi=xiaoyi,
+        trace=trace,
         metadata=metadata,
     )
 

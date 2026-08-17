@@ -11,10 +11,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from jiuwenswarm.common.invocation_context import (
+    TRACE_CONTEXT_METADATA_KEY,
+    TRACE_HEADER_EXPORTER_METADATA_KEY,
+)
+from jiuwenswarm.common.schema.agent import AgentRequest
 from openjiuwen.agent_teams.schema.team import TeamRole
 
 from jiuwenswarm.server.runtime.agent_adapter import evolution_helpers
 from jiuwenswarm.server.runtime.agent_adapter import team_helpers
+
+build_team_request_metadata = team_helpers.build_team_request_metadata
 
 
 def _broadcast_recorder(events: list[dict], manager=None):
@@ -38,6 +46,31 @@ def test_team_event_queue_is_bounded() -> None:
 
     assert queue.maxsize == team_helpers.TEAM_EVENT_QUEUE_MAXSIZE
     assert queue.maxsize > 0
+
+
+def test_build_team_request_metadata_preserves_request_fields_and_trace() -> None:
+    request = AgentRequest(
+        session_id="sess-team-metadata",
+        request_id="req-team-metadata",
+        channel_id="xiaoyi",
+        metadata={"xiaoyi_task_id": "root&21&abc&0"},
+        params={"mode": "team", "supports_user_interaction": False},
+    )
+
+    metadata = build_team_request_metadata(request)
+
+    assert metadata == {
+        "xiaoyi_task_id": "root&21&abc&0",
+        "mode": "team",
+        "supports_user_interaction": False,
+        TRACE_HEADER_EXPORTER_METADATA_KEY: "xiaoyi",
+        TRACE_CONTEXT_METADATA_KEY: {
+            "version": 1,
+            "trace_id": "root&21&abc&0",
+            "conversation_id": "root",
+            "interaction_id": "21",
+        },
+    }
 
 
 def test_persist_team_history_event_keeps_human_spawn_details(
@@ -1463,7 +1496,7 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch,
 @pytest.mark.anyio
 async def test_process_team_message_stream_emits_deferred_marker_for_followup(monkeypatch):
     class _FakeManager(_InactiveTeamRuntimeManagerMixin):
-        interact_calls: list[tuple[str, str]] = []
+        interact_calls: list[tuple[str, str, dict[str, Any] | None]] = []
 
         @staticmethod
         def has_stream_task(session_id: str) -> bool:
@@ -1475,17 +1508,17 @@ async def test_process_team_message_stream_emits_deferred_marker_for_followup(mo
             return SimpleNamespace(team_name="unit-team")
 
         @classmethod
-        async def interact(cls, session_id: str, query: str):
-            cls.interact_calls.append((session_id, query))
+        async def interact(cls, session_id: str, query: str, *, request_metadata=None):
+            cls.interact_calls.append((session_id, query, request_metadata))
             return True, None
 
     monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
 
-    request = SimpleNamespace(
+    request = AgentRequest(
         session_id="sess-team-followup",
         request_id="req-team-followup",
         channel_id="web",
-        metadata=None,
+        metadata={"xiaoyi_task_id": "root&19&abc&0"},
         params={"mode": "team"},
     )
     inputs = {"query": "$human-reporter claim task"}
@@ -1499,7 +1532,22 @@ async def test_process_team_message_stream_emits_deferred_marker_for_followup(mo
         chunks.append(chunk)
 
     assert _FakeManager.interact_calls == [
-        ("sess-team-followup", "$human-reporter claim task"),
+        (
+            "sess-team-followup",
+            "$human-reporter claim task",
+            {
+                "xiaoyi_task_id": "root&19&abc&0",
+                "mode": "team",
+                "supports_user_interaction": True,
+                TRACE_HEADER_EXPORTER_METADATA_KEY: "xiaoyi",
+                TRACE_CONTEXT_METADATA_KEY: {
+                    "version": 1,
+                    "trace_id": "root&19&abc&0",
+                    "conversation_id": "root",
+                    "interaction_id": "19",
+                },
+            },
+        ),
     ]
     # follow-up short stream emits chat.processing_status_deferred
     # to tell the Gateway not to auto-emit is_processing=False, preventing

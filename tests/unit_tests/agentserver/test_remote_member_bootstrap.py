@@ -35,9 +35,12 @@ build_team_destroy_envelope = _mod.build_team_destroy_envelope
 apply_team_destroy_envelope_from_control_plane = _mod.apply_team_destroy_envelope_from_control_plane
 apply_bootstrap_envelope_from_control_plane = _mod.apply_bootstrap_envelope_from_control_plane
 apply_member_shutdown_envelope_from_control_plane = _mod.apply_member_shutdown_envelope_from_control_plane
+apply_trace_context_update_envelope_from_control_plane = _mod.apply_trace_context_update_envelope_from_control_plane
+notify_remote_members_trace_context_update = _mod.notify_remote_members_trace_context_update
 finalize_remote_member_shutdown_on_teammate = _mod.finalize_remote_member_shutdown_on_teammate
 notify_remote_member_shutdown_finalize = _mod.notify_remote_member_shutdown_finalize
 REMOTE_TEAM_DESTROY_DIRECT_EVENT_TYPE = _mod.REMOTE_TEAM_DESTROY_DIRECT_EVENT_TYPE
+REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE = _mod.REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE
 precheck_and_reserve_remote_spawn = _mod.precheck_and_reserve_remote_spawn
 RemoteSpawnPrecheck = _mod.RemoteSpawnPrecheck
 
@@ -1471,3 +1474,114 @@ async def test_shutdown_member_wrapper_notifies_remote_finalize_for_temporary(mo
 
     assert notified == [("sid-temp", "calc-expert", True)]
     assert wait_polls == ["calc-expert"]
+
+
+@pytest.mark.asyncio
+async def test_notify_remote_members_trace_context_update_targets_reserved_members(monkeypatch) -> None:
+    reservation = SimpleNamespace(service_id="remote-1", endpoint="tcp://127.0.0.1:29111")
+    monkeypatch.setitem(
+        _mod._A2X_RESERVATIONS_BY_SESSION,
+        "sid-1",
+        [("researcher", reservation, {})],
+    )
+    deliveries: list[dict[str, Any]] = []
+
+    async def fake_notify(**kwargs):
+        deliveries.append(kwargs)
+        return True
+
+    monkeypatch.setattr(_mod, "_notify_reserved_teammate_control_plane", fake_notify)
+    team_agent = SimpleNamespace(
+        spec=SimpleNamespace(
+            team_name="demo-team",
+            leader=SimpleNamespace(member_name="leader"),
+        ),
+        runtime_context=None,
+    )
+
+    delivered = await notify_remote_members_trace_context_update(
+        team_agent,
+        "sid-1",
+        request_metadata={
+            "jiuwenswarm_trace_header_exporter": "xiaoyi",
+            "jiuwenswarm_trace_context": {
+                "version": 1,
+                "trace_id": "root&20&abc&0",
+                "conversation_id": "root",
+                "interaction_id": "20",
+            }
+        },
+    )
+
+    assert delivered == 1
+    assert len(deliveries) == 1
+    assert deliveries[0]["event_type"] == REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE
+    assert deliveries[0]["member_name"] == "researcher"
+    assert deliveries[0]["timeout_s"] == 2.0
+    assert deliveries[0]["envelope"]["session_id"] == "sid-1"
+    assert deliveries[0]["envelope"]["jiuwenswarm_trace_header_exporter"] == "xiaoyi"
+    assert deliveries[0]["envelope"]["jiuwenswarm_trace_context"] == {
+        "version": 1,
+        "trace_id": "root&20&abc&0",
+        "conversation_id": "root",
+        "interaction_id": "20",
+    }
+
+
+@pytest.mark.asyncio
+async def test_trace_context_update_refreshes_dynamic_member_without_bootstrap(monkeypatch) -> None:
+    pool_entry = SimpleNamespace(metadata={"client": {"custom_headers": {"keep": "yes"}}})
+    spec = SimpleNamespace(model_pool=[pool_entry], model_router=None, agents={})
+    update_model_pool = MagicMock()
+    dynamic_agent = SimpleNamespace(
+        _configurator=SimpleNamespace(ctx=SimpleNamespace(team_spec=spec)),
+        update_model_pool=update_model_pool,
+    )
+    monkeypatch.setitem(_mod._DYNAMIC_MEMBER_AGENTS, ("sid-1", "researcher"), dynamic_agent)
+    bootstrap = AsyncMock()
+    monkeypatch.setattr(_mod, "_ensure_dynamic_member_execution_loop", bootstrap)
+    refreshed_evolution_rails: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda: SimpleNamespace(
+            _refresh_live_evolution_rail_trace=lambda session_id, headers: (
+                refreshed_evolution_rails.append((session_id, headers))
+            )
+        ),
+    )
+
+    applied = await apply_trace_context_update_envelope_from_control_plane(
+        envelope={
+            "trace_update_id": "trace-1",
+            "session_id": "sid-1",
+            "member_name": "researcher",
+            "jiuwenswarm_trace_header_exporter": "xiaoyi",
+            "jiuwenswarm_trace_context": {
+                "version": 1,
+                "trace_id": "root&20&abc&0",
+                "conversation_id": "root",
+                "interaction_id": "20",
+            },
+        },
+        source_id="trace-1",
+    )
+
+    assert applied is True
+    assert pool_entry.metadata["client"]["custom_headers"] == {
+        "keep": "yes",
+        "x-hag-trace-id": "root&20&abc&0",
+        "x-session-id": "root",
+        "x-interaction-id": "20",
+    }
+    update_model_pool.assert_called_once_with([pool_entry])
+    assert refreshed_evolution_rails == [
+        (
+            "sid-1",
+            {
+                "x-hag-trace-id": "root&20&abc&0",
+                "x-session-id": "root",
+                "x-interaction-id": "20",
+            },
+        )
+    ]
+    bootstrap.assert_not_awaited()

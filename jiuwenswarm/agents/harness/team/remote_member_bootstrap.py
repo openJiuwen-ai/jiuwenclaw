@@ -25,9 +25,11 @@ import types
 import uuid
 from typing import Any, NamedTuple
 
-from jiuwenswarm.server.request_context import (
-    XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY,
-    get_xiaoyi_model_trace_headers,
+from jiuwenswarm.common.invocation_context import (
+    TRACE_CONTEXT_METADATA_KEY,
+    TRACE_HEADER_EXPORTER_METADATA_KEY,
+    trace_context_from_dict,
+    trace_context_to_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,12 +58,14 @@ _A2X_RESERVATIONS_BY_SESSION: dict[str, list[tuple[str, Any, dict[str, Any]]]] =
 _SHUTDOWN_CLEANUP_TASKS: dict[str, asyncio.Task] = {}
 _REMOTE_SHUTDOWN_TIMEOUT_SEC = 20.0
 _REMOTE_SHUTDOWN_POLL_SEC = 0.25
+_REMOTE_TRACE_UPDATE_TIMEOUT_SEC = 2.0
 
 # Remote claw → leader: JSON body on a normal team P2P message (DB + MESSAGE topic).
 REMOTE_BOOTSTRAP_ACK_TYPE = "jiuwen.remote_bootstrap_ack"
 REMOTE_BOOTSTRAP_DIRECT_EVENT_TYPE = "jiuwen.remote_teammate_bootstrap.direct"
 REMOTE_TEAM_DESTROY_DIRECT_EVENT_TYPE = "jiuwen.remote_team_destroy.direct"
 REMOTE_MEMBER_SHUTDOWN_DIRECT_EVENT_TYPE = "jiuwen.remote_member_shutdown.direct"
+REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE = "jiuwen.remote_trace_context_update.direct"
 _TRANSPORT_BOOTSTRAP_DIRECT_ADDR_KEY = "bootstrap_direct_addr"
 _TRANSPORT_BOOTSTRAP_KNOWN_PEERS_KEY = "bootstrap_known_peers"
 
@@ -609,9 +613,12 @@ def _swarm_assembly_hint(team_agent: Any) -> dict[str, Any]:
         hint["mode"] = mode
     if project_dir:
         hint["project_dir"] = project_dir
-    trace_headers = get_xiaoyi_model_trace_headers(request_metadata)
-    if trace_headers:
-        hint[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = trace_headers
+    trace_context = (request_metadata or {}).get(TRACE_CONTEXT_METADATA_KEY)
+    if isinstance(trace_context, dict):
+        hint[TRACE_CONTEXT_METADATA_KEY] = dict(trace_context)
+    exporter_name = (request_metadata or {}).get(TRACE_HEADER_EXPORTER_METADATA_KEY)
+    if isinstance(exporter_name, str) and exporter_name.strip():
+        hint[TRACE_HEADER_EXPORTER_METADATA_KEY] = exporter_name.strip()
     return hint
 
 
@@ -695,6 +702,45 @@ def build_team_destroy_envelope(
             "endpoint": _normalize_leader_direct_addr(getattr(reservation, "endpoint", "")),
         }
     return body
+
+
+def build_trace_context_update_envelope(
+    team_agent: Any,
+    *,
+    session_id: str,
+    member_name: str,
+    trace_context: dict[str, Any],
+    trace_header_exporter: str | None = None,
+) -> dict[str, Any]:
+    """Build a direct event that refreshes one remote member's model trace."""
+    spec = getattr(team_agent, "spec", None)
+    ctx = getattr(team_agent, "runtime_context", None)
+    team_spec = getattr(ctx, "team_spec", None) if ctx else None
+    team_name = (getattr(team_spec, "team_name", None) if team_spec else None) or (
+        getattr(spec, "team_name", "") if spec else ""
+    )
+    leader_member_name = (getattr(team_spec, "leader_member_name", None) if team_spec else None) or (
+        spec.leader.member_name if spec and getattr(spec, "leader", None) else None
+    )
+    messager = _messager_bootstrap_dict(team_agent)
+    envelope = {
+        "type": "jiuwen.remote_trace_context_update",
+        "version": 1,
+        "trace_update_id": str(uuid.uuid4()),
+        "team_name": team_name,
+        "session_id": str(session_id or "").strip(),
+        "member_name": str(member_name or "").strip(),
+        "leader_member_name": leader_member_name,
+        "leader_agent_id": _normalize_leader_agent_id(
+            messager.get("node_id"),
+            team_name=team_name,
+            leader_member_name=str(leader_member_name or ""),
+        ),
+        TRACE_CONTEXT_METADATA_KEY: dict(trace_context),
+    }
+    if trace_header_exporter:
+        envelope[TRACE_HEADER_EXPORTER_METADATA_KEY] = trace_header_exporter
+    return envelope
 
 
 def _apply_leader_route_from_envelope(team_agent: Any, envelope: dict[str, Any]) -> bool:
@@ -1005,6 +1051,7 @@ async def _notify_reserved_teammate_control_plane(
     id_field: str,
     success_message: str,
     failure_message: str,
+    timeout_s: float = 20.0,
 ) -> bool:
     messager = _team_agent_messager(team_agent)
     peer_agent_id = str(getattr(reservation, "service_id", "") or "").strip()
@@ -1032,7 +1079,10 @@ async def _notify_reserved_teammate_control_plane(
                 payload={"envelope": envelope},
                 sender_id=str(envelope.get("leader_member_name") or ""),
             )
-            await send(peer_agent_id, control_event)
+            await asyncio.wait_for(
+                send(peer_agent_id, control_event),
+                timeout=max(0.2, timeout_s),
+            )
             delivered = True
     except Exception as exc:
         logger.warning(failure_message, member_name, peer_agent_id, peer_addr, exc)
@@ -1045,6 +1095,7 @@ async def _notify_reserved_teammate_control_plane(
             event_type=event_type,
             log_label=log_label,
             id_field=id_field,
+            timeout_s=timeout_s,
         )
     if delivered:
         logger.info(
@@ -1121,6 +1172,69 @@ async def notify_remote_member_shutdown_finalize(
         member,
     )
     return False
+
+
+async def notify_remote_members_trace_context_update(
+    team_agent: Any,
+    session_id: str,
+    *,
+    request_metadata: dict[str, Any] | None,
+) -> int:
+    """Refresh TraceContext for active A2X-hosted members in one Team session."""
+    payload = (request_metadata or {}).get(TRACE_CONTEXT_METADATA_KEY)
+    if payload is None:
+        return 0
+    try:
+        trace_context = trace_context_from_dict(payload)
+    except ValueError as exc:
+        logger.warning("[RemoteMemberBootstrap] ignored invalid remote trace update: %s", exc)
+        return 0
+    serialized_trace = trace_context_to_dict(trace_context)
+    if serialized_trace is None:
+        return 0
+
+    key = str(session_id or "").strip()
+    if not key:
+        return 0
+    notifications: list[Any] = []
+    exporter_name = str(
+        (request_metadata or {}).get(TRACE_HEADER_EXPORTER_METADATA_KEY) or ""
+    ).strip()
+    notified_members: set[str] = set()
+    for member_name, reservation, _ in _A2X_RESERVATIONS_BY_SESSION.get(key, []):
+        member = str(member_name or "").strip()
+        if not member or member in notified_members:
+            continue
+        notified_members.add(member)
+        envelope = build_trace_context_update_envelope(
+            team_agent,
+            session_id=key,
+            member_name=member,
+            trace_context=serialized_trace,
+            trace_header_exporter=exporter_name or None,
+        )
+        notifications.append(
+            _notify_reserved_teammate_control_plane(
+                team_agent=team_agent,
+                member_name=member,
+                reservation=reservation,
+                envelope=envelope,
+                event_type=REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE,
+                log_label="trace context update",
+                id_field="trace_update_id",
+                success_message=(
+                    "[RemoteMemberBootstrap] notified remote teammate trace update "
+                    "member=%s service_id=%s endpoint=%s trace_update_id=%s"
+                ),
+                failure_message=(
+                    "[RemoteMemberBootstrap] remote teammate trace update failed "
+                    "member=%s service_id=%s endpoint=%s: %s"
+                ),
+                timeout_s=_REMOTE_TRACE_UPDATE_TIMEOUT_SEC,
+            )
+        )
+    results = await asyncio.gather(*notifications, return_exceptions=True)
+    return sum(result is True for result in results)
 
 
 async def release_a2x_reservations_for_session(
@@ -2371,7 +2485,8 @@ async def _ensure_dynamic_member_execution_loop(
     card_replaced: bool = False,
     assembly_mode: str = "",
     assembly_project_dir: str = "",
-    assembly_trace_headers: dict[str, str] | None = None,
+    assembly_trace_context: dict[str, Any] | None = None,
+    assembly_trace_header_exporter: str | None = None,
 ) -> tuple[bool, bool]:
     """Best-effort bootstrap for teammate runtime loop after dynamic member takeover.
 
@@ -2423,16 +2538,16 @@ async def _ensure_dynamic_member_execution_loop(
 
         team_manager = get_team_manager(channel_id)
         request_metadata: dict[str, Any] | None = None
-        if assembly_mode or assembly_trace_headers:
+        if assembly_mode or assembly_trace_context or assembly_trace_header_exporter:
             request_metadata = {}
             if assembly_mode:
                 request_metadata["mode"] = assembly_mode
             if assembly_project_dir:
                 request_metadata["project_dir"] = assembly_project_dir
-            if assembly_trace_headers:
-                request_metadata[XIAOYI_MODEL_TRACE_HEADERS_METADATA_KEY] = dict(
-                    assembly_trace_headers
-                )
+            if assembly_trace_context:
+                request_metadata[TRACE_CONTEXT_METADATA_KEY] = dict(assembly_trace_context)
+            if assembly_trace_header_exporter:
+                request_metadata[TRACE_HEADER_EXPORTER_METADATA_KEY] = assembly_trace_header_exporter
         leader_team_agent = await team_manager.get_or_create_team(
             sid,
             deep_agent,
@@ -2680,7 +2795,12 @@ async def apply_bootstrap_envelope_from_control_plane(
     # teammate's auxiliary leader is rebuilt provider-style with the same mode.
     assembly_mode = str(envelope.get("mode", "")).strip()
     assembly_project_dir = str(envelope.get("project_dir", "")).strip()
-    assembly_trace_headers = get_xiaoyi_model_trace_headers(envelope)
+    assembly_trace_context = envelope.get(TRACE_CONTEXT_METADATA_KEY)
+    if not isinstance(assembly_trace_context, dict):
+        assembly_trace_context = None
+    assembly_trace_header_exporter = str(
+        envelope.get(TRACE_HEADER_EXPORTER_METADATA_KEY) or ""
+    ).strip() or None
 
     logger.info(
         "[RemoteMemberBootstrap] teammate received direct bootstrap team=%s session_id=%s "
@@ -2724,7 +2844,8 @@ async def apply_bootstrap_envelope_from_control_plane(
                 card_replaced=card_replaced,
                 assembly_mode=assembly_mode,
                 assembly_project_dir=assembly_project_dir,
-                assembly_trace_headers=assembly_trace_headers,
+                assembly_trace_context=assembly_trace_context,
+                assembly_trace_header_exporter=assembly_trace_header_exporter,
             )
             if kicked:
                 logger.info(
@@ -2773,6 +2894,71 @@ async def apply_bootstrap_envelope_from_control_plane(
         kickoff_task.add_done_callback(_on_kickoff_done)
     processed_ids.add(bootstrap_id)
     return target_member
+
+
+async def apply_trace_context_update_envelope_from_control_plane(
+    *,
+    envelope: dict[str, Any],
+    source_id: str,
+) -> bool:
+    """Apply a new trace to an already-running remote member without bootstrap."""
+    if not isinstance(envelope, dict):
+        return False
+    session_id = str(envelope.get("session_id", "")).strip()
+    member_name = str(envelope.get("member_name", "")).strip()
+    if not session_id or not member_name:
+        return False
+    try:
+        trace_context = trace_context_from_dict(envelope.get(TRACE_CONTEXT_METADATA_KEY))
+    except ValueError as exc:
+        logger.warning(
+            "[RemoteMemberBootstrap] ignored invalid trace update session_id=%s member=%s source_id=%s: %s",
+            session_id,
+            member_name,
+            source_id,
+            exc,
+        )
+        return False
+    serialized_trace = trace_context_to_dict(trace_context)
+    if serialized_trace is None:
+        return False
+
+    team_agent = _DYNAMIC_MEMBER_AGENTS.get((session_id, member_name))
+    configurator = getattr(team_agent, "_configurator", None)
+    context = getattr(configurator, "ctx", None)
+    spec = getattr(context, "team_spec", None)
+    if spec is None:
+        logger.debug(
+            "[RemoteMemberBootstrap] trace update skipped: dynamic member is not active "
+            "session_id=%s member=%s source_id=%s",
+            session_id,
+            member_name,
+            source_id,
+        )
+        return False
+
+    from jiuwenswarm.agents.harness.team.team_manager import TeamManager, get_team_manager
+
+    trace_headers = TeamManager._apply_trace_context(
+        spec,
+        request_metadata={
+            TRACE_CONTEXT_METADATA_KEY: serialized_trace,
+            TRACE_HEADER_EXPORTER_METADATA_KEY: str(
+                envelope.get(TRACE_HEADER_EXPORTER_METADATA_KEY) or ""
+            ).strip(),
+        },
+    )
+    update_model_pool = getattr(team_agent, "update_model_pool", None)
+    if callable(update_model_pool):
+        update_model_pool(list(spec.model_pool))
+    get_team_manager()._refresh_live_evolution_rail_trace(session_id, trace_headers)
+    logger.info(
+        "[RemoteMemberBootstrap] applied remote trace update session_id=%s member=%s source_id=%s",
+        session_id,
+        member_name,
+        source_id,
+    )
+    return True
 
 
 async def apply_member_shutdown_envelope_from_control_plane(
@@ -2986,6 +3172,10 @@ async def run_teammate_bootstrap_daemon(*, stop_event: asyncio.Event, poll_inter
                         payload_obj = raw.get("payload")
                         if isinstance(payload_obj, dict):
                             env = payload_obj.get("envelope")
+                    elif event_type == REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE:
+                        payload_obj = raw.get("payload")
+                        if isinstance(payload_obj, dict):
+                            env = payload_obj.get("envelope")
                     if isinstance(env, dict) and event_type == REMOTE_BOOTSTRAP_DIRECT_EVENT_TYPE:
                         source_id = str(env.get("bootstrap_id", "")).strip() or str(uuid.uuid4())
                         adopted_member = await apply_bootstrap_envelope_from_control_plane(
@@ -3011,6 +3201,12 @@ async def run_teammate_bootstrap_daemon(*, stop_event: asyncio.Event, poll_inter
                         await apply_member_shutdown_envelope_from_control_plane(
                             kickoff_tasks=kickoff_tasks,
                             loop_kicked_members=loop_kicked_members,
+                            envelope=env,
+                            source_id=source_id,
+                        )
+                    elif isinstance(env, dict) and event_type == REMOTE_TRACE_CONTEXT_UPDATE_DIRECT_EVENT_TYPE:
+                        source_id = str(env.get("trace_update_id", "")).strip() or str(uuid.uuid4())
+                        await apply_trace_context_update_envelope_from_control_plane(
                             envelope=env,
                             source_id=source_id,
                         )

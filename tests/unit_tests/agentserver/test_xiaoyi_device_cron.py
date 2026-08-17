@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
@@ -19,9 +20,12 @@ from jiuwenswarm.common.device_rpc.models import (
 from jiuwenswarm.common.invocation_context.models import (
     INVOCATION_CONTEXT_VERSION,
     InvocationContext,
-    XiaoyiInvocationContext,
 )
 from jiuwenswarm.gateway.cron.models import CronJob
+from jiuwenswarm.server.xiaoyi_invocation import (
+    XIAOYI_INVOCATION_EXTENSION_KEY,
+    XiaoyiInvocationExtension,
+)
 
 
 def _scheduled_invocation(
@@ -40,19 +44,15 @@ def _scheduled_invocation(
         session_id="cron-session",
         channel_id="__cron__",
         chat_id=None,
-        xiaoyi=XiaoyiInvocationContext(
-            scheduled_device=scheduled_device,
-            cron={"job_id": "job-1", "run_id": "run-1"}
-            if include_cron
-            else None,
-        ),
         metadata={
-            "scheduled_device": scheduled_device,
-            **(
-                {"cron": {"job_id": "job-1", "run_id": "run-1"}}
-                if include_cron
-                else {}
-            ),
+            XIAOYI_INVOCATION_EXTENSION_KEY: asdict(
+                XiaoyiInvocationExtension(
+                    scheduled_device=scheduled_device,
+                    cron={"job_id": "job-1", "run_id": "run-1"}
+                    if include_cron
+                    else None,
+                )
+            )
         },
     )
 

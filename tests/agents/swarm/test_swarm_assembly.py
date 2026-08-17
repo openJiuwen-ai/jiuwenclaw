@@ -148,6 +148,7 @@ _COMMON_TOOL_NAMES: frozenset[str] = frozenset(
         registry.XIAOYI_PHONE,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
+        registry.SEND_HTML_CARD,
     }
 )
 
@@ -1506,6 +1507,7 @@ def test_code_capability_specs_rail_and_tool_names(mode: str) -> None:
         registry.CODE_EXTRA_TOOLS,
         registry.CRON_TOOLS,
         registry.SEND_FILE,
+        registry.SEND_HTML_CARD,
     }
 
 

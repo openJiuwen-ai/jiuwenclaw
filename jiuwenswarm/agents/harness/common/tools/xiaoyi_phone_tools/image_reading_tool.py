@@ -19,6 +19,7 @@ import aiohttp
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.utils import logger
+from jiuwenswarm.server.xiaoyi_invocation import export_current_xiaoyi_trace_headers
 
 from .file_upload_helpers import XiaoyiObsUploadConfig, upload_local_file_public_url
 from .utils import ToolInputError
@@ -75,7 +76,8 @@ async def _call_image_understanding_api(
     api_url = (
         f"{file_upload_url}/celia-claw/v1/sse-api/skill/execute"
     )
-    trace_id = str(uuid.uuid4())
+    trace_headers = export_current_xiaoyi_trace_headers()
+    trace_id = trace_headers.get("x-hag-trace-id") or str(uuid.uuid4())
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -86,6 +88,7 @@ async def _call_image_understanding_api(
         "x-skill-id": "xiaoyi_image_comprehension",
         "x-prd-pkg-name": "com.huawei.hag",
     }
+    headers.update(trace_headers)
     payload: Dict[str, Any] = {
         "version": "1.0",
         "session": {

@@ -8,11 +8,9 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools.device_reverse_r
     get_xiaoyi_device_reverse_rpc_client,
 )
 from jiuwenswarm.common.invocation_context import get_current_invocation_context
-from jiuwenswarm.common.invocation_context.adapters import (
-    build_device_command_context_from_invocation,
-)
 from jiuwenswarm.common.reverse_rpc.errors import ReverseRpcTimeoutError
 from jiuwenswarm.common.utils import logger
+from jiuwenswarm.server.xiaoyi_invocation import build_xiaoyi_device_command_context
 
 
 def _is_data_event_status_success(status: Any) -> bool:
@@ -64,7 +62,7 @@ async def execute_device_command(
         invocation.channel_id,
         id(asyncio.current_task()) if asyncio.current_task() else None,
     )
-    context = build_device_command_context_from_invocation(invocation)
+    context = build_xiaoyi_device_command_context(invocation)
     channel_id = str(invocation.channel_id or "").strip().lower()
     if channel_id == "xiaoyi":
         pass

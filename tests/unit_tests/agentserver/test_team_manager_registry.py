@@ -10,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 
+from jiuwenswarm.common.invocation_context import (
+    TRACE_CONTEXT_METADATA_KEY,
+    TRACE_HEADER_EXPORTER_METADATA_KEY,
+)
 from jiuwenswarm.agents.harness.team.team_manager import (
     TeamManager,
     TeamRailMountContext,
@@ -1205,6 +1209,136 @@ async def test_interact_uses_runner_only_for_active_session(
     assert success is True
     assert reason is None
     assert interact_calls == [("hello team", "demo-team", "sess-1")]
+
+
+@pytest.mark.asyncio
+async def test_interact_refreshes_active_team_model_pool_trace_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_trace_header_exporters
+
+    assert get_xiaoyi_trace_header_exporters()
+    manager = _TeamManagerHarness()
+    manager.set_active_runtime_for_test("sess-1", "demo-team")
+    pool_entry = SimpleNamespace(metadata={"client": {"custom_headers": {"keep": "yes"}}})
+    evolution_model_config = {
+        "model_client_config": {"custom_headers": {"evolution": "yes"}},
+        "model_config_obj": {"temperature": 0.3},
+        "model_name": "trace-test-model",
+    }
+    evolution_rail = SimpleNamespace(
+        params={"evolution_model_config": evolution_model_config}
+    )
+    agent_spec = SimpleNamespace(model=None, rails=[evolution_rail], subagents=None)
+    spec = SimpleNamespace(
+        model_pool=[pool_entry],
+        model_router=None,
+        agents={"leader": agent_spec},
+    )
+    updated_pools: list[list[object]] = []
+    team_agent = SimpleNamespace(
+        _configurator=SimpleNamespace(ctx=SimpleNamespace(team_spec=spec)),
+        update_model_pool=lambda pool: updated_pools.append(pool),
+    )
+    previous_evolution_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(custom_headers={"evolution": "yes"}),
+        model_config=SimpleNamespace(temperature=0.3),
+    )
+    refreshed_evolution_models: list[tuple[object, str]] = []
+    live_evolution_rail = SimpleNamespace(
+        evolver=SimpleNamespace(llm=previous_evolution_model, model="trace-test-model"),
+        update_llm=lambda model, name: refreshed_evolution_models.append((model, name)),
+    )
+    manager.register_team_skill_rail("sess-1", live_evolution_rail)
+
+    class _Pool:
+        async def get(self, team_name: str):
+            assert team_name == "demo-team"
+            return SimpleNamespace(agent=team_agent)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager._runner_team_runtime_manager",
+        lambda _runner: SimpleNamespace(pool=_Pool()),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Model",
+        lambda *, model_client_config, model_config: SimpleNamespace(
+            model_client_config=model_client_config,
+            model_config=model_config,
+        ),
+        raising=False,
+    )
+
+    async def fake_interact_agent_team(user_input: str, *, team_name: str, session_id: str) -> bool:
+        assert pool_entry.metadata["client"]["custom_headers"] == {
+            "keep": "yes",
+            "x-hag-trace-id": "root&19&abc&0",
+            "x-session-id": "root",
+            "x-interaction-id": "19",
+        }
+        assert evolution_model_config["model_client_config"]["custom_headers"] == {
+            "evolution": "yes",
+            "x-hag-trace-id": "root&19&abc&0",
+            "x-session-id": "root",
+            "x-interaction-id": "19",
+        }
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.Runner.interact_agent_team",
+        fake_interact_agent_team,
+    )
+    remote_updates: list[tuple[object, str, dict[str, object] | None]] = []
+
+    async def fake_notify_remote_trace(team_agent, session_id, *, request_metadata):
+        remote_updates.append((team_agent, session_id, request_metadata))
+        return 1
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.notify_remote_members_trace_context_update",
+        fake_notify_remote_trace,
+    )
+
+    result = await manager.interact(
+        "sess-1",
+        "follow up",
+        request_metadata={
+            TRACE_HEADER_EXPORTER_METADATA_KEY: "xiaoyi",
+            TRACE_CONTEXT_METADATA_KEY: {
+                "version": 1,
+                "trace_id": "root&19&abc&0",
+                "conversation_id": "root",
+                "interaction_id": "19",
+            }
+        },
+    )
+
+    assert result == (True, None)
+    assert updated_pools == [[pool_entry]]
+    assert len(refreshed_evolution_models) == 1
+    refreshed_model, refreshed_model_name = refreshed_evolution_models[0]
+    assert refreshed_model_name == "trace-test-model"
+    assert refreshed_model.model_client_config.custom_headers == {
+        "evolution": "yes",
+        "x-hag-trace-id": "root&19&abc&0",
+        "x-session-id": "root",
+        "x-interaction-id": "19",
+    }
+    assert remote_updates == [
+        (
+            team_agent,
+            "sess-1",
+            {
+                TRACE_HEADER_EXPORTER_METADATA_KEY: "xiaoyi",
+                TRACE_CONTEXT_METADATA_KEY: {
+                    "version": 1,
+                    "trace_id": "root&19&abc&0",
+                    "conversation_id": "root",
+                    "interaction_id": "19",
+                }
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

@@ -154,27 +154,32 @@ def build_behaviordetect_request(action: str, config: CsplConfig) -> dict[str, A
     """Build behaviordetect.request fields; gateway reads session from HTTP headers."""
     task_id = ""
     message = ""
+    trace = None
 
     try:
-        from jiuwenswarm.server.request_context import (
-            get_current_agent_request,
-            get_device_context,
-        )
+        from jiuwenswarm.common.invocation_context import get_current_invocation_context
+        from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_invocation_extension
 
-        device = get_device_context()
-        if device is not None:
-            task_id = _first_text(device.xiaoyi_task_id)
+        invocation = get_current_invocation_context()
+        trace = invocation.trace if invocation is not None else None
+        if trace is not None:
+            task_id = trace.trace_id
+        if invocation is not None and not task_id:
+            xiaoyi = get_xiaoyi_invocation_extension(invocation)
+            task_id = _first_text(xiaoyi.task_id if xiaoyi else None)
+    except Exception:
+        logger.debug("[CsplClient] invocation context unavailable", exc_info=True)
+
+    try:
+        from jiuwenswarm.server.request_context import get_current_agent_request
+        from jiuwenswarm.server.xiaoyi_invocation import get_xiaoyi_request_extension
 
         request = get_current_agent_request()
         if request is not None:
-            metadata = dict(request.metadata or {})
             params = request.params if isinstance(request.params, dict) else {}
             if not task_id:
-                task_id = _first_text(
-                    metadata.get("xiaoyi_task_id"),
-                    params.get("task_id"),
-                    request.request_id,
-                )
+                xiaoyi = get_xiaoyi_request_extension(request)
+                task_id = _first_text(xiaoyi.task_id if xiaoyi else None)
             if not message:
                 message = _first_text(params.get("query"), params.get("message"))
     except Exception:
@@ -186,6 +191,9 @@ def build_behaviordetect_request(action: str, config: CsplConfig) -> dict[str, A
 
     package_name = config.package_name or "com.huawei.hag"
     session_id, interaction_id, full_task_id = _split_xiaoyi_task(task_id)
+    if trace is not None:
+        session_id = trace.conversation_id or session_id
+        interaction_id = trace.interaction_id or interaction_id
     return {
         "checkPoint": action,
         "ansDone": 0,
