@@ -320,6 +320,7 @@ class AgentOSRouterClient(AgentServerClient):
         workspace_root: str | None = None,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
+        disconnect_cleanup_timeout_seconds: float = 60.0,
         auth_client: AgentOSAuthenticator | None = None,
         ws_client_factory: Callable[[], WebSocketAgentServerClient] | None = None,
     ) -> None:
@@ -337,6 +338,10 @@ class AgentOSRouterClient(AgentServerClient):
         self._sandbox_idle_timeout_seconds = float(sandbox_idle_timeout_seconds)
         self._sandbox_idle_check_interval_seconds = max(
             1.0, float(sandbox_idle_check_interval_seconds)
+        )
+        # <= 0 disables the channel-disconnect cleanup path entirely.
+        self._disconnect_cleanup_timeout_seconds = float(
+            disconnect_cleanup_timeout_seconds
         )
         self._idle_reaper_task: asyncio.Task[None] | None = None
         self._server_ready = False
@@ -423,8 +428,9 @@ class AgentOSRouterClient(AgentServerClient):
                 task.cancel()
         elif event_type == "disconnected":
             count = self._agent_manager.decrement_user_connections(user_id)
-            if count <= 0:
-                # 连接数为 0：1 分钟后触发 jiuwenswarm agent 清理
+            # 配置的超时清理时长为0或者负数时，不触发清理机制
+            if count <= 0 and self._disconnect_cleanup_timeout_seconds > 0:
+                # 连接数为 0：超时后尝试删除 jiuwenswarm agent
                 task = asyncio.create_task(
                     self._delayed_cleanup(user_id),
                     name=f"agentos-delayed-cleanup-{user_id[:24]}",
@@ -434,9 +440,16 @@ class AgentOSRouterClient(AgentServerClient):
                 task.add_done_callback(self._background_tasks.discard)
 
     async def _delayed_cleanup(self, user_id: str) -> None:
-        """连接断开 1 分钟后，若用户仍无连接，删除其 jiuwenswarm agent。"""
+        """连接断开后，若用户仍无连接且 agent 真的空闲，删除其 jiuwenswarm agent。
+
+        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（status=READY、
+        task_count==0、last_active_at 距今超过本超时），避免在 in-flight 的
+        chat/SSH 还未释放时强制 kill。超时时长由
+        ``disconnect_cleanup_timeout_seconds`` 配置，<= 0 表示关闭该路径。
+        """
+        timeout = self._disconnect_cleanup_timeout_seconds
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(timeout)
         except asyncio.CancelledError:
             return
         # 二次检查：用户可能已重连
@@ -459,15 +472,24 @@ class AgentOSRouterClient(AgentServerClient):
                 if session_id:
                     key_values = {"session_id": session_id}
             try:
-                await self.delete_agent(user_id, runtime.info.agent_type, key_values=key_values)
-                logger.info(
-                    "[AgentOSRouter] delayed cleanup deleted agent: user=%s agent_type=%s",
+                # 走 pop_if_idle：task_count>0 / 非 READY / 未达空闲阈值时
+                # 直接返回 False，确保不会误杀活动中的 agent。
+                deleted = await self.delete_agent(
                     user_id,
                     runtime.info.agent_type,
+                    key_values=key_values,
+                    idle_timeout_seconds=timeout,
                 )
             except Exception:
                 logger.exception(
                     "[AgentOSRouter] delayed cleanup delete failed: user=%s agent_type=%s",
+                    user_id,
+                    runtime.info.agent_type,
+                )
+                continue
+            if deleted:
+                logger.info(
+                    "[AgentOSRouter] delayed cleanup deleted agent: user=%s agent_type=%s",
                     user_id,
                     runtime.info.agent_type,
                 )

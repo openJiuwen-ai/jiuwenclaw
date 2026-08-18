@@ -590,6 +590,16 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 http_status=status,
                 error_code="INTERNAL_ERROR",
             ) from exc
+        # Frontend GET /files/list 返回的是 FaaS invoke 外壳
+        # {"body": {"items": [...]}, "innerCode": "0", ...}
+        # chat invoke 已经剥这层；list 必须同样处理，否则 gateway 看到空列表
+        if isinstance(parsed, dict) and self._is_faas_envelope(parsed):
+            parsed, faas_err = self._normalize_faas_body(parsed)
+            if faas_err:
+                raise self._agent_file_http_error(
+                    status or 500,
+                    json.dumps({"error": f"faas list failed: innerCode={faas_err}"}),
+                )
         if isinstance(parsed, list):
             items = parsed
         elif isinstance(parsed, dict):
