@@ -317,7 +317,10 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     assert spec["rootfs"]["imageurl"] == "jiuwenswarm-agent-runtime:latest"
     assert spec["rootfs"]["user"] == "agentos"
     env = yuanrong.create_payloads[0]["env_vars"]
-    assert env["AGENT_SERVER_HOST"] == "127.0.0.1"
+    # builtin 路径不注入 AGENT_SERVER_HOST: 留空让沙箱内 agentserver 自行检测
+    # 沙箱本地非 loopback IP(ISOLATED 模式 bind veth 地址, 见
+    # app_agentserver._resolve_bind_host); 单机版默认仍 127.0.0.1。
+    assert "AGENT_SERVER_HOST" not in env
     assert env["AGENT_SERVER_PORT"] == dyn_port
     # create 后通过 frontend WS 代理直连 instance（不走 invoke 链路）。
     assert yuanrong.ws_connect_uris == [
