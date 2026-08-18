@@ -127,9 +127,6 @@ def find_nested_files_conflict(
 
 def _resolve_workspace_dir() -> Path | None:
     """Resolve agent workspace directory for sandbox rw bind."""
-    user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
-    if user_dir:
-        return Path(user_dir) / "agent" / "workspace"
     try:
         workspace = Path(get_agent_workspace_dir()).expanduser().resolve()
     except OSError as exc:
@@ -317,13 +314,17 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
     """Assemble yuanrong provider extra_params; always identity-mount agent_root."""
     endpoint = get_sandbox_endpoint()
     executor = str(endpoint.get("executor") or "docker").strip().lower() or "docker"
-    agent_root = _resolve_agent_root_dir()
+    agent_root = _resolve_workspace_dir()
+    real_agent_root = None
+    user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
+    if user_dir:
+        real_agent_root = Path(user_dir) / "agent" / "workspace"
     if agent_root is None:
         raise ValueError("yuanrong sandbox requires a resolvable agent_root directory")
 
     agent_root_str = str(agent_root)
     agent_root_mount = {
-        "source": agent_root_str,
+        "source": str(real_agent_root) if real_agent_root else agent_root_str,
         "target": agent_root_str,
         "readonly": False,
     }
