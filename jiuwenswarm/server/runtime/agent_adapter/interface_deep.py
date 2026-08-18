@@ -219,7 +219,6 @@ from jiuwenswarm.common.model_config_validation import (
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     TOOL_PERMISSION_CHANNEL_ID,
-    TOOL_PERMISSION_SESSION_ID,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
@@ -4000,43 +3999,31 @@ class JiuWenSwarmDeepAdapter:
     def _resolve_sys_operation(self) -> SysOperation | None:
         """Create a sys operation.
 
-        沙箱决策结合产品权限 ``sandbox_intent`` 与 ``sandbox.enabled`` / 可用性：
+        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
+        ``sandbox.url`` / ``sandbox.type`` 已配置）。其他 sandbox 字段
+        (``excluded_commands`` / ``files`` / ``idle_ttl_seconds`` /
+        ``idle_check_interval``) 透传给 ``create_sandbox_sysop_card``,
+        分别写入 ``launcher_config.extra_params`` 与 ``launcher_config`` 上
+        的同名字段。
 
-        - ``optional``（Full Access）：尊重 ``sandbox.enabled``
-        - ``required``（Auto/Strict）：可用则必进沙箱；不可用则 Fail-Open 到宿主机并告警
+        注意: 每次都从 ``get_sandbox_endpoint()`` 读最新 sandbox.url/type, 因为
+        ``/sandbox enable`` 会动态写入这两个字段; yuanrong 也会填默认占位 url。
 
-        其他 sandbox 字段 (``excluded_commands`` / ``files`` / ``idle_ttl_seconds`` /
-        ``idle_check_interval``) 透传给 ``create_sandbox_sysop_card``。
-
-        注意: 每次都从 ``get_sandbox_endpoint()`` 读最新 sandbox.url/type。
-
-        副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard。
+        副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard，
+        供 ``apply_sandbox_runtime_patch`` 等运行时热更使用。
         """
         try:
-            from openjiuwen.harness.security import resolve_sandbox
-            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
-                get_sandbox_intent,
-            )
-
             endpoint = get_sandbox_endpoint()
             sandbox_url = endpoint.get("url") or None
             sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
-            intent = get_sandbox_intent()
-            user_enabled = bool(runtime.get("enabled"))
-            available = bool(sandbox_url and sandbox_type)
-            resolve, warning = resolve_sandbox(
-                intent,  # type: ignore[arg-type]
-                enabled=user_enabled,
-                available=available,
-            )
-            if warning:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
-                    "Fail-Open to HOST (sandbox.url/type missing or incomplete)"
-                )
             sysop_card: SysOperationCard | None
-            if resolve == "sandbox":
+            if runtime.get("enabled") and sandbox_url and sandbox_type:
+                # 走 ``self.`` 而不是 ``JiuWenSwarmDeepAdapter.``——_create_sandbox_
+                # sys_operation 已从 staticmethod 改成 instance method (要透传
+                # ``self._is_code_agent``), 用类名直接调会绕过 MRO 把 Code 子类
+                # 的 override (如果将来需要的话) 静默吃掉, 且 staticmethod 时代
+                # 的 caller 风格不再适用。
                 sysop_card = self._create_sandbox_sys_operation(
                     sandbox_url,
                     sandbox_type,
@@ -9044,7 +9031,6 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
-        token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
         token_perm = setup_permission_context(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
@@ -9212,7 +9198,6 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            TOOL_PERMISSION_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
             self._unmark_session_active(session_id)
@@ -9337,7 +9322,6 @@ class JiuWenSwarmDeepAdapter:
             # the long-lived team stream task keeps the values this request set
             # even after the resets below run at request end.
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
-            token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
             token_perm = setup_permission_context(request)
             resolved_language = self._resolve_runtime_language()
             resolved_channel = str(cid or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
@@ -9366,7 +9350,6 @@ class JiuWenSwarmDeepAdapter:
 
                 reset_current_multimodal_image_files(image_files_token)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-                TOOL_PERMISSION_SESSION_ID.reset(token_sid)
                 cleanup_permission_context(token_perm)
             return
 
@@ -9614,7 +9597,6 @@ class JiuWenSwarmDeepAdapter:
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
-        token_sid = TOOL_PERMISSION_SESSION_ID.set((request.session_id or session_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
@@ -10353,7 +10335,6 @@ class JiuWenSwarmDeepAdapter:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
-            TOOL_PERMISSION_SESSION_ID.reset(token_sid)
             cleanup_permission_context(token_perm)
             if not stream_consumer_cancelled:
                 self._reset_runtime_cron_context(cron_context_tokens)

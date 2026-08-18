@@ -67,8 +67,6 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
-    update_permissions_mode_in_config,
-    get_permissions_mode_from_config,
     update_setup_guide_enabled_in_config,
     update_enable_free_models_in_config,
     update_memory_forbidden_enabled_in_config,
@@ -858,7 +856,6 @@ _CONFIG_YAML_KEYS = frozenset({
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
-    "permissions_mode",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
@@ -2342,18 +2339,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
-            try:
-                perm_mode = get_permissions_mode_from_config()
-            except Exception:
-                if perm_cfg.get("enabled") is False:
-                    perm_mode = "full_access"
-                elif str(perm_cfg.get("permission_mode") or "").lower() == "strict":
-                    perm_mode = "strict"
-                else:
-                    perm_mode = "auto"
-            payload["permissions_mode"] = perm_mode
-            # 兼容旧前端：full_access 映射为 permissions_enabled=false
-            payload["permissions_enabled"] = "false" if perm_mode == "full_access" else "true"
+            payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
             # Skill evolution is controlled solely by the canonical nested YAML key.
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
             payload["skill_evolution"] = "true" if evolution_cfg.get("skill_evolution", False) else "false"
@@ -2385,8 +2371,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
-            payload.setdefault("permissions_enabled", "true")
-            payload.setdefault("permissions_mode", "auto")
+            payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_evolution", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -2623,8 +2608,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
-                elif param_key == "permissions_mode":
-                    update_permissions_mode_in_config(str(val or "").strip())
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "enable_free_models":
