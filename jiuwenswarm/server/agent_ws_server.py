@@ -128,6 +128,11 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.personal_context import PersonalContextHostAPI
+from jiuwenswarm.server.personal_context.ws_handler import (
+    PERSONAL_CONTEXT_REQUEST_METHODS as _PERSONAL_CONTEXT_REQ_METHODS,
+    handle_personal_context_request,
+)
 from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
@@ -922,6 +927,11 @@ class AgentWebSocketServer:
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
+        # AgentServer 内唯一持有的进程内 PersonalContext Host；Context Rail 使用同一固定目录。
+        self._personal_context_host = PersonalContextHostAPI(
+            home=Path.home() / ".jiuwenswarm" / ".personal_context",
+        )
+        self._personal_context_start_task: asyncio.Task[None] | None = None
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
         # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
@@ -1050,10 +1060,26 @@ class AgentWebSocketServer:
         self._checkpointer_warmup_task = asyncio.create_task(
             _warmup_checkpointer(), name="checkpointer-warmup"
         )
+        self._personal_context_start_task = asyncio.create_task(
+            self._start_personal_context_best_effort(),
+            name="personal-context-host-start",
+        )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+
+    async def _start_personal_context_best_effort(self) -> None:
+        """Start optional PersonalContext without changing AgentServer readiness."""
+        try:
+            await self._personal_context_host.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PersonalContext startup failed: %s",
+                type(exc).__name__,
+            )
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -1275,8 +1301,43 @@ class AgentWebSocketServer:
         )
         return forbidden_origin_response(args)
 
+    async def _stop_personal_context_best_effort(self) -> None:
+        """Cancel PersonalContext startup and stop PersonalContext without masking main shutdown."""
+        start_task = self._personal_context_start_task
+        self._personal_context_start_task = None
+        if start_task is not None:
+            if not start_task.done():
+                start_task.cancel()
+            try:
+                await start_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] optional PersonalContext startup cleanup failed: %s",
+                    type(exc).__name__,
+                )
+        try:
+            await self._personal_context_host.stop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PersonalContext stop failed: %s",
+                type(exc).__name__,
+            )
+
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        try:
+            await self._stop_main_services()
+        finally:
+            await self._stop_personal_context_best_effort()
+
+    async def _stop_main_services(self) -> None:
+        """Run the unchanged AgentServer shutdown before optional PersonalContext cleanup."""
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -1473,6 +1534,12 @@ class AgentWebSocketServer:
             )
 
         try:
+            if request.req_method in _PERSONAL_CONTEXT_REQ_METHODS:
+                await handle_personal_context_request(
+                    self._personal_context_host, ws, request, send_lock
+                )
+                return
+
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)

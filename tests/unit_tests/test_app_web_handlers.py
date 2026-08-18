@@ -1756,6 +1756,47 @@ def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
     assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
+def test_web_forwards_only_canonical_personal_context_rpc_methods():
+    methods = {
+        "personal_context.runtime.status",
+        "personal_context.runtime.start",
+        "personal_context.runtime.stop",
+        "personal_context.runtime.get_config",
+        "personal_context.runtime.patch_config",
+        "personal_context.runtime.select_model",
+        "personal_context.fetch.list_services",
+        "personal_context.fetch.create_service",
+        "personal_context.fetch.delete_service",
+        "personal_context.fetch.patch_service",
+        "personal_context.fetch.start_service",
+        "personal_context.fetch.stop_service",
+        "personal_context.fetch.start_scheduler",
+        "personal_context.fetch.stop_scheduler",
+        "personal_context.fetch.run_all",
+        "personal_context.fetch.run_one",
+        "personal_context.fetch.get_run_status",
+        "personal_context.fetch.get_authorization_status",
+        "personal_context.fetch.authorize_provider",
+        "personal_context.context.stream_graph",
+        "personal_context.context.search_pages",
+        "personal_context.context.get_node",
+    }
+    forwarded = {
+        method
+        for method in app_web_handlers._FORWARD_REQ_METHODS
+        if method.startswith("personal_context.")
+    }
+    no_local = {
+        method
+        for method in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
+        if method.startswith("personal_context.")
+    }
+
+    assert forwarded == methods
+    assert no_local == methods
+    assert len(methods) == 22
+
+
 # =====================================================================
 # _normalize_feishu_conf 纯函数测试
 # =====================================================================
