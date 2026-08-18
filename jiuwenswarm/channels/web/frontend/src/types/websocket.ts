@@ -62,6 +62,7 @@ export interface ConnectionAckPayload {
   mode?: string;
   tools?: string[];
   protocol_version?: string;
+  task_running?: boolean;
 }
 
 export interface ProcessingStatusPayload {
