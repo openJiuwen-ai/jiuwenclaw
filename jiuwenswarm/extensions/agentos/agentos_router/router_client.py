@@ -69,6 +69,9 @@ from jiuwenswarm.server.runtime.attachments.upload_storage import safe_upload_fi
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Builtin jiuwenswarm create only: sandbox env so agentserver can locate
+# the host workspace bind path (``/home/agentos/users/<user_id>``).
+USER_DIRECTORY_ENV_KEY = "JIUWENSWARM_USER_DIRECTORY"
 
 # Gateway-side file transfer limits (design: stricter than YuanRong 512MB).
 _AGENT_FILE_PATH_ROOT = "/home/agentos"
@@ -1474,6 +1477,10 @@ class AgentOSRouterClient(AgentServerClient):
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
+        workspace = resolve_agent_workspace(
+            agent_info.user_id,
+            workspace_root=self._workspace_root,
+        )
         # runtime_spec 获取方式因 agent_type 而异
         if agent_info.agent_type == BUILTIN_AGENT_TYPE:
             # jiuwenswarm: 不从注册中心获取镜像信息，使用内置 runtime_spec
@@ -1493,7 +1500,11 @@ class AgentOSRouterClient(AgentServerClient):
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
-            env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
+            env_vars = {
+                "AGENT_SERVER_HOST": "127.0.0.1",
+                "AGENT_SERVER_PORT": f"{port}",
+                USER_DIRECTORY_ENV_KEY: workspace,
+            }
             # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
             extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
@@ -1510,10 +1521,6 @@ class AgentOSRouterClient(AgentServerClient):
             if agent_port is not None:
                 extra_metadata["agent_port"] = agent_port
 
-        workspace = resolve_agent_workspace(
-            agent_info.user_id,
-            workspace_root=self._workspace_root,
-        )
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
