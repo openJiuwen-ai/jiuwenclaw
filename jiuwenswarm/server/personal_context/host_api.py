@@ -18,7 +18,7 @@ from typing import NoReturn, cast
 
 import yaml
 
-from openjiuwen.core.personal_context import PersonalContext
+from openjiuwen.harness.personal_context import PersonalContext
 
 from jiuwenswarm.common.config import get_default_models
 

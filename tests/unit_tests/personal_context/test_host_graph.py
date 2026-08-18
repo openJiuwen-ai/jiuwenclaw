@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.core.personal_context.models import RawChangeItem
-from openjiuwen.core.personal_context.source_metadata import upsert_source_metadata
+from openjiuwen.harness.personal_context.models import RawChangeItem
+from openjiuwen.harness.personal_context.source_metadata import upsert_source_metadata
 
 from jiuwenswarm.server.personal_context.host_api import PersonalContextHostAPI
 

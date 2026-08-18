@@ -11,7 +11,7 @@ from typing import BinaryIO, cast
 import pytest
 import yaml
 
-from openjiuwen.core.personal_context import PersonalContext
+from openjiuwen.harness.personal_context import PersonalContext
 
 from jiuwenswarm.server.personal_context import host_api as host_module
 from jiuwenswarm.server.personal_context.host_api import PersonalContextHostAPI
@@ -269,13 +269,13 @@ def fake_host(
     return host, fake
 
 
-def test_host_module_imports_only_personal_context_from_core() -> None:
+def test_host_module_imports_personal_context_from_harness() -> None:
     tree = ast.parse(HOST_API_PATH.read_text(encoding="utf-8"))
     imported: list[str] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.ImportFrom)
-            and node.module == "openjiuwen.core.personal_context"
+            and node.module == "openjiuwen.harness.personal_context"
         ):
             imported.extend(alias.name for alias in node.names)
     assert imported == ["PersonalContext"]
