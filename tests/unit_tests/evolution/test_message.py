@@ -2,7 +2,11 @@
 
 """Unit tests for schema models."""
 
-from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.agent import (
+    AgentRequest,
+    AgentResponse,
+    AgentResponseChunk,
+)
 from jiuwenswarm.common.schema.message import ReqMethod, EventType, Mode, Message
 
 
@@ -24,29 +28,38 @@ class TestReqMethod:
         assert ReqMethod.CONFIG_SET.value == "config.set"
 
     @staticmethod
-    def test_pcs_methods():
-        """Test PCS request methods exposed through the WebSocket gateway."""
-        assert {item.value for item in ReqMethod if item.value.startswith("pcs.")} == {
-            "pcs.runtime.status",
-            "pcs.runtime.start",
-            "pcs.runtime.stop",
-            "pcs.runtime.get_config",
-            "pcs.runtime.patch_config",
-            "pcs.runtime.select_model",
-            "pcs.fetch.list_services",
-            "pcs.fetch.patch_service",
-            "pcs.fetch.start_service",
-            "pcs.fetch.stop_service",
-            "pcs.fetch.start_scheduler",
-            "pcs.fetch.stop_scheduler",
-            "pcs.fetch.run_all",
-            "pcs.fetch.run_one",
-            "pcs.fetch.get_run_status",
-            "pcs.fetch.authorize_provider",
-            "pcs.context.stream_graph",
-            "pcs.context.search_pages",
-            "pcs.context.get_node",
+    def test_personal_context_methods():
+        """Test PersonalContext request methods exposed through the WebSocket gateway."""
+        methods = {
+            item.value
+            for item in ReqMethod
+            if item.value.startswith("personal_context.")
         }
+        assert methods == {
+            "personal_context.runtime.status",
+            "personal_context.runtime.start",
+            "personal_context.runtime.stop",
+            "personal_context.runtime.get_config",
+            "personal_context.runtime.patch_config",
+            "personal_context.runtime.select_model",
+            "personal_context.fetch.list_services",
+            "personal_context.fetch.create_service",
+            "personal_context.fetch.delete_service",
+            "personal_context.fetch.patch_service",
+            "personal_context.fetch.start_service",
+            "personal_context.fetch.stop_service",
+            "personal_context.fetch.start_scheduler",
+            "personal_context.fetch.stop_scheduler",
+            "personal_context.fetch.run_all",
+            "personal_context.fetch.run_one",
+            "personal_context.fetch.get_run_status",
+            "personal_context.fetch.get_authorization_status",
+            "personal_context.fetch.authorize_provider",
+            "personal_context.context.stream_graph",
+            "personal_context.context.search_pages",
+            "personal_context.context.get_node",
+        }
+        assert len(methods) == 22
 
     @staticmethod
     def test_session_methods():

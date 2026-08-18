@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""PCS WebSocket request dispatch on JiuwenSwarm's existing E2A wire path."""
+"""PersonalContext WebSocket request dispatch on JiuwenSwarm's existing E2A wire path."""
 
 from __future__ import annotations
 
@@ -23,32 +23,35 @@ from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server.ws_send import send_wire_payload
 
 if TYPE_CHECKING:
-    from jiuwenswarm.server.proactive_context.host_api import PCSHostAPI
+    from jiuwenswarm.server.personal_context.host_api import PersonalContextHostAPI
 
 
 logger = logging.getLogger(__name__)
 
-PCS_REQUEST_METHODS = frozenset(
+PERSONAL_CONTEXT_REQUEST_METHODS = frozenset(
     {
-        ReqMethod.PCS_RUNTIME_STATUS,
-        ReqMethod.PCS_RUNTIME_START,
-        ReqMethod.PCS_RUNTIME_STOP,
-        ReqMethod.PCS_RUNTIME_GET_CONFIG,
-        ReqMethod.PCS_RUNTIME_PATCH_CONFIG,
-        ReqMethod.PCS_RUNTIME_SELECT_MODEL,
-        ReqMethod.PCS_FETCH_LIST_SERVICES,
-        ReqMethod.PCS_FETCH_PATCH_SERVICE,
-        ReqMethod.PCS_FETCH_START_SERVICE,
-        ReqMethod.PCS_FETCH_STOP_SERVICE,
-        ReqMethod.PCS_FETCH_START_SCHEDULER,
-        ReqMethod.PCS_FETCH_STOP_SCHEDULER,
-        ReqMethod.PCS_FETCH_RUN_ALL,
-        ReqMethod.PCS_FETCH_RUN_ONE,
-        ReqMethod.PCS_FETCH_GET_RUN_STATUS,
-        ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER,
-        ReqMethod.PCS_CONTEXT_STREAM_GRAPH,
-        ReqMethod.PCS_CONTEXT_SEARCH_PAGES,
-        ReqMethod.PCS_CONTEXT_GET_NODE,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_START,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_LIST_SERVICES,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_CREATE_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_PATCH_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ONE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_NODE,
     }
 )
 
@@ -62,7 +65,7 @@ def _payload(value: object) -> dict[str, object]:
         dumped = value.model_dump(mode="json")
         if isinstance(dumped, dict):
             return dumped
-    raise TypeError("PCS Host result must be an object")
+    raise TypeError("PersonalContext Host result must be an object")
 
 
 def _text(params: dict[str, object], name: str) -> str:
@@ -146,7 +149,7 @@ async def _send_error(
 
 
 async def _stream_graph(
-    host: PCSHostAPI,
+    host: PersonalContextHostAPI,
     ws: Any,
     request: AgentRequest,
     send_lock: asyncio.Lock,
@@ -155,24 +158,30 @@ async def _stream_graph(
     nodes = graph.get("nodes")
     edges = graph.get("edges")
     if not isinstance(nodes, list) or not isinstance(edges, list):
-        raise TypeError("PCS graph nodes and edges must be arrays")
+        raise TypeError("PersonalContext graph nodes and edges must be arrays")
     events: list[dict[str, object]] = [
         {
-            "event_type": "pcs.graph.start",
+            "event_type": "personal_context.graph.start",
             "context_ready": bool(graph.get("context_ready")),
         }
     ]
     events.extend(
-        {"event_type": "pcs.graph.nodes", "nodes": nodes[index : index + 200]}
+        {
+            "event_type": "personal_context.graph.nodes",
+            "nodes": nodes[index : index + 200],
+        }
         for index in range(0, len(nodes), 200)
     )
     events.extend(
-        {"event_type": "pcs.graph.edges", "edges": edges[index : index + 200]}
+        {
+            "event_type": "personal_context.graph.edges",
+            "edges": edges[index : index + 200],
+        }
         for index in range(0, len(edges), 200)
     )
     events.append(
         {
-            "event_type": "pcs.graph.end",
+            "event_type": "personal_context.graph.end",
             "node_count": len(nodes),
             "edge_count": len(edges),
         }
@@ -193,73 +202,90 @@ async def _stream_graph(
             await send_wire_payload(ws, wire)
 
 
-async def _execute(host: PCSHostAPI, request: AgentRequest) -> dict[str, object]:
+async def _execute(
+    host: PersonalContextHostAPI, request: AgentRequest
+) -> dict[str, object]:
     method = request.req_method
     params = request.params
-    if method == ReqMethod.PCS_RUNTIME_STATUS:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS:
         return _payload(await host.get_status())
-    if method == ReqMethod.PCS_RUNTIME_START:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_START:
         return _payload(await host.set_runtime_enabled(True))
-    if method == ReqMethod.PCS_RUNTIME_STOP:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP:
         return _payload(await host.set_runtime_enabled(False))
-    if method == ReqMethod.PCS_RUNTIME_GET_CONFIG:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG:
         return await host.get_runtime_config()
-    if method == ReqMethod.PCS_RUNTIME_PATCH_CONFIG:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG:
         return await host.patch_runtime_config(
             cast(dict[str, object], params.get("patch"))
         )
-    if method == ReqMethod.PCS_RUNTIME_SELECT_MODEL:
+    if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL:
         return await host.select_model(cast(int, params.get("model_index")))
-    if method == ReqMethod.PCS_FETCH_LIST_SERVICES:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_LIST_SERVICES:
         return {"services": await host.list_fetch_services()}
-    if method == ReqMethod.PCS_FETCH_PATCH_SERVICE:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_CREATE_SERVICE:
+        service = params.get("service")
+        if not isinstance(service, dict):
+            raise ValueError("service must be an object")
+        return await host.create_fetch_service(cast(dict[str, object], service))
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE:
+        await host.delete_fetch_service(_text(params, "service_id"))
+        return {"ok": True}
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_PATCH_SERVICE:
         return await host.patch_fetch_service(
             _text(params, "service_id"),
             cast(dict[str, object], params.get("patch")),
         )
-    if method in {ReqMethod.PCS_FETCH_START_SERVICE, ReqMethod.PCS_FETCH_STOP_SERVICE}:
+    if method in {
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
+    }:
         await host.set_fetching(
-            enabled=method == ReqMethod.PCS_FETCH_START_SERVICE,
+            enabled=method == ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
             service_id=_text(params, "service_id"),
         )
         return {"ok": True}
     if method in {
-        ReqMethod.PCS_FETCH_START_SCHEDULER,
-        ReqMethod.PCS_FETCH_STOP_SCHEDULER,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
     }:
         await host.set_fetching(
-            enabled=method == ReqMethod.PCS_FETCH_START_SCHEDULER,
+            enabled=method == ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
         )
         return {"ok": True}
-    if method == ReqMethod.PCS_FETCH_RUN_ALL:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL:
         return await host.run_fetch()
-    if method == ReqMethod.PCS_FETCH_RUN_ONE:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ONE:
         return await host.run_fetch(service_id=_text(params, "service_id"))
-    if method == ReqMethod.PCS_FETCH_GET_RUN_STATUS:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS:
         return await host.get_fetch_run_status(
             cast(str | None, params.get("service_id"))
         )
-    if method == ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER:
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS:
+        return await host.get_authorization_status(_text(params, "provider"))
+    if method == ReqMethod.PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER:
         return await host.authorize_provider(_text(params, "provider"))
-    if method == ReqMethod.PCS_CONTEXT_SEARCH_PAGES:
+    if method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES:
         return await host.search_graph(_text(params, "query"))
-    if method == ReqMethod.PCS_CONTEXT_GET_NODE:
+    if method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_NODE:
         return await host.get_graph_page(_text(params, "node_id"))
-    raise ValueError("unknown PCS method")
+    raise ValueError("unknown PersonalContext method")
 
 
-async def handle_pcs_request(
-    host: PCSHostAPI,
+async def handle_personal_context_request(
+    host: PersonalContextHostAPI,
     ws: Any,
     request: AgentRequest,
     send_lock: asyncio.Lock,
 ) -> None:
-    """Execute one parsed PCS request without introducing a PCS wire protocol."""
+    """Execute one parsed PersonalContext request without introducing a PersonalContext wire protocol."""
 
     try:
-        if request.req_method == ReqMethod.PCS_CONTEXT_STREAM_GRAPH:
+        if request.req_method == ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH:
             if not request.is_stream:
-                raise ValueError("pcs.context.stream_graph requires is_stream=true")
+                raise ValueError(
+                    "personal_context.context.stream_graph requires is_stream=true"
+                )
             await _stream_graph(host, ws, request, send_lock)
             return
         await _send_result(ws, request, send_lock, await _execute(host, request))
@@ -283,11 +309,11 @@ async def handle_pcs_request(
             status=exc.status.name,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("PCS request failed: %s", type(exc).__name__)
+        logger.warning("PersonalContext request failed: %s", type(exc).__name__)
         await _send_error(
             ws,
             request,
             send_lock,
-            message="PCS request failed",
+            message="PersonalContext request failed",
             code="INTERNAL_ERROR",
         )

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""PCS WebSocket API routing and Graph streaming tests."""
+"""PersonalContext WebSocket API routing and Graph streaming tests."""
 
 from __future__ import annotations
 
@@ -20,21 +20,23 @@ from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-from jiuwenswarm.server.proactive_context import ws_handler
-from jiuwenswarm.server.proactive_context.ws_handler import handle_pcs_request
+from jiuwenswarm.server.personal_context import ws_handler
+from jiuwenswarm.server.personal_context.ws_handler import (
+    handle_personal_context_request,
+)
 
 
-def test_pcs_does_not_extend_generic_e2a_codec_or_gateway_client() -> None:
-    assert not hasattr(wire_codec, "validate_pcs_e2a_request_dict")
-    assert not hasattr(wire_codec, "encode_pcs_request_for_wire")
-    assert not hasattr(wire_codec, "encode_pcs_response_for_wire")
-    assert not hasattr(wire_codec, "encode_pcs_chunk_for_wire")
-    assert not hasattr(agent_client, "_is_pcs_method")
+def test_personal_context_does_not_extend_generic_e2a_codec_or_gateway_client() -> None:
+    assert not hasattr(wire_codec, "validate_personal_context_e2a_request_dict")
+    assert not hasattr(wire_codec, "encode_personal_context_request_for_wire")
+    assert not hasattr(wire_codec, "encode_personal_context_response_for_wire")
+    assert not hasattr(wire_codec, "encode_personal_context_chunk_for_wire")
+    assert not hasattr(agent_client, "_is_personal_context_method")
 
 
-def test_agent_server_delegates_pcs_requests_to_module_handler() -> None:
-    assert callable(ws_handler.handle_pcs_request)
-    assert not hasattr(AgentWebSocketServer, "_handle_pcs_request")
+def test_agent_server_delegates_personal_context_requests_to_module_handler() -> None:
+    assert callable(ws_handler.handle_personal_context_request)
+    assert not hasattr(AgentWebSocketServer, "_handle_personal_context_request")
 
 
 class _FakeHost:
@@ -92,6 +94,15 @@ class _FakeHost:
             [{"service_id": "github-main", "state": "STOPPED"}],
         )
 
+    async def create_fetch_service(
+        self,
+        service: dict[str, object],
+    ) -> dict[str, object]:
+        return self._record("create_fetch_service", service, dict(service))
+
+    async def delete_fetch_service(self, service_id: str) -> None:
+        self._record("delete_fetch_service", service_id, None)
+
     async def patch_fetch_service(
         self,
         service_id: str,
@@ -135,11 +146,30 @@ class _FakeHost:
             {"service_id": service_id, "state": "RUNNING"},
         )
 
+    async def get_authorization_status(self, provider: str) -> dict[str, object]:
+        return self._record(
+            "get_authorization_status",
+            provider,
+            {
+                "provider": provider,
+                "state": "authorized",
+                "verification_url": None,
+                "expires_at": None,
+                "error": None,
+            },
+        )
+
     async def authorize_provider(self, provider: str) -> dict[str, object]:
         return self._record(
             "authorize_provider",
             provider,
-            {"provider": provider, "state": "ready"},
+            {
+                "provider": provider,
+                "state": "authorized",
+                "verification_url": None,
+                "expires_at": None,
+                "error": None,
+            },
         )
 
     async def get_graph(self) -> dict[str, object]:
@@ -152,7 +182,7 @@ class _FakeHost:
         return self._record(
             "get_graph_page",
             node_id,
-            {"node_id": node_id, "markdown": "# PCS\n"},
+            {"node_id": node_id, "markdown": "# PersonalContext\n"},
         )
 
 
@@ -175,7 +205,7 @@ def capture_wire(monkeypatch: pytest.MonkeyPatch) -> None:
 def _server() -> tuple[AgentWebSocketServer, _FakeHost]:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     host = _FakeHost()
-    server._pcs_host = host
+    server._personal_context_host = host
     return server, host
 
 
@@ -186,7 +216,7 @@ def _request(
     is_stream: bool = False,
 ) -> AgentRequest:
     return AgentRequest(
-        request_id="pcs-1",
+        request_id="personal-context-1",
         channel_id="web",
         req_method=method,
         params=params or {},
@@ -204,7 +234,7 @@ def _canonical(
     return json.dumps(
         {
             "protocol_version": "1.0",
-            "request_id": "pcs-wire-1",
+            "request_id": "personal-context-wire-1",
             "channel": "web",
             "method": method,
             "params": params or {},
@@ -214,84 +244,167 @@ def _canonical(
     )
 
 
-PCS_HOST_CALLS = [
-    (ReqMethod.PCS_RUNTIME_STATUS, {}, "get_status", None),
-    (ReqMethod.PCS_RUNTIME_START, {}, "set_runtime_enabled", True),
-    (ReqMethod.PCS_RUNTIME_STOP, {}, "set_runtime_enabled", False),
-    (ReqMethod.PCS_RUNTIME_GET_CONFIG, {}, "get_runtime_config", None),
+SERVICE_PAYLOAD: dict[str, object] = {
+    "service_id": "local-files-1",
+    "provider": "local_files",
+    "enabled": True,
+    "interval_seconds": 3_600,
+    "max_items_per_run": 100,
+    "source": {"root_dir": "D:/context"},
+    "credentials": {},
+}
+
+
+PERSONAL_CONTEXT_HOST_CALLS = [
+    (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS, {}, "get_status", None, None),
+    (ReqMethod.PERSONAL_CONTEXT_RUNTIME_START, {}, "set_runtime_enabled", True, None),
+    (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP, {}, "set_runtime_enabled", False, None),
     (
-        ReqMethod.PCS_RUNTIME_PATCH_CONFIG,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG,
+        {},
+        "get_runtime_config",
+        None,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG,
         {"patch": {"strategy_profile": "rules"}},
         "patch_runtime_config",
         {"strategy_profile": "rules"},
+        None,
     ),
-    (ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"model_index": 0}, "select_model", 0),
-    (ReqMethod.PCS_FETCH_LIST_SERVICES, {}, "list_fetch_services", None),
     (
-        ReqMethod.PCS_FETCH_PATCH_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL,
+        {"model_index": 0},
+        "select_model",
+        0,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_LIST_SERVICES,
+        {},
+        "list_fetch_services",
+        None,
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_CREATE_SERVICE,
+        {"service": SERVICE_PAYLOAD},
+        "create_fetch_service",
+        SERVICE_PAYLOAD,
+        SERVICE_PAYLOAD,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE,
+        {"service_id": "local-files-1"},
+        "delete_fetch_service",
+        "local-files-1",
+        {"ok": True},
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_PATCH_SERVICE,
         {"service_id": "github-main", "patch": {"interval_seconds": 10_800}},
         "patch_fetch_service",
         ("github-main", {"interval_seconds": 10_800}),
+        None,
     ),
     (
-        ReqMethod.PCS_FETCH_START_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SERVICE,
         {"service_id": " github-main "},
         "set_fetching",
         (True, "github-main"),
+        None,
     ),
     (
-        ReqMethod.PCS_FETCH_STOP_SERVICE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SERVICE,
         {"service_id": "github-main"},
         "set_fetching",
         (False, "github-main"),
+        None,
     ),
-    (ReqMethod.PCS_FETCH_START_SCHEDULER, {}, "set_fetching", (True, None)),
-    (ReqMethod.PCS_FETCH_STOP_SCHEDULER, {}, "set_fetching", (False, None)),
-    (ReqMethod.PCS_FETCH_RUN_ALL, {}, "run_fetch", None),
     (
-        ReqMethod.PCS_FETCH_RUN_ONE,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_START_SCHEDULER,
+        {},
+        "set_fetching",
+        (True, None),
+        None,
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER,
+        {},
+        "set_fetching",
+        (False, None),
+        None,
+    ),
+    (ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ALL, {}, "run_fetch", None, None),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_RUN_ONE,
         {"service_id": "github-main"},
         "run_fetch",
         "github-main",
+        None,
     ),
     (
-        ReqMethod.PCS_FETCH_GET_RUN_STATUS,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS,
         {"service_id": "github-main"},
         "get_fetch_run_status",
         "github-main",
+        None,
     ),
     (
-        ReqMethod.PCS_FETCH_AUTHORIZE_PROVIDER,
+        ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
+        {"provider": "feishu"},
+        "get_authorization_status",
+        "feishu",
+        {
+            "provider": "feishu",
+            "state": "authorized",
+            "verification_url": None,
+            "expires_at": None,
+            "error": None,
+        },
+    ),
+    (
+        ReqMethod.PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER,
         {"provider": "feishu"},
         "authorize_provider",
         "feishu",
+        {
+            "provider": "feishu",
+            "state": "authorized",
+            "verification_url": None,
+            "expires_at": None,
+            "error": None,
+        },
     ),
     (
-        ReqMethod.PCS_CONTEXT_SEARCH_PAGES,
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES,
         {"query": "  主动上下文  "},
         "search_graph",
         "主动上下文",
+        None,
     ),
     (
-        ReqMethod.PCS_CONTEXT_GET_NODE,
-        {"node_id": "page:topics/pcs.md"},
+        ReqMethod.PERSONAL_CONTEXT_CONTEXT_GET_NODE,
+        {"node_id": "page:topics/personal_context.md"},
         "get_graph_page",
-        "page:topics/pcs.md",
+        "page:topics/personal_context.md",
+        None,
     ),
 ]
 
 
-def test_agentserver_registers_exact_19_pcs_methods() -> None:
-    assert server_module._PCS_REQ_METHODS == {
-        item for item in ReqMethod if item.value.startswith("pcs.")
+def test_agentserver_registers_exact_22_personal_context_methods() -> None:
+    assert server_module._PERSONAL_CONTEXT_REQ_METHODS == {
+        item for item in ReqMethod if item.value.startswith("personal_context.")
     }
-    assert len(server_module._PCS_REQ_METHODS) == 19
+    assert len(server_module._PERSONAL_CONTEXT_REQ_METHODS) == 22
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method", "params", "host_method", "host_argument"),
-    PCS_HOST_CALLS,
+    ("method", "params", "host_method", "host_argument", "expected_result"),
+    PERSONAL_CONTEXT_HOST_CALLS,
 )
 async def test_non_graph_methods_call_exact_host_operation(
     capture_wire: None,
@@ -299,11 +412,14 @@ async def test_non_graph_methods_call_exact_host_operation(
     params: dict[str, object],
     host_method: str,
     host_argument: object,
+    expected_result: dict[str, object] | None,
 ) -> None:
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(host, ws, _request(method, params), asyncio.Lock())
+    await handle_personal_context_request(
+        host, ws, _request(method, params), asyncio.Lock()
+    )
 
     assert host.calls == [(host_method, host_argument)]
     assert len(ws.sent) == 1
@@ -311,6 +427,98 @@ async def test_non_graph_methods_call_exact_host_operation(
     assert ws.sent[0]["is_final"] is True
     assert ws.sent[0]["status"] == "succeeded"
     assert ws.sent[0]["agent_ref"] == {"mode": "agent", "id": "agent-1"}
+    if expected_result is not None:
+        response = parse_agent_server_wire_unary(ws.sent[0])
+        assert response.payload == expected_result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "invalid_params", "valid_params", "valid_host_call"),
+    [
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_CREATE_SERVICE,
+            {},
+            {"service": SERVICE_PAYLOAD},
+            ("create_fetch_service", SERVICE_PAYLOAD),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_CREATE_SERVICE,
+            {"service": "not-an-object"},
+            {"service": SERVICE_PAYLOAD},
+            ("create_fetch_service", SERVICE_PAYLOAD),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE,
+            {},
+            {"service_id": "local-files-1"},
+            ("delete_fetch_service", "local-files-1"),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE,
+            {"service_id": "   "},
+            {"service_id": "local-files-1"},
+            ("delete_fetch_service", "local-files-1"),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_DELETE_SERVICE,
+            {"service_id": 1},
+            {"service_id": "local-files-1"},
+            ("delete_fetch_service", "local-files-1"),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
+            {},
+            {"provider": "feishu"},
+            ("get_authorization_status", "feishu"),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
+            {"provider": "   "},
+            {"provider": "feishu"},
+            ("get_authorization_status", "feishu"),
+        ),
+        (
+            ReqMethod.PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS,
+            {"provider": 1},
+            {"provider": "feishu"},
+            ("get_authorization_status", "feishu"),
+        ),
+    ],
+)
+async def test_source_management_bad_request_keeps_connection_available(
+    capture_wire: None,
+    method: ReqMethod,
+    invalid_params: dict[str, object],
+    valid_params: dict[str, object],
+    valid_host_call: tuple[str, object],
+) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(method, invalid_params),
+        asyncio.Lock(),
+    )
+
+    assert host.calls == []
+    assert ws.open is True
+    assert ws.sent[0]["status"] == "failed"
+    assert ws.sent[0]["body"]["details"]["code"] == "BAD_REQUEST"
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(method, valid_params),
+        asyncio.Lock(),
+    )
+
+    assert host.calls == [valid_host_call]
+    assert len(ws.sent) == 2
+    assert ws.sent[1]["status"] == "succeeded"
+    assert ws.sent[1]["is_final"] is True
 
 
 @pytest.mark.asyncio
@@ -320,10 +528,10 @@ async def test_select_model_rejects_old_origin_index_parameter(
     _server_instance, host = _server()
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(
+    await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PCS_RUNTIME_SELECT_MODEL, {"origin_index": 0}),
+        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL, {"origin_index": 0}),
         asyncio.Lock(),
     )
 
@@ -339,10 +547,10 @@ async def test_non_graph_stream_request_is_one_completed_chunk(
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(
+    await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PCS_RUNTIME_STATUS, is_stream=True),
+        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS, is_stream=True),
         asyncio.Lock(),
     )
 
@@ -364,10 +572,10 @@ async def test_graph_stream_is_bounded_ordered_and_final(
     }
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(
+    await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PCS_CONTEXT_STREAM_GRAPH, is_stream=True),
+        _request(ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH, is_stream=True),
         asyncio.Lock(),
     )
 
@@ -387,13 +595,13 @@ async def test_graph_stream_is_bounded_ordered_and_final(
         for frame in ws.sent
     ]
     assert [event["event_type"] for event in events] == [
-        "pcs.graph.start",
-        "pcs.graph.nodes",
-        "pcs.graph.nodes",
-        "pcs.graph.nodes",
-        "pcs.graph.edges",
-        "pcs.graph.edges",
-        "pcs.graph.end",
+        "personal_context.graph.start",
+        "personal_context.graph.nodes",
+        "personal_context.graph.nodes",
+        "personal_context.graph.nodes",
+        "personal_context.graph.edges",
+        "personal_context.graph.edges",
+        "personal_context.graph.end",
     ]
     assert events[-1]["node_count"] == 450
     assert events[-1]["edge_count"] == 250
@@ -404,10 +612,10 @@ async def test_graph_requires_stream_request(capture_wire: None) -> None:
     server, host = _server()
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(
+    await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PCS_CONTEXT_STREAM_GRAPH),
+        _request(ReqMethod.PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH),
         asyncio.Lock(),
     )
 
@@ -417,21 +625,21 @@ async def test_graph_requires_stream_request(capture_wire: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_canonical_pcs_bypasses_chat_hooks_and_agent_creation(
+async def test_canonical_personal_context_bypasses_chat_hooks_and_agent_creation(
     capture_wire: None,
 ) -> None:
     server, host = _server()
     server._trigger_before_chat_request_hook = AsyncMock(
-        side_effect=AssertionError("PCS must bypass chat hooks")
+        side_effect=AssertionError("PersonalContext must bypass chat hooks")
     )
     server._handle_unary = AsyncMock(
-        side_effect=AssertionError("PCS must bypass Agent creation")
+        side_effect=AssertionError("PersonalContext must bypass Agent creation")
     )
     ws = _FakeWebSocket()
 
     await server._handle_message(
         ws,
-        _canonical("pcs.runtime.status"),
+        _canonical("personal_context.runtime.status"),
         asyncio.Lock(),
     )
 
@@ -444,21 +652,21 @@ async def test_canonical_pcs_bypasses_chat_hooks_and_agent_creation(
 @pytest.mark.parametrize(
     ("method", "params", "host_call"),
     [
-        ("pcs.runtime.status", {}, ("get_status", None)),
-        ("pcs.runtime.get_config", {}, ("get_runtime_config", None)),
-        ("pcs.fetch.list_services", {}, ("list_fetch_services", None)),
+        ("personal_context.runtime.status", {}, ("get_status", None)),
+        ("personal_context.runtime.get_config", {}, ("get_runtime_config", None)),
+        ("personal_context.fetch.list_services", {}, ("list_fetch_services", None)),
         (
-            "pcs.fetch.get_run_status",
+            "personal_context.fetch.get_run_status",
             {},
             ("get_fetch_run_status", None),
         ),
         (
-            "pcs.context.search_pages",
+            "personal_context.context.search_pages",
             {"query": "context"},
             ("search_graph", "context"),
         ),
         (
-            "pcs.context.get_node",
+            "personal_context.context.get_node",
             {"node_id": "page:description.md"},
             ("get_graph_page", "page:description.md"),
         ),
@@ -481,16 +689,16 @@ async def test_canonical_wire_round_trip_for_query_methods(
 
 
 @pytest.mark.asyncio
-async def test_pcs_failure_keeps_connection_and_ordinary_request_available(
+async def test_personal_context_failure_keeps_connection_and_ordinary_request_available(
     capture_wire: None,
 ) -> None:
     server, host = _server()
-    host.failure = RuntimeError("PCS start failed")
+    host.failure = RuntimeError("PersonalContext start failed")
     ws = _FakeWebSocket()
 
     await server._handle_message(
         ws,
-        _canonical("pcs.runtime.start"),
+        _canonical("personal_context.runtime.start"),
         asyncio.Lock(),
     )
 
@@ -538,19 +746,19 @@ async def test_pcs_failure_keeps_connection_and_ordinary_request_available(
 @pytest.mark.asyncio
 async def test_core_error_is_returned_as_final_e2a_error(capture_wire: None) -> None:
     server, host = _server()
-    host.failure = BaseError(StatusCode.ERROR, msg="safe PCS error")
+    host.failure = BaseError(StatusCode.ERROR, msg="safe PersonalContext error")
     ws = _FakeWebSocket()
 
-    await handle_pcs_request(
+    await handle_personal_context_request(
         host,
         ws,
-        _request(ReqMethod.PCS_RUNTIME_STATUS),
+        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS),
         asyncio.Lock(),
     )
 
     assert ws.sent[0]["response_kind"] == "e2a.error"
     assert ws.sent[0]["body"]["details"] == {
-        "error": "safe PCS error",
+        "error": "safe PersonalContext error",
         "code": StatusCode.ERROR.code,
         "status": "ERROR",
     }
@@ -562,9 +770,9 @@ async def test_handler_propagates_cancellation(capture_wire: None) -> None:
     host.failure = asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):
-        await handle_pcs_request(
+        await handle_personal_context_request(
             host,
             _FakeWebSocket(),
-            _request(ReqMethod.PCS_RUNTIME_STATUS),
+            _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS),
             asyncio.Lock(),
         )

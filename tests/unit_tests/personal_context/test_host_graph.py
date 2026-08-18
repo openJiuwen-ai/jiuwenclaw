@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.core.proactive_context.models import RawChangeItem
-from openjiuwen.core.proactive_context.source_metadata import upsert_source_metadata
+from openjiuwen.core.personal_context.models import RawChangeItem
+from openjiuwen.core.personal_context.source_metadata import upsert_source_metadata
 
-from jiuwenswarm.server.proactive_context.host_api import PCSHostAPI
+from jiuwenswarm.server.personal_context.host_api import PersonalContextHostAPI
 
 
 def _write_source(home: Path) -> tuple[str, Path]:
@@ -38,7 +38,7 @@ def _link(page: Path, target: Path) -> str:
 
 @pytest.mark.asyncio
 async def test_graph_is_empty_without_root_description(tmp_path: Path) -> None:
-    host = PCSHostAPI(home=tmp_path / "pcs")
+    host = PersonalContextHostAPI(home=tmp_path / "personal_context")
     assert await host.get_graph() == {
         "context_ready": False,
         "nodes": [],
@@ -50,7 +50,7 @@ async def test_graph_is_empty_without_root_description(tmp_path: Path) -> None:
 async def test_host_returns_atomic_source_graph_without_rebuilding_fields(
     tmp_path: Path,
 ) -> None:
-    home = tmp_path / "pcs"
+    home = tmp_path / "personal_context"
     context = home / "workspace" / "context"
     page = context / "topics" / "agent.md"
     page.parent.mkdir(parents=True)
@@ -70,7 +70,7 @@ async def test_host_returns_atomic_source_graph_without_rebuilding_fields(
         encoding="utf-8",
     )
 
-    graph = await PCSHostAPI(home=home).get_graph()
+    graph = await PersonalContextHostAPI(home=home).get_graph()
 
     assert graph["context_ready"] is True
     assert {node["id"]: (node["kind"], node["subkind"]) for node in graph["nodes"]} == {
@@ -94,11 +94,13 @@ async def test_host_returns_atomic_source_graph_without_rebuilding_fields(
 async def test_host_returns_source_metadata_through_shared_page_detail(
     tmp_path: Path,
 ) -> None:
-    home = tmp_path / "pcs"
+    home = tmp_path / "personal_context"
     source_id, source_path = _write_source(home)
     markdown = source_path.read_text(encoding="utf-8")
 
-    assert await PCSHostAPI(home=home).get_graph_page(f"source:{source_id}") == {
+    assert await PersonalContextHostAPI(home=home).get_graph_page(
+        f"source:{source_id}"
+    ) == {
         "node_id": f"source:{source_id}",
         "title": "GitHub PR 42",
         "path": f"{source_id}.md",

@@ -1,4 +1,4 @@
-"""Clean-cut checks for the single JiuwenSwarm PCS host class."""
+"""Clean-cut checks for the single JiuwenSwarm PersonalContext host class."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[3]
-HOST = ROOT / "jiuwenswarm" / "server" / "proactive_context"
+HOST = ROOT / "jiuwenswarm" / "server" / "personal_context"
 LEGACY_PACKAGE = ROOT / "jiuwenswarm" / "server" / "proactive_harness"
 
 
@@ -22,7 +22,7 @@ def _classes(path: Path) -> set[str]:
 
 
 def test_jiuwen_swarm_declares_only_the_host_class() -> None:
-    assert _classes(HOST) == {"PCSHostAPI"}
+    assert _classes(HOST) == {"PersonalContextHostAPI"}
 
 
 def test_legacy_host_package_is_removed() -> None:

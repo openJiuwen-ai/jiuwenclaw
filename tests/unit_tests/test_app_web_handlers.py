@@ -1756,43 +1756,45 @@ def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
     assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
-def test_web_forwards_only_canonical_pcs_rpc_methods():
+def test_web_forwards_only_canonical_personal_context_rpc_methods():
     methods = {
-        "pcs.runtime.status",
-        "pcs.runtime.start",
-        "pcs.runtime.stop",
-        "pcs.runtime.get_config",
-        "pcs.runtime.patch_config",
-        "pcs.runtime.select_model",
-        "pcs.fetch.list_services",
-        "pcs.fetch.patch_service",
-        "pcs.fetch.start_service",
-        "pcs.fetch.stop_service",
-        "pcs.fetch.start_scheduler",
-        "pcs.fetch.stop_scheduler",
-        "pcs.fetch.run_all",
-        "pcs.fetch.run_one",
-        "pcs.fetch.get_run_status",
-        "pcs.fetch.authorize_provider",
-        "pcs.context.stream_graph",
-        "pcs.context.search_pages",
-        "pcs.context.get_node",
+        "personal_context.runtime.status",
+        "personal_context.runtime.start",
+        "personal_context.runtime.stop",
+        "personal_context.runtime.get_config",
+        "personal_context.runtime.patch_config",
+        "personal_context.runtime.select_model",
+        "personal_context.fetch.list_services",
+        "personal_context.fetch.create_service",
+        "personal_context.fetch.delete_service",
+        "personal_context.fetch.patch_service",
+        "personal_context.fetch.start_service",
+        "personal_context.fetch.stop_service",
+        "personal_context.fetch.start_scheduler",
+        "personal_context.fetch.stop_scheduler",
+        "personal_context.fetch.run_all",
+        "personal_context.fetch.run_one",
+        "personal_context.fetch.get_run_status",
+        "personal_context.fetch.get_authorization_status",
+        "personal_context.fetch.authorize_provider",
+        "personal_context.context.stream_graph",
+        "personal_context.context.search_pages",
+        "personal_context.context.get_node",
     }
     forwarded = {
         method
         for method in app_web_handlers._FORWARD_REQ_METHODS
-        if method.startswith("pcs.")
+        if method.startswith("personal_context.")
     }
     no_local = {
         method
         for method in app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
-        if method.startswith("pcs.")
+        if method.startswith("personal_context.")
     }
 
     assert forwarded == methods
     assert no_local == methods
-    assert "pcs.fetch.create_service" not in forwarded
-    assert "pcs.fetch.delete_service" not in forwarded
+    assert len(methods) == 22
 
 
 # =====================================================================

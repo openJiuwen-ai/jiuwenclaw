@@ -8,25 +8,25 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from jiuwenswarm.server.proactive_context.host_api import PCSHostAPI
+from jiuwenswarm.server.personal_context.host_api import PersonalContextHostAPI
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.harness.prompts import PromptAttachmentKind, PromptAttachmentManager
-from openjiuwen.harness.rails.proactive_context import PCSContextRail
+from openjiuwen.harness.rails.personal_context import PersonalContextRail
 
 
 @pytest.mark.asyncio
 async def test_real_host_core_and_rail_connection(tmp_path: Path) -> None:
     """A configured Host starts Core and the Rail reads the same fixed Context root."""
 
-    home = tmp_path / ".jiuwenswarm" / ".pcs"
+    home = tmp_path / ".jiuwenswarm" / ".personal_context"
     source_root = tmp_path / "source"
     source_root.mkdir()
     context_root = home / "workspace" / "context"
     context_root.mkdir(parents=True)
     (context_root / "description.md").write_text("smoke context", encoding="utf-8")
 
-    host = PCSHostAPI(home=home)
+    host = PersonalContextHostAPI(home=home)
     config = {
         "enabled": True,
         "fetching_enabled": True,
@@ -44,7 +44,9 @@ async def test_real_host_core_and_rail_connection(tmp_path: Path) -> None:
 
     await host.configure(config)
     try:
-        saved = yaml.safe_load((home / "pcs.yaml").read_text(encoding="utf-8"))
+        saved = yaml.safe_load(
+            (home / "personal_context.yaml").read_text(encoding="utf-8")
+        )
         assert saved["fetch_services"][0]["interval_seconds"] == 10_800.0
 
         status = await host.get_status()
@@ -54,7 +56,7 @@ async def test_real_host_core_and_rail_connection(tmp_path: Path) -> None:
 
         manager = PromptAttachmentManager()
         agent = SimpleNamespace(prompt_attachment_manager=manager)
-        rail = PCSContextRail(home)
+        rail = PersonalContextRail(home)
         rail.init(agent)
         ctx = AgentCallbackContext(
             agent=agent,
@@ -65,8 +67,20 @@ async def test_real_host_core_and_rail_connection(tmp_path: Path) -> None:
         await rail.before_model_call(ctx)
         attachments = await manager.collect_for_session("smoke-session")
         assert len(attachments) == 1
-        assert attachments[0].section == "proactive_context"
+        assert attachments[0].section == "personal_context"
         assert attachments[0].kind == PromptAttachmentKind.RUNTIME
+        assert "smoke context" in (attachments[0].content or "")
+        await rail.after_model_call(ctx)
+        assert await manager.collect_for_session("smoke-session") == []
+
+        await host.set_runtime_enabled(False)
+        await rail.before_model_call(ctx)
+        assert await manager.collect_for_session("smoke-session") == []
+
+        await host.set_runtime_enabled(True)
+        await rail.before_model_call(ctx)
+        attachments = await manager.collect_for_session("smoke-session")
+        assert len(attachments) == 1
         assert "smoke context" in (attachments[0].content or "")
         await rail.after_model_call(ctx)
         assert await manager.collect_for_session("smoke-session") == []

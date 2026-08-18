@@ -70,7 +70,9 @@ class ReqMethod(Enum):
 
     MEMORY_COMPUTE = "memory.compute"
 
-    PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    PROACTIVE_TICK = (
+        "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    )
     COMMAND_GOAL = "command.goal"
 
     FILES_LIST = "files.list"
@@ -148,25 +150,32 @@ class ReqMethod(Enum):
     SKILLS_GRAPH_GET = "skills.graph.get"
     SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
 
-    PCS_RUNTIME_STATUS = "pcs.runtime.status"
-    PCS_RUNTIME_START = "pcs.runtime.start"
-    PCS_RUNTIME_STOP = "pcs.runtime.stop"
-    PCS_RUNTIME_GET_CONFIG = "pcs.runtime.get_config"
-    PCS_RUNTIME_PATCH_CONFIG = "pcs.runtime.patch_config"
-    PCS_RUNTIME_SELECT_MODEL = "pcs.runtime.select_model"
-    PCS_FETCH_LIST_SERVICES = "pcs.fetch.list_services"
-    PCS_FETCH_PATCH_SERVICE = "pcs.fetch.patch_service"
-    PCS_FETCH_START_SERVICE = "pcs.fetch.start_service"
-    PCS_FETCH_STOP_SERVICE = "pcs.fetch.stop_service"
-    PCS_FETCH_START_SCHEDULER = "pcs.fetch.start_scheduler"
-    PCS_FETCH_STOP_SCHEDULER = "pcs.fetch.stop_scheduler"
-    PCS_FETCH_RUN_ALL = "pcs.fetch.run_all"
-    PCS_FETCH_RUN_ONE = "pcs.fetch.run_one"
-    PCS_FETCH_GET_RUN_STATUS = "pcs.fetch.get_run_status"
-    PCS_FETCH_AUTHORIZE_PROVIDER = "pcs.fetch.authorize_provider"
-    PCS_CONTEXT_STREAM_GRAPH = "pcs.context.stream_graph"
-    PCS_CONTEXT_SEARCH_PAGES = "pcs.context.search_pages"
-    PCS_CONTEXT_GET_NODE = "pcs.context.get_node"
+    PERSONAL_CONTEXT_RUNTIME_STATUS = "personal_context.runtime.status"
+    PERSONAL_CONTEXT_RUNTIME_START = "personal_context.runtime.start"
+    PERSONAL_CONTEXT_RUNTIME_STOP = "personal_context.runtime.stop"
+    PERSONAL_CONTEXT_RUNTIME_GET_CONFIG = "personal_context.runtime.get_config"
+    PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG = "personal_context.runtime.patch_config"
+    PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL = "personal_context.runtime.select_model"
+    PERSONAL_CONTEXT_FETCH_LIST_SERVICES = "personal_context.fetch.list_services"
+    PERSONAL_CONTEXT_FETCH_CREATE_SERVICE = "personal_context.fetch.create_service"
+    PERSONAL_CONTEXT_FETCH_DELETE_SERVICE = "personal_context.fetch.delete_service"
+    PERSONAL_CONTEXT_FETCH_PATCH_SERVICE = "personal_context.fetch.patch_service"
+    PERSONAL_CONTEXT_FETCH_START_SERVICE = "personal_context.fetch.start_service"
+    PERSONAL_CONTEXT_FETCH_STOP_SERVICE = "personal_context.fetch.stop_service"
+    PERSONAL_CONTEXT_FETCH_START_SCHEDULER = "personal_context.fetch.start_scheduler"
+    PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER = "personal_context.fetch.stop_scheduler"
+    PERSONAL_CONTEXT_FETCH_RUN_ALL = "personal_context.fetch.run_all"
+    PERSONAL_CONTEXT_FETCH_RUN_ONE = "personal_context.fetch.run_one"
+    PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS = "personal_context.fetch.get_run_status"
+    PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS = (
+        "personal_context.fetch.get_authorization_status"
+    )
+    PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER = (
+        "personal_context.fetch.authorize_provider"
+    )
+    PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH = "personal_context.context.stream_graph"
+    PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES = "personal_context.context.search_pages"
+    PERSONAL_CONTEXT_CONTEXT_GET_NODE = "personal_context.context.get_node"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -342,6 +351,7 @@ class Mode(Enum):
 @dataclass
 class Message:
     """统一消息结构."""
+
     id: str
     type: Literal["req", "res", "event"]
     channel_id: str
@@ -354,7 +364,7 @@ class Message:
     user_id: str | None = None
     bot_id: str | None = None  # 已弃用，请使用 app_id + agent_ref 替代
     app_id: str | None = None  # V2: 应用实例标识，从 bot_id 拆出
-    agent_ref: Any = None      # V2: AgentRef(mode, id)，后端智能体标识
+    agent_ref: Any = None  # V2: AgentRef(mode, id)，后端智能体标识
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None
