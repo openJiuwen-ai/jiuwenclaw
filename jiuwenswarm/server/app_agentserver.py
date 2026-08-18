@@ -29,6 +29,7 @@ parse_dotenv_early("jiuwenswarm-agentserver")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_default_builtin_skills,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir,
@@ -54,6 +55,9 @@ mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
 
 if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
@@ -211,6 +215,12 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
 
     await warm_image_modality_cache(get_config(), reason="startup")
+
+    # ---------- Opencode Zen 免费模型注入 ----------
+    # 开箱即用：从 Zen 拉取限时免费模型，追加到 models.defaults。失败兜底、不阻断启动。
+    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+
+    await warm_zen_free_models(reason="startup")
 
     server = AgentWebSocketServer.get_instance(
         host=host,

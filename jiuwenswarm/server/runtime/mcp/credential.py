@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -215,12 +218,40 @@ class CredentialStore:
             return {}
 
     def _save(self, name: str, data: dict[str, str]) -> None:
+        """原子写入 + Unix 权限收紧到 0600。
+
+        凭证文件存明文 token，写到一半崩溃会留下截断文件（下次读取 token
+        丢失，需重输）。用 tempfile + os.replace 保证原子性：要么完整新值，
+        要么保留旧值。Unix 下额外 chmod 600 防止多用户机其他账号读取；
+        Windows 无 stat 权限语义（NTFS ACL 不走 mode），原子写仍生效。
+        """
         p = self._path(name)
         try:
-            with p.open("w", encoding="utf-8") as fh:
+            # dir= 同目录保证 os.replace 是原子的 rename，不跨文件系统。
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=str(p.parent), suffix=".tmp",
+                delete=False,
+            ) as fh:
                 json.dump(data, fh, ensure_ascii=False)
+                tmp_path = Path(fh.name)
+            # Unix 收紧权限（仅在非 Windows 且 mode 可写时）；Windows 跳过。
+            if os.name != "nt":
+                try:
+                    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+                except OSError as chmod_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[mcp.credential] chmod 0600 %s failed: %s",
+                        tmp_path, chmod_exc,
+                    )
+            os.replace(tmp_path, p)
         except OSError as exc:  # noqa: BLE001
             logger.warning("[mcp.credential] failed to write %s: %s", p, exc)
+            # 失败时清理残留临时文件，避免 .tmp 文件堆积。
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:  # noqa: BLE001
+                pass
 
     def save_token(self, name: str, key: str, value: str) -> None:
         data = self._load(name)

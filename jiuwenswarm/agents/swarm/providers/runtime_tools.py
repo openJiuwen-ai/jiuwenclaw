@@ -161,6 +161,14 @@ class SendFileInput(ConstructionInput):
         attr="request_metadata",
         description="Request metadata mapping.",
     )
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        description="Active user project directory.",
+    )
+    team_workspace_root: str | None = context_field(
+        attr="team_ws_root",
+        description="Internal team collaboration workspace root.",
+    )
 
 
 @harness_element(
@@ -203,6 +211,8 @@ def build_send_file_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
             session_id=inp.session_id,
             channel_id=inp.channel_id,
             metadata=inp.request_metadata,
+            project_dir=inp.project_dir,
+            team_workspace_root=inp.team_workspace_root,
         )
         tools = list(toolkit.get_tools())
         logger.info(

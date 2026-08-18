@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
@@ -21,16 +22,28 @@ from jiuwenswarm.server.runtime.mcp.credential import (
 
 _HTTP_MCP_TRANSPORTS = frozenset({"sse", "http", "streamable-http", "streamable_http"})
 
+_PLACEHOLDER_RE = re.compile(r"\$\{(\w+)\}")
 
-def extract_enabled_mcp_server_entries(config_base: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Return enabled MCP server entries — merges config.yaml + state.json.
 
-    MCP connection/enabled state lives in ``mcp/state.json``; ``get_mcp_servers``
-    merges that with config.yaml's hand-written ``mcp.servers``. This wrapper
-    filters to enabled entries so the adapter's init/sync paths register only
-    what's on. ``config_base`` is accepted for callers that pass a resolved
-    snapshot, but the authoritative source is the merged ``get_mcp_servers()``
-    list — config_base's mcp.servers would miss state.json MCPs.
+def _resolve_string(value: str, resolver) -> str:
+    """Substitute ${VAR} in a string via the resolver; missing stays literal."""
+    if not resolver or not isinstance(value, str):
+        return value
+    return _PLACEHOLDER_RE.sub(
+        lambda m: resolver(m.group(1)) or m.group(0), value
+    )
+
+
+def extract_enabled_mcp_server_entries(
+    config_base: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return enabled MCP server entries from the merged source.
+
+    ``config_base`` is accepted for callers that pass a resolved snapshot, but
+    the authoritative source is the merged ``get_mcp_servers()`` list
+    (config.yaml ∪ state.json) — config_base's mcp.servers would miss
+    state.json MCPs (the dynamic-loading feature writes connected/registered
+    custom MCPs there).
     """
     from jiuwenswarm.common.config import get_mcp_servers
     try:
@@ -52,18 +65,6 @@ def extract_enabled_mcp_server_entries(config_base: dict[str, Any] | None = None
             continue
         result.append(item)
     return result
-
-
-_PLACEHOLDER_RE = re.compile(r"\$\{(\w+)\}")
-
-
-def _resolve_string(value: str, resolver) -> str:
-    """Substitute ${VAR} in a string via the resolver; missing stays literal."""
-    if not resolver or not isinstance(value, str):
-        return value
-    return _PLACEHOLDER_RE.sub(
-        lambda m: resolver(m.group(1)) or m.group(0), value
-    )
 
 
 def build_mcp_server_config(
@@ -176,8 +177,16 @@ async def preflight_mcp_server_reachable(
 ) -> tuple[bool, str]:
     """Reachability + auth probe for HTTP-based MCP servers.
 
-    Plain httpx POST (not client.connect — that leaks anyio ghost tasks on
-    401/timeout). Returns (reachable, reason). Non-HTTP transports skip.
+    Uses a plain ``httpx.AsyncClient`` POST (never ``client.connect()``, which
+    enters the mcp SDK's anyio task group and leaks ghost tasks on 401/timeout
+    — the "restart then can't chat" symptom). Catches: 401/403 (auth rejected),
+    timeout (server not responding), connect error (unreachable). Other status
+    codes defer to the real connect path; this probe only guards reachability
+    and auth, not protocol correctness.
+
+    Non-HTTP transports report reachable (no cheap probe). Shared by the
+    config-time ``_pre_check_mcp_http_auth`` and cold-start
+    ``_register_mcp_server`` so both gates stay identical.
     """
     transport = (getattr(cfg, "client_type", "") or "").strip().lower()
     if transport not in _HTTP_MCP_TRANSPORTS:
@@ -201,7 +210,7 @@ async def preflight_mcp_server_reachable(
     http_timeout = httpx.Timeout(connect=min(read_t, 5.0), read=read_t, write=5.0, pool=5.0)
 
     headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-    # Caller headers live in params.headers and/or auth_headers.
+    # Caller headers live in params.headers and/or auth_headers. 
     params = getattr(cfg, "params", None) or {}
     cfg_headers = params.get("headers") if isinstance(params, dict) else None
     if isinstance(cfg_headers, dict):
@@ -262,29 +271,6 @@ async def preflight_mcp_server_reachable(
             pass
         return False, f"http {resp.status_code} from server{(': ' + snippet) if snippet else ''}"
     return True, f"ok (http {resp.status_code})"
-
-
-def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
-    stable_payload = {
-        key: value
-        for key, value in payload.items()
-        if key != "server_id"
-    }
-    raw = json.dumps(
-        {"scope": scope, "payload": stable_payload},
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-    safe_scope = _safe_id_part(scope, default="scope")
-    safe_name = _safe_id_part(name, default="server")
-    return f"mcp_{safe_scope}_{safe_name}_{digest}"
-
-
-def _safe_id_part(value: str, *, default: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_").lower()
-    return (normalized or default)[:48]
 
 
 async def fetch_mcp_tools_via_temp_connection(entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -511,12 +497,32 @@ async def probe_mcp_live_connection(name: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
+    stable_payload = {
+        key: value
+        for key, value in payload.items()
+        if key != "server_id"
+    }
+    raw = json.dumps(
+        {"scope": scope, "payload": stable_payload},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    safe_scope = _safe_id_part(scope, default="scope")
+    safe_name = _safe_id_part(name, default="server")
+    return f"mcp_{safe_scope}_{safe_name}_{digest}"
+
+
+def _safe_id_part(value: str, *, default: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_").lower()
+    return (normalized or default)[:48]
+
+
 __all__ = [
     "build_enabled_mcp_server_configs",
     "build_mcp_server_config",
     "extract_enabled_mcp_server_entries",
     "preflight_mcp_server_reachable",
-    "fetch_mcp_tools_via_temp_connection",
-    "fill_mcp_tools_fallback",
-    "probe_mcp_live_connection",
 ]

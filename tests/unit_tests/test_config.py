@@ -15,6 +15,7 @@ from jiuwenswarm.common.config import (
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    update_external_cli_agents_in_config,
     update_skill_retrieval_in_config,
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
@@ -689,6 +690,117 @@ modes:
         saved = raw["modes"]["team"]["alpha_team"]
         assert "teammate" not in saved
         assert "teammate" not in saved["agents"]
+
+    @staticmethod
+    def test_replace_teams_in_config_writes_external_cli_agents(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        payload["team"][0]["external_cli_publish_url"] = "ws://127.0.0.1:19000/ws"
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        assert saved["external_transport"] == {
+            "type": "hybrid",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+        assert "external_cli_publish_url" not in saved
+
+    @staticmethod
+    def test_replace_teams_in_config_keeps_claude_without_external_transport(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
+
+    @staticmethod
+    def test_replace_teams_in_config_removes_external_transport_without_codex(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
+        payload["team"][0]["external_transport"] = {
+            "type": "inprocess",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
+
+    @staticmethod
+    def test_update_external_cli_agents_in_config_updates_default_team(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_external_cli_agents_in_config(
+            [
+                {"cli_agent": "claude", "cli_path": "/opt/claude"},
+                {"cli_agent": "codex", "cli_path": "/opt/codex"},
+            ],
+            "ws://127.0.0.1:19000/ws",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["jiuwen_team"]
+        assert saved["external_cli_agents"] == [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        assert saved["external_transport"] == {
+            "type": "hybrid",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+
+    @staticmethod
+    def test_update_external_cli_agents_in_config_removes_external_transport_without_codex(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_external_cli_agents_in_config(["claude", "codex"], "ws://127.0.0.1:19000/ws")
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        raw["modes"]["team"]["jiuwen_team"]["external_transport"] = {
+            "type": "inprocess",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+        update_external_cli_agents_in_config(["claude"])
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["jiuwen_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
 
     @staticmethod
     def test_replace_teams_in_config_rejects_duplicate_team_names(

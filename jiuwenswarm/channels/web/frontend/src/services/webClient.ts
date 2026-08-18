@@ -12,6 +12,7 @@ import { getWsBase } from '../utils/env';
 import { resolveUserId } from '../utils/userId';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
+import { createSessionEventGate } from './sessionEventGate';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -87,6 +88,9 @@ class WebClient {
   private connectPromise: Promise<void> | null = null;
   private lastConnectOptions: WebConnectOptions = {};
   private requestSeq = 0;
+  private readonly sessionEventGate = createSessionEventGate((event) => {
+    this.dispatchEventNow(event);
+  });
 
   getState(): WebConnectionState {
     return this.state;
@@ -122,6 +126,10 @@ class WebClient {
         this.handlers.delete(eventName);
       }
     };
+  }
+
+  suspendSessionEvents(sessionId: string): () => void {
+    return this.sessionEventGate.suspend(sessionId);
   }
 
   async connect(options: WebConnectOptions = {}): Promise<void> {
@@ -459,6 +467,10 @@ class WebClient {
   }
 
   private dispatchEvent(event: WsEvent): void {
+    this.sessionEventGate.dispatch(event);
+  }
+
+  private dispatchEventNow(event: WsEvent): void {
     const handlers = this.handlers.get(event.event);
     if (!handlers || handlers.size === 0) {
       return;

@@ -161,6 +161,37 @@ def test_store_reads_file_with_utf8_bom(tmp_path: Path) -> None:
     assert store.get_all("baidu-netdisk") == {"BAIDU_ACCESS_TOKEN": "real-token"}
 
 
+def test_store_save_is_atomic_no_tmp_leftover(tmp_path: Path) -> None:
+    """_save 用 tempfile + os.replace 原子写: 不残留 .tmp 文件."""
+    store = cred.CredentialStore(workspace_dir=tmp_path)
+    store.save_token("tyc-mcp", "TIANYANCHA_API_KEY", "v1")
+
+    # credentials 目录下应只有最终的 <name>.json,无 .tmp 残留.
+    cred_files = list((tmp_path / "mcp" / "credentials").iterdir())
+    assert any(p.name == "tyc-mcp.json" for p in cred_files)
+    assert not any(p.suffix == ".tmp" or ".tmp" in p.name for p in cred_files), \
+        f"temp file leaked: {cred_files}"
+
+
+def test_store_save_preserves_old_on_overwrite_failure(tmp_path: Path) -> None:
+    """写入过程中 os.replace 失败时,旧值应仍可读(原子性保证)."""
+    store = cred.CredentialStore(workspace_dir=tmp_path)
+    store.save_token("tyc-mcp", "TIANYANCHA_API_KEY", "old-value")
+    assert store.get_token("tyc-mcp", "TIANYANCHA_API_KEY") == "old-value"
+
+    # 模拟 os.replace 抛错(目标文件被占用等),save_token 应捕获并 log,
+    # 旧值仍在(原子写失败不破坏旧文件).
+    with patch("jiuwenswarm.server.runtime.mcp.credential.os.replace",
+                side_effect=OSError("replace failed")):
+        store.save_token("tyc-mcp", "TIANYANCHA_API_KEY", "new-value")
+
+    assert store.get_token("tyc-mcp", "TIANYANCHA_API_KEY") == "old-value"
+    # 临时文件应被清理,不残留.
+    cred_files = list((tmp_path / "mcp" / "credentials").iterdir())
+    assert not any(".tmp" in p.name for p in cred_files), \
+        f"temp file leaked on failure: {cred_files}"
+
+
 # --- detect placeholders in raw mcp.json (the probe used by detect_credential_kind) ---
 
 def test_extract_placeholders_finds_all_env_keys(tmp_path: Path) -> None:

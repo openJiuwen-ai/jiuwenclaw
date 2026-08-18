@@ -118,6 +118,22 @@ def _build_model_request_kwargs(
     request_kwargs.pop("model", None)
     request_kwargs.pop("model_name", None)
     request_kwargs.pop("reasoning_level", None)
+    # _source 是 jiuwenswarm 内部标记（如 agentos 备份模型），不得进入 core 的
+    # ModelRequestConfig；core 侧 extra="allow" 会静默收下它，但下游 SDK 调
+    # AsyncCompletions.create(**params) 时不认该 kwarg 会抛 "unexpected keyword
+    # argument"。统一在此清理，覆盖 build_model_from_entry / config.validate_model
+    # / image_modality_warmup 等所有走本函数的路径。
+    is_agentos = request_kwargs.get("_source") == "agentos"
+    request_kwargs.pop("_source", None)
+    # agentos 的 max_tokens 是"输入侧上下文窗口"别名（-> ContextEngineConfig，
+    # 不发厂商），绝不能进 core 的 ModelRequestConfig.max_tokens（那是"输出
+    # token 上限"语义、会发厂商）。此处是所有路径的公共出口，统一在此 pop，
+    # 保证 web validate 等绕过 build_model_from_entry 的路径也不会把它误当成
+    # 输出上限。build_model_from_entry 会从原始 mco 取该值，挂到 Model 的普通属性
+    # _agentos_ctx_window（不进 ModelRequestConfig 的 extra，故不经 model_dump
+    # 流到 SDK），供 _deep_agent_context_engine_config 路径 A 读取；不依赖此处的 pop。
+    if is_agentos:
+        request_kwargs.pop("max_tokens", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 

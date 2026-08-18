@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -230,3 +231,35 @@ def test_no_seed_zip_skips_silently(tmp_path: Path) -> None:
     )
     # 无种子: 不阻断启动, 目录未创建.
     assert not dest.exists()
+
+
+def test_bad_seed_zip_preserves_existing_dir(seed_dir: Path, tmp_path: Path) -> None:
+    """解压失败时旧目录必须原样保留 —— 原子化的核心保证。
+
+    旧实现 rmtree 旧目录后再解压,中途 BadZipFile 会留下「旧目录已删 +
+    新目录半残」状态。原子化后先解压到临时目录,失败只清理临时目录、
+    旧目录不动,下次启动可重试。
+    """
+    # 先用好种子装一份 v0.1,塞个脏文件标记旧内容.
+    _make_seed_zip(seed_dir / "mcp_builtins_v0.1.zip", "v0.1", nested=False)
+    dest = tmp_path / "ws" / "mcp" / "mcp_builtins"
+    _ensure_mcp_builtins(seed_dir, dest, overwrite=False, cumulative_diff=_new_diff())
+    (dest / "old-marker.txt").write_text("old", encoding="utf-8")
+    old_index_mtime = (dest / "index.json").stat().st_mtime_ns
+
+    # 换成损坏种子(version 不一致触发 need_extract,但 zip 本身损坏).
+    (seed_dir / "mcp_builtins_v0.1.zip").unlink()
+    bad_zip = seed_dir / "mcp_builtins_v0.2.zip"
+    bad_zip.write_bytes(b"not a zip, will raise BadZipFile")
+
+    _ensure_mcp_builtins(seed_dir, dest, overwrite=False, cumulative_diff=_new_diff())
+
+    # 旧目录必须原样保留: 脏文件还在, index.json 未被截断/删除.
+    assert (dest / "old-marker.txt").read_text(encoding="utf-8") == "old"
+    assert (dest / "index.json").is_file()
+    assert (dest / "index.json").stat().st_mtime_ns == old_index_mtime
+    # 损坏解压不留半残临时目录.
+    assert not (dest.parent / f".{dest.name}.tmp.{os.getpid()}").exists()
+    # 也不留其它 .tmp 残留.
+    tmp_leaks = [p for p in dest.parent.iterdir() if ".tmp." in p.name]
+    assert not tmp_leaks, f"temp dir leaked: {tmp_leaks}"

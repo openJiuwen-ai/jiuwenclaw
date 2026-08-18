@@ -1,7 +1,7 @@
 import { createStaticPreviewDocument } from '../isolatedPreview';
 import { getSvgNaturalHeight, getSvgNaturalWidth } from '../../../utils/svgDimensions';
 
-export type SvgMarkupStatus = 'streaming' | 'ready' | 'previewable' | 'invalid';
+export type SvgMarkupStatus = 'streaming' | 'ready' | 'invalid';
 
 export interface SvgPreview {
   markup: string;
@@ -34,7 +34,10 @@ export function getSvgPreview(code: string): SvgPreview | null {
   if (!normalized.hasAttribute('xmlns')) normalized.setAttribute('xmlns', SVG_NAMESPACE);
   const xmlDocument = new DOMParser().parseFromString(code, 'image/svg+xml');
   const xmlRoot = xmlDocument.documentElement;
-  const wellFormed = xmlDocument.querySelector('parsererror') === null && xmlRoot.namespaceURI === SVG_NAMESPACE && xmlRoot.localName === 'svg';
+  const wellFormed =
+    xmlDocument.querySelector('parsererror') === null &&
+    xmlRoot.localName === 'svg' &&
+    (xmlRoot.namespaceURI === null || xmlRoot.namespaceURI === SVG_NAMESPACE);
 
   return {
     markup: normalized.outerHTML,
@@ -110,6 +113,5 @@ export function updateSvgPreview(frame: HTMLIFrameElement | null, code: string):
 
 export function getSvgMarkupStatus(preview: SvgPreview | null, complete: boolean, isStreaming: boolean): SvgMarkupStatus {
   if (!complete && isStreaming) return 'streaming';
-  if (!preview) return 'invalid';
-  return preview.wellFormed ? 'ready' : 'previewable';
+  return preview?.wellFormed ? 'ready' : 'invalid';
 }

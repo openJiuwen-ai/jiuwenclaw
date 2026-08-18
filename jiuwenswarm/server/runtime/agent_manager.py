@@ -923,6 +923,38 @@ class AgentManager:
             )
             return self._borrow_agent(agent)
 
+    def get_agent_for_session_nowait(
+        self,
+        channel_id: str,
+        session_id: str,
+    ) -> "JiuWenSwarm | None":
+        """Return the cached channel agent that owns ``session_id`` runtime."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+
+        channel_key = _normalize_channel_id(channel_id)
+        channel_agents = self.agents.get(channel_key, {})
+        if not isinstance(channel_agents, dict):
+            return None
+
+        for cache_key, agent in channel_agents.items():
+            has_runtime = getattr(agent, "has_session_runtime", None)
+            if not callable(has_runtime):
+                continue
+            try:
+                if has_runtime(sid):
+                    return self._borrow_agent(agent)
+            except Exception:
+                logger.exception(
+                    "[AgentManager] session runtime lookup failed: "
+                    "channel_id=%s session_id=%s cache_key=%s",
+                    channel_key,
+                    sid,
+                    cache_key,
+                )
+        return None
+
     def get_agent_nowait(
         self,
         channel_id: str = "",
@@ -991,8 +1023,10 @@ class AgentManager:
             channel_id: Optional channel ID to limit broadcast scope.
             skip_instance: Optional agent instance to skip (already processed by caller).
         """
-        # plan / fast 已合并为单一 agent；agent.fast / agent.plan 作为历史 token 仍兼容匹配。
-        target_modes = {"agent", "agent.fast", "agent.plan"}
+        # 单 agent 模式热生效：work(agent) 与 code。manager_mode 在上游已归一，
+        # cache_key 前缀只会是 agent 或 code。code.team / team.* 走独立
+        # TeamAgent 体系，cache_key 前缀为 code.team/team，严格相等不命中。
+        target_modes = {"agent", "code"}
 
         for channel_key, channel_agents in self.agents.items():
             # Limit to specific channel if provided

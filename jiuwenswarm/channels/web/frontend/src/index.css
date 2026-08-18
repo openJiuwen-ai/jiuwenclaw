@@ -571,6 +571,9 @@ body.workspace-resize-active iframe {
   .chat-bubble.user {
     border-color: transparent;
     background: var(--color-chat-bubble-user);
+    width: fit-content;
+    max-width: 100%;
+    margin-left: auto;
   }
 
   .chat-bubble.assistant {
@@ -598,6 +601,10 @@ body.workspace-resize-active iframe {
     flex: 0 0 auto;
     width: 32px;
     margin-top: 2px;
+  }
+
+  .chat-bubble-wrapper--with-files {
+    width: min(82%, 720px);
   }
 
   /* AI disclaimer — footer note pinned below the composer */
@@ -774,10 +781,10 @@ body.workspace-resize-active iframe {
     line-height: 1.7142857;
   }
 
-  /* Proactive Recommendation Card */
+  /* Proactive Recommendation Card — 外层 MessageItem 已用 assistant-row + avatar
+     占位对齐正常 agent 回复，这里不再单独限宽，撑满 chat-bubble-wrapper 即可。 */
   .proactive-recommendation-card {
     margin: 0.75rem 0;
-    max-width: 85%;
   }
 
   .proactive-card {
@@ -1027,6 +1034,11 @@ body.workspace-resize-active iframe {
   .team-member-message__body.is-continued {
     grid-column: 2;
     margin-left: 0;
+  }
+
+  .chat-message-file-list {
+    width: 100%;
+    max-width: min(100%, 720px);
   }
 
   .team-member-message__card {

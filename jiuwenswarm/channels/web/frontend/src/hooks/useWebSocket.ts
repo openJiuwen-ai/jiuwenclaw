@@ -43,7 +43,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import { isPlanWireMode, resolvePlanWireMode, stripPlanSuffix } from '../features/planMode/wireMode';
+import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
@@ -67,6 +67,7 @@ import {
   findOverlappingFileExecutionEvent,
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
+import { makeEventDedupKey } from '../utils/wsEventDedup';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -115,12 +116,21 @@ const GOAL_STALE_REFRESH_CHECK_INTERVAL_MS = 15000;
  */
 const GOAL_UNKNOWN_RETRY_INTERVAL_MS = 5 * 60 * 1000;
 /**
- * set 发出后，等这么久还没等到 goal.snapshot/execution.error 把 pendingAction 清掉，才补一次
- * 兜底 get——正常路径下 snapshot 应该早就到了，不必让这个兜底跟它赛跑（赛跑赢了反而会用 set
- * 落地前的旧数据提前清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口）。这个值
- * 只是给首次设置目标时快照丢包这种小概率情况兜底，不需要很短。
+ * set/resume 发出后，等这么久还没等到 goal.snapshot/execution.error/runtime.accepted 把
+ * pendingAction 清掉，才补一次兜底 get——正常路径下 snapshot 应该早就到了，不必让这个兜底跟它
+ * 赛跑（赛跑赢了反而会用 set/resume 落地前的旧数据提前清掉 pendingAction，重新打开"按钮提前
+ * 解禁、能打出冲突指令"的窗口）。这个值只是给"确认事件丢包/被误判为重复丢弃"这类小概率情况
+ * 兜底，不需要很短。
+ *
+ * resume 原来没有这个兜底（假设 goal.snapshot/goal.updated/execution.error 迟早会到），但
+ * bug001 实测：同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被 resume 两次时（例如来回快速切换
+ * 2 个会话），第二次 resume 自己的 goal.snapshot 因为跟第一次内容相同会被去重逻辑当成重复事件
+ * 丢弃，pendingAction 从此没有任何信号能清空，只能等 60s 的无更新兜底巡检（GOAL_STALE_REFRESH_MS）
+ * 才会恢复——用户能明显感知到编辑/暂停按钮"卡死"了几十秒。root cause 已经用 request_id 让去重
+ * 更精确（见 makeEventDedupKey），这里再给 resume 补上跟 set 一样的兜底定时器做双保险，即使
+ * 未来又出现新的"确认事件丢失"场景，也能在几秒内自愈，不会再退化到 60s。
  */
-const GOAL_SET_CONVERGENCE_DELAY_MS = 4000;
+const GOAL_ACTION_CONVERGENCE_DELAY_MS = 4000;
 
 /**
  * 目标完成事件（goal.updated）和它所在这一轮回复的正文（chat.delta/chat.final），走的是两条
@@ -411,37 +421,14 @@ function resolveInterruptResumeMode(sessionId: string): AgentMode {
 }
 
 /**
- * 取该会话的 work_mode（`work` / `code`）。
- *
- * 与 `getSessionWorkContext` 同一套取值顺序：session → selectedProject →
- * workspaceStore。这里单独抽出，是因为 team + plan 时 `resolvePlanWireMode`
- * 要据此区分 `team.plan.normal` / `team.plan.code`，而那个函数不读 store。
- */
-function getSessionWorkMode(sessionId: string): string | undefined {
-  const sessionStore = useSessionStore.getState();
-  const workspaceStore = useWorkspaceStore.getState();
-  const session =
-    sessionStore.currentSession?.session_id === sessionId
-      ? sessionStore.currentSession
-      : sessionStore.sessions.find((item) => item.session_id === sessionId);
-  const selectedProject = workspaceStore.selectedProject;
-  return session?.work_mode || selectedProject?.work_mode || workspaceStore.workMode;
-}
-
-/**
  * 组合出本次请求要发送的 mode。
  *
  * UI 的 `AgentMode` 只有 agent / team / auto_harness；Plan 是独立开关。所有出站
  * 请求（普通消息、队列重发、interrupt resume）都必须走这里，否则 Plan 状态会被
- * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。team + plan 时还要带上
- * work_mode，以便 `resolvePlanWireMode` 路由到 `team.plan.normal` / `team.plan.code`。
+ * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。
  */
 function resolveOutgoingMode(sessionId: string, baseMode: AgentMode | string | undefined): string {
-  return resolvePlanWireMode(
-    baseMode,
-    usePlanStore.getState().isActive(sessionId),
-    getSessionWorkMode(sessionId)
-  );
+  return resolvePlanWireMode(baseMode, usePlanStore.getState().isActive(sessionId));
 }
 
 /**
@@ -697,11 +684,10 @@ interface PendingContextCompressionStart {
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent';
-  // 后端 session.mode 可能带 `.plan` 后缀（`agent.plan` / `team.plan.normal` /
-  // `team.plan.code`），先剥掉后缀再归一化，否则 `team.plan.*` 会落进下面的
-  // 兜底分支被误判成单 agent。
-  const normalized = stripPlanSuffix(rawMode.trim().toLowerCase());
-  if (normalized === 'team') return 'team';
+  const normalized = rawMode.trim().toLowerCase();
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent';
 }
@@ -816,27 +802,6 @@ function stringifyCompact(value: unknown): string {
   } catch {
     return String(value ?? '');
   }
-}
-
-function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
-  try {
-    const serialized = JSON.stringify(payload);
-    if (!serialized) {
-      return '';
-    }
-    return serialized.length > 800 ? serialized.slice(0, 800) : serialized;
-  } catch {
-    return '';
-  }
-}
-
-function makeEventDedupKey(eventName: string, payload: Record<string, unknown>): string {
-  const payloadSessionId =
-    typeof payload.session_id === 'string' ? payload.session_id : '';
-  const payloadEventType =
-    typeof payload.event_type === 'string' ? payload.event_type : '';
-  const payloadSnapshot = stringifyPayloadForDedup(payload);
-  return `${eventName}::${payloadSessionId}::${payloadEventType}::${payloadSnapshot}`;
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
@@ -1326,27 +1291,26 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        // 没有数据可落——pendingAction 会在 goal.snapshot/goal.updated/execution.error 事件到达时
-        // 清掉（applyGoalSnapshot -> applyIncomingGoal）。协议文档确认这条流式失败事件的 payload
-        // 也一定带 goal 字段（哪怕是 null），所以 resume 的业务层失败不需要额外兜底 get。
-        if (action === 'set') {
-          // set 是 fire-and-forget，正常路径下应该很快会收到 goal.snapshot/execution.error
-          // 把 pendingAction 清掉。这里延迟 GOAL_SET_CONVERGENCE_DELAY_MS 后补一次兜底 get，
-          // 只覆盖"事件真的丢了"这类小概率情况（尤其是这个 session 第一次设置目标时，1 分钟
-          // 无更新兜底轮询要求 store 里已有非空 goal 才会巡检，覆盖不到这个场景）——不在发送后
-          // 立刻发，是因为立刻发会跟真正的 snapshot 赛跑，赢了反而用 set 落地前的旧数据提前
-          // 清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口，等于没解决问题。
-          window.setTimeout(() => {
-            // 到点一看 pendingAction 已经不是 'set' 了，说明真正的事件已经收敛过一次，不需要
-            // 再补——不管是被这次 set 自己的事件清的，还是用户切走后又发起了别的操作。
-            if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== 'set') return;
-            void requestGoalAction({ sessionId, action: 'get', mode })
-              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
-              .catch(() => {
-                // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
-              });
-          }, GOAL_SET_CONVERGENCE_DELAY_MS);
-        }
+        // 没有数据可落——pendingAction 正常应该在 goal.snapshot/goal.updated/execution.error/
+        // runtime.accepted 事件到达时被清掉（applyGoalSnapshot -> applyIncomingGoal，或
+        // runtime.accepted 的专属处理）。但两类事件都可能因为各种原因没能把这次操作的
+        // pendingAction 清空——比如 bug001：同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被
+        // resume 两次，第二次自己的确认事件因为内容跟第一次相同，被事件去重逻辑当成"重复事件"
+        // 丢弃（已经用 request_id 让去重更精确，但作为双保险，这里 set/resume 都统一补一次
+        // 收敛兜底 get，避免未来再出现类似的"确认事件丢失"场景时按钮又卡死到 60s 那么久）。
+        // 不在发送后立刻补，是因为立刻发会跟真正的 snapshot 赛跑，赢了反而用 set/resume 落地前
+        // 的旧数据提前清掉 pendingAction，重新打开"按钮提前解禁、能打出冲突指令"的窗口，等于
+        // 没解决问题。
+        window.setTimeout(() => {
+          // 到点一看 pendingAction 已经不是这次发起的 action 了，说明真正的事件已经收敛过一次，
+          // 不需要再补——不管是被这次操作自己的事件清的，还是用户切走后又发起了别的操作。
+          if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== action) return;
+          void requestGoalAction({ sessionId, action: 'get', mode })
+            .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
+            .catch(() => {
+              // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
+            });
+        }, GOAL_ACTION_CONVERGENCE_DELAY_MS);
         return;
       }
 
@@ -1402,9 +1366,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      // User-visible text is required; attachment-only / 【上传文档】-only payloads
-      // must not send (matches InputArea canSubmit / handleSubmit).
-      if (!stripUploadDocumentBlocks(content).trim()) return false;
+      // Attachment-only payloads are allowed when mediaItems are present.
+      // 【上传文档】-only text without any mediaItems is still blocked.
+      if (!stripUploadDocumentBlocks(content).trim() && !hasMedia) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
@@ -1993,6 +1957,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     []
   );
 
+  // 主动推荐来源的 chunk 是后台主 agent 跑指令式 query 产生的系统推送话术，
+  // 不是用户这一轮的思考流。若让它走正常 appendReasoning / closeReasoning /
+  // setProcessing / setThinking，会把 proactive 的思考段追加进 session 全局
+  // reasoningSegments（segment 无 messageId 绑定，按 startedAt 排序并入上一轮
+  // turn），进而污染上一条用户消息的思考状态（"已完成" → "已完成 N 次思考"
+  // streak chip）。proactive 流的 chunk 只负责把推荐正文落地为卡片，不参与
+  // 会话级思考状态机。
+  const isProactiveRecommendationPayload = useCallback(
+    (payload: Record<string, unknown>): boolean =>
+      typeof payload.source === 'string' && payload.source === 'proactive_recommendation',
+    []
+  );
+
   const clearThinkingForVisibleOutput = useCallback((sessionId: string) => {
     const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
     const isProcessingNow = useChatStore.getState().getRuntime(sessionId)?.isProcessing;
@@ -2000,25 +1977,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       return;
     }
     useChatStore.getState().setThinking(sessionId, false);
-  }, []);
-
-  const shouldRecoverProcessingFromReasoning = useCallback((sessionId: string, payload: Record<string, unknown>): boolean => {
-    const runtime = useChatStore.getState().getRuntime(sessionId);
-    if (!runtime || runtime.isProcessing || runtime.isLoadingHistory || runtime.isPaused) {
-      return false;
-    }
-    if (runtime.currentStreamId) {
-      return true;
-    }
-    if (webClient.getInflightCount() > 0) {
-      return true;
-    }
-    const payloadRequestId = getPayloadRequestId(payload);
-    return Boolean(
-      payloadRequestId &&
-      activeRequestIdRef.current &&
-      payloadRequestId === activeRequestIdRef.current
-    );
   }, []);
 
   const getTeamMemberOutputKey = useCallback(
@@ -2155,7 +2113,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
         const activityRuntime = useChatStore.getState().getRuntime(sessionId);
-        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
+        if (
+          !isProactiveRecommendationPayload(payload) &&
+          !activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused
+        ) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -2175,12 +2136,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           revealPendingContextUsage(sessionId);
         }
         if (currentMode === 'team' && content) {
-          clearThinkingForVisibleOutput(sessionId);
-          if (content.trim()) {
-            useChatStore.getState().bumpThinkingAnchor(sessionId);
-            useChatStore.getState().closeReasoning(sessionId, {
-              atMs: eventTimestampMs(payload),
-            });
+          if (!isProactiveRecommendationPayload(payload)) {
+            clearThinkingForVisibleOutput(sessionId);
+            if (content.trim()) {
+              useChatStore.getState().bumpThinkingAnchor(sessionId);
+              useChatStore.getState().closeReasoning(sessionId, {
+                atMs: eventTimestampMs(payload),
+              });
+            }
           }
           const existingMsg = findActiveTeamLeaderMessage(sessionId);
 
@@ -2213,12 +2176,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-        clearThinkingForVisibleOutput(sessionId);
-        if (content.trim()) {
-          useChatStore.getState().bumpThinkingAnchor(sessionId);
-          useChatStore.getState().closeReasoning(sessionId, {
-            atMs: eventTimestampMs(payload),
-          });
+        if (!isProactiveRecommendationPayload(payload)) {
+          clearThinkingForVisibleOutput(sessionId);
+          if (content.trim()) {
+            useChatStore.getState().bumpThinkingAnchor(sessionId);
+            useChatStore.getState().closeReasoning(sessionId, {
+              atMs: eventTimestampMs(payload),
+            });
+          }
         }
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
@@ -2245,10 +2210,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.reasoning', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        // 主动推荐来源的 reasoning 不进 session 全局 reasoningSegments——否则会并入
+        // 上一轮 turn（segment 无 messageId 绑定，按 startedAt 排序），把上一条
+        // 用户消息的思考状态从"已完成"污染成"已完成 N 次思考" streak chip。
+        if (isProactiveRecommendationPayload(payload)) return;
 
-        // 只在明确属于当前活跃请求时恢复 processing，避免 evolution 后置 reasoning
-        // 把已完成会话重新拉回处理中。
-        if (shouldRecoverProcessingFromReasoning(sessionId, payload)) {
+        // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
+        const activityRuntime = useChatStore.getState().getRuntime(sessionId);
+        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -2877,14 +2846,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
         // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
         const activityRuntime = useChatStore.getState().getRuntime(sessionId);
-        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
+        if (
+          !isProactiveRecommendationPayload(payload) &&
+          !activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused
+        ) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        clearThinkingForVisibleOutput(sessionId);
-        useChatStore.getState().closeReasoning(sessionId, {
-          atMs: eventTimestampMs(payload),
-        });
+        if (!isProactiveRecommendationPayload(payload)) {
+          clearThinkingForVisibleOutput(sessionId);
+          useChatStore.getState().closeReasoning(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
+        }
         const toolCall = normalizeToolCallPayload(payload);
         const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
         if (shutdownMemberId) {
@@ -3027,10 +3001,22 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('goal.updated', payload)) return;
         applyGoalSnapshot(payload);
       }),
-      webClient.on('runtime.accepted', () => {
-        // Goal 的 loading 结束统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
-        // runtime.accepted 下发 goal.snapshot）；这里仅作为通用 ACK 占位，不做任何状态变更，
+      webClient.on('runtime.accepted', ({ payload }) => {
+        if (shouldDropDuplicatedEvent('runtime.accepted', payload)) return;
+        // Goal 的 loading 正常路径下统一以 goal.snapshot 为准（文档 §4 中 set/resume 均先于
+        // runtime.accepted 下发 goal.snapshot，实测 bug001 复现日志里 16/16 次 resume 也确认了
+        // 这个顺序），所以这里大多数时候只是个通用 ACK 占位。但 goalStore.ts 里 pendingAction
+        // 字段的注释本来就写明"收到 goal.snapshot 或 runtime.accepted 后清空"——留一个防御性
+        // 兜底：如果这个 session 的 pendingAction 还没被 goal.snapshot 清掉（比如极端情况下
+        // goal.snapshot 真的没发下来，只有这一条 runtime.accepted；或者它本身就是被去重逻辑
+        // 丢弃的那次操作的确认），就在这里把它清掉，避免编辑/暂停/删除按钮无限期置灰。
         // 不当作错误、不重试、不新增消息（文档 §6.1）。
+        const sessionId = getPayloadSessionId(payload);
+        if (!sessionId) return;
+        const pendingAction = useGoalStore.getState().runtimes[sessionId]?.pendingAction;
+        if (pendingAction === 'resume' || pendingAction === 'set') {
+          useGoalStore.getState().setPendingAction(sessionId, null);
+        }
       }),
       webClient.on('execution.error', ({ payload }) => {
         const goal = payload.goal;
@@ -3105,6 +3091,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
+        // 主动推荐来源的 processing_status 不参与会话级状态机：它不该拉起/打断
+        // 用户轮的 processing，更不该触发 setThinking/stopStreaming/taskQueue 自动排空。
+        if (isProactiveRecommendationPayload(payload)) return;
         // 切换模式时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
         // 加载历史消息时忽略处理状态更新
@@ -3967,7 +3956,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,
-    shouldRecoverProcessingFromReasoning,
     t,
     takeTeamMemberOutputEventId,
   ]);

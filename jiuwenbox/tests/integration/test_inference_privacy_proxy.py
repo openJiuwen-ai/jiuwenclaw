@@ -1,10 +1,12 @@
 """Integration tests for HTTP-aware inference privacy proxy with path routing."""
 
 import asyncio
+import base64
 import http.client
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
@@ -13,6 +15,11 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from jiuwenbox.models.policy import (
+    InferencePrivacyProxyPolicy,
+    ProxyBasicAuth,
+    ProxyRouteEntry,
+)
 from jiuwenbox.proxy.inference_privacy_proxy import (
     InferencePrivacyProxyConfig,
     ProxyRoute,
@@ -578,9 +585,9 @@ class TestInferencePrivacyProxyUnit:
     """Unit tests for HTTP-aware proxy."""
 
     @pytest.mark.asyncio
-    async def test_proxy_starts_and_stops(self):
+    async def test_proxy_starts_and_stops(self, proxy_listen_port):
         config = InferencePrivacyProxyConfig(
-            listen_port=18080,
+            listen_port=proxy_listen_port,
             routes=[
                 ProxyRoute(
                     path_prefix="/test",
@@ -1920,50 +1927,36 @@ class TestModelValidation:
 
     @staticmethod
     def test_listen_port_out_of_range_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="listen_port must be between"):
             InferencePrivacyProxyPolicy(listen_port=70000, listen_host="0.0.0.0")
 
     @staticmethod
     def test_listen_port_negative_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="listen_port must be between"):
             InferencePrivacyProxyPolicy(listen_port=-1, listen_host="0.0.0.0")
 
     @staticmethod
     def test_listen_port_valid_accepted():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         policy = InferencePrivacyProxyPolicy(listen_port=8080, listen_host="127.0.0.1")
         assert policy.listen_port == 8080
 
     @staticmethod
     def test_path_prefix_empty_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="path_prefix cannot be empty"):
             ProxyRouteEntry(path_prefix="", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_path_prefix_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test\r\nbad", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_path_prefix_with_control_chars_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test\x01bad", target_endpoint="https://api.openai.com")
 
     @staticmethod
     def test_api_key_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(
                 path_prefix="/test",
@@ -1973,8 +1966,6 @@ class TestModelValidation:
 
     @staticmethod
     def test_api_key_with_control_chars_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(
                 path_prefix="/test",
@@ -1984,52 +1975,38 @@ class TestModelValidation:
 
     @staticmethod
     def test_target_endpoint_invalid_scheme_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="http or https"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="ftp://example.com")
 
     @staticmethod
     def test_target_endpoint_empty_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="target_endpoint cannot be empty"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="")
 
     @staticmethod
     def test_target_endpoint_with_crlf_rejected():
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="invalid characters"):
             ProxyRouteEntry(path_prefix="/test", target_endpoint="https://api.openai.com\r\nbad")
 
     @staticmethod
     def test_listen_host_invalid_ip_rejected():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         with pytest.raises(ValueError, match="valid IP address"):
             InferencePrivacyProxyPolicy(listen_port=8080, listen_host="invalid-host")
 
     @staticmethod
     def test_listen_host_ipv6_accepted():
-        from jiuwenbox.models.policy import InferencePrivacyProxyPolicy
-        
         policy = InferencePrivacyProxyPolicy(listen_port=8080, listen_host="::1")
         assert policy.listen_host == "::1"
 
     @staticmethod
     def test_path_prefix_root_rejected():
         """Root path '/' should be rejected to prevent catch-all blocking other routes."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         with pytest.raises(ValueError, match="root path"):
             ProxyRouteEntry(path_prefix="/", target_endpoint="http://example.com")
 
     @staticmethod
     def test_path_prefix_multi_level_rejected():
         """Path prefix with internal slashes should be rejected (single-level only)."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         invalid_prefixes = [
             "/api/v1",
             "/openai/chat",
@@ -2044,8 +2021,6 @@ class TestModelValidation:
     @staticmethod
     def test_path_prefix_single_level_accepted():
         """Single-level path prefix should be accepted."""
-        from jiuwenbox.models.policy import ProxyRouteEntry
-        
         valid_prefixes = [
             "/api",
             "/api-v2",
@@ -2359,3 +2334,635 @@ class TestRealLLMIntegration:
         logger.info(
             "[test_llm_api_key_injection_anthropic] Anthropic X-Api-Key injection works"
         )
+
+
+# =============================================================================
+# HTTP Basic Auth injection tests
+# =============================================================================
+
+class TestBasicAuthInjection:
+    """Unit tests for Basic auth header injection (req tests 1-6)."""
+
+    @staticmethod
+    def _basic_proxy(username="neo4j", password="dev-password"):
+        route = ProxyRoute(
+            path_prefix="/neo4j",
+            target_endpoint="http://127.0.0.1:9999",
+            basic_username=username,
+            basic_password=password,
+        )
+        proxy = InferencePrivacyProxy(InferencePrivacyProxyConfig(routes=[route]))
+        return proxy, route
+
+    @pytest.mark.asyncio
+    async def test_no_authorization_gets_basic_added(self):
+        proxy, route = self._basic_proxy()
+        expected = base64.b64encode(b"neo4j:dev-password").decode()
+        headers = b"POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n"
+        out = proxy.inject_api_key(headers, route).decode()
+        assert f"Authorization: Basic {expected}" in out
+        assert out.lower().count("authorization:") == 1
+
+    @pytest.mark.asyncio
+    async def test_client_bearer_overwritten_by_basic(self):
+        proxy, route = self._basic_proxy()
+        expected = base64.b64encode(b"neo4j:dev-password").decode()
+        headers = f"POST /p HTTP/1.1\r\nAuthorization: Bearer {PLACEHOLDER}\r\nHost: x\r\n".encode()
+        out = proxy.inject_api_key(headers, route).decode()
+        assert PLACEHOLDER not in out
+        assert "Bearer" not in out
+        assert f"Authorization: Basic {expected}" in out
+        assert out.lower().count("authorization:") == 1
+
+    @pytest.mark.asyncio
+    async def test_client_fake_basic_overwritten(self):
+        proxy, route = self._basic_proxy()
+        expected = base64.b64encode(b"neo4j:dev-password").decode()
+        fake = base64.b64encode(b"attacker:bad").decode()
+        headers = f"POST /p HTTP/1.1\r\nAuthorization: Basic {fake}\r\nHost: x\r\n".encode()
+        out = proxy.inject_api_key(headers, route).decode()
+        assert fake not in out
+        assert f"Authorization: Basic {expected}" in out
+        assert out.lower().count("authorization:") == 1
+
+    @pytest.mark.asyncio
+    async def test_lowercase_authorization_overwritten_single(self):
+        proxy, route = self._basic_proxy()
+        expected = base64.b64encode(b"neo4j:dev-password").decode()
+        headers = b"POST /p HTTP/1.1\r\nauthorization: bearer attacker\r\nHost: x\r\n"
+        out = proxy.inject_api_key(headers, route).decode()
+        assert "attacker" not in out
+        assert f"Authorization: Basic {expected}" in out
+        assert out.lower().count("authorization:") == 1
+
+    @pytest.mark.asyncio
+    async def test_basic_route_preserves_x_api_key(self):
+        proxy, route = self._basic_proxy()
+        headers = b"POST /p HTTP/1.1\r\nX-Api-Key: keepme\r\nHost: x\r\n"
+        out = proxy.inject_api_key(headers, route).decode()
+        assert "X-Api-Key: keepme" in out
+
+    @pytest.mark.asyncio
+    async def test_base64_decodes_to_configured_credentials(self):
+        proxy, route = self._basic_proxy(username="user name", password="p@ss w:rd")
+        headers = b"POST /p HTTP/1.1\r\nHost: x\r\n"
+        out = proxy.inject_api_key(headers, route).decode()
+        m = re.search(r"Authorization: Basic (\S+)", out)
+        assert m is not None
+        decoded = base64.b64decode(m.group(1)).decode()
+        assert decoded == "user name:p@ss w:rd"
+
+    @pytest.mark.asyncio
+    async def test_api_key_route_unchanged_by_basic_branch(self):
+        """Regression: api_key routes still use Bearer/X-Api-Key injection."""
+        route = ProxyRoute(
+            path_prefix="/oai",
+            target_endpoint="http://127.0.0.1:9999",
+            api_key="sk-key",
+        )
+        proxy = InferencePrivacyProxy(InferencePrivacyProxyConfig(routes=[route]))
+        headers = f"Authorization: Bearer {PLACEHOLDER}\r\nHost: x\r\n".encode()
+        out = proxy.inject_api_key(headers, route).decode()
+        assert "Authorization: Bearer sk-key" in out
+
+    @pytest.mark.asyncio
+    async def test_no_auth_route_passthrough(self):
+        """Regression: routes without api_key/basic pass headers through unchanged."""
+        route = ProxyRoute(path_prefix="/none", target_endpoint="http://127.0.0.1:9999")
+        proxy = InferencePrivacyProxy(InferencePrivacyProxyConfig(routes=[route]))
+        headers = b"POST /p HTTP/1.1\r\nHost: x\r\n"
+        assert proxy.inject_api_key(headers, route) == headers
+
+
+class TestBasicAuthHttpForwarding:
+    """End-to-end Basic injection through a real in-process proxy (req tests 1-3, 6, 12)."""
+
+    @pytest.mark.asyncio
+    async def test_basic_header_reaches_upstream_and_log_has_no_secret(self, proxy_listen_port):
+        received: dict[str, str] = {}
+
+        async def target_server(reader, writer):
+            data = await reader.read(8192)
+            received["raw"] = data.decode(errors="replace")
+            resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+            writer.write(resp.encode())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("0.0.0.0", 0))
+            target_port = s.getsockname()[1]
+        server = await asyncio.start_server(target_server, "127.0.0.1", target_port)
+        server_task = asyncio.create_task(server.serve_forever())
+
+        secret = "dev-password-XYZ"
+        route = ProxyRoute(
+            path_prefix="/neo4j",
+            target_endpoint=f"http://127.0.0.1:{target_port}",
+            basic_username="neo4j",
+            basic_password=secret,
+        )
+        log_lines: list[str] = []
+        config = InferencePrivacyProxyConfig(listen_port=proxy_listen_port, routes=[route])
+        proxy = InferencePrivacyProxy(config, log_callback=log_lines.append)
+        proxy.enable_route("/neo4j")
+        await proxy.start()
+        try:
+            request = (
+                "POST /neo4j/db/neo4j/tx/commit HTTP/1.1\r\n"
+                "Host: x\r\n"
+                "Content-Length: 2\r\n"
+                "\r\n"
+                "{}"
+            )
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy_listen_port)
+            writer.write(request.encode())
+            await writer.drain()
+            resp = await reader.read(4096)
+            assert "200 OK" in resp.decode()
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await proxy.stop()
+            server.close()
+            await server.wait_closed()
+            server_task.cancel()
+
+        upstream = received.get("raw", "")
+        expected = base64.b64encode(f"neo4j:{secret}".encode()).decode()
+        assert f"Authorization: Basic {expected}" in upstream
+        assert upstream.lower().count("authorization:") == 1
+        # Logs must not contain the secret or the base64 credential.
+        joined = "\n".join(log_lines)
+        assert secret not in joined
+        assert expected not in joined
+
+
+class TestBasicAuthResolution:
+    """Route-assembly validation (req tests 7-10)."""
+
+    @staticmethod
+    def _entry(**kw):
+        from jiuwenbox.proxy.inference_privacy_proxy_manager import build_proxy_route
+
+        base = {"path_prefix": "/neo4j", "target_endpoint": "http://upstream:7474"}
+        base.update(kw)
+        return build_proxy_route, ProxyRouteEntry(**base)
+
+    def test_api_key_and_basic_mutually_exclusive(self):
+        build, entry = self._entry(api_key="sk", basic_auth={"username": "u", "password": "p"})
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            build(entry)
+
+    def test_basic_requires_username(self):
+        build, entry = self._entry(basic_auth={"password": "p"})
+        with pytest.raises(ValueError, match="username cannot be empty"):
+            build(entry)
+
+    def test_basic_requires_password_source(self):
+        build, entry = self._entry(basic_auth={"username": "u"})
+        with pytest.raises(ValueError, match="requires one of password or password_file"):
+            build(entry)
+
+    def test_password_and_password_file_mutually_exclusive(self):
+        build, entry = self._entry(basic_auth={"username": "u", "password": "p", "password_file": "/tmp/x"})
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            build(entry)
+
+    def test_password_file_not_found_rejected(self, tmp_path):
+        build, entry = self._entry(basic_auth={"username": "u", "password_file": str(tmp_path / "nope")})
+        with pytest.raises(ValueError, match="not found or not a regular file"):
+            build(entry)
+
+    def test_password_file_unreadable_rejected(self, tmp_path, monkeypatch):
+        """Cover the unreadable-file branch deterministically.
+
+        Real ``chmod 0o000`` cannot be asserted under root (root bypasses file
+        mode), which previously forced a long-term skip on root/CI. Instead,
+        monkeypatch ``os.access`` to report the target file as non-readable so
+        the branch is exercised on every platform/uid without depending on the
+        real permission system.
+        """
+        import jiuwenbox.proxy.inference_privacy_proxy_manager as _manager_mod
+
+        f = tmp_path / "secret"
+        f.write_text("pw")
+        target = str(f)
+        real_access = os.access
+
+        def fake_access(path, mode):
+            if str(path) == target and mode == os.R_OK:
+                return False
+            return real_access(path, mode)
+
+        monkeypatch.setattr(_manager_mod.os, "access", fake_access)
+        build, entry = self._entry(basic_auth={"username": "u", "password_file": target})
+        with pytest.raises(ValueError, match="not readable"):
+            build(entry)
+
+    def test_password_crlf_rejected(self):
+        build, entry = self._entry(basic_auth={"username": "u", "password": "pw\r\nX-Inject: bad"})
+        with pytest.raises(ValueError, match="invalid characters"):
+            build(entry)
+
+    def test_password_file_strips_only_trailing_newline(self, tmp_path):
+        f = tmp_path / "secret"
+        f.write_text("p w:rd\n")  # internal space/colon preserved, trailing newline stripped
+        build, entry = self._entry(basic_auth={"username": "u", "password_file": str(f)})
+        route = build(entry)
+        assert route.basic_password == "p w:rd"
+
+    def test_password_file_empty_rejected(self, tmp_path):
+        """An empty or newline-only password_file must be rejected.
+
+        ``_strip_trailing_newline`` reduces both ``""`` and ``"\\n"`` to ``""``,
+        which passes the CR/LF/NUL and control-char checks (an empty string
+        contains none); without this guard the route reports
+        ``password_configured: true`` while injecting ``Basic base64(user:)``
+        (empty password), so the upstream 401s and the route looks configured
+        but is unusable.
+        """
+        for content in ("", "\n"):
+            f = tmp_path / ("empty" if not content else "newline")
+            f.write_text(content)
+            build, entry = self._entry(
+                basic_auth={"username": "u", "password_file": str(f)}
+            )
+            with pytest.raises(ValueError, match="password_file is empty"):
+                build(entry)
+
+    def test_valid_inline_and_file_resolve(self, tmp_path):
+        f = tmp_path / "secret"
+        f.write_text("filepw\n")
+        build, entry = self._entry(basic_auth={"username": "neo4j", "password_file": str(f)})
+        route = build(entry)
+        assert route.basic_username == "neo4j"
+        assert route.basic_password == "filepw"
+        assert route.basic_password_file == str(f)
+
+
+class TestBasicAuthYamlLoad:
+    """YAML startup load path (req test 14)."""
+
+    @staticmethod
+    async def _stop_all(manager):
+        for r in await manager.list_proxies():
+            try:
+                await manager.stop_proxy(r["name"])
+            except Exception:  # noqa: BLE001
+                pass
+
+    @pytest.mark.asyncio
+    async def test_load_from_policy_inline_basic(self, manager, proxy_listen_port):
+        policy = InferencePrivacyProxyPolicy(
+            listen_port=proxy_listen_port,
+            listen_host="127.0.0.1",
+            routes=[
+                ProxyRouteEntry(
+                    path_prefix="/neo4j",
+                    target_endpoint="http://upstream:7474",
+                    basic_auth=ProxyBasicAuth(username="neo4j", password="yaml-pw"),
+                )
+            ],
+        )
+        try:
+            await manager.load_from_policy(policy)
+            detail = await manager.get_proxy("neo4j")
+            assert detail is not None
+            assert detail["route"]["auth_type"] == "basic"
+            assert detail["route"]["basic_auth"]["password_configured"] is True
+            assert detail["route"]["basic_auth"]["username"] == "neo4j"
+            assert "password" not in detail["route"]["basic_auth"]
+            assert "yaml-pw" not in json.dumps(detail)
+        finally:
+            await self._stop_all(manager)
+
+    @pytest.mark.asyncio
+    async def test_load_from_policy_password_file(self, manager, proxy_listen_port, tmp_path):
+        f = tmp_path / "neo4j_pw"
+        f.write_text("file-pw\n")
+        policy = InferencePrivacyProxyPolicy(
+            listen_port=proxy_listen_port,
+            listen_host="127.0.0.1",
+            routes=[
+                ProxyRouteEntry(
+                    path_prefix="/neo4j2",
+                    target_endpoint="http://upstream:7474",
+                    basic_auth=ProxyBasicAuth(username="neo4j", password_file=str(f)),
+                )
+            ],
+        )
+        try:
+            await manager.load_from_policy(policy)
+            listing = await manager.list_proxies()
+            names = [r["name"] for r in listing]
+            assert "neo4j2" in names
+            entry = next(r for r in listing if r["name"] == "neo4j2")
+            assert entry["route"]["auth_type"] == "basic"
+            assert entry["route"]["basic_auth"]["password_file"] == str(f)
+            assert "file-pw" not in json.dumps(listing)
+        finally:
+            await self._stop_all(manager)
+
+    @pytest.mark.asyncio
+    async def test_load_from_policy_bad_password_file_does_not_crash(self, manager, proxy_listen_port, tmp_path):
+        policy = InferencePrivacyProxyPolicy(
+            listen_port=proxy_listen_port,
+            listen_host="127.0.0.1",
+            routes=[
+                ProxyRouteEntry(
+                    path_prefix="/bad",
+                    target_endpoint="http://upstream:7474",
+                    basic_auth=ProxyBasicAuth(username="u", password_file=str(tmp_path / "nope")),
+                )
+            ],
+        )
+        # Must not raise; the bad route is skipped and the server keeps running.
+        await manager.load_from_policy(policy)
+        listing = await manager.list_proxies()
+        assert all(r["name"] != "bad" for r in listing)
+
+    @pytest.mark.asyncio
+    async def test_load_from_policy_valid_routes_kept_when_one_basic_invalid(
+        self, manager, proxy_listen_port, tmp_path, caplog
+    ):
+        """One invalid Basic route must not block other valid routes (req: batch tolerance)."""
+        policy = InferencePrivacyProxyPolicy(
+            listen_port=proxy_listen_port,
+            listen_host="127.0.0.1",
+            routes=[
+                ProxyRouteEntry(
+                    path_prefix="/bearer",
+                    target_endpoint="http://upstream:7474",
+                    api_key="sk-bearer",
+                ),
+                ProxyRouteEntry(
+                    path_prefix="/bad",
+                    target_endpoint="http://upstream:7474",
+                    basic_auth=ProxyBasicAuth(
+                        username="u", password_file=str(tmp_path / "nope")
+                    ),
+                ),
+                ProxyRouteEntry(
+                    path_prefix="/none",
+                    target_endpoint="http://upstream:7474",
+                ),
+                ProxyRouteEntry(
+                    path_prefix="/goodbasic",
+                    target_endpoint="http://upstream:7474",
+                    basic_auth=ProxyBasicAuth(username="neo4j", password="inline-pw"),
+                ),
+            ],
+        )
+        try:
+            await manager.load_from_policy(policy)
+            listing = await manager.list_proxies()
+            names = sorted(r["name"] for r in listing)
+            # Valid Bearer / no-auth / valid Basic routes all loaded; only
+            # the misconfigured Basic route is skipped.
+            assert names == ["bearer", "goodbasic", "none"]
+            assert "bad" not in names
+
+            bearer = next(r for r in listing if r["name"] == "bearer")
+            assert bearer["route"]["auth_type"] == "api_key"
+
+            none = next(r for r in listing if r["name"] == "none")
+            assert none["route"]["auth_type"] == "none"
+
+            good = next(r for r in listing if r["name"] == "goodbasic")
+            assert good["route"]["auth_type"] == "basic"
+            assert good["route"]["basic_auth"]["password_configured"] is True
+            assert good["route"]["basic_auth"]["username"] == "neo4j"
+            assert "password" not in good["route"]["basic_auth"]
+
+            # The skip is emitted via the module logger (the proxy instance
+            # does not exist yet at build time), so assert on captured logs.
+            assert "Skipping proxy route '/bad'" in caplog.text
+            # No inline password of any route may leak into the skip log.
+            assert "inline-pw" not in caplog.text
+        finally:
+            await self._stop_all(manager)
+
+
+class TestUpdateContractBasicAuth:
+    """PUT /proxies/{name} update contract (req: Basic matches api_key full-replace).
+
+    The existing ``api_key`` contract is full replacement: omitting ``api_key``
+    on PUT clears the stored key. Basic must follow the SAME semantics — omitting
+    ``basic_auth`` clears Basic — and must NOT get an implicit partial-update
+    mode that preserves the old password. These are no-server manager-level
+    checks (the proxy is never started), so they exercise update_proxy directly.
+    """
+
+    @staticmethod
+    def _route(prefix, **kw):
+        base = {"path_prefix": prefix, "target_endpoint": "http://upstream:7474"}
+        base.update(kw)
+        return ProxyRoute(**base)
+
+    @pytest.mark.asyncio
+    async def test_update_omit_basic_clears_basic(self, manager, proxy_listen_port):
+        """PUT replacing a Basic route with an api_key route clears Basic."""
+        config = InferencePrivacyProxyConfig(
+            listen_port=proxy_listen_port,
+            routes=[
+                self._route(
+                    "/uc-basic",
+                    basic_username="neo4j",
+                    basic_password="orig-pw",
+                )
+            ],
+        )
+        await manager.create_proxy("uc-basic", config)
+
+        # Full update: provide api_key, omit basic_auth -> Basic cleared.
+        new_config = InferencePrivacyProxyConfig(
+            routes=[self._route("/uc-basic", api_key="sk-only")]
+        )
+        await manager.update_proxy("uc-basic", new_config)
+
+        detail = await manager.get_proxy("uc-basic")
+        assert detail["route"]["auth_type"] == "api_key"
+        assert detail["route"]["api_key"] == "sk-only"
+        # Basic fields fully cleared (no implicit preserve of old password).
+        assert detail["route"]["basic_auth"] is None
+        assert "orig-pw" not in json.dumps(detail)
+
+    @pytest.mark.asyncio
+    async def test_update_omit_api_key_clears_api_key(self, manager, proxy_listen_port):
+        """Regression: existing api_key full-replace contract is unchanged.
+
+        Omitting ``api_key`` on PUT clears the stored key (existing behavior,
+        not altered by the Basic work). This anchors the contract that Basic
+        mirrors.
+        """
+        config = InferencePrivacyProxyConfig(
+            listen_port=proxy_listen_port,
+            routes=[self._route("/uc-key", api_key="sk-orig")],
+        )
+        await manager.create_proxy("uc-key", config)
+
+        new_config = InferencePrivacyProxyConfig(
+            routes=[self._route("/uc-key")]  # no api_key, no basic_auth
+        )
+        await manager.update_proxy("uc-key", new_config)
+
+        detail = await manager.get_proxy("uc-key")
+        assert detail["route"]["auth_type"] == "none"
+        assert detail["route"]["api_key"] == ""
+        assert detail["route"]["basic_auth"] is None
+
+
+class TestIntegrationProxyBasicAuth:
+    """REST API redaction + REST create path (req tests 11, 12, 14)."""
+
+    @pytest.mark.asyncio
+    async def test_list_and_detail_no_plaintext_password(
+        self, api_client, integration_target_endpoint, test_route_cleanup
+    ):
+        secret = "rest-secret-pw-456"
+        resp = await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "/basicauth",
+                "target_endpoint": integration_target_endpoint,
+                "basic_auth": {"username": "neo4j", "password": secret},
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        test_route_cleanup.append("basicauth")
+
+        listing = (await api_client.get("/api/v1/proxies")).json()
+        entry = next(r for r in listing if r["name"] == "basicauth")
+        assert entry["route"]["auth_type"] == "basic"
+        assert entry["route"]["basic_auth"]["username"] == "neo4j"
+        assert entry["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in entry["route"]["basic_auth"]
+        assert secret not in json.dumps(listing)
+
+        detail = (await api_client.get("/api/v1/proxies/basicauth")).json()
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in json.dumps(detail)
+
+    @pytest.mark.asyncio
+    async def test_update_basic_route_full_update(self, api_client, integration_target_endpoint, test_route_cleanup):
+        secret = "upd-secret-pw"
+        create = await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "/basicupd",
+                "target_endpoint": integration_target_endpoint,
+                "basic_auth": {"username": "neo4j", "password": secret},
+            },
+        )
+        assert create.status_code == 201, create.text
+        test_route_cleanup.append("basicupd")
+
+        # Full update: PUT replaces the route. Name "basicupd" derives from path_prefix.
+        new_secret = "upd-secret-pw-2"
+        resp = await api_client.put(
+            "/api/v1/proxies/basicupd",
+            json={
+                "path_prefix": "/basicupd",
+                "target_endpoint": integration_target_endpoint,
+                "basic_auth": {"username": "neo4j", "password": new_secret},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        detail = (await api_client.get("/api/v1/proxies/basicupd")).json()
+        assert detail["route"]["auth_type"] == "basic"
+        assert secret not in json.dumps(detail)
+        assert new_secret not in json.dumps(detail)
+
+    @pytest.mark.asyncio
+    async def test_update_basic_route_omit_basic_clears_basic(
+        self, api_client, integration_target_endpoint, test_route_cleanup
+    ):
+        """PUT omitting basic_auth clears Basic (matches api_key full-replace contract)."""
+        secret = "omit-orig-pw"
+        create = await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "/basicomit",
+                "target_endpoint": integration_target_endpoint,
+                "basic_auth": {"username": "neo4j", "password": secret},
+            },
+        )
+        assert create.status_code == 201, create.text
+        test_route_cleanup.append("basicomit")
+
+        # Full update: provide api_key, omit basic_auth -> Basic cleared,
+        # route becomes an api_key route. No implicit password preservation.
+        resp = await api_client.put(
+            "/api/v1/proxies/basicomit",
+            json={
+                "path_prefix": "/basicomit",
+                "target_endpoint": integration_target_endpoint,
+                "api_key": "sk-after",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        detail = (await api_client.get("/api/v1/proxies/basicomit")).json()
+        assert detail["route"]["auth_type"] == "api_key"
+        assert detail["route"]["basic_auth"] is None
+        assert secret not in json.dumps(detail)
+
+    @pytest.mark.asyncio
+    async def test_update_api_key_route_omit_api_key_clears_api_key(
+        self, api_client, integration_target_endpoint, test_route_cleanup
+    ):
+        """Regression: existing api_key PUT contract (omit = clear) unchanged."""
+        await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "/keyomit",
+                "target_endpoint": integration_target_endpoint,
+                "api_key": "sk-orig",
+            },
+        )
+        test_route_cleanup.append("keyomit")
+
+        resp = await api_client.put(
+            "/api/v1/proxies/keyomit",
+            json={
+                "path_prefix": "/keyomit",
+                "target_endpoint": integration_target_endpoint,
+                # no api_key, no basic_auth
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        detail = (await api_client.get("/api/v1/proxies/keyomit")).json()
+        assert detail["route"]["auth_type"] == "none"
+        assert detail["route"]["api_key"] == ""
+        assert detail["route"]["basic_auth"] is None
+
+    @pytest.mark.asyncio
+    async def test_error_response_no_password(self, api_client):
+        secret = "leak-check-pw-789"
+        # api_key + basic_auth mutex -> 400, detail must not contain the secret.
+        resp = await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "/leak",
+                "target_endpoint": "http://upstream:7474",
+                "api_key": "sk",
+                "basic_auth": {"username": "u", "password": secret},
+            },
+        )
+        assert resp.status_code == 400
+        assert secret not in resp.text
+
+        # Model ValidationError (empty path_prefix) with basic_auth present -> 400, no secret.
+        resp2 = await api_client.post(
+            "/api/v1/proxies",
+            json={
+                "path_prefix": "",
+                "target_endpoint": "http://upstream:7474",
+                "basic_auth": {"username": "u", "password": secret},
+            },
+        )
+        assert resp2.status_code == 400
+        assert secret not in resp2.text

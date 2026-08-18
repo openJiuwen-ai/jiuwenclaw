@@ -1,6 +1,12 @@
 # 前端显示语言：zh（中文）/ en（英文），与 Web 界面语言切换同步
 preferred_language: zh
 
+# Agent 模式是否启用渐进式工具暴露（tool_search + deferred 工具）
+# true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；
+# false：不挂载 ProgressiveToolRail，未显式声明 exposure 的工具按 direct 暴露。
+# ToolCard 自己显式声明的 exposure 优先级更高。
+progressive_tool_enabled: true
+
 # Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
 setup_guide:
   enabled: true
@@ -233,13 +239,15 @@ proactive_recommendation:
   max_rounds_per_tick: 20                # 每次 Tick 读取最近几轮对话
 
 models:
+  # 开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。
+  enable_free_models: true
   defaults:
     - model_client_config:
         api_base: ${API_BASE}
         api_key: ${API_KEY}
         model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
-        # HTTP 请求超时（秒）。需严格 > stream_first_chunk_timeout，确保先触发应用层流超时（可被 LLMRetryRail 重试）
+        # HTTP 请求超时（秒）。需严格 > stream_first_chunk_timeout，确保先触发应用层流超时（可被 ModelAnomalyDetectionRail 重试）
         timeout: 360
         # 流式：等待首个分片的最大时间（秒）。放宽以兼容 reasoning/思考模型思考期的静默
         stream_first_chunk_timeout: 300
@@ -290,6 +298,31 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.95
+  # ---- AgentOS 模型（备份切换用，不参与主对话）----
+  # 列表结构，可配多个备份模型，凭证直接填在 YAML，无环境变量。
+  # 每个元素一个模型；model_name 为空 = 该条未配置，跳过不入缓存。
+  # 填入后通过 models.list 可见、可按名切换，但不带 is_default，
+  # 绝不抢主对话，仅在被显式选中时使用。
+  # 可配多条备份模型。填写约束：(model_name, api_base, api_key) 三元组唯一，
+  # 即不存在完全相同的两条；同名（base 或 key 不同）可共存，靠缓存
+  # {model_name}#{index} 区分。
+  # max_tokens：输入侧上下文窗口上限，映射到 core 的 ContextEngineConfig.context_window_tokens
+  #   （上下文压缩阈值，不发往厂商）。仅作用于选中的 agentos 条目，不影响 defaults：
+  #   build_model_from_entry 会把它的值挪到 ModelRequestConfig 的 extra 键
+  #   _agentos_ctx_window（随选中 Model 带入缓存），并从输出侧 kwargs 里 pop 掉，
+  #   绝不作为输出 token 上限发往厂商。_deep_agent_context_engine_config 从选中
+  #   Model 读该 extra 做覆盖，因此同名条目也能精确"选中哪个用哪个的 max_tokens"。
+  agentos:
+    - model_client_config:
+        api_base: ""
+        api_key: ""
+        model_name: ""
+        client_provider: ""
+        verify_ssl: true
+        timeout: 1800
+      model_config_obj:
+        temperature: 0.95
+        max_tokens: 131072
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
@@ -407,7 +440,7 @@ team_observability:
 #
 # 注意：OTel 一个进程只允许一个全局 TracerProvider。若本进程内 team 与
 # agent 可观测性同时开启，先初始化的一方生效，另一方复用同一个 provider
-#（其 exporter/endpoint 会被忽略）。代码层面用 ownership 标记保证
+#（其 exporter/endpoint 会被忽略）。代码层面用 demand 状态保证
 # 关闭时不会误拆对方依赖的 provider。
 #
 # 前置条件（otlp 模式）：启动 OTel Collector + Langfuse。
@@ -468,12 +501,17 @@ debug_trace:
 react:
   agent_name: main_agent
   enable_task_loop: true
+  # 单轮任务循环等待上限（秒）；null 表示不限时，避免长任务被静默截断
+  completion_timeout: null
   max_iterations: 100
   model_name: ${MODEL_NAME}
   skill_mode: all
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent: code.team 路径通过此 key 门控（单 agent 路径仍由 browser runtime 开关决定）
   subagents:
+    statusline-setup:
+      enabled: true
+      max_iterations: 15
     general_agent:
       enabled: true
     code_agent:
@@ -492,40 +530,60 @@ react:
   kv_cache_affinity_config:
     enable_kv_cache_release: false
     enable_kv_cache_affinity: false
+  # ============ 上下文引擎（上下文压缩/召回/会话记忆）============
   context_engine_config:
-    enable_openrouter_model_context_window_tokens: true
+    enabled: true # 全局开关：false 时整个上下文引擎（含下列所有处理器）不生效
+    enable_openrouter_model_context_window_tokens: true # 从 OpenRouter 拉取模型的上下文窗口大小；false 时按内置模型表解析
     # 显式覆盖上下文窗口 token 上限（正整数）；注释掉或留空则按模型自动解析
     # context_window_tokens: 131072
-    enable_reload: true
-    enabled: true
+    enable_reload: true    # 卸载重载：开启后模型可通过 [[HANDLE:xxx]] 标记把已卸载的大消息原文拉回上下文
+
+    enable_context_debug: false     # 上下文压缩 debug 模式：开启后各处理器在阈值判断、片段切分、压缩重试、 前后对比等每个阶段落盘 JSONL 记录，便于排查压缩问题。关闭时零开销。默认关闭
+    # debug 记录目录；留空则按环境变量 OPENJIUWEN_CONTEXT_DEBUG_DIR，
+    # 再缺省落到 {workspace}/context/{session_id}_context/context_debug/
+    # context_debug_dir:
+
+    # 压缩召回：压缩器替换原始消息时，把原文分块归档到会话目录 compression_recall/，
+    # 模型可通过 [[COMPRESSION_RECALL: id=...]] 标记按需召回原文。默认关闭。
+    compression_recall_config:
+      enabled: false               # true 开启压缩召回（仅对对话/当前轮/轮次级三个压缩器生效）
+      chunk_size_tokens: 3000      # 归档分块大小（tokens）
+      chunk_overlap_tokens: 500    # 相邻分块重叠（tokens，须小于 chunk_size_tokens）
+
+    # 消息摘要卸载器：把超大的工具消息摘要化卸载（保留 [[OFFLOAD:...]] 索引，可重载）
     message_summary_offloader_config:
-      # read_pdf outputs are page-level source text; keep them verbatim like
-      # read_file so summaries are not built from doubly-compressed digests.
-      protected_tool_names: ["read_file", "read_pdf"]
-      add_message_threshold_ratio: 0.1
-      ttl_seconds: 300
-      ttl_context_occupancy_ratio: 0.5
-      ttl_message_threshold_ratio: 0.05
+      protected_tool_names: ["read_file", "read_pdf"]  # 这些工具的输出保持原文，不卸载
+      add_message_threshold_ratio: 0.1      # 新增工具消息超过上下文窗口容量的该比例时，立即卸载
+      ttl_seconds: 300                      # 距上次模型请求空闲超过该秒数后，才允许做 TTL（闲时）卸载
+      ttl_context_occupancy_ratio: 0.5      # 上下文占用超过该比例时，才允许做 TTL 卸载
+      ttl_message_threshold_ratio: 0.05     # TTL 卸载时，单条工具消息超过窗口容量的该比例才被处理
+
+    # 会话记忆：压缩发生前把已提交的关键信息沉淀为 session memory 笔记，
+    # 后续作为压缩上下文块注入。默认关闭。
+    # 配置分两层：外层是压缩器本体（何时触发、笔记多大）；
+    # 内层 memory 是异步更新器（SessionMemoryManager，由独立 agent/模型后台更新笔记）的行为参数。
+    session_memory_compressor_config:
+      enabled: false               # true 开启会话记忆
+      trigger_context_ratio: 0.8   # 上下文占用达到该比例时使用更新的笔记替换上下文、建议sessionmemory的阈值要小于等于下面的compressor，开启是下面的compressor作为兜底设计
+      memory:
+        update_trigger_context_ratio: 0.1   # 上下文占用达到该比例时异步更新记忆
+
+    # 对话压缩器：整体对话历史超长时，把旧对话压缩成摘要
     dialogue_compressor_config:
-      trigger_context_ratio: 0.8
-      min_target_context_ratio: 0.1
+      trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
+      min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
+
+    # 当前轮次压缩器：单轮对话（含工具调用链）过长时压缩当前轮
     current_round_compressor_config:
-      trigger_context_ratio: 0.8
-      min_target_context_ratio: 0.1
-      keep_recent_messages: 4
+      trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
+      min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
+      keep_recent_messages: 4         # 保留最近消息数
+
+    # 轮次级别压缩器：多轮长对话的三轮渐进式压缩（最强力，最后触发）
     round_level_compressor_config:
-      trigger_context_ratio: 0.8
-      min_target_context_ratio: 0.1
-      keep_recent_messages: 4
-    # 连续相同 reasoning+工具集 / 相同工具入参时，折叠重复轮次；超阈值后兜底中止
-    reasoning_tool_loop_compact_config:
-      enabled: true                        # 是否启用循环压缩
-      consecutive_threshold: 3             # reasoning+工具名连续相同几轮触发压缩
-      tool_args_consecutive_threshold: 5   # 工具名+入参连续相同几轮触发压缩（与 reasoning 无关）
-      reasoning_min_chars: 4               # reasoning 低于此长度（strip 后）的轮次不参与匹配
-      reasoning_preview_max_chars: 512     # 摘要里 reasoning 预览的最大字符数
-      bailout_threshold: 3                 # reasoning 规则压缩次数达此值后中止
-      tool_args_bailout_threshold: 2       # 工具入参规则压缩次数达此值后终止
+      trigger_context_ratio: 0.8      # 上下文占用达到该比例时触发压缩
+      min_target_context_ratio: 0.1   # 压缩目标下限（占窗口比例）
+      keep_recent_messages: 4         # 保留最近消息数
   # Skills 在线自演进配置
   evolution:
     skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
@@ -619,7 +677,7 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
       client_keys_dir: "/root/.ssh"
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
+    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8090}
     timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
     # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
     auth_enabled: false
@@ -636,9 +694,9 @@ heartbeat:
 
 # 执行护栏：工具循环检测与主动中断
 execution_guard:
-  # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
-  llm_retry_rail:
-    # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
+  # 模型异常检测护栏：重复输出/流式帧超时重试，以及连续相同工具调用压缩
+  model_anomaly_detection_rail:
+    # 总开关。关闭后不注册 ModelAnomalyDetectionRail
     enabled: true
     # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
     max_retries: 2
@@ -654,6 +712,11 @@ execution_guard:
     repeat_window_chars: 1024
     # 单字符连续重复阈值，用于检测分隔线等场景，默认较高以减少误判
     single_char_repeat_count: 90
+    # 连续相同工具名+入参+返回值时，折叠重复轮次；第 N 次命中时兜底中止
+    tool_loop_compact:
+      enabled: true                        # 是否启用循环压缩（openjiuwen 默认关闭）
+      consecutive_threshold: 4             # 工具名+入参+返回值连续相同几轮触发压缩
+      bailout_threshold: 3                 # 第几次命中时抛异常（默认最多压缩 2 次）
 
   # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
   circuit_breaker:
@@ -1039,10 +1102,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm 
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 
@@ -1254,9 +1315,6 @@ modes:
       # SwarmFlow agent calls with options.isolation="worktree".
       worktree:
         enabled: true
-
-      # Team-specific permission control.
-      enable_permissions: false
 
       leader:
         member_name: team-leader

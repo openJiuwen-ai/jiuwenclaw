@@ -85,3 +85,21 @@ def test_second_prepare_skips_when_version_matches(temp_workspace: Path) -> None
     # 第二次: overwrite=False, 版本一致 -> 跳过解压, 脏文件保留.
     prepare_workspace(overwrite=False, preferred_language="zh", workspace_dir=temp_workspace)
     assert dirty.read_text(encoding="utf-8") == "keep"
+
+
+def test_prepare_workspace_leaves_no_seed_zip_leftover(temp_workspace: Path) -> None:
+    """种子 zip 必须留在 resources 包内原地址解压, 不拷到用户工作区根.
+
+    拷贝 template workspace 时 ignore 掉 mcp_builtins*.zip —— 该 zip 是
+    _ensure_mcp_builtins 的种子, 直接从 template 原地址读并解压到
+    mcp/mcp_builtins/, 不应在用户工作区根留一份 4MB 无用途拋留。
+    """
+    prepare_workspace(overwrite=True, preferred_language="zh", workspace_dir=temp_workspace)
+
+    ws_root = temp_workspace / "agent" / "workspace"
+    leftovers = list(ws_root.glob("mcp_builtins*.zip"))
+    assert not leftovers, f"seed zip leaked to workspace root: {leftovers}"
+    # 解压目录仍在, 且内容完整。
+    mcp_builtins = ws_root / "mcp" / "mcp_builtins"
+    assert (mcp_builtins / "index.json").is_file()
+

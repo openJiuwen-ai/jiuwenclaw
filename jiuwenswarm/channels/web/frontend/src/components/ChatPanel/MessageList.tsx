@@ -90,14 +90,18 @@ function TurnElapsed({
     return null;
   }
   return (
-    <div className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', showActive && 'is-active')}>
+    <div
+      className={clsx('turn-elapsed', teamLayout && 'turn-elapsed--team', showActive && 'is-active')}
+      data-testid="chat-panel-turn-elapsed"
+      data-variant={showActive ? 'active' : 'finished'}
+    >
       {showActive && (
         <LoaderCircle className="turn-elapsed__spinner" size={12} strokeWidth={2.2} aria-hidden="true" />
       )}
-      <span className="turn-elapsed__label">
+      <span className="turn-elapsed__label" data-testid="chat-panel-turn-elapsed-label">
         {showActive ? t('chatUi.turnRunning') : t('chatUi.turnElapsed')}
       </span>
-      <span className="turn-elapsed__value">
+      <span className="turn-elapsed__value" data-testid="chat-panel-turn-elapsed-value">
         {showActive ? formatElapsedCoarse(elapsed) : formatDurationPrecise(elapsed)}
       </span>
     </div>
@@ -152,8 +156,10 @@ function CompletedWorkChip({
       )}
       onClick={onToggle}
       aria-expanded={expanded}
+      data-testid="chat-panel-completed-work-chip"
+      data-variant={variant}
     >
-      <span className={clsx('completed-work-chip__icon', toneClass)} aria-hidden="true">
+      <span className={clsx('completed-work-chip__icon', toneClass)} aria-hidden="true" data-testid="chat-panel-completed-work-chip-icon">
         {showErrorIcon ? (
           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="10" cy="10" r="6.5" />
@@ -166,9 +172,13 @@ function CompletedWorkChip({
           </svg>
         )}
       </span>
-      <span className="completed-work-chip__label">{label}</span>
+      <span className="completed-work-chip__label" data-testid="chat-panel-completed-work-chip-label">{label}</span>
       {showPartialBadge ? (
-        <span className="completed-work-chip__badge is-partial">
+        <span
+          className="completed-work-chip__badge is-partial"
+          data-testid="chat-panel-completed-work-chip-badge"
+          data-variant="partial"
+        >
           {t('chatUi.workOutcomePartial')}
         </span>
       ) : null}
@@ -258,7 +268,7 @@ function ReasoningSegmentBlock({
   const running = !segment.closed;
 
   const content = (
-    <div className="min-w-0 reasoning-panel">
+    <div className="min-w-0 reasoning-panel" data-testid="chat-panel-reasoning-panel">
       <button
         type="button"
         className="tool-tree__header"
@@ -267,6 +277,7 @@ function ReasoningSegmentBlock({
           setOpen((current) => !current);
         }}
         aria-expanded={open}
+        data-testid="chat-panel-reasoning-panel-header"
       >
         <span className="tool-tree__header-line">
           <span className="tool-tree__cat-icon" aria-hidden="true">
@@ -275,7 +286,11 @@ function ReasoningSegmentBlock({
               <path d="M8.3 16.2h3.4" />
             </svg>
           </span>
-          <span className={clsx('tool-tree__header-line-text', running && 'is-running')}>
+          <span
+            className={clsx('tool-tree__header-line-text', running && 'is-running')}
+            data-testid="chat-panel-reasoning-panel-header-text"
+            data-variant={running ? 'thinking' : 'thought'}
+          >
             {running ? t('chatUi.reasoning.thinking') : t('chatUi.reasoning.thought')}
           </span>
           <span className={clsx('tool-tree-item__disclosure', open && 'is-open')} aria-hidden="true">
@@ -287,7 +302,7 @@ function ReasoningSegmentBlock({
       </button>
       <div className={clsx('reasoning-panel__collapse', open && 'is-open')}>
         <div className="reasoning-panel__collapse-inner">
-          <div ref={bodyRef} className="reasoning-panel__body">
+          <div ref={bodyRef} className="reasoning-panel__body" data-testid="chat-panel-reasoning-panel-body">
             {body}
           </div>
         </div>
@@ -297,7 +312,11 @@ function ReasoningSegmentBlock({
 
   if (teamLayout) {
     return (
-      <div className="reasoning-row reasoning-row--team" data-testid="reasoning-block">
+      <div
+        className="reasoning-row reasoning-row--team"
+        data-testid="chat-panel-reasoning-block"
+        data-variant="team"
+      >
         <div className="pt-0.5">{showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}</div>
         {content}
       </div>
@@ -305,7 +324,11 @@ function ReasoningSegmentBlock({
   }
 
   return (
-    <div className="reasoning-row" data-testid="reasoning-block">
+    <div
+      className="reasoning-row"
+      data-testid="chat-panel-reasoning-block"
+      data-variant="default"
+    >
       <div className="reasoning-row__avatar">
         {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
       </div>
@@ -447,7 +470,7 @@ export function ChatTimelineList({
   };
 
   return (
-    <div className="chat-timeline">
+    <div className="chat-timeline" data-testid="chat-panel-timeline">
       {renderItems.map((item) => {
         if (item.type === 'message') {
           const meta = item.turnId >= 0 ? turnWorkMeta.get(item.turnId) : undefined;
@@ -484,7 +507,11 @@ export function ChatTimelineList({
                     {renderAfterMessage?.(item.message)}
                   </>
                 ) : null}
-                <div className={clsx('timeline-collapse', turnOpen && 'is-open')}>
+                <div
+                  className={clsx('timeline-collapse', turnOpen && 'is-open')}
+                  data-testid="chat-panel-timeline-collapse"
+                  data-variant={turnOpen ? 'open' : 'closed'}
+                >
                   <div className="timeline-collapse-inner">
                     <MessageItem
                       message={item.message}
@@ -620,6 +647,8 @@ export function ChatTimelineList({
               <div
                 key={`${item.key}-collapse`}
                 className={clsx('timeline-collapse', contentOpen && 'is-open')}
+                data-testid="chat-panel-timeline-collapse"
+                data-variant={contentOpen ? 'open' : 'closed'}
               >
                 <div className="timeline-collapse-inner">{body}</div>
               </div>
