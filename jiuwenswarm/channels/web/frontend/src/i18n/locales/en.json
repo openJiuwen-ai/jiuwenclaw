@@ -2509,6 +2509,7 @@
     "prev": "Previous",
     "next": "Next",
     "cancel": "Cancel",
+    "replyLater": "Reply Later",
     "skip": "Skip",
     "nextStep": "Next",
     "confirm": "Confirm",
@@ -2518,5 +2519,218 @@
   },
   "qaSummary": {
     "title": "Clarifications"
+  },
+  "connectorMarket": {
+    "title": "Extensions",
+    "subtitle": "Create and manage plugins and MCPs",
+    "tabs": {
+      "plugin": "Plugins",
+      "mcp": "MCP",
+      "my": "My Extensions"
+    },
+    "categories": {
+      "all": "All",
+      "product-design": "Product Design",
+      "marketing": "Marketing",
+      "productivity": "Productivity",
+      "data-analysis": "Data Analysis",
+      "content-creation": "Content Creation",
+      "security": "Security",
+      "communication": "Communication",
+      "other": "Other"
+    },
+    "search": {
+      "plugin": "Search plugins",
+      "mcp": "Search MCP",
+      "my": "Search my extensions"
+    },
+    "statusFilter": {
+      "all": "All",
+      "pending": "Pending install/connect",
+      "available": "Connected"
+    },
+    "create": {
+      "menuLabel": "Create",
+      "manual": "Create manually",
+      "withSkill": "Create via chat",
+      "withUpload": "Create from file",
+      "registerMcp": "Configure MCP",
+      "basicInfo": "Basic info",
+      "uploadHint": "Supports png, jpeg, gif, jpg, up to 200Kb",
+      "avatarNotPersisted": "Local preview only for now, can't be saved yet (awaiting backend support)",
+      "name": "Plugin name",
+      "id": "Plugin ID",
+      "idPlaceholder": "Auto-suggested from name, editable",
+      "idHint": "Workspace directory name; must not already exist",
+      "description": "Plugin description",
+      "skillsOptional": "Skills (optional)",
+      "addSkill": "Add skill",
+      "mcpOptional": "MCP (optional)",
+      "addMcp": "Add MCP",
+      "pickSkillTitle": "Select skills",
+      "pickMcpTitle": "Select MCP",
+      "submitError": "Creation failed - this still awaits backend support",
+      "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
+    },
+    "errors": {
+      "runtimeMissing": "This MCP requires a runtime environment that isn't installed. Please install it before using this MCP.",
+      "runtimeMissingNamed": "This MCP requires {{runtime}}. Please install {{runtime}} before using this MCP.",
+      "installNetwork": "Failed to download a dependency. Please check your network connection and retry.",
+      "cliIncomplete": "The CLI is incomplete or outdated. Please reconnect to retry.",
+      "cliIncompleteNamed": "The CLI is incomplete or outdated. Please run the following command to install or upgrade it, then retry: {{command}}"
+    },
+    "card": {
+      "use": "Use",
+      "useNotWired": "Not wired yet — use it from the \"+\" panel in the chat input instead.",
+      "install": "Install",
+      "installing": "Installing",
+      "connecting": "Connecting",
+      "disconnecting": "Disconnecting",
+      "deleting": "Deleting",
+      "stateError": "Connection failed",
+      "retry": "Retry",
+      "uninstall": "Uninstall",
+      "unbind": "Disconnect",
+      "edit": "Edit",
+      "editNotSupportedYet": "Plugin editing is still waiting on backend support and isn't available yet."
+    },
+    "detail": {
+      "breadcrumbMy": "My Extensions",
+      "breadcrumbPlugin": "Plugin details",
+      "breadcrumbMcp": "MCP details",
+      "mcpDisconnectedBanner": "This plugin's MCP isn't connected, so it can't be used normally",
+      "mcpDisconnectedBannerSelf": "This MCP isn't connected, so it can't be used normally",
+      "connectMcp": "Connect MCP",
+      "sections": {
+        "basicInfo": "Basic info",
+        "skills": "Skills",
+        "tools": "Tools",
+        "rails": "Rails",
+        "mcps": "MCP",
+        "connectionConfig": "Connection config",
+        "examples": "Try it like this"
+      },
+      "integrationType": {
+        "cli": "CLI authorization",
+        "stdioMcp": "Local MCP",
+        "remoteMcp": "Remote MCP",
+        "skillOnly": "Skills only"
+      },
+      "cliSpecPresentHint": "Supports CLI-driven setup",
+      "config": {
+        "transport": "Transport",
+        "command": "Launch command",
+        "url": "Server URL",
+        "headers": "Headers",
+        "env": "Environment variables"
+      }
+    },
+    "confirmUninstall": {
+      "title": "Uninstall {{name}}?",
+      "message": "This MCP will become unavailable until you connect it again."
+    },
+    "confirmUnbind": {
+      "title": "Disconnect {{name}}?",
+      "message": "Disconnecting will clear the local credentials and disconnect this MCP, making it unavailable. The definition is kept so you can reconnect — you'll need to re-enter credentials to reconnect."
+    },
+    "confirmDeleteMcp": {
+      "title": "Permanently delete {{name}}?",
+      "message": "Deleting this custom MCP removes its configuration, credentials, and skills for good — this cannot be undone. If you just want to reconnect later, disconnect instead of deleting."
+    },
+    "confirmUninstallPlugin": {
+      "message": "This plugin will become unavailable — you can reinstall it anytime."
+    },
+    "empty": {
+      "myMcp": "No MCPs installed yet",
+      "myPlugin": "No plugins installed yet",
+      "searchNoResult": "No matches found",
+      "loadingPlugin": "Loading plugins...",
+      "loadingMcp": "Loading MCPs...",
+      "loadingMyPlugin": "Loading my plugins...",
+      "loadingMyMcp": "Loading my MCPs..."
+    },
+    "pagination": {
+      "pageSize": "Rows per page",
+      "all": "All",
+      "rangeInfo": "{{start}}-{{end}} of {{total}}",
+      "prev": "Previous page",
+      "next": "Next page"
+    },
+    "toast": {
+      "mcpConnected": "MCP connected successfully.",
+      "mcpCreated": "MCP created successfully.",
+      "mcpCreatedAndConnected": "MCP created and connected successfully.",
+      "pluginInstalled": "Plugin installed successfully.",
+      "pluginUninstalled": "Plugin uninstalled successfully."
+    },
+    "tokenModal": {
+      "title": "Connect {{name}}",
+      "placeholder": "Paste your {{name}} API Key",
+      "saveAndConnect": "Save and connect"
+    },
+    "cliAuth": {
+      "title": "Connect {{name}}",
+      "step": "Step {{current}}/{{total}}",
+      "instruction": "The authorization page has been opened for you. Complete it in your browser — this will confirm automatically. If no new page appeared, click the button below to open it manually.",
+      "instructionNoUrl": "The CLI has already opened a browser window automatically. Complete authorization there — this will confirm automatically, no action needed here.",
+      "openLink": "Open authorization page",
+      "waiting": "Waiting for authorization…",
+      "stepDone": "Done, continue to the next step",
+      "error": "Connection failed, please retry",
+      "retry": "Retry",
+      "timeout": "Authorization timed out, please reopen the page and retry"
+    },
+    "registerMcp": {
+      "title": "Configure MCP",
+      "editTitle": "Edit MCP",
+      "creating": "Creating...",
+      "saving": "Saving...",
+      "name": "Name",
+      "type": "Type",
+      "typeStdio": "STUDIO",
+      "typeHttp": "Streamable HTTP",
+      "command": "Startup command",
+      "args": "Arguments",
+      "pleaseInput": "Please enter",
+      "env": "Environment variables",
+      "key": "Key",
+      "value": "Value",
+      "bearerTokenEnvKey": "Bearer token env var",
+      "headers": "Headers",
+      "headersFromEnv": "Headers from env var",
+      "envPassthrough": "Env passthrough",
+      "envVarName": "Env var name",
+      "addJson": "Add JSON config",
+      "addJsonHint": "Copy the config JSON from the MCP server's docs (prefer NPX or UVX config) and paste it below."
+    },
+    "upload": {
+      "hint": "Supports .zip and .tar files; once extracted, the folder must include manifest.json and README.md, and the .json file must declare packageType.",
+      "dropHint": "Click or drag a file here",
+      "invalidType": "Only .zip / .tar files are supported",
+      "importSuccess": "Plugin imported successfully"
+    },
+    "common": {
+      "back": "Back",
+      "cancel": "Cancel",
+      "confirm": "Confirm",
+      "search": "Search",
+      "noResult": "No matches found"
+    }
+  },
+  "swarmflow": {
+    "statusPlanned": "Planned",
+    "statusPending": "Pending",
+    "statusRunning": "Running",
+    "statusCompleted": "Completed",
+    "statusFailed": "Failed",
+    "statusStopped": "Stopped",
+    "statusWaitingForHuman": "Waiting for input",
+    "subWorkflow": "Sub-workflow",
+    "clickToReply": "Click to reply",
+    "waitingForHuman": "Waiting for {{count}}",
+    "noWorkflow": "No workflow",
+    "layoutIndented": "Indented Tree",
+    "layoutOrgChart": "Org Chart",
+    "layoutGraph": "Flow Graph"
   }
 }

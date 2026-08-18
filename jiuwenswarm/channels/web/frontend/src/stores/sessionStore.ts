@@ -21,6 +21,11 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
+import {
+  applyWorkflowUpdate as applyWorkflowUpdateImpl,
+  type WorkflowRun,
+} from '../components/teamArea/workflowTypes';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';

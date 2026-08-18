@@ -59,6 +59,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
   const { t } = useTranslation();
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const addMessage = useChatStore((s) => s.addMessage);
+  const isSwarmflowHuman = pending.source === 'swarmflow_human';
 
   const questions = useMemo<Question[]>(
     () => (pending.questions ?? []).slice(0, MAX_PAGES),
@@ -359,7 +360,7 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
           disabled={submitting}
           data-testid="interaction-slot-ix-cancel-button"
         >
-          {t('interactionPrompt.cancel')}
+          {isSwarmflowHuman ? t('interactionPrompt.replyLater') : t('interactionPrompt.cancel')}
         </button>
         <button
           type="button"
@@ -370,6 +371,16 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
         >
           {t('interactionPrompt.skip')}
         </button>
+        {!isSwarmflowHuman && (
+          <button
+            type="button"
+            className="ix-btn ix-btn--ghost"
+            onClick={handleSkip}
+            disabled={submitting}
+          >
+            {t('interactionPrompt.skip')}
+          </button>
+        )}
         <button
           type="button"
           className="ix-btn ix-btn--primary"
