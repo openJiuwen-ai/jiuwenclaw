@@ -38,7 +38,11 @@ from openjiuwen.harness.image_modality_probe import (
     reset_image_support_cache,
 )
 
-from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.config import (
+    get_config,
+    get_configured_read_image_multimodal,
+    get_default_models,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,24 +51,6 @@ logger = logging.getLogger(__name__)
 # run concurrently, so this only guards against a model client that ignores
 # its own deadline -- server start-up must never hang on a probe.
 _WARMUP_TOTAL_TIMEOUT_SECONDS = 30.0
-
-
-def _read_image_multimodal_is_explicit(config_base: dict[str, Any]) -> bool:
-    """Return whether ``enable_read_image_multimodal`` is pinned in config.
-
-    A pinned boolean short-circuits ``_resolve_read_image_multimodal`` in every
-    agent, so probing would spend LLM calls on a verdict nobody reads.
-
-    Args:
-        config_base: The resolved ``config.yaml`` mapping.
-
-    Returns:
-        True when the switch carries an explicit boolean.
-    """
-    react_cfg = config_base.get("react") if isinstance(config_base, dict) else None
-    if not isinstance(react_cfg, dict):
-        return False
-    return isinstance(react_cfg.get("enable_read_image_multimodal"), bool)
 
 
 def _build_probe_models(config_base: dict[str, Any]) -> list[Model]:
@@ -130,7 +116,7 @@ async def warm_image_modality_cache(
     """
     effective_config = config_base if isinstance(config_base, dict) else get_config()
 
-    if _read_image_multimodal_is_explicit(effective_config):
+    if get_configured_read_image_multimodal(effective_config) is not None:
         logger.info(
             "[ImageModalityWarmup] skipped (%s): "
             "react.enable_read_image_multimodal is set explicitly",
