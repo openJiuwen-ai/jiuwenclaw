@@ -33,6 +33,17 @@ from jiuwenswarm.common._build_config import (
     DISPLAY_NAME,
     EXECUTABLE_NAME,
 )
+from jiuwenswarm.common.startup_diagnostics import (
+    DOCTOR_FLAG,
+    DOCTOR_OUTPUT_FLAG,
+    DOCTOR_TIMEOUT_SECONDS,
+    STARTUP_DIAGNOSTICS_DIR_ENV,
+    is_native_startup_failure,
+    load_doctor_result,
+    load_startup_failures,
+    select_blocking_doctor_check,
+    select_startup_failure,
+)
 from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
 from jiuwenswarm.instance_manager.config import (
     BASE_PORTS,
@@ -51,6 +62,7 @@ WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 STARTUP_TIMEOUT_SECONDS = 45.0
+STARTUP_DOCTOR_TIMEOUT_SECONDS = DOCTOR_TIMEOUT_SECONDS + 15.0
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 DESKTOP_BLOB_CHUNK_SIZE = 1024 * 1024
 MAX_JAVASCRIPT_SAFE_INTEGER = 9_007_199_254_740_991
@@ -360,9 +372,15 @@ def _build_child_command(name: str, extra_args: list[str] | None = None) -> list
     return base
 
 
-def _build_child_env(name: str, ports: dict[str, int]) -> dict[str, str]:
+def _build_child_env(
+    name: str,
+    ports: dict[str, int],
+    startup_diagnostics_dir: Path | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     env[DESKTOP_ENV_FLAG] = "1"
+    if startup_diagnostics_dir is not None:
+        env[STARTUP_DIAGNOSTICS_DIR_ENV] = str(startup_diagnostics_dir)
     # Inject the full session port group so app → agent/gateway and web agree.
     # load_dotenv_runtime preserves these under JIUWENSWARM_DESKTOP=1.
     env["WEB_HOST"] = BACKEND_HOST
@@ -393,10 +411,11 @@ def _start_process(
     name: str,
     command: list[str],
     ports: dict[str, int],
+    startup_diagnostics_dir: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     logger.info("[desktop] starting %s: %s", name, command)
     kwargs: dict[str, object] = {
-        "env": _build_child_env(name, ports),
+        "env": _build_child_env(name, ports, startup_diagnostics_dir),
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
     }
@@ -563,6 +582,10 @@ class _WindowApi:
     def close_window(self) -> bool:
         return self._runtime.close_window()
 
+    def get_startup_status(self) -> dict[str, str]:
+        """Return a snapshot consumed by the local Loading page."""
+        return self._runtime.get_startup_status()
+
     def install_update(self, installer_path: str) -> bool:
         return self._runtime.install_update(installer_path)
 
@@ -728,24 +751,80 @@ class DesktopRuntime:
         self._blob_save_transfers: dict[str, _BlobSaveTransfer] = {}
         self._is_shutting_down = False
         self._desktop_dnd_bound = False
+        self._startup_cancelled = threading.Event()
+        self._startup_status_lock = threading.Lock()
+        self._startup_status: dict[str, str] = {
+            "state": "starting",
+            "title": "",
+            "message": "服务启动加载中",
+            "component": "",
+            "diagnostic_path": "",
+            "frontend_url": self.frontend_url,
+        }
+        startup_id = uuid.uuid4().hex
+        preferred_dir = get_logs_dir() / "startup" / startup_id
+        try:
+            preferred_dir.mkdir(parents=True, exist_ok=True)
+            self._startup_diagnostics_dir = preferred_dir
+        except OSError:
+            fallback_dir = Path(tempfile.gettempdir()) / "jiuwenswarm-startup" / startup_id
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            self._startup_diagnostics_dir = fallback_dir
+        self._doctor_output_path = self._startup_diagnostics_dir / "doctor.json"
 
     @property
     def frontend_url(self) -> str:
         return f"http://{self.frontend_host}:{self.frontend_port}"
 
+    def get_startup_status(self) -> dict[str, str]:
+        with self._startup_status_lock:
+            return dict(self._startup_status)
+
+    def _set_startup_status(self, state: str, **updates: str) -> None:
+        with self._startup_status_lock:
+            current = self._startup_status["state"]
+            if current in {"ready", "failed"}:
+                return
+            self._startup_status.update(updates)
+            self._startup_status["state"] = state
+
+    def _raise_if_startup_cancelled(self) -> None:
+        if self._startup_cancelled.is_set():
+            raise RuntimeError("desktop startup cancelled")
+
+    def _start_managed_process(
+        self, name: str, command: list[str]
+    ) -> subprocess.Popen[bytes]:
+        self._raise_if_startup_cancelled()
+        process = _start_process(
+            name,
+            command,
+            self.ports,
+            startup_diagnostics_dir=self._startup_diagnostics_dir,
+        )
+        with self._lock:
+            shutting_down = self._is_shutting_down
+            if not shutting_down:
+                self.processes[name] = process
+        if shutting_down:
+            _terminate_process_tree(process)
+            raise RuntimeError("desktop startup cancelled")
+        return process
+
     def start_services(self) -> None:
         # 先起后台预读, 与后续子进程拉起/端口等待并行, 不阻塞 start_services.
         _warmup_page_cache_background()
-        self.processes["app"] = _start_process(
-            "app", _build_child_command("app"), self.ports
+        app_process = self._start_managed_process(
+            "app", _build_child_command("app")
         )
-        _ensure_process_running("app", self.processes["app"])
+        _ensure_process_running("app", app_process)
         _wait_for_tcp(
             BACKEND_HOST,
             self.backend_port,
             STARTUP_TIMEOUT_SECONDS,
-            process=self.processes["app"],
+            process=app_process,
         )
+        self._raise_if_startup_cancelled()
 
         web_command = _build_child_command(
             "web",
@@ -758,16 +837,119 @@ class DesktopRuntime:
                 f"http://{BACKEND_HOST}:{self.backend_port}",
             ],
         )
-        self.processes["web"] = _start_process("web", web_command, self.ports)
-        _ensure_process_running("web", self.processes["web"])
+        web_process = self._start_managed_process("web", web_command)
+        _ensure_process_running("web", web_process)
         _wait_for_http(
             self.frontend_host,
             self.frontend_port,
             "/",
             STARTUP_TIMEOUT_SECONDS,
-            process=self.processes["web"],
+            process=web_process,
         )
+        self._raise_if_startup_cancelled()
         logger.info("[desktop] services ready: %s", self.frontend_url)
+
+    def _run_doctor_after_failure(self) -> dict[str, object] | None:
+        if not getattr(sys, "frozen", False):
+            return None
+        command = [
+            sys.executable,
+            DOCTOR_FLAG,
+            DOCTOR_OUTPUT_FLAG,
+            str(self._doctor_output_path),
+        ]
+        logger.info("[desktop] running startup doctor after service failure")
+        doctor_process: subprocess.Popen[bytes] | None = None
+        try:
+            doctor_process = self._start_managed_process(
+                "doctor",
+                command,
+            )
+            doctor_process.wait(timeout=STARTUP_DOCTOR_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning("[desktop] startup doctor timed out")
+            if doctor_process is not None and doctor_process.poll() is None:
+                _terminate_process_tree(doctor_process)
+                try:
+                    doctor_process.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    _kill_process_tree(doctor_process)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            logger.warning("[desktop] startup doctor failed to run: %s", exc)
+            return None
+        finally:
+            with self._lock:
+                if self.processes.get("doctor") is doctor_process:
+                    self.processes.pop("doctor", None)
+        return load_doctor_result(self._doctor_output_path)
+
+    @staticmethod
+    def _should_run_startup_doctor(
+        exc: BaseException,
+        child_failure: dict[str, object] | None,
+    ) -> bool:
+        if not getattr(sys, "frozen", False):
+            return False
+        if is_native_startup_failure(child_failure):
+            return True
+        child_error_type = str((child_failure or {}).get("error_type") or "")
+        unexplained_child_exit = (
+            child_failure is None or child_error_type == "SystemExit"
+        )
+        return unexplained_child_exit and "exited early with code" in str(exc).lower()
+
+    @staticmethod
+    def _short_error(value: object, max_chars: int = 700) -> str:
+        message = str(value or "").strip()
+        if len(message) <= max_chars:
+            return message
+        return message[: max_chars - 3] + "..."
+
+    def _build_failed_status(
+        self,
+        exc: BaseException,
+        doctor_result: dict[str, object] | None,
+        child_failure: dict[str, object] | None = None,
+    ) -> dict[str, str]:
+        if child_failure is None:
+            records = load_startup_failures(self._startup_diagnostics_dir)
+            child_failure = select_startup_failure(records)
+        blocking_check = select_blocking_doctor_check(
+            doctor_result,
+            child_failure,
+        )
+
+        if blocking_check is not None:
+            component = str(blocking_check.get("name") or "unknown")
+            display_name = str(blocking_check.get("display_name") or component)
+            detail = self._short_error(blocking_check.get("message") or "加载失败")
+            return {
+                "title": "运行环境缺少必要组件",
+                "message": f"{display_name} 无法加载：{detail}",
+                "component": component,
+                "diagnostic_path": str(self._doctor_output_path),
+            }
+
+        if child_failure is not None:
+            role = str(child_failure.get("process_role") or "service")
+            error_type = str(child_failure.get("error_type") or "Error")
+            detail = self._short_error(child_failure.get("message") or exc)
+            return {
+                "title": f"{DISPLAY_NAME} 服务启动失败",
+                "message": f"{role}: {error_type}: {detail}",
+                "component": role,
+                "diagnostic_path": str(
+                    child_failure.get("diagnostic_path")
+                    or self._startup_diagnostics_dir
+                ),
+            }
+
+        return {
+            "title": f"{DISPLAY_NAME} 服务启动失败",
+            "message": self._short_error(exc) or "未知启动错误",
+            "component": "desktop-startup",
+            "diagnostic_path": str(self._startup_diagnostics_dir),
+        }
 
     def minimize_window(self) -> bool:
         if self.window is None or not hasattr(self.window, "minimize"):
@@ -1857,25 +2039,28 @@ nohup {q_executable} >/dev/null 2>&1 &
             if self._is_shutting_down:
                 return
             self._is_shutting_down = True
+            self._startup_cancelled.set()
+            processes = list(self.processes.values())
 
         self._abort_all_blob_saves()
         deadline = time.monotonic() + 8.0
         logger.info("[desktop] shutting down child processes")
 
-        for process in self.processes.values():
+        for process in processes:
             if process.poll() is None:
                 _terminate_process_tree(process)
 
         while time.monotonic() < deadline:
-            if all(process.poll() is not None for process in self.processes.values()):
+            if all(process.poll() is not None for process in processes):
                 break
             time.sleep(0.2)
 
-        for process in self.processes.values():
+        for process in processes:
             if process.poll() is None:
                 _kill_process_tree(process)
 
-        self.processes.clear()
+        with self._lock:
+            self.processes.clear()
 
     @staticmethod
     def _clear_wkwebview_system_cache() -> None:
@@ -1919,15 +2104,64 @@ nohup {q_executable} >/dev/null 2>&1 &
         self.window.events.loaded += self._on_loaded_first
         self.window.events.closed += self._on_closed
 
-        def _start_services_and_navigate() -> None:
+        def _start_services_and_report() -> None:
             try:
                 self.start_services()
-                if self.window is not None:
-                    self.window.load_url(self.frontend_url)
+                self._set_startup_status(
+                    "ready",
+                    message="服务已就绪",
+                    frontend_url=self.frontend_url,
+                )
+                try:
+                    # Healthy starts produce no records; avoid accumulating one
+                    # empty directory per launch. Never delete a non-empty session.
+                    self._startup_diagnostics_dir.rmdir()
+                except OSError:
+                    pass
             except Exception as exc:
-                logger.error("[desktop] service startup failed: %s", exc)
+                logger.exception("[desktop] service startup failed: %s", exc)
+                try:
+                    records = load_startup_failures(self._startup_diagnostics_dir)
+                    child_failure = select_startup_failure(records)
+                    doctor_result = None
+                    if self._should_run_startup_doctor(exc, child_failure):
+                        self._set_startup_status(
+                            "diagnosing",
+                            title="正在诊断启动失败原因",
+                            message="服务启动失败，正在检查本机运行环境…",
+                            component="desktop-startup",
+                            diagnostic_path=str(self._startup_diagnostics_dir),
+                        )
+                        doctor_result = self._run_doctor_after_failure()
+                    else:
+                        logger.info(
+                            "[desktop] startup doctor skipped; "
+                            "failure already has a non-native cause"
+                        )
+                    failed_status = self._build_failed_status(
+                        exc,
+                        doctor_result,
+                        child_failure,
+                    )
+                except Exception as diagnostic_exc:  # noqa: BLE001
+                    logger.exception(
+                        "[desktop] failed to build startup diagnostics: %s",
+                        diagnostic_exc,
+                    )
+                    failed_status = {
+                        "title": f"{DISPLAY_NAME} 服务启动失败",
+                        "message": self._short_error(exc) or "未知启动错误",
+                        "component": "desktop-startup",
+                        "diagnostic_path": str(self._startup_diagnostics_dir),
+                    }
+                self._set_startup_status("failed", **failed_status)
+                self.shutdown()
 
-        threading.Thread(target=_start_services_and_navigate, daemon=True).start()
+        threading.Thread(
+            target=_start_services_and_report,
+            name="desktop-service-startup",
+            daemon=True,
+        ).start()
 
         gui = "edgechromium" if os.name == "nt" else None
         logger.info("[desktop] opening window with loading screen")
@@ -1952,7 +2186,7 @@ nohup {q_executable} >/dev/null 2>&1 &
                 pass
 
         return r"""<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1961,7 +2195,9 @@ nohup {q_executable} >/dev/null 2>&1 &
 html,body{width:100%;height:100%;overflow:hidden;background:#0f172a;
 font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 color:#e2e8f0;display:flex;align-items:center;justify-content:center}
-.root{display:flex;flex-direction:column;align-items:center;gap:32px;padding:40px}
+.root{width:min(680px,calc(100% - 48px));padding:40px}
+.panel{display:flex;flex-direction:column;align-items:center;gap:32px;text-align:center}
+.hidden{display:none}
 
 /* Logo */
 .logo{width:64px;height:64px;border-radius:16px;
@@ -1992,10 +2228,24 @@ transition:opacity .4s ease,transform .4s ease}
 .dot{width:4px;height:4px;border-radius:50%;background:#475569}
 .dot.active{background:#60a5fa;animation:pulse 1.2s ease infinite}
 @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+
+/* Startup failure */
+.error-icon{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;
+justify-content:center;background:rgba(239,68,68,.14);color:#f87171;font-size:30px;font-weight:700}
+.error-title{font-size:20px;font-weight:700;color:#f8fafc}
+.error-message{max-width:620px;color:#cbd5e1;font-size:14px;line-height:1.7;
+white-space:pre-wrap;overflow-wrap:anywhere}
+.error-meta{width:100%;padding:14px 16px;border:1px solid #334155;border-radius:10px;
+background:#111827;color:#94a3b8;font-size:12px;line-height:1.6;text-align:left;
+white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
+.close-button{border:0;border-radius:8px;padding:10px 24px;background:#2563eb;color:white;
+font-size:14px;cursor:pointer}
+.close-button:hover{background:#1d4ed8}
 </style>
 </head>
 <body>
 <div class="root">
+<div class="panel" id="loading-panel">
 <div class="logo">__LOGO_SVG__</div>
 <div class="app-name">__APP_DISPLAY_NAME__</div>
 <div class="spinner"></div>
@@ -2004,7 +2254,15 @@ transition:opacity .4s ease,transform .4s ease}
     <div class="tip-text" id="tip"></div>
 </div>
 <div class="dots" id="dots"></div>
-<div class="tip-label" style="margin-top:16px">服务启动加载中</div>
+<div class="tip-label" id="startup-label" style="margin-top:16px">服务启动加载中</div>
+</div>
+<div class="panel hidden" id="error-panel">
+    <div class="error-icon">!</div>
+    <div class="error-title" id="error-title">__APP_DISPLAY_NAME__ 服务启动失败</div>
+    <div class="error-message" id="error-message"></div>
+    <div class="error-meta" id="error-meta"></div>
+    <button class="close-button" id="close-button" type="button">退出 __APP_DISPLAY_NAME__</button>
+</div>
 </div>
 <script>
 const tips=[
@@ -2014,8 +2272,15 @@ const tips=[
 "自主演进 —— 根据你的反馈自动调整技能，持续进化，越用越懂你"
 ];
 let idx=0;
+let terminal=false;
+let pollingStarted=false;
+let lastStatusAt=0;
+const pageStartedAt=Date.now();
 const el=document.getElementById('tip');
 const dotsEl=document.getElementById('dots');
+const loadingPanel=document.getElementById('loading-panel');
+const errorPanel=document.getElementById('error-panel');
+const startupLabel=document.getElementById('startup-label');
 
 tips.forEach((_,i)=>{
 const d=document.createElement('div');
@@ -2035,6 +2300,83 @@ idx=(idx+1)%tips.length;
 }
 showTip();
 setInterval(showTip,3500);
+
+function showFailure(status){
+terminal=true;
+loadingPanel.classList.add('hidden');
+errorPanel.classList.remove('hidden');
+document.getElementById('error-title').textContent=
+    status.title||'__APP_DISPLAY_NAME__ 服务启动失败';
+document.getElementById('error-message').textContent=
+    status.message||'启动过程中发生未知错误。';
+const meta=[];
+if(status.component) meta.push('故障组件：'+status.component);
+if(status.diagnostic_path) meta.push('诊断信息：'+status.diagnostic_path);
+document.getElementById('error-meta').textContent=
+    meta.length?meta.join('\n'):'请查看 __APP_DISPLAY_NAME__ 日志获取详细信息。';
+}
+
+async function pollStartupStatus(){
+if(terminal) return;
+try{
+    const status=await window.pywebview.api.get_startup_status();
+    lastStatusAt=Date.now();
+    if(status.state==='ready'){
+        terminal=true;
+        setTimeout(()=>showFailure({
+            title:'__APP_DISPLAY_NAME__ 页面加载失败',
+            message:'服务已经启动，但桌面页面无法打开。请退出后重新启动应用。',
+            component:'desktop-navigation'
+        }),15000);
+        window.location.replace(status.frontend_url);
+        return;
+    }
+    if(status.state==='failed'){
+        showFailure(status);
+        return;
+    }
+    if(status.state==='diagnosing'){
+        startupLabel.textContent=status.message||'正在诊断启动失败原因';
+    }
+}catch(_error){
+    // The watchdog below turns a broken bridge into a visible error state.
+}
+if(!terminal) setTimeout(pollStartupStatus,500);
+}
+
+function waitForBridge(){
+if(terminal||pollingStarted) return;
+if(window.pywebview&&window.pywebview.api&&window.pywebview.api.get_startup_status){
+    pollingStarted=true;
+    pollStartupStatus();
+    return;
+}
+setTimeout(waitForBridge,200);
+}
+
+window.addEventListener('pywebviewready',waitForBridge);
+waitForBridge();
+document.getElementById('close-button').addEventListener('click',async()=>{
+try{
+    await window.pywebview.api.close_window();
+}catch(_error){
+    window.close();
+}
+});
+
+setInterval(()=>{
+if(terminal) return;
+const now=Date.now();
+const bridgeNeverResponded=lastStatusAt===0&&now-pageStartedAt>120000;
+const bridgeStoppedResponding=lastStatusAt>0&&now-lastStatusAt>30000;
+if(bridgeNeverResponded||bridgeStoppedResponding){
+    showFailure({
+        title:'无法获取启动状态',
+        message:'桌面界面与启动服务之间的通信中断。请退出后重新启动应用。',
+        component:'desktop-webview-bridge'
+    });
+}
+},5000);
 </script>
 </body>
 </html>""".replace("__LOGO_SVG__", logo_svg).replace("__APP_DISPLAY_NAME__", DISPLAY_NAME)

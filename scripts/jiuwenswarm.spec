@@ -202,6 +202,19 @@ dispatch_submodules = collect_tree_python_modules(symphony_root, DISPATCH_PACKAG
 # 部分包需要显式声明隐藏导入
 hiddenimports = webview_hiddenimports + [
     "pandas",  # pymilvus 依赖
+    # ``--doctor`` imports these targets dynamically before business imports.
+    # Keep them explicit so the installed executable can diagnose a broken
+    # native dependency instead of reporting a PyInstaller collection gap.
+    "tiktoken._tiktoken",
+    "grpc._cython.cygrpc",
+    "cryptography.hazmat.bindings._rust",
+    "numpy",
+    "pandas._libs.lib",
+    "lxml.etree",
+    "PIL._imaging",
+    "bcrypt._bcrypt",
+    "faiss",
+    "chromadb_rust_bindings",
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
     "tiktoken_ext.openai_public",
     "ruamel.yaml",
