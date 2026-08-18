@@ -22,7 +22,7 @@ Runtime layout:
 - <root>/agent/sessions
 - <root>/agent/workspace/agent-data.json
 - <root>/agent/.checkpoint
-- <root>/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
+- <root>/agent/.logs（channel.log / agent_server.log / full.log；gateway.log 独立存放于 /var/log/agentos）
 
 内置模板位于包内 ``jiuwenswarm/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
@@ -48,6 +48,10 @@ from ruamel.yaml import YAML
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
+
+# gateway 日志独立目录（与其它组件日志目录分离），轮转归档文件同样落在该目录下。
+# 可通过环境变量 AGENTOS_GATEWAY_LOG_DIR 覆盖（便于测试与特殊部署场景）。
+_GATEWAY_LOG_DIR = Path("/var/log/agentos")
 
 
 @dataclass
@@ -2289,6 +2293,19 @@ def get_logs_dir() -> Path:
     return get_agent_root_dir() / ".logs"
 
 
+def get_gateway_log_dir() -> Path:
+    """获取 gateway 日志目录（默认 ``/var/log/agentos``）。
+
+    gateway.log 及其轮转归档文件独立存放于该目录，与其它组件日志
+    （channel.log / agent_server.log / full.log 位于 ``agent/.logs``）分离。
+    环境变量 ``AGENTOS_GATEWAY_LOG_DIR`` 可覆盖默认路径。
+    """
+    env_dir = os.getenv("AGENTOS_GATEWAY_LOG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return _GATEWAY_LOG_DIR
+
+
 def get_xy_tmp_dir() -> Path:
     workspace_dir = get_user_workspace_dir()
     xy_tmp_dir = workspace_dir / "tmp" / "xiaoyi"
@@ -2598,7 +2615,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenswarm.agents.*`` 或 ``jiuwenswarm.server.*`` → agent_server.log
     - 其余 ``jiuwenswarm.*``（含 ``jiuwenswarm.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``；
+    其中 gateway.log 及其轮转归档独立存放于 ``/var/log/agentos/``
+    （可由环境变量 ``AGENTOS_GATEWAY_LOG_DIR`` 覆盖；目录不可写时降级回上述目录）。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
@@ -2626,9 +2645,11 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         level: int,
         name_filter: Optional[_ComponentNameFilter] = None,
         custom_formatter: Optional[logging.Formatter] = None,
+        target_dir: Optional[Path] = None,
     ) -> None:
+        base_dir = target_dir if target_dir is not None else logs_root
         h = SafeRotatingFileHandler(
-            filename=logs_root / filename,
+            filename=base_dir / filename,
             maxBytes=_LOG_FILE_MAX_BYTES,
             backupCount=_LOG_FILE_BACKUP_COUNT,
             encoding="utf-8",
@@ -2640,7 +2661,25 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.addFilter(name_filter)
         root.addHandler(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+    # gateway 日志独立目录（默认 /var/log/agentos），轮转归档同样落在该目录。
+    # 目录不可创建/不可写时降级回 logs_root，避免日志目录权限问题导致服务无法启动。
+    gateway_log_dir = get_gateway_log_dir()
+    try:
+        gateway_log_dir.mkdir(parents=True, exist_ok=True)
+        # 探测可写性（部分场景目录存在但无写权限）
+        _probe = gateway_log_dir / ".write_probe"
+        _probe.touch()
+        _probe.unlink()
+    except OSError as exc:
+        print(
+            f"[jiuwenswarm] gateway log dir {gateway_log_dir} is not writable ({exc}); "
+            f"falling back to {logs_root}",
+            file=sys.stderr,
+        )
+        gateway_log_dir = logs_root
+
+    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"),
+        target_dir=gateway_log_dir)
     _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
     _add_rotating("agent_server.log", levels.agent_server,
         _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
