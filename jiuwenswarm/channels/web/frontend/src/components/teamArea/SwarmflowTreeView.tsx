@@ -68,7 +68,7 @@ function StatusIcon({ status, className }: { status: WorkflowStatus; className?:
     case 'running':
       return <Loader2 className={`${cls} text-blue-500 animate-spin`} />;
     case 'paused':
-      return <Pause className={`${cls} text-amber-500`} />;
+      return <Pause className={`${cls} text-violet-500`} />;
     case 'pending':
     case 'planned':
       return <CircleDot className={`${cls} text-gray-400`} />;
@@ -122,7 +122,7 @@ function statusDotColor(status: WorkflowStatus): string {
   switch (status) {
     case 'completed': return 'bg-emerald-500';
     case 'running': return 'bg-blue-500 animate-pulse';
-    case 'paused': return 'bg-amber-500';
+    case 'paused': return 'bg-violet-500';
     case 'failed': return 'bg-red-500';
     case 'waiting_for_human': return 'bg-amber-500';
     case 'pending':
@@ -715,7 +715,7 @@ function RunNode({
         ) : (
           <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
         )}
-        <StatusIcon status={run.status} className="w-5 h-5" />
+        <StatusIcon status={run.status} className="w-4 h-4 shrink-0" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold text-text-strong truncate">
