@@ -32,6 +32,7 @@ import {
   isProjectDirectoryPickerSupported,
   selectProjectDirectory,
 } from '../../features/workspace/projectDirectoryPicker';
+import { toDisplaySessionTitle } from '../../utils/documentMessage';
 import './ConversationSidebar.css';
 import '../dialogs/dialogs.css';
 import AddProjectIcon from '../../assets/work-mode/add-project.svg?react';
@@ -122,7 +123,8 @@ export function formatRelativeTime(
 }
 
 function getSessionTitle(session: Session, fallback: string): string {
-  return session.display_title?.trim() || session.title?.trim() || fallback;
+  const raw = session.display_title?.trim() || session.title?.trim() || fallback;
+  return toDisplaySessionTitle(raw) || fallback;
 }
 
 const menuIconByAction: Record<SidebarMenuAction, React.ComponentType<React.SVGProps<SVGSVGElement>>> = {

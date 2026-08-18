@@ -32,9 +32,11 @@ from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     resolve_sdk_choice,
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode, is_auto_memory_enabled, is_memory_enabled
+from jiuwenswarm.agents.harness.code.prompt import plan_approval as _plan_approval
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
     append_history_record,
+    collapse_file_content_blocks,
 )
 from jiuwenswarm.server.runtime.session.session_manager import SessionManager
 from jiuwenswarm.server.runtime.session.permission_response_ledger import (
@@ -67,6 +69,12 @@ from jiuwenswarm.agents.harness.common.auto_memory import (
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     EVOLUTION_INTERRUPT_METADATA_SOURCES,
     is_interrupt_resume_payload,
+)
+
+PLAN_REMINDER_ORIGINAL_QUERY_KEY = getattr(
+    _plan_approval,
+    "PLAN_REMINDER_ORIGINAL_QUERY_KEY",
+    "_plan_reminder_original_query",
 )
 
 
@@ -133,12 +141,29 @@ def _history_user_content(params: Any, query: Any) -> Any:
 
     追加补充/调整请求时，``query`` 是包装后的提示词模板，会把模型提示词暴露到
     历史记录里。这里优先使用原始用户输入 ``supplement_input`` 作为展示内容。
+
+    进入 plan 的那一轮同理：``query`` 前面被拼了一段 <system-reminder>，历史里
+    要还原成用户原文，否则重新加载会话会把提示词当成用户提问显示出来。
+
+    Gateway 可能已把 ``@path`` 展开成 ``<file-content>`` 正文；历史只保留 ``@path``，
+    避免 transcript 膨胀，也不影响当轮已发给模型的内联内容。
     """
-    if isinstance(params, dict) and params.get("is_supplement"):
+    content: Any
+    if not isinstance(params, dict):
+        content = query
+    elif params.get("is_supplement"):
         supplement_input = params.get("supplement_input")
         if isinstance(supplement_input, str) and supplement_input.strip():
-            return supplement_input
-    return query
+            content = supplement_input
+        else:
+            content = query
+    else:
+        original_query = params.get(PLAN_REMINDER_ORIGINAL_QUERY_KEY)
+        content = original_query if isinstance(original_query, str) else query
+
+    if isinstance(content, str):
+        return collapse_file_content_blocks(content)
+    return content
 
 
 def _should_record_user_history(params: Any) -> bool:

@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import queue
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -25,6 +26,42 @@ _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_VALID_SESSION_ID = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9])?$"
+)
+# Gateway may inline @path as <file-content>...</file-content> before chat.send.
+# History should keep the short @path form so jsonl rows stay one physical line
+# and refresh UI does not load megabytes of file body.
+_FILE_CONTENT_BLOCK_RE = re.compile(
+    r"\n?<file-content\s+path=\"([^\"]*)\">.*?</file-content>\n?",
+    re.DOTALL,
+)
+
+
+def collapse_file_content_blocks(content: str) -> str:
+    """Replace inlined ``<file-content>`` bodies with ``@path`` references.
+
+    Used when persisting / serving user history so the agent-facing inline
+    expansion is not stored as the user-visible transcript.
+    """
+    if not content or "<file-content" not in content:
+        return content
+
+    def _replacer(match: re.Match[str]) -> str:
+        path = match.group(1) or ""
+        if not path:
+            return "\n"
+        ref = f'@"{path}"' if any(ch.isspace() for ch in path) else f"@{path}"
+        return f"\n{ref}\n"
+
+    collapsed = _FILE_CONTENT_BLOCK_RE.sub(_replacer, content)
+    return re.sub(r"\n{3,}", "\n\n", collapsed).strip()
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    """Return whether a session id is safe to use as one path component."""
+
+    return _VALID_SESSION_ID.fullmatch(session_id) is not None
 
 # 缓冲层分两组：普通缓冲层（_session_buffer，合并后批量写）与暂留层（_session_pending，
 # tool_calls.delta 等对应 chat.tool_call 命中后再决定丢弃/落盘）。
@@ -412,8 +449,13 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw_line.strip()
+        # JSONL records are delimited by "\n" only. Do NOT use str.splitlines():
+        # inlined file bodies may contain Unicode line separators (U+2028 etc.)
+        # that splitlines() treats as breaks, corrupting a single JSON object
+        # into fragments and dropping the user turn on refresh.
+        text = path.read_text(encoding="utf-8")
+        for lineno, raw_line in enumerate(text.split("\n"), start=1):
+            line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
             try:
@@ -422,6 +464,14 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
                 logger.warning("读取 history.jsonl 第 %d 行失败，已跳过: %s", lineno, exc)
                 continue
             if isinstance(item, dict):
+                content = item.get("content")
+                if (
+                    item.get("role") in {"user", "human"}
+                    and isinstance(content, str)
+                    and "<file-content" in content
+                ):
+                    item = dict(item)
+                    item["content"] = collapse_file_content_blocks(content)
                 records.append(item)
             else:
                 logger.warning(
