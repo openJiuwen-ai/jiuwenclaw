@@ -2924,10 +2924,10 @@ function ModelSelector({
             const isFree = (m: ModelEntry) => m.is_free === true;
             const freeModels = chatAvailableModels.filter(isFree);
             const configuredModels = chatAvailableModels.filter((m) => !isFree(m));
-            const renderGroup = (label: string, models: ModelEntry[], variant: string) =>
+            const renderGroup = (label: string, models: ModelEntry[]) =>
               models.length === 0 ? null : (
                 <>
-                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={variant}>{label}</div>
+                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
                   {models.map((m, idx) => {
                     const key = m.alias || m.model_name;
                     const isActive = key === (selectedModel.alias || selectedModel.model_name);
@@ -2963,8 +2963,8 @@ function ModelSelector({
               );
             return (
               <>
-                {renderGroup(t('chat.modelSelector.free'), freeModels, 'free')}
-                {renderGroup(t('chat.modelSelector.configured'), configuredModels, 'configured')}
+                {renderGroup(t('chat.modelSelector.free'), freeModels)}
+                {renderGroup(t('chat.modelSelector.configured'), configuredModels)}
               </>
             );
           })()}
