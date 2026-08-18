@@ -428,8 +428,13 @@ def _resolve_session_is_team(session_id: str, params: dict[str, Any]) -> bool:
     metadata: dict[str, Any] = {}
     try:
         metadata = session_metadata.get_session_metadata(session_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "[ProductKVCacheHooks] failed to resolve session metadata: "
+            "session_id=%s error=%s",
+            session_id,
+            exc,
+        )
     return is_team_params({"mode": params.get("mode"), "team": params.get("team")}) or is_team_params(metadata)
 
 

@@ -65,6 +65,40 @@ class _TeamManager:
         return True
 
 
+def test_resolve_session_is_team_logs_metadata_failure_and_uses_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning_calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def _raise_metadata_error(_session_id: str) -> dict:
+        raise OSError("metadata unavailable")
+
+    monkeypatch.setattr(
+        kv_cache_product_hooks.session_metadata,
+        "get_session_metadata",
+        _raise_metadata_error,
+    )
+    monkeypatch.setattr(
+        kv_cache_product_hooks.logger,
+        "warning",
+        lambda message, *args: warning_calls.append(
+            (message, tuple(str(arg) for arg in args))
+        ),
+    )
+
+    assert kv_cache_product_hooks._resolve_session_is_team(
+        "team_sess_001",
+        {"mode": "team"},
+    ) is True
+    assert warning_calls == [
+        (
+            "[ProductKVCacheHooks] failed to resolve session metadata: "
+            "session_id=%s error=%s",
+            ("team_sess_001", "metadata unavailable"),
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_cancel_pending_tasks_cleans_all_kvc_registries(
     monkeypatch: pytest.MonkeyPatch,

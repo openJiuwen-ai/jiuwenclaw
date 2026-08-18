@@ -205,13 +205,11 @@ class SessionKVCacheTaskGuard:
         *,
         reason: str,
     ) -> KVCGuardActionRequest | None:
-        if (
-            facts.deleted
-            or facts.running_tasks > 0
-            or facts.foreground_view_ids
-            or not facts.has_completed_inference
-            or facts.expected_cache_state == "cold"
-        ):
+        if facts.deleted or facts.expected_cache_state == "cold":
+            return None
+        if facts.running_tasks > 0 or facts.foreground_view_ids:
+            return None
+        if not facts.has_completed_inference:
             return None
         facts.expected_cache_state = "cold"
         return self._request(facts, "offload", reason=reason)
