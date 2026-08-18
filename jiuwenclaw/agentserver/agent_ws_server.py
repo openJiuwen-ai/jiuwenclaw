@@ -2459,7 +2459,7 @@ class AgentWebSocketServer:
         from jiuwenclaw.config import (
             get_config,
             replace_teams_in_config,
-            upsert_subagent_in_config,
+            batch_upsert_subagents_in_config,
         )
 
         agent_params = build_team_member_agent_params(teams_payload)
@@ -2513,8 +2513,11 @@ class AgentWebSocketServer:
                     agent_service.create_agent(item)
                     for item in agent_params
                 ]
-                for agent in materialized_agents:
-                    upsert_subagent_in_config(agent.name, enabled=True)
+                if materialized_agents:
+                    batch_upsert_subagents_in_config(
+                        [agent.name for agent in materialized_agents],
+                        enabled=True,
+                    )
 
                 config_base = get_config()
                 if entity_store is not None:
@@ -2563,7 +2566,7 @@ class AgentWebSocketServer:
             AgentConfigService,
             build_single_agent_params,
         )
-        from jiuwenclaw.config import upsert_subagent_in_config
+        from jiuwenclaw.config import batch_upsert_subagents_in_config
 
         agent_params = build_single_agent_params(agents_payload)
         builtin_names = {agent.name for agent in BUILTIN_AGENTS}
@@ -2585,8 +2588,11 @@ class AgentWebSocketServer:
                 materialized_agents = [
                     agent_service.create_agent(item) for item in agent_params
                 ]
-                for agent in materialized_agents:
-                    upsert_subagent_in_config(agent.name, enabled=True)
+                if materialized_agents:
+                    batch_upsert_subagents_in_config(
+                        [agent.name for agent in materialized_agents],
+                        enabled=True,
+                    )
 
                 await self._reload_after_agents_sync()
             except Exception:

@@ -1754,7 +1754,9 @@ async def test_reload_finishes_post_configure_work_after_unregister_failures():
     adapter._apply_model_to_react_agent.assert_called_once_with(adapter._model)
     adapter._refresh_fork_agent_executor_model.assert_called_once_with()
     adapter._maybe_recreate_sys_operation.assert_called_once_with()
-    adapter._handle_memory_rail_by_config.assert_awaited_once_with("agent.plan")
+    adapter._handle_memory_rail_by_config.assert_awaited_once_with(
+        "agent.plan", {"react": {"agent_name": "a"}, "models": {"default": {}}}
+    )
     adapter._handle_external_memory_rail_by_config.assert_awaited_once()
     adapter._apply_registered_skill_dirs_to_runtime_rails.assert_called_once_with()
     assert adapter._memory_engine_snapshot == "builtin"

@@ -1983,7 +1983,7 @@ class JiuWenClawDeepAdapter:
         已配置 key 且 ``_audio_model_config`` 完整时注册全部 harness 音频工具；否则仅保留
         ``audio_metadata``（ACRCloud，仍依赖 ``ACR_*`` 环境变量在运行时识别曲库）。
         """
-        config_base = get_config()
+        config_base = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
         sid, aid = self._env_ns_ids()
         if not dedicated_multimodal_model_configured(
             config_base,
@@ -4974,7 +4974,7 @@ class JiuWenClawDeepAdapter:
                     )
                 self._memory_rail = None
 
-            await self._handle_memory_rail_by_config(reload_mode)
+            await self._handle_memory_rail_by_config(reload_mode, config_base)
             await self._handle_external_memory_rail_by_config(config_base)
             self._apply_registered_skill_dirs_to_runtime_rails()
             self._memory_engine_snapshot = get_memory_engine(config_base)
@@ -5912,7 +5912,8 @@ class JiuWenClawDeepAdapter:
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
         _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",
                              "memory_get", "memory_index")
-        if not is_builtin_memory_allowed(get_config()):
+        _cfg = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
+        if not is_builtin_memory_allowed(_cfg):
             for tool_name in _all_memory_tools:
                 try:
                     self._instance.ability_manager.remove(tool_name)
@@ -5955,9 +5956,10 @@ class JiuWenClawDeepAdapter:
                         pass
             # 非群聊数字分身且记忆启用时，恢复写入工具
             else:
-                if is_builtin_memory_allowed(get_config()):
+                _cfg2 = self._latest_config_base if isinstance(self._latest_config_base, dict) else get_config()
+                if is_builtin_memory_allowed(_cfg2):
                     try:
-                        _mem_mode = get_memory_mode(get_config())
+                        _mem_mode = get_memory_mode(_cfg2)
                         if _mem_mode == "wiki":
                             for tool in get_decorated_tools():
                                 name = getattr(getattr(tool, "card", None), "name", "")
@@ -10977,8 +10979,8 @@ class JiuWenClawDeepAdapter:
                 "iterate decorated tools failed: %s", exc,
             )
 
-    async def _handle_memory_rail_by_config(self, mode: str):
-        config = get_config()
+    async def _handle_memory_rail_by_config(self, mode: str, config_base: dict[str, Any] | None = None):
+        config = config_base if isinstance(config_base, dict) else get_config()
         memory_mode = get_memory_mode(config)
 
         if memory_mode == "wiki":
