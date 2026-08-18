@@ -216,6 +216,10 @@ from jiuwenswarm.common.model_config_validation import (
     is_placeholder_model_entry,
     model_client_config_view,
 )
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    build_kv_cache_affinity_config,
+    model_provider,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     TOOL_PERMISSION_CHANNEL_ID,
 )
@@ -916,36 +920,14 @@ def _deep_agent_context_engine_config(
     )
 
 
-def _model_provider(model: Any) -> str:
-    for owner in (model, getattr(model, "_client", None)):
-        model_client_config = getattr(owner, "model_client_config", None)
-        provider = getattr(model_client_config, "client_provider", None)
-        if provider is not None:
-            return str(getattr(provider, "value", provider) or "").strip()
-    return ""
-
-
 def _deep_agent_kv_cache_affinity_config(
-        react_cfg: dict[str, Any] | None,
-        model: Model | None = None,
+    react_cfg: dict[str, Any] | None,
+    model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
-    react_cfg = react_cfg or {}
-    kv_cfg = react_cfg.get("kv_cache_affinity_config")
-    kv_cfg = kv_cfg if isinstance(kv_cfg, dict) else {}
-    affinity_enabled = bool(kv_cfg.get("enable_kv_cache_affinity", False))
-    if affinity_enabled and model is not None:
-        provider = _model_provider(model)
-        if provider != "AscendAffinity":
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] KV cache affinity failed closed: "
-                "model provider=%s requires=AscendAffinity",
-                provider or "<empty>",
-            )
-            affinity_enabled = False
-    return KVCacheAffinityConfig(
-        enable_kv_cache_release=bool(kv_cfg.get("enable_kv_cache_release", False)),
-        enable_kv_cache_affinity=affinity_enabled,
+    return build_kv_cache_affinity_config(
+        react_cfg,
+        provider=model_provider(model),
     )
 
 

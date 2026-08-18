@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Session lifecycle hooks for Ascend KV cache affinity."""
+"""Provider-facing lifecycle operations for root Session KV cache affinity."""
 
 from __future__ import annotations
 
@@ -12,12 +12,18 @@ from typing import Any, Literal
 from openjiuwen.core.foundation.kv_cache import resolve_kvc_action_timeout
 
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    get_default_model_provider,
+    is_affinity_enabled,
+    model_provider,
+    normalize_provider,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 
 logger = logging.getLogger(__name__)
 
 KVAction = Literal["evict", "offload", "prefetch"]
-ASCEND_AFFINITY_PROVIDER = "AscendAffinity"
 
 
 @dataclass(frozen=True)
@@ -46,9 +52,7 @@ def _result(
 def is_kv_cache_affinity_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether jiuwenswarm should emit Ascend KV lifecycle calls."""
     cfg = config if isinstance(config, dict) else get_config()
-    react_cfg = cfg.get("react") or {}
-    kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
-    return bool(kv_cfg.get("enable_kv_cache_affinity", False))
+    return is_affinity_enabled(cfg)
 
 
 def _model_supports_kv_cache_affinity(model: Any) -> bool:
@@ -61,28 +65,8 @@ def _model_supports_kv_cache_affinity(model: Any) -> bool:
     )
 
 
-def _normalize_provider(provider: Any) -> str:
-    if provider is None:
-        return ""
-    value = getattr(provider, "value", provider)
-    return str(value or "").strip()
-
-
 def _is_ascend_affinity_provider(provider: Any) -> bool:
-    return _normalize_provider(provider).lower() == ASCEND_AFFINITY_PROVIDER.lower()
-
-
-def _provider_from_model(model: Any) -> str:
-    model_client_config = getattr(model, "model_client_config", None)
-    return _normalize_provider(getattr(model_client_config, "client_provider", None))
-
-
-def _default_model_provider(config: dict[str, Any]) -> str:
-    entry = _default_model_entry(config)
-    if entry is None:
-        return ""
-    model_client_config, _ = entry
-    return _normalize_provider(model_client_config.get("client_provider"))
+    return normalize_provider(provider).lower() == ASCEND_AFFINITY_PROVIDER.lower()
 
 
 def _model_from_jiuwenswarm_agent(agent: Any) -> Any | None:
@@ -187,7 +171,11 @@ async def run_session_kv_cache_lifecycle(
             return _result("skipped")
 
         model = resolve_kv_cache_affinity_model(agent=agent, config=cfg)
-        provider = _provider_from_model(model) if model is not None else _default_model_provider(cfg)
+        provider = (
+            model_provider(model)
+            if model is not None
+            else get_default_model_provider(cfg)
+        )
         if provider and not _is_ascend_affinity_provider(provider):
             logger.warning(
                 "[KVCacheAffinityLifecycle] %s blocked: session_id=%s provider=%s requires=%s",
