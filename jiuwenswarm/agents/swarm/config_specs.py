@@ -42,6 +42,7 @@ from openjiuwen.harness.rails import SkillUseRail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
+from jiuwenswarm.agents.harness.common.memory.config import is_memory_enabled
 from jiuwenswarm.common.config import (
     ASCEND_AFFINITY_PROVIDER,
     get_default_model_provider,
@@ -424,7 +425,7 @@ def _team_common_rail_names(role: str) -> tuple[str, ...]:
     return _COMMON_RAIL_NAMES
 
 
-def _code_base_rail_names(role: str) -> tuple[str, ...]:
+def _code_base_rail_names(config: dict[str, Any], role: str) -> tuple[str, ...]:
     """Code-profile rails minus permission interrupt; leaders omit code todo planning.
 
     ``PERMISSION_INTERRUPT`` is excluded for all team members: it relies on a
@@ -435,6 +436,9 @@ def _code_base_rail_names(role: str) -> tuple[str, ...]:
         name for name in _CODE_RAIL_NAMES
         if name != registry.PERMISSION_INTERRUPT
     )
+    if not is_memory_enabled("code", config):
+        memory_rails = {registry.CODE_PROJECT_MEMORY, registry.CODE_CODING_MEMORY}
+        names = tuple(name for name in names if name not in memory_rails)
     if role == "leader":
         return tuple(name for name in names if name != registry.CODE_TASK_PLANNING)
     return names
@@ -549,7 +553,7 @@ def _build_code_capability_specs(
 
     rails_specs: list[RailSpec] = [
         RailSpec(type=name, params=_rail_params(name, config))
-        for name in _code_base_rail_names(role)
+        for name in _code_base_rail_names(config, role)
     ]
 
     if is_team_plan_leader:
@@ -703,6 +707,22 @@ def _is_explore_subagent(spec: Any) -> bool:
     )
 
 
+def _is_browser_subagent(spec: Any) -> bool:
+    """Return whether *spec* declares any browser sub-agent shape.
+
+    Base specs and provider-backed specs do not share one identity field.  In
+    particular, the code adapter's base spec can carry a legacy browser entry
+    even when ``react.subagents.browser_agent.enabled`` is false.  Treat the
+    config-derived list as authoritative by recognizing all supported shapes
+    before merging.
+    """
+    return (
+        getattr(spec, "subagent_type", None) == "browser_agent"
+        or getattr(spec, "factory_name", None) == registry.SWARM_BROWSER_AGENT
+        or getattr(getattr(spec, "agent_card", None), "name", None) == "browser_agent"
+    )
+
+
 def build_member_subagent_specs(
     config: dict[str, Any],
     mode: str,
@@ -832,14 +852,14 @@ def build_member_deep_agent_spec(
                 spec for spec in merged_subagents
                 if not _is_explore_subagent(spec)
             ]
-        # Remove any browser_agent from base_spec to prevent the shared
-        # playwright_official_stdio entry from co-existing with our isolated one.
-        if team_browser_spec or any(
-            getattr(s, "subagent_type", None) == "browser_agent" for s in subagent_specs
-        ):
+        # Code-team config is authoritative for browser availability.  Strip
+        # the adapter's hard-coded base browser even when the configured gate
+        # is false; otherwise disabling it only omits the replacement while the
+        # legacy shared browser silently survives the merge.
+        if _is_code_mode(mode) or team_browser_spec:
             merged_subagents = [
                 s for s in merged_subagents
-                if getattr(s, "subagent_type", None) != "browser_agent"
+                if not _is_browser_subagent(s)
             ]
         if team_browser_spec:
             merged_subagents.append(team_browser_spec)

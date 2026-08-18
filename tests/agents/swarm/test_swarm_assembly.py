@@ -2580,6 +2580,32 @@ def test_browser_subagent_spec_excluded_when_disabled() -> None:
         assert all(s.factory_name != SWARM_BROWSER_AGENT for s in subs)
 
 
+def test_code_team_browser_gate_removes_legacy_base_spec_when_disabled() -> None:
+    """A false browser gate must not retain the adapter's base browser."""
+    from openjiuwen.agent_teams.schema.deep_agent_spec import SubAgentSpec
+    from openjiuwen.core.single_agent import AgentCard
+
+    shared_browser = SubAgentSpec(
+        agent_card=AgentCard(name="browser_agent"),
+        system_prompt="",
+        subagent_type="browser_agent",
+    )
+    base = DeepAgentSpec(
+        subagents=[shared_browser],
+        workspace=WorkspaceSpec(root_path="/tmp/ws"),
+    )
+    config = {"react": {"subagents": {"browser_agent": {"enabled": False}}}}
+
+    spec = build_member_deep_agent_spec(config, "code.team", "leader", base)
+
+    assert all(
+        getattr(item, "subagent_type", None) != "browser_agent"
+        and getattr(item, "factory_name", None) != SWARM_BROWSER_AGENT
+        and getattr(getattr(item, "agent_card", None), "name", None) != "browser_agent"
+        for item in (spec.subagents or [])
+    )
+
+
 def test_browser_subagent_provider_skips_without_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

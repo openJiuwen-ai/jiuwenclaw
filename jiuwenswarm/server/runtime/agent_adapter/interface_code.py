@@ -552,12 +552,13 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             root_path=self._workspace_dir or "./",
             language=self._resolve_runtime_language(),
         )
-        _set_workspace_coding_memory_directory(
-            workspace,
-            project_dir=self._project_dir or self._workspace_dir,
-            agent_workspace_dir=self._agent_workspace_dir,
-            description="Coding Agent 记忆模块",
-        )
+        if is_memory_enabled("code", config_base):
+            _set_workspace_coding_memory_directory(
+                workspace,
+                project_dir=self._project_dir or self._workspace_dir,
+                agent_workspace_dir=self._agent_workspace_dir,
+                description="Coding Agent 记忆模块",
+            )
 
         self._instance = create_deep_agent(
             model=model,
@@ -1571,11 +1572,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         tool_cards = self.build_code_tool_cards(agent_id)
         added_tools = _merge_tool_cards(agent, tool_cards)
 
-        _set_coding_memory_directory(
-            agent,
-            initial_workspace,
-            self._agent_workspace_dir,
-        )
+        if is_memory_enabled("code", config_base):
+            _set_coding_memory_directory(
+                agent,
+                initial_workspace,
+                self._agent_workspace_dir,
+            )
 
         rails = self._build_agent_rails(react_config, config_base, mode="code")
         added_rails = sum(1 for rail in rails if _queue_rail_if_missing(agent, rail))
