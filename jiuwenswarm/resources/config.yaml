@@ -901,15 +901,67 @@ channels:
 # ========== 细粒度权限管控（tiered_policy）==========
 #
 # schema: tiered_policy（或兼容 v_cc / v4.2）时由 tiered_policy.evaluate_tiered_policy 求值；
-# mode: full_access|auto|strict 为产品权限三态（默认 auto）；旧 permission_mode 已并入 mode。
-# 完全访问 = enabled:true + mode:full_access（禁止再用 enabled:false 表示完全访问）。
-# Global 不写顶层 defaults / tools；整工具兜底由 mode preset 注入。
-# 整工具 ask/deny 名单写 user_permissions.yaml（ask_tools / deny_tools）。
-# pattern 规则继续写下方 rules；规则动作 allow / ask / deny。
+# permission_mode: normal|strict 决定 severity 映射，见 agentserver/permissions/tiered_policy.py。
+# severity（normal）：LOW/MEDIUM→allow，HIGH/CRITICAL→ask；strict 下 MEDIUM→ask、CRITICAL→deny。
+# rules[*].action: 可选显式动作 allow|ask|deny；配置后优先于 severity 映射，适合敏感文件读取、
+# 系统控制等不希望随 permission_mode 漂移的规则。
+# 内置参数规则 > 用户 rules；整工具存在则不用 defaults；详见 tiered_policy 模块说明。
+#
+# 三种动作: allow / ask / deny
 permissions:
-  enabled: true
-  mode: auto
+  enabled: false
   schema: tiered_policy
+  permission_mode: normal
+
+  defaults:
+    "*": "allow"
+
+  tools:
+    bash: ask
+    mcp_exec_command: ask
+    create_terminal: ask
+    write: allow
+    write_file: allow
+    edit_file: allow
+    search_replace: allow
+    # ask_user 只向用户提问，不修改系统，自动放行避免权限中断阻塞问题选项呈现
+    ask_user: allow
+    write_memory: allow
+    edit_memory: allow
+    read_memory: allow
+    memory_search: allow
+    memory_get: allow
+    todo_create: allow
+    todo_insert: allow
+    todo_complete: allow
+    todo_remove: allow
+    todo_list: allow
+    # Coding Memory 工具权限
+    coding_memory_write: allow
+    coding_memory_edit: allow
+    coding_memory_read: allow
+    # 外接记忆工具（External Memory — OpenJiuwen / Mem0 / OpenViking）
+    ltm_search: allow
+    ltm_search_summary: allow
+    mem0_profile: allow
+    mem0_search: allow
+    mem0_conclude: allow
+    viking_search: allow
+    viking_read: allow
+    viking_browse: allow
+    viking_remember: allow
+    viking_add_resource: allow
+    mcp_free_search: allow
+    mcp_paid_search: allow
+    mcp_fetch_webpage: allow
+    cron_list_jobs: allow
+    cron_get_job: allow
+    cron_create_job: allow
+    cron_update_job: allow
+    cron_delete_job: allow
+    cron_toggle_job: allow
+    cron_preview_job: allow
+    acp_chat: ask
 
   rules:
     - id: shell_allow_dir
@@ -1003,11 +1055,8 @@ permissions:
   owner_scopes: {}
   deny_guidance_message: ""
 
-  # Native 路径层（agent-core FileGuard）。
-  # defaults / workspace 由 mode preset 注入，下列 YAML 轴不生效：
-  #   Auto: 工作目录读写 allow；区外读 allow、写/exec ask
-  #   Strict: 工作目录读 allow；工作目录写与区外访问 ask
-  # trusted_dirs（用户选中的工作目录 / 项目 cwd）运行时按 workspace 轴编译。
+  # Native 路径层（agent-core FileGuard）：defaults + workspace 绑定运行时 workspace_root
+  # trusted_dirs（TUI 项目 cwd / /add-dir）由引擎运行时编译，不必写进 YAML。
   file_guard:
     enabled: true
     defaults:
@@ -1018,9 +1067,17 @@ permissions:
       read: allow
       write: allow
       exec: ask
-    # 敏感路径内置底线见 agent-core builtin_rules.yaml → sensitive_paths（ask|deny）。
-    # 此处仅放产品/组织增量 paths；勿重复内置名单。
-    paths: []
+    paths:
+      - path: "**/.ssh/**"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
+      - path: "**/.env*"
+        match: glob
+        read: ask
+        write: ask
+        exec: ask
 
   # Legacy external_directory：仅作兼容；启用上方 Native file_guard 后 "*" 不再驱动路径层。
   # 新信任目录写入 file_guard.paths（/add-dir），勿再写本键具名 allow。
