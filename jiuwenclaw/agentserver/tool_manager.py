@@ -686,14 +686,18 @@ class ToolManager:
                 getter = _make_stdio_params_getter(server_name)
                 for td in tool_defs:
                     tname = td["name"]
+                    # 不同连接器下可能存在同名工具（如多个 Supabase MCP 共享 execute_sql）；
+                    # 在 LLM 可见名上叠加 server 前缀做命名空间隔离，避免 ability_manager._tools
+                    # 后注册覆盖前注册。资源侧的 full id 不变，仍由 server_id 唯一定位。
+                    qualified_name = f"{server_name}__{tname}"
                     tool_id = f"{request_scoped_server_id}.{server_name}.{tname}"
                     card = ToolCard(
                         id=tool_id,
-                        name=tname,
+                        name=qualified_name,
                         description=td.get("description") or "",
                         input_params=td.get("input_params") or {},
                     )
-                    ephemeral = EphemeralStdioMcpTool(card, getter)
+                    ephemeral = EphemeralStdioMcpTool(card, getter, raw_tool_name=tname)
                     add_res = Runner.resource_mgr.add_tool(ephemeral, tag=server_name)
                     if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
                         err = _mcp_add_result_error_text(add_res)
@@ -701,7 +705,7 @@ class ToolManager:
                             raise RuntimeError(f"注册 ephemeral 工具失败 {tname}: {err}")
                     agent.ability_manager.add(card)
                     tool_ids.append(tool_id)
-                    tool_names.append(tname)
+                    tool_names.append(qualified_name)
 
                 reg = {
                     "kind": "stdio",
@@ -786,11 +790,16 @@ class ToolManager:
                         except Exception as exc:
                             logger.warning("[ToolManager] remove_tool 失败 tool_id=%s: %s", tool_id, exc)
                     if agent is not None:
+                        # tool_names 已经是带 server 前缀的 qualified name，
+                        # 与 add() 时写入 ability_manager._tools 的 key 一致。
                         for tool_name in reg.get("tool_names", []):
                             try:
                                 agent.ability_manager.remove(tool_name)
                             except Exception as exc:
-                                logger.warning("[ToolManager] ability_manager.remove 失败 name=%s: %s", tool_name, exc)
+                                logger.warning(
+                                    "[ToolManager] ability_manager.remove 失败 name=%s: %s",
+                                    tool_name, exc,
+                                )
                 elif reg.get("kind") == "shared":
                     server_id = reg.get("server_id")
                     if server_id:
