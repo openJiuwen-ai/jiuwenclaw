@@ -1307,7 +1307,7 @@ class AgentWebSocketServer:
             await self._server.wait_closed()
             self._server = None
 
-        from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
             cancel_pending_tasks,
         )
 
@@ -1886,7 +1886,7 @@ class AgentWebSocketServer:
     async def _record_kvc_chat_started(self, request: AgentRequest) -> None:
         """Best-effort KVC task fact; only same-Session evict may block it."""
         try:
-            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                 record_chat_started,
             )
 
@@ -1912,7 +1912,7 @@ class AgentWebSocketServer:
         succeeded: bool,
     ) -> None:
         try:
-            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                 record_chat_finished,
             )
 
@@ -3137,7 +3137,7 @@ class AgentWebSocketServer:
         context = None
         dispatch_signals = None
         try:
-            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                 dispatch_session_switch_signals,
                 resolve_session_switch_context,
             )
@@ -3219,7 +3219,7 @@ class AgentWebSocketServer:
             )
         else:
             try:
-                from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                     record_session_prepare,
                 )
 
@@ -4133,7 +4133,7 @@ class AgentWebSocketServer:
                     team_name = str(metadata.get("team_name") or "").strip()
                     channel_id = str(metadata.get("channel_id") or request.channel_id or "").strip() or None
                     try:
-                        from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                             mark_session_deleted,
                         )
 
@@ -4169,7 +4169,7 @@ class AgentWebSocketServer:
                                 session_id=target,
                             )
 
-                            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                                 evict_plan_session,
                             )
 
@@ -4190,7 +4190,7 @@ class AgentWebSocketServer:
 
                     if not deleted:
                         try:
-                            from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
+                            from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks import (
                                 restore_session_after_failed_delete,
                             )
 

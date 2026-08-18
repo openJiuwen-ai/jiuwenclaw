@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Product-session hooks for Ascend KV cache affinity."""
+"""Product-session adapters for optional KV cache affinity lifecycle hooks."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ async def cancel_pending_tasks() -> None:
     """Best-effort cleanup for all Agent-side KVC signal registries."""
     cleanup_callbacks = []
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             cancel_pending_kv_cache_lifecycle_tasks,
         )
 
@@ -69,7 +69,7 @@ async def cancel_pending_tasks() -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -87,7 +87,7 @@ async def evict_plan_session(
 ) -> bool:
     """Best-effort evict for a permanently deleted non-Team session."""
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             evict_session_kv_cache,
             is_kv_cache_affinity_enabled,
         )
@@ -127,7 +127,7 @@ def resolve_session_switch_context(
     params: dict[str, Any],
 ) -> SessionSwitchContext:
     """Resolve switch facts without changing the product runtime."""
-    from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+    from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
         is_kv_cache_affinity_enabled,
     )
 
@@ -201,7 +201,7 @@ async def dispatch_session_switch_signals(
     if not context.affinity_enabled:
         return
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -252,7 +252,7 @@ async def record_chat_started(
     """Record one top-level task start; never wait for prefetch/offload."""
     if not session_id:
         return
-    from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+    from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
         is_kv_cache_affinity_enabled,
         wait_for_session_kv_cache_evict,
     )
@@ -264,7 +264,7 @@ async def record_chat_started(
     await wait_for_session_kv_cache_evict(session_id)
     is_team = _resolve_session_is_team(session_id, params)
     team_manager = _resolve_team_manager(channel_id) if is_team else None
-    from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+    from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
         get_session_kv_cache_task_guard,
     )
 
@@ -291,10 +291,10 @@ def record_chat_finished(
     if not session_id:
         return
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             is_kv_cache_affinity_enabled,
         )
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -328,10 +328,10 @@ def record_session_prepare(
 ) -> Literal["scheduled", "not_needed", "disabled", "failed"]:
     """Record typing intent and report whether it scheduled a prefetch."""
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             is_kv_cache_affinity_enabled,
         )
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -378,13 +378,13 @@ def mark_session_deleted(
 ) -> None:
     """Tombstone only in process memory; the existing delete owner runs evict."""
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             is_kv_cache_affinity_enabled,
         )
 
         if not is_kv_cache_affinity_enabled():
             return
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -404,13 +404,13 @@ def mark_session_deleted(
 def restore_session_after_failed_delete(session_id: str) -> None:
     """Restore KVC facts when the authoritative product delete did not commit."""
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             is_kv_cache_affinity_enabled,
         )
 
         if not is_kv_cache_affinity_enabled():
             return
-        from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
             get_session_kv_cache_task_guard,
         )
 
@@ -464,7 +464,7 @@ def _dispatch_guard_action(
         task.add_done_callback(_log_product_guard_task)
         return
 
-    from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+    from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
         dispatch_offload_session_kv_cache,
         dispatch_prefetch_session_kv_cache,
     )

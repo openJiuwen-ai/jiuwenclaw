@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
     SessionKVCacheTaskGuard,
 )
 

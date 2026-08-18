@@ -1996,7 +1996,7 @@ async def test_handle_session_kvc_prepare_is_best_effort(monkeypatch):
         fake_encode_agent_response_for_wire,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks."
         "record_session_prepare",
         _prepare,
     )
@@ -2829,7 +2829,7 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
         fake_ensure_persistent_checkpointer,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks.evict_plan_session",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
         fake_evict_plan_session,
     )
     monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
@@ -2898,7 +2898,7 @@ async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
         fake_ensure_persistent_checkpointer,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks.evict_plan_session",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
         fake_evict_plan_session,
     )
     monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)

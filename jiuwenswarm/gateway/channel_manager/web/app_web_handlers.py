@@ -3778,7 +3778,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session is not a directory", code="BAD_REQUEST",
             )
             return
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             evict_session_kv_cache,
         )
 

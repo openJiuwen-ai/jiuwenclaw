@@ -5,13 +5,13 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.runtime.session import kv_cache_product_hooks
+from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_product_hooks
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
 
 @pytest.fixture(autouse=True)
 def _clear_kvc_task_guard() -> Iterator[None]:
-    from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+    from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard import (
         get_session_kv_cache_task_guard,
     )
 
@@ -75,7 +75,7 @@ async def test_cancel_pending_tasks_cleans_all_kvc_registries(
         cleanup_calls.append(owner)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "cancel_pending_kv_cache_lifecycle_tasks",
         lambda: _record("root"),
     )
@@ -104,12 +104,12 @@ async def test_disabled_plan_delete_does_not_resolve_live_agent(
             raise AssertionError("disabled affinity must not resolve a Plan agent")
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: False,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "evict_session_kv_cache",
         lambda **_kwargs: pytest.fail("disabled affinity dispatched evict"),
     )
@@ -125,7 +125,7 @@ def test_disabled_delete_does_not_mutate_kvc_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: False,
     )
@@ -137,7 +137,7 @@ def test_disabled_delete_does_not_mutate_kvc_guard(
         ),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_task_guard."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_task_guard."
         "get_session_kv_cache_task_guard",
         lambda: guard,
     )
@@ -164,7 +164,7 @@ async def test_team_switch_records_foreground_without_navigation_prefetch(
         lambda _channel_id: team_manager,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: affinity_enabled,
     )
@@ -203,7 +203,7 @@ async def test_plan_navigation_alone_dispatches_no_root_signals(
     offload_calls: list[dict] = []
     prefetch_calls: list[dict] = []
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: True,
     )
@@ -218,12 +218,12 @@ async def test_plan_navigation_alone_dispatches_no_root_signals(
         lambda _session_id: True,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "dispatch_offload_session_kv_cache",
         lambda **kwargs: offload_calls.append(kwargs),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "dispatch_prefetch_session_kv_cache",
         lambda **kwargs: prefetch_calls.append(kwargs),
     )
@@ -261,12 +261,12 @@ async def test_disabled_plan_switch_skips_kvc_and_preserves_resolved_mode(
         lambda _session_id: {},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: False,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "dispatch_offload_session_kv_cache",
         lambda **_kwargs: pytest.fail("disabled affinity dispatched offload"),
     )
@@ -296,7 +296,7 @@ async def test_disabled_affinity_keeps_previous_team_fact_for_lifecycle(
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: False,
     )
@@ -331,7 +331,7 @@ async def test_disabled_affinity_routes_previous_team_to_team_owner(
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: False,
     )
@@ -412,12 +412,12 @@ async def test_team_to_plan_routes_previous_session_to_team_owner(
         lambda _session_id: False,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: True,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "dispatch_offload_session_kv_cache",
         lambda **_kwargs: pytest.fail("Team owner must handle previous session"),
     )

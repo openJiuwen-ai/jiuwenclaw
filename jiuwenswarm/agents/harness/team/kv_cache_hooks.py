@@ -20,7 +20,7 @@ StopRuntime = Callable[..., Awaitable[bool]]
 def is_enabled() -> bool:
     """Fail closed without affecting the owning Team lifecycle."""
     try:
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             is_kv_cache_affinity_enabled,
         )
 

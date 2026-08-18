@@ -7,7 +7,7 @@ import pytest
 
 from openjiuwen.core.foundation.kv_cache import KVC_SESSION_EVICT_TIMEOUT_SECONDS
 
-from jiuwenswarm.server.runtime.session import kv_cache_affinity_lifecycle as lifecycle
+from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_lifecycle as lifecycle
 
 
 class FakeAffinityModel:

@@ -20,7 +20,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _register_web_handlers,
 )
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
-from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
     KVCacheLifecycleResult,
 )
 
@@ -122,11 +122,11 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
         lambda _sid: {"mode": "agent.plan", "channel_id": "web"},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         lambda: True,
     )
@@ -177,7 +177,7 @@ async def test_web_plan_fallback_evicts_root_without_changing_local_delete(
         lambda _sid: {"mode": "agent.plan"},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     _register_web_handlers(
@@ -228,7 +228,7 @@ async def test_tui_plan_fallback_evicts_root_without_changing_local_delete(
         lambda _sid: {"mode": "agent.plan"},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     register_cli_handlers(
@@ -267,7 +267,7 @@ async def test_web_plan_fallback_uses_lifecycle_gate_without_changing_delete(
     evict_ok: bool,
     expected_calls: int,
 ) -> None:
-    from jiuwenswarm.server.runtime.session import kv_cache_affinity_lifecycle as lifecycle
+    from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_lifecycle as lifecycle
 
     sessions_root = tmp_path / "sessions"
     (sessions_root / "gated-root").mkdir(parents=True)
@@ -339,7 +339,7 @@ async def test_team_fallback_remains_agent_unavailable_without_evict_or_delete(
         lambda _sid: {"mode": "team"},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
 
@@ -385,7 +385,7 @@ async def test_missing_plan_fallback_preserves_not_found_without_evict(
         lambda _sid: {"mode": "agent.plan"},
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
 
@@ -442,11 +442,11 @@ async def test_team_session_delete_delegates_terminal_kvc_to_agent_core(
     )
     monkeypatch.setattr("jiuwenswarm.agents.harness.team.get_team_manager", lambda _cid: manager)
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.is_kv_cache_affinity_enabled",
         lambda: True,
     )
     monkeypatch.setattr(
@@ -497,11 +497,11 @@ async def test_team_delete_delegates_terminal_kvc_to_agent_core(
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
     monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.is_kv_cache_affinity_enabled",
         lambda: True,
     )
     monkeypatch.setattr(
@@ -546,7 +546,7 @@ async def test_team_delete_keeps_original_stop_order_when_affinity_disabled(
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
     monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.is_kv_cache_affinity_enabled",
         lambda: False,
     )
     monkeypatch.setattr(
@@ -599,7 +599,7 @@ async def test_plain_disconnect_does_not_emit_root_evict(monkeypatch: pytest.Mon
             raise StopAsyncIteration
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle.evict_session_kv_cache",
         fake_evict,
     )
     monkeypatch.setattr(
@@ -720,7 +720,7 @@ async def test_team_kvc_owner_hook_contains_disabled_or_failed_affinity_gate(
         return False
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle."
         "is_kv_cache_affinity_enabled",
         affinity_gate,
     )
