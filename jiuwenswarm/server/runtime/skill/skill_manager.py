@@ -1917,6 +1917,7 @@ class SkillManager:
 
         Hub 推荐本身不带 plugin_type；若传入 plugin_type/skill_type，则在 enrich
         后按 plugins 元数据过滤（对齐 SkillHub 市场 list + order_by=recommend）。
+        enrich 时 plugins 查不到的项（下架/不可见）会丢掉；HTTP 失败则保留原项。
         """
         auth = self._resolve_teamskills_hub_auth_with_env(params)
         if auth.get("error"):
@@ -3673,12 +3674,16 @@ class SkillManager:
         *,
         base_url: str,
     ) -> list[dict[str, Any]]:
-        """用 /api/v1/plugins?asset_id= 补齐推荐结果的展示字段（失败则保留原项）。"""
+        """用 /api/v1/plugins?asset_id= 补齐推荐结果的展示字段。
 
-        async def _one(item: dict[str, Any]) -> dict[str, Any]:
+        plugins 列表默认排除 OFFLINE：查不到则视为下架/不可见并丢掉。
+        HTTP 失败时保留原项，避免瞬时故障把整页推荐滤空。
+        """
+
+        async def _one(item: dict[str, Any]) -> dict[str, Any] | None:
             asset_id = str(item.get("asset_id") or "").strip()
             if not asset_id:
-                return item
+                return None
             try:
                 data = await self._team_skills_hub_http_get_data(
                     "/api/v1/plugins",
@@ -3689,7 +3694,8 @@ class SkillManager:
                 rows = data.get("items", []) if isinstance(data, dict) else []
                 row = rows[0] if rows and isinstance(rows[0], dict) else None
                 if not row:
-                    return item
+                    logger.info("推荐结果不可见，已过滤 asset_id=%s", asset_id)
+                    return None
                 name = str(row.get("name", "")).strip() or asset_id
                 plugin_type = self._normalize_hub_plugin_type(str(row.get("plugin_type") or ""))
                 return {
@@ -3706,7 +3712,8 @@ class SkillManager:
                 logger.warning("推荐结果补齐失败 asset_id=%s: %s", asset_id, exc)
                 return item
 
-        return list(await asyncio.gather(*[_one(s) for s in skills]))
+        enriched = await asyncio.gather(*[_one(s) for s in skills])
+        return [item for item in enriched if item is not None]
 
     @staticmethod
     def _safe_extract_zip_members_into(zf: zipfile.ZipFile, dest_root: Path) -> None:
