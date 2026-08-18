@@ -67,6 +67,7 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
+import { runStatusLineCommand } from "./core/statusline-runner.js";
 import { generateCreateToken } from "./core/session-state.js";
 import {
   applyWorkflowUpdate,
@@ -84,11 +85,7 @@ import {
   type WorkflowRun,
 } from "./core/workflows.js";
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
-import { execFile, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface ModelUsageEntry {
   model: string;
@@ -248,37 +245,6 @@ const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
 const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
 
-function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = createConnection({ host, port });
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function hasExternalNetwork(): Promise<boolean> {
-  if (process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "1" || process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "true") {
-    return true;
-  }
-  const probes = [
-    probeTcp("223.5.5.5", 53, 1500),
-    probeTcp("114.114.114.114", 53, 1500),
-    probeTcp("1.1.1.1", 443, 1500),
-  ];
-  const results = await Promise.all(probes);
-  return results.some(Boolean);
-}
-
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
 }
@@ -422,7 +388,6 @@ export class CliPiAppState {
   private activeTurnReconnectNoticeShown = false;
   private lastStreamActivityAt: number | null = null;
   private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamStallNoticeShown = false;
   private streamStalled = false;
   /** 静默中断当前任务时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
@@ -901,7 +866,6 @@ export class CliPiAppState {
     }
     this.lastStreamActivityAt = Date.now();
     this.streamStalled = false;
-    this.streamStallNoticeShown = false;
     this.scheduleStreamStallWatchdog();
   }
 
@@ -927,7 +891,6 @@ export class CliPiAppState {
   private clearStreamStallWatchdog(): void {
     this.clearStreamStallTimers();
     this.lastStreamActivityAt = null;
-    this.streamStallNoticeShown = false;
     this.streamStalled = false;
   }
 
@@ -935,18 +898,14 @@ export class CliPiAppState {
     if (!this.hasActiveResponseStream()) {
       return;
     }
-    if (await hasExternalNetwork()) {
-      this.lastStreamActivityAt = Date.now();
-      this.scheduleStreamStallWatchdog();
-      return;
-    }
-    if (this.streamStallNoticeShown) {
-      return;
-    }
-    this.streamStallNoticeShown = true;
-    this.failActiveTurnAfterConnectionLoss(
-      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
-    );
+    // 到达此处时 connectionStatus 必为 "connected"（hasActiveResponseStream 已隐含，
+    // 且本函数 fire 于定时器回调、其间无 await 改写该字段）。ws 仍 connected 即认为
+    // 本地服务（Gateway/AgentServer）还活着、任务在跑只是暂未吐帧，故续期不报错。
+    // air-gapped 内网里 ws 恒 connected，故永远续期，消除公网探针必然失败导致的误报。
+    // 公网用户真断网时 ws 会先变 reconnecting（见 handleConnectionStatusChanged，走 60s
+    // 重连看门狗），本函数在 reconnecting 下不会被调到，故公网保护语义不变。
+    this.lastStreamActivityAt = Date.now();
+    this.scheduleStreamStallWatchdog();
   }
 
   private frameBelongsToActiveSession(frame: EventFrame): boolean {
@@ -3306,57 +3265,22 @@ export class CliPiAppState {
     }
     const jsonInput = JSON.stringify(this.buildStatusLineJsonInput());
     const cmd = sl.command;
-    const isWindows = process.platform === "win32";
-
     try {
-      if (isWindows) {
-        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
-        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
-        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
-        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
-        writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile
-          .split(sep)
-          .join("/")
-          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
-        const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
-        const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
-
-        const child = execFile(
-          "sh",
-          ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
-        child.stdin?.end(jsonInput);
-      } else {
-        // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile(
-          "sh",
-          ["-c", cmd],
-          { timeout: 3_000, maxBuffer: 10_240 },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        child.stdin?.end(jsonInput);
-      }
+      runStatusLineCommand(
+        cmd,
+        jsonInput,
+        getCurrentCwd() || process.cwd(),
+        (err, stdout) => {
+          if (err) return;
+          const text = stdout.trim().replace(/\r\n/g, "\n");
+          if (text !== this.statusLineText) {
+            this.statusLineText = text || null;
+            this.emitChange();
+          }
+        },
+      );
     } catch {
-      // Silently ignore — sh may not be in PATH on Windows
+      // Ignore launch errors; invalid commands should not disrupt the TUI.
     }
   }
 

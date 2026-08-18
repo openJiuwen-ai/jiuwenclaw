@@ -344,6 +344,15 @@ def test_visible_skill_filter_hides_unavailable_branches() -> None:
     assert "Unknown branch node id" in explore["result"]
 
 
+def test_runtime_tool_descriptions_use_product_neutral_orchestration_wording() -> None:
+    tools = _toolkit_mod.SkillRetrievalToolkit(manager=SimpleNamespace()).get_tools()
+    explore_tool = next(tool for tool in tools if tool.card.name == "skill_branch_explore")
+
+    assert "To guide Skill orchestration" in explore_tool.card.description
+    assert "Symphony" not in explore_tool.card.description
+    assert "symphony_compose_graph.candidate_skill_ids" in explore_tool.card.description
+
+
 @pytest.mark.asyncio
 async def test_runtime_toolkit_methods_return_build_and_missing_index_results(monkeypatch) -> None:
     monkeypatch.setattr(

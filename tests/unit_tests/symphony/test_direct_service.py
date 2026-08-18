@@ -1714,6 +1714,42 @@ def test_build_progress_uses_completed_batches_and_never_regresses():
     assert _build_progress(entries)["percent"] == 84
 
 
+def test_build_progress_uses_global_candidate_counts_across_matcher_windows():
+    entries = [
+        {"stage": "graph.resolve.start", "candidate_count": 143},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 20,
+            "total_candidate_count": 143,
+        },
+    ]
+
+    progress = _build_progress(entries)
+
+    assert progress["percent"] == 74
+    assert progress["current"] == 20
+    assert progress["total"] == 143
+
+
 def test_build_progress_invalid_relation_totals_stay_at_stage_start():
     entries = [
         {
@@ -1862,6 +1898,43 @@ async def test_graph_status_repairs_interrupted_build_log(monkeypatch, tmp_path)
     assert result["build_progress"]["status"] == "cancelled"
     assert result["build_log"][-1]["stage"] == "update.cancelled"
     assert result["build_log"][-1]["reason"] == "process_interrupted"
+
+
+@pytest.mark.asyncio
+async def test_service_graph_status_does_not_bind_freshness_to_current_default_model(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    captured = {}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+
+    def fake_graph_status(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {"success": True, "exists": True, "stale": False}
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        fake_graph_status,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("default model must not affect graph status")
+        ),
+    )
+
+    result = await SwarmSymphonyService().graph_status()
+
+    assert result["stale"] is False
+    assert captured.get("llm_config") is None
 
 
 @pytest.mark.asyncio

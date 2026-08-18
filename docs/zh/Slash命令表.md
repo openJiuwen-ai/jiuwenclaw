@@ -508,9 +508,9 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
-| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
+| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#team-模式与-swarmflow多智能体定时任务) |
 | `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
@@ -1024,7 +1024,8 @@ hooks:
 
 | 命令 | 说明 |
 |---|---|
-| `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
+| `/statusline` | 启动内置 setup 子 agent，创建、检查、修改或删除状态栏 |
+| `/statusline get` | 始终只查看当前状态栏配置，不触发 setup agent |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
 | `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
@@ -1036,9 +1037,9 @@ hooks:
 
 - **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
-- **Agent 自动生成模式**：非空参数若不是已知子命令（`set`、`padding`、`clear`、`help`、`json`、`get`），TUI 会将其交给 Agent，并使用 `script-creator` skill 生成配置。例如：`/statusline 显示模式、模型和剩余上下文`。无参数 `/statusline` 仍然只查看当前配置。
-- **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
-- **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
+- **Agent 自动生成模式**：无论是否附带自然语言描述，`/statusline` 都会交给内置 `statusline-setup` 子 agent。未配置时，它会引导创建并自动应用配置；已配置时，它会检查当前设置，并可说明、修改或删除状态栏。若只想查看原始配置，请使用 `/statusline get`。
+- **JSON 输入**：每次执行时，系统通过 stdin 将当前会话信息以 JSON 格式传入命令，可用 `jq`、PowerShell `ConvertFrom-Json` 或其他可用工具解析。
+- **Shell 选择**：Windows 优先使用已安装的 Git Bash，否则回退到 PowerShell；macOS/Linux 使用 `sh`。setup 子 agent 会生成适合当前平台的持久化脚本，Windows 不强制依赖 `jq`。
 
 #### JSON 输入字段
 
@@ -1119,7 +1120,8 @@ hooks:
 
 #### 更多示例
 
-- `/statusline` — 查看当前配置
+- `/statusline` — 启动内置 setup 子 agent，创建、检查、修改或删除状态栏
+- `/statusline get` — 查看当前配置，不触发 setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比
@@ -1138,7 +1140,7 @@ hooks:
 - **故障静默**：命令执行失败时不显示错误，保持上一次成功输出或隐藏状态栏。
 - **持久化**：配置保存在 `~/.jiuwenswarm-tui/config.json` 的 `statusLine` 字段，重启 TUI 后自动恢复。
 - **别名**：`/sl`
-- **Windows 适配**：系统自动将 `$(cat)` 替换为读取临时文件，用户命令格式不变；需确保 Git Bash 的 `usr\bin` 在系统 PATH 中。
+- **Windows 适配**：运行器通过 stdin 传入 JSON，已安装 Git Bash 时使用 Git Bash，否则回退到 PowerShell；未安装 Git Bash 或 `jq` 时，建议使用持久化 PowerShell 脚本。
 
 #### 配置文件结构
 
@@ -1397,3 +1399,9 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
 ## 待开发
 
 （暂无）
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

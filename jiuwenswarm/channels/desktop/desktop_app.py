@@ -17,15 +17,22 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from logging.handlers import RotatingFileHandler
 
 import webview
 
+from jiuwenswarm.common._build_config import (
+    APP_BUNDLE_NAME,
+    BUNDLE_IDENTIFIER,
+    DISPLAY_NAME,
+    EXECUTABLE_NAME,
+)
 from jiuwenswarm.common.utils import get_user_workspace_dir, get_logs_dir, wait_for_pid_exit, wait_for_tcp_port
 from jiuwenswarm.instance_manager.config import (
     BASE_PORTS,
@@ -45,6 +52,8 @@ UPDATE_HELPER_FLAG = "--desktop-install-update"
 DESKTOP_ENV_FLAG = "JIUWENSWARM_DESKTOP"
 STARTUP_TIMEOUT_SECONDS = 45.0
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+DESKTOP_BLOB_CHUNK_SIZE = 1024 * 1024
+MAX_JAVASCRIPT_SAFE_INTEGER = 9_007_199_254_740_991
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,17 @@ class _DataUrlExportSpec:
     allowed_suffixes: frozenset[str]
     allowed_parameters: frozenset[str]
     file_types: tuple[str, ...]
+
+
+@dataclass
+class _BlobSaveTransfer:
+    expected_size: int
+    export_file: BinaryIO
+    mime_type: str
+    target_path: Path
+    temp_path: Path
+    bytes_written: int = 0
+    signature: bytes = b""
 
 
 DATA_URL_EXPORT_SPECS = {
@@ -184,12 +204,12 @@ ATTACHMENT_DIALOG_EXTENSIONS: tuple[str, ...] = (
     ".flv",
 )
 UPDATE_CLEANUP_PATTERNS = (
-    "JiuwenSwarm-setup-*.exe",
-    "JiuwenSwarm-*.dmg",
-    "JiuwenSwarm-*.tar.gz",
-    "JiuwenSwarm-*.exe.part",
-    "JiuwenSwarm-*.dmg.part",
-    "JiuwenSwarm-*.tar.gz.part",
+    "*.exe",
+    "*.dmg",
+    "*.tar.gz",
+    "*.exe.part",
+    "*.dmg.part",
+    "*.tar.gz.part",
     "_install_helper.ps1",
     "_install_helper.sh",
 )
@@ -560,6 +580,24 @@ class _WindowApi:
         """保存前端生成的 data URL 文件，供分享图片和图表导出使用。"""
         return self._runtime.save_data_url(data_url, filename)
 
+    def begin_blob_save(
+        self, filename: str, mime_type: str, total_size: int
+    ) -> dict[str, bool | str]:
+        """选择保存位置并创建分块写入事务。"""
+        return self._runtime.begin_blob_save(filename, mime_type, total_size)
+
+    def append_blob_save(self, transfer_id: str, encoded_chunk: str) -> bool:
+        """向桌面保存事务追加一个 base64 编码的数据块。"""
+        return self._runtime.append_blob_save(transfer_id, encoded_chunk)
+
+    def finish_blob_save(self, transfer_id: str) -> DesktopSaveResult:
+        """校验并原子提交桌面保存事务。"""
+        return self._runtime.finish_blob_save(transfer_id)
+
+    def abort_blob_save(self, transfer_id: str) -> bool:
+        """中止桌面保存事务并删除部分文件。"""
+        return self._runtime.abort_blob_save(transfer_id)
+
     def select_project_directory(self) -> str | None:
         """打开系统目录选择器，返回用户选择的项目目录绝对路径。"""
         return self._runtime.select_project_directory()
@@ -578,6 +616,17 @@ class _WindowApi:
         return self._runtime.select_local_files(
             allow_multiple=bool(allow_multiple),
             initial_dir=initial_dir,
+        )
+
+    def select_local_file_path(
+        self,
+        initial_path: str | None = None,
+        title: str | None = None,
+    ) -> str | None:
+        """Open a native file picker and return the selected absolute path."""
+        return self._runtime.select_local_file_path(
+            initial_path=initial_path,
+            title=title,
         )
 
     def describe_local_files(self, paths: list[str] | None = None) -> list[dict[str, Any]]:
@@ -675,6 +724,8 @@ class DesktopRuntime:
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.window = None
         self._lock = threading.Lock()
+        self._blob_save_lock = threading.Lock()
+        self._blob_save_transfers: dict[str, _BlobSaveTransfer] = {}
         self._is_shutting_down = False
         self._desktop_dnd_bound = False
 
@@ -840,6 +891,200 @@ class DesktopRuntime:
         except Exception:  # noqa: BLE001
             return str(Path(selected_path).expanduser())
 
+    @staticmethod
+    def _resolve_blob_export(
+        filename: str, mime_type: str, total_size: int
+    ) -> tuple[str, str, _DataUrlExportSpec]:
+        safe_name = DesktopRuntime._sanitize_filename(filename)
+        if isinstance(total_size, bool) or not isinstance(total_size, int):
+            raise ValueError("invalid_blob_size")
+        if total_size < 0 or total_size > MAX_JAVASCRIPT_SAFE_INTEGER:
+            raise ValueError("invalid_blob_size")
+        if not isinstance(mime_type, str):
+            raise ValueError("invalid_blob_mime_type")
+
+        metadata = [part.strip().lower() for part in mime_type.split(";")]
+        normalized_mime_type = metadata[0]
+        export_spec = DATA_URL_EXPORT_SPECS.get(normalized_mime_type)
+        if export_spec is None:
+            raise ValueError("unsupported_blob_mime_type")
+
+        parameters = metadata[1:]
+        if len(parameters) != len(set(parameters)) or any(
+            parameter not in export_spec.allowed_parameters for parameter in parameters
+        ):
+            raise ValueError("unsupported_blob_mime_parameters")
+        if Path(safe_name).suffix.lower() not in export_spec.allowed_suffixes:
+            raise ValueError("blob_filename_extension_mismatch")
+        return safe_name, normalized_mime_type, export_spec
+
+    @staticmethod
+    def _discard_blob_save_transfer(transfer: _BlobSaveTransfer) -> None:
+        try:
+            transfer.export_file.close()
+        except OSError as exc:
+            logger.warning("[desktop] failed to close partial blob export: %s", exc)
+        try:
+            transfer.temp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(
+                "[desktop] failed to remove partial blob export %s: %s",
+                transfer.temp_path,
+                exc,
+            )
+
+    def begin_blob_save(
+        self, filename: str, mime_type: str, total_size: int
+    ) -> dict[str, bool | str]:
+        """选择目标路径并创建有界内存的分块保存事务。"""
+        try:
+            safe_name, normalized_mime_type, export_spec = self._resolve_blob_export(
+                filename, mime_type, total_size
+            )
+            target_path = self._select_save_path(safe_name, export_spec.file_types)
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error("[desktop] failed to begin blob export: %s", exc)
+            return {"ok": False, "cancelled": False}
+
+        if target_path is None:
+            logger.info("[desktop] blob export cancelled by user")
+            return {"ok": False, "cancelled": True}
+
+        temp_fd: int | None = None
+        temp_path: Path | None = None
+        export_file: BinaryIO | None = None
+        try:
+            temp_fd, temp_name = tempfile.mkstemp(
+                dir=target_path.parent,
+                prefix=f".{target_path.name}.",
+                suffix=".part",
+            )
+            temp_path = Path(temp_name)
+            export_file = os.fdopen(temp_fd, "wb")
+            temp_fd = None
+            transfer = _BlobSaveTransfer(
+                expected_size=total_size,
+                export_file=export_file,
+                mime_type=normalized_mime_type,
+                target_path=target_path,
+                temp_path=temp_path,
+            )
+            with self._blob_save_lock:
+                transfer_id = uuid.uuid4().hex
+                while transfer_id in self._blob_save_transfers:
+                    transfer_id = uuid.uuid4().hex
+                self._blob_save_transfers[transfer_id] = transfer
+            return {"ok": True, "cancelled": False, "transfer_id": transfer_id}
+        except OSError as exc:
+            logger.error("[desktop] failed to create blob export transaction: %s", exc)
+            if export_file is not None:
+                try:
+                    export_file.close()
+                except OSError:
+                    pass
+            if temp_fd is not None:
+                try:
+                    os.close(temp_fd)
+                except OSError:
+                    pass
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return {"ok": False, "cancelled": False}
+
+    def append_blob_save(self, transfer_id: str, encoded_chunk: str) -> bool:
+        """解码并追加一个不超过协议上限的数据块。"""
+        if not isinstance(transfer_id, str):
+            return False
+        max_encoded_size = ((DESKTOP_BLOB_CHUNK_SIZE + 2) // 3) * 4
+        transfer_to_discard: _BlobSaveTransfer | None = None
+
+        with self._blob_save_lock:
+            transfer = self._blob_save_transfers.get(transfer_id)
+            if transfer is None:
+                return False
+            try:
+                if (
+                    not isinstance(encoded_chunk, str)
+                    or not encoded_chunk
+                    or len(encoded_chunk) > max_encoded_size
+                ):
+                    raise ValueError("invalid_blob_chunk")
+                chunk = base64.b64decode(encoded_chunk, validate=True)
+                if not chunk or len(chunk) > DESKTOP_BLOB_CHUNK_SIZE:
+                    raise ValueError("invalid_blob_chunk_size")
+                if transfer.bytes_written + len(chunk) > transfer.expected_size:
+                    raise ValueError("blob_size_exceeded")
+
+                written = transfer.export_file.write(chunk)
+                if written != len(chunk):
+                    raise OSError("incomplete_blob_chunk_write")
+                transfer.bytes_written += written
+                if len(transfer.signature) < len(PNG_SIGNATURE):
+                    remaining = len(PNG_SIGNATURE) - len(transfer.signature)
+                    transfer.signature += chunk[:remaining]
+            except (OSError, ValueError) as exc:
+                logger.error("[desktop] failed to append blob export: %s", exc)
+                transfer_to_discard = self._blob_save_transfers.pop(transfer_id)
+
+        if transfer_to_discard is not None:
+            self._discard_blob_save_transfer(transfer_to_discard)
+            return False
+        return True
+
+    def finish_blob_save(self, transfer_id: str) -> DesktopSaveResult:
+        """校验字节数和文件签名，然后原子提交分块保存事务。"""
+        if not isinstance(transfer_id, str):
+            return _desktop_save_result(False)
+        with self._blob_save_lock:
+            transfer = self._blob_save_transfers.pop(transfer_id, None)
+        if transfer is None:
+            return _desktop_save_result(False)
+
+        committed = False
+        try:
+            if transfer.bytes_written != transfer.expected_size:
+                raise ValueError("blob_size_mismatch")
+            if (
+                transfer.mime_type == "image/png"
+                and transfer.signature != PNG_SIGNATURE
+            ):
+                raise ValueError("invalid_png_signature")
+
+            transfer.export_file.flush()
+            os.fsync(transfer.export_file.fileno())
+            transfer.export_file.close()
+            os.replace(transfer.temp_path, transfer.target_path)
+            committed = True
+            logger.info("[desktop] blob export saved to: %s", transfer.target_path)
+            return _desktop_save_result(True)
+        except (OSError, ValueError) as exc:
+            logger.error("[desktop] failed to finish blob export: %s", exc)
+            return _desktop_save_result(False)
+        finally:
+            if not committed:
+                self._discard_blob_save_transfer(transfer)
+
+    def abort_blob_save(self, transfer_id: str) -> bool:
+        """中止事务并删除尚未提交的部分文件。"""
+        if not isinstance(transfer_id, str):
+            return False
+        with self._blob_save_lock:
+            transfer = self._blob_save_transfers.pop(transfer_id, None)
+        if transfer is None:
+            return False
+        self._discard_blob_save_transfer(transfer)
+        return True
+
+    def _abort_all_blob_saves(self) -> None:
+        with self._blob_save_lock:
+            transfers = list(self._blob_save_transfers.values())
+            self._blob_save_transfers.clear()
+        for transfer in transfers:
+            self._discard_blob_save_transfer(transfer)
+
     def select_local_files(
         self,
         allow_multiple: bool = True,
@@ -882,6 +1127,43 @@ class DesktopRuntime:
         if results:
             remember_file_picker_dir(results[0].get("path") or path_list[0])
         return results
+
+    def select_local_file_path(
+        self,
+        initial_path: str | None = None,
+        title: str | None = None,
+    ) -> str | None:
+        """Open a native file picker and return the selected absolute path."""
+        if self.window is None or not hasattr(self.window, "create_file_dialog"):
+            logger.error("[desktop] local file path picker unavailable")
+            return None
+
+        initial_dir = str(Path.home())
+        if isinstance(initial_path, str) and initial_path.strip():
+            candidate = Path(initial_path.strip()).expanduser()
+            parent = candidate.parent if candidate.name else candidate
+            if parent.is_dir():
+                initial_dir = str(parent)
+
+        file_types = ("Executable files (*.exe)", "All files (*.*)") if sys.platform == "win32" else ()
+        try:
+            selected_paths = self.window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                directory=initial_dir,
+                allow_multiple=False,
+                file_types=file_types,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[desktop] local file path picker failed: %s", exc)
+            return None
+
+        if not selected_paths:
+            return None
+        selected_path = selected_paths if isinstance(selected_paths, (str, Path)) else selected_paths[0]
+        try:
+            return str(Path(selected_path).expanduser().resolve())
+        except Exception:  # noqa: BLE001
+            return str(Path(selected_path).expanduser())
 
     @staticmethod
     def _describe_local_file(raw_path: str | Path) -> dict[str, Any] | None:
@@ -1341,7 +1623,7 @@ class DesktopRuntime:
 
         # Derive the .app bundle path from the frozen executable.
         # sys.executable is typically:
-        #   /Applications/JiuwenSwarm.app/Contents/MacOS/jiuwenswarm
+        #   /Applications/<configured app bundle>/Contents/MacOS/<configured executable>
         # so the bundle is three levels up. Prefer replacing the exact bundle
         # the user launched, but fall back to /Applications when running from a
         # read-only DMG mount or from a non-bundled development executable.
@@ -1351,7 +1633,7 @@ class DesktopRuntime:
         elif app_bundle.suffix == ".app":
             install_target = f"/Applications/{app_bundle.name}"
         else:
-            install_target = "/Applications/JiuwenSwarm.app"
+            install_target = f"/Applications/{APP_BUNDLE_NAME}"
 
         log_file = get_logs_dir() / "update_helper.log"
         backend_port = self.backend_port
@@ -1371,7 +1653,7 @@ set -e
 LOG_FILE={q_log_file}
 exec >>"$LOG_FILE" 2>&1
 
-echo "=== JiuwenSwarm macOS install helper: $(date) ==="
+echo "=== {DISPLAY_NAME} macOS install helper: $(date) ==="
 echo "[helper] dmg={q_target}"
 echo "[helper] install_target={q_install_target}"
 echo "[helper] parent_pid={parent_pid}"
@@ -1509,7 +1791,7 @@ echo "=== install helper finished: $(date) ==="
         q_target = shlex.quote(str(target))
         q_install_dir = shlex.quote(install_dir)
         q_backup_dir = shlex.quote(backup_dir)
-        q_executable = shlex.quote(f"{install_dir}/jiuwenswarm")
+        q_executable = shlex.quote(f"{install_dir}/{EXECUTABLE_NAME}")
 
         helper_content = f"""#!/bin/bash
 set -e
@@ -1576,6 +1858,7 @@ nohup {q_executable} >/dev/null 2>&1 &
                 return
             self._is_shutting_down = True
 
+        self._abort_all_blob_saves()
         deadline = time.monotonic() + 8.0
         logger.info("[desktop] shutting down child processes")
 
@@ -1606,7 +1889,7 @@ nohup {q_executable} >/dev/null 2>&1 &
         """
         if sys.platform != "darwin":
             return
-        cache_dir = Path.home() / "Library" / "Caches" / "com.jiuwenswarm.desktop"
+        cache_dir = Path.home() / "Library" / "Caches" / BUNDLE_IDENTIFIER
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
             logger.info("[desktop] cleared WKWebView HTTP cache: %s", cache_dir)
@@ -1714,7 +1997,7 @@ transition:opacity .4s ease,transform .4s ease}
 <body>
 <div class="root">
 <div class="logo">__LOGO_SVG__</div>
-<div class="app-name">JiuwenSwarm</div>
+<div class="app-name">__APP_DISPLAY_NAME__</div>
 <div class="spinner"></div>
 <div class="tip-area">
     <div class="tip-label">专属智能AI Agent助理</div>
@@ -1754,7 +2037,7 @@ showTip();
 setInterval(showTip,3500);
 </script>
 </body>
-</html>""".replace("__LOGO_SVG__", logo_svg)
+</html>""".replace("__LOGO_SVG__", logo_svg).replace("__APP_DISPLAY_NAME__", DISPLAY_NAME)
 
     def _on_loaded_first(self) -> None:
         if self.window is not None:
@@ -1828,8 +2111,8 @@ def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch JiuwenSwarm desktop window.")
-    parser.add_argument("--title", default="JiuwenSwarm", help="Desktop window title.")
+    parser = argparse.ArgumentParser(description=f"Launch {DISPLAY_NAME} desktop window.")
+    parser.add_argument("--title", default=DISPLAY_NAME, help="Desktop window title.")
     parser.add_argument("--width", type=int, default=1440, help="Initial window width.")
     parser.add_argument(
         "--height", type=int, default=960, help="Initial window height."
@@ -1861,17 +2144,17 @@ def _setup_tui_path() -> None:
         return
     # Prefer /Applications path over /Volumes (DMG mount) path
     tui_dir = str(tui_binary.parent)
-    apps_dir = "/Applications/JiuwenSwarm.app/Contents/MacOS"
+    apps_dir = f"/Applications/{APP_BUNDLE_NAME}/Contents/MacOS"
     if Path(apps_dir).is_dir():
         tui_dir = apps_dir
-    marker = "JiuwenSwarm.app/Contents/MacOS"
+    marker = f"{APP_BUNDLE_NAME}/Contents/MacOS"
     zshrc = Path.home() / ".zshrc"
     try:
         existing = zshrc.read_text(encoding="utf-8") if zshrc.exists() else ""
         if marker in existing:
             return
         with open(zshrc, "a", encoding="utf-8") as f:
-            f.write(f"\n# Added by JiuwenSwarm - jiuwenswarm-tui CLI\n")
+            f.write(f"\n# Added by {DISPLAY_NAME} - jiuwenswarm-tui CLI\n")
             f.write(f'export PATH="{tui_dir}:$PATH"\n')
         logger.info("[desktop] added TUI to PATH in ~/.zshrc")
     except OSError as exc:

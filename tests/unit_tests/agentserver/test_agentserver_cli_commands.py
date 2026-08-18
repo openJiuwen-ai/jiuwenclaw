@@ -577,7 +577,7 @@ async def test_handle_command_mcp_list(server, fake_ws, monkeypatch):
 async def test_handle_command_mcp_add_triggers_reload(server, fake_ws, monkeypatch):
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (payload, True),
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -627,7 +627,7 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
     def _raise_not_found(_name, _enabled):
         raise KeyError("MCP server 'demo' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _raise_not_found)
+    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled", _raise_not_found)
     request = AgentRequest(
         request_id="req-mcp-enable",
         channel_id="tui",
@@ -649,7 +649,7 @@ async def test_handle_command_mcp_enable_not_found(server, fake_ws, monkeypatch)
 async def test_handle_command_mcp_remove(server, fake_ws, monkeypatch):
     monkeypatch.setattr(
         agent_ws_server_module,
-        "remove_mcp_server_in_config",
+        "remove_mcp_server",
         lambda name: {"name": name, "enabled": True, "transport": "sse", "url": "http://127.0.0.1:9000/sse"},
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -689,7 +689,7 @@ async def test_handle_command_mcp_update(server, fake_ws, monkeypatch):
     )
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (payload, False),
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -731,7 +731,7 @@ async def test_handle_command_mcp_add_http_auth_rejected(server, fake_ws, monkey
     upsert_calls = []
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (upsert_calls.append(payload), (payload, True))[1],
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -787,7 +787,7 @@ async def test_handle_command_mcp_add_http_timeout(server, fake_ws, monkeypatch)
     upsert_calls = []
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (upsert_calls.append(payload), (payload, True))[1],
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -828,7 +828,7 @@ async def test_handle_command_mcp_add_http_passed(server, fake_ws, monkeypatch):
     upsert_calls = []
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (upsert_calls.append(payload), (payload, True))[1],
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -879,7 +879,7 @@ async def test_handle_command_mcp_add_stdio_command_not_found(server, fake_ws, m
     upsert_calls = []
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (upsert_calls.append(payload), (payload, True))[1],
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -926,7 +926,7 @@ async def test_handle_command_mcp_update_http_auth_rejected(server, fake_ws, mon
     upsert_calls = []
     monkeypatch.setattr(
         agent_ws_server_module,
-        "upsert_mcp_server_in_config",
+        "upsert_mcp_server",
         lambda payload: (upsert_calls.append(payload), (payload, False))[1],
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
@@ -988,9 +988,9 @@ async def test_handle_command_mcp_minimal_flow_add_list_disable(server, fake_ws,
                 return dict(item)
         raise KeyError(f"MCP server '{name}' not found")
 
-    monkeypatch.setattr(agent_ws_server_module, "upsert_mcp_server_in_config", _upsert)
+    monkeypatch.setattr(agent_ws_server_module, "upsert_mcp_server", _upsert)
     monkeypatch.setattr(agent_ws_server_module, "get_mcp_servers", _get_servers)
-    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled_in_config", _set_enabled)
+    monkeypatch.setattr(agent_ws_server_module, "set_mcp_server_enabled", _set_enabled)
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": _get_servers()}})
 
     # This flow test exercises add→list→disable, not real connectivity. Mock

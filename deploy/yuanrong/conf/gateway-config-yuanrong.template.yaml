@@ -475,6 +475,11 @@ gateway:
     sandbox_idle_timeout_seconds: 600
     # 空闲扫描周期（秒）
     sandbox_idle_check_interval_seconds: 30
+    # 连接断开清理：用户连接数归零后，等待该时长再删除 jiuwenswarm agent
+    # （给重连与 in-flight 的 chat/SSH 留出时间）。与 idle 回收共用 READY +
+    # task_count==0 + 空闲超阈值的安全检查，不会误杀活动中的 agent。
+    # 也可通过环境变量 DISCONNECT_CLEANUP_TIMEOUT_SECONDS 覆盖（优先于本配置）。
+    disconnect_cleanup_timeout_seconds: 60
     registry:
       # Agent OS 注册中心：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
       endpoint: http://<<MASTER_NODE_IP>>:<<REGISTRY_PORT>>
@@ -489,6 +494,7 @@ gateway:
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
     # agentos_router.load_router_config 不会解析 ${VAR}，部署时用 <<>> 替换进 yaml。
+    # 部署脚本空值默认 http://<<MASTER_NODE_IP>>:8090；可用 AGENTOS_AUTH_SERVICE_URL 覆盖。
     auth_service_url: <<AGENTOS_AUTH_SERVICE_URL>>
     timeout: <<AGENTOS_AUTH_TIMEOUT>>
     # TUI token 鉴权；本 template 默认开启。true 时创建 AgentOSAuthenticator 校验 TUI 连接。
@@ -861,10 +867,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 

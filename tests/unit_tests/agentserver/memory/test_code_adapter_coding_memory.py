@@ -4,15 +4,14 @@
 
 from types import SimpleNamespace
 
-from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
 
 
-def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
+def test_configure_code_team_member_uses_fallback_for_rail_without_workspace_node(
     monkeypatch,
     tmp_path,
 ):
-    """The workspace node and rail must share one fallback project identity."""
+    """Coding Memory keeps the fallback project identity without a workspace node."""
     global_workspace = tmp_path / "global_agent_workspace"
     fallback_workspace = tmp_path / "fallback_project_workspace"
     observed_project_dirs = {}
@@ -61,6 +60,7 @@ def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
 
     def fake_create_coding_memory_rail(*, project_dir, agent_workspace_dir, config):
         observed_project_dirs["rail"] = project_dir
+        observed_project_dirs["agent_workspace"] = agent_workspace_dir
         return object()
 
     def build_only_coding_memory_rail(self, react_config, config_base, *, mode):
@@ -110,9 +110,6 @@ def test_configure_code_team_member_uses_same_fallback_for_workspace_and_rail(
     adapter.configure_team_member_agent(agent)
 
     expected_project_dir = str(fallback_workspace)
-    expected_memory_path = resolve_project_coding_memory_dir(
-        agent_workspace_dir=str(global_workspace),
-        project_dir=expected_project_dir,
-    )
     assert observed_project_dirs["rail"] == expected_project_dir
-    assert observed_project_dirs["workspace_path"] == expected_memory_path
+    assert observed_project_dirs["agent_workspace"] == str(global_workspace)
+    assert "workspace_path" not in observed_project_dirs

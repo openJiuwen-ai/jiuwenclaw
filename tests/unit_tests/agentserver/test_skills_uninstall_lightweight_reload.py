@@ -82,8 +82,11 @@ async def swarm_with_fake_adapter(monkeypatch):
 
     swarm._skill_manager = _StubSkillManager()
 
-    # Stub _refresh_team_shared_skill_links (no-op)
-    swarm._refresh_team_shared_skill_links = lambda session_id=None: None
+    # Stub the live team skill-view reload (no-op)
+    async def _noop_reload(session_id=None):
+        return None
+
+    swarm._reload_team_skill_rails = _noop_reload
 
     return swarm
 
@@ -152,7 +155,7 @@ async def test_refresh_skill_rails_after_change_noop_when_adapter_none():
 
 
 @pytest.mark.asyncio
-async def test_refresh_skill_rails_removes_deleted_skill_from_real_skill_use_rail(tmp_path):
+async def test_refresh_skill_rails_removes_deleted_skill_from_real_skill_use_rail(tmp_path, monkeypatch):
     """Real SkillUseRail.reload_skills should evict deleted skill cache entries."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -171,6 +174,14 @@ async def test_refresh_skill_rails_removes_deleted_skill_from_real_skill_use_rai
     adapter._skill_manager = _NoDisabledSkillManager()
     adapter._skill_rail = skill_rail
     adapter._skill_evolution_rail = None
+
+    # refresh_skill_rails rebuilds scan roots via _skill_scan_dirs(), which
+    # always prepends get_agent_skills_dir() (the global skills dir). Point
+    # it at our temp skills_root so no real global skills leak into the rail.
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.get_agent_skills_dir",
+        lambda: skills_root,
+    )
 
     shutil.rmtree(deleted_skill_dir)
 

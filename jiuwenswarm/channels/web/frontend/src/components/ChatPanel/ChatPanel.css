@@ -1350,6 +1350,7 @@ overflow: hidden;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.4;
 }
 
 .chat-mode-select__chevron,
@@ -2124,6 +2125,8 @@ overflow: hidden;
 .model-select__menu {
   min-width: 220px;
   max-width: 320px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .model-select__section-header {
@@ -2647,11 +2650,12 @@ overflow: hidden;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  max-width: 116px;
 }
 
 .chat-msg-file-card__name {
-  overflow: visible;
-  text-overflow: clip;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -2659,6 +2663,9 @@ overflow: hidden;
   font-size: 13px;
   font-weight: 600;
   line-height: 18px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .chat-msg-file-card__ext {

@@ -32,7 +32,6 @@ from openjiuwen.agent_teams.harness.manifest import (
     param_field,
 )
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails import SkillUseRail
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.mode_matrix import (
@@ -55,7 +54,6 @@ STRUCTURED_ASK_USER = "swarm.structured_ask_user"
 CODE_TASK_PLANNING = "swarm.code_task_planning"
 CODE_AGENT_RAIL = "swarm.code_agent_rail"
 USER_HOOKS = "swarm.user_hooks"
-CODE_SKILL_USE = "swarm.code_skill_use"
 
 # Key under ``ctx.extras`` where the main agent's CodingMemoryRail is published
 # for the code_agent sub-agent to reuse the same instance.
@@ -324,7 +322,6 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
     try:
         from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
             create_coding_memory_rail,
-            _set_workspace_coding_memory_directory,
         )
 
         inp = CodeCodingMemoryInput.resolve(params, ctx)
@@ -333,11 +330,6 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
         # The build workspace identifies the project. Persistent Coding Memory
         # belongs to the agent-owned system workspace instead.
         agent_workspace_dir = str(get_agent_workspace_dir())
-        _set_workspace_coding_memory_directory(
-            ctx.workspace,
-            project_dir=effective_project_dir,
-            agent_workspace_dir=agent_workspace_dir,
-        )
         rail = create_coding_memory_rail(
             project_dir=effective_project_dir,
             agent_workspace_dir=agent_workspace_dir,
@@ -543,51 +535,6 @@ def build_user_hooks(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
         return None
 
 
-class CodeSkillUseInput(ConstructionInput):
-    """Construction inputs for the code skill-use rail."""
-
-    skill_mode: str = param_field(
-        default=SkillUseRail.SKILL_MODE_ALL,
-        description="Skill exposure mode (ALL or AUTO_LIST) from react.skill_mode.",
-    )
-    include_tools: bool = param_field(
-        default=True,
-        description="Whether SkillUseRail should expose regular skill tools.",
-    )
-
-
-@harness_element(
-    kind=ElementKind.RAIL,
-    name=CODE_SKILL_USE,
-    description="Skill-use rail from the config source (skill_mode plus disabled skills).",
-    input_model=CodeSkillUseInput,
-)
-def build_code_skill_use(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
-    """Build SkillUseRail from the config source (skill_mode + disabled skills)."""
-    from jiuwenswarm.common.utils import get_agent_skills_dir
-    from jiuwenswarm.agents.harness.common.tools.skill_retrieval_toolkits import (
-        is_skill_retrieval_enabled,
-    )
-    from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
-
-    try:
-        inp = CodeSkillUseInput.resolve(params, ctx)
-        skill_mode = (
-            SkillUseRail.SKILL_MODE_AUTO_LIST
-            if is_skill_retrieval_enabled()
-            else inp.skill_mode
-        )
-        return SkillUseRail(
-            skills_dir=str(get_agent_skills_dir()),
-            skill_mode=skill_mode,
-            include_tools=inp.include_tools,
-            disabled_skills=load_execution_disabled_skills(),
-        )
-    except Exception as exc:
-        logger.warning("[swarm.code_skill_use] create failed: %s", exc)
-        return None
-
-
 __all__ = [
     "CODE_RUNTIME_PROMPT",
     "CODE_PROJECT_MEMORY",
@@ -599,7 +546,6 @@ __all__ = [
     "CODE_TASK_PLANNING",
     "CODE_AGENT_RAIL",
     "USER_HOOKS",
-    "CODE_SKILL_USE",
     "CODING_MEMORY_EXTRAS_KEY",
     "code_runtime_language",
     "structured_ask_user_language",

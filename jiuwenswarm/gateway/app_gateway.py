@@ -48,6 +48,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_default_builtin_skills,
     get_cron_jobs_path,
     get_env_file,
     get_root_dir,
@@ -64,9 +65,20 @@ _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration),
+# or if the preset MCP package dir isn't seated yet (an install predating the
+# mcp_builtins zip-seed feature would otherwise skip an already-initialized
+# workspace, leaving mcp_builtins absent and mcp.list empty).
+_mcp_builtins_dir = _new_workspace / "mcp" / "mcp_builtins"
+config_missing = not _config_file.exists()
+workspace_migration_needed = _old_workspace.exists() and not _new_workspace.exists()
+mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
+
+if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
@@ -1507,6 +1519,7 @@ async def _run(
         web_host: str,
         web_port: int,
         web_path: str,
+        web_dual_protocol: bool = True,
 ) -> None:
     from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
     from jiuwenswarm.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import DingTalkChannel, \
@@ -1861,7 +1874,13 @@ async def _run(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        port=web_port,
+        path=web_path,
+        dual_protocol=web_dual_protocol,
+    )
     web_channel = WebChannel(web_config, _DummyBus())
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
@@ -2709,6 +2728,15 @@ async def _run(
         name="agent-prewarm-periodic-sync",
     )
 
+    # ---------- Opencode Zen 免费模型预热 ----------
+    # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
+    # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
+    try:
+        from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+        await warm_zen_free_models(reason="gateway-startup")
+    except Exception as e:  # noqa: BLE001 - 兜底
+        logger.warning("[App] zen free models warm failed (non-fatal): %s", e)
+
     await channel_manager.start_dispatch()
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
@@ -2966,6 +2994,8 @@ def main() -> None:
     web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))
     web_path = args.web_path or os.getenv("WEB_PATH", "/ws")
+    _dual_raw = os.getenv("WEB_DUAL_PROTOCOL", "1").strip().lower()
+    web_dual_protocol = _dual_raw not in {"0", "false", "no", "off"}
 
     install_async_dump_handler("gateway")
     asyncio.run(
@@ -2974,6 +3004,7 @@ def main() -> None:
             web_host=web_host,
             web_port=web_port,
             web_path=web_path,
+            web_dual_protocol=web_dual_protocol,
         )
     )
 

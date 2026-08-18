@@ -51,7 +51,7 @@ export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JS
       }}
     >
       {viewMode === 'image' ? (
-        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'}>
+        <div className="svg-diagram__canvas" aria-busy={status === 'streaming'} data-testid="markdown-svg-canvas">
           <iframe
             ref={previewRef}
             className="svg-diagram__frame"
@@ -59,11 +59,12 @@ export function SvgDiagram({ code, complete, isStreaming }: SvgDiagramProps): JS
             title={t('svg.previewTitle')}
             sandbox={UNTRUSTED_STATIC_PREVIEW_SANDBOX}
             srcDoc={SVG_PREVIEW_DOCUMENT}
+            data-testid="markdown-svg-frame"
             onLoad={() => updateSvgPreview(previewRef.current, previewMarkup)}
           />
         </div>
       ) : (
-        <div className="svg-diagram__code-view">
+        <div className="svg-diagram__code-view" data-testid="markdown-svg-code-view">
           <pre>
             <code>{code}</code>
           </pre>

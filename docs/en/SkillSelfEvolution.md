@@ -88,6 +88,8 @@ Evolution experience is stored in the `evolutions.json` file under the skill dir
 └── ...
 ```
 
+> **In Agent Team mode the path is exactly the same.** There is only one copy of each skill, in the global skill library above; team workspaces and member workspaces hold no `skills/` directory and no copies. Evolution records produced by a team member are therefore written to that very same `evolutions.json` under the global library. Which skills of the library a member can see is decided by its visibility declaration — see the "Team Skills" section of [Agent Team](AgentTeam.md).
+
 **Common operations:**
 - Add new records: Append new objects to the `entries` array
 - Modify records: Edit the `change.content` field to update evolution content

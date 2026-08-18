@@ -111,6 +111,9 @@ class WebChannelConfig:
     port: int = 19000
     path: str = "/ws"
     allow_from: list[str] = field(default_factory=list)
+    # True: uvicorn+FastAPI on the same port (WS now; HTTP routes can be added later).
+    # False: legacy websockets.serve only (rollback).
+    dual_protocol: bool = True
 
 
 class WebChannel(BaseWsChannel):
@@ -131,6 +134,7 @@ class WebChannel(BaseWsChannel):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
         self._server: Any = None
+        self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
@@ -144,6 +148,8 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+        # AgentOSRouterClient for same-port HTTP container file APIs (set by handlers).
+        self.container_file_client: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -356,13 +362,17 @@ class WebChannel(BaseWsChannel):
         return connection_user_id
 
     @staticmethod
-    def _connection_user_id(ws: Any) -> str | None:
+    def connection_user_id(ws: Any) -> str | None:
         """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
         uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
         if uid is None:
             return None
         text = str(uid).strip()
         return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        return WebChannel.connection_user_id(ws)
 
     def _extract_ws_user_id(self, ws: Any) -> str:
         """WebChannel: 从 ws 提取连接级 user_id。"""
@@ -534,6 +544,41 @@ class WebChannel(BaseWsChannel):
             logger.warning("WebChannel 未启用（enabled=False）")
             return
 
+        if self.config.dual_protocol:
+            await self._start_dual_protocol()
+            return
+        await self._start_websockets_legacy()
+
+    async def _start_dual_protocol(self) -> None:
+        """Same port: FastAPI/uvicorn (WS today; HTTP routes can be mounted later)."""
+        import uvicorn
+
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
+        from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+
+        app = build_web_channel_app(self)
+        uv_cfg = uvicorn.Config(
+            app,
+            host=self.config.host,
+            port=self.config.port,
+            log_level="info",
+            access_log=False,
+            ws_max_size=WEB_WS_MAX_MESSAGE_BYTES,
+            ws_ping_interval=20.0,
+            ws_ping_timeout=60.0,
+        )
+        self._uvicorn_server = uvicorn.Server(uv_cfg)
+        self._running = True
+        logger.info(
+            "WebChannel 已启动(dual_protocol): ws://%s:%s%s (HTTP-ready same port)",
+            self.config.host,
+            self.config.port,
+            self.config.path,
+        )
+        await self._uvicorn_server.serve()
+
+    async def _start_websockets_legacy(self) -> None:
+        """Rollback path: pure websockets.serve (no HTTP on this port)."""
         try:
             from websockets.legacy.server import serve as ws_serve
         except Exception:  # pragma: no cover
@@ -544,7 +589,7 @@ class WebChannel(BaseWsChannel):
         from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
-            self._connection_handler,
+            self.handle_connection,
             self.config.host,
             self.config.port,
             process_request=self._process_request,
@@ -554,7 +599,10 @@ class WebChannel(BaseWsChannel):
         )
         self._running = True
         logger.info(
-            f"WebChannel 已启动: ws://{self.config.host}:{self.config.port}{self.config.path}"
+            "WebChannel 已启动(legacy): ws://%s:%s%s",
+            self.config.host,
+            self.config.port,
+            self.config.path,
         )
         await self._server.wait_closed()
 
@@ -568,6 +616,9 @@ class WebChannel(BaseWsChannel):
             await asyncio.gather(*close_tasks, return_exceptions=True)
         self._clients_by_key.clear()
 
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
+            self._uvicorn_server = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -656,7 +707,13 @@ class WebChannel(BaseWsChannel):
                 "session_id": msg.session_id,
                 "content": content,
             }
-            for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
+            for _key in (
+                "role", "member_name", "member_action", "source_channel", "user_id", "display_name",
+                # 主动推荐标记需透传到所有 chunk 事件（chat.delta/chat.reasoning/…），
+                # 否则前端无法按 source 短路：proactive 的 chat.reasoning 会被当作
+                # 用户轮思考流追加进 reasoningSegments，污染上一条消息的思考状态。
+                "source", "proactive_type", "proactive_target",
+            ):
                 _val = msg.payload.get(_key)
                 if _val is not None:
                     payload[_key] = _val
@@ -665,16 +722,12 @@ class WebChannel(BaseWsChannel):
                 if isinstance(cron_extra, dict):
                     payload["cron"] = cron_extra
                 source = msg.payload.get("source")
-                if source:
-                    payload["source"] = source
-                ptype = msg.payload.get("proactive_type")
-                if ptype:
-                    payload["proactive_type"] = ptype
                 if source == "proactive_recommendation":
                     logger.info(
                         "[WebChannel] proactive push frame: source=%s proactive_type=%s "
                         "content_len=%d payload_keys=%s",
-                        source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        source, msg.payload.get("proactive_type"),
+                        len(str(payload.get("content", ""))), list(payload.keys()),
                     )
             return payload
 
@@ -963,6 +1016,10 @@ class WebChannel(BaseWsChannel):
 
     # ── 内部实现 ──────────────────────────────────────────
 
+    async def handle_connection(self, ws: Any, path: str | None = None) -> None:
+        """Public entry for serving one accepted WebSocket (dual-protocol / adapters)."""
+        await self._connection_handler(ws, path=path)
+
     async def _connection_handler(self, ws: Any, path: str | None = None) -> None:
         raw_path = path if path is not None else getattr(ws, "path", "")
         parsed = urlparse(raw_path)
@@ -1035,8 +1092,19 @@ class WebChannel(BaseWsChannel):
                 )
 
         try:
+            inflight: set[Any] = set()
             async for raw in ws:
-                await self._handle_raw_message(ws, raw, query)
+                task = asyncio.create_task(self._handle_raw_message(ws, raw, query))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
+            # connection closing: let in-flight handlers finish (bounded) to avoid
+            # truncating responses mid-flight; cancel if they exceed a grace period.
+            if inflight:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*inflight, return_exceptions=True), timeout=5.0)
+                except asyncio.TimeoutError:
+                    for t in inflight:
+                        t.cancel()
         except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
             logger.info(
                 "WebChannel 连接关闭: %s",

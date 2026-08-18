@@ -17,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.harness.schema import deep_agent_spec as das
+from openjiuwen.agent_teams.rails.elements import TEAM_SKILL_USE
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm import register_swarm_providers, registry
@@ -129,14 +130,12 @@ def test_factory_ref_resolves_for_every_descriptor() -> None:
             {"tool_names": ["switch_mode"]},
             {"tool_names": 123},
         ),
-        (registry.MEMBER_SKILL_TOOLKIT, {"skills": ["alpha"]}, {"skills": 7}),
         (registry.EXPLORE_AGENT, {"max_iterations": 20}, {"max_iterations": "many"}),
         (
             registry.PERMISSION_INTERRUPT,
             {"permissions_config": {"enabled": True}, "model_name": "gpt-4"},
             {"model_name": 123},
         ),
-        (registry.CODE_SKILL_USE, {"skill_mode": "all"}, {"skill_mode": 5}),
     ],
 )
 def test_input_schema_validates(name: str, good: dict, bad: dict) -> None:
@@ -194,7 +193,6 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
     """Config-derived attributes are params; per-request runtime values are context."""
     catalog = get_catalog()
     expected = {
-        registry.CODE_SKILL_USE: {"skill_mode": "params"},
         registry.PERMISSION_INTERRUPT: {
             "permissions_config": "params",
             "model_name": "params",
@@ -212,14 +210,17 @@ def test_attribute_fields_are_params_env_fields_are_context() -> None:
         registry.TEAM_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
             "auto_save": "params",
-            "team_skills_dir": "context",
-            "trajectory_registry": "context",
+            "global_skills_dir": "context",
+            "trajectory_span_processor": "context",
         },
-        registry.TEAM_SKILL_CREATE: {},
+        registry.TEAM_SKILL_CREATE: {
+            "global_skills_dir": "context",
+            "team_skill_visibility_path": "context",
+        },
         registry.MEMBER_SKILL_EVOLUTION: {
             "evolution_model_config": "params",
-            "team_skills_dir": "context",
-            "trajectory_registry": "context",
+            "global_skills_dir": "context",
+            "trajectory_span_processor": "context",
         },
     }
     for name, fields in expected.items():
@@ -252,7 +253,7 @@ def test_config_specs_bakes_attribute_params() -> None:
     by_type = {spec.type: spec.params for spec in rails}
 
     assert (
-        by_type[registry.CODE_SKILL_USE]["skill_mode"]
+        by_type[TEAM_SKILL_USE]["skill_mode"]
         == SkillUseRail.SKILL_MODE_AUTO_LIST
     )
     assert registry.PERMISSION_INTERRUPT not in by_type

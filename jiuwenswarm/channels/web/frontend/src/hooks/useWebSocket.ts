@@ -67,6 +67,7 @@ import {
   findOverlappingFileExecutionEvent,
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
+import { makeEventDedupKey } from '../utils/wsEventDedup';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -684,7 +685,9 @@ interface PendingContextCompressionStart {
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent';
   const normalized = rawMode.trim().toLowerCase();
-  if (normalized === 'team') return 'team';
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent';
 }
@@ -799,40 +802,6 @@ function stringifyCompact(value: unknown): string {
   } catch {
     return String(value ?? '');
   }
-}
-
-function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
-  try {
-    const serialized = JSON.stringify(payload);
-    if (!serialized) {
-      return '';
-    }
-    return serialized.length > 800 ? serialized.slice(0, 800) : serialized;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * bug001 根因之一：纯内容比对分不清"同一次操作的重复投递"（该去重）和"不同操作但状态没变、
- * 内容碰巧完全一样"（不该去重——同一 session 在 EVENT_DEDUP_WINDOW_MS 窗口内被 resume 两次时，
- * 两次的 goal.snapshot 内容经常完全相同，纯内容比对会把第二次误判成第一次的重复事件丢弃，
- * 导致第二次操作设置的 pendingAction 永远等不到清空信号）。
- *
- * 触发事件的那次 RPC/流式命令的 request_id 才是"这是不是同一次操作"的权威标识——后端已经把
- * chat 前缀、goal 前缀，以及 runtime.accepted / execution.error 这几类事件的
- * payload.request_id 回填好（见 web_connect.py `_build_event_payload`）。有 request_id 时
- * 优先用它区分；事件类型本身不带 request_id 的（多数其它事件）维持原来的纯内容比对，行为不变。
- */
-function makeEventDedupKey(eventName: string, payload: Record<string, unknown>): string {
-  const payloadSessionId =
-    typeof payload.session_id === 'string' ? payload.session_id : '';
-  const payloadEventType =
-    typeof payload.event_type === 'string' ? payload.event_type : '';
-  const payloadRequestId =
-    typeof payload.request_id === 'string' ? payload.request_id : '';
-  const contentKey = payloadRequestId ? `rid:${payloadRequestId}` : stringifyPayloadForDedup(payload);
-  return `${eventName}::${payloadSessionId}::${payloadEventType}::${contentKey}`;
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
@@ -1397,9 +1366,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessage = useCallback(
     async (content: string, sessionId: string, mediaItems: MediaItem[] = []): Promise<boolean> => {
       const hasMedia = mediaItems.length > 0;
-      // User-visible text is required; attachment-only / 【上传文档】-only payloads
-      // must not send (matches InputArea canSubmit / handleSubmit).
-      if (!stripUploadDocumentBlocks(content).trim()) return false;
+      // Attachment-only payloads are allowed when mediaItems are present.
+      // 【上传文档】-only text without any mediaItems is still blocked.
+      if (!stripUploadDocumentBlocks(content).trim() && !hasMedia) return false;
 
       const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
       const unsupportedEvolutionMode = unsupportedEvolutionModeMessage(content, currentMode ?? 'agent');
@@ -1988,6 +1957,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     []
   );
 
+  // 主动推荐来源的 chunk 是后台主 agent 跑指令式 query 产生的系统推送话术，
+  // 不是用户这一轮的思考流。若让它走正常 appendReasoning / closeReasoning /
+  // setProcessing / setThinking，会把 proactive 的思考段追加进 session 全局
+  // reasoningSegments（segment 无 messageId 绑定，按 startedAt 排序并入上一轮
+  // turn），进而污染上一条用户消息的思考状态（"已完成" → "已完成 N 次思考"
+  // streak chip）。proactive 流的 chunk 只负责把推荐正文落地为卡片，不参与
+  // 会话级思考状态机。
+  const isProactiveRecommendationPayload = useCallback(
+    (payload: Record<string, unknown>): boolean =>
+      typeof payload.source === 'string' && payload.source === 'proactive_recommendation',
+    []
+  );
+
   const clearThinkingForVisibleOutput = useCallback((sessionId: string) => {
     const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
     const isProcessingNow = useChatStore.getState().getRuntime(sessionId)?.isProcessing;
@@ -1995,25 +1977,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       return;
     }
     useChatStore.getState().setThinking(sessionId, false);
-  }, []);
-
-  const shouldRecoverProcessingFromReasoning = useCallback((sessionId: string, payload: Record<string, unknown>): boolean => {
-    const runtime = useChatStore.getState().getRuntime(sessionId);
-    if (!runtime || runtime.isProcessing || runtime.isLoadingHistory || runtime.isPaused) {
-      return false;
-    }
-    if (runtime.currentStreamId) {
-      return true;
-    }
-    if (webClient.getInflightCount() > 0) {
-      return true;
-    }
-    const payloadRequestId = getPayloadRequestId(payload);
-    return Boolean(
-      payloadRequestId &&
-      activeRequestIdRef.current &&
-      payloadRequestId === activeRequestIdRef.current
-    );
   }, []);
 
   const getTeamMemberOutputKey = useCallback(
@@ -2150,7 +2113,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
         const activityRuntime = useChatStore.getState().getRuntime(sessionId);
-        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
+        if (
+          !isProactiveRecommendationPayload(payload) &&
+          !activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused
+        ) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -2170,12 +2136,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           revealPendingContextUsage(sessionId);
         }
         if (currentMode === 'team' && content) {
-          clearThinkingForVisibleOutput(sessionId);
-          if (content.trim()) {
-            useChatStore.getState().bumpThinkingAnchor(sessionId);
-            useChatStore.getState().closeReasoning(sessionId, {
-              atMs: eventTimestampMs(payload),
-            });
+          if (!isProactiveRecommendationPayload(payload)) {
+            clearThinkingForVisibleOutput(sessionId);
+            if (content.trim()) {
+              useChatStore.getState().bumpThinkingAnchor(sessionId);
+              useChatStore.getState().closeReasoning(sessionId, {
+                atMs: eventTimestampMs(payload),
+              });
+            }
           }
           const existingMsg = findActiveTeamLeaderMessage(sessionId);
 
@@ -2208,12 +2176,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         let currentStreamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
-        clearThinkingForVisibleOutput(sessionId);
-        if (content.trim()) {
-          useChatStore.getState().bumpThinkingAnchor(sessionId);
-          useChatStore.getState().closeReasoning(sessionId, {
-            atMs: eventTimestampMs(payload),
-          });
+        if (!isProactiveRecommendationPayload(payload)) {
+          clearThinkingForVisibleOutput(sessionId);
+          if (content.trim()) {
+            useChatStore.getState().bumpThinkingAnchor(sessionId);
+            useChatStore.getState().closeReasoning(sessionId, {
+              atMs: eventTimestampMs(payload),
+            });
+          }
         }
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
@@ -2240,10 +2210,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.reasoning', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        // 主动推荐来源的 reasoning 不进 session 全局 reasoningSegments——否则会并入
+        // 上一轮 turn（segment 无 messageId 绑定，按 startedAt 排序），把上一条
+        // 用户消息的思考状态从"已完成"污染成"已完成 N 次思考" streak chip。
+        if (isProactiveRecommendationPayload(payload)) return;
 
-        // 只在明确属于当前活跃请求时恢复 processing，避免 evolution 后置 reasoning
-        // 把已完成会话重新拉回处理中。
-        if (shouldRecoverProcessingFromReasoning(sessionId, payload)) {
+        // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
+        const activityRuntime = useChatStore.getState().getRuntime(sessionId);
+        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -2872,14 +2846,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
         // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
         const activityRuntime = useChatStore.getState().getRuntime(sessionId);
-        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
+        if (
+          !isProactiveRecommendationPayload(payload) &&
+          !activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused
+        ) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        clearThinkingForVisibleOutput(sessionId);
-        useChatStore.getState().closeReasoning(sessionId, {
-          atMs: eventTimestampMs(payload),
-        });
+        if (!isProactiveRecommendationPayload(payload)) {
+          clearThinkingForVisibleOutput(sessionId);
+          useChatStore.getState().closeReasoning(sessionId, {
+            atMs: eventTimestampMs(payload),
+          });
+        }
         const toolCall = normalizeToolCallPayload(payload);
         const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
         if (shutdownMemberId) {
@@ -3112,6 +3091,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
+        // 主动推荐来源的 processing_status 不参与会话级状态机：它不该拉起/打断
+        // 用户轮的 processing，更不该触发 setThinking/stopStreaming/taskQueue 自动排空。
+        if (isProactiveRecommendationPayload(payload)) return;
         // 切换模式时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
         // 加载历史消息时忽略处理状态更新
@@ -3974,7 +3956,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,
-    shouldRecoverProcessingFromReasoning,
     t,
     takeTeamMemberOutputEventId,
   ]);

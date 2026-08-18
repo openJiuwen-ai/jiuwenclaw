@@ -293,7 +293,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
 
   if (loading) {
     return (
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0" data-testid="agent-panel-loading">
         <div className="card w-full h-full flex items-center justify-center">
           <div className="w-8 h-8 rounded-full border-4 border-border border-t-accent animate-spin" />
         </div>
@@ -317,6 +317,8 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
           className="w-full min-h-10 flex items-center gap-2 rounded-lg px-2 py-2 text-left text-[15px] text-text-muted hover:bg-secondary/40 hover:text-text "
           style={{ paddingLeft: `${depth * 14 + 8}px` }}
           title={node.label}
+          data-testid="agent-panel-workspace-folder-item"
+          data-variant={folderKey}
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
             {hasChildren ? (
@@ -334,9 +336,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
           <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h4.5l1.5 2.25h10.5v8.25A2.25 2.25 0 0118 19.5H6A2.25 2.25 0 013.75 17.25V6.75z" />
           </svg>
-          <span className="flex-1 min-w-0 truncate">{node.label}</span>
+          <span className="flex-1 min-w-0 truncate" data-testid="agent-panel-workspace-folder-name">{node.label}</span>
           {node.isSkillFolder ? (
-            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--color-border-accent)] bg-accent-subtle text-accent">
+            <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-[var(--color-border-accent)] bg-accent-subtle text-accent" data-testid="agent-panel-workspace-folder-skills-badge">
               skills
             </span>
           ) : null}
@@ -363,6 +365,8 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                   onClick={() => handleFileClick(file)}
                   disabled={!selectable}
                   title={file.name}
+                  data-testid="agent-panel-workspace-file-item"
+                  data-variant={file.path}
                 >
                   <span className="w-4 h-4 flex items-center justify-center" />
                   <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -372,9 +376,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                       <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3.75h7.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5h-10.5a1.5 1.5 0 01-1.5-1.5v-15a1.5 1.5 0 011.5-1.5zM14.25 3.75v4.5h4.5" />
                     )}
                   </svg>
-                  <span className="flex-1 min-w-0 truncate">{file.name}</span>
+                  <span className="flex-1 min-w-0 truncate" data-testid="agent-panel-workspace-file-name">{file.name}</span>
                   {!selectable ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40" data-testid="agent-panel-workspace-file-not-previewable">
                       {t('agent.notPreviewable')}
                     </span>
                   ) : null}
@@ -388,22 +392,22 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
   };
 
   return (
-    <div className="flex-1 min-h-0">
-      <div className="card w-full h-full flex flex-col">
+    <div className="flex-1 min-h-0" data-testid="agent-panel-root">
+      <div className="card w-full h-full flex flex-col" data-testid="agent-panel-card">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h2 className="text-lg font-semibold">{t('agent.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">{t('agent.subtitle')}</p>
+            <h2 className="text-lg font-semibold" data-testid="agent-panel-title">{t('agent.title')}</h2>
+            <p className="text-sm text-text-muted mt-1" data-testid="agent-panel-subtitle">{t('agent.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-2 text-xs text-text-muted">
-              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
+              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60" data-testid="agent-panel-directory-count-badge">
                 {t('agent.directoryCount', { count: treeData.directoryCount })}
               </span>
-              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
+              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60" data-testid="agent-panel-file-count-badge">
                 {t('agent.fileCount', { count: treeData.totalFileCount })}
               </span>
-              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
+              <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60" data-testid="agent-panel-previewable-count-badge">
                 {t('agent.previewableCount', { count: treeData.previewableFileCount })}
               </span>
             </div>
@@ -411,18 +415,18 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
         </div>
 
         {loadError ? (
-          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          <div className="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger" data-testid="agent-panel-error">
             {loadError}
           </div>
         ) : null}
 
         <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-4">
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0" data-testid="agent-panel-workspace-pane">
             <div className="px-4 py-3 bg-secondary/30 border-b border-border">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-medium text-text">{t('agent.workspace')}</h3>
-                  <p className="text-xs text-text-muted mt-1 mono">
+                  <h3 className="text-sm font-medium text-text" data-testid="agent-panel-workspace-heading">{t('agent.workspace')}</h3>
+                  <p className="text-xs text-text-muted mt-1 mono" data-testid="agent-panel-workspace-meta">
                     {t('agent.workspaceMeta', { directories: treeData.directoryCount, files: treeData.totalFileCount })}
                   </p>
                 </div>
@@ -432,6 +436,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                   disabled={refreshing}
                   className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                   title={t('agent.refresh')}
+                  data-testid="agent-panel-workspace-refresh-button"
                 >
                   {refreshing ? t('common.refreshing') : t('common.refresh')}
                 </button>
@@ -439,9 +444,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
             </div>
             <div className="flex-1 overflow-auto p-2">
               {treeData.rootChildDirectoryKeys.length === 0 && treeData.rootFiles.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('agent.empty')}</div>
+                <div className="h-full flex items-center justify-center text-sm text-text-muted" data-testid="agent-panel-workspace-empty">{t('agent.empty')}</div>
               ) : (
-                <div className="space-y-0.5">
+                <div className="space-y-0.5" data-testid="agent-panel-workspace-list">
                   {treeData.rootEntries.map((entry) => {
                     if (entry.kind === 'directory') {
                       return renderTree(entry.key, 0);
@@ -463,6 +468,8 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                         style={{ paddingLeft: '8px' }}
                         onClick={() => handleFileClick(file)}
                         disabled={!selectable}
+                        data-testid="agent-panel-workspace-file-item"
+                        data-variant={file.path}
                       >
                         <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                           {file.isMarkdown ? (
@@ -485,12 +492,14 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
             </div>
           </div>
 
-          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+          <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0" data-testid="agent-panel-preview-pane">
             {selectedFile ? (
-              <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
+              <div data-testid="agent-panel-file-viewer">
+                <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
+              </div>
             ) : (
               <>
-                <div className="px-4 py-3 bg-secondary/30 border-b border-border">
+                <div className="px-4 py-3 bg-secondary/30 border-b border-border" data-testid="agent-panel-preview-placeholder">
                   <div className="flex items-center gap-3">
                     <span className="h-9 w-9 rounded-lg border border-border bg-card flex items-center justify-center text-text-muted flex-shrink-0">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="h-7 w-7">
@@ -498,13 +507,13 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                       </svg>
                     </span>
                     <div>
-                      <h4 className="text-sm font-medium text-text">{t('agent.contentPreview')}</h4>
-                      <p className="text-xs text-text-muted mt-1">{t('agent.selectMarkdown')}</p>
+                      <h4 className="text-sm font-medium text-text" data-testid="agent-panel-preview-placeholder-title">{t('agent.contentPreview')}</h4>
+                      <p className="text-xs text-text-muted mt-1" data-testid="agent-panel-preview-placeholder-hint">{t('agent.selectMarkdown')}</p>
                     </div>
                   </div>
                 </div>
                 <div className="flex-1 min-h-0 flex items-center justify-center">
-                  <div className="text-center text-text-muted">
+                  <div className="text-center text-text-muted" data-testid="agent-panel-preview-placeholder-content">
                     <div className="mb-2 text-sm">{t('agent.selectMarkdownContent')}</div>
                     <div className="text-xs mono">{t('agent.markdownOnly')}</div>
                   </div>

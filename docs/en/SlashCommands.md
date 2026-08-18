@@ -491,9 +491,9 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#push-to-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
+| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
 | `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
@@ -1022,7 +1022,8 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | Launch the built-in setup subagent to create, review, modify, or remove the status line |
+| `/statusline get` | Always view the current status line configuration without launching the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
@@ -1034,9 +1035,9 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 - **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
-- **Agent-generated mode**: Any non-empty argument that is not a known subcommand (`set`, `padding`, `clear`, `help`, `json`, or `get`) is sent to the Agent with the `script-creator` skill. For example: `/statusline show mode, model, and remaining context`. Running `/statusline` with no arguments still only shows the current configuration.
-- **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
-- **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+- **Agent-generated mode**: `/statusline`, with or without a natural-language description, delegates to the built-in `statusline-setup` subagent. When unconfigured, it guides creation and applies the configuration. When configured, it inspects the current setup and can explain, modify, or remove it. Use `/statusline get` to display the raw configuration without launching the subagent.
+- **JSON input**: Each execution receives current session info as JSON through stdin, which the configured command can parse with `jq`, PowerShell `ConvertFrom-Json`, or another available tool.
+- **Shell selection**: On Windows, the runner uses Git Bash when it is installed and otherwise falls back to PowerShell. On macOS/Linux, it uses `sh`. The setup subagent creates a platform-appropriate persistent script and does not require `jq` on Windows.
 
 #### JSON Input Fields
 
@@ -1117,7 +1118,8 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — Launch the built-in setup subagent to create, review, modify, or remove the status line
+- `/statusline get` — View current configuration without launching the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
@@ -1136,7 +1138,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
 - **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
-- **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
+- **Windows adaptation**: The runner pipes JSON through stdin, uses Git Bash when installed, and falls back to PowerShell. Prefer a persistent PowerShell script when Git Bash or `jq` is unavailable.
 
 #### Config File Structure
 

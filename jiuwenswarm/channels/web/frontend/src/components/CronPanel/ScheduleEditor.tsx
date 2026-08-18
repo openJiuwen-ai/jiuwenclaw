@@ -240,8 +240,7 @@ export default function ScheduleEditor({
             key={mode}
             type="button"
             onClick={() => switchTopMode(mode)}
-            data-testid="cron-schedule-mode-tab"
-            data-variant={mode}
+            data-testid={`cron-schedule-mode-tab-${mode}`}
             className={`rounded px-4 py-1.5 text-sm transition-colors ${
               topMode === mode ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
             }`}
@@ -252,8 +251,7 @@ export default function ScheduleEditor({
         <button
           type="button"
           onClick={() => setTopMode('cronExpr')}
-          data-testid="cron-schedule-mode-tab"
-          data-variant="cronExpr"
+          data-testid="cron-schedule-mode-tab-cron-expr"
           className={`rounded px-4 py-1.5 text-sm transition-colors ${
             topMode === 'cronExpr' ? 'bg-card font-bold text-text-strong shadow-sm' : 'text-text-muted hover:text-text'
           }`}

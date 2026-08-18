@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Agent Team 模块 - 多智能体协作团队支持.
 
@@ -21,7 +21,7 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     find_team_skill_rail_across_managers,
     get_all_team_managers,
     get_team_manager,
-    refresh_team_shared_skill_links_across_managers,
+    reload_team_skill_views_across_managers,
     reset_team_manager,
     stop_all_paused_team_session_runtimes_across_managers,
     stop_team_session_runtime_across_managers,
@@ -42,7 +42,7 @@ __all__ = [
     "find_team_skill_rail_across_managers",
     "get_all_team_managers",
     "get_team_manager",
-    "refresh_team_shared_skill_links_across_managers",
+    "reload_team_skill_views_across_managers",
     "reset_team_manager",
     "stop_all_paused_team_session_runtimes_across_managers",
     "stop_team_session_runtime_across_managers",

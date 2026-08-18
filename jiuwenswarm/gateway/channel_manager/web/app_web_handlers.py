@@ -1,22 +1,28 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """WebChannel RPC handlers and shared constants (used by app gateway; single source with app.py)."""
 
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import importlib.util
 import inspect
 import json
 import logging
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
+import subprocess
+import sys
 import time
 import base64
 import threading
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 try:
@@ -41,6 +47,7 @@ from openjiuwen.extensions.external_provider.openai_auth.openai_account_models i
 
 from jiuwenswarm.common.config import (
     DEFAULT_SWARMFLOW_ENABLED,
+    EXTERNAL_CLI_AGENTS_CONFIG_PATH,
     SWARMFLOW_ENABLED_CONFIG_PATH,
     get_config,
     get_config_raw,
@@ -61,8 +68,10 @@ from jiuwenswarm.common.config import (
     update_symphony_in_config,
     update_permissions_enabled_in_config,
     update_setup_guide_enabled_in_config,
+    update_enable_free_models_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
+    update_external_cli_agents_in_config,
     update_swarmflow_enabled_in_config,
     update_a2ui_in_config,
     update_updater_in_config,
@@ -85,6 +94,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
+from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_sessions_dir,
     get_env_file,
@@ -186,6 +196,49 @@ class _ConfigChangeSet:
             "target_channel_id": _WEB_CONFIG_RELOAD_CHANNEL_ID,
             "reload_scopes": sorted(self.reload_scopes),
         }
+
+
+@dataclass(frozen=True)
+class _ConfigApplyResult:
+    env_updates: dict[str, str]
+    yaml_updated: list[str]
+    external_cli_dependency_installs: dict[str, dict[str, Any]] | None = None
+
+
+def _external_cli_dependency_install_status_template() -> dict[str, Any]:
+    return {
+        "status": "idle",
+        "phase": "idle",
+        "error": "",
+        "last_log": "",
+        "log_tail": [],
+        "started_at": 0.0,
+        "finished_at": 0.0,
+        "updated_at": 0.0,
+    }
+
+
+_EXTERNAL_CLI_DEPENDENCY_MODULES = {
+    "claude": "claude_agent_sdk",
+    "codex": "openai_codex",
+}
+_EXTERNAL_CLI_DEPENDENCY_EXTRAS = {
+    "claude": "claude",
+    "codex": "codex",
+}
+_EXTERNAL_CLI_DEPENDENCY_DISPLAY_NAMES = {
+    "claude": "Claude",
+    "codex": "Codex",
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS = {
+    cli_agent: threading.Lock()
+    for cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS: dict[str, dict[str, Any]] = {
+    cli_agent: _external_cli_dependency_install_status_template()
+    for cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES
+}
+_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT = 8
 
 
 _PROJECT_ROOT = get_root_dir()
@@ -623,6 +676,18 @@ _FORWARD_REQ_METHODS = frozenset({
     "plugins.enable",
     "plugins.disable",
     "plugins.reload",
+    "agent_templates.list",
+    "agent_templates.show",
+    "agent_templates.file.list",
+    "agent_templates.file.read",
+    "agent_templates.create",
+    "agent_templates.install",
+    "agent_templates.uninstall",
+    "plugin_packages.list",
+    "plugin_packages.show",
+    "plugin_packages.create",
+    "plugin_packages.install",
+    "plugin_packages.uninstall",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -721,6 +786,18 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "plugins.enable",
     "plugins.disable",
     "plugins.reload",
+    "agent_templates.list",
+    "agent_templates.show",
+    "agent_templates.file.list",
+    "agent_templates.file.read",
+    "agent_templates.create",
+    "agent_templates.install",
+    "agent_templates.uninstall",
+    "plugin_packages.list",
+    "plugin_packages.show",
+    "plugin_packages.create",
+    "plugin_packages.install",
+    "plugin_packages.uninstall",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -734,6 +811,8 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.enable",
     "agents.disable",
     "agents.tools_list",
+    "external_cli.detect",
+    "external_cli.install_status",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -809,9 +888,29 @@ _CONFIG_YAML_KEYS = frozenset({
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",
     "swarmflow_enabled",
+    "external_cli_agent_claude_enabled",
+    "external_cli_agent_claude_use_builtin",
+    "external_cli_agent_claude_cli_path",
+    "external_cli_agent_codex_enabled",
+    "external_cli_agent_codex_use_builtin",
+    "external_cli_agent_codex_cli_path",
     "setup_guide_enabled",
     "skill_evolution",
+    "enable_free_models",
 })
+_EXTERNAL_CLI_AGENT_CONFIG_KEYS = frozenset({
+    "external_cli_agent_claude_enabled",
+    "external_cli_agent_claude_use_builtin",
+    "external_cli_agent_claude_cli_path",
+    "external_cli_agent_codex_enabled",
+    "external_cli_agent_codex_use_builtin",
+    "external_cli_agent_codex_cli_path",
+})
+_EXTERNAL_CLI_AGENT_KINDS = ("claude", "codex")
+_DEFAULT_EXTERNAL_CLI_PUBLISH_HOST = "127.0.0.1"
+_DEFAULT_EXTERNAL_CLI_PUBLISH_PORT = "19000"
+_EXTERNAL_CLI_PUBLISH_PATH = "/ws"
+_UNSUPPORTED_WINDOWS_CLI_SUFFIXES = {".bat", ".cmd", ".ps1"}
 
 # 微信通道数值参数的取值范围：(下限, 上限, 是否必须为整数)。均为秒，必须为有限正数。
 # 用于 channel.wechat.set_conf 写盘前校验，拒绝负数 / 0 / 极大值 / 浮点越界 / 非数字，
@@ -970,6 +1069,185 @@ def _flatten_swarmflow_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
     return {"swarmflow_enabled": "true" if enabled else "false"}
 
 
+def _flatten_external_cli_agents_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
+    agents = _get_nested_config_value(raw, EXTERNAL_CLI_AGENTS_CONFIG_PATH, [])
+    configured: dict[str, dict[str, str]] = {}
+    if isinstance(agents, list):
+        for item in agents:
+            if isinstance(item, str):
+                cli_agent = item.strip()
+                cli_path = ""
+            elif isinstance(item, dict):
+                cli_agent = str(item.get("cli_agent") or "").strip()
+                cli_path = str(item.get("cli_path") or item.get("codex_bin") or "").strip()
+            else:
+                continue
+            if cli_agent:
+                configured[cli_agent] = {"cli_path": cli_path}
+    return {
+        "external_cli_agent_claude_enabled": "true" if "claude" in configured else "false",
+        "external_cli_agent_claude_use_builtin": (
+            "true" if "claude" in configured and not configured["claude"].get("cli_path") else "false"
+        ),
+        "external_cli_agent_claude_cli_path": configured.get("claude", {}).get("cli_path", ""),
+        "external_cli_agent_codex_enabled": "true" if "codex" in configured else "false",
+        "external_cli_agent_codex_use_builtin": (
+            "true" if "codex" in configured and not configured["codex"].get("cli_path") else "false"
+        ),
+        "external_cli_agent_codex_cli_path": configured.get("codex", {}).get("cli_path", ""),
+    }
+
+
+def _parse_config_switch_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_version_tuple(version: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def _external_cli_reference_version(cli_agent: str) -> str:
+    if cli_agent == "claude":
+        try:
+            from claude_agent_sdk._cli_version import __cli_version__
+
+            return str(__cli_version__)
+        except Exception:
+            return ""
+    if cli_agent == "codex":
+        try:
+            return importlib.metadata.version("openai-codex")
+        except importlib.metadata.PackageNotFoundError:
+            return ""
+    return ""
+
+
+def _resolve_external_cli_path(cli_agent: str, cli_path: str = "") -> tuple[str, str]:
+    requested = cli_path.strip()
+    if requested:
+        resolved = shutil.which(requested)
+        if resolved:
+            return resolved, ""
+        candidate = Path(requested).expanduser()
+        if candidate.is_file():
+            return str(candidate), ""
+        return "", f"{requested} not found"
+
+    resolved = shutil.which(cli_agent)
+    if resolved:
+        return resolved, ""
+    return "", f"{cli_agent} not found in PATH"
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+def _run_external_cli_version_command(cli_agent: str, resolved_path: str) -> tuple[str, str]:
+    commands = [["-v"]] if cli_agent == "claude" else [["--version"], ["-V"]]
+    errors: list[str] = []
+    for args in commands:
+        try:
+            process = subprocess.run(
+                [resolved_path, *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                shell=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(str(exc))
+            continue
+        output = "\n".join(part for part in (process.stdout, process.stderr) if part).strip()
+        if process.returncode == 0:
+            return output, ""
+        errors.append(output or f"exit code {process.returncode}")
+    return "", "; ".join(errors)
+
+
+def _detect_external_cli_agent(cli_agent: str, cli_path: str = "") -> dict[str, Any]:
+    normalized_agent = cli_agent.strip().lower()
+    if normalized_agent not in _EXTERNAL_CLI_AGENT_KINDS:
+        return {
+            "cli_agent": normalized_agent,
+            "status": "unavailable",
+            "path": "",
+            "version": "",
+            "reference_version": "",
+            "message": f"unsupported cli_agent: {cli_agent}",
+        }
+
+    resolved_path, path_error = _resolve_external_cli_path(normalized_agent, cli_path)
+    reference_version = _external_cli_reference_version(normalized_agent)
+    if not resolved_path:
+        return {
+            "cli_agent": normalized_agent,
+            "status": "missing",
+            "path": "",
+            "version": "",
+            "reference_version": reference_version,
+            "message": path_error,
+        }
+
+    suffix = Path(resolved_path).suffix.lower()
+    if _is_windows_platform() and suffix in _UNSUPPORTED_WINDOWS_CLI_SUFFIXES:
+        return {
+            "cli_agent": normalized_agent,
+            "status": "unsupported",
+            "path": resolved_path,
+            "version": "",
+            "reference_version": reference_version,
+            "reason": "windows_script",
+            "suffix": suffix,
+            "message": "windows_script",
+        }
+
+    version_output, version_error = _run_external_cli_version_command(normalized_agent, resolved_path)
+    version_match = re.search(r"(\d+\.\d+\.\d+)", version_output)
+    version = version_match.group(1) if version_match else ""
+    if not version_output:
+        return {
+            "cli_agent": normalized_agent,
+            "status": "unavailable",
+            "path": resolved_path,
+            "version": "",
+            "reference_version": reference_version,
+            "message": version_error or "version command failed",
+        }
+
+    status = "ok"
+    message = ""
+    version_tuple = _parse_version_tuple(version)
+    reference_tuple = _parse_version_tuple(reference_version)
+    has_detected_version = bool(version)
+    has_reference_version = bool(reference_version)
+    has_parsed_versions = version_tuple is not None and reference_tuple is not None
+    has_comparable_versions = has_detected_version and has_reference_version and has_parsed_versions
+    if has_comparable_versions:
+        if version_tuple < reference_tuple:
+            status = "warning"
+            message = f"version {version} may be incompatible with expected version {reference_version}"
+    elif not version:
+        status = "warning"
+        message = "version output could not be parsed"
+
+    return {
+        "cli_agent": normalized_agent,
+        "status": status,
+        "path": resolved_path,
+        "version": version,
+        "reference_version": reference_version,
+        "message": message,
+    }
+
+
 def _build_symphony_config_update(params: dict[str, Any]) -> dict[str, Any]:
     updates: dict[str, Any] = {}
     for key, (path, value_type, default) in _SYMPHONY_CONFIG_SPECS.items():
@@ -1040,6 +1318,12 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
         flat[f"{team_prefix}enable_permissions"] = (
             "true" if bool(team_spec.get("enable_permissions", False)) else "false"
         )
+        external_cli_agents = team_spec.get("external_cli_agents")
+        flat[f"{team_prefix}external_cli_agents"] = (
+            json.dumps(external_cli_agents, ensure_ascii=False)
+            if isinstance(external_cli_agents, list)
+            else ""
+        )
 
         agents = team_spec.get("agents")
         if not isinstance(agents, dict):
@@ -1098,12 +1382,390 @@ def _flatten_modes_team_for_config_panel(raw: dict[str, Any]) -> dict[str, str]:
     return flat
 
 
+def _team_payload_requested_external_cli_agents(params: dict[str, Any]) -> set[str]:
+    teams_raw = params.get("team")
+    requested: set[str] = set()
+    if not isinstance(teams_raw, list):
+        return requested
+    for team_item in teams_raw:
+        if not isinstance(team_item, dict):
+            continue
+        external_cli_agents = team_item.get("external_cli_agents")
+        if not isinstance(external_cli_agents, list):
+            continue
+        for item in external_cli_agents:
+            cli_agent = item if isinstance(item, str) else item.get("cli_agent") if isinstance(item, dict) else ""
+            if cli_agent in _EXTERNAL_CLI_DEPENDENCY_MODULES:
+                requested.add(cli_agent)
+    return requested
+
+
+def _team_item_requests_codex(team_item: dict[str, Any]) -> bool:
+    external_cli_agents = team_item.get("external_cli_agents")
+    if not isinstance(external_cli_agents, list):
+        return False
+    for item in external_cli_agents:
+        if item == "codex":
+            return True
+        if isinstance(item, dict) and item.get("cli_agent") == "codex":
+            return True
+    return False
+
+
+def _inject_external_cli_publish_url(params: dict[str, Any]) -> dict[str, Any]:
+    teams_raw = params.get("team")
+    if not isinstance(teams_raw, list):
+        return params
+
+    publish_url = _build_external_cli_publish_url()
+    teams: list[Any] = []
+    changed = False
+    for team_item in teams_raw:
+        if isinstance(team_item, dict) and _team_item_requests_codex(team_item):
+            item = dict(team_item)
+            item["external_cli_publish_url"] = publish_url
+            teams.append(item)
+            changed = True
+        else:
+            teams.append(team_item)
+
+    if not changed:
+        return params
+    return {**params, "team": teams}
+
+
+def _remove_external_cli_agents_from_team_payload(params: dict[str, Any], cli_agents: set[str]) -> dict[str, Any]:
+    teams_raw = params.get("team")
+    if not cli_agents or not isinstance(teams_raw, list):
+        return params
+
+    teams: list[Any] = []
+    changed = False
+    for team_item in teams_raw:
+        if not isinstance(team_item, dict):
+            teams.append(team_item)
+            continue
+        external_cli_agents = team_item.get("external_cli_agents")
+        if not isinstance(external_cli_agents, list):
+            teams.append(team_item)
+            continue
+        filtered_agents: list[Any] = []
+        item_changed = False
+        for item in external_cli_agents:
+            cli_agent = item if isinstance(item, str) else item.get("cli_agent") if isinstance(item, dict) else ""
+            if cli_agent in cli_agents:
+                item_changed = True
+                changed = True
+                continue
+            filtered_agents.append(item)
+        if item_changed:
+            item = dict(team_item)
+            item["external_cli_agents"] = filtered_agents
+            teams.append(item)
+        else:
+            teams.append(team_item)
+
+    if not changed:
+        return params
+    return {**params, "team": teams}
+
+
+def _external_cli_agent_key(cli_agent: str, suffix: str) -> str:
+    return f"external_cli_agent_{cli_agent}_{suffix}"
+
+
+def _external_cli_agent_effective_state(
+    cli_agent: str,
+    current: dict[str, str],
+    params: dict[str, Any],
+) -> tuple[bool, bool, str]:
+    enabled_key = _external_cli_agent_key(cli_agent, "enabled")
+    use_builtin_key = _external_cli_agent_key(cli_agent, "use_builtin")
+    cli_path_key = _external_cli_agent_key(cli_agent, "cli_path")
+    enabled = _parse_config_switch_bool(params.get(enabled_key, current[enabled_key]))
+    use_builtin = _parse_config_switch_bool(params.get(use_builtin_key, current[use_builtin_key]))
+    if use_builtin:
+        return enabled, True, ""
+    return enabled, False, str(params.get(cli_path_key, current[cli_path_key]) or "").strip()
+
+
+def _external_cli_agents_from_switches(raw: dict[str, Any], params: dict[str, Any]) -> list[dict[str, str]]:
+    current = _flatten_external_cli_agents_for_config_panel(raw)
+    agents: list[dict[str, str]] = []
+    for cli_agent in _EXTERNAL_CLI_AGENT_KINDS:
+        enabled, use_builtin, requested_path = _external_cli_agent_effective_state(cli_agent, current, params)
+        if not enabled:
+            continue
+        entry = {"cli_agent": cli_agent}
+        if not use_builtin:
+            detection = _detect_external_cli_agent(cli_agent, requested_path)
+            if detection["status"] not in {"ok", "warning"}:
+                raise ValueError(
+                    f"{cli_agent} cli_path is not available: {detection.get('message') or detection.get('status')}"
+                )
+            entry["cli_path"] = str(detection.get("path") or "").strip()
+        agents.append(entry)
+    return agents
+
+
+def _build_external_cli_publish_url() -> str:
+    host = str(os.getenv("WEB_HOST") or _DEFAULT_EXTERNAL_CLI_PUBLISH_HOST).strip()
+    if host in {"", "0.0.0.0", "::", "[::]"}:
+        host = _DEFAULT_EXTERNAL_CLI_PUBLISH_HOST
+    if ":" in host and not (host.startswith("[") and host.endswith("]")):
+        host = f"[{host}]"
+
+    port = str(os.getenv("WEB_PORT") or _DEFAULT_EXTERNAL_CLI_PUBLISH_PORT).strip()
+    return f"ws://{host}:{port}{_EXTERNAL_CLI_PUBLISH_PATH}"
+
+
+def _external_cli_dependency_module(cli_agent: str) -> str:
+    module = _EXTERNAL_CLI_DEPENDENCY_MODULES.get(cli_agent)
+    if module is None:
+        raise ValueError(f"unsupported external cli agent: {cli_agent}")
+    return module
+
+
+def _external_cli_dependency_display_name(cli_agent: str) -> str:
+    return _EXTERNAL_CLI_DEPENDENCY_DISPLAY_NAMES.get(cli_agent, cli_agent)
+
+
+def _external_cli_desktop_missing_dependency_error(cli_agent: str) -> str:
+    display_name = _external_cli_dependency_display_name(cli_agent)
+    extra = _EXTERNAL_CLI_DEPENDENCY_EXTRAS[cli_agent]
+    return (
+        f"this desktop package does not include {display_name} support; "
+        f"rebuild it after running `uv sync --extra {extra}`"
+    )
+
+
+def _is_frozen_runtime() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _snapshot_external_cli_dependency_install_status(cli_agent: str) -> dict[str, Any]:
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]
+        snapshot = dict(status)
+        snapshot["cli_agent"] = cli_agent
+        snapshot["log_tail"] = list(status.get("log_tail") or [])
+        return snapshot
+
+
+def _update_external_cli_dependency_install_status(cli_agent: str, updates: dict[str, Any]) -> None:
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].update(updates)
+        _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]["updated_at"] = time.time()
+
+
+def _append_external_cli_dependency_install_log(cli_agent: str, line: str) -> None:
+    stripped = line.strip()
+    if not stripped:
+        return
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        status = _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent]
+        log_tail = list(status.get("log_tail") or [])
+        log_tail.append(stripped)
+        status.update({
+            "last_log": stripped,
+            "log_tail": log_tail[-_EXTERNAL_CLI_DEPENDENCY_INSTALL_LOG_TAIL_LIMIT:],
+            "updated_at": time.time(),
+        })
+
+
+def _ensure_external_cli_dependency_available_or_start_install(cli_agent: str) -> dict[str, Any] | None:
+    module = _external_cli_dependency_module(cli_agent)
+    if importlib.util.find_spec(module) is not None:
+        _update_external_cli_dependency_install_status(cli_agent, {
+            "status": "succeeded",
+            "phase": "succeeded",
+            "error": "",
+            "finished_at": time.time(),
+        })
+        return None
+
+    if _is_frozen_runtime():
+        _update_external_cli_dependency_install_status(cli_agent, {
+            "status": "failed",
+            "phase": "failed",
+            "error": _external_cli_desktop_missing_dependency_error(cli_agent),
+            "last_log": "",
+            "log_tail": [],
+            "started_at": 0.0,
+            "finished_at": time.time(),
+        })
+        return _snapshot_external_cli_dependency_install_status(cli_agent)
+
+    with _EXTERNAL_CLI_DEPENDENCY_INSTALL_LOCKS[cli_agent]:
+        if _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].get("status") == "running":
+            already_running = True
+        else:
+            already_running = False
+            _EXTERNAL_CLI_DEPENDENCY_INSTALL_STATUS[cli_agent].update({
+                "status": "running",
+                "phase": "preparing",
+                "error": "",
+                "last_log": "",
+                "log_tail": [],
+                "started_at": time.time(),
+                "finished_at": 0.0,
+                "updated_at": time.time(),
+            })
+    if already_running:
+        return _snapshot_external_cli_dependency_install_status(cli_agent)
+
+    thread = threading.Thread(
+        target=_run_external_cli_dependency_install_background,
+        args=(cli_agent,),
+        name=f"{cli_agent}-dependency-install",
+        daemon=True,
+    )
+    thread.start()
+    return _snapshot_external_cli_dependency_install_status(cli_agent)
+
+
+def _ensure_external_cli_dependencies_available_or_start_install(
+    cli_agents: set[str],
+) -> dict[str, dict[str, Any]]:
+    installs: dict[str, dict[str, Any]] = {}
+    for cli_agent in sorted(cli_agents):
+        snapshot = _ensure_external_cli_dependency_available_or_start_install(cli_agent)
+        if snapshot is not None:
+            installs[cli_agent] = snapshot
+    return installs
+
+
+def _run_external_cli_dependency_install_background(cli_agent: str) -> None:
+    try:
+        _install_external_cli_dependency(cli_agent)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[config.set] %s dependency installation failed: %s",
+            _external_cli_dependency_display_name(cli_agent),
+            exc,
+        )
+        _append_external_cli_dependency_install_log(cli_agent, str(exc))
+        _update_external_cli_dependency_install_status(cli_agent, {
+            "status": "failed",
+            "phase": "failed",
+            "error": str(exc),
+            "finished_at": time.time(),
+        })
+        return
+
+    _update_external_cli_dependency_install_status(cli_agent, {
+        "status": "succeeded",
+        "phase": "succeeded",
+        "error": "",
+        "finished_at": time.time(),
+    })
+
+
+def _install_external_cli_dependency(cli_agent: str) -> None:
+    if _is_frozen_runtime():
+        raise RuntimeError(_external_cli_desktop_missing_dependency_error(cli_agent))
+    module = _external_cli_dependency_module(cli_agent)
+    package = _resolve_openjiuwen_extra_package(_EXTERNAL_CLI_DEPENDENCY_EXTRAS[cli_agent])
+    args = _build_optional_dependency_install_args(package)
+    output_lines: list[str] = []
+    _update_external_cli_dependency_install_status(cli_agent, {
+        "phase": "installing",
+    })
+    try:
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {exc}") from exc
+
+    output_queue: queue.Queue[str | None] = queue.Queue()
+
+    def read_output() -> None:
+        if process.stdout is None:
+            output_queue.put(None)
+            return
+        try:
+            for line in process.stdout:
+                output_queue.put(line)
+        finally:
+            output_queue.put(None)
+
+    reader = threading.Thread(target=read_output, name=f"{cli_agent}-dependency-install-output", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + 600
+    reader_done = False
+    while True:
+        try:
+            item = output_queue.get(timeout=0.2)
+        except queue.Empty:
+            item = None
+        else:
+            if item is None:
+                reader_done = True
+            else:
+                line = item.rstrip()
+                if line:
+                    output_lines.append(line)
+                    _append_external_cli_dependency_install_log(cli_agent, line)
+
+        if process.poll() is not None and reader_done:
+            break
+        if time.monotonic() > deadline:
+            process.kill()
+            raise RuntimeError(f"failed to install {cli_agent} dependency: timed out")
+
+    reader.join(timeout=1)
+    returncode = process.wait()
+    if returncode != 0:
+        output = "\n".join(output_lines[-20:])
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {output}")
+    _update_external_cli_dependency_install_status(cli_agent, {
+        "phase": "verifying",
+    })
+    if importlib.util.find_spec(module) is None:
+        raise RuntimeError(f"failed to install {cli_agent} dependency: {module} is still unavailable")
+
+
+def _resolve_openjiuwen_extra_package(extra: str) -> str:
+    spec = importlib.util.find_spec("openjiuwen")
+    if spec is None:
+        return f"openjiuwen[{extra}]"
+
+    candidate_paths: list[Path] = []
+    if spec.origin:
+        candidate_paths.append(Path(spec.origin))
+    if spec.submodule_search_locations:
+        candidate_paths.extend(Path(location) for location in spec.submodule_search_locations)
+
+    for candidate_path in candidate_paths:
+        package_root = candidate_path if candidate_path.is_dir() else candidate_path.parent
+        project_root = package_root.parent if package_root.name == "openjiuwen" else package_root
+        if (project_root / "pyproject.toml").is_file() and (project_root / "openjiuwen").is_dir():
+            return f"{project_root}[{extra}]"
+
+    return f"openjiuwen[{extra}]"
+
+
+def _build_optional_dependency_install_args(package: str) -> list[str]:
+    uv_cmd = shutil.which("uv")
+    if uv_cmd and sys.prefix != sys.base_prefix:
+        return [uv_cmd, "pip", "install", package]
+    return [sys.executable, "-m", "pip", "install", package]
+
+
 async def _clear_agent_config_cache(agent_client=None) -> None:
     """写回 config.yaml 后清除 agent 侧配置缓存，使下次读取时得到最新文件内容。"""
     try:
         if agent_client is not None:
             from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-            from jiuwenswarm.common.schema.message import ReqMethod
 
             env = e2a_from_agent_fields(
                 request_id=f"cfg-reload-{uuid.uuid4().hex[:8]}",
@@ -1128,7 +1790,6 @@ async def _restart_agent_browser_runtime(
         return
 
     from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-    from jiuwenswarm.common.schema.message import ReqMethod
 
     env = e2a_from_agent_fields(
         request_id=f"browser-restart-{uuid.uuid4().hex[:8]}",
@@ -1364,6 +2025,18 @@ class WebHandlersBindParams:
     updater_service: UpdaterService | None = None
 
 
+_CONTAINER_FILE_API_METHODS = (
+    "upload_container_file",
+    "download_container_file",
+    "list_container_files",
+)
+
+
+def _supports_container_file_api(client: Any) -> bool:
+    """True when *client* can back WebChannel ``/file-api`` (no extensions import)."""
+    return all(callable(getattr(client, name, None)) for name in _CONTAINER_FILE_API_METHODS)
+
+
 def _attribute_session_project(
     meta: dict[str, Any],
     visible_by_id: set[str],
@@ -1490,6 +2163,15 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 obj = entry.get("model_config_obj")
                 if isinstance(obj, dict):
                     model_config_obj = dict(obj)
+                # AgentOS 备份模型的 mco 含 _source=="agentos" 标记（由
+                # get_default_models 注入）。其 max_tokens 是输入侧上下文窗口
+                # 别名（-> ContextEngineConfig.context_window_tokens，压缩阈值，
+                # 不发厂商），不得进入输出侧的 ModelRequestConfig.max_tokens
+                # （否则会被当输出上限发给厂商）。_source 标记本身由
+                # reasoning_injector._build_model_request_kwargs 统一 pop，
+                # 这里只需清 max_tokens。
+                if model_config_obj.get("_source") == "agentos":
+                    model_config_obj.pop("max_tokens", None)
                 logger.info(
                     "[config.validate_model] loaded model_config_obj for '%s' "
                     "(matched_by=%s): %s",
@@ -1553,7 +2235,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 from jiuwenswarm.common.e2a.gateway_normalize import (
                     e2a_from_agent_fields,
                 )
-                from jiuwenswarm.common.schema.message import ReqMethod
 
                 real_client = _resolve(agent_client)
                 if real_client is None:
@@ -1654,6 +2335,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             for param_key, env_key in _CONFIG_SET_ENV_MAP.items()
         }
         payload["app_version"] = __version__
+        runtime_platform = (os.getenv("JIUWENSWARM_RUNTIME_PLATFORM") or "").strip().lower() or "default"
+        payload["runtime_platform"] = runtime_platform
+        payload["external_cli_agents_supported"] = "false" if runtime_platform == "harmony" else "true"
         # 合并 config.yaml 中的配置项
         try:
             raw = get_config_raw()
@@ -1687,6 +2371,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["memory_forbidden_description"] = memory_desc
             payload.update(get_a2ui_config_payload(raw))
             payload.update(_flatten_swarmflow_for_config_panel(raw))
+            payload.update(_flatten_external_cli_agents_for_config_panel(raw))
             payload.update(_flatten_symphony_for_config_panel(raw))
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "false"
@@ -1701,6 +2386,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 proactive_cfg.get("max_recommend_per_day", 10))
             payload["proactive_recommendation_max_rounds_per_tick"] = str(
                 proactive_cfg.get("max_rounds_per_tick", 20))
+            # Opencode Zen 免费模型开关（models.enable_free_models，默认 true）
+            models_cfg = resolved.get("models") or {}
+            payload["enable_free_models"] = "true" if models_cfg.get("enable_free_models", True) else "false"
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
@@ -1727,9 +2415,40 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("free_search_ddg_enabled", "false")
             payload.setdefault("free_search_bing_enabled", "false")
             payload.setdefault("proactive_recommendation_enabled", "false")
+            payload.setdefault("enable_free_models", "true")
             payload.setdefault("proactive_recommendation_max_recommend_per_day", "10")
             payload.setdefault("proactive_recommendation_max_rounds_per_tick", "20")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
+
+    async def _external_cli_detect(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        cli_agent = str(params.get("cli_agent") or "").strip().lower()
+        cli_path = str(params.get("cli_path") or "").strip()
+        result = _detect_external_cli_agent(cli_agent, cli_path)
+        await channel.send_response(ws, req_id, ok=True, payload=result)
+
+    async def _external_cli_install_status(ws, req_id, params, session_id):
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        cli_agent = str(params.get("cli_agent") or "").strip().lower()
+        if cli_agent not in _EXTERNAL_CLI_DEPENDENCY_MODULES:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=f"unsupported external cli agent: {cli_agent}",
+                code="BAD_REQUEST",
+            )
+            return
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload=_snapshot_external_cli_dependency_install_status(cli_agent),
+        )
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
         """把已更新的环境变量写回 .env（仅覆盖或追加对应 KEY=value 行）。"""
@@ -1845,11 +2564,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "failed to preserve team entity config: " + ", ".join(sorted(failed_team_names))
             )
 
-    def _apply_config_payload(params: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    def _apply_config_payload(params: dict[str, Any]) -> _ConfigApplyResult:
         """Apply config.set-style payload to .env/config.yaml without triggering reload."""
         params = _encrypt_config_params(params)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
+        external_cli_dependency_installs: dict[str, dict[str, Any]] = {}
         available_model_providers = [provider.value for provider in ProviderType]
         raw = get_config_raw()
         preferred_lang = raw.get("preferred_language", "zh")
@@ -1875,16 +2595,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         if "agents" in params or "team" in params:
             try:
+                requested_cli_agents = _team_payload_requested_external_cli_agents(params)
+                external_cli_dependency_installs.update(
+                    _ensure_external_cli_dependencies_available_or_start_install(requested_cli_agents)
+                )
+                params_to_save = _remove_external_cli_agents_from_team_payload(
+                    params,
+                    set(external_cli_dependency_installs),
+                )
                 if "team" in params:
                     _preserve_deleted_team_entities(params)
-                replace_teams_in_config(params)
+                replace_teams_in_config(_inject_external_cli_publish_url(params_to_save))
                 yaml_updated.append("modes.team")
             except ValueError as exc:
                 raise _ConfigBadRequest(str(exc)) from exc
+            except _ConfigInternalError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[config.set] 写回 modes.team 失败: %s", exc)
                 raise _ConfigInternalError("failed to update modes.team") from exc
 
+        external_cli_agents_updated = False
         for param_key in _CONFIG_YAML_KEYS:
             if param_key not in params:
                 continue
@@ -1901,6 +2632,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_permissions_enabled_in_config(parsed)
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
+                elif param_key == "enable_free_models":
+                    update_enable_free_models_in_config(parsed)
                 elif param_key == "memory_forbidden_enabled":
                     update_memory_forbidden_enabled_in_config(parsed)
                 elif param_key == "memory_forbidden_description":
@@ -1908,6 +2641,31 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
                 elif param_key == "swarmflow_enabled":
                     update_swarmflow_enabled_in_config(parsed)
+                elif param_key in _EXTERNAL_CLI_AGENT_CONFIG_KEYS:
+                    if not external_cli_agents_updated:
+                        try:
+                            external_cli_agents = _external_cli_agents_from_switches(raw, params)
+                        except ValueError as exc:
+                            raise _ConfigBadRequest(str(exc)) from exc
+                        requested_cli_agents = {
+                            item.get("cli_agent", "")
+                            for item in external_cli_agents
+                            if item.get("cli_agent") in _EXTERNAL_CLI_DEPENDENCY_MODULES
+                        }
+                        external_cli_dependency_installs.update(
+                            _ensure_external_cli_dependencies_available_or_start_install(requested_cli_agents)
+                        )
+                        if external_cli_dependency_installs:
+                            external_cli_agents = [
+                                item
+                                for item in external_cli_agents
+                                if item.get("cli_agent") not in external_cli_dependency_installs
+                            ]
+                        update_external_cli_agents_in_config(
+                            external_cli_agents,
+                            _build_external_cli_publish_url(),
+                        )
+                        external_cli_agents_updated = True
                 elif param_key == "skill_evolution":
                     update_skill_evolution_enabled_in_config(parsed)
                 elif param_key.startswith("a2ui_"):
@@ -1931,6 +2689,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
                 if param_key == "swarmflow_enabled":
                     raise _ConfigInternalError("failed to update enable_swarmflow") from e
+                if param_key in _EXTERNAL_CLI_AGENT_CONFIG_KEYS:
+                    raise _ConfigInternalError("failed to update external_cli_agents") from e
 
         if params.get("model_provider") == ASCEND_AFFINITY_PROVIDER:
             try:
@@ -1979,7 +2739,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "KV cache affinity saved but not applied: " + "; ".join(failures)
                 )
 
-        return env_updates, yaml_updated
+        return _ConfigApplyResult(env_updates, yaml_updated, external_cli_dependency_installs or None)
 
     async def _apply_config_change_set(change_set: _ConfigChangeSet) -> bool:
         """Synchronously apply only the runtime scope affected by a saved config change."""
@@ -2092,13 +2852,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
-            env_updates, yaml_updated = _apply_config_payload(params)
+            apply_result = _apply_config_payload(params)
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
             return
         except _ConfigInternalError as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
             return
+        env_updates = apply_result.env_updates
+        yaml_updated = apply_result.yaml_updated
         change_set = _ConfigChangeSet(env_updates, yaml_updated)
         try:
             applied_without_restart = await _apply_config_change_set(change_set)
@@ -2107,9 +2869,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             applied_without_restart = False
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
+        payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
+        if apply_result.external_cli_dependency_installs is not None:
+            payload["external_cli_dependency_installs"] = apply_result.external_cli_dependency_installs
         await channel.send_response(
             ws, req_id, ok=True,
-            payload={"updated": updated_param_keys, "applied_without_restart": applied_without_restart},
+            payload=payload,
         )
 
     async def _config_validate_model(ws, req_id, params, session_id, max_tokens_bounds=None):
@@ -2306,8 +3071,68 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
                 })
-                # active_model 为列表首位的模型（主对话默认）
-            active_model = result[0]["model_name"] if result else ""
+                # active_model 为列表首位的模型（主对话默认）；首次启动时该条目
+                # 仍为 .env 占位符，则回退到 Zen 免费模型（如 DeepSeek V4 Flash）。
+            default_name = result[0]["model_name"] if result else ""
+            active_model = default_name
+            try:
+                from jiuwenswarm.common.model_config_validation import (
+                    is_placeholder_model_entry,
+                )
+                from jiuwenswarm.server.runtime.opencode_zen import (
+                    get_zen_default_free_model_entry,
+                )
+                if not default_name or is_placeholder_model_entry(
+                    {
+                        "api_base": result[0].get("api_base", ""),
+                        "api_key": result[0].get("api_key", ""),
+                        "model_name": result[0].get("model_name", ""),
+                    }
+                ):
+                    zen_default = get_zen_default_free_model_entry()
+                    if zen_default is not None:
+                        zen_name = (
+                            (zen_default.get("model_client_config") or {})
+                            .get("model_name", "")
+                        )
+                        if zen_name:
+                            active_model = zen_name
+            except Exception:
+                logger.debug("[models.list] resolve default model failed", exc_info=True)
+
+            # 追加 Opencode Zen 免费模型（内存态，不入 config.yaml）。
+            # 仅在此处合并展示，不影响 active_model（已取首位用户自配模型，
+            # 占位时已在上方回退到 Zen 免费模型）。
+            try:
+                from jiuwenswarm.server.runtime.opencode_zen import (
+                    get_zen_free_model_entries,
+                    get_zen_free_context_window,
+                )
+                zen_entries = get_zen_free_model_entries()
+                zen_cw = get_zen_free_context_window()
+                existing_names = {r["model_name"] for r in result}
+                for zent in zen_entries:
+                    zmcc = zent.get("model_client_config") or {}
+                    zname = zmcc.get("model_name", "")
+                    if not zname or zname in existing_names:
+                        continue
+                    existing_names.add(zname)
+                    result.append({
+                        "model_name": zname,
+                        "api_base": zmcc.get("api_base", ""),
+                        "api_key": zmcc.get("api_key", ""),
+                        "model_provider": zmcc.get("client_provider", ""),
+                        "temperature": (zent.get("model_config_obj") or {}).get("temperature", 0.95),
+                        "reasoning_level": "",
+                        "is_default": True,  # 出现在前端下拉框（is_default !== false 过滤）
+                        "alias": zent.get("alias", ""),
+                        "origin_index": -1,  # 非 config 条目，不参与 replace_all 保留逻辑
+                        "context_window_tokens": zen_cw,
+                        "is_free": bool(zent.get("is_free", False)),  # 免费模型分组标识（前端据此归入"免费模型"组）
+                    })
+            except Exception:
+                logger.debug("[models.list] append zen free models failed", exc_info=True)
+
             await channel.send_response(ws, req_id, ok=True, payload={
                 "models": result,
                 "active_model": active_model,
@@ -2395,9 +3220,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     yaml_updated.append("models.default_provider")
 
             if config_params:
-                applied_env, applied_yaml = _apply_config_payload(config_params)
+                apply_result = _apply_config_payload(config_params)
+                applied_env = apply_result.env_updates
+                applied_yaml = apply_result.yaml_updated
                 env_updates.update(applied_env)
                 yaml_updated.extend(applied_yaml)
+            else:
+                apply_result = _ConfigApplyResult({}, [])
 
             if new_models is not None:
                 default_provider = default_model_provider_from_entries(new_models)
@@ -2429,15 +3258,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             applied_without_restart = await _apply_config_change_set(change_set)
 
+            payload = {
+                "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
+                "applied_without_restart": applied_without_restart,
+                "models_count": models_count,
+            }
+            if apply_result.external_cli_dependency_installs is not None:
+                payload["external_cli_dependency_installs"] = apply_result.external_cli_dependency_installs
+
             await channel.send_response(
                 ws,
                 req_id,
                 ok=True,
-                payload={
-                    "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
-                    "applied_without_restart": applied_without_restart,
-                    "models_count": models_count,
-                },
+                payload=payload,
             )
         except _ConfigBadRequest as exc:
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
@@ -2774,7 +3607,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         create_params = dict(params)
         create_params.pop("session_id", None)
@@ -2884,7 +3716,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         ac = _resolve(agent_client)
         if ac is not None and getattr(ac, "server_ready", False):
@@ -4696,7 +5527,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload=result)
 
     async def _path_get(ws, req_id, params, session_id):
-        """读 browser.chrome_path 并返回给前端（会解析环境变量）。"""
+        """读 browser.chrome_path / browser_type 并返回给前端（会解析环境变量）。"""
         try:
             config_base = get_config()
         except FileNotFoundError:
@@ -4704,7 +5535,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws,
                 req_id,
                 ok=True,
-                payload={"chrome_path": "", "headless": True},
+                payload={"chrome_path": "", "browser_type": "auto", "headless": True},
             )
             return
 
@@ -4714,18 +5545,37 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         config = _resolve_env_vars(config_base)
         browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
         chrome_path = ""
+        browser_type = "auto"
         headless = True
         if isinstance(browser_cfg, dict):
             value = browser_cfg.get("chrome_path", "")
             if isinstance(value, str):
                 chrome_path = value
+            raw_type = browser_cfg.get("browser_type", "auto")
+            if isinstance(raw_type, str) and raw_type.strip():
+                normalized = raw_type.strip().lower()
+                if normalized in {"chrome", "google-chrome", "google_chrome"}:
+                    browser_type = "chrome"
+                elif normalized in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+                    browser_type = "msedge"
+                else:
+                    browser_type = "auto"
             raw_headless = browser_cfg.get("headless", True)
             headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "chrome_path": chrome_path,
+                "browser_type": browser_type,
+                "headless": headless,
+            },
+        )
 
     async def _path_set(ws, req_id, params, session_id):
-        """更新 browser.chrome_path / browser.headless 并写回 config。"""
+        """更新 browser.chrome_path / browser_type / headless 并写回 config。"""
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
@@ -4735,6 +5585,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="chrome_path must be string", code="BAD_REQUEST")
             return
         chrome_path = chrome_path.strip()
+
+        raw_browser_type = params.get("browser_type", "auto")
+        if not isinstance(raw_browser_type, str):
+            await channel.send_response(ws, req_id, ok=False, error="browser_type must be string", code="BAD_REQUEST")
+            return
+        normalized_type = raw_browser_type.strip().lower()
+        if normalized_type in {"chrome", "google-chrome", "google_chrome"}:
+            browser_type = "chrome"
+        elif normalized_type in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+            browser_type = "msedge"
+        elif normalized_type in {"", "auto"}:
+            browser_type = "auto"
+        else:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="browser_type must be one of: auto, chrome, msedge",
+                code="BAD_REQUEST",
+            )
+            return
 
         raw_headless = params.get("headless", True)
         headless = bool(raw_headless) if isinstance(raw_headless, bool) else True
@@ -4753,7 +5624,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
         try:
-            update_browser_in_config({"chrome_path": chrome_path, "headless": headless})
+            update_browser_in_config(
+                {
+                    "chrome_path": chrome_path,
+                    "browser_type": browser_type,
+                    "headless": headless,
+                }
+            )
             resolved_agent_client = _resolve(agent_client)
             await _clear_agent_config_cache(resolved_agent_client)
         except Exception as e:  # noqa: BLE001
@@ -4773,7 +5650,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 e,
             )
 
-        await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path, "headless": headless})
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "chrome_path": chrome_path,
+                "browser_type": browser_type,
+                "headless": headless,
+            },
+        )
 
     async def _path_select_directory(ws, req_id, params, session_id):
         """在服务端本机弹出系统文件夹对话框（浏览器 / whl 包回退方案）。
@@ -4858,6 +5744,53 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(
             ws, req_id, ok=True, payload={"files": selected, "cancelled": False},
         )
+
+    async def _path_select_file(ws, req_id, params, _session_id):
+        if not isinstance(params, dict):
+            params = {}
+
+        initial_dir = params.get("initial_dir")
+        initial_path = params.get("initial_path")
+        title = params.get("title")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_dir must be string", code="BAD_REQUEST",
+            )
+            return
+        if initial_path is not None and not isinstance(initial_path, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="initial_path must be string", code="BAD_REQUEST",
+            )
+            return
+        if title is not None and not isinstance(title, str):
+            await channel.send_response(
+                ws, req_id, ok=False, error="title must be string", code="BAD_REQUEST",
+            )
+            return
+
+        resolved_initial_dir = initial_dir.strip() if isinstance(initial_dir, str) else None
+        if isinstance(initial_path, str) and initial_path.strip():
+            resolved_initial_dir = str(Path(initial_path.strip()).expanduser().parent)
+
+        from jiuwenswarm.channels.web.directory_picker import select_file_native
+
+        try:
+            selected = await asyncio.to_thread(
+                select_file_native,
+                initial_dir=resolved_initial_dir,
+                title=title.strip() if isinstance(title, str) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[path.select_file] picker unavailable: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="UNSUPPORTED",
+            )
+            return
+
+        if not selected:
+            await channel.send_response(ws, req_id, ok=True, payload={"path": None, "cancelled": True})
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"path": selected, "cancelled": False})
 
     async def _memory_compute(ws, req_id, params, session_id):
         if _HAS_PSUTIL:
@@ -5980,6 +6913,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("config.set", _config_set)
     channel.register_method("config.save_all", _config_save_all)
     channel.register_method("config.validate_model", _config_validate_model)
+    channel.register_method("external_cli.detect", _external_cli_detect)
+    channel.register_method("external_cli.install_status", _external_cli_install_status)
     channel.register_method("models.list", _models_list)
     channel.register_method("models.replace_all", _models_replace_all)
     channel.register_method("models.validate", _models_validate)
@@ -6025,6 +6960,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("path.set", _path_set)
     channel.register_method("path.select_directory", _path_select_directory)
     channel.register_method("path.select_files", _path_select_files)
+    channel.register_method("path.select_file", _path_select_file)
 
     async def _hooks_list(ws, req_id, params, session_id):
         from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -6137,7 +7073,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         """permissions.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（与 config_rpc 同源）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.agent import AgentRequest
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
@@ -6209,6 +7144,72 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         out = resp.payload if isinstance(resp.payload, dict) else {}
         await channel.send_response(ws, req_id, ok=True, payload=out)
 
+    async def _forward_mcp_to_agent(ws, req_id, params, session_id, *, req_method):
+        """mcp.* : 经 E2A 转发到 AgentServer。"""
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+
+        if not isinstance(req_method, ReqMethod):
+            await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
+            return
+
+        ac = _resolve(agent_client)
+        if ac is None or not getattr(ac, "server_ready", False):
+            await channel.send_response(ws, req_id, ok=False, error="AgentServer not ready", code="AGENT_NOT_READY")
+            return
+
+        env = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+        )
+        try:
+            resp = await ac.send_request(env)
+        except Exception as e:
+            logger.exception("[mcp] forward to agent failed: %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+            return
+        if not resp.ok:
+            pl = resp.payload if isinstance(resp.payload, dict) else {}
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(pl.get("error") or "request failed"),
+                code=str(pl.get("code") or "BAD_REQUEST"),
+            )
+            return
+        out = resp.payload if isinstance(resp.payload, dict) else {}
+        await channel.send_response(ws, req_id, ok=True, payload=out)
+
+    async def _mcp_list_local(ws, req_id, params, session_id):
+        # 本地处理(不转发 AgentServer)，避免被长连接 connect 阻塞。直接读 marketplace。
+        # filter: builtin(预置目录) | local(已连接预置 + 全部自定义)。兜底 builtin。
+        try:
+            from jiuwenswarm.server.runtime.mcp.registry import list_marketplace_mcps
+            filter_val = str((params or {}).get("filter") or "builtin").strip().lower() or "builtin"
+            if filter_val not in ("builtin", "local"):
+                filter_val = "builtin"
+            items = await asyncio.to_thread(list_marketplace_mcps, filter_val)
+            await channel.send_response(ws, req_id, ok=True, payload={"type": "list", "items": items})
+        except Exception as exc:
+            logger.exception("[mcp] mcp.list failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=str(exc), code="MCP_INTERNAL")
+
+    def _register_mcp_agent(method_name: str, rm: Any) -> None:
+        async def _handler(ws, req_id, params, session_id):
+            await _forward_mcp_to_agent(ws, req_id, params, session_id, req_method=rm)
+        channel.register_method(method_name, _handler)
+
+    channel.register_method("mcp.list", _mcp_list_local)
+    _register_mcp_agent("mcp.show", ReqMethod.MCP_SHOW)
+    _register_mcp_agent("mcp.connect", ReqMethod.MCP_CONNECT)
+    _register_mcp_agent("mcp.wait_auth", ReqMethod.MCP_WAIT_AUTH)
+    _register_mcp_agent("mcp.disconnect", ReqMethod.MCP_DISCONNECT)
+    _register_mcp_agent("mcp.register_custom", ReqMethod.MCP_REGISTER_CUSTOM)
+    _register_mcp_agent("mcp.delete_custom", ReqMethod.MCP_DELETE_CUSTOM)
+    _register_mcp_agent("mcp.save_credentials", ReqMethod.MCP_SAVE_CREDENTIALS)
     from jiuwenswarm.common.schema.message import ReqMethod as _PermReq
 
     def _register_perm(method_name: str, rm: Any) -> None:
@@ -6255,7 +7256,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
         """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
-        from jiuwenswarm.common.schema.message import ReqMethod
 
         if not isinstance(req_method, ReqMethod):
             await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
@@ -6268,7 +7268,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 _HARNESS_PACKAGES_FILE,
                 AutoHarnessService,
             )
-            from pathlib import Path
 
             try:
                 if req_method == ReqMethod.HARNESS_PACKAGES_GET:
@@ -6453,3 +7452,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=f"Export failed: {exc}", code="INTERNAL_ERROR")
 
     channel.register_method("harness.export", _harness_export_handler)
+
+    real_agent_client = _resolve(agent_client)
+    # Container file transfer is HTTP on the WebChannel port (dual_protocol),
+    # not WS JSON-RPC. Bind any client that already exposes the container-file
+    # methods so build_web_channel_app can mount /file-api/* at channel.start().
+    # Do not import AgentOSRouterClient here: this module must not depend on extensions.
+    if _supports_container_file_api(real_agent_client):
+        channel.container_file_client = real_agent_client
+    else:
+        channel.container_file_client = None
