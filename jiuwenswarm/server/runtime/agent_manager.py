@@ -462,6 +462,17 @@ class AgentManager:
             topology[str(channel_id)] = sorted((str(agent_key), id(agent)) for agent_key, agent in agents.items())
         return topology
 
+    def iter_jiuwenswarm_instances(self) -> list["JiuWenSwarm"]:
+        """Return initialized agents from the current two-level cache."""
+        instances: list["JiuWenSwarm"] = []
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            instances.extend(
+                agent for agent in channel_agents.values() if agent is not None
+            )
+        return instances
+
     async def _create_agent(
         self,
         agent_key: str,
@@ -512,7 +523,12 @@ class AgentManager:
             setattr(agent, "_env_service_id", self._env_service_id)
             if self._user_workspace_dir is not None:
                 setattr(agent, "_user_workspace_dir", self._user_workspace_dir)
-            await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
+            await agent.create_instance(
+                config,
+                mode=mode_key,
+                sub_mode=sub_mode_key or None,
+                config_base=self._latest_config_base,
+            )
             setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
             setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
             setattr(agent, "_jiuwenswarm_agent_sub_mode", sub_mode_key)

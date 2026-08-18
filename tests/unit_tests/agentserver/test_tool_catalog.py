@@ -13,6 +13,7 @@ from jiuwenswarm.server.runtime.tool_catalog import (
     short_description_from_description,
     tool_catalog_entry_from_card,
 )
+from jiuwenswarm.server.runtime import tool_catalog
 
 
 class _FakeAbilityManager:
@@ -118,3 +119,14 @@ def test_jiuwenswarm_get_registered_tools_catalog_member() -> None:
     assert len(tools) == 1
     assert tools[0]["name"] == "grep"
     assert tools[0]["short_description"] == "Search in files."
+
+
+def test_stable_tools_catalog_includes_builtin_and_team_tools() -> None:
+    get_stable_tools_catalog = getattr(tool_catalog, "get_stable_tools_catalog", None)
+    assert callable(get_stable_tools_catalog)
+
+    catalog = get_stable_tools_catalog("en")
+
+    assert catalog["bash"]["description"]
+    assert catalog["spawn_external_cli"]["description"]
+    assert catalog["async_task_cancel"]["description"]

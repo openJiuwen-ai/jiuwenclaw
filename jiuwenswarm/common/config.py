@@ -1012,6 +1012,87 @@ def get_permissions_tools() -> dict[str, Any]:
     return {"tools": dict(tools)}
 
 
+def normalize_permissions_tool_level(raw: Any) -> str | None:
+    """Normalize a configured tool level for UI display."""
+    if isinstance(raw, str):
+        level = raw.strip().lower()
+        if level in {"guard", "ask"}:
+            return "ask"
+        if level in _VALID_PERM_LEVEL:
+            return level
+        return None
+    if isinstance(raw, dict) and "*" in raw:
+        return normalize_permissions_tool_level(raw.get("*"))
+    return None
+
+
+def get_permissions_defaults_level() -> str:
+    """Return the effective default tool level as ``allow|ask|deny``."""
+    raw = _effective_permissions().get("defaults", "guard")
+    return normalize_permissions_tool_level(raw) or "ask"
+
+
+def build_permissions_tools_list_view(
+    catalog_by_name: dict[str, dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Build the permissions list from runtime and explicitly configured tools."""
+    from jiuwenswarm.server.runtime.tool_catalog import (
+        get_stable_tools_catalog,
+        ui_list_short_description,
+    )
+
+    runtime_catalog = dict(catalog_by_name or {})
+    configured_tools = get_permissions_tools().get("tools")
+    if not isinstance(configured_tools, dict):
+        configured_tools = {}
+    default_level = get_permissions_defaults_level()
+    preferred_language = str(
+        (get_config() or {}).get("preferred_language", "")
+    ).lower()
+    stable_catalog = get_stable_tools_catalog(
+        "en" if preferred_language.startswith("en") else "cn"
+    )
+    visible_names = set(runtime_catalog) | {
+        str(name).strip() for name in configured_tools if str(name).strip()
+    }
+
+    tools_out: list[dict[str, Any]] = []
+    for name in sorted(visible_names):
+        runtime_entry = runtime_catalog.get(name, {})
+        stable_entry = stable_catalog.get(name, {})
+        short = ui_list_short_description(
+            name,
+            description=str(runtime_entry.get("description", "") or ""),
+            short_description=str(
+                runtime_entry.get("short_description", "") or ""
+            ),
+        )
+        if not short:
+            short = ui_list_short_description(
+                name,
+                description=str(stable_entry.get("description", "") or ""),
+                short_description=str(
+                    stable_entry.get("short_description", "") or ""
+                ),
+            )
+        configured = name in configured_tools
+        level = (
+            normalize_permissions_tool_level(configured_tools.get(name))
+            if configured
+            else None
+        ) or default_level
+        tools_out.append(
+            {
+                "name": name,
+                "short_description": short,
+                "level": level,
+                "configured": configured,
+                "registered": name in runtime_catalog,
+            }
+        )
+    return {"default_level": default_level, "tools": tools_out}
+
+
 def replace_permissions_tools_in_config(tools: Any) -> None:
     """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``（或 legacy ``{\"*\": level}``）。"""
     normalized = _validate_tools_map(tools)
@@ -1513,69 +1594,92 @@ def _require_non_empty_string(value: Any, field_name: str) -> str:
     return text
 
 
-def _transform_front_team_model_config(model_raw: dict[str, Any]) -> dict[str, Any]:
-    model_client_config: dict[str, Any] = {}
-    model_request_config: dict[str, Any] = {}
+def resolve_legacy_team_model_ref(
+    model_raw: dict[str, Any],
+    config_data: dict[str, Any] | None,
+) -> str | None:
+    legacy_model_name = str(resolve_env_vars(model_raw.get("model") or "")).strip()
+    if not legacy_model_name:
+        return None
+    models = config_data.get("models") if isinstance(config_data, dict) else None
+    defaults = models.get("defaults") if isinstance(models, dict) else None
+    if not isinstance(defaults, list):
+        return None
 
-    # 从 models.defaults 列表中按 #index 查找完整配置
-    model_value = model_raw.get("model")
-    if model_value and isinstance(model_value, str) and "#" in model_value:
-        sep = model_value.rfind("#")
-        model_name_part = model_value[:sep]
-        index_part = model_value[sep + 1:]
-        try:
-            target_index = int(index_part)
-        except ValueError:
-            target_index = None
-        if target_index is not None:
-            defaults_list = get_config_raw().get("models", {}).get("defaults")
-            if isinstance(defaults_list, list) and 0 <= target_index < len(defaults_list):
-                entry = defaults_list[target_index]
-                if isinstance(entry, dict):
-                    mcc = entry.get("model_client_config")
-                    if isinstance(mcc, dict):
-                        model_client_config.update({
-                            k: v for k, v in mcc.items()
-                            if k not in ("model_name",) and v is not None
-                        })
-                        model_request_config["model"] = resolve_env_vars(str(mcc.get("model_name", model_name_part)))
-                    mco = entry.get("model_config_obj")
-                    if isinstance(mco, dict):
-                        model_request_config.update(mco)
-
-    # 前端字段覆盖（优先级高于 #index 解析）
-    if "provider" in model_raw and model_raw["provider"] is not None:
-        model_client_config["client_provider"] = model_raw["provider"]
-    if "api_base" in model_raw and model_raw["api_base"] is not None:
-        model_client_config["api_base"] = model_raw["api_base"]
-    if "api_key" in model_raw and model_raw["api_key"] is not None:
-        model_client_config["api_key"] = model_raw["api_key"]
-    if "model" in model_raw and model_raw["model"] is not None:
-        # 若包含 #index，提取纯 model_name
-        raw_model = model_raw["model"]
-        if isinstance(raw_model, str) and "#" in raw_model:
-            model_request_config["model"] = raw_model[:raw_model.rfind("#")]
-        else:
-            model_request_config["model"] = raw_model
-
-    transformed: dict[str, Any] = {}
-    if model_client_config:
-        model_client_config.setdefault("timeout", 1800)
-        model_client_config.setdefault("verify_ssl", False)
-        model_client_config.setdefault("custom_headers", {})
-        transformed["model_client_config"] = model_client_config
-    if model_request_config:
-        transformed["model_request_config"] = model_request_config
-    return transformed
+    source_provider = str(
+        resolve_env_vars(model_raw.get("provider") or "")
+    ).strip().lower()
+    source_api_base = str(
+        resolve_env_vars(model_raw.get("api_base") or "")
+    ).strip().rstrip("/")
+    matches: list[int] = []
+    for index, entry in enumerate(defaults):
+        if not isinstance(entry, dict):
+            continue
+        client_config = entry.get("model_client_config")
+        if not isinstance(client_config, dict):
+            continue
+        candidate_name = str(resolve_env_vars(client_config.get("model_name") or "")).strip()
+        if candidate_name != legacy_model_name:
+            continue
+        candidate_provider = str(
+            resolve_env_vars(client_config.get("client_provider") or "")
+        ).strip().lower()
+        if source_provider and candidate_provider != source_provider:
+            continue
+        candidate_api_base = str(
+            resolve_env_vars(client_config.get("api_base") or "")
+        ).strip().rstrip("/")
+        if source_api_base and candidate_api_base != source_api_base:
+            continue
+        matches.append(index)
+    if len(matches) != 1:
+        return None
+    return f"{legacy_model_name}#{matches[0]}"
 
 
-def _transform_front_team_agent_spec(agent_key: str, agent_raw: Any) -> dict[str, Any]:
+def _transform_front_team_model_config(
+    model_raw: dict[str, Any],
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    model_ref = str(model_raw.get("ref") or "").strip()
+    if not model_ref:
+        legacy_value = str(model_raw.get("model") or "").strip()
+        if "#" in legacy_value:
+            model_ref = legacy_value
+    if not model_ref:
+        if not str(model_raw.get("model") or "").strip():
+            return {}
+        model_ref = resolve_legacy_team_model_ref(model_raw, config_data)
+        if model_ref is None:
+            legacy_model_name = str(model_raw.get("model") or "").strip()
+            raise ValueError(
+                f"legacy team agent model {legacy_model_name!r} does not resolve to a unique models.defaults entry"
+            )
+
+    model_name, separator, index_text = model_ref.rpartition("#")
+    if not separator or not model_name.strip():
+        raise ValueError("team agent model.ref must use model_name#index")
+    try:
+        model_index = int(index_text)
+    except ValueError as exc:
+        raise ValueError("team agent model.ref index must be an integer") from exc
+    if model_index < 0:
+        raise ValueError("team agent model.ref index must be non-negative")
+    return {"ref": f"{model_name.strip()}#{model_index}"}
+
+
+def _transform_front_team_agent_spec(
+    agent_key: str,
+    agent_raw: Any,
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     agent_config = _require_dict(agent_raw, f"agents.{agent_key}")
     transformed: dict[str, Any] = {}
 
     if "model" in agent_config:
         model_raw = _require_dict(agent_config.get("model"), f"agents.{agent_key}.model")
-        transformed_model = _transform_front_team_model_config(model_raw)
+        transformed_model = _transform_front_team_model_config(model_raw, config_data)
         if transformed_model:
             transformed["model"] = transformed_model
 
@@ -1591,14 +1695,18 @@ def _resolve_front_team_agent_spec(
     agent_key: Any,
     *,
     field_name: str,
+    config_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_key = _require_non_empty_string(agent_key, field_name)
     if resolved_key not in agents_raw:
         raise ValueError(f"{field_name} references unknown agent_key: {resolved_key}")
-    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key])
+    return _transform_front_team_agent_spec(resolved_key, agents_raw[resolved_key], config_data)
 
 
-def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
+def _build_modes_team_mapping(
+    front_payload: dict[str, Any],
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     agents_raw = _require_dict(front_payload.get("agents"), "agents")
     teams_raw = front_payload.get("team")
     if teams_raw is None:
@@ -1634,6 +1742,7 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
             agents_raw,
             leader_raw.get("agent_key"),
             field_name=f"team[{team_index}].leader.agent_key",
+            config_data=config_data,
         )
 
         teammate_raw = team_raw.get("teammate")
@@ -1644,6 +1753,7 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
                 agents_raw,
                 teammate_raw.get("agent_key"),
                 field_name=f"team[{team_index}].teammate.agent_key",
+                config_data=config_data,
             )
             transformed_team["teammate"] = {"agent_key": teammate_raw.get("agent_key", "")}
 
@@ -1683,6 +1793,7 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
                 agents_raw,
                 member.get("agent_key"),
                 field_name=f"team[{team_index}].predefined_members[{member_index}].agent_key",
+                config_data=config_data,
             )
             transformed_agents[member_name] = member_agent_spec
 
@@ -1698,12 +1809,15 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
     return team_mapping
 
 
-def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
+def _build_front_agent_registry(
+    front_payload: dict[str, Any],
+    config_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     agents_raw = _require_dict(front_payload.get("agents"), "agents")
     registry: dict[str, Any] = {}
     for agent_key, agent_raw in agents_raw.items():
         resolved_key = _require_non_empty_string(agent_key, f"agents.{agent_key}")
-        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw)
+        registry[resolved_key] = _transform_front_team_agent_spec(resolved_key, agent_raw, config_data)
     return registry
 
 
@@ -1723,7 +1837,7 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     panel_cfg_modified = False
     agent_registry = None
     if "agents" in front_payload:
-        agent_registry = _build_front_agent_registry(front_payload)
+        agent_registry = _build_front_agent_registry(front_payload, data)
         panel_cfg = data.get("web_config_panel")
         if not isinstance(panel_cfg, dict):
             panel_cfg = {}
@@ -1742,7 +1856,7 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
         return
 
     # 非空数组：正常构建并保存
-    team_mapping = _build_modes_team_mapping(front_payload)
+    team_mapping = _build_modes_team_mapping(front_payload, data)
 
     data = load_yaml_round_trip(_current_config_yaml_path())
     # Merge web_config_panel back into reloaded data (it was written earlier in this function)

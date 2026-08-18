@@ -104,7 +104,6 @@ _COMMON_RAIL_NAMES: tuple[str, ...] = (
 _COMMON_TOOL_NAMES: tuple[str, ...] = (
     registry.WEB_SEARCH,
     registry.WEB_FETCH,
-    registry.WEB_PAID_SEARCH,
     registry.VISION,
     registry.AUDIO,
     # Skill-management tools (search/install/uninstall_skill) are registered by
@@ -156,7 +155,6 @@ _CODE_SHARED_RAIL_NAMES: tuple[str, ...] = (
 _CODE_TOOL_NAMES: tuple[str, ...] = (
     registry.WEB_SEARCH,
     registry.WEB_FETCH,
-    registry.WEB_PAID_SEARCH,
     registry.VISION,
     registry.AUDIO,
     # See _COMMON_TOOL_NAMES: skill tools come from the MEMBER_SKILL_TOOLKIT

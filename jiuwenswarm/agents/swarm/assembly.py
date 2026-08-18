@@ -25,10 +25,12 @@ from typing import Any
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 
 from jiuwenswarm.agents.swarm.config_specs import build_member_deep_agent_spec
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
-from jiuwenswarm.agents.swarm.registry import register_swarm_providers
+from jiuwenswarm.agents.harness.team.config_loader import _normalize_prompt_language
+from jiuwenswarm.agents.swarm.registry import STREAM_EVENT, register_swarm_providers
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.mcp_config import build_enabled_mcp_server_configs
 from jiuwenswarm.common.utils import get_agent_skills_dir
@@ -37,6 +39,25 @@ logger = logging.getLogger(__name__)
 
 # Member roles enriched in place, in deterministic order.
 _MEMBER_ROLES: tuple[str, ...] = ("leader", "teammate")
+
+
+def _mount_named_teammate_stream_events(spec: Any) -> list[str]:
+    """Mount canonical UI stream events on named predefined LLM teammates."""
+    mounted: list[str] = []
+    for member in getattr(spec, "predefined_members", None) or []:
+        role_type = getattr(member, "role_type", None)
+        if getattr(role_type, "value", role_type) != "teammate":
+            continue
+        member_name = str(getattr(member, "member_name", "") or "").strip()
+        if not member_name or member_name in _MEMBER_ROLES or member_name not in spec.agents:
+            continue
+        member_spec = spec.agents[member_name]
+        rails = list(member_spec.rails or [])
+        if not any(rail.type == STREAM_EVENT for rail in rails):
+            rails.append(RailSpec(type=STREAM_EVENT))
+            spec.agents[member_name] = member_spec.model_copy(update={"rails": rails})
+        mounted.append(member_name)
+    return mounted
 
 
 def _with_project_cwd(member_spec: Any, project_dir: str | None) -> Any:
@@ -62,6 +83,7 @@ def enrich_team_spec_for_swarm(
     request_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
+    config_base: dict[str, Any] | None = None,
 ) -> None:
     """Enrich *spec* in place for provider-based swarm assembly.
 
@@ -77,10 +99,11 @@ def enrich_team_spec_for_swarm(
         request_id: Originating request id, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
+        config_base: Explicit effective config snapshot for the active tenant.
     """
     register_swarm_providers()
 
-    config = get_config()
+    config = config_base if config_base is not None else get_config()
     workspace = spec.workspace
     team_ws_root = (
         workspace.root_path
@@ -105,6 +128,10 @@ def enrich_team_spec_for_swarm(
         global_skills_dir=global_skills_dir,
         trajectory_registry=InMemoryTrajectoryRegistry(),
         config=config,
+        language=_normalize_prompt_language(
+            getattr(spec, "language", None)
+            or (config.get("preferred_language") if isinstance(config, dict) else None)
+        ),
     )
     mcp_configs = build_enabled_mcp_server_configs(
         config,
@@ -124,15 +151,18 @@ def enrich_team_spec_for_swarm(
             member_spec = _with_project_cwd(member_spec, project_dir)
             spec.agents[role] = member_spec
 
+    named_teammates = _mount_named_teammate_stream_events(spec)
+
     spec.build_context = base
     # Carry a serializable seed alongside the live context so members rebuilt
     # across a serialization boundary (spawned teammate, distributed remote,
     # cold recovery) can reconstruct the context via the registered factory.
     spec.build_context_seed = base.to_seed()
     logger.info(
-        "[swarm.assembly] enriched team spec '%s' (roles=%s, session=%s, mcps=%d)",
+        "[swarm.assembly] enriched team spec '%s' (roles=%s, named_teammates=%s, session=%s, mcps=%d)",
         spec.team_name,
         [role for role in _MEMBER_ROLES if role in spec.agents],
+        named_teammates,
         session_id,
         len(mcp_configs),
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from types import SimpleNamespace
 import uuid
 
@@ -445,13 +446,15 @@ async def test_real_team_runner_uses_same_provider_and_has_no_orphans(
     )
 
     async def _consume_one_answer() -> None:
-        async for chunk in Runner.run_agent_team_streaming(
+        stream = Runner.run_agent_team_streaming(
             agent_team=spec,
             inputs={"query": "Say hello"},
             session=session_id,
-        ):
-            if getattr(chunk, "type", "") in {"answer", "team_completed"}:
-                return
+        )
+        async with aclosing(stream):
+            async for chunk in stream:
+                if getattr(chunk, "type", "") in {"answer", "team_completed"}:
+                    return
 
     monkeypatch.chdir(tmp_path)
     await Runner.start()

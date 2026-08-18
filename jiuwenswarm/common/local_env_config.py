@@ -38,12 +38,10 @@ _DEFAULT_HEADERS_ALIASES = (
     "DEFAULT_HEADERS",
     "OPENAI_DEFAULT_HEADERS",
 )
-# Huawei MaaS / OfficeClaw: same Authorization JSON is also synced for Petal.
-# Use as fallback when ``default_headers`` is missing from tip seal.
+# Huawei MaaS / OfficeClaw: use the protocol-specific header as a fallback when
+# ``default_headers`` is missing from the tip seal.
 _DEFAULT_HEADERS_FALLBACK_ALIASES = (
     "OFFICE_CLAW_HUAWEI_MAAS_HEADERS_JSON",
-    "PETAL_SEARCH_HEADERS",
-    "PETAL_API_KEY",
 )
 
 logger = logging.getLogger(__name__)
@@ -285,6 +283,8 @@ def normalize_env_ns_id(value: str | None, *, default: str = _DEFAULT_AGENT_ID) 
         text = str(value).strip() or default
     if "__" in text:
         raise EnvNsIdError(f"env ns id must not contain '__': {text!r}")
+    if any(token in text for token in ("\x00", "/", "\\")) or text in {".", ".."}:
+        raise EnvNsIdError(f"env ns id must not contain path syntax: {text!r}")
     return text
 
 
@@ -1145,7 +1145,6 @@ def read_default_headers_raw() -> str:
     for env_key in _DEFAULT_HEADERS_FALLBACK_ALIASES:
         raw = read_env(env_key, "")
         text = raw.strip()
-        # PETAL_API_KEY may be a real API key; only accept JSON object payloads.
         if text.startswith("{") and text.endswith("}"):
             return text
     return ""

@@ -1141,8 +1141,14 @@ class JiuWenSwarm:
                 return "code"
         return "agent"
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *,
-                              mode: str = "agent", sub_mode: str = None) -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
+    ) -> None:
         """初始化 Agent 实例.
 
         Args:
@@ -1153,7 +1159,10 @@ class JiuWenSwarm:
         adapter = self._ensure_adapter(mode=mode)
         setattr(adapter, "_env_service_id", getattr(self, "_env_service_id", "default"))
         setattr(adapter, "_env_agent_id", getattr(self, "_env_agent_id", "default"))
-        await adapter.create_instance(config, mode=mode, sub_mode=sub_mode)
+        create_kwargs: dict[str, Any] = {"mode": mode, "sub_mode": sub_mode}
+        if config_base is not None:
+            create_kwargs["config_base"] = config_base
+        await adapter.create_instance(config, **create_kwargs)
         logger.info(
             "[JiuWenSwarm] Agent instance created: sdk=%s, mode=%s, sub_mode=%s",
             self._sdk_name, mode, sub_mode,
@@ -2721,6 +2730,7 @@ class JiuWenSwarm:
         stream_done = asyncio.Event()
         final_answer_content = ""
         final_answer_chunks: list[str] = []
+        facade_emitted_terminal_chunk = False
         durable_pending_final_chunks: list[str] = []
         durable_pending_reasoning_chunks: list[str] = []
         durable_final_content = ""
@@ -3014,6 +3024,8 @@ class JiuWenSwarm:
                                     durable_final_content = str(data.payload.get("content", ""))
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
+                        if data.is_complete:
+                            facade_emitted_terminal_chunk = True
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
@@ -3224,12 +3236,13 @@ class JiuWenSwarm:
 
         _schedule_symphony_session_feedback(session_id, rid)
         await self._try_apply_adapter_pending_reload()
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={"is_complete": True},
-            is_complete=True,
-        )
+        if not facade_emitted_terminal_chunk:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
 
     # ---------- 实例获取 ----------
 

@@ -5,9 +5,22 @@ import {
   canAutoSaveOpenAIAccountModel,
   patchModelSnapshot,
   preserveConfiguredModelName,
+  resolveConfiguredModelIndex,
   shouldContinueOpenAIAccountLoginPoll,
   syncAgentsWithModelChanges,
 } from "../node_modules/.cache/openai-account-model-state/components/ConfigPanel/openaiAccountModelState.js";
+
+test('resolveConfiguredModelIndex only resolves a bare model name when it is unique', () => {
+  const models = [
+    { model_name: 'gpt-4.1', model_provider: 'OpenAI', api_base: 'https://one.example/v1', api_key: '' },
+    { model_name: 'gpt-4.1', model_provider: 'OpenAI', api_base: 'https://two.example/v1', api_key: '' },
+    { model_name: 'o3', model_provider: 'OpenAI', api_base: 'https://api.openai.com/v1', api_key: '' },
+  ];
+
+  assert.equal(resolveConfiguredModelIndex(models, 'gpt-4.1'), -1);
+  assert.equal(resolveConfiguredModelIndex(models, 'o3'), 2);
+  assert.equal(resolveConfiguredModelIndex(models, 'gpt-4.1#1'), 1);
+});
 
 const persistedModels = [
   {
@@ -182,7 +195,31 @@ test("updates only agents linked to the changed model entry", () => {
 
   assert.notEqual(updated, agents);
   assert.equal(updated[0].model.model, "gpt-new");
+  assert.equal(updated[0].model.ref, "gpt-new#0");
   assert.equal(updated[1], agents[1]);
+});
+
+test("keeps agents bound to the same model entry after models are reordered", () => {
+  const agents = [{
+    name: "coding-agent",
+    model: {
+      ref: "gpt-old#0",
+      provider: "OpenAIAccount",
+      api_base: "https://chatgpt.com/backend-api/codex",
+      api_key: "",
+      model: "gpt-old",
+    },
+    skills: ["coding"],
+  }];
+
+  const updated = syncAgentsWithModelChanges(
+    agents,
+    persistedModels,
+    [persistedModels[1], persistedModels[0]],
+  );
+
+  assert.equal(updated[0].model.model, "gpt-old");
+  assert.equal(updated[0].model.ref, "gpt-old#1");
 });
 
 test("keeps the same agent snapshot when no linked model changed", () => {

@@ -70,6 +70,7 @@ async def _invoke(
     db_snapshot: dict[str, Any] | None,
     active_team_name: str | None = "team-sess-1",
     metadata_team_name: str | None = None,
+    metadata_runtime_team_name: str | None = None,
 ):
     from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
     from jiuwenswarm.server import agent_ws_server
@@ -97,7 +98,12 @@ async def _invoke(
         mock.patch(
             "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
             return_value=(
-                {"team_name": metadata_team_name} if metadata_team_name else {}
+                {
+                    "team_name": metadata_team_name,
+                    "runtime_team_name": metadata_runtime_team_name,
+                }
+                if metadata_team_name or metadata_runtime_team_name
+                else {}
             ),
         ),
     ):
@@ -166,9 +172,15 @@ async def test_monitor_down_uses_db() -> None:
         "tasks": [{"task_id": "uuid-1", "title": "t", "status": "completed"}],
         "team_id": "team-sess-1",
     }
-    resp, db_calls = await _invoke(monitor=None, db_snapshot=db)
+    resp, db_calls = await _invoke(
+        monitor=None,
+        db_snapshot=db,
+        active_team_name=None,
+        metadata_team_name="logical-team",
+        metadata_runtime_team_name="logical-team_sess-1",
+    )
 
-    assert db_calls == [("sess-1", "team-sess-1")]
+    assert db_calls == [("sess-1", "logical-team_sess-1")]
     assert resp.payload["tasks"][0]["task_id"] == "uuid-1"
     assert resp.payload["members"][0]["member_id"] == "w1"
 

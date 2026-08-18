@@ -260,8 +260,12 @@ _MERGE = {
 def _session_dir(
     session_id: str, *, create: bool = True, sessions_root: str | None = None
 ) -> Path:
-    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
-    session_dir = root / session_id
+    from jiuwenswarm.server.runtime.session.session_metadata import resolve_session_subdir
+
+    selected_root = sessions_root if sessions_root is not None else get_agent_sessions_dir()
+    session_dir = resolve_session_subdir(session_id, sessions_root=selected_root)
+    if session_dir is None:
+        raise ValueError("invalid session_id")
     if create:
         session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
@@ -287,23 +291,16 @@ def resolve_session_dir(
         ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
         ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
     """
-    from jiuwenswarm.server.runtime.prompt_attachment_loader import sanitize_session_id
+    from jiuwenswarm.server.runtime.session.session_metadata import resolve_session_subdir
 
-    if not session_id or sanitize_session_id(session_id) != session_id:
+    selected_root = sessions_root if sessions_root is not None else get_agent_sessions_dir()
+    resolved = resolve_session_subdir(session_id, sessions_root=selected_root)
+    if resolved is None:
         return None, "invalid session_id"
-
-    if sessions_root is None:
-        sessions_root = get_agent_sessions_dir()
-    session_dir = sessions_root / session_id
     # 纵深防御必须在 mkdir 之前：先 resolve + relative_to 确认路径仍在 sessions
     # 目录内，通过后才允许创建。否则白名单一旦被绕过，mkdir(parents=True) 会
     # 先在 sessions 根目录之外越界创建目录，relative_to 才事后检测到——此时
     # 副作用已发生，越界空目录残留在磁盘上（虽不触发 rmtree，但仍是文件系统泄漏）。
-    try:
-        resolved = session_dir.resolve(strict=False)
-        resolved.relative_to(sessions_root.resolve(strict=False))
-    except (ValueError, OSError):
-        return None, "invalid session_id"
     if create:
         resolved.mkdir(parents=True, exist_ok=True)
     return resolved, None

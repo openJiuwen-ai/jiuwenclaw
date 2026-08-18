@@ -57,6 +57,7 @@ class ReqMethod(Enum):
     TEAM_BINDING_GENERATE = "team.binding.generate"
     TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
+    TEAM_SESSION_RESET = "team.session.reset"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"

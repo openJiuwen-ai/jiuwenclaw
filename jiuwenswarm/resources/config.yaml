@@ -260,54 +260,54 @@ models:
         max_tokens: ${LLM_MAX_TOKENS:-32768}
       is_default: true
   video:
-      model_client_config:
-        api_base: ${VIDEO_API_BASE}
-        api_key: ${VIDEO_API_KEY}
-        model_name: ${VIDEO_MODEL_NAME}
-        client_provider: ${VIDEO_PROVIDER}
-        timeout: 1800
-        verify_ssl: true
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${VIDEO_API_BASE}
+      api_key: ${VIDEO_API_KEY}
+      model_name: ${VIDEO_MODEL_NAME}
+      client_provider: ${VIDEO_PROVIDER}
+      timeout: 1800
+      verify_ssl: true
+    model_config_obj:
+      temperature: 0.6
   audio:
-      model_client_config:
-        api_base: ${AUDIO_API_BASE}
-        api_key: ${AUDIO_API_KEY}
-        model_name: ${AUDIO_MODEL_NAME}
-        client_provider: ${AUDIO_PROVIDER}
-        verify_ssl: true
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${AUDIO_API_BASE}
+      api_key: ${AUDIO_API_KEY}
+      model_name: ${AUDIO_MODEL_NAME}
+      client_provider: ${AUDIO_PROVIDER}
+      verify_ssl: true
+      timeout: 1800
+    model_config_obj:
+      temperature: 0.6
   vision:
-      model_client_config:
-        api_base: ${VISION_API_BASE}
-        api_key: ${VISION_API_KEY}
-        model_name: ${VISION_MODEL_NAME}
-        client_provider: ${VISION_PROVIDER}
-        verify_ssl: true
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${VISION_API_BASE}
+      api_key: ${VISION_API_KEY}
+      model_name: ${VISION_MODEL_NAME}
+      client_provider: ${VISION_PROVIDER}
+      verify_ssl: true
+      timeout: 1800
+    model_config_obj:
+      temperature: 0.6
   image_gen:
-      model_client_config:
-        api_base: ${IMAGE_GEN_API_BASE}
-        api_key: ${IMAGE_GEN_API_KEY}
-        model_name: ${IMAGE_GEN_MODEL_NAME}
-        client_provider: ${IMAGE_GEN_PROVIDER}
-        verify_ssl: true
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${IMAGE_GEN_API_BASE}
+      api_key: ${IMAGE_GEN_API_KEY}
+      model_name: ${IMAGE_GEN_MODEL_NAME}
+      client_provider: ${IMAGE_GEN_PROVIDER}
+      verify_ssl: true
+      timeout: 1800
+    model_config_obj:
+      temperature: 0.6
 
 # 外接 ACP Agent（stdio），供工具 acp_chat 使用。按需取消注释并填写；command/args 可指向任意兼容 ACP 的包（与 VS Code formulahendry.acp-client 预置列表一致）。
 acp_agents:
-   codex:
-     command: npx
-     args: ["@zed-industries/codex-acp@latest"]
-     cwd:
-     env:
-       OPENAI_API_KEY: ${OPENAI_API_KEY}   # 仅由此 env 注入子进程（不读 workspace .env / 父进程）
+  codex:
+    command: npx
+    args: ["@zed-industries/codex-acp@latest"]
+    cwd:
+    env:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}    # 仅由此 env 注入子进程（不读 workspace .env / 父进程）
 
 # ============================================================
 # Agent 配置（可被 team.agents / modes.team.<name>.agents 引用）
@@ -994,10 +994,8 @@ permissions:
   enabled: false
   schema: tiered_policy
   permission_mode: normal
-
   defaults:
-    "*": "allow"
-
+    '*': allow
   tools:
     bash: ask
     mcp_exec_command: ask
@@ -1006,7 +1004,6 @@ permissions:
     write_file: allow
     edit_file: allow
     search_replace: allow
-    # ask_user 只向用户提问，不修改系统，自动放行避免权限中断阻塞问题选项呈现
     ask_user: allow
     write_memory: allow
     edit_memory: allow
@@ -1018,11 +1015,9 @@ permissions:
     todo_complete: allow
     todo_remove: allow
     todo_list: allow
-    # Coding Memory 工具权限
     coding_memory_write: allow
     coding_memory_edit: allow
     coding_memory_read: allow
-    # 外接记忆工具（External Memory — OpenJiuwen / Mem0 / OpenViking）
     ltm_search: allow
     ltm_search_summary: allow
     mem0_profile: allow
@@ -1047,98 +1042,154 @@ permissions:
 
   rules:
     - id: shell_allow_dir
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "dir *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: dir *
       severity: LOW
     - id: shell_allow_ls
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "ls *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: ls *
       severity: LOW
     - id: shell_allow_pwd
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "pwd *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: pwd *
       severity: LOW
     - id: shell_allow_cd
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "cd *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: cd *
       severity: LOW
     - id: shell_allow_echo
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "echo *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: echo *
       severity: LOW
     - id: shell_allow_cat
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "cat *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: cat *
       severity: LOW
     - id: shell_allow_type
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "type *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: type *
       severity: LOW
     - id: shell_allow_head
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "head *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: head *
       severity: LOW
     - id: shell_allow_tail
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "tail *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: tail *
       severity: LOW
     - id: shell_allow_git_status
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "git status *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: git status *
       severity: LOW
     - id: shell_allow_git_log
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "git log *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: git log *
       severity: LOW
     - id: shell_allow_git_diff
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "git diff *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: git diff *
       severity: LOW
     - id: shell_allow_git_branch
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "git branch *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: git branch *
       severity: LOW
     - id: shell_ask_rm
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "rm *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: rm *
       severity: HIGH
     - id: shell_ask_del
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "del *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: del *
       severity: HIGH
     - id: shell_ask_rd
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "rd *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: rd *
       severity: HIGH
     - id: shell_ask_mv
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "mv *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: mv *
       severity: HIGH
     - id: shell_ask_cp
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "cp *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: cp *
       severity: HIGH
     - id: shell_ask_chmod
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "chmod *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: chmod *
       severity: HIGH
     - id: shell_ask_chown
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "chown *"
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: chown *
       severity: HIGH
     - id: shell_ask_sensitive_file_reads
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
+      tools:
+        - bash
+        - mcp_exec_command
+        - create_terminal
+      pattern: re:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))
       severity: HIGH
-    # path_ask_* 已迁到 file_guard.paths（match: glob）；Pipeline A 不再重复匹配。
-    # - id: path_ask_ssh / path_ask_env → 见下方 file_guard.paths
-
-  # 数字分身 owner-scoped 权限（默认空，不生效）
   owner_scopes: {}
-  deny_guidance_message: ""
-
-  # Native 路径层（agent-core FileGuard）：defaults + workspace 绑定运行时 workspace_root
-  # trusted_dirs（TUI 项目 cwd / /add-dir）由引擎运行时编译，不必写进 YAML。
+  deny_guidance_message: ''
   file_guard:
     enabled: true
     defaults:
@@ -1150,22 +1201,18 @@ permissions:
       write: allow
       exec: ask
     paths:
-      - path: "**/.ssh/**"
+      - path: '**/.ssh/**'
         match: glob
         read: ask
         write: ask
         exec: ask
-      - path: "**/.env*"
+      - path: '**/.env*'
         match: glob
         read: ask
         write: ask
         exec: ask
-
-  # Legacy external_directory：仅作兼容；启用上方 Native file_guard 后 "*" 不再驱动路径层。
-  # 新信任目录写入 file_guard.paths（/add-dir），勿再写本键具名 allow。
   external_directory:
-    "*": "ask"
-
+    '*': ask
 browser:
   # chrome_path can be a string or per-OS map.
   # Example:
@@ -1182,7 +1229,7 @@ updater:
   # 桌面端版本检查源类型：gitcode / github
   desktop_release_api_type: "gitcode"
   repo_owner: openJiuwen
-  repo_name: jiuwenswarm 
+  repo_name: jiuwenswarm
   release_api_url: ""
   asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
   asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
@@ -1319,9 +1366,9 @@ modes:
       - skill_retrieval
 
     embedding_config:
-      model_name: null
-      base_url: null
-      api_key: null
+      model_name:
+      base_url:
+      api_key:
   team:
     jiuwen_team:
       team_name: jiuwen_team
@@ -1329,6 +1376,8 @@ modes:
       teammate_mode: build_mode
       spawn_mode: inprocess
       enable_swarmflow: false
+      # Per-teammate soft ceiling for debate messages; task-board collaboration is excluded.
+      max_debate_rounds: 3
 
       # SwarmFlow per-Leader concurrency caps (three-layer governor).
       # Only effective when enable_swarmflow is true.
@@ -1338,7 +1387,7 @@ modes:
       #   max_agents_total: L3 — global agent admission across all runs (>=1).
       swarmflow_concurrency:
         max_workflows: 16
-        agents_per_run: null
+        agents_per_run:
         max_agents_total: 64
 
       # Enable the host-managed worktree capability used by team members and

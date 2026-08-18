@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import logging
 import re
 import time
@@ -69,7 +70,11 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     build_member_rails,
 )
 from jiuwenswarm.common.utils import get_agent_skills_dir
-from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+from jiuwenswarm.server.runtime.session.session_metadata import (
+    get_session_metadata,
+    get_session_team_template_snapshot,
+    resolve_session_runtime_team_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +433,10 @@ class TeamManager:
     def get_monitor(self, session_id: str) -> TeamMonitorHandler | None:
         return self._team_monitors.get(session_id)
 
+    def pop_monitor(self, session_id: str) -> TeamMonitorHandler | None:
+        """Remove and return a stale monitor before rebinding it."""
+        return self._team_monitors.pop(session_id, None)
+
     def get_team_evolution_watcher(self, session_id: str) -> asyncio.Task | None:
         return self._team_evolution_watchers.get(session_id)
 
@@ -514,8 +523,12 @@ class TeamManager:
         供网关等外部模块做 team/session 一致性校验时复用，避免直接访问受保护成员。
         """
         base_name = str(team_name or "").strip() or "team"
-        session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
+        raw_session_id = str(session_id or "").strip()
+        session_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_session_id)
         session_suffix = session_suffix.strip("._-")
+        if raw_session_id and session_suffix != raw_session_id:
+            digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()[:12]
+            session_suffix = f"{session_suffix}_{digest}" if session_suffix else digest
         if not session_suffix:
             return base_name
         if base_name.endswith(f"_{session_suffix}"):
@@ -541,12 +554,13 @@ class TeamManager:
         template_id: str | None = None,
         template_snapshot: dict[str, Any] | None = None,
         strict_template: bool = False,
+        config_base: dict[str, Any] | None = None,
     ) -> TeamAgentSpec:
-        config_base = get_config()
+        runtime_config = config_base if config_base is not None else get_config()
         # Keep dependency checks scoped to distributed mode to make the
         # control flow explicit at the call site (local mode bypasses checks).
-        if TeamManager._is_distributed_mode(config_base):
-            missing = missing_distributed_dependencies(config_base)
+        if TeamManager._is_distributed_mode(runtime_config):
+            missing = missing_distributed_dependencies(runtime_config)
             if missing:
                 missing_list = ", ".join(missing)
                 logger.warning(
@@ -562,23 +576,23 @@ class TeamManager:
                     "[TeamManager][ACTION] install via: "
                     "pip install -e \".[distribute]\" or uv sync --extra distribute"
                 )
-                config_base = fallback_distributed_to_local(config_base)
+                runtime_config = fallback_distributed_to_local(runtime_config)
 
         spec_dict = load_team_spec_dict(
-            config_base=config_base,
+            config_base=runtime_config,
             requested_model_name=requested_model_name,
             template_id=template_id,
             template_snapshot=template_snapshot,
             strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
-        if TeamManager._is_distributed_mode(config_base):
-            spec_dict = TeamManager._normalize_distributed_transport_fields(config_base, spec_dict)
+        if TeamManager._is_distributed_mode(runtime_config):
+            spec_dict = TeamManager._normalize_distributed_transport_fields(runtime_config, spec_dict)
 
         # When models.defaults has more than one entry, populate model_pool
         # and set model_pool_strategy to by_model_name so team members
         # can be assigned different model endpoints from the pool.
-        default_models = get_default_models(config_base)
+        default_models = get_default_models(runtime_config)
         if len(default_models) > 1:
             from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 
@@ -620,20 +634,37 @@ class TeamManager:
         return TeamAgentSpec.model_validate(spec_dict)
 
     @staticmethod
-    def _lookup_bound_team_identity(session_id: str) -> tuple[str | None, str | None, dict[str, Any] | None]:
-        metadata = get_session_metadata(session_id, cache_bust=True)
+    def _lookup_bound_team_identity(
+        session_id: str,
+        *,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
+    ) -> tuple[str | None, str | None, str | None, dict[str, Any] | None]:
+        metadata_kwargs: dict[str, Any] = {"cache_bust": True}
+        if sessions_root is not None:
+            metadata_kwargs["sessions_root"] = sessions_root
+        metadata = get_session_metadata(session_id, **metadata_kwargs)
         team_name = str(metadata.get("team_name") or "").strip()
+        runtime_team_name = resolve_session_runtime_team_name(metadata)
         template_id = str(metadata.get("team_template_id") or "").strip()
-        template_snapshot: dict[str, Any] | None = None
+        template_snapshot = get_session_team_template_snapshot(
+            session_id,
+            sessions_root=sessions_root,
+        )
+        if template_snapshot is None and isinstance(metadata.get("team_template_snapshot"), dict):
+            template_snapshot = copy.deepcopy(metadata["team_template_snapshot"])
         if team_name:
             from jiuwenswarm.server.runtime.team_binding_store import get_team_binding_store
             from jiuwenswarm.server.runtime.team_entity_store import ensure_team_entity, ensure_team_entity_for_binding
 
+            runtime_config = config_base if config_base is not None else get_config()
             binding = get_team_binding_store().get(team_name)
-            if binding is not None:
+            if template_snapshot is not None:
+                entity = None
+            elif binding is not None:
                 if not template_id:
                     template_id = binding.template_id
-                entity = ensure_team_entity_for_binding(binding, config_base=get_config())
+                entity = ensure_team_entity_for_binding(binding, config_base=runtime_config)
             else:
                 legacy_snapshot = (
                     copy.deepcopy(metadata.get("team_template_snapshot"))
@@ -644,20 +675,37 @@ class TeamManager:
                     team_name=team_name,
                     template_id=template_id,
                     template_snapshot=legacy_snapshot,
-                    config_base=get_config(),
+                    config_base=runtime_config,
                 )
-            if entity is not None:
+            if template_snapshot is None and entity is not None:
                 template_id = entity.template_id
                 template_snapshot = copy.deepcopy(entity.template_snapshot)
-        return team_name or None, template_id or None, template_snapshot
+        return (
+            team_name or None,
+            runtime_team_name or None,
+            template_id or None,
+            template_snapshot,
+        )
 
     def _load_session_team_spec(
         self,
         session_id: str,
         *,
         requested_model_name: str | None = None,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
     ) -> tuple[TeamAgentSpec, bool]:
-        team_name, template_id, template_snapshot = self._lookup_bound_team_identity(session_id)
+        lookup_kwargs: dict[str, Any] = {}
+        if config_base is not None:
+            lookup_kwargs["config_base"] = config_base
+        if sessions_root is not None:
+            lookup_kwargs["sessions_root"] = sessions_root
+        (
+            team_name,
+            runtime_team_name,
+            template_id,
+            template_snapshot,
+        ) = self._lookup_bound_team_identity(session_id, **lookup_kwargs)
         load_kwargs: dict[str, Any] = {}
         if requested_model_name is not None:
             load_kwargs["requested_model_name"] = requested_model_name
@@ -666,9 +714,11 @@ class TeamManager:
             load_kwargs["strict_template"] = template_snapshot is None
         if template_snapshot is not None:
             load_kwargs["template_snapshot"] = template_snapshot
+        if config_base is not None:
+            load_kwargs["config_base"] = config_base
         spec = self._load_team_spec(session_id, **load_kwargs)
         if team_name:
-            spec.team_name = team_name
+            spec.team_name = runtime_team_name or team_name
             return spec, True
         return spec, False
 
@@ -683,6 +733,8 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        config_base: dict[str, Any] | None = None,
+        sessions_root: str | Path | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -704,11 +756,17 @@ class TeamManager:
         """
         from jiuwenswarm.agents.swarm import enrich_team_spec_for_swarm
 
-        config_base = get_config()
-        await self._ensure_postgresql_for_leader(config_base)
+        runtime_config = config_base if config_base is not None else get_config()
+        await self._ensure_postgresql_for_leader(runtime_config)
+        session_context: dict[str, Any] = {}
+        if config_base is not None:
+            session_context["config_base"] = runtime_config
+        if sessions_root is not None:
+            session_context["sessions_root"] = sessions_root
         spec, has_binding = self._load_session_team_spec(
             session_id,
             requested_model_name=requested_model_name,
+            **session_context,
         )
         if not has_binding:
             self._apply_session_scoped_team_name(spec, session_id=session_id)
@@ -721,6 +779,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            config_base=runtime_config,
         )
         return spec
 
@@ -922,7 +981,7 @@ class TeamManager:
             return pending_team_name
 
         metadata = get_session_metadata(session_id)
-        team_name = str(metadata.get("team_name") or "").strip()
+        team_name = resolve_session_runtime_team_name(metadata)
         return team_name or None
 
     def _resolve_session_team_name(self, session_id: str) -> str | None:
@@ -1011,9 +1070,16 @@ class TeamManager:
         return self.is_runtime_active(session_id)
 
     @staticmethod
-    def _resolve_delete_session_team_name(session_id: str) -> str | None:
-        metadata = get_session_metadata(session_id)
-        team_name = str(metadata.get("team_name") or "").strip()
+    def _resolve_delete_session_team_name(
+        session_id: str,
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> str | None:
+        if sessions_root is None:
+            metadata = get_session_metadata(session_id)
+        else:
+            metadata = get_session_metadata(session_id, sessions_root=sessions_root)
+        team_name = resolve_session_runtime_team_name(metadata)
         if team_name:
             return team_name
 
@@ -2217,7 +2283,13 @@ class TeamManager:
         )
         return True
 
-    async def delete_session_runtime(self, session_id: str, reason: str = "") -> bool:
+    async def delete_session_runtime(
+        self,
+        session_id: str,
+        reason: str = "",
+        *,
+        sessions_root: str | Path | None = None,
+    ) -> bool:
         """Delete a team-mode session and its session-scoped team data.
 
         Jiuwenswarm scopes team names by session id, so deleting a
@@ -2226,7 +2298,10 @@ class TeamManager:
         team name cannot be resolved from session metadata, fall back to
         releasing only the session checkpoint.
         """
-        team_name = self._resolve_delete_session_team_name(session_id)
+        team_name = self._resolve_delete_session_team_name(
+            session_id,
+            sessions_root=sessions_root,
+        )
         await kv_cache_hooks.stop_runtime_before_terminal_delete(
             self.stop_session_runtime,
             session_id=session_id,
@@ -2235,11 +2310,19 @@ class TeamManager:
 
         try:
             if team_name:
-                await Runner.delete_agent_team(
+                deleted = await Runner.delete_agent_team(
                     team_name=team_name,
                     session_ids=[session_id],
                     force=True,
                 )
+                if not deleted:
+                    logger.warning(
+                        "[TeamManager] runner did not delete team session runtime: "
+                        "session_id=%s team_name=%s",
+                        session_id,
+                        team_name,
+                    )
+                    return False
             else:
                 logger.warning(
                     "[TeamManager] delete session runtime fell back to session release: "

@@ -50,6 +50,7 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _RailBuildInfo,
     _agent_def_to_subagent_config,
     _deep_agent_kv_cache_affinity_config,
+    _resolve_instance_config_base,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
@@ -406,8 +407,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── 初始化 ──────────────────────────────
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *,
-                              mode: str = "code", sub_mode: str = None) -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "code",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
+    ) -> None:
         """初始化 DeepAgent 实例（code 模式）.
 
         统一使用 create_deep_agent()，不传 vision_model_config /
@@ -426,7 +433,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
-        config_base = get_config()
+        config_base = _resolve_instance_config_base(config_base)
+        self._config_base_cache = config_base.copy()
+        self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()

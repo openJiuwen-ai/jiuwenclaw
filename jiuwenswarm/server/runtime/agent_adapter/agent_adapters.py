@@ -29,11 +29,19 @@ class AgentAdapter(Protocol):
     adapter modules implement it without any coupling to each other.
     """
 
-    async def create_instance(self, config: dict[str, Any] | None = None, *,
-                              mode: str = "claw", sub_mode: str = None) -> None:
+    async def create_instance(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "claw",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
+    ) -> None:
         """Initialise the underlying SDK agent from config.
 
         Called once on startup and again after skill install/uninstall.
+        ``config_base`` is an optional authoritative runtime snapshot; adapters
+        fall back to their native config source when it is omitted.
         """
         ...
 

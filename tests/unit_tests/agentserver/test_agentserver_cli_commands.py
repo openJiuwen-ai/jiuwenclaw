@@ -357,9 +357,11 @@ async def test_handle_command_diff_returns_summary_payload(server, fake_ws):
 
 @pytest.mark.asyncio
 async def test_handle_command_diff_includes_session_extra_history_roots(
-    server, fake_ws, monkeypatch
+    server, fake_ws, monkeypatch, tmp_path
 ):
     captured = {}
+    tenant_sessions_root = tmp_path / "tenant-sessions"
+    tenant_agent_workspace_root = tmp_path / "tenant-agent-workspace"
 
     class FakeDiffService:
         def get_turn_diffs(self, session_id, project_dir, **kwargs):
@@ -380,7 +382,22 @@ async def test_handle_command_diff_includes_session_extra_history_roots(
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.git_diff_status.get_session_extra_history_roots",
-        lambda session_id: [f"/history/{session_id}/worktrees"],
+        lambda session_id, *, sessions_root=None, agent_workspace_root=None: (
+            captured.setdefault("sessions_root", sessions_root),
+            captured.setdefault("agent_workspace_root", agent_workspace_root),
+            [f"/history/{session_id}/worktrees"],
+        )[2],
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: tenant_sessions_root,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_agent_workspace_dir_for_request",
+        lambda _request: tenant_agent_workspace_root,
+        raising=False,
     )
     request = AgentRequest(
         request_id="req-diff-extra-roots",
@@ -392,6 +409,8 @@ async def test_handle_command_diff_includes_session_extra_history_roots(
 
     await server.handle_command_diff_for_test(fake_ws, request, asyncio.Lock())
 
+    assert captured["sessions_root"] == tenant_sessions_root
+    assert captured["agent_workspace_root"] == tenant_agent_workspace_root
     assert captured["turns"] == {
         "session_id": "sess-1",
         "project_dir": "/repo",

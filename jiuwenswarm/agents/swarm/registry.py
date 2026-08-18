@@ -31,9 +31,6 @@ from openjiuwen.agent_teams.rails.builtin_elements import (
     SYS_OPERATION as _OJ_SYS_OPERATION,
     TASK_PLANNING as _OJ_TASK_PLANNING,
     VISION as _OJ_VISION,
-    WEB_FETCH as _OJ_WEB_FETCH,
-    WEB_PAID_SEARCH as _OJ_WEB_PAID_SEARCH,
-    WEB_SEARCH as _OJ_WEB_SEARCH,
     WORKTREE as _OJ_WORKTREE,
 )
 from openjiuwen.agent_teams.rails.registration import (
@@ -71,10 +68,9 @@ SYMPHONY_TOOLKIT = _tools.SYMPHONY_TOOLKIT
 CRON_TOOLS = _runtime_tools.CRON_TOOLS
 SEND_FILE = _runtime_tools.SEND_FILE
 MEMBER_SKILL_TOOLKIT = _skills.MEMBER_SKILL_TOOLKIT
-# Generic tools provided + registered by openjiuwen (referenced by bare name).
-WEB_SEARCH = _OJ_WEB_SEARCH
-WEB_FETCH = _OJ_WEB_FETCH
-WEB_PAID_SEARCH = _OJ_WEB_PAID_SEARCH
+# Team-owned wrappers around Jiuwen's unified web tools.
+WEB_SEARCH = _tools.WEB_SEARCH
+WEB_FETCH = _tools.WEB_FETCH
 VISION = _OJ_VISION
 AUDIO = _OJ_AUDIO
 RUNTIME_PROMPT = _member_rails.RUNTIME_PROMPT
@@ -197,7 +193,6 @@ __all__ = [
     "SYMPHONY_TOOLKIT",
     "WEB_SEARCH",
     "WEB_FETCH",
-    "WEB_PAID_SEARCH",
     "VISION",
     "AUDIO",
     "CRON_TOOLS",

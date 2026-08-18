@@ -900,6 +900,12 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
             yield AgentResponseChunk(
                 request_id="req-stream-answer",
                 channel_id="tui",
+                payload={"event_type": "chat.delta", "content": "<a2ui-json>\n"},
+                is_complete=False,
+            )
+            yield AgentResponseChunk(
+                request_id="req-stream-answer",
+                channel_id="tui",
                 payload={"event_type": "chat.done"},
                 is_complete=True,
             )
@@ -958,9 +964,8 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
     assert len(FakeTeamManager.interact_calls) == 0
     assert isinstance(fake_adapter.seen_inputs["query"], InteractiveInput)
     assert fake_adapter.seen_inputs["query"].user_inputs["exit_plan_mode_call_1"]["approved"] is True
-    assert chunks[0].payload == {"event_type": "chat.done"}
-    assert chunks[0].is_complete is True
-    assert chunks[-1].is_complete is True
+    assert any(chunk.payload == {"event_type": "chat.done"} for chunk in chunks)
+    assert sum(chunk.is_complete for chunk in chunks) == 1
 
 
 def test_process_message_stream_routes_web_evolution_interrupt_without_user_history(monkeypatch):
@@ -1272,8 +1277,7 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
     assert len(FakeTeamManager.interact_calls) == 0
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[0].is_complete is True
-    assert chunks[-1].payload == {"is_complete": True}
-    assert chunks[-1].is_complete is True
+    assert sum(chunk.is_complete for chunk in chunks) == 1
 
 
 def test_process_message_stream_treats_plain_team_query_as_first_request_after_round_end(monkeypatch):
@@ -2286,7 +2290,7 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
     ]
 
 
-def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
+def test_agent_manager_creates_code_adapter_with_tenant_config_for_code_team(monkeypatch):
     from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
@@ -2304,12 +2308,20 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
         pass
 
     class FakeAdapter:
-        async def create_instance(self, config=None, *, mode="agent", sub_mode=None):
+        async def create_instance(
+            self,
+            config=None,
+            *,
+            mode="agent",
+            sub_mode=None,
+            config_base=None,
+        ):
             calls.append(
                 {
                     "create_instance_mode": mode,
                     "sub_mode": sub_mode,
                     "config": config,
+                    "config_base": config_base,
                 }
             )
 
@@ -2324,7 +2336,9 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     monkeypatch.setattr(interface_module, "create_adapter", fake_create_adapter)
 
     async def run_case():
-        manager = agent_manager_module.AgentManager()
+        manager = agent_manager_module.AgentManager(
+            config_base={"models": {"defaults": [{"model": "tenant-model"}]}},
+        )
         await manager.get_agent(channel_id="tui", mode="code", sub_mode="team")
 
     asyncio.run(run_case())
@@ -2334,6 +2348,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
         "create_instance_mode": "code",
         "sub_mode": "team",
         "config": {},
+        "config_base": {"models": {"defaults": [{"model": "tenant-model"}]}},
     } in calls
 
 

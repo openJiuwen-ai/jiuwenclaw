@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from jiuwenswarm.server.runtime.session.session_history import resolve_session_dir
+from jiuwenswarm.server.runtime.session import session_history
 
 
 @pytest.fixture
@@ -104,6 +105,25 @@ def test_traversal_payload_rejected(patched_sessions_root, session_id):
     p, err = resolve_session_dir(session_id)
     assert p is None, f"LEAK: payload resolved to path: {session_id!r} -> {p}"
     assert err is not None
+
+
+def test_history_path_helpers_reject_traversal_without_creating_outside_directory(
+    patched_sessions_root,
+):
+    outside_dir = patched_sessions_root.parent / "outside-history"
+
+    with pytest.raises(ValueError, match="invalid session_id"):
+        session_history.get_write_history_path(
+            "../outside-history",
+            sessions_root=str(patched_sessions_root),
+        )
+    with pytest.raises(ValueError, match="invalid session_id"):
+        session_history.get_read_history_path(
+            "../outside-history",
+            sessions_root=str(patched_sessions_root),
+        )
+
+    assert not outside_dir.exists()
 
 
 def test_empty_and_none_rejected(patched_sessions_root):

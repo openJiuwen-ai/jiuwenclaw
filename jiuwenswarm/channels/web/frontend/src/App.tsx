@@ -109,7 +109,7 @@ type LoadedHistoryPage = {
 
 type AgentsTeamsSavePayload = {
   agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
+    model: { ref: string };
     skills: string[];
   }>;
   team: Array<{
@@ -1106,7 +1106,7 @@ function AppContent() {
     const agentCount = Object.keys(payload.agents).length;
     Object.entries(payload.agents).forEach(([name, agent], idx) => {
       updates[`agent_name_${idx}`] = name;
-      updates[`agent_model_${idx}`] = agent.model.model;
+      updates[`agent_model_${idx}`] = agent.model.ref;
       updates[`agent_skills_${idx}`] = agent.skills.join(',');
     });
     for (let i = agentCount; i < 10; i++) {

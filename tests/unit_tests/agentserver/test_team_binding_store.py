@@ -9,10 +9,23 @@ import threading
 
 import pytest
 
+from jiuwenswarm.server.runtime import team_binding_store as team_binding_store_module
 from jiuwenswarm.server.runtime.team_binding_store import (
     TeamBindingStore,
     TeamBindingStoreError,
 )
+
+
+def test_team_binding_store_defaults_to_user_workspace(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        team_binding_store_module,
+        "get_user_workspace_dir",
+        lambda: tmp_path,
+    )
+
+    store = TeamBindingStore()
+
+    assert store.path == tmp_path / "agent" / "teams" / "bindings.json"
 
 
 def test_team_binding_store_creates_and_persists_binding(tmp_path) -> None:

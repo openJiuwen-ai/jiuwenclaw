@@ -32,14 +32,29 @@ def test_read_default_headers_prefers_primary_key() -> None:
         reset_task_env_overlay(token)
 
 
-def test_read_default_headers_falls_back_to_petal_json() -> None:
+def test_read_default_headers_does_not_fall_back_to_petal_headers() -> None:
     token = bind_task_env_overlay(
         {
+            "PETAL_SEARCH_HEADERS": '{"Authorization":"Basic search"}',
             "PETAL_API_KEY": '{"Authorization":"Basic petal"}',
         }
     )
     try:
-        assert read_default_headers() == {"Authorization": "Basic petal"}
+        assert read_default_headers() is None
+    finally:
+        reset_task_env_overlay(token)
+
+
+def test_read_default_headers_falls_back_to_huawei_maas_headers() -> None:
+    token = bind_task_env_overlay(
+        {
+            "OFFICE_CLAW_HUAWEI_MAAS_HEADERS_JSON": (
+                '{"Authorization":"Basic maas"}'
+            )
+        }
+    )
+    try:
+        assert read_default_headers() == {"Authorization": "Basic maas"}
     finally:
         reset_task_env_overlay(token)
 

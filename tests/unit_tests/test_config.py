@@ -418,6 +418,7 @@ class TestTeamModesConfig:
             "agents": {
                 "agent_1": {
                     "model": {
+                        "ref": "gpt-4.1#0",
                         "provider": "OpenAI",
                         "model": "gpt-4.1",
                         "api_base": "${OPENAI_BASE_URL:-https://api.openai.com/v1}",
@@ -432,6 +433,7 @@ class TestTeamModesConfig:
                 },
                 "agent_2": {
                     "model": {
+                        "ref": "gpt-4.1-mini#1",
                         "provider": "OpenAI",
                         "model": "gpt-4.1-mini",
                         "api_base": "${OPENAI_BASE_URL:-https://api.openai.com/v1}",
@@ -528,19 +530,92 @@ modes:
             "agent_key": "agent_1",
         }
         assert [item["agent_key"] for item in saved["predefined_members"]] == ["agent_1", "agent_2"]
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["client_provider"] == "OpenAI"
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["timeout"] == 1800
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["verify_ssl"] is False
-        assert saved["agents"]["leader"]["model"]["model_client_config"]["custom_headers"] == {}
-        assert saved["agents"]["leader"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert saved["agents"]["leader"]["model"] == {"ref": "gpt-4.1#0"}
         assert saved["agents"]["analyst"]["skills"] == ["team-management"]
         assert saved["agents"]["coder"]["skills"] == ["coding"]
         assert saved.get("teammate") is None
         assert "teammate" not in saved["agents"]
         registry = raw["web_config_panel"]["agent_team_agents"]
         assert set(registry) == {"agent_1", "agent_2"}
-        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_1"]["model"] == {"ref": "gpt-4.1#0"}
         assert registry["agent_2"]["skills"] == ["coding"]
+        saved_text = temp_config_file.read_text(encoding="utf-8")
+        assert "api_key" not in saved_text
+        assert "api_base" not in saved_text
+        assert "custom_headers" not in saved_text
+
+    @staticmethod
+    def test_replace_teams_in_config_migrates_legacy_inline_model_to_ref(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: gpt-4.1
+        client_provider: OpenAI
+        api_base: https://api.openai.com/v1
+        api_key: server-secret
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "OpenAI",
+            "api_base": "https://api.openai.com/v1",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["agents"]["leader"]["model"] == {"ref": "gpt-4.1#0"}
+        assert "legacy-secret" not in temp_config_file.read_text(encoding="utf-8")
+
+    @staticmethod
+    def test_replace_teams_in_config_resolves_env_before_legacy_model_migration(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setenv("MODEL_NAME", "gpt-4.1")
+        monkeypatch.setenv("MODEL_PROVIDER", "OpenAI")
+        monkeypatch.setenv("API_BASE", "https://api.openai.com/v1")
+        temp_config_file.write_text(
+            """
+models:
+  defaults:
+    - model_client_config:
+        model_name: ${MODEL_NAME}
+        client_provider: ${MODEL_PROVIDER}
+        api_base: ${API_BASE}
+        api_key: ${API_KEY}
+      model_config_obj: {}
+modes: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["agents"]["agent_1"]["model"] = {
+            "provider": "openai",
+            "api_base": "https://api.openai.com/v1/",
+            "api_key": "legacy-secret",
+            "model": "gpt-4.1",
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["modes"]["team"]["alpha_team"]["agents"]["leader"]["model"] == {
+            "ref": "gpt-4.1#0",
+        }
 
     @staticmethod
     def test_replace_teams_in_config_expands_reused_agent_specs_without_yaml_aliases(
@@ -597,7 +672,7 @@ modes:
         assert "team" not in raw["modes"]
         registry = raw["web_config_panel"]["agent_team_agents"]
         assert set(registry) == {"agent_1", "agent_2"}
-        assert registry["agent_1"]["model"]["model_request_config"]["model"] == "gpt-4.1"
+        assert registry["agent_1"]["model"] == {"ref": "gpt-4.1#0"}
         assert registry["agent_2"]["skills"] == ["coding"]
 
     @staticmethod

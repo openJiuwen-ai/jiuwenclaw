@@ -80,7 +80,13 @@ class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
     async def _ensure_persistent_checkpointer_response(self, _request):
         return None
 
-    async def _find_team_session_ids(self, _team_name: str) -> list[str]:
+    async def _find_team_session_ids(
+        self,
+        _team_name: str,
+        *,
+        sessions_root=None,
+    ) -> list[str]:
+        _ = sessions_root
         return list(self.team_session_ids)
 
 
@@ -112,11 +118,20 @@ async def test_plan_agentserver_delete_evicts_self_parent_and_preserves_release(
         release_calls.append(session_id)
 
     monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _sid, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "agent.plan", "channel_id": "web"},
+        lambda _sid, **_kwargs: {"mode": "agent.plan", "channel_id": "web"},
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
@@ -428,14 +443,27 @@ async def test_team_session_delete_delegates_terminal_kvc_to_agent_core(
         deleted_teams.append(kwargs)
         return True
 
-    monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_delete_session_team_name",
+        lambda _sid, **_kwargs: "demo-team",
+    )
     monkeypatch.setattr(manager, "stop_session_runtime", AsyncMock(return_value=True))
     monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _sid, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
-        lambda _sid: {"mode": "team", "channel_id": "web"},
+        lambda _sid, **_kwargs: {"mode": "team", "channel_id": "web"},
     )
     monkeypatch.setattr("jiuwenswarm.agents.harness.team.get_team_manager", lambda _cid: manager)
     monkeypatch.setattr(
@@ -490,9 +518,17 @@ async def test_team_delete_delegates_terminal_kvc_to_agent_core(
         assert kwargs == {"stop_runner": False}
         return True
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _sid, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.evict_session_kv_cache",
         fake_evict,
@@ -539,9 +575,17 @@ async def test_team_delete_keeps_original_stop_order_when_affinity_disabled(
         stop_kwargs.append(kwargs)
         return True
 
-    monkeypatch.setattr(agent_ws_server_module, "get_agent_sessions_dir", lambda: sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "_sessions_dir_for_request",
+        lambda _request: sessions_root,
+    )
     monkeypatch.setattr(agent_ws_server_module, "encode_agent_response_for_wire", _wire_response)
-    monkeypatch.setattr(agent_ws_server_module, "remove_session_metadata_cache", lambda _sid: None)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda _sid, **_kwargs: None,
+    )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle.is_kv_cache_affinity_enabled",
         lambda: False,
@@ -688,7 +732,11 @@ async def test_team_session_delete_keeps_baseline_stop_before_runner_delete(
         events.append("baseline-delete")
         return True
 
-    monkeypatch.setattr(manager, "_resolve_delete_session_team_name", lambda _sid: "demo-team")
+    monkeypatch.setattr(
+        manager,
+        "_resolve_delete_session_team_name",
+        lambda _sid, **_kwargs: "demo-team",
+    )
     monkeypatch.setattr(manager, "stop_session_runtime", _stop)
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.Runner.delete_agent_team",

@@ -425,6 +425,7 @@ from jiuwenswarm.common.utils import (
     get_multi_tenant_user_workspace_dir,
     get_prompt_attachment_dir,
     get_runtime_state_path,
+    resolve_tenant_sessions_dir,
     reset_free_search_runtime_flags,
     resolve_agent_registered_skill_dirs,
 )
@@ -1261,6 +1262,14 @@ def parse_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _resolve_instance_config_base(config_base: dict[str, Any] | None) -> dict[str, Any]:
+    if config_base is None:
+        return get_config()
+    if not isinstance(config_base, dict):
+        raise TypeError("config_base must be a dict when provided")
+    return resolve_env_vars(config_base)
 
 
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
@@ -2395,6 +2404,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
             instance_ready_at = time.monotonic()
 
@@ -7328,11 +7338,17 @@ class JiuWenSwarmDeepAdapter:
                 self._session_instance_config,
                 mode=self._session_instance_mode or "agent",
                 sub_mode=self._session_instance_sub_mode,
+                config_base=self._config_base_cache,
             )
             return self._instance
 
     async def create_instance(
-        self, config: dict[str, Any] | None = None, *, mode: str = "agent", sub_mode: str = None
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        mode: str = "agent",
+        sub_mode: str = None,
+        config_base: dict[str, Any] | None = None,
     ) -> None:
         """初始化 DeepAgent 实例.
 
@@ -7361,7 +7377,7 @@ class JiuWenSwarmDeepAdapter:
         ns_token, overlay_token = self._bind_request_env_overlay()
         try:
             load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-            config_base = get_config()
+            config_base = _resolve_instance_config_base(config_base)
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
             if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
@@ -13441,11 +13457,30 @@ class JiuWenSwarmDeepAdapter:
                     or self._workspace_dir,
                 )
 
+                from jiuwenswarm.server.runtime.tenant_agent_pool import TenantAgentPool
+
+                tenant_agent_id, tenant_service_id, _workspace_key = (
+                    TenantAgentPool.extract_ids(request)
+                )
+                team_stream_kwargs = {
+                    "config_base": self._config_base_cache,
+                    "sessions_root": resolve_tenant_sessions_dir(
+                        tenant_service_id,
+                        tenant_agent_id,
+                    ),
+                }
+                if (
+                    evolution_slash_command_name(str(inputs.get("query") or ""))
+                    == "evolve_rebuild"
+                ):
+                    team_stream_kwargs["rebuild_skill"] = (
+                        self.generate_evolution_merge_version
+                    )
                 async for chunk in process_team_message_stream(
                     request,
                     inputs,
                     self._instance,
-                    rebuild_skill=self.generate_evolution_merge_version,
+                    **team_stream_kwargs,
                 ):
                     maybe_mark_answer_first_byte(getattr(chunk, "payload", None))
                     yield chunk

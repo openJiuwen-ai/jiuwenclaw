@@ -1130,24 +1130,11 @@ class TenantAgentPool:
 
     def collect_runtime_tools_catalog_nowait(self) -> dict[str, dict[str, str]]:
         """Union tool catalogs from all initialized JiuWenSwarm instances."""
-        import logging as _logging
+        from jiuwenswarm.server.runtime.tool_catalog import collect_tools_catalog_from_swarms
 
-        from jiuwenswarm.server.runtime.tool_catalog import (
-            get_registered_tools_catalog,
-            merge_tools_catalog_entries,
-        )
-
-        _log = _logging.getLogger(__name__)
-        catalogs: list[list[dict[str, str]]] = []
-        for agent_manager in self.iter_agent_managers_nowait():
-            ability = getattr(agent_manager, "ability_manager", None)
-            if ability is None:
-                continue
-            try:
-                entries = get_registered_tools_catalog(ability)
-            except Exception as exc:
-                _log.warning("[TenantAgentPool] get_registered_tools_catalog failed: %s", exc)
-                continue
-            if entries:
-                catalogs.append(entries)
-        return merge_tools_catalog_entries(catalogs)
+        swarms: list[Any] = []
+        for manager in self.iter_agent_managers_nowait():
+            iterator = getattr(manager, "iter_jiuwenswarm_instances", None)
+            if callable(iterator):
+                swarms.extend(iterator())
+        return collect_tools_catalog_from_swarms(swarms)

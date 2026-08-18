@@ -10,6 +10,7 @@ import {
   modelEntriesEqual,
   patchModelSnapshot,
   preserveConfiguredModelName,
+  resolveConfiguredModelIndex,
   shouldContinueOpenAIAccountLoginPoll,
   syncAgentsWithModelChanges,
   type ModelIdentity,
@@ -137,6 +138,7 @@ function MultiSelectDropdown({
 }
 
 interface AgentModel {
+  ref: string;
   provider: string;
   api_base: string;
   api_key: string;
@@ -201,7 +203,7 @@ interface ConfigPanelProps {
   /** 多Agent和Teams操作回调 */
   onAgentsTeamsSave?: (payload: {
     agents: Record<string, {
-      model: { provider: string; api_base: string; api_key: string; model: string };
+      model: { ref: string };
       skills: string[];
     }>;
     team: Array<{
@@ -221,7 +223,7 @@ interface ConfigPanelProps {
 
 interface AgentsTeamsPayload {
   agents: Record<string, {
-    model: { provider: string; api_base: string; api_key: string; model: string };
+    model: { ref: string };
     skills: string[];
   }>;
   team: Array<{
@@ -257,7 +259,7 @@ function buildAgentsTeamsPayload(
   for (const agent of agents) {
     if (!agent.name) continue;
     agentsPayload[agent.name] = {
-      model: { ...agent.model },
+      model: { ref: agent.model.ref },
       skills: agent.skills,
     };
   }
@@ -1897,13 +1899,17 @@ function MultiModelSection({
     });
   };
 
-  const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
+  const getModelAgentReferences = (modelIndex: number, modelName: string, modelProvider: string, modelApiBase: string): string[] => {
     if (!agents) return [];
     const references: string[] = [];
     agents.forEach((agent) => {
-      if (agent.model.model === modelName &&
-        agent.model.provider === modelProvider &&
-        agent.model.api_base === modelApiBase) {
+      const separatorIndex = agent.model.ref.lastIndexOf("#");
+      const referencedIndex = separatorIndex >= 0 ? Number(agent.model.ref.slice(separatorIndex + 1)) : -1;
+      const hasIndexedRef = Number.isInteger(referencedIndex) && referencedIndex >= 0;
+      if ((hasIndexedRef && referencedIndex === modelIndex) ||
+        (!hasIndexedRef && agent.model.model === modelName &&
+          agent.model.provider === modelProvider &&
+          agent.model.api_base === modelApiBase)) {
         references.push(agent.name);
       }
     });
@@ -2019,7 +2025,7 @@ function MultiModelSection({
     }
     setLocalError(null);
     const model = models[idx];
-    const references = getModelAgentReferences(model.model_name, model.model_provider, model.api_base);
+    const references = getModelAgentReferences(idx, model.model_name, model.model_provider, model.api_base);
     if (onDeleteModel) {
       onDeleteModel(idx, model.model_name, references);
     }
@@ -2457,7 +2463,7 @@ function MultiAgentSection({
   const [newAgentError, setNewAgentError] = useState<string | null>(null);
   const [newAgent, setNewAgent] = useState<AgentEntry>({
     name: "",
-    model: { provider: "", api_base: "", api_key: "", model: "" },
+    model: { ref: "", provider: "", api_base: "", api_key: "", model: "" },
     skills: [],
   });
 
@@ -2545,6 +2551,7 @@ function MultiAgentSection({
     copy[idx] = {
       ...copy[idx],
       model: {
+        ref: modelKey,
         provider: selectedModel.model_provider || "",
         api_base: selectedModel.api_base || "",
         api_key: selectedModel.api_key || "",
@@ -2570,7 +2577,7 @@ function MultiAgentSection({
     onAgentsChange([...agents, { ...newAgent, name }]);
     setExpandedIdx(agents.length);
     setAddingNew(false);
-    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
+    setNewAgent({ name: "", model: { ref: "", provider: "", api_base: "", api_key: "", model: "" }, skills: [] });
   };
 
   const agentFields: (keyof AgentEntry)[] = ["name", "skills"];
@@ -2721,6 +2728,7 @@ function MultiAgentSection({
                 setNewAgent((p) => ({
                   ...p,
                   model: {
+                    ref: modelKey,
                     provider: selectedModel!.model_provider || "",
                     api_base: selectedModel!.api_base || "",
                     api_key: selectedModel!.api_key || "",
@@ -3657,16 +3665,18 @@ export function ConfigPanel({
           }
         }
         const mainModel = next[0];
-        setDraftAgents((prev) =>
-          prev.map((agent) => {
-            if (
-              agent.model.model === model.model_name &&
-              (agent.model.provider || "") === (model.model_provider || "") &&
-              (agent.model.api_base || "") === (model.api_base || "")
-            ) {
+        const reboundAgents = draftAgents.map((agent) => {
+            const separatorIndex = agent.model.ref.lastIndexOf("#");
+            const referencedIndex = separatorIndex >= 0 ? Number(agent.model.ref.slice(separatorIndex + 1)) : -1;
+            const hasIndexedRef = Number.isInteger(referencedIndex) && referencedIndex >= 0;
+            if ((hasIndexedRef && referencedIndex === deleteModelConfirm.idx) ||
+              (!hasIndexedRef && agent.model.model === model.model_name &&
+                (agent.model.provider || "") === (model.model_provider || "") &&
+                (agent.model.api_base || "") === (model.api_base || ""))) {
               return {
                 ...agent,
                 model: {
+                  ref: `${mainModel.model_name || ""}#0`,
                   provider: mainModel.model_provider || "",
                   api_base: mainModel.api_base || "",
                   api_key: mainModel.api_key || "",
@@ -3675,10 +3685,12 @@ export function ConfigPanel({
               };
             }
             return agent;
-          })
-        );
+          });
+        setDraftAgents(reboundAgents);
+        handleModelsChange(next, reboundAgents);
+      } else {
+        handleModelsChange(next);
       }
-      handleModelsChange(next);
     }
     setDeleteModelConfirm(null);
   };
@@ -3772,16 +3784,20 @@ export function ConfigPanel({
     for (let i = 0; i < 10; i++) {
       const name = normalizedConfig[`agent_name_${i}`] || normalizedConfig[`agent_${i}_name`];
       if (!name) continue;
-      const modelName = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
-      const matchedModel = storeAvailableModels.find((m) => m.model_name === modelName);
+      const modelRef = normalizedConfig[`agent_model_${i}`] || normalizedConfig[`agent_${i}_model`] || "";
+      const separatorIndex = modelRef.lastIndexOf("#");
+      const referencedName = separatorIndex >= 0 ? modelRef.slice(0, separatorIndex) : modelRef;
+      const matchedIndex = resolveConfiguredModelIndex(storeAvailableModels, modelRef);
+      const matchedModel = matchedIndex >= 0 ? storeAvailableModels[matchedIndex] : undefined;
       agents.push({
         name,
         model: matchedModel ? {
+          ref: `${matchedModel.model_name}#${matchedIndex}`,
           provider: matchedModel.model_provider || "",
           api_base: matchedModel.api_base || "",
           api_key: matchedModel.api_key || "",
           model: matchedModel.model_name || "",
-        } : { provider: "", api_base: "", api_key: "", model: modelName },
+        } : { ref: modelRef, provider: "", api_base: "", api_key: "", model: referencedName },
         skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
       });
     }
@@ -3988,7 +4004,7 @@ export function ConfigPanel({
       if (!ia) return true;
       if (da.name !== ia.name) return true;
       if (da.skills.length !== ia.skills.length || da.skills.some((s, j) => s !== ia.skills[j])) return true;
-      if (da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
+      if (da.model.ref !== ia.model.ref || da.model.provider !== ia.model.provider || da.model.api_base !== ia.model.api_base
           || da.model.api_key !== ia.model.api_key || da.model.model !== ia.model.model) return true;
     }
     // 比较 teams
@@ -4128,7 +4144,7 @@ export function ConfigPanel({
     }
   };
 
-  const handleModelsChange = (models: ModelEntry[]) => {
+  const handleModelsChange = (models: ModelEntry[], agents = draftAgents) => {
     const oldModels = draftModels;
     const defaultIndex = getDefaultModelIndex(models);
     const defaultProvider = defaultIndex >= 0 ? models[defaultIndex].model_provider : "";
@@ -4145,8 +4161,8 @@ export function ConfigPanel({
       setError(null);
     }
 
-    const updatedAgents = syncAgentsWithModelChanges(draftAgents, oldModels, models);
-    if (updatedAgents !== draftAgents) {
+    const updatedAgents = syncAgentsWithModelChanges(agents, oldModels, models);
+    if (updatedAgents !== agents) {
       setDraftAgents(updatedAgents);
       setAgentsTeamsEdited(true);
     }
