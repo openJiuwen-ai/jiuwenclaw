@@ -563,8 +563,7 @@ modes: {}
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["agents"]["agent_1"]["model"] = {
             "provider": "OpenAI",
@@ -602,8 +601,7 @@ modes: {}
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
-        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+        monkeypatch.setattr("jiuwenswarm.common.config.get_config_file", lambda: temp_config_file)
         payload = TestTeamModesConfig._front_payload(["alpha_team"])
         payload["agents"]["agent_1"]["model"] = {
             "provider": "openai",
