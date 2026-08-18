@@ -69,6 +69,9 @@ from jiuwenswarm.server.runtime.attachments.upload_storage import safe_upload_fi
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# Builtin jiuwenswarm create only: sandbox env so agentserver can locate
+# the host workspace bind path (``/home/agentos/users/<user_id>``).
+USER_DIRECTORY_ENV_KEY = "JIUWENSWARM_USER_DIRECTORY"
 
 # Gateway-side file transfer limits (design: stricter than YuanRong 512MB).
 _AGENT_FILE_PATH_ROOT = "/home/agentos"
@@ -253,22 +256,6 @@ def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
             f"runtime_spec is required from registry for agent_type={image_info.image_name}"
         )
     return dict(raw_spec)  # type: ignore[return-value]
-
-
-def _extract_runtime_spec_port(runtime_spec: Mapping[str, Any]) -> int | None:
-    """从 runtime_spec ``rootfs.ports``（如 ``["tcp:18092"]``）取第一个端口."""
-    rootfs = runtime_spec.get("rootfs")
-    ports = rootfs.get("ports") if isinstance(rootfs, Mapping) else None
-    if not isinstance(ports, (list, tuple)):
-        return None
-    for entry in ports:
-        text = str(entry or "")
-        candidate = text.rsplit(":", 1)[-1] if ":" in text else text
-        try:
-            return int(candidate)
-        except ValueError:
-            continue
-    return None
 
 
 def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
@@ -933,6 +920,12 @@ class AgentOSRouterClient(AgentServerClient):
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                return self._routing_error_response(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
@@ -953,6 +946,13 @@ class AgentOSRouterClient(AgentServerClient):
             return
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                yield self._routing_error_chunk(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
+                return
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
@@ -1479,26 +1479,32 @@ class AgentOSRouterClient(AgentServerClient):
         return reaped
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
+        workspace = resolve_agent_workspace(
+            agent_info.user_id,
+            workspace_root=self._workspace_root,
+        )
         # runtime_spec 获取方式因 agent_type 而异
+        env_vars: dict[str, str] | None = None
         if agent_info.agent_type == BUILTIN_AGENT_TYPE:
             # jiuwenswarm: 不从注册中心获取镜像信息，使用内置 runtime_spec
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = int(sock.getsockname()[1])
+            port = 18092
             runtime_spec: dict[str, Any] = {
                 "sandbox_type": "supervisor",
                 "runtime": "python3.11",
                 "rootfs": {
                     "imageurl": f"{BUILTIN_AGENT_TYPE}-agent-runtime:latest",
                     "user": "agentos",
-                    "ports": [f"tcp:{port}"]
                 },
                 "cmds": [["sh", "-c", f"exec jiuwenswarm-agentserver --port {port}"]],
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
-            env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
+            # 不注入 AGENT_SERVER_HOST: 留空让沙箱内 agentserver 自行检测沙箱本地
+            # 非 loopback IP(ISOLATED 模式 bind veth 地址,外部可达;见
+            # app_agentserver._resolve_bind_host)。单机版默认仍 127.0.0.1。
+            env_vars = {
+                USER_DIRECTORY_ENV_KEY: workspace,
+            }
             # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
             extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
@@ -1511,14 +1517,13 @@ class AgentOSRouterClient(AgentServerClient):
                 else None
             )
             extra_metadata = {"image_info": dict(image_info.metadata)}
-            agent_port = _extract_runtime_spec_port(runtime_spec)
-            if agent_port is not None:
-                extra_metadata["agent_port"] = agent_port
+            # 3rdagent 走 SSH，不连 agentserver WS；create 的 rootfs 不传 ports。
+            rootfs = runtime_spec.get("rootfs")
+            if isinstance(rootfs, dict) and "ports" in rootfs:
+                runtime_spec["rootfs"] = {
+                    key: value for key, value in rootfs.items() if key != "ports"
+                }
 
-        workspace = resolve_agent_workspace(
-            agent_info.user_id,
-            workspace_root=self._workspace_root,
-        )
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
