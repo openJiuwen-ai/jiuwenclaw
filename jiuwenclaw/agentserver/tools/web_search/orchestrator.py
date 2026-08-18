@@ -6,6 +6,7 @@ import logging
 import re
 
 from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
+from jiuwenclaw.agentserver.tools.web_search.free import _free_search_engines
 from jiuwenclaw.agentserver.tools.web_search.providers import (
     any_paid_provider_available,
     paid_provider_available,
@@ -181,7 +182,12 @@ async def run_web_search(
             reason=f"requested source {preferred_source} unavailable: {reason}",
             detail=paid_availability_report(settings.paid_provider_order),
         )
-        return f"[ERROR]: requested paid source '{preferred_source}' unavailable ({reason})."
+        return (
+            f"[ERROR]: requested paid source '{preferred_source}' unavailable ({reason}). "
+            "You may retry with search_mode=free."
+            if _free_search_engines()
+            else f"[ERROR]: requested paid source '{preferred_source}' unavailable ({reason})."
+        )
     logger.debug(
         "[web_search] start query=%r search_mode=%s search_source=%s %s",
         truncate_query(query),
@@ -234,13 +240,16 @@ async def run_web_search(
             paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
         else:
             if not any_paid_provider_available(settings.paid_provider_order):
+                availability = paid_availability_report(settings.paid_provider_order)
                 _log_failed(
                     query=query,
                     mode=mode,
                     reason="paid unavailable",
-                    detail=paid_availability_report(settings.paid_provider_order),
+                    detail=availability,
                 )
-                return "[ERROR]: paid search unavailable."
+                if _free_search_engines():
+                    return "[ERROR]: paid search unavailable. Use search_mode=free instead."
+                return "[ERROR]: paid search unavailable. No search source is available."
             paid_run, tried = await run_paid_chain(query, settings)
         if paid_run and paid_run.quality_passed:
             _log_done(
@@ -267,7 +276,9 @@ async def run_web_search(
             providers_tried=tried,
             detail=provider_run_summary(paid_run),
         )
-        return "[ERROR]: paid search failed."
+        if _free_search_engines():
+            return "[ERROR]: paid search failed. You may retry with search_mode=free."
+        return "[ERROR]: paid search failed. No search source is available."
 
     paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
     if paid_run and paid_run.quality_passed:
@@ -308,7 +319,11 @@ async def run_web_search(
             providers_tried=tried,
             detail=provider_run_summary(free_run),
         )
-        return f"[ERROR]: free search failed: {free_run.error}"
+        return (
+            "[ERROR]: web search failed: all sources exhausted (configuration issue, not query-related). "
+            "Do not retry with any search_mode or a different query; "
+            "inform the user that web search is currently unavailable."
+        )
     if not _has_usable_results(free_run):
         _log_failed(
             query=query,
@@ -317,7 +332,11 @@ async def run_web_search(
             providers_tried=tried,
             detail=provider_run_summary(free_run),
         )
-        return "[ERROR]: free search failed: no results"
+        return (
+            "[ERROR]: web search failed: no results from any source. "
+            "Do not retry with any search_mode or a different query; "
+            "inform the user that web search returned no results."
+        )
     tried.append(f"{free_run.provider}({_provider_status(free_run)})")
     _log_done(
         query=query,
