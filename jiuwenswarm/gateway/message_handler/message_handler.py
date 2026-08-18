@@ -20,6 +20,8 @@ from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.common.e2a.constants import (
     E2A_CANCEL_SOURCE_CLIENT_DISCONNECT,
     E2A_INTERNAL_CANCEL_SOURCE_KEY,
+    E2A_RESPONSE_KIND_REVERSE_RPC_CANCEL,
+    E2A_RESPONSE_KIND_REVERSE_RPC_REQUEST,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
 )
 from jiuwenswarm.common.config import get_evolution_auto_save_enabled
@@ -43,6 +45,11 @@ from jiuwenswarm.gateway.message_handler.prompts.review_prompt import build_revi
 from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
     GitPreExecError,
     build_security_review_prompt,
+)
+from jiuwenswarm.gateway.reverse_rpc import (
+    CapabilityRegistry,
+    ReverseRpcDispatcher,
+    ReverseRpcResponseTransport,
 )
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
@@ -265,6 +272,11 @@ class MessageHandler(ABC):
         # 组合：/join /exit 团队成员管理逻辑（独立文件维护，通过 self._h 访问宿主能力）
         self._join_exit = JoinExitHandlers(self)
         self._cron_controller = None
+        self._reverse_rpc_registry = CapabilityRegistry()
+        self._reverse_rpc_dispatcher = ReverseRpcDispatcher(
+            self._reverse_rpc_registry,
+            ReverseRpcResponseTransport(self.agent_client),
+        )
 
         # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
@@ -315,6 +327,13 @@ class MessageHandler(ABC):
 
         if isinstance(self.agent_client, WebSocketAgentServerClient):
             self.agent_client.set_server_push_handler(self._handle_agent_server_push)
+            self.agent_client.set_disconnect_handler(
+                self._reverse_rpc_dispatcher.on_agent_disconnect
+            )
+
+    def get_reverse_rpc_registry(self) -> CapabilityRegistry:
+        """Return the registry used by explicitly assembled capabilities."""
+        return self._reverse_rpc_registry
 
     def update_evolution_auto_save(self, config_payload: dict[str, Any] | None) -> None:
         """Refresh the in-memory evolution auto-save flag from a config snapshot.
@@ -2817,6 +2836,14 @@ class MessageHandler(ABC):
     async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_chunk
+
+        response_kind = str(wire.get("response_kind") or "")
+        if response_kind in (
+            E2A_RESPONSE_KIND_REVERSE_RPC_REQUEST,
+            E2A_RESPONSE_KIND_REVERSE_RPC_CANCEL,
+        ):
+            await self._reverse_rpc_dispatcher.handle(wire)
+            return
 
         try:
             chunk = parse_agent_server_wire_chunk(wire)

@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from jiuwenswarm.common.e2a.constants import (
+    E2A_RESPONSE_STATUS_IN_PROGRESS,
     E2A_RESPONSE_STATUS_SUCCEEDED,
     E2A_WIRE_INTERNAL_METADATA_KEYS,
     E2A_WIRE_SERVER_PUSH_KEY,
@@ -22,12 +23,16 @@ def build_server_push_wire(msg: dict[str, Any]) -> dict[str, Any]:
     """将 send_push 入参编码为与 WebSocket 单帧一致的 E2A 响应线 dict。"""
     response_kind = str(msg.get("response_kind") or "").strip()
     if response_kind:
+        status = str(msg.get("status") or E2A_RESPONSE_STATUS_SUCCEEDED)
+        is_final = bool(
+            msg.get("is_final", status != E2A_RESPONSE_STATUS_IN_PROGRESS)
+        )
         wire = E2AResponse(
             response_id=str(msg.get("request_id", "")),
             request_id=str(msg.get("request_id", "")),
             sequence=0,
-            is_final=True,
-            status=E2A_RESPONSE_STATUS_SUCCEEDED,
+            is_final=is_final,
+            status=status,
             response_kind=response_kind,
             timestamp=utc_now_iso(),
             provenance=E2AProvenance(
