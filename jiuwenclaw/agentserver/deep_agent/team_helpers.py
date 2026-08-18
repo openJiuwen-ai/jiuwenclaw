@@ -2037,17 +2037,18 @@ async def process_team_message_stream(request: Any,
                 # which stringifies ProviderType enums. No need to handle the enum
                 # branch defensively.
                 _provider_str = mcc.get('client_provider', '') or ''
+                excluded = ('model_name', 'api_key', 'api_base', 'client_provider')
+                client_extra = {}
+                for k, v in mcc.items():
+                    if k not in excluded and v is not None:
+                        client_extra[k] = v
                 pool_entry = ModelPoolEntry(
                     model_name=model_name,
                     api_key=mcc.get('api_key', ''),
                     api_base_url=mcc.get('api_base', ''),
                     api_provider=_provider_str,
                     metadata={
-                        'client': {
-                            k: v for k, v in mcc.items()
-                            if k not in ('model_name', 'api_key', 'api_base', 'client_provider')
-                            and v is not None
-                        },
+                        'client': client_extra,
                         'request': dict(mco) if isinstance(mco, dict) else {},
                     },
                 )

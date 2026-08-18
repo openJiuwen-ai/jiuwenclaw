@@ -2529,7 +2529,7 @@ class JiuWenClawDeepAdapter:
         pool = TenantAgentPool.peek_instance()
         if pool is None:
             return
-        service_cache = pool._service_model_cache.get(self._env_service_id, {})
+        service_cache = pool.get_service_model_cache(self._env_service_id)
         if not service_cache:
             return
         merged = 0
@@ -2568,7 +2568,7 @@ class JiuWenClawDeepAdapter:
         pool = TenantAgentPool.peek_instance()
         if pool is None:
             return None
-        service_cache = pool._service_model_cache.get(self._env_service_id, {})
+        service_cache = pool.get_service_model_cache(self._env_service_id)
         entry = service_cache.get(name)
         if entry is None:
             return None

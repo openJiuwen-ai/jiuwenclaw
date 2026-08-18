@@ -169,6 +169,15 @@ class TenantAgentPool:
         )
         return cache
 
+    def get_service_model_cache(self, service_id: str) -> dict[str, Any]:
+        """Return the shared model cache for ``service_id`` (read-only view).
+
+        Returns an empty dict when ``service_id`` has no cache yet. Callers
+        must not mutate the returned dict in place — the cache is written
+        exclusively under ``_sync_lock`` in ``sync_agents_configs``.
+        """
+        return self._service_model_cache.get(service_id, {})
+
     def _get_lock(self, cache_key: Hashable) -> asyncio.Lock:
         current_loop = asyncio.get_running_loop()
 
