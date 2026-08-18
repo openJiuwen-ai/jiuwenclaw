@@ -2548,6 +2548,19 @@ async def _run(
                     logger.info("[App] channels.xiaoyi.%s, XiaoyiChannel disabled", reason)
                 else:
                     xiaoyi_channel = channel_manager.build_channel("xiaoyi", xiaoyi_conf)
+                    # clientVariables.permission 档位热重载（同上，apps 形式之外的顶层 dict 形式）
+                    async def _reload_xiaoyi_permissions() -> None:
+                        reload_env = e2a_from_agent_fields(
+                            request_id=f"xiaoyi-perm-reload-{uuid_module.uuid4().hex[:8]}",
+                            channel_id="xiaoyi",
+                            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                            params={"reload_scopes": ["permissions"]},
+                        )
+                        reload_resp = await client.send_request(reload_env)
+                        if not getattr(reload_resp, "ok", False):
+                            raise RuntimeError(f"agent.reload_config rejected: {getattr(reload_resp, 'payload', None)}")
+
+                    xiaoyi_channel.set_reload_permissions_handler(_reload_xiaoyi_permissions)
                     channel_manager.register_channel(xiaoyi_channel)
                     xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
                     logger.info("[App] XiaoyiChannel registered from config.yaml.channels.xiaoyi")
@@ -2589,6 +2602,21 @@ async def _run(
                         file_upload_url=str(app.get("file_upload_url") or "").strip(),
                     )
                     channel = XiaoyiChannel(config, _DummyBus())
+                    # clientVariables.permission 档位热重载：渠道改 config.yaml 后经
+                    # gateway→AgentServer E2A 连接发 agent.reload_config（对齐桌面端
+                    # 「写盘 + reload_scopes: [permissions]」流程，AgentServer 重新读盘生效）
+                    async def _reload_xiaoyi_permissions() -> None:
+                        reload_env = e2a_from_agent_fields(
+                            request_id=f"xiaoyi-perm-reload-{uuid_module.uuid4().hex[:8]}",
+                            channel_id="xiaoyi",
+                            req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+                            params={"reload_scopes": ["permissions"]},
+                        )
+                        reload_resp = await client.send_request(reload_env)
+                        if not getattr(reload_resp, "ok", False):
+                            raise RuntimeError(f"agent.reload_config rejected: {getattr(reload_resp, 'payload', None)}")
+
+                    channel.set_reload_permissions_handler(_reload_xiaoyi_permissions)
                     channel_manager.register_channel(channel)
                     task = asyncio.create_task(channel.start(), name=f"xiaoyi-{api_id or 'default'}")
                     channel.start_task = task  # 挂到 channel 对象上，不另存 dict

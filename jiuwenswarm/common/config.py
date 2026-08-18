@@ -702,6 +702,59 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_permission_profile_in_config(profile: str) -> bool:
+    """按权限档位补丁更新 permissions 段（跨进程互斥），返回是否有实际变更。
+
+    档位映射见 jiuwenswarm/common/permission_profile.py（与桌面端三档对齐）：
+    enabled / permission_mode / tools.bash / 网络工具 / file_guard.defaults.read+write。
+    只动这些已知键，保留 rules / approval_overrides / file_guard.paths 等其余配置。
+    档位未识别时返回 False 且不写盘。调用方据返回值决定是否触发 agent.reload_config。
+    """
+    from jiuwenswarm.common.permission_profile import permission_profile_config_patch
+
+    patch = permission_profile_config_patch(profile)
+    if patch is None:
+        return False
+
+    changed = False
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal changed
+        section = data.get("permissions")
+        if not isinstance(section, dict):
+            section = {}
+            data["permissions"] = section
+
+        def _set(container: dict[str, Any], key: str, value: Any) -> None:
+            nonlocal changed
+            if container.get(key) != value:
+                container[key] = value
+                changed = True
+
+        _set(section, "enabled", patch["enabled"])
+        _set(section, "permission_mode", patch["permission_mode"])
+        tools = section.get("tools")
+        if not isinstance(tools, dict):
+            tools = {}
+            section["tools"] = tools
+        for tool_name, level in patch["tools"].items():
+            _set(tools, tool_name, level)
+        file_guard = section.get("file_guard")
+        if not isinstance(file_guard, dict):
+            file_guard = {}
+            section["file_guard"] = file_guard
+        defaults = file_guard.get("defaults")
+        if not isinstance(defaults, dict):
+            defaults = {}
+            file_guard["defaults"] = defaults
+        _set(defaults, "read", patch["file_guard_rw"])
+        _set(defaults, "write", patch["file_guard_rw"])
+        return data
+
+    update_config(mutator)
+    return changed
+
+
 def update_auto_recap_enabled_in_config(value: bool) -> None:
     """更新 auto_recap.enabled（自动回顾开关）并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)

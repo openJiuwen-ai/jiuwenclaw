@@ -38,8 +38,57 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.format
 from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi.xiaoyi_utils.a2a_vars import (
     extract_model_name,
 )
+from jiuwenswarm.common.permission_profile import (
+    normalize_permission_profile,
+    resolve_client_workspace,
+    resolve_trusted_dirs,
+    with_workspace_directive,
+)
 
 logger = logging.getLogger(__name__)
+
+# ==================== clientVariables 权限审批回复约定 ====================
+# 手机端收到审批提示后直接回复文本（或携带 AgentEvent/PermissionReply data event）。
+# 文本回复按归一化（去空白/标点、小写）后的精确匹配识别：
+_APPROVAL_APPROVE_WORDS = frozenset({
+    "同意", "允许", "批准", "确认", "好", "好的", "是", "可以", "执行", "继续", "本次允许",
+    "yes", "y", "ok", "okay", "approve", "approved", "proceed", "allow", "confirm",
+})
+_APPROVAL_SESSION_WORDS = frozenset({
+    "会话内允许", "会话内记住", "本次会话允许", "本次会话内允许", "本会话允许",
+    "session_allow", "sessionallow",
+})
+_APPROVAL_ALWAYS_WORDS = frozenset({
+    "永久允许", "永久记住", "总是允许", "始终允许", "一直允许",
+    "always_allow", "allow_always", "alwaysallow", "always",
+})
+_APPROVAL_REJECT_WORDS = frozenset({
+    "拒绝", "不同意", "不允许", "取消", "否", "不要", "算了",
+    "no", "n", "reject", "rejected", "deny", "denied", "cancel",
+})
+# PermissionReply data event 的 action → 审批决定
+_APPROVAL_EVENT_ACTIONS = {
+    "approve": "approve",
+    "allow": "approve",
+    "agree": "approve",
+    "session_allow": "session",
+    "always_allow": "always",
+    "reject": "reject",
+    "deny": "reject",
+    "refuse": "reject",
+}
+# 待答复审批有效期（超时后按普通消息处理，避免陈旧 request_id 误恢复）
+_APPROVAL_EXPIRE_S = 30 * 60
+
+_APPROVAL_REPLY_HINT = (
+    "请直接回复：同意（仅本次）/ 会话内允许 / 永久允许 / 拒绝。"
+    "回复其他内容将视为拒绝，并把该内容作为反馈转达给智能体。"
+)
+
+
+def _normalize_approval_text(text: str) -> str:
+    """审批回复归一化：去全部空白与常见标点、转小写，便于精确匹配词表。"""
+    return re.sub(r"[\s，。！？!?,.、；;：:~～…·'\"“”‘’（）()\[\]【】]+", "", text or "").lower()
 
 
 def _is_data_event_status_success(status: Any) -> bool:
@@ -335,6 +384,9 @@ class XiaoyiChannel(BaseChannel):
         self._device_command_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._privilege_check_lock = asyncio.Lock()
         self._scheduled_device_command_lock = asyncio.Lock()
+        # clientVariables 审批桥接：待答复审批（logical_session → 审批上下文）
+        self._pending_approvals: dict[str, dict[str, Any]] = {}
+        self._reload_permissions_cb: Callable[[], Any] | None = None
 
     @property
     def channel_id(self) -> str:
@@ -881,6 +933,15 @@ class XiaoyiChannel(BaseChannel):
                 )
             return
 
+        # 权限/确认审批（chat.ask_user_question）：渲染提示并登记待答复审批，
+        # 用户下一条消息（文本约定或 PermissionReply 事件）将被转换为 interrupt resume
+        # 恢复挂起的运行，而不是结束本轮等用户新开一轮。
+        # 必须放在 non_user_visible SKIPPED 判断之前——ask_user_question 不在
+        # should_send_as_text/reasoning_text 名单内，位置错会被静默吞掉。
+        if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
+            await self._send_ask_user_question_prompt(msg, session_id, task_id)
+            return
+
         if not (
             should_send_as_reasoning_text(msg.event_type)
             or should_send_as_text(msg.event_type)
@@ -936,49 +997,6 @@ class XiaoyiChannel(BaseChannel):
                 self._accumulated_texts.pop(session_id, None)
 
             logger.warning(f"XiaoyiChannel 发送错误消息: session={session_id}, error={error_text}")
-            return
-
-        # 问卷降级保底：端侧无选项点选卡片能力，把 chat.ask_user_question 降级为纯文本，
-        # 走 text part 管道（A2A artifact-update kind:"text"），保证端侧一定能渲染出问卷。
-        # 必须放在下方 non_user_visible SKIPPED 判断之前——chat.ask_user_question 既非
-        #   status_update 也非 reasoning/text，会被那段直接 SKIPPED，降级就永远到不了。
-        # 协议帧与普通正文回复末帧完全一致：append=False, lastChunk=True, final=True, kind="text"。
-        #   last_chunk=True：一次性整段输出，按协议流式输出必须以 lastChunk=True 结束，
-        #   且 last_chunk=True 才走 kind:"text" 正文管道（False 会走 reasoningText 思考管道）。
-        #   is_final=True：与普通回复末帧一致，本轮结束；用户回答问卷作为新一轮请求重新进来，
-        #   agent 拿到回答后再给出方案，与纯文本 ask_user 的处理方式完全相同。
-        if msg.event_type == EventType.CHAT_ASK_USER_QUESTION:
-            ask_payload = msg.payload if isinstance(msg.payload, dict) else {}
-            ask_questions = ask_payload.get("questions", []) or []
-            if ask_questions:
-                ask_lines = ["为了帮你更好地完成任务，请回答以下几个问题：", ""]
-                for q in ask_questions:
-                    q_header = q.get("header", "") or q.get("question", "") or "问题"
-                    q_text = q.get("question", "")
-                    if q_header and q_header != q_text:
-                        ask_lines.append(f"【{q_header}】{q_text}")
-                    else:
-                        ask_lines.append(q_text)
-                    q_opts = q.get("options", []) or []
-                    for opt in q_opts:
-                        if isinstance(opt, dict):
-                            opt_label = opt.get("label", "") or opt.get("description", "")
-                        else:
-                            opt_label = str(opt)
-                        if opt_label:
-                            ask_lines.append(f"  • {opt_label}")
-                ask_lines.append("（直接回复你的选择或补充具体信息即可，我会据此继续处理）")
-                ask_text = "\n".join(ask_lines)
-                for url_key in list(self._ws_connections.keys()):
-                    await self._send_text_response(
-                        session_id,
-                        task_id,
-                        ask_text,
-                        url_key,
-                        append=False,
-                        last_chunk=True,
-                        is_final=True,  # 与普通回复末帧一致，本轮结束；用户回答作为新请求重新进来
-                    )
             return
 
         if not (
@@ -2128,6 +2146,8 @@ class XiaoyiChannel(BaseChannel):
         # ==================== PROCESS PARTS (TEXT & FILES) ====================
         text = ""
         push_id = ""  # V2: 从 data part 的 systemVariables 提取，webhook 推送寻址 token
+        client_variables: dict[str, Any] = {}  # data part 的 variables.clientVariables（workspace/permission 等）
+        permission_reply: dict[str, Any] | None = None  # AgentEvent/PermissionReply 审批回执事件
         file_attachments: list[str] = []
         media_files: list[dict[str, Any]] = []
 
@@ -2170,6 +2190,26 @@ class XiaoyiChannel(BaseChannel):
                 if isinstance(data, dict):
                     push_id = data.get("variables", {}).get("systemVariables", {}).get("push_id", "")
                     self.config.push_id = push_id if push_id else self.config.push_id
+                    # clientVariables：手机端下发的工作空间/权限模式等客户端上下文
+                    variables = data.get("variables")
+                    if isinstance(variables, dict):
+                        cv = variables.get("clientVariables")
+                        if isinstance(cv, dict):
+                            client_variables.update(cv)
+                    # 审批回执事件（AgentEvent/PermissionReply）：用户点选/结构化回复授权决定
+                    events = data.get("events")
+                    if isinstance(events, list):
+                        for ev in events:
+                            if not isinstance(ev, dict):
+                                continue
+                            header = ev.get("header")
+                            if (
+                                isinstance(header, dict)
+                                and header.get("namespace") == "AgentEvent"
+                                and header.get("name") == "PermissionReply"
+                            ):
+                                payload = ev.get("payload")
+                                permission_reply = payload if isinstance(payload, dict) else {}
                     # 持久化 pushId 到本地 pushIdList.json（异步，不阻塞主流程），
                     # 供 pushBroadcast 向所有已注册 pushId 广播。对应 xy_channel
                     # 的 utils/pushid-manager.ts addPushId 调用。
@@ -2284,6 +2324,31 @@ class XiaoyiChannel(BaseChannel):
             logger.warning("XiaoyiChannel failed to update .xiaoyiruntime", exc_info=True)
 
         raw_msg_id = message.get("id")
+        # ==================== PERMISSION APPROVAL BRIDGE ====================
+        # 本会话存在待答复的权限/确认审批时，把用户回复（文本约定或 PermissionReply
+        # data event）转换为 interrupt resume（chat.send + request_id/answers/source）
+        # 恢复被挂起的运行，而不是作为新任务下发。
+        # 必须在空帧拦截之前：仅携带 PermissionReply 事件的帧无 text/file，
+        # 放后面会被当成空帧丢弃，审批回执永远到不了。
+        approval = self._resolve_approval_reply(logical_session, text.strip(), permission_reply)
+        if approval is not None:
+            answer, pending = approval
+            logger.info(
+                f"XiaoYi: 识别到审批回复 session={logical_session} "
+                f"request_id={pending.get('request_id')} answer={answer}"
+            )
+            await self._route_approval_reply(
+                message,
+                answer,
+                pending,
+                session_id=session_id,
+                logical_session=logical_session,
+                agent_id=agent_id,
+                device_id=device_id,
+                push_id=push_id,
+            )
+            return
+        # =================================================================
         # ── 空 message/stream 帧拦截 ───────────────────────────────────
         # 端侧会通过同一条 WS 推一些 method=message/stream 的事件帧（切换到下一条
         # 指令、文件更新通知 files_updated_by_user、push_id 回写等）：它们带一个
@@ -2322,8 +2387,39 @@ class XiaoyiChannel(BaseChannel):
             self._team_tasks.add((session_id, task_id))
         self._session_task_map[task_id] = session_id
 
+        # ==================== clientVariables：工作空间 + 权限模式 ====================
+        # 手机端在 data part 的 variables.clientVariables 里携带：
+        #   workspace  —— 工作空间路径（WorkspaceQuery 应答条目回传）
+        #   permission —— 权限模式（default / full_access，兼容中文名）
+        client_workspace = resolve_client_workspace(client_variables.get("workspace"))
+        if client_variables.get("workspace") and not client_workspace:
+            logger.warning(
+                f"XiaoYi: clientVariables.workspace 无效或目录不存在，按未携带处理: "
+                f"{client_variables.get('workspace')}"
+            )
+        permission_profile = normalize_permission_profile(client_variables.get("permission"))
+        if client_variables.get("permission") and not permission_profile:
+            logger.warning(
+                f"XiaoYi: clientVariables.permission 未识别，保持当前权限配置: "
+                f"{client_variables.get('permission')}"
+            )
+        # 权限档位先落 config.yaml + 热重载（best-effort），再路由本消息，保证当轮生效
+        if permission_profile:
+            await self._apply_permission_profile(permission_profile)
+        # 工作空间按请求下发 project_dir/cwd（AgentServer 首回合锁定到会话）；受限档
+        # 附带 trusted_dirs 与工作空间约束指令（与桌面端本地对话行为完全一致）
+        if client_workspace:
+            text = with_workspace_directive(text, client_workspace, permission_profile)
+        # =================================================================
+
         # Add media payload to metadata
         params = {"query": text, "task_id": task_id}
+        if client_workspace:
+            params["project_dir"] = client_workspace
+            params["cwd"] = client_workspace
+            trusted_dirs = resolve_trusted_dirs(permission_profile, client_workspace)
+            if trusted_dirs:
+                params["trusted_dirs"] = trusted_dirs
         if media_payload:
             params["files"] = media_payload
         # Per-request model (same key as Web chat.send); agent last-mile overrides model=
@@ -2406,6 +2502,217 @@ class XiaoyiChannel(BaseChannel):
         # Start session heartbeat to prevent xiaoyi client timeout
         if not self.config.enable_streaming and session_id:
             await self._start_session_heartbeat(session_id, task_id)
+
+    # ==================== clientVariables 权限档位 + 审批桥接 ====================
+
+    def set_reload_permissions_handler(self, cb: Callable[[], Any] | None) -> None:
+        """注入权限热重载回调（gateway 侧持有 AgentServer E2A 连接，由 app_gateway 装配）。"""
+        self._reload_permissions_cb = cb
+
+    async def _apply_permission_profile(self, profile: str) -> None:
+        """把 clientVariables.permission 指定的权限档位落 config.yaml 并热重载（best-effort）。
+
+        配置无变更时跳过 reload；reload 失败不阻塞消息（配置已写盘，下一轮对话生效）。
+        """
+        try:
+            from jiuwenswarm.common.config import update_permission_profile_in_config
+
+            changed = await asyncio.to_thread(update_permission_profile_in_config, profile)
+        except Exception as e:
+            logger.warning(f"XiaoYi: 权限档位 {profile} 写配置失败: {e}")
+            return
+        if not changed:
+            return
+        cb = self._reload_permissions_cb
+        if cb is None:
+            logger.info(f"XiaoYi: 权限档位 {profile} 已写盘（未注入热重载回调，AgentServer 下次重载生效）")
+            return
+        try:
+            result = cb()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=15)
+            logger.info(f"XiaoYi: 权限档位已切换为 {profile} 并完成热重载")
+        except Exception as e:
+            logger.warning(f"XiaoYi: 权限热重载失败（配置已写盘，下一轮对话生效）: {e}")
+
+    def _resolve_approval_reply(
+        self,
+        logical_session: str,
+        text: str,
+        permission_reply: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """待答复审批 + 用户回复 → (answer, pending)；无待答复或不构成回复返回 None。
+
+        识别顺序：PermissionReply data event（结构化回执）→ 文本约定词表 →
+        其余非空文本视为「其他意见」（拒绝 + 原文反馈，对齐 Web 端 custom_input 语义）。
+        """
+        pending = self._pending_approvals.get(logical_session)
+        if not pending:
+            return None
+        if time.time() - float(pending.get("created_at", 0)) > _APPROVAL_EXPIRE_S:
+            self._pending_approvals.pop(logical_session, None)
+            logger.info(f"XiaoYi: 待答复审批已过期，按普通消息处理 session={logical_session}")
+            return None
+
+        if permission_reply is not None:
+            action = str(permission_reply.get("action") or "").strip().lower()
+            decision = _APPROVAL_EVENT_ACTIONS.get(action)
+            if decision is None:
+                logger.warning(f"XiaoYi: 未识别的 PermissionReply.action={action}，不消费待答复审批")
+                return None
+            feedback = str(permission_reply.get("feedback") or "")
+            self._pending_approvals.pop(logical_session, None)
+            return self._build_approval_answer(decision, feedback), pending
+
+        normalized = _normalize_approval_text(text)
+        if not normalized:
+            return None
+        if normalized in _APPROVAL_APPROVE_WORDS:
+            decision = "approve"
+        elif normalized in _APPROVAL_SESSION_WORDS:
+            decision = "session"
+        elif normalized in _APPROVAL_ALWAYS_WORDS:
+            decision = "always"
+        elif normalized in _APPROVAL_REJECT_WORDS:
+            decision = "reject"
+        else:
+            decision = "feedback"
+        self._pending_approvals.pop(logical_session, None)
+        return self._build_approval_answer(decision, text.strip()), pending
+
+    @staticmethod
+    def _build_approval_answer(decision: str, feedback: str = "") -> dict[str, Any]:
+        """审批决定 → interrupt resume answers 条目（selected_options 取框架识别的标签）。"""
+        if decision == "approve":
+            return {"selected_options": ["本次允许"], "custom_input": ""}
+        if decision == "session":
+            return {"selected_options": ["会话内记住"], "custom_input": ""}
+        if decision == "always":
+            return {"selected_options": ["永久记住"], "custom_input": ""}
+        if decision == "reject":
+            return {"selected_options": ["拒绝"], "custom_input": feedback}
+        # 其他意见：拒绝并把原文作为反馈（对齐 Web 端 custom_input 语义）
+        return {"selected_options": [], "custom_input": feedback}
+
+    async def _route_approval_reply(
+        self,
+        message: dict[str, Any],
+        answer: dict[str, Any],
+        pending: dict[str, Any],
+        *,
+        session_id: str,
+        logical_session: str,
+        agent_id: str,
+        device_id: str,
+        push_id: str,
+    ) -> None:
+        """把审批回复转成 chat.send interrupt-resume 路由给 AgentServer（恢复挂起的运行）。
+
+        resume 的 xiaoyi_task_id 沿用原任务 id：续跑流式输出回到手机端同一任务气泡。
+        """
+        task_id = str(pending.get("task_id") or "")
+        params = {
+            "query": "",
+            "task_id": task_id,
+            "session_id": logical_session,  # 对齐 Web 端 resume 载荷（useWebSocket chat.send）
+            "request_id": pending.get("request_id") or "",
+            "answers": [answer],
+            "source": pending.get("source") or "permission_interrupt",
+            "mode": "agent",
+        }
+        metadata = {
+            "method": "message/stream",
+            "xiaoyi_session_id": session_id,  # 顶层 sessionId（物理回发）
+            "xiaoyi_task_id": task_id,  # 续跑流回原始任务气泡
+            "xiaoyi_conversation_id": logical_session,  # 逻辑会话
+            "xiaoyi_push_id": push_id,
+            "xiaoyi_device_id": device_id,
+            "im_sender_user_id": agent_id,
+        }
+        resume_message = Message(
+            id=message.get("id", ""),
+            type="req",
+            channel_id=self.channel_id,
+            session_id=logical_session,
+            user_id=agent_id,
+            bot_id=self.config.agent_id,
+            app_id=self.app_id,
+            params=params,
+            timestamp=time.time(),
+            is_stream=self.config.enable_streaming,
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            chat_id=session_id,
+            metadata=metadata,
+        )
+        handled = False
+        if self._on_message_cb is not None:
+            result = self._on_message_cb(resume_message)
+            if inspect.isawaitable(result):
+                result = await result
+            handled = bool(result)
+        if not handled:
+            await self.bus.route_user_message(resume_message)
+        # 回执：状态条提示已收到回复（append 到任务流，不关闭气泡）
+        for url_key in list(self._ws_connections.keys()):
+            await self._send_status_update(task_id, session_id, "已收到您的回复，继续执行…")
+
+    async def _send_ask_user_question_prompt(self, msg: Message, session_id: str, task_id: str) -> None:
+        """权限/确认审批提示：渲染问题与选项，并登记待答复审批（等用户下一条消息回复）。
+
+        回复约定：文本（同意 / 会话内允许 / 永久允许 / 拒绝，详见模块级词表）或
+        data event {"header":{"namespace":"AgentEvent","name":"PermissionReply"},
+        "payload":{"action":"approve|session_allow|always_allow|reject","feedback":?}}。
+        """
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        questions = payload.get("questions") or []
+        request_id = str(payload.get("request_id") or "").strip()
+        source = str(payload.get("source") or "").strip() or "permission_interrupt"
+        meta = getattr(msg, "metadata", None) or {}
+        logical_session = (
+            str(meta.get("xiaoyi_conversation_id") or "").strip()
+            or (msg.session_id or "")
+            or session_id
+        )
+        if request_id and logical_session:
+            self._pending_approvals[logical_session] = {
+                "request_id": request_id,
+                "source": source,
+                "task_id": task_id,
+                "created_at": time.time(),
+            }
+        else:
+            logger.warning("XiaoYi: ask_user_question 缺少 request_id/会话标识，无法登记待答复审批")
+
+        q0: dict[str, Any] = questions[0] if questions and isinstance(questions[0], dict) else {}
+        header = str(q0.get("header") or "").strip()
+        question = str(q0.get("question") or "").strip()
+        options = q0.get("options") or []
+        labels = [
+            str(opt.get("label") or "").strip()
+            for opt in options
+            if isinstance(opt, dict) and str(opt.get("label") or "").strip()
+        ]
+        lines = ["🔐 需要您的确认"]
+        if header:
+            lines.append(f"【{header}】")
+        if question:
+            lines.append(question)
+        if labels:
+            lines.append("可选项：" + " / ".join(labels))
+        lines.append(_APPROVAL_REPLY_HINT)
+        prompt_text = "\n".join(lines)
+        # 完整文本块但非 final：提示可见且不关闭任务气泡，续跑结果继续落到同一任务
+        for url_key in list(self._ws_connections.keys()):
+            await self._send_text_response(
+                session_id,
+                task_id,
+                prompt_text,
+                url_key,
+                append=True,
+                last_chunk=True,
+                is_final=False,
+            )
 
     async def _start_session_heartbeat(self, session_id: str, task_id: str) -> None:
         """启动会话心跳任务，每隔5秒发送空消息直到final消息发出."""
@@ -2657,6 +2964,12 @@ class XiaoyiChannel(BaseChannel):
         session_id = message.get("sessionId", "")
         logger.info(f"XiaoyiChannel 清空上下文: {session_id}")
 
+        # 清理待答复审批（两个会话键都兜底清理）
+        self._pending_approvals.pop(session_id, None)
+        conversation_id = message.get("conversationId") or message.get("params", {}).get("sessionId", "") or ""
+        if conversation_id:
+            self._pending_approvals.pop(conversation_id, None)
+
         # Check if there's an active task for this session
         if self._is_session_active(session_id):
             logger.info(f"[CLEAR] Active task exists for session {session_id}, will continue in background")
@@ -2683,6 +2996,11 @@ class XiaoyiChannel(BaseChannel):
         session_id = params.get("sessionId") or message.get("sessionId", "")
         task_id = params.get("id") or message.get("taskId", "")
         logger.info(f"XiaoyiChannel 取消任务: {session_id} {task_id}")
+        # 取消即放弃待答复审批（两个会话键都兜底清理）
+        self._pending_approvals.pop(session_id, None)
+        cancel_conversation_id = message.get("conversationId") or message.get("params", {}).get("sessionId", "") or ""
+        if cancel_conversation_id:
+            self._pending_approvals.pop(cancel_conversation_id, None)
         response = {
             "jsonrpc": "2.0",
             "id": message.get("id", ""),
