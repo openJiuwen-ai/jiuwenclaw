@@ -239,6 +239,8 @@ proactive_recommendation:
   max_rounds_per_tick: 20                # 每次 Tick 读取最近几轮对话
 
 models:
+  # 开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。
+  enable_free_models: true
   defaults:
     - model_client_config:
         api_base: ${API_BASE}

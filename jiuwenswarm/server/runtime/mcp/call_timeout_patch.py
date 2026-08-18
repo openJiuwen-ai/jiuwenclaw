@@ -101,20 +101,58 @@ def apply_mcp_call_timeout_patch(default_timeout: float = DEFAULT_CALL_TIMEOUT) 
                 )
                 # Tear down the dead session so the next call fails fast rather
                 # than burning another full timeout window on a half-open conn.
+                # disconnect runs the same anyio task-group teardown that can
+                # raise a BaseExceptionGroup (containing GeneratorExit); coerce
+                # it so the timeout path doesn't escape as an uncatchable group.
                 try:
                     await self.disconnect()
-                except Exception as exc:
-                    logger.warning(
-                        "[mcp-timeout] %s.%s disconnect after timeout also failed: %r",
-                        cls.__name__,
-                        name,
-                        exc,
+                except BaseException as disc_exc:  # noqa: BLE001
+                    from jiuwenswarm.server.runtime.mcp.exc_group import (
+                        reraise_as_exception,
                     )
+                    try:
+                        reraise_as_exception(disc_exc)
+                    except Exception as coerce_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[mcp-timeout] %s.%s disconnect after timeout also failed: %r",
+                            cls.__name__,
+                            name,
+                            coerce_exc,
+                        )
                 raise
+            except BaseException as exc:
+                # The mcp SDK's streamablehttp_client runs inside an anyio task
+                # group. When the server returns an HTTP error (403/500/...),
+                # the task-group teardown raises a BaseExceptionGroup containing
+                # the real exception (e.g. httpx.HTTPStatusError) PLUS a
+                # GeneratorExit (from the generator-based client context being
+                # closed). A BaseExceptionGroup containing GeneratorExit is NOT
+                # an Exception subclass, so every `except Exception` above and
+                # in the handler escapes it → the frontend hangs forever.
+                # Coerce it back into a catchable Exception (re-raises the
+                # HTTPStatusError on its own when possible, wraps the rest).
+                from jiuwenswarm.server.runtime.mcp.exc_group import (
+                    reraise_as_exception,
+                )
+                reraise_as_exception(exc)
 
         setattr(cls, name, wrapped)
 
     # (A) HTTP long-poll transports — same failure mode when the server dies.
+    # call_tool / list_tools are the hot path. They enter and exit the MCP SDK's
+    # anyio task-group scope within the same call, so anyio.fail_after's cancel
+    # scope stays correctly paired.
+    #
+    # connect is deliberately NOT wrapped: connect() does
+    # ``self._exit_stack.enter_async_context(self._client)`` — it ENTERS the
+    # SDK streamable_http_client's task-group cancel scope but does not EXIT it
+    # (the exit is deferred to disconnect() via self._exit_stack.aclose()). If
+    # anyio.fail_after wrapped connect, its cancel scope would close when
+    # connect() returns, while the SDK's task-group scope it entered is still
+    # alive — anyio then raises "Attempted to exit a cancel scope that isn't
+    # the current task's current cancel scope" on the next task-group op
+    # (e.g. list_tools). connect already guards initialize() with
+    # asyncio.wait_for, so it does not need an outer cancel scope.
     for cls in (StreamableHttpClient, SseClient):
         _wrap_with_timeout(cls, "call_tool")
         _wrap_with_timeout(cls, "list_tools")

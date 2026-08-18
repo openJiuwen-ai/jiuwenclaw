@@ -3204,65 +3204,92 @@ class SkillManager:
     # -----------------------------------------------------------------------
 
     def _scan_local_skills(self) -> list[dict]:
-        """扫描 agent/skills/ 下的本地 skill（跳过 _marketplace）."""
+        """扫描 agent/skills/ 下的本地 skill（跳过 _marketplace）.
+
+        Also scans connected MCPs' bundled skills (under
+        <workspace>/mcp/skills/<name>/). An MCP's skills surface only while
+        it is connected — toggling it on/off controls whether its skills load.
+        """
         results: list[dict] = []
-        if not self._skills_dir.exists():
-            return results
 
-        for child in self._skills_dir.iterdir():
-            if not child.is_dir() or child.name.startswith("_"):
+        # 1) user skills under <workspace>/skills/
+        if self._skills_dir.exists():
+            for child in self._skills_dir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                meta = self._scan_one_skill_dir(child)
+                if meta is not None:
+                    results.append(meta)
+
+        # 2) connected MCP skill dirs (only connected MCPs). skill_installer
+        # normalizes all MCP skills to the nested shape mcp/skills/<name>/<skill>/,
+        # so each child dir here is one skill (no flat-layout special case).
+        for entry in self._mcp_skills_dirs():
+            cdir = Path(str(entry.get("dir", "")))
+            if not cdir.is_dir():
                 continue
-            md = self._try_find_skill_file(child)
-            if md is None:
-                continue
-            meta = self._parse_skill_md(md)
-            if meta is None:
-                continue
-
-            if meta.get("name") == md.stem:
-                meta["name"] = child.name
-
-            # 判断 source 类型
-            installed = self._get_installed_plugins()
-            source = "project"
-            for p in installed:
-                if p.get("name") == meta.get("name"):
-                    source = p.get("source", "project")
-                    if source == "project" and p.get("marketplace"):
-                        source = p.get("marketplace", "project")
-                    break
-            # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
-            for ls in self._state.get("local_skills", []):
-                if ls.get("name") == meta.get("name"):
-                    source = ls.get("source", "local") if isinstance(ls, dict) else "local"
-                    if isinstance(ls, dict):
-                        origin = ls.get("origin")
-                        if isinstance(origin, str) and origin.strip():
-                            meta["origin"] = origin.strip()
-                        display_name = ls.get("display_name")
-                        if isinstance(display_name, str) and display_name.strip():
-                            meta["display_name"] = display_name.strip()
-                    break
-
-            meta["source"] = source
-            if not str(meta.get("display_name") or "").strip():
-                meta["display_name"] = meta.get("name", "")
-            meta["installed"] = True
-            meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
-            # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
-            meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
-            builtin_dir = get_builtin_skills_dir()
-            if builtin_dir.exists():
-                builtin_skill_path = builtin_dir / child.name
-                meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
-            else:
-                meta["is_builtin_source"] = False
-            meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
-            # 不在列表中返回 body
-            meta.pop("body", None)
-            results.append(meta)
+            for child in cdir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                meta = self._scan_one_skill_dir(child, source_default="mcp")
+                if meta is not None:
+                    results.append(meta)
 
         return results
+
+    def _scan_one_skill_dir(
+        self, child: Path, *, source_default: str = "project"
+    ) -> dict[str, Any] | None:
+        """Scan a single skill directory -> meta dict, or None if not a skill."""
+        md = self._try_find_skill_file(child)
+        if md is None:
+            return None
+        meta = self._parse_skill_md(md)
+        if meta is None:
+            return None
+
+        if meta.get("name") == md.stem:
+            meta["name"] = child.name
+
+        # 判断 source 类型
+        installed = self._get_installed_plugins()
+        source = source_default
+        for p in installed:
+            if p.get("name") == meta.get("name"):
+                source = p.get("source", source_default)
+                if source == source_default and p.get("marketplace"):
+                    source = p.get("marketplace", source_default)
+                break
+        # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
+        for ls in self._state.get("local_skills", []):
+            if ls.get("name") == meta.get("name"):
+                source = ls.get("source", source_default) if isinstance(ls, dict) else source_default
+                if isinstance(ls, dict):
+                    origin = ls.get("origin")
+                    if isinstance(origin, str) and origin.strip():
+                        meta["origin"] = origin.strip()
+                    display_name = ls.get("display_name")
+                    if isinstance(display_name, str) and display_name.strip():
+                        meta["display_name"] = display_name.strip()
+                break
+
+        meta["source"] = source
+        if not str(meta.get("display_name") or "").strip():
+            meta["display_name"] = meta.get("name", "")
+        meta["installed"] = True
+        meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
+        # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
+        meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
+        builtin_dir = get_builtin_skills_dir()
+        if builtin_dir.exists():
+            builtin_skill_path = builtin_dir / child.name
+            meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
+        else:
+            meta["is_builtin_source"] = False
+        meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
+        # 不在列表中返回 body
+        meta.pop("body", None)
+        return meta
 
     def _scan_builtin_skills(self) -> list[dict]:
         """扫描内置技能目录中尚未安装到用户目录的技能.
@@ -4577,6 +4604,26 @@ class SkillManager:
     def _get_installed_plugins(self) -> list[dict]:
         return self._state.get("installed_plugins", [])
 
+    # MCP-bundled skills live under <workspace>/mcp/skills/<name>/<skill>/,
+    # physically isolated from user skills. The scan list is derived from
+    # state.json's connected records (see state_store.connected_mcp_skill_dirs)
+    # — an MCP's skills surface only while it is connected.
+
+    @staticmethod
+    def _mcp_skills_dirs() -> list[dict[str, str]]:
+        """MCP skills dirs to scan: derived from state.json's connected records.
+
+        Returns ``[{"name", "dir"}]`` for each connected MCP whose
+        ``mcp/skills/<name>/`` dir exists on disk.
+        """
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                connected_mcp_skill_dirs,
+            )
+            return connected_mcp_skill_dirs()
+        except Exception:  # noqa: BLE001
+            return []
+
     # -----------------------------------------------------------------------
     # 供 AgentServer 内部其它组件复用的轻量公开查询接口
     # -----------------------------------------------------------------------
@@ -4692,6 +4739,17 @@ class SkillManager:
     def remove_skill_config(self, skill_name: str) -> None:
         if remove_skill_config(self._state, skill_name):
             self._save_state()
+
+    def reload_state(self) -> None:
+        """重新从 skills_state.json 加载状态。
+
+        SkillManager 在 __init__ 时加载一次 _state，之后内存缓存。外部流程
+        （如 MCP 连接器经独立 SkillManager 实例写 skill_configs）落盘后，本实例
+        的 _state 仍是旧值——list_disabled_skills 看不到新 disabled 的 skill。
+        refresh_skill_rails 调用本方法先重载再算 disabled_skills，确保磁盘最新值
+        生效。
+        """
+        self._state = self._load_state()
 
     def list_disabled_skills(self) -> list[str]:
         return list_disabled_skills(self._state)

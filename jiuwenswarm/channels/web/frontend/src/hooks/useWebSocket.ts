@@ -1979,25 +1979,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     useChatStore.getState().setThinking(sessionId, false);
   }, []);
 
-  const shouldRecoverProcessingFromReasoning = useCallback((sessionId: string, payload: Record<string, unknown>): boolean => {
-    const runtime = useChatStore.getState().getRuntime(sessionId);
-    if (!runtime || runtime.isProcessing || runtime.isLoadingHistory || runtime.isPaused) {
-      return false;
-    }
-    if (runtime.currentStreamId) {
-      return true;
-    }
-    if (webClient.getInflightCount() > 0) {
-      return true;
-    }
-    const payloadRequestId = getPayloadRequestId(payload);
-    return Boolean(
-      payloadRequestId &&
-      activeRequestIdRef.current &&
-      payloadRequestId === activeRequestIdRef.current
-    );
-  }, []);
-
   const getTeamMemberOutputKey = useCallback(
     (payload: Record<string, unknown>, memberId: string): string => stableEventId(
       'member-output-key',
@@ -2234,9 +2215,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 用户消息的思考状态从"已完成"污染成"已完成 N 次思考" streak chip。
         if (isProactiveRecommendationPayload(payload)) return;
 
-        // 只在明确属于当前活跃请求时恢复 processing，避免 evolution 后置 reasoning
-        // 把已完成会话重新拉回处理中。
-        if (shouldRecoverProcessingFromReasoning(sessionId, payload)) {
+        // 页面刷新后收到活跃事件时恢复执行状态；已暂停会话的迟到事件不得重新拉起 processing
+        const activityRuntime = useChatStore.getState().getRuntime(sessionId);
+        if (!activityRuntime?.isProcessing && !activityRuntime?.isLoadingHistory && !activityRuntime?.isPaused) {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
@@ -3975,7 +3956,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     updateSession,
     resolveEventSessionId,
     shouldDropDuplicatedEvent,
-    shouldRecoverProcessingFromReasoning,
     t,
     takeTeamMemberOutputEventId,
   ]);

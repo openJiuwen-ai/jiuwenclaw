@@ -88,6 +88,16 @@ class ReqMethod(Enum):
     AGENT_SWITCH = "3rdagent.switch"
     AGENT_LIST = "3rdagent.list"
 
+    # mcp management.
+    MCP_LIST = "mcp.list"
+    MCP_SHOW = "mcp.show"
+    MCP_CONNECT = "mcp.connect"
+    MCP_WAIT_AUTH = "mcp.wait_auth"
+    MCP_DISCONNECT = "mcp.disconnect"
+    MCP_REGISTER_CUSTOM = "mcp.register_custom"
+    MCP_DELETE_CUSTOM = "mcp.delete_custom"
+    MCP_SAVE_CREDENTIALS = "mcp.save_credentials"
+
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"

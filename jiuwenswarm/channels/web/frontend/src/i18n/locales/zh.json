@@ -308,6 +308,7 @@
       "tooltip": "切换对话使用的模型",
       "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
+      "free": "免费模型",
       "addModel": "添加自定义模型",
       "placeholder": "选择模型"
     },
@@ -767,18 +768,42 @@
   },
   "modelSetupGuide": {
     "progress": "第 {{current}} 步，共 {{total}} 步",
-    "clickMore": "点击“更多”继续",
+    "clickMore": "点击「更多」继续",
     "acknowledge": "我知道了",
     "skip": "跳过",
     "steps": {
+      "0": {
+        "title": "欢迎使用 jiuwenswarm",
+        "description": "你已获得免费体验额度！选择下方方式开始配置你的模型服务。"
+      },
       "1": {
         "title": "配置你的首个模型",
-        "description": "模型配置位于“更多”中的“配置信息”。"
+        "description": "模型配置位于「更多」中的「配置信息」。"
       },
       "2": {
         "title": "完成模型配置",
         "description": "在默认模型区域填写模型名称、API 地址、API Key 和模型提供商，然后点击保存。"
       }
+    },
+    "quickSetup": {
+      "title": "一键配置华为云 MaaS",
+      "description": "自动引导你完成华为云购买和 API 配置",
+      "steps": {
+        "openConsole": "打开华为云 MaaS 控制台",
+        "updateAuth": "自动更新服务授权权限",
+        "createApiKey": "创建 API Key（用于 JiuwenSwarm 调用模型）",
+        "enableModels": "开通预置模型服务（按调用量计费）"
+      },
+      "agreementPrefix": "点击「一键配置」即表示您同意",
+      "agreementMaas": "《MaaS 模型即服务声明》",
+      "agreementAnd": "和",
+      "agreementCloud": "《华为云用户协议》",
+      "agreementSuffix": "。",
+      "billingNote": "模型开通本身不产生费用，实际调用按用量计费。"
+    },
+    "manualSetup": {
+      "title": "手动配置",
+      "description": "已有 API Key，手动填入配置"
     }
   },
   "config": {
@@ -885,7 +910,8 @@
       "proactiveEnabled": "启用主动推荐",
       "proactiveTickInterval": "检查间隔（分钟）",
       "proactiveMaxPerDay": "每日推荐上限",
-      "proactiveMaxRounds": "每次检查对话轮数"
+      "proactiveMaxRounds": "每次检查对话轮数",
+      "enableFreeModels": "启用免费模型"
     },
     "defaults": {
       "teamLeaderDisplayName": "团队领导",
@@ -937,7 +963,8 @@
       "teamMemberName": "成员内部 ID：须以小写字母开头，仅含小写字母、数字或连字符。",
       "teamPersona": "角色人设与职责描述，影响该成员的行为风格与分工。",
       "teamPromptHint": "额外提示词片段，会注入该成员的系统提示中。",
-      "teamAgentKey": "绑定到「多 Agent 配置」中已有 Agent 的名称（name）。"
+      "teamAgentKey": "绑定到「多 Agent 配置」中已有 Agent 的名称（name）。",
+      "enableFreeModels": "开启后实时拉取可用的免费模型，注意免费模型可能有限流、限窗口大小等限制。免费模型来源于 Opencode Zen 网关（https://opencode.ai/zen），由 models.dev 目录（https://models.opencode.ai/api.json）与 Zen 实时模型列表取交集得到（判定标准：输入价格为 0）。"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -1485,19 +1512,25 @@
   },
   "browser": {
     "title": "浏览器",
-    "subtitle": "配置浏览器 Agent 使用的 Chrome 路径和显示模式。",
-    "refreshPath": "刷新路径",
-    "savePath": "保存路径",
-    "pathConfigHelp": "CHROME 路径配置（Chrome地址栏输入：chrome://version查看，复制可执行文件路径）",
-    "examplePath": "例如：/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "subtitle": "配置浏览器 Agent 使用的浏览器类型、可执行文件路径和显示模式。",
+    "refreshPath": "刷新配置",
+    "savePath": "保存配置",
+    "pathConfigHelp": "浏览器配置（留空路径时自动探测；同时安装时默认优先 Chrome，其次 Edge）",
+    "browserType": "浏览器类型",
+    "browserTypeAuto": "自动（Chrome > Edge）",
+    "browserTypeChrome": "Chrome",
+    "browserTypeEdge": "Microsoft Edge",
+    "browserTypeHelp": "指定类型时只查找该浏览器；填写路径时以路径为准。",
+    "binaryPath": "可执行文件路径（可选）",
+    "examplePath": "例如：C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe 或 msedge.exe 路径",
     "success": {
-      "pathSaved": "Chrome 路径已保存"
+      "pathSaved": "浏览器配置已保存"
     },
     "showBrowser": "显示浏览器",
     "showBrowserDesc": "执行浏览器任务时打开可见的浏览器窗口。",
     "errors": {
-      "loadPath": "加载 Chrome 路径失败",
-      "savePath": "保存 Chrome 路径失败"
+      "loadPath": "加载浏览器配置失败",
+      "savePath": "保存浏览器配置失败"
     }
   },
   "logsPanel": {

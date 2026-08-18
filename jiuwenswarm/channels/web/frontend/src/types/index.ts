@@ -66,6 +66,8 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
+  /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
+  is_free?: boolean;
 }
 
 export interface OffloadFileListResponse {

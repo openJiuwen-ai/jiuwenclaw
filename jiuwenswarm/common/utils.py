@@ -38,6 +38,7 @@ import shutil
 import socket
 import stat
 import time
+import zipfile
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -622,6 +623,7 @@ def _install_default_builtin_skills(
     默认安装的技能：
     - skill-creator: 技能创建助手
     - swarmskill-creator: Swarm技能创建助手
+    - huawei-cloud-maas-setup: 华为云MaaS购买与配置引导
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -630,7 +632,7 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -671,6 +673,47 @@ def _install_default_builtin_skills(
             logger.error(f"安装默认技能失败 {skill_name}: {e}")
 
     # 更新 skills_state.json，记录已安装的技能
+    if installed_skills:
+        _update_skills_state_for_builtin(user_skills_dir, installed_skills)
+
+
+def ensure_default_builtin_skills() -> None:
+    """确保所有默认内置技能已安装到用户技能目录（幂等）。
+
+    与 ``prepare_workspace`` 不同，本函数设计为每次启动都可安全调用：
+    仅复制用户目录中尚不存在的默认技能，已存在的技能不会被覆盖或修改，
+    从而让新增的默认技能在老用户工作区中也能自动补齐。
+    """
+    builtin_dir = get_builtin_skills_dir()
+    user_skills_dir = get_agent_skills_dir()
+
+    if not builtin_dir.exists() or not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过默认技能补齐: {builtin_dir}")
+        return
+
+    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
+
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    installed_skills = []
+    for skill_name in default_skills:
+        builtin_skill_path = builtin_dir / skill_name
+        user_skill_path = user_skills_dir / skill_name
+
+        if not builtin_skill_path.exists() or not builtin_skill_path.is_dir():
+            logger.warning(f"内置技能不存在，跳过补齐: {skill_name}")
+            continue
+
+        if user_skill_path.exists():
+            continue
+
+        try:
+            shutil.copytree(builtin_skill_path, user_skill_path)
+            logger.info(f"已补齐默认技能: {skill_name}")
+            installed_skills.append(skill_name)
+        except Exception as e:
+            logger.error(f"补齐默认技能失败 {skill_name}: {e}")
+
     if installed_skills:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 
@@ -1150,6 +1193,7 @@ def prepare_workspace(
 
     # Copy DeepAgent workspace template (includes agent-data.json, memory, skills)
     # Ignore _ZH.md and _EN.md files - they are handled separately
+    # Ignore mcp_builtins*.zip
     if template_agent_workspace.exists():
         with TrackCopyDiff(
             dest=deepagent_workspace,
@@ -1159,7 +1203,7 @@ def prepare_workspace(
             _copy_dir(
                 template_agent_workspace,
                 deepagent_workspace,
-                ignore_patterns=("*_ZH.md", "*_EN.md", "skills"),
+                ignore_patterns=("*_ZH.md", "*_EN.md", "skills", "mcp_builtins*.zip"),
             )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
@@ -1223,7 +1267,167 @@ def prepare_workspace(
         cumulative_diff=cumulative_diff,
     )
 
+    # ----- 预置 MCP 包目录: 首次解压 zip 种子 / 版本升级覆盖 -----
+    _ensure_mcp_builtins(
+        template_agent_workspace=template_agent_workspace,
+        mcp_builtins_dir=deepagent_workspace / "mcp" / "mcp_builtins",
+        overwrite=overwrite,
+        cumulative_diff=cumulative_diff,
+    )
+
     return cumulative_diff
+
+
+def _find_mcp_builtins_seed(template_agent_workspace: Path) -> Path | None:
+    """定位打包进 resources 的预置 MCP 种子 zip。
+
+    文件名形如 ``mcp_builtins_v0.1.zip``（版本号随发布变），用 glob
+    匹配 ``mcp_builtins*.zip``，这样升级换 zip 时无需改代码。种子随
+    ``resources/**/*`` 打进 whl（pyproject 的 package-data 已含）。
+    """
+    candidates = sorted(template_agent_workspace.glob("mcp_builtins*.zip"))
+    return candidates[-1] if candidates else None
+
+
+def _read_zip_index_version(zip_path: Path) -> str | None:
+    """读 zip 内顶层 index.json 的 version 字段（不落地解压）。"""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            # zip 打包时可能把 mcp_builtins/ 顶层或内容直接铺在根，
+            # index.json 可能在根也可能在 mcp_builtins/ 下，取第一个命中。
+            idx_name = None
+            for n in names:
+                if n.rstrip("/") == "index.json" or n.endswith("/index.json"):
+                    idx_name = n
+                    break
+            if not idx_name:
+                return None
+            with zf.open(idx_name) as fh:
+                data = json.load(fh)
+            return str(data.get("version", "")).strip() or None
+    except (OSError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        logger.warning("[mcp_builtins] read seed index.json failed: %s", exc)
+        return None
+
+
+def _ensure_mcp_builtins(
+    template_agent_workspace: Path,
+    mcp_builtins_dir: Path,
+    overwrite: bool,
+    cumulative_diff: CopyDiffResult,
+) -> None:
+    """启动时保证预置 MCP 包目录就位（首次解压 / 版本更新覆盖）。
+
+    规则：无 mcp_builtins 目录 → 解压种子；已有但 index.json version 与
+    种子不一致 → 整目录覆盖解压（版本升级）；一致且非 overwrite → 跳过；
+    overwrite=True（init -f）→ 无论版本一致都重新解压。种子 zip 缺失则
+    跳过（开发期 resources 没打 zip 不应阻断启动）。
+    """
+    seed_zip = _find_mcp_builtins_seed(template_agent_workspace)
+    if seed_zip is None:
+        logger.debug("[mcp_builtins] no seed zip under %s; skip", template_agent_workspace)
+        return
+
+    seed_version = _read_zip_index_version(seed_zip)
+    # 读已落地的 index.json version（目录不存在视为 None）。
+    local_version: str | None = None
+    if mcp_builtins_dir.is_dir():
+        local_idx = mcp_builtins_dir / "index.json"
+        try:
+            with local_idx.open("r", encoding="utf-8") as fh:
+                local_version = str(json.load(fh).get("version", "")).strip() or None
+        except (OSError, json.JSONDecodeError):
+            local_version = None
+
+    # 首次安装（无目录）或版本不一致（升级）或强制覆盖 → 解压。
+    need_extract = (
+        not mcp_builtins_dir.exists()
+        or (seed_version is not None and seed_version != local_version)
+        or overwrite
+    )
+    if not need_extract:
+        return
+
+    action = "install" if not mcp_builtins_dir.exists() else (
+        "upgrade" if local_version != seed_version else "reinstall"
+    )
+    logger.info(
+        "[mcp_builtins] %s: seed=%s local=%s -> extract %s",
+        action, seed_version, local_version, seed_zip.name,
+    )
+    print(
+        f"[jiuwenswarm-init] MCP 预置包 {action} (v{seed_version or '?'}) "
+        f"<- {seed_zip.name}"
+    )
+
+    # 原子化覆盖：先解压到临时目录，成功后整体替换旧目录，避免解压中途
+    # 失败留下「旧目录已删 + 新目录半残」的损坏状态。
+    mcp_builtins_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = mcp_builtins_dir.parent / f".{mcp_builtins_dir.name}.tmp.{os.getpid()}"
+    # 残留的临时目录（上次崩溃遗留）先清掉。
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    try:
+        with zipfile.ZipFile(seed_zip) as zf:
+            # Normalize ZIP member paths to forward slashes and extract manually
+            # to prevent extractall from flattening the directory tree on Linux
+            # when backslashes are used.
+            for info in zf.infolist():
+                member = info.filename.replace("\\", "/")
+                # Skip dir entries (trailing /)
+                if member.endswith("/"):
+                    continue
+                # Guard against absolute / parent-traversal entries.
+                if member.startswith("/") or ".." in member.split("/"):
+                    continue
+                target = tmp_dir / member
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        # A zip built under a wrapper dir would leave a nested mcp_builtins/
+        # subdir; flatten so tmp_dir directly holds each package dir. Flat zips
+        # are unaffected. 套在 try 内，move 失败也走回滚清理。
+        nested = tmp_dir / "mcp_builtins"
+        if nested.is_dir():
+            for entry in nested.iterdir():
+                shutil.move(str(entry), str(tmp_dir / entry.name))
+            nested.rmdir()
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.error("[mcp_builtins] extract %s failed: %s", seed_zip, exc)
+        print(f"[jiuwenswarm-init] ERROR: extract MCP seed failed: {exc}")
+        # 清理半残的临时目录，保留旧目录不动（下次启动可重试）。
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+
+    # 解压完成且 flatten 后，原子替换旧目录。Windows 上 os.replace 对目录
+    # 的支持依赖 Python 3.9+ 的可替代语义；失败时降级为 rmtree + rename。
+    if mcp_builtins_dir.exists():
+        try:
+            shutil.rmtree(mcp_builtins_dir)
+        except OSError as rmtree_exc:  # noqa: BLE001
+            logger.warning(
+                "[mcp_builtins] rmtree old dir failed (will retry rename): %s",
+                rmtree_exc,
+            )
+            # Windows 文件占用：无法删旧目录时，退一步把临时目录 rename
+            # 覆盖（shutil.move 跨目录 rename 失败会降级 copy+remove）。
+            try:
+                shutil.rmtree(mcp_builtins_dir, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        os.replace(tmp_dir, mcp_builtins_dir)
+    except OSError:
+        shutil.move(str(tmp_dir), str(mcp_builtins_dir))
+
+    with TrackCopyDiff(
+        dest=mcp_builtins_dir,
+        cumulative=cumulative_diff,
+        overwrite=overwrite,
+    ):
+        pass  # 仅登记到 diff 摘要，文件已解压就位
 
 
 def _close_log_handlers() -> None:

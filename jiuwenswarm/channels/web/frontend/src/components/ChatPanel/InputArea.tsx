@@ -27,7 +27,7 @@ import {
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
-import { AgentMode, MediaItem, Permission, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, ModelEntry, Permission, type ProjectInfo } from '../../types';
 import { NEW_CONVERSATION_ID } from '../../multi-session/state/newConversationLifecycle';
 import { ProjectCreateMenu, type ProjectCreateMode } from '../../multi-session/sidebar/ProjectCreateMenu';
 import { projectCreateErrorKey } from '../../multi-session/sidebar/projectCreateErrors';
@@ -2929,38 +2929,54 @@ function ModelSelector({
             : { position: 'fixed', top: menuAnchor.bottom + 10, left: menuAnchor.left, zIndex: 9999 }
           }
         >
-          <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header">{t('chat.modelSelector.configured')}</div>
-          {chatAvailableModels.map((m, idx) => {
-            const key = m.alias || m.model_name;
-            const isActive = key === (selectedModel.alias || selectedModel.model_name);
+          {(() => {
+            const isFree = (m: ModelEntry) => m.is_free === true;
+            const freeModels = chatAvailableModels.filter(isFree);
+            const configuredModels = chatAvailableModels.filter((m) => !isFree(m));
+            const renderGroup = (label: string, models: ModelEntry[]) =>
+              models.length === 0 ? null : (
+                <>
+                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header">{label}</div>
+                  {models.map((m, idx) => {
+                    const key = m.alias || m.model_name;
+                    const isActive = key === (selectedModel.alias || selectedModel.model_name);
+                    return (
+                      <button
+                        type="button"
+                        key={`${m.model_name}-${idx}`}
+                        onClick={() => handleSelect(key)}
+                        className={clsx(
+                          'chat-mode-select__option',
+                          isActive && 'chat-mode-select__option--active',
+                        )}
+                        role="menuitemradio"
+                        aria-checked={isActive}
+                        data-testid="chat-panel-model-selector-option"
+                        data-variant={key}
+                      >
+                        <span className="chat-mode-select__option-main">
+                          <span className="chat-mode-select__icon" aria-hidden="true">
+                            <ModelProviderIcon model={m} />
+                          </span>
+                          <span className="chat-mode-select__label">{key}</span>
+                        </span>
+                        {isActive && (
+                          <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
+                          </svg>
+                        )}
+                      </button>
+                    );
+                  })}
+                </>
+              );
             return (
-              <button
-                type="button"
-                key={`${m.model_name}-${idx}`}
-                onClick={() => handleSelect(key)}
-                className={clsx(
-                  'chat-mode-select__option',
-                  isActive && 'chat-mode-select__option--active',
-                )}
-                role="menuitemradio"
-                aria-checked={isActive}
-                data-testid="chat-panel-model-selector-option"
-                data-variant={key}
-              >
-                <span className="chat-mode-select__option-main">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <ModelProviderIcon model={m} />
-                  </span>
-                  <span className="chat-mode-select__label">{key}</span>
-                </span>
-                {isActive && (
-                  <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                  </svg>
-                )}
-              </button>
+              <>
+                {renderGroup(t('chat.modelSelector.free'), freeModels)}
+                {renderGroup(t('chat.modelSelector.configured'), configuredModels)}
+              </>
             );
-          })}
+          })()}
           <button
             type="button"
             className="model-select__add-btn"

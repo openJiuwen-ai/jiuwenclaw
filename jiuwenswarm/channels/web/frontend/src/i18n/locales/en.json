@@ -307,6 +307,7 @@
       "tooltip": "Switch the model used for chat",
       "clusterLockedTooltip": "Cluster mode uses the configured default model and cannot be changed",
       "configured": "Configured Models",
+      "free": "Free Models",
       "addModel": "Add Custom Model",
       "placeholder": "Select Model"
     },
@@ -771,6 +772,10 @@
     "acknowledge": "Got it",
     "skip": "Skip",
     "steps": {
+      "0": {
+        "title": "Welcome to jiuwenswarm",
+        "description": "You have free credits! Choose a way to configure your model service below."
+      },
       "1": {
         "title": "Configure your first model",
         "description": "Model settings are under More, in Configuration."
@@ -779,6 +784,26 @@
         "title": "Complete model configuration",
         "description": "Enter the model name, API URL, API key, and model provider in Default model, then select Save."
       }
+    },
+    "quickSetup": {
+      "title": "Auto-setup Huawei Cloud MaaS",
+      "description": "Guided Huawei Cloud purchase and API configuration",
+      "steps": {
+        "openConsole": "Open Huawei Cloud MaaS console",
+        "updateAuth": "Update service authorization automatically",
+        "createApiKey": "Create an API key for JiuwenSwarm model calls",
+        "enableModels": "Enable preset models (pay-as-you-go)"
+      },
+      "agreementPrefix": "By clicking \"Auto-setup\" you agree to the ",
+      "agreementMaas": "MaaS Model-as-a-Service Statement",
+      "agreementAnd": " and the ",
+      "agreementCloud": "Huawei Cloud User Agreement",
+      "agreementSuffix": ".",
+      "billingNote": "Enabling models is free; you only pay for actual usage."
+    },
+    "manualSetup": {
+      "title": "Manual setup",
+      "description": "Already have an API key, configure manually"
     }
   },
   "config": {
@@ -885,7 +910,8 @@
       "proactiveEnabled": "Enable proactive recommendation",
       "proactiveTickInterval": "Check interval (minutes)",
       "proactiveMaxPerDay": "Daily recommendation limit",
-      "proactiveMaxRounds": "Max rounds per check"
+      "proactiveMaxRounds": "Max rounds per check",
+      "enableFreeModels": "Enable free models"
     },
     "defaults": {
       "teamLeaderDisplayName": "Team Leader",
@@ -937,7 +963,8 @@
       "teamMemberName": "Internal member ID: must start with a lowercase letter, then lowercase letters, digits, or hyphens.",
       "teamPersona": "Role persona and responsibilities; shapes behavior and division of labor.",
       "teamPromptHint": "Extra prompt fragment injected into this member's system prompt.",
-      "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration."
+      "teamAgentKey": "Name of an existing Agent from Multi-Agent Configuration.",
+      "enableFreeModels": "When enabled, available free models are fetched live. Note that free models may have limitations such as rate limits or restricted context window size. Free models are sourced from the Opencode Zen gateway (https://opencode.ai/zen), obtained by intersecting the models.dev catalog (https://models.opencode.ai/api.json) with the Zen live model list (criterion: input price is 0)."
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -1487,19 +1514,25 @@
   },
   "browser": {
     "title": "Browser",
-    "subtitle": "Configure the Chrome path and display mode used by browser agents.",
-    "refreshPath": "Refresh Path",
-    "savePath": "Save Path",
-    "pathConfigHelp": "Chrome path configuration (open chrome://version in Chrome and copy the executable path)",
-    "examplePath": "Example: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "subtitle": "Configure browser type, executable path, and display mode for browser agents.",
+    "refreshPath": "Refresh",
+    "savePath": "Save",
+    "pathConfigHelp": "Browser settings (leave path empty to auto-detect; when both are installed, Chrome is preferred over Edge)",
+    "browserType": "Browser type",
+    "browserTypeAuto": "Auto (Chrome > Edge)",
+    "browserTypeChrome": "Chrome",
+    "browserTypeEdge": "Microsoft Edge",
+    "browserTypeHelp": "Pinning a type searches only that browser; an explicit path always wins.",
+    "binaryPath": "Executable path (optional)",
+    "examplePath": "Example: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe or an msedge.exe path",
     "success": {
-      "pathSaved": "Chrome path saved"
+      "pathSaved": "Browser settings saved"
     },
     "showBrowser": "Show Browser",
     "showBrowserDesc": "Open a visible browser window when running browser tasks.",
     "errors": {
-      "loadPath": "Failed to load Chrome path",
-      "savePath": "Failed to save Chrome path"
+      "loadPath": "Failed to load browser settings",
+      "savePath": "Failed to save browser settings"
     }
   },
   "logsPanel": {

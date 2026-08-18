@@ -41,6 +41,7 @@ export const PROVIDER_SPECS: ProviderSpec[] = [
   { key: 'stepfun',     keywords: ['stepfun', 'step-'] },
   { key: 'baichuan',    keywords: ['baichuan'] },
   { key: 'sensetime',   keywords: ['sensetime', 'sensenova', 'nova-ptc'] },
+  { key: 'opencode-zen', keywords: ['opencode.ai/zen', 'opencode-zen', 'opencode zen'] },
 ];
 
 const DEFAULT_PROVIDER =
