@@ -465,7 +465,8 @@ async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str
 
     response = await client.send_request(_envelope(agent_type="opencode"))
 
-    assert response.ok
+    assert not response.ok
+    assert "does not use websocket" in str(response.payload)
     assert yuanrong.create_calls == 1
     assert yuanrong.create_payloads[0]["workspace"] == str(
         Path(agentos_workspace_root) / "u1"
@@ -474,12 +475,10 @@ async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str
         "TRACE_ID": "registry-trace",
         "FEATURE_FLAG": "1",
     }
-    assert yuanrong.send_calls == 1
-    # 第三方 agent 端口取自 runtime_spec rootfs.ports（tcp:22）。
-    assert yuanrong.ws_connect_uris == [
-        "ws://yuanrong.test:8888/serverless/v1/ws"
-        "?instance=sbx-1&tenant_id=default&port=22"
-    ]
+    spec = yuanrong.create_payloads[0]["runtime_spec"]
+    assert "ports" not in spec["rootfs"]
+    assert yuanrong.send_calls == 0
+    assert yuanrong.ws_connect_uris == []
     agents = await agent_manager.list_user_agents("u1")
     assert agents[0].info.agent_type == "opencode"
     assert agents[0].info.status is AgentStatus.READY
@@ -521,6 +520,7 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
         "TRACE_ID": "switch-trace",
         "ENABLE_FLAG": "True",
     }
+    assert "ports" not in yuanrong.create_payloads[0]["runtime_spec"]["rootfs"]
     agents = await agent_manager.list_user_agents("u1")
     assert len(agents) == 1
     assert agents[0].info.agent_type == "opencode"
