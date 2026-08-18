@@ -27,12 +27,29 @@ def _runtime_dependency_sources() -> list[Path]:
     sources = list(_runtime_sources())
     for folder in ("cron", "xiaoyi_phone_tools"):
         sources.extend(
-            (package / "agents" / "harness" / "common" / "tools" / folder).glob(
-                "*.py"
-            )
+            (package / "agents" / "harness" / "common" / "tools" / folder).glob("*.py")
         )
     sources.append(
         package / "server" / "runtime" / "agent_adapter" / "interface_deep.py"
+    )
+    sources.extend(
+        [
+            package
+            / "agents"
+            / "harness"
+            / "common"
+            / "tools"
+            / "send_file_to_user.py",
+            package
+            / "agents"
+            / "harness"
+            / "common"
+            / "tools"
+            / "multi_session_toolkits.py",
+            package / "server" / "runtime" / "agent_adapter" / "team_helpers.py",
+            package / "agents" / "harness" / "team" / "remote_member_bootstrap.py",
+            package / "server" / "runtime" / "proactive_adapter.py",
+        ]
     )
     return sorted(set(sources))
 
@@ -52,6 +69,38 @@ def test_runtime_public_api_has_no_transport_imports() -> None:
                     violations.append(f"{source.name}:{node.lineno}: {module}")
 
     assert violations == []
+
+
+def test_runtime_host_services_cold_import_does_not_load_runtime_core() -> None:
+    script = """
+import sys
+import jiuwenswarm.runtime.host_services
+
+unexpected = sorted(
+    name for name in sys.modules
+    if name == 'jiuwenswarm.runtime.service'
+    or name == 'jiuwenswarm.server.runtime.agent_manager'
+)
+print('UNEXPECTED_RUNTIME_CORE=' + repr(unexpected))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "UNEXPECTED_RUNTIME_CORE=[]" in result.stdout
+
+
+def test_runtime_lazy_public_exports_remain_discoverable() -> None:
+    import jiuwenswarm.runtime as runtime
+
+    assert set(runtime.__all__) <= set(dir(runtime))
+    assert runtime.AgentRuntime.__name__ == "AgentRuntime"
 
 
 def test_runtime_execution_dependencies_have_no_transport_imports() -> None:
@@ -116,3 +165,23 @@ def test_runtime_does_not_reintroduce_alternate_agent_implementations() -> None:
         )
 
     assert declared.isdisjoint(FORBIDDEN_RUNTIME_TYPES)
+
+
+def test_agentserver_injects_runtime_manager_into_teammate_daemon() -> None:
+    """The control-plane daemon runs outside a request ContextVar."""
+    source = PROJECT_ROOT / "jiuwenswarm" / "server" / "app_agentserver.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    daemon_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_teammate_bootstrap_daemon"
+    ]
+
+    assert len(daemon_calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in daemon_calls[0].keywords}
+    manager = keywords.get("agent_manager")
+    assert isinstance(manager, ast.Call)
+    assert isinstance(manager.func, ast.Attribute)
+    assert manager.func.attr == "get_agent_manager"

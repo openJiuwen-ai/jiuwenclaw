@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from collections.abc import Callable
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -99,10 +100,12 @@ class CronTools:
         )
         self._scheduler: CronScheduler | None = None
         self._scheduler_factory = scheduler_factory
-        # Kept only for source compatibility with callers that previously
-        # supplied transport objects. Runtime never discovers or imports them.
-        self._legacy_host_objects = (agent_client, message_handler)
+        # Explicit legacy hosts remain supported through a duck-typed factory
+        # on the host. Runtime never imports or discovers Gateway singletons.
+        self._agent_client = agent_client
+        self._message_handler = message_handler
         self._scheduler_started = False
+        self._scheduler_start_lock = asyncio.Lock()
 
     async def ensure_scheduler(self) -> CronScheduler | None:
         """Start an explicitly injected host scheduler, if one exists."""
@@ -113,21 +116,41 @@ class CronTools:
             # Already tried to start but failed or stopped
             return self._scheduler
         
-        if self._scheduler_factory is None:
-            self._scheduler_started = True
-            return None
+        async with self._scheduler_start_lock:
+            if self._scheduler is not None and self._scheduler.is_running():
+                return self._scheduler
+            if self._scheduler_started:
+                return self._scheduler
 
-        try:
-            self._scheduler = self._scheduler_factory(self._local_store)
-            await self._scheduler.start()
-            logger.info("[CronTools] Scheduler started successfully")
-            self._scheduler_started = True
-            return self._scheduler
-            
-        except Exception as exc:
-            logger.warning("[CronTools] Failed to start scheduler: %s", exc)
-            self._scheduler_started = True  # Mark as tried
-            return None
+            factory = self._scheduler_factory
+            if factory is None and self._message_handler is not None:
+                host_factory = getattr(
+                    self._message_handler,
+                    "create_cron_scheduler",
+                    None,
+                )
+                if callable(host_factory):
+                    def _host_scheduler_factory(
+                        store: CronJobStore,
+                    ) -> CronScheduler:
+                        return host_factory(store, self._agent_client)
+
+                    factory = _host_scheduler_factory
+
+            if factory is None:
+                self._scheduler_started = True
+                return None
+
+            try:
+                self._scheduler = factory(self._local_store)
+                await self._scheduler.start()
+                logger.info("[CronTools] Scheduler started successfully")
+                self._scheduler_started = True
+                return self._scheduler
+            except Exception as exc:
+                logger.warning("[CronTools] Failed to start scheduler: %s", exc)
+                self._scheduler_started = True  # Mark as tried
+                return None
 
     async def _reload_scheduler(self) -> None:
         """Reload scheduler if it's running."""

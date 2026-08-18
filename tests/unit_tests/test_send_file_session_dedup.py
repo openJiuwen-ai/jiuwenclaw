@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -38,13 +38,13 @@ def test_send_file_skips_duplicate_after_success(tmp_path):
         session_id="sess-1",
         channel_id="web",
     )
-    mock_server = MagicMock()
-    mock_server.send_push = AsyncMock()
+    pushed: list[dict] = []
 
-    with patch(
-        "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
-        return_value=mock_server,
-    ), patch(
+    async def _push(message: dict) -> bool:
+        pushed.append(message)
+        return True
+
+    with patch.object(sfu, "send_runtime_push", _push), patch(
         "jiuwenswarm.server.runtime.session.session_history.append_history_record",
     ):
         first = asyncio.run(toolkit.send_file(str(file_path)))
@@ -52,4 +52,30 @@ def test_send_file_skips_duplicate_after_success(tmp_path):
 
     assert "成功发送" in first
     assert "跳过重复投递" in second
-    assert mock_server.send_push.await_count == 1
+    assert len(pushed) == 1
+
+
+def test_history_failure_after_push_does_not_duplicate_delivery(tmp_path):
+    file_path = tmp_path / "delivered.md"
+    file_path.write_text("hello", encoding="utf-8")
+    toolkit = sfu.SendFileToolkit(
+        request_id="r-history",
+        session_id="sess-history",
+        channel_id="web",
+    )
+    pushed: list[dict] = []
+
+    async def _push(message: dict) -> bool:
+        pushed.append(message)
+        return True
+
+    with patch.object(sfu, "send_runtime_push", _push), patch(
+        "jiuwenswarm.server.runtime.session.session_history.append_history_record",
+        side_effect=OSError("history unavailable"),
+    ):
+        first = asyncio.run(toolkit.send_file(str(file_path)))
+        second = asyncio.run(toolkit.send_file(str(file_path)))
+
+    assert "成功发送" in first
+    assert "跳过重复投递" in second
+    assert len(pushed) == 1

@@ -22,6 +22,15 @@ if TYPE_CHECKING:
     from jiuwenswarm.runtime.events import RuntimeEvent
     from jiuwenswarm.runtime.plan import PlanModeController
 
+logger = logging.getLogger(__name__)
+
+_PROCESS_RUNTIME_DEPENDENCY_LOCK = asyncio.Lock()
+_PROCESS_RUNTIME_DEPENDENCY_USERS = 0
+_PROCESS_RUNTIME_EXTENSION_LOCK = asyncio.Lock()
+_PROCESS_RUNTIME_EXTENSION_USERS = 0
+_PROCESS_RUNTIME_EXTENSION_MANAGER: Any = None
+_PROCESS_RUNTIME_EXTENSION_REGISTRY: Any = None
+
 
 class RuntimeStateError(RuntimeError):
     """Raised when an operation violates the runtime lifecycle."""
@@ -34,6 +43,182 @@ async def _initialize_runtime_dependencies() -> None:
     )
 
     await ensure_persistent_checkpointer()
+
+
+async def _acquire_process_runtime_dependencies() -> None:
+    """Acquire the process-global checkpointer/Runner exactly once."""
+    global _PROCESS_RUNTIME_DEPENDENCY_USERS
+
+    async with _PROCESS_RUNTIME_DEPENDENCY_LOCK:
+        if _PROCESS_RUNTIME_DEPENDENCY_USERS == 0:
+            runner_start_attempted = False
+            try:
+                await _initialize_runtime_dependencies()
+                from openjiuwen.core.runner import Runner
+
+                runner_start_attempted = True
+                runner_started = await Runner.start()
+                if runner_started is False:
+                    raise RuntimeError("Runner failed to start")
+            except BaseException as start_error:
+                from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+                    close_persistent_checkpointer,
+                )
+
+                cleanup_errors: list[BaseException] = []
+                if runner_start_attempted:
+                    try:
+                        runner_stopped = await Runner.stop()
+                        if runner_stopped is False:
+                            cleanup_errors.append(
+                                RuntimeError("Runner failed to stop during rollback")
+                            )
+                    except BaseException as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                try:
+                    await close_persistent_checkpointer()
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+                for cleanup_error in cleanup_errors:
+                    logger.warning(
+                        "Runtime dependency rollback failed while preserving "
+                        "%s: %s",
+                        type(start_error).__name__,
+                        cleanup_error,
+                        exc_info=(
+                            type(cleanup_error),
+                            cleanup_error,
+                            cleanup_error.__traceback__,
+                        ),
+                    )
+                raise
+        _PROCESS_RUNTIME_DEPENDENCY_USERS += 1
+
+
+async def _release_process_runtime_dependencies() -> None:
+    """Release shared dependencies after the final Runtime owner closes."""
+    global _PROCESS_RUNTIME_DEPENDENCY_USERS
+
+    async with _PROCESS_RUNTIME_DEPENDENCY_LOCK:
+        if _PROCESS_RUNTIME_DEPENDENCY_USERS <= 0:
+            return
+        _PROCESS_RUNTIME_DEPENDENCY_USERS -= 1
+        if _PROCESS_RUNTIME_DEPENDENCY_USERS > 0:
+            return
+
+        cleanup_errors: list[BaseException] = []
+        from openjiuwen.core.runner import Runner
+
+        try:
+            runner_stopped = await Runner.stop()
+            if runner_stopped is False:
+                cleanup_errors.append(RuntimeError("Runner failed to stop"))
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            close_persistent_checkpointer,
+        )
+
+        try:
+            await close_persistent_checkpointer()
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if cleanup_errors:
+            raise cleanup_errors[0]
+
+
+async def _acquire_process_runtime_extensions() -> bool:
+    """Acquire extensions created by Runtime, preserving external ownership."""
+    global _PROCESS_RUNTIME_EXTENSION_MANAGER
+    global _PROCESS_RUNTIME_EXTENSION_REGISTRY
+    global _PROCESS_RUNTIME_EXTENSION_USERS
+
+    from openjiuwen.core.runner import Runner
+
+    from jiuwenswarm.extensions.manager import ExtensionManager
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+    async with _PROCESS_RUNTIME_EXTENSION_LOCK:
+        try:
+            registry = ExtensionRegistry.get_instance()
+        except RuntimeError:
+            registry = ExtensionRegistry.create_instance(
+                callback_framework=Runner.callback_framework,
+                config={},
+                logger=logger,
+            )
+            manager: ExtensionManager | None = None
+            try:
+                manager = ExtensionManager(registry=registry)
+                await manager.load_all_extensions(include_transport_extensions=False)
+            except BaseException as load_error:
+                cleanup_error: BaseException | None = None
+                if manager is not None:
+                    try:
+                        await manager.shutdown_all_extensions()
+                    except BaseException as exc:
+                        cleanup_error = exc
+                try:
+                    current = ExtensionRegistry.get_instance()
+                except RuntimeError:
+                    current = None
+                if current is registry:
+                    ExtensionRegistry.reset_instance()
+                if cleanup_error is not None:
+                    logger.warning(
+                        "Runtime extension rollback failed while preserving "
+                        "%s: %s",
+                        type(load_error).__name__,
+                        cleanup_error,
+                        exc_info=(
+                            type(cleanup_error),
+                            cleanup_error,
+                            cleanup_error.__traceback__,
+                        ),
+                    )
+                raise
+            _PROCESS_RUNTIME_EXTENSION_MANAGER = manager
+            _PROCESS_RUNTIME_EXTENSION_REGISTRY = registry
+        else:
+            if registry is not _PROCESS_RUNTIME_EXTENSION_REGISTRY:
+                # AgentServer/Gateway may preload the registry. Runtime borrows it
+                # and must not participate in or alter that owner's lifecycle.
+                return False
+
+        _PROCESS_RUNTIME_EXTENSION_USERS += 1
+        return True
+
+
+async def _release_process_runtime_extensions() -> None:
+    """Release Runtime-owned extensions after the final Runtime closes."""
+    global _PROCESS_RUNTIME_EXTENSION_MANAGER
+    global _PROCESS_RUNTIME_EXTENSION_REGISTRY
+    global _PROCESS_RUNTIME_EXTENSION_USERS
+
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+    async with _PROCESS_RUNTIME_EXTENSION_LOCK:
+        if _PROCESS_RUNTIME_EXTENSION_USERS <= 0:
+            return
+        _PROCESS_RUNTIME_EXTENSION_USERS -= 1
+        if _PROCESS_RUNTIME_EXTENSION_USERS > 0:
+            return
+
+        manager = _PROCESS_RUNTIME_EXTENSION_MANAGER
+        registry = _PROCESS_RUNTIME_EXTENSION_REGISTRY
+        _PROCESS_RUNTIME_EXTENSION_MANAGER = None
+        _PROCESS_RUNTIME_EXTENSION_REGISTRY = None
+        try:
+            if manager is not None:
+                await manager.shutdown_all_extensions()
+        finally:
+            try:
+                current = ExtensionRegistry.get_instance()
+            except RuntimeError:
+                current = None
+            if current is registry:
+                ExtensionRegistry.reset_instance()
 
 
 class AgentRuntime:
@@ -57,7 +242,8 @@ class AgentRuntime:
         self._manage_runner = initializer is None
         self._runner_started = False
         self._checkpointer_started = False
-        self._owned_extension_manager: Any = None
+        self._shared_dependencies_acquired = False
+        self._shared_extensions_acquired = False
         if plan_controller is None:
             from jiuwenswarm.runtime.plan import PlanModeController
 
@@ -93,22 +279,29 @@ class AgentRuntime:
             if self._started:
                 return
             try:
-                await self._initializer()
                 if self._manage_runner:
+                    await _acquire_process_runtime_dependencies()
+                    self._shared_dependencies_acquired = True
                     self._checkpointer_started = True
-                    from openjiuwen.core.runner import Runner
-
-                    await Runner.start()
                     self._runner_started = True
+                else:
+                    await self._initializer()
                 if self._initialize_extensions:
                     await self._ensure_extensions()
                 self._started = True
-            except BaseException:
+            except BaseException as start_error:
                 try:
                     await self._rollback_start()
-                except Exception:  # noqa: BLE001
-                    logging.getLogger(__name__).exception(
-                        "Runtime start rollback encountered a cleanup error"
+                except BaseException as cleanup_error:
+                    logger.warning(
+                        "Runtime start rollback failed while preserving %s: %s",
+                        type(start_error).__name__,
+                        cleanup_error,
+                        exc_info=(
+                            type(cleanup_error),
+                            cleanup_error,
+                            cleanup_error.__traceback__,
+                        ),
                     )
                 raise
 
@@ -158,7 +351,18 @@ class AgentRuntime:
         allow_create: bool = False,
     ) -> AgentResponse:
         """Cancel the target request/session without crossing a transport."""
-        await self.start()
+        # Cancellation must stay responsive while the first Runtime start is
+        # still initializing the checkpointer/Runner.  Looking up an existing
+        # Agent only needs the manager that is already constructed in __init__;
+        # forcing start() here would wait on the lifecycle lock and defeat the
+        # no-Agent fast-success path used by ESC during first-agent creation.
+        if allow_create:
+            # Agent creation can touch Runner/checkpointer-backed resources and
+            # therefore retains the normal lifecycle barrier.  Only the
+            # existing-Agent lookup path is safe during first initialization.
+            await self.start()
+        elif self._closed:
+            raise RuntimeStateError("runtime is already closed")
         from jiuwenswarm.runtime.request import cancel_request
 
         return await cancel_request(
@@ -167,18 +371,49 @@ class AgentRuntime:
             allow_create=allow_create,
         )
 
-    async def invoke(self, request: AgentRequest) -> list[RuntimeEvent]:
+    async def invoke(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None = None,
+    ) -> list[RuntimeEvent]:
         """Execute one non-streaming request and return Runtime events."""
         await self.start()
+        from jiuwenswarm.runtime.context import (
+            reset_runtime_context,
+            set_runtime_context,
+        )
+
+        token = set_runtime_context(self, self._agent_manager)
+        try:
+            return await self._invoke_started(
+                request,
+                trigger_hook=trigger_hook,
+                on_control_event=on_control_event,
+            )
+        finally:
+            reset_runtime_context(token)
+
+    async def _invoke_started(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None,
+    ) -> list[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
-        await self._trigger_before_chat_request_hook(request)
+        if trigger_hook:
+            await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
         foreground = request.req_method in self._chat_turn_methods()
         if foreground:
             await self._agent_manager.begin_foreground_chat()
         events: list[RuntimeEvent] = []
         agent: Any = None
+        execution_error: Exception | None = None
+        cancellation: asyncio.CancelledError | None = None
         readonly_goal_get = self._is_readonly_goal_get_request(request)
         stateless = self._is_stateless_method_request(request)
         try:
@@ -197,11 +432,11 @@ class AgentRuntime:
                         sub_mode,
                         agent,
                     )
-                    events.extend(
-                        self._control_events(
-                            request,
-                            plan_result.events,
-                        )
+                    await self._emit_control_events(
+                        request,
+                        plan_result.events,
+                        events=events,
+                        handler=on_control_event,
                     )
             response = await agent.process_message(request)
             events.append(
@@ -214,7 +449,10 @@ class AgentRuntime:
                     default_complete=True,
                 )
             )
+        except asyncio.CancelledError as exc:
+            cancellation = exc
         except Exception as exc:  # noqa: BLE001
+            execution_error = exc
             events.append(
                 RuntimeEvent.error(
                     request_id=request.request_id,
@@ -224,18 +462,51 @@ class AgentRuntime:
                 )
             )
         finally:
-            if agent is not None and not stateless and not readonly_goal_get:
-                events.extend(
-                    self._control_events(
+            plan_error: BaseException | None = None
+            end_error: BaseException | None = None
+            try:
+                if agent is not None and not stateless and not readonly_goal_get:
+                    await self._emit_control_events(
                         request,
                         await self._plan_controller.check_post_process_exit(
                             request,
                             agent,
                         ),
+                        events=events,
+                        handler=on_control_event,
                     )
+            except BaseException as exc:  # preserve execution/cancellation below
+                plan_error = exc
+            finally:
+                if foreground:
+                    try:
+                        await self._agent_manager.end_foreground_chat()
+                    except BaseException as exc:
+                        end_error = exc
+
+            primary_error: BaseException | None = cancellation or execution_error
+            if primary_error is not None:
+                self._log_suppressed_cleanup_error(
+                    "plan post-processing",
+                    plan_error,
+                    primary_error,
                 )
-            if foreground:
-                await self._agent_manager.end_foreground_chat()
+                self._log_suppressed_cleanup_error(
+                    "foreground cleanup",
+                    end_error,
+                    primary_error,
+                )
+            elif plan_error is not None:
+                self._log_suppressed_cleanup_error(
+                    "foreground cleanup",
+                    end_error,
+                    plan_error,
+                )
+                raise plan_error
+            elif end_error is not None:
+                raise end_error
+        if cancellation is not None:
+            raise cancellation
         return events
 
     async def answer_interaction(
@@ -249,12 +520,58 @@ class AgentRuntime:
             raise ValueError("interaction answer must use ReqMethod.CHAT_ANSWER")
         return await self.invoke(request)
 
-    async def stream(self, request: AgentRequest) -> AsyncIterator[RuntimeEvent]:
+    async def stream(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool = True,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
         """Execute one request and yield the shared Runtime event stream."""
         await self.start()
+        from jiuwenswarm.runtime.context import (
+            reset_runtime_context,
+            set_runtime_context,
+        )
+
+        stream = self._stream_started(
+            request,
+            trigger_hook=trigger_hook,
+            on_control_event=on_control_event,
+        )
+        try:
+            while True:
+                # Never keep a ContextVar token across a yield boundary.  An
+                # async generator may be finalized by another task/context;
+                # resetting such a token there raises ValueError.  Each
+                # execution slice still runs with the Runtime context, and
+                # child tasks created by the agent inherit it normally.
+                token = set_runtime_context(self, self._agent_manager)
+                try:
+                    event = await anext(stream)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    reset_runtime_context(token)
+                yield event
+        finally:
+            token = set_runtime_context(self, self._agent_manager)
+            try:
+                await stream.aclose()
+            finally:
+                reset_runtime_context(token)
+
+    async def _stream_started(
+        self,
+        request: AgentRequest,
+        *,
+        trigger_hook: bool,
+        on_control_event: Callable[[RuntimeEvent], Awaitable[None]] | None,
+    ) -> AsyncIterator[RuntimeEvent]:
         from jiuwenswarm.runtime.events import RuntimeEvent
 
-        await self._trigger_before_chat_request_hook(request)
+        if trigger_hook:
+            await self._trigger_before_chat_request_hook(request)
         channel_id = request.channel_id or "default"
         foreground = request.req_method in self._chat_turn_methods()
         if foreground:
@@ -264,7 +581,7 @@ class AgentRuntime:
         stateless = self._is_stateless_method_request(request)
         error: Exception | None = None
         cancellation: asyncio.CancelledError | None = None
-        cancelled = False
+        generator_exit: GeneratorExit | None = None
         try:
             if stateless:
                 agent = await self._get_stateless_agent(channel_id)
@@ -281,11 +598,13 @@ class AgentRuntime:
                         sub_mode,
                         agent,
                     )
-                    for event in self._control_events(
-                        request,
-                        plan_result.events,
-                    ):
-                        yield event
+                    control_events = self._control_events(request, plan_result.events)
+                    if on_control_event is not None:
+                        for event in control_events:
+                            await on_control_event(event)
+                    else:
+                        for event in control_events:
+                            yield event
             async for chunk in agent.process_message_stream(request):
                 yield RuntimeEvent.from_agent_message(
                     chunk,
@@ -294,26 +613,64 @@ class AgentRuntime:
                     session_id=request.session_id,
                     default_agent_ref=request.agent_ref,
                 )
+        except GeneratorExit as exc:
+            generator_exit = exc
+            raise
         except asyncio.CancelledError as exc:
-            cancelled = True
             cancellation = exc
         except Exception as exc:  # noqa: BLE001
             error = exc
         finally:
+            plan_error: BaseException | None = None
+            end_error: BaseException | None = None
             should_check_plan_exit = (
                 agent is not None and not stateless and not readonly_goal_get
             )
-            if not cancelled and should_check_plan_exit:
-                for event in self._control_events(
-                    request,
-                    await self._plan_controller.check_post_process_exit(
+            try:
+                if should_check_plan_exit:
+                    control_events = self._control_events(
                         request,
-                        agent,
-                    ),
-                ):
-                    yield event
-            if foreground:
-                await self._agent_manager.end_foreground_chat()
+                        await self._plan_controller.check_post_process_exit(
+                            request,
+                            agent,
+                        ),
+                    )
+                    if on_control_event is not None:
+                        for event in control_events:
+                            await on_control_event(event)
+                    elif generator_exit is None:
+                        for event in control_events:
+                            yield event
+            except BaseException as exc:  # preserve execution/cancellation below
+                plan_error = exc
+            finally:
+                if foreground:
+                    try:
+                        await self._agent_manager.end_foreground_chat()
+                    except BaseException as exc:
+                        end_error = exc
+
+            primary_error: BaseException | None = generator_exit or cancellation or error
+            if primary_error is not None:
+                self._log_suppressed_cleanup_error(
+                    "plan post-processing",
+                    plan_error,
+                    primary_error,
+                )
+                self._log_suppressed_cleanup_error(
+                    "foreground cleanup",
+                    end_error,
+                    primary_error,
+                )
+            elif plan_error is not None:
+                self._log_suppressed_cleanup_error(
+                    "foreground cleanup",
+                    end_error,
+                    plan_error,
+                )
+                raise plan_error
+            elif end_error is not None:
+                raise end_error
         if cancellation is not None:
             raise cancellation
         if error is not None:
@@ -339,52 +696,38 @@ class AgentRuntime:
         async with self._lifecycle_lock:
             if self._closed:
                 return
-            cleanup_errors: list[Exception] = []
+            cleanup_errors: list[BaseException] = []
             try:
                 await self._agent_manager.cancel_all_inflight_work("[runtime close] ")
-            except Exception as exc:  # noqa: BLE001
+            except BaseException as exc:  # preserve cancellation until cleanup completes
                 cleanup_errors.append(exc)
             for agent in self._stateless_agents.values():
                 cleanup = getattr(agent, "cleanup", None)
                 if callable(cleanup):
                     try:
                         await cleanup()
-                    except Exception as exc:  # noqa: BLE001
+                    except BaseException as exc:
                         cleanup_errors.append(exc)
             self._stateless_agents.clear()
             try:
                 await self._agent_manager.cleanup()
-            except Exception as exc:  # noqa: BLE001
+            except BaseException as exc:
                 cleanup_errors.append(exc)
-            if self._owned_extension_manager is not None:
-                from jiuwenswarm.extensions.registry import ExtensionRegistry
-
+            if self._shared_extensions_acquired:
                 try:
-                    await self._owned_extension_manager.shutdown_all_extensions()
-                except Exception as exc:  # noqa: BLE001
+                    await _release_process_runtime_extensions()
+                except BaseException as exc:
                     cleanup_errors.append(exc)
                 finally:
-                    self._owned_extension_manager = None
-                    ExtensionRegistry.reset_instance()
-            if self._runner_started:
-                from openjiuwen.core.runner import Runner
-
+                    self._shared_extensions_acquired = False
+            if self._shared_dependencies_acquired:
                 try:
-                    await Runner.stop()
-                except Exception as exc:  # noqa: BLE001
+                    await _release_process_runtime_dependencies()
+                except BaseException as exc:
                     cleanup_errors.append(exc)
                 finally:
+                    self._shared_dependencies_acquired = False
                     self._runner_started = False
-            if self._checkpointer_started:
-                from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-                    close_persistent_checkpointer,
-                )
-
-                try:
-                    await close_persistent_checkpointer()
-                except Exception as exc:  # noqa: BLE001
-                    cleanup_errors.append(exc)
-                finally:
                     self._checkpointer_started = False
             self._started = False
             self._closed = True
@@ -434,57 +777,26 @@ class AgentRuntime:
         return agent
 
     async def _ensure_extensions(self) -> None:
-        from openjiuwen.core.runner import Runner
-
-        from jiuwenswarm.extensions.manager import ExtensionManager
-        from jiuwenswarm.extensions.registry import ExtensionRegistry
-
-        try:
-            ExtensionRegistry.get_instance()
-            return
-        except RuntimeError:
-            pass
-        registry = ExtensionRegistry.create_instance(
-            callback_framework=Runner.callback_framework,
-            config={},
-            logger=logging.getLogger(__name__),
-        )
-        manager = ExtensionManager(registry=registry)
-        await manager.load_all_extensions(include_transport_extensions=False)
-        self._owned_extension_manager = manager
+        self._shared_extensions_acquired = await _acquire_process_runtime_extensions()
 
     async def _rollback_start(self) -> None:
         """Undo partially initialized owned dependencies after start failure."""
-        cleanup_errors: list[Exception] = []
-        if self._owned_extension_manager is not None:
-            from jiuwenswarm.extensions.registry import ExtensionRegistry
-
+        cleanup_errors: list[BaseException] = []
+        if self._shared_extensions_acquired:
             try:
-                await self._owned_extension_manager.shutdown_all_extensions()
-            except Exception as exc:  # noqa: BLE001
+                await _release_process_runtime_extensions()
+            except BaseException as exc:
                 cleanup_errors.append(exc)
             finally:
-                self._owned_extension_manager = None
-                ExtensionRegistry.reset_instance()
-        if self._runner_started:
-            from openjiuwen.core.runner import Runner
-
+                self._shared_extensions_acquired = False
+        if self._shared_dependencies_acquired:
             try:
-                await Runner.stop()
-            except Exception as exc:  # noqa: BLE001
+                await _release_process_runtime_dependencies()
+            except BaseException as exc:
                 cleanup_errors.append(exc)
             finally:
+                self._shared_dependencies_acquired = False
                 self._runner_started = False
-        if self._checkpointer_started:
-            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-                close_persistent_checkpointer,
-            )
-
-            try:
-                await close_persistent_checkpointer()
-            except Exception as exc:  # noqa: BLE001
-                cleanup_errors.append(exc)
-            finally:
                 self._checkpointer_started = False
         if cleanup_errors:
             raise cleanup_errors[0]
@@ -505,6 +817,41 @@ class AgentRuntime:
             )
             for payload in payloads
         ]
+
+    @staticmethod
+    async def _emit_control_events(
+        request: AgentRequest,
+        payloads: list[dict[str, Any]],
+        *,
+        events: list[RuntimeEvent],
+        handler: Callable[[RuntimeEvent], Awaitable[None]] | None,
+    ) -> None:
+        control_events = AgentRuntime._control_events(request, payloads)
+        if handler is None:
+            events.extend(control_events)
+            return
+        for event in control_events:
+            await handler(event)
+
+    @staticmethod
+    def _log_suppressed_cleanup_error(
+        stage: str,
+        cleanup_error: BaseException | None,
+        primary_error: BaseException,
+    ) -> None:
+        if cleanup_error is None:
+            return
+        logger.warning(
+            "Runtime %s failed while preserving primary %s: %s",
+            stage,
+            type(primary_error).__name__,
+            cleanup_error,
+            exc_info=(
+                type(cleanup_error),
+                cleanup_error,
+                cleanup_error.__traceback__,
+            ),
+        )
 
     @staticmethod
     async def _trigger_before_chat_request_hook(request: AgentRequest) -> None:

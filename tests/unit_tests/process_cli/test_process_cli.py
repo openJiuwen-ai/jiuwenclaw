@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import importlib
 import io
 import json
 from pathlib import Path
@@ -85,6 +86,63 @@ class StartFailureClient(FakeClient):
     async def start(self) -> None:
         self.calls.append("start")
         raise RuntimeError("start failed")
+
+
+class SlowStartClient(FakeClient):
+    async def start(self) -> None:
+        self.calls.append("start")
+        await asyncio.sleep(10)
+
+
+class SlowSessionClient(FakeClient):
+    async def create_or_resume_session(
+        self,
+        *,
+        channel_id: str,
+        session_id: str | None,
+    ) -> str:
+        self.calls.append(f"session:{channel_id}:{session_id or ''}")
+        await asyncio.sleep(10)
+        return "unreachable"
+
+
+def _interaction_event(request, question: str) -> RuntimeEvent:
+    return RuntimeEvent(
+        request_id=request.request_id,
+        channel_id=request.channel_id,
+        session_id=request.session_id,
+        payload={
+            "event_type": "chat.ask_user_question",
+            "question": question,
+            "source": "ask_user",
+        },
+    )
+
+
+class InteractionClient(FakeClient):
+    async def stream(self, request):
+        self.calls.append(f"stream:{request.session_id}")
+        yield _interaction_event(request, "first question")
+
+
+class ConsecutiveInteractionClient(InteractionClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.answer_count = 0
+
+    async def answer_interaction(self, request):
+        self.answer_count += 1
+        if self.answer_count == 1:
+            return [_interaction_event(request, "second question")]
+        return [
+            RuntimeEvent(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                session_id=request.session_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+        ]
 
 
 def _args(tmp_path: Path, **overrides) -> argparse.Namespace:
@@ -187,6 +245,42 @@ async def test_timeout_keeps_jsonl_error_machine_compatible(
 
 
 @pytest.mark.asyncio
+async def test_timeout_covers_runtime_startup(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(app, "InProcessRuntimeClient", SlowStartClient)
+    stdout = io.StringIO()
+
+    result = await app.run(
+        _args(tmp_path, timeout=0.01, output="json"),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    document = json.loads(stdout.getvalue())
+    client = SlowStartClient.latest
+    assert result == 124
+    assert document["ok"] is False
+    assert document["events"][-1]["payload"]["event_type"] == "runtime.error"
+    assert client is not None
+    assert client.calls == ["start", "close"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_covers_session_creation(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(app, "InProcessRuntimeClient", SlowSessionClient)
+
+    result = await app.run(
+        _args(tmp_path, timeout=0.01),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    client = SlowSessionClient.latest
+    assert result == 124
+    assert client is not None
+    assert client.calls == ["start", "session:process_cli:", "close"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_error_returns_failure_and_cleans_up(
     monkeypatch,
     tmp_path: Path,
@@ -276,12 +370,68 @@ async def test_start_failure_still_closes_runtime(
 ) -> None:
     monkeypatch.setattr(app, "InProcessRuntimeClient", StartFailureClient)
 
-    with pytest.raises(RuntimeError, match="start failed"):
-        await app.run(_args(tmp_path))
+    stdout = io.StringIO()
+    result = await app.run(
+        _args(tmp_path),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
 
     client = StartFailureClient.latest
+    event = json.loads(stdout.getvalue())
+    assert result == 1
+    assert event["ok"] is False
+    assert event["payload"]["error"] == "start failed"
     assert client is not None
     assert client.calls == ["start", "close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output_format", ["json", "jsonl"])
+async def test_noninteractive_interaction_is_an_explicit_machine_failure(
+    monkeypatch,
+    tmp_path: Path,
+    output_format: str,
+) -> None:
+    monkeypatch.setattr(app, "InProcessRuntimeClient", InteractionClient)
+    stdout = io.StringIO()
+
+    result = await app.run(
+        _args(tmp_path, output=output_format),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert result == 4
+    if output_format == "json":
+        document = json.loads(stdout.getvalue())
+        assert document["ok"] is False
+        events = document["events"]
+    else:
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert events[-1]["ok"] is False
+    assert events[-1]["payload"]["event_type"] == "runtime.error"
+    assert "interactive input is unavailable" in events[-1]["payload"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_handles_consecutive_questions(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(app, "InProcessRuntimeClient", ConsecutiveInteractionClient)
+    monkeypatch.setattr(app, "_interaction_answer", lambda _payload, _stream: ("y", []))
+
+    result = await app.run(
+        _args(tmp_path, output="human", _interactive_worker=True),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    client = ConsecutiveInteractionClient.latest
+    assert result == 0
+    assert client is not None
+    assert client.answer_count == 2
 
 
 @pytest.mark.asyncio
@@ -348,3 +498,14 @@ def test_new_entry_does_not_replace_existing_remote_cli() -> None:
     text = pyproject.read_text(encoding="utf-8")
     assert 'jiuwenswarm = "jiuwenswarm.channels.cli.main:main"' in text
     assert 'jiuwenswarm-process = "jiuwenswarm.channels.process_cli.main:main"' in text
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    ["chat", "events", "gateway_client", "render", "_terminal"],
+)
+def test_historical_remote_cli_imports_alias_migrated_modules(module_name: str) -> None:
+    historical = importlib.import_module(f"jiuwenswarm.cli.{module_name}")
+    migrated = importlib.import_module(f"jiuwenswarm.channels.cli.{module_name}")
+
+    assert historical is migrated

@@ -992,10 +992,35 @@ async def close_persistent_checkpointer() -> None:
         kv_store = getattr(checkpointer, "_kv_store", None)
         engine = getattr(kv_store, "engine", None)
         dispose = getattr(engine, "dispose", None)
-        if callable(dispose):
-            await dispose()
-        CheckpointerFactory.set_default_checkpointer(None)
-        _PERSISTENT_CHECKPOINTER_READY = False
+        dispose_error: BaseException | None = None
+        try:
+            if callable(dispose):
+                await dispose()
+        except BaseException as exc:
+            dispose_error = exc
+
+        reset_error: BaseException | None = None
+        try:
+            CheckpointerFactory.set_default_checkpointer(None)
+        except BaseException as exc:
+            reset_error = exc
+        finally:
+            # READY describes whether the currently installed factory value is
+            # safe to reuse.  Even a failed/partial dispose must force the next
+            # Runtime startup through initialization instead of reusing a
+            # potentially closed pool.
+            _PERSISTENT_CHECKPOINTER_READY = False
+
+        if dispose_error is not None:
+            if reset_error is not None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] checkpointer factory reset failed "
+                    "while preserving dispose error: %s",
+                    reset_error,
+                )
+            raise dispose_error
+        if reset_error is not None:
+            raise reset_error
         logger.info("[JiuWenSwarmDeepAdapter] persistent checkpointer closed")
 
 

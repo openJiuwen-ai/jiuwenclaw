@@ -32,6 +32,9 @@ INTERRUPT_RESUME_SOURCES = frozenset(
 )
 INTERACTION_EVENTS = frozenset({"chat.ask_user_question", "plan.approval_required"})
 SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
+INTERACTIVE_INPUT_REQUIRED = (
+    "process CLI received an interaction request but interactive input is unavailable"
+)
 
 
 def _new_request_id(prefix: str = "cli") -> str:
@@ -158,29 +161,54 @@ async def _consume(
     *,
     interactive: bool,
 ) -> int:
+    async def handle_interaction(
+        original_request: AgentRequest,
+        interaction: RuntimeEvent,
+    ) -> int:
+        if not interactive:
+            renderer.render(
+                RuntimeEvent.error(
+                    request_id=interaction.request_id or original_request.request_id,
+                    channel_id=original_request.channel_id,
+                    session_id=original_request.session_id,
+                    error=RuntimeError(INTERACTIVE_INPUT_REQUIRED),
+                )
+            )
+            return 4
+
+        renderer.prepare_interaction()
+        _answer, answers = await asyncio.to_thread(
+            _interaction_answer,
+            interaction.payload,
+            renderer.stdout,
+        )
+        answer_request, resumes_stream = _answer_request(
+            original_request,
+            interaction,
+            answers,
+        )
+        if resumes_stream:
+            return await _consume(
+                client,
+                answer_request,
+                renderer,
+                interactive=interactive,
+            )
+
+        for answer_event in await client.answer_interaction(answer_request):
+            renderer.render(answer_event)
+            if answer_event.event_type in INTERACTION_EVENTS:
+                nested = await handle_interaction(answer_request, answer_event)
+                if nested != 0:
+                    return nested
+        return 1 if renderer.failed else 0
+
     async for event in client.stream(request):
         renderer.render(event)
         if event.event_type in INTERACTION_EVENTS:
-            if not interactive:
-                return 4
-            _answer, answers = await asyncio.to_thread(
-                _interaction_answer,
-                event.payload,
-                renderer.stdout,
-            )
-            answer_request, resumes_stream = _answer_request(request, event, answers)
-            if resumes_stream:
-                nested = await _consume(
-                    client,
-                    answer_request,
-                    renderer,
-                    interactive=interactive,
-                )
-                if nested != 0:
-                    return nested
-            else:
-                for answer_event in await client.answer_interaction(answer_request):
-                    renderer.render(answer_event)
+            nested = await handle_interaction(request, event)
+            if nested != 0:
+                return nested
     return 1 if renderer.failed else 0
 
 
@@ -194,6 +222,7 @@ async def run(
     client = InProcessRuntimeClient()
     request: AgentRequest | None = None
     session_id = ""
+    request_id = _new_request_id()
     renderer = EventRenderer(
         args.output,
         stdout=stdout,
@@ -202,7 +231,9 @@ async def run(
         show_tools=args.show_tools,
     )
     renderer.start()
-    try:
+
+    async def execute() -> int:
+        nonlocal request, session_id
         await client.start()
         session_id = await client.create_or_resume_session(
             channel_id=CHANNEL_ID,
@@ -214,47 +245,56 @@ async def run(
         request = _build_request(
             args,
             session_id=session_id,
-            request_id=_new_request_id(),
+            request_id=request_id,
         )
         renderer.working()
         interactive = bool(getattr(args, "_interactive_worker", False)) or (
             args.output == "human" and sys.stdin.isatty()
         )
+        return await _consume(
+            client,
+            request,
+            renderer,
+            interactive=interactive,
+        )
+
+    try:
         if args.timeout is not None:
             async with asyncio.timeout(args.timeout):
-                result = await _consume(
-                    client,
-                    request,
-                    renderer,
-                    interactive=interactive,
-                )
+                result = await execute()
         else:
-            result = await _consume(
-                client,
-                request,
-                renderer,
-                interactive=interactive,
-            )
-        renderer.finish(session_id=session_id, request_id=request.request_id)
+            result = await execute()
+        renderer.finish(session_id=session_id, request_id=request_id)
         return result
     except TimeoutError:
         if request is not None:
             await _bounded_cleanup(client.cancel(_cancel_request(request)))
-            renderer.render(
-                RuntimeEvent.error(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    session_id=request.session_id,
-                    error=TimeoutError("process CLI execution timed out"),
-                )
+        renderer.render(
+            RuntimeEvent.error(
+                request_id=request_id,
+                channel_id=CHANNEL_ID,
+                session_id=session_id or None,
+                error=TimeoutError("process CLI execution timed out"),
             )
-            renderer.finish(session_id=session_id, request_id=request.request_id)
+        )
+        renderer.finish(session_id=session_id, request_id=request_id)
         return 124
     except asyncio.CancelledError:
         if request is not None:
             await _bounded_cleanup(client.cancel(_cancel_request(request)))
         renderer.interrupted()
         raise
+    except Exception as exc:  # noqa: BLE001 - CLI converts failures to events
+        renderer.render(
+            RuntimeEvent.error(
+                request_id=request_id,
+                channel_id=CHANNEL_ID,
+                session_id=session_id or None,
+                error=exc,
+            )
+        )
+        renderer.finish(session_id=session_id, request_id=request_id)
+        return 1
     finally:
         if session_id:
             await _bounded_cleanup(

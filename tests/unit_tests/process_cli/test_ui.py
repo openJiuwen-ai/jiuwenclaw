@@ -35,9 +35,9 @@ def test_startup_uses_chinese_card_and_jiuwenswarm_title(monkeypatch) -> None:
     text = output.getvalue()
     assert ">_ JiuwenSwarm" in text
     assert "进程式 CLI · 本地 Runtime" in text
-    assert "模型：  gpt-5.6-sol" in text
+    assert "模型（配置推断）：  gpt-5.6-sol" in text
     assert "目录：  D:\\work_space\\jiuwenswarm" in text
-    assert "模式：  code.normal" in text
+    assert "模式（请求推断）：  code.normal" in text
     assert "会话：  尚未创建" in text
     assert "工作模式" not in text
     assert "输入 / 查看可用命令。" in text
@@ -58,8 +58,8 @@ def test_narrow_terminal_falls_back_to_plain_layout(monkeypatch) -> None:
     )
 
     text = output.getvalue()
-    assert "模型：gpt-5.6-sol" in text
-    assert "模式：code.normal" in text
+    assert "模型（配置推断）：gpt-5.6-sol" in text
+    assert "模式（请求推断）：code.normal" in text
     assert "会话：runtime-session" in text
     assert "工作模式" not in text
     assert "╭" not in text

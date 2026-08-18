@@ -8,10 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from jiuwenswarm import runtime as runtime_package
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime import AgentRuntime, RuntimeStateError
+from jiuwenswarm.runtime import service as runtime_service_module
 from jiuwenswarm.runtime.plan import PlanStateResult
 
 
@@ -75,6 +77,7 @@ class FakeAgent:
             request_id=request.request_id,
             channel_id=request.channel_id,
             payload={"event_type": "chat.final", "content": "done"},
+            metadata={"route": "unary"},
         )
 
     async def process_message_stream(self, request: AgentRequest):
@@ -82,12 +85,14 @@ class FakeAgent:
             request_id=request.request_id,
             channel_id=request.channel_id,
             payload={"event_type": "chat.delta", "delta": "ok"},
+            metadata={"route": "stream"},
         )
         yield AgentResponseChunk(
             request_id=request.request_id,
             channel_id=request.channel_id,
             payload={"event_type": "chat.final", "content": "ok"},
             is_complete=True,
+            metadata={"route": "stream"},
         )
 
 
@@ -268,7 +273,7 @@ async def test_stream_uses_selected_existing_agent_and_runtime_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_preserves_cancellation_and_skips_plan_exit_check() -> None:
+async def test_stream_preserves_cancellation_and_checks_plan_exit() -> None:
     manager = FakeAgentManager()
     manager.agent = CancellingAgent()
     plan = FakePlanController()
@@ -300,7 +305,7 @@ async def test_stream_preserves_cancellation_and_skips_plan_exit_check() -> None
             pass
 
     assert manager.foreground_calls == ["begin", "end"]
-    plan.check_post_process_exit.assert_not_awaited()
+    plan.check_post_process_exit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -372,3 +377,903 @@ async def test_agent_server_cancel_delegates_to_runtime_public_api() -> None:
 
     assert response is expected
     runtime.cancel_request.assert_awaited_once_with(request, allow_create=False)
+
+
+@pytest.mark.asyncio
+async def test_runtime_events_preserve_unary_and_stream_metadata() -> None:
+    manager = FakeAgentManager()
+    plan = FakePlanController()
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=plan,
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+    request = AgentRequest(
+        request_id="metadata-request",
+        channel_id="process_cli",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "hello", "mode": "agent", "work_mode": "work"},
+    )
+
+    unary = await runtime.invoke(request)
+    streamed = [event async for event in runtime.stream(request)]
+
+    assert unary[-1].metadata == {"route": "unary"}
+    assert [event.metadata for event in streamed] == [
+        {"route": "stream"},
+        {"route": "stream"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unary_control_event_is_delivered_before_agent_execution() -> None:
+    order: list[str] = []
+
+    class OrderedAgent(FakeAgent):
+        async def process_message(self, request: AgentRequest) -> AgentResponse:
+            order.append("agent")
+            return await super().process_message(request)
+
+    class OrderedPlanController(FakePlanController):
+        async def ensure_state(self, *args: object) -> PlanStateResult:
+            order.append("plan")
+            return PlanStateResult(
+                events=[{"event_type": "plan.mode_exited", "mode": "code.normal"}]
+            )
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    manager = FakeAgentManager()
+    manager.agent = OrderedAgent()
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=OrderedPlanController(),
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+
+    async def control_handler(event) -> None:
+        order.append(f"control:{event.event_type}")
+
+    events = await runtime.invoke(
+        _chat_request("ordered-control"),
+        on_control_event=control_handler,
+    )
+
+    assert order[:3] == ["plan", "control:plan.mode_exited", "agent"]
+    assert [event.event_type for event in events] == ["chat.final"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_does_not_wait_for_first_runtime_start() -> None:
+    manager = FakeAgentManager()
+    initialize_started = asyncio.Event()
+    allow_initialize = asyncio.Event()
+
+    async def initialize() -> None:
+        initialize_started.set()
+        await allow_initialize.wait()
+
+    runtime = AgentRuntime(agent_manager=manager, initializer=initialize)
+    start_task = asyncio.create_task(runtime.start())
+    await initialize_started.wait()
+    request = AgentRequest(
+        request_id="cancel-during-start",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={},
+    )
+
+    response = await asyncio.wait_for(runtime.cancel_request(request), timeout=0.1)
+
+    assert response.ok is True
+    assert response.payload["event_type"] == "chat.interrupt_result"
+    allow_initialize.set()
+    await start_task
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_agent_creation_waits_for_runtime_start() -> None:
+    manager = FakeAgentManager()
+    initialize_started = asyncio.Event()
+    allow_initialize = asyncio.Event()
+
+    async def initialize() -> None:
+        initialize_started.set()
+        await allow_initialize.wait()
+
+    runtime = AgentRuntime(agent_manager=manager, initializer=initialize)
+    request = AgentRequest(
+        request_id="cancel-create-during-start",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_CANCEL,
+        params={"mode": "agent"},
+    )
+    cancel_task = asyncio.create_task(
+        runtime.cancel_request(request, allow_create=True)
+    )
+    await initialize_started.wait()
+    await asyncio.sleep(0)
+
+    assert manager.agent_calls == []
+    assert cancel_task.done() is False
+
+    allow_initialize.set()
+    response = await cancel_task
+
+    assert response.ok is True
+    assert len(manager.agent_calls) == 1
+
+
+class _FailingPlanController(FakePlanController):
+    async def check_post_process_exit(self, *args: object) -> list[dict[str, object]]:
+        raise RuntimeError("plan post failed")
+
+
+class _FailingAgent(FakeAgent):
+    async def process_message(self, request: AgentRequest) -> AgentResponse:
+        raise ValueError("agent execution failed")
+
+    async def process_message_stream(self, request: AgentRequest):
+        if False:
+            yield
+        raise ValueError("agent stream failed")
+
+
+def _chat_request(request_id: str) -> AgentRequest:
+    return AgentRequest(
+        request_id=request_id,
+        channel_id="process_cli",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "hello", "mode": "agent", "work_mode": "work"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_post_error_always_ends_foreground_chat() -> None:
+    manager = FakeAgentManager()
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=_FailingPlanController(),
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+
+    with pytest.raises(RuntimeError, match="plan post failed"):
+        await runtime.invoke(_chat_request("plan-post-unary"))
+    assert manager.foreground_calls == ["begin", "end"]
+
+    manager.foreground_calls.clear()
+    with pytest.raises(RuntimeError, match="plan post failed"):
+        async for _event in runtime.stream(_chat_request("plan-post-stream")):
+            pass
+    assert manager.foreground_calls == ["begin", "end"]
+
+
+@pytest.mark.asyncio
+async def test_plan_post_error_does_not_replace_agent_error() -> None:
+    manager = FakeAgentManager()
+    manager.agent = _FailingAgent()
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=_FailingPlanController(),
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+
+    unary = await runtime.invoke(_chat_request("primary-unary-error"))
+    streamed = [
+        event async for event in runtime.stream(_chat_request("primary-stream-error"))
+    ]
+
+    assert unary[-1].payload["error"] == "agent execution failed"
+    assert streamed[-1].payload["error"] == "agent stream failed"
+    assert manager.foreground_calls == ["begin", "end", "begin", "end"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_is_inherited_by_child_tasks_and_isolated() -> None:
+    observed: list[tuple[object, object, object, object]] = []
+
+    class ContextAgent(FakeAgent):
+        def __init__(self, runtime_getter, manager_getter) -> None:
+            self._runtime_getter = runtime_getter
+            self._manager_getter = manager_getter
+
+        async def process_message(self, request: AgentRequest) -> AgentResponse:
+            direct = (self._runtime_getter(), self._manager_getter())
+
+            async def child_context() -> tuple[object, object]:
+                await asyncio.sleep(0)
+                return self._runtime_getter(), self._manager_getter()
+
+            child = await asyncio.create_task(child_context())
+            observed.append((*direct, *child))
+            return await super().process_message(request)
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtimes: list[AgentRuntime] = []
+    managers: list[FakeAgentManager] = []
+    for index in range(2):
+        manager = FakeAgentManager()
+        runtime = AgentRuntime(
+            agent_manager=manager,
+            initializer=initialize,
+            plan_controller=FakePlanController(),
+        )
+        manager.agent = ContextAgent(
+            runtime_package.get_current_runtime,
+            runtime_package.get_current_agent_manager,
+        )
+        runtime._trigger_before_chat_request_hook = no_hook
+        managers.append(manager)
+        runtimes.append(runtime)
+
+    await asyncio.gather(
+        runtimes[0].invoke(_chat_request("context-a")),
+        runtimes[1].invoke(_chat_request("context-b")),
+    )
+
+    assert set(observed) == {
+        (runtimes[0], managers[0], runtimes[0], managers[0]),
+        (runtimes[1], managers[1], runtimes[1], managers[1]),
+    }
+    assert runtime_package.get_runtime_context() is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_context_is_available_during_early_stream_close() -> None:
+    manager = FakeAgentManager()
+    observed: list[tuple[object, object]] = []
+
+    class ContextPlanController(FakePlanController):
+        async def check_post_process_exit(
+            self,
+            *args: object,
+        ) -> list[dict[str, object]]:
+            observed.append(
+                (
+                    runtime_package.get_current_runtime(),
+                    runtime_package.get_current_agent_manager(),
+                )
+            )
+            return [{"event_type": "plan.mode_exited", "mode": "agent"}]
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=ContextPlanController(),
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+    stream = runtime.stream(_chat_request("context-early-close"))
+
+    await anext(stream)
+    await stream.aclose()
+
+    assert observed == [(runtime, manager)]
+    assert manager.foreground_calls == ["begin", "end"]
+    assert runtime_package.get_runtime_context() is None
+
+
+@pytest.mark.asyncio
+async def test_early_stream_close_delivers_post_event_to_callback() -> None:
+    manager = FakeAgentManager()
+    delivered: list[str] = []
+
+    class ExitPlanController(FakePlanController):
+        async def check_post_process_exit(
+            self,
+            *args: object,
+        ) -> list[dict[str, object]]:
+            return [{"event_type": "plan.mode_exited", "mode": "agent"}]
+
+    async def initialize() -> None:
+        return None
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    async def control_handler(event) -> None:
+        delivered.append(event.event_type)
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=ExitPlanController(),
+    )
+    runtime._trigger_before_chat_request_hook = no_hook
+    stream = runtime.stream(
+        _chat_request("callback-early-close"),
+        on_control_event=control_handler,
+    )
+
+    await anext(stream)
+    await stream.aclose()
+
+    assert delivered == ["plan.mode_exited"]
+    assert manager.foreground_calls == ["begin", "end"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_owned_extensions_are_reference_counted(monkeypatch) -> None:
+    from openjiuwen.core.runner import Runner
+
+    from jiuwenswarm.extensions.manager import ExtensionManager
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    ExtensionRegistry.reset_instance()
+    load_extensions = AsyncMock()
+    shutdown_extensions = AsyncMock()
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(Runner, "start", AsyncMock(return_value=True))
+    monkeypatch.setattr(Runner, "stop", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(ExtensionManager, "load_all_extensions", load_extensions)
+    monkeypatch.setattr(
+        ExtensionManager,
+        "shutdown_all_extensions",
+        shutdown_extensions,
+    )
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_EXTENSION_USERS", 0)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_MANAGER",
+        None,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_REGISTRY",
+        None,
+    )
+
+    first = AgentRuntime()
+    second = AgentRuntime()
+    await first.start()
+    registry = ExtensionRegistry.get_instance()
+    await second.start()
+
+    load_extensions.assert_awaited_once_with(include_transport_extensions=False)
+    assert ExtensionRegistry.get_instance() is registry
+    await first.close()
+    shutdown_extensions.assert_not_awaited()
+    assert ExtensionRegistry.get_instance() is registry
+
+    await second.close()
+    shutdown_extensions.assert_awaited_once()
+    with pytest.raises(RuntimeError, match="ExtensionRegistry"):
+        ExtensionRegistry.get_instance()
+    assert runtime_service_module._PROCESS_RUNTIME_EXTENSION_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_close_externally_owned_extensions(monkeypatch) -> None:
+    from openjiuwen.core.runner import Runner
+
+    from jiuwenswarm.extensions.manager import ExtensionManager
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    ExtensionRegistry.reset_instance()
+    external_registry = ExtensionRegistry.create_instance(
+        callback_framework=Runner.callback_framework,
+        config={},
+        logger=None,
+    )
+    shutdown_extensions = AsyncMock()
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(Runner, "start", AsyncMock(return_value=True))
+    monkeypatch.setattr(Runner, "stop", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        ExtensionManager,
+        "shutdown_all_extensions",
+        shutdown_extensions,
+    )
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_EXTENSION_USERS", 0)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_MANAGER",
+        None,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_REGISTRY",
+        None,
+    )
+
+    runtime = AgentRuntime()
+    await runtime.start()
+    await runtime.close()
+
+    shutdown_extensions.assert_not_awaited()
+    assert ExtensionRegistry.get_instance() is external_registry
+    ExtensionRegistry.reset_instance()
+
+
+@pytest.mark.asyncio
+async def test_process_dependencies_are_reference_counted(monkeypatch) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    initialize = AsyncMock()
+    runner_start = AsyncMock(return_value=True)
+    runner_stop = AsyncMock(return_value=True)
+    close_checkpointer = AsyncMock()
+    ensure_extensions = AsyncMock()
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        initialize,
+    )
+    monkeypatch.setattr(Runner, "start", runner_start)
+    monkeypatch.setattr(Runner, "stop", runner_stop)
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(AgentRuntime, "_ensure_extensions", ensure_extensions)
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    first = AgentRuntime()
+    second = AgentRuntime()
+    await first.start()
+    await second.start()
+
+    initialize.assert_awaited_once()
+    runner_start.assert_awaited_once()
+    await first.close()
+    runner_stop.assert_not_awaited()
+    close_checkpointer.assert_not_awaited()
+
+    await second.close()
+    runner_stop.assert_awaited_once()
+    close_checkpointer.assert_awaited_once()
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_process_dependency_lease_rolls_back_on_start_failure(
+    monkeypatch,
+) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        AsyncMock(),
+    )
+    runner_stop = AsyncMock(return_value=True)
+    close_checkpointer = AsyncMock()
+    monkeypatch.setattr(Runner, "start", AsyncMock(return_value=True))
+    monkeypatch.setattr(Runner, "stop", runner_stop)
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    runtime = AgentRuntime()
+    runtime._ensure_extensions = AsyncMock(side_effect=RuntimeError("extension failed"))
+
+    with pytest.raises(RuntimeError, match="extension failed"):
+        await runtime.start()
+
+    runner_stop.assert_awaited_once()
+    close_checkpointer.assert_awaited_once()
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_checkpointer_init_error_survives_close_error_and_allows_retry(
+    monkeypatch,
+) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    initialize = AsyncMock(
+        side_effect=[ValueError("checkpointer init failed"), None],
+    )
+    runner_start = AsyncMock(return_value=True)
+    runner_stop = AsyncMock(return_value=True)
+    close_checkpointer = AsyncMock(
+        side_effect=[RuntimeError("checkpointer rollback failed"), None],
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        initialize,
+    )
+    monkeypatch.setattr(Runner, "start", runner_start)
+    monkeypatch.setattr(Runner, "stop", runner_stop)
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(AgentRuntime, "_ensure_extensions", AsyncMock())
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    failed_runtime = AgentRuntime()
+    with pytest.raises(ValueError, match="checkpointer init failed"):
+        await failed_runtime.start()
+
+    assert runner_start.await_count == 0
+    assert runner_stop.await_count == 0
+    assert close_checkpointer.await_count == 1
+    assert failed_runtime._shared_dependencies_acquired is False
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+    retry_runtime = AgentRuntime()
+    await retry_runtime.start()
+    await retry_runtime.close()
+    await failed_runtime.close()
+
+    assert initialize.await_count == 2
+    assert runner_start.await_count == 1
+    assert runner_stop.await_count == 1
+    assert close_checkpointer.await_count == 2
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_dispose_error_resets_checkpointer_state_and_reinitializes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    dispose_error = RuntimeError("dispose failed")
+    dispose = AsyncMock(side_effect=dispose_error)
+    stale_checkpointer = SimpleNamespace(
+        _kv_store=SimpleNamespace(engine=SimpleNamespace(dispose=dispose))
+    )
+    replacement_checkpointer = object()
+    create_checkpointer = AsyncMock(return_value=replacement_checkpointer)
+    installed: list[object | None] = []
+
+    monkeypatch.setattr(interface_deep, "_PERSISTENT_CHECKPOINTER_READY", True)
+    monkeypatch.setattr(
+        interface_deep,
+        "PersistenceCheckpointerProvider",
+        lambda: None,
+    )
+    monkeypatch.setattr(interface_deep, "get_checkpoint_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        CheckpointerFactory,
+        "get_checkpointer",
+        lambda: stale_checkpointer,
+    )
+    monkeypatch.setattr(CheckpointerFactory, "create", create_checkpointer)
+    monkeypatch.setattr(
+        CheckpointerFactory,
+        "set_default_checkpointer",
+        installed.append,
+    )
+
+    with pytest.raises(RuntimeError, match="dispose failed") as caught:
+        await interface_deep.close_persistent_checkpointer()
+
+    assert caught.value is dispose_error
+    dispose.assert_awaited_once()
+    assert installed == [None]
+    assert interface_deep._PERSISTENT_CHECKPOINTER_READY is False
+
+    await interface_deep.ensure_persistent_checkpointer()
+
+    create_checkpointer.assert_awaited_once()
+    assert installed == [None, replacement_checkpointer]
+    assert interface_deep._PERSISTENT_CHECKPOINTER_READY is True
+
+
+@pytest.mark.asyncio
+async def test_runner_start_error_survives_checkpointer_rollback_error_and_retries(
+    monkeypatch,
+) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    initialize = AsyncMock()
+    runner_start = AsyncMock(
+        side_effect=[ValueError("runner start failed"), True],
+    )
+    close_checkpointer = AsyncMock(
+        side_effect=[RuntimeError("checkpointer close failed"), None],
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        initialize,
+    )
+    monkeypatch.setattr(Runner, "start", runner_start)
+    monkeypatch.setattr(Runner, "stop", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(AgentRuntime, "_ensure_extensions", AsyncMock())
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    failed_runtime = AgentRuntime()
+    with pytest.raises(ValueError, match="runner start failed"):
+        await failed_runtime.start()
+
+    assert failed_runtime.started is False
+    assert failed_runtime._shared_dependencies_acquired is False
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+    retry_runtime = AgentRuntime()
+    await retry_runtime.start()
+    await retry_runtime.close()
+    await failed_runtime.close()
+
+    assert initialize.await_count == 2
+    assert runner_start.await_count == 2
+    assert close_checkpointer.await_count == 2
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_false_start_result_is_rolled_back(monkeypatch) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    runner_stop = AsyncMock(return_value=True)
+    close_checkpointer = AsyncMock()
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(Runner, "start", AsyncMock(return_value=False))
+    monkeypatch.setattr(Runner, "stop", runner_stop)
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    runtime = AgentRuntime()
+    with pytest.raises(RuntimeError, match="Runner failed to start"):
+        await runtime.start()
+
+    runner_stop.assert_awaited_once()
+    close_checkpointer.assert_awaited_once()
+    assert runtime.started is False
+    assert runtime._shared_dependencies_acquired is False
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_false_stop_result_closes_runtime_and_allows_retry(
+    monkeypatch,
+) -> None:
+    from openjiuwen.core.runner import Runner
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    runner_start = AsyncMock(return_value=True)
+    runner_stop = AsyncMock(side_effect=[False, True])
+    close_checkpointer = AsyncMock()
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_initialize_runtime_dependencies",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(Runner, "start", runner_start)
+    monkeypatch.setattr(Runner, "stop", runner_stop)
+    monkeypatch.setattr(
+        interface_deep,
+        "close_persistent_checkpointer",
+        close_checkpointer,
+    )
+    monkeypatch.setattr(AgentRuntime, "_ensure_extensions", AsyncMock())
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_DEPENDENCY_USERS", 0)
+
+    first = AgentRuntime()
+    await first.start()
+    with pytest.raises(RuntimeError, match="Runner failed to stop"):
+        await first.close()
+
+    assert first.closed is True
+    assert first.started is False
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+    second = AgentRuntime()
+    await second.start()
+    await second.close()
+
+    assert runner_start.await_count == 2
+    assert runner_stop.await_count == 2
+    assert close_checkpointer.await_count == 2
+    assert runtime_service_module._PROCESS_RUNTIME_DEPENDENCY_USERS == 0
+
+
+@pytest.mark.asyncio
+async def test_extension_load_error_survives_shutdown_error_and_retries(
+    monkeypatch,
+) -> None:
+    from jiuwenswarm.extensions.manager import ExtensionManager
+    from jiuwenswarm.extensions.registry import ExtensionRegistry
+
+    ExtensionRegistry.reset_instance()
+    load_extensions = AsyncMock(
+        side_effect=[ValueError("extension load failed"), None],
+    )
+    shutdown_extensions = AsyncMock(
+        side_effect=[RuntimeError("extension shutdown failed"), None],
+    )
+    monkeypatch.setattr(ExtensionManager, "load_all_extensions", load_extensions)
+    monkeypatch.setattr(
+        ExtensionManager,
+        "shutdown_all_extensions",
+        shutdown_extensions,
+    )
+    monkeypatch.setattr(runtime_service_module, "_PROCESS_RUNTIME_EXTENSION_USERS", 0)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_MANAGER",
+        None,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_PROCESS_RUNTIME_EXTENSION_REGISTRY",
+        None,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="extension load failed"):
+            await runtime_service_module._acquire_process_runtime_extensions()
+
+        with pytest.raises(RuntimeError, match="ExtensionRegistry"):
+            ExtensionRegistry.get_instance()
+        assert runtime_service_module._PROCESS_RUNTIME_EXTENSION_USERS == 0
+
+        assert await runtime_service_module._acquire_process_runtime_extensions()
+        await runtime_service_module._release_process_runtime_extensions()
+
+        assert load_extensions.await_count == 2
+        assert shutdown_extensions.await_count == 2
+        assert runtime_service_module._PROCESS_RUNTIME_EXTENSION_USERS == 0
+        with pytest.raises(RuntimeError, match="ExtensionRegistry"):
+            ExtensionRegistry.get_instance()
+    finally:
+        ExtensionRegistry.reset_instance()
+
+
+@pytest.mark.asyncio
+async def test_start_preserves_primary_error_when_rollback_is_cancelled(
+    monkeypatch,
+) -> None:
+    acquire_dependencies = AsyncMock()
+    release_dependencies = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_acquire_process_runtime_dependencies",
+        acquire_dependencies,
+    )
+    monkeypatch.setattr(
+        runtime_service_module,
+        "_release_process_runtime_dependencies",
+        release_dependencies,
+    )
+
+    runtime = AgentRuntime()
+    runtime._ensure_extensions = AsyncMock(
+        side_effect=ValueError("extension initialization failed")
+    )
+
+    with pytest.raises(ValueError, match="extension initialization failed"):
+        await runtime.start()
+
+    acquire_dependencies.assert_awaited_once()
+    release_dependencies.assert_awaited_once()
+    assert runtime._shared_dependencies_acquired is False
+    assert runtime.started is False
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_cleanup_before_propagating_cancellation() -> None:
+    manager = FakeAgentManager()
+    manager.cancel_error = asyncio.CancelledError()
+
+    async def initialize() -> None:
+        return None
+
+    runtime = AgentRuntime(agent_manager=manager, initializer=initialize)
+    await runtime.start()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.close()
+
+    assert manager.cancel_calls == ["[runtime close] "]
+    assert manager.cleanup_calls == 1
+    assert runtime.started is False
+    assert runtime.closed is True
+
+    await runtime.close()
+    assert manager.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_server_stop_replaces_closed_one_shot_runtime(monkeypatch) -> None:
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.runtime.session import kv_cache_product_hooks
+
+    server = AgentWebSocketServer()
+    previous_runtime = server.get_runtime()
+    previous_runtime.close = AsyncMock()
+    monkeypatch.setattr(
+        kv_cache_product_hooks,
+        "cancel_pending_tasks",
+        AsyncMock(),
+    )
+
+    await server.stop()
+
+    previous_runtime.close.assert_awaited_once()
+    assert server.get_runtime() is not previous_runtime
+    assert server.get_runtime().closed is False
+    assert server.get_runtime().agent_manager is server.get_agent_manager()

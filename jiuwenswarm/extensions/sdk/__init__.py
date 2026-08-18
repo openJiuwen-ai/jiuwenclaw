@@ -32,4 +32,8 @@ def __getattr__(name: str) -> Any:
     return value
 
 
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_EXPORTS))
+
+
 __all__ = list(_EXPORTS)

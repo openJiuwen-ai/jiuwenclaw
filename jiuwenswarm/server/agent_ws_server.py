@@ -1070,6 +1070,12 @@ class AgentWebSocketServer:
             await self._runtime.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] runtime.close failed: %s", exc)
+        finally:
+            # AgentRuntime is intentionally one-shot for process-style CLI
+            # commands. AgentServer historically supports start after stop, so
+            # prepare a fresh Runtime and manager for its next lifecycle.
+            self._runtime = AgentRuntime(plan_controller=_SERVER_PLAN_CONTROLLER)
+            self._agent_manager = self._runtime.agent_manager
 
         runtime_push_handler = getattr(self, "_runtime_push_handler", None)
         if runtime_push_handler is not None:
@@ -1247,6 +1253,11 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            # Extensions must observe and may normalize chat input before
+            # automatic team binding or any other request-side effect. Runtime
+            # execution below is told not to trigger this hook a second time.
+            await self._trigger_before_chat_request_hook(request)
 
             if request.req_method == ReqMethod.SESSION_LIST:
                 await self._handle_session_list(ws, request, send_lock)
@@ -1891,7 +1902,21 @@ class AgentWebSocketServer:
             return
 
         runtime = self._execution_runtime()
-        for event in await runtime.invoke(request):
+
+        async def _send_control_event(event: RuntimeEvent) -> None:
+            await self._send_runtime_event(
+                ws,
+                event,
+                send_lock,
+                streaming=False,
+                sequence=0,
+            )
+
+        for event in await runtime.invoke(
+            request,
+            trigger_hook=False,
+            on_control_event=_send_control_event,
+        ):
             await self._send_runtime_event(
                 ws,
                 event,
@@ -1973,7 +1998,26 @@ class AgentWebSocketServer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
-            async for event in self._execution_runtime().stream(request):
+            async def _send_control_event(event: RuntimeEvent) -> None:
+                await self._send_runtime_event(
+                    ws,
+                    event,
+                    send_lock,
+                    streaming=True,
+                    sequence=chunk_count,
+                )
+
+            async for event in self._execution_runtime().stream(
+                request,
+                trigger_hook=False,
+                on_control_event=_send_control_event,
+            ):
+                # Runtime control events normally use the callback above. Keep
+                # compatibility with custom Runtime implementations without
+                # consuming a wire sequence number or resetting heartbeats.
+                if event.event_type == PLAN_MODE_EXITED_EVENT_TYPE:
+                    await _send_control_event(event)
+                    continue
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
@@ -2054,12 +2098,19 @@ class AgentWebSocketServer:
             )
             return True
         if streaming:
+            payload = dict(event.payload)
+            if not event.ok:
+                # AgentResponseChunk has no `ok` field. Reuse the established
+                # chat.error contract so the E2A codec preserves failed status.
+                payload["event_type"] = "chat.error"
+                payload.setdefault("error", "Runtime execution failed")
             message = AgentResponseChunk(
                 request_id=event.request_id,
                 channel_id=event.channel_id,
-                payload=event.payload,
+                payload=payload,
                 is_complete=event.is_complete,
                 agent_ref=event.agent_ref,
+                metadata=event.metadata,
             )
             wire = encode_agent_chunk_for_wire(
                 message,
@@ -2073,6 +2124,7 @@ class AgentWebSocketServer:
                 ok=event.ok,
                 payload=event.payload,
                 agent_ref=event.agent_ref,
+                metadata=event.metadata,
             )
             wire = encode_agent_response_for_wire(
                 message,

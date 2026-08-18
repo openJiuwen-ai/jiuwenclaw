@@ -2,6 +2,7 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from jiuwenswarm.common.schema.agent import (
 )
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.runtime import AgentRuntime
+from jiuwenswarm.runtime.events import RuntimeEvent
 from jiuwenswarm.runtime.plan import PlanStateResult
 from jiuwenswarm.server import agent_ws_server
 from jiuwenswarm.server import ws_send
@@ -245,3 +247,182 @@ def test_agent_ws_server_has_no_direct_websocket_send_calls():
     ]
 
     assert direct_sends == []
+
+
+@pytest.mark.asyncio
+async def test_send_runtime_event_preserves_metadata_for_unary_and_stream() -> None:
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    ws = FakeWebSocket()
+    event = RuntimeEvent(
+        request_id="metadata-event",
+        channel_id="team",
+        session_id="session-1",
+        payload={"event_type": "chat.delta", "content": "hello"},
+        metadata={"fan_out_targets": ["member-a", "member-b"]},
+    )
+
+    await server._send_runtime_event(
+        ws,
+        event,
+        asyncio.Lock(),
+        streaming=True,
+        sequence=0,
+    )
+    await server._send_runtime_event(
+        ws,
+        event,
+        asyncio.Lock(),
+        streaming=False,
+        sequence=0,
+    )
+
+    stream_wire, unary_wire = [json.loads(payload) for payload in ws.sent]
+    expected = {"fan_out_targets": ["member-a", "member-b"]}
+    assert stream_wire["metadata"] == expected
+    assert unary_wire["metadata"] == expected
+
+
+@pytest.mark.asyncio
+async def test_stream_runtime_error_keeps_failed_wire_semantics() -> None:
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    ws = FakeWebSocket()
+    event = RuntimeEvent.error(
+        request_id="runtime-error",
+        channel_id="web",
+        session_id="session-1",
+        error=ValueError("boom"),
+    )
+
+    await server._send_runtime_event(
+        ws,
+        event,
+        asyncio.Lock(),
+        streaming=True,
+        sequence=0,
+    )
+
+    wire = json.loads(ws.sent[0])
+    assert wire["response_kind"] == "e2a.error"
+    assert wire["status"] == "failed"
+    assert wire["is_final"] is True
+    assert wire["body"]["details"] == {
+        "event_type": "chat.error",
+        "error": "boom",
+    }
+
+
+@pytest.mark.asyncio
+async def test_server_unary_disables_duplicate_runtime_hook() -> None:
+    manager = object()
+
+    class RecordingRuntime:
+        agent_manager = manager
+
+        def __init__(self) -> None:
+            self.call: tuple[bool, object] | None = None
+
+        async def invoke(
+            self,
+            request,
+            *,
+            trigger_hook=True,
+            on_control_event=None,
+        ):
+            self.call = (trigger_hook, on_control_event)
+            return [
+                RuntimeEvent(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    payload={"event_type": "chat.final", "content": "done"},
+                    is_complete=True,
+                )
+            ]
+
+    runtime = RecordingRuntime()
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._agent_manager = manager
+    server._runtime = runtime
+    request = AgentRequest(
+        request_id="unary-hook-once",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "agent"},
+    )
+    ws = FakeWebSocket()
+
+    await server._handle_unary_impl(ws, request, asyncio.Lock())
+
+    assert runtime.call is not None
+    trigger_hook, control_handler = runtime.call
+    assert trigger_hook is False
+    assert callable(control_handler)
+    assert len(ws.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_control_event_does_not_consume_chunk_sequence() -> None:
+    manager = object()
+    runtime_call: dict[str, object] = {}
+
+    class RecordingRuntime:
+        agent_manager = manager
+
+        async def stream(
+            self,
+            request,
+            *,
+            trigger_hook=True,
+            on_control_event=None,
+        ):
+            runtime_call["trigger_hook"] = trigger_hook
+            runtime_call["control_handler"] = on_control_event
+            await on_control_event(
+                RuntimeEvent.control(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    payload={
+                        "event_type": "plan.mode_exited",
+                        "mode": "code.normal",
+                    },
+                )
+            )
+            yield RuntimeEvent(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                session_id=request.session_id,
+                payload={"event_type": "chat.delta", "content": "hello"},
+            )
+
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._agent_manager = manager
+    server._runtime = RecordingRuntime()
+    server._session_stream_tasks = {}
+    server.send_push = AsyncMock()
+    request = AgentRequest(
+        request_id="stream-control-sequence",
+        channel_id="tui",
+        session_id="session-1",
+        req_method=ReqMethod.CHAT_SEND,
+        params={"mode": "agent"},
+        is_stream=True,
+    )
+    ws = FakeWebSocket()
+
+    await server._handle_stream_impl(ws, request, asyncio.Lock())
+
+    assert runtime_call["trigger_hook"] is False
+    assert callable(runtime_call["control_handler"])
+    server.send_push.assert_awaited_once()
+    assert len(ws.sent) == 1
+    assert json.loads(ws.sent[0])["sequence"] == 0

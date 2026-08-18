@@ -17,6 +17,7 @@ class RuntimeEvent:
     session_id: str | None
     payload: dict[str, Any]
     agent_ref: Any = None
+    metadata: dict[str, Any] | None = None
     is_complete: bool = False
     ok: bool = True
 
@@ -50,6 +51,11 @@ class RuntimeEvent:
                 getattr(message, "agent_ref", None)
                 if getattr(message, "agent_ref", None) is not None
                 else default_agent_ref
+            ),
+            metadata=(
+                dict(message.metadata)
+                if isinstance(getattr(message, "metadata", None), dict)
+                else None
             ),
             is_complete=bool(getattr(message, "is_complete", default_complete)),
             ok=bool(getattr(message, "ok", True)),

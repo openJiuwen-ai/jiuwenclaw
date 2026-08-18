@@ -2229,6 +2229,12 @@ class MessageHandler(ABC):
         """将消息放入 user_messages 队列（异步）."""
         await self._user_messages.put(msg)
 
+    async def _publish_runtime_wake(self, msg: "Message") -> None:
+        """Accept Runtime wakeups only while the forwarding host is live."""
+        if not self._running:
+            raise RuntimeError("runtime wake host is not forwarding")
+        await self.publish_user_messages(msg)
+
     def publish_user_messages_nowait(self, msg: "Message") -> None:
         """将消息放入 user_messages 队列（同步）."""
         self._user_messages.put_nowait(msg)
@@ -2757,6 +2763,13 @@ class MessageHandler(ABC):
             )
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
+                if event_type_str in {
+                    "runtime.error",
+                    EventType.CHAT_ERROR.value,
+                }:
+                    payload["event_type"] = EventType.CHAT_ERROR.value
+                    payload["is_complete"] = True
+                    event_type_str = EventType.CHAT_ERROR.value
                 try:
                     event_type = EventType(event_type_str)
                     # 如果是事件类型，创建事件消息而不是响应消息
@@ -2767,7 +2780,7 @@ class MessageHandler(ABC):
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
-                        ok=True,
+                        ok=event_type != EventType.CHAT_ERROR,
                         payload=payload,
                         event_type=event_type,
                         metadata=metadata,
@@ -2880,6 +2893,22 @@ class MessageHandler(ABC):
     def set_cron_controller(self, controller: Any) -> None:
         self._cron_controller = controller
 
+    def create_cron_scheduler(
+        self,
+        store: Any,
+        agent_client: Any | None = None,
+    ) -> Any:
+        """Build the Gateway-owned scheduler for an explicitly injected host."""
+        from jiuwenswarm.gateway.cron.scheduler import CronSchedulerService
+
+        return CronSchedulerService(
+            store=store,
+            agent_client=(
+                self.agent_client if agent_client is None else agent_client
+            ),
+            message_handler=self,
+        )
+
     async def _handle_cron_push_payload(
         self,
         *,
@@ -2978,6 +3007,13 @@ class MessageHandler(ABC):
             )
             event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
+                if event_type_str in {
+                    "runtime.error",
+                    EventType.CHAT_ERROR.value,
+                }:
+                    payload["event_type"] = EventType.CHAT_ERROR.value
+                    payload["is_complete"] = True
+                    event_type_str = EventType.CHAT_ERROR.value
                 try:
                     event_type = EventType(event_type_str)
                 except ValueError:
@@ -2990,7 +3026,7 @@ class MessageHandler(ABC):
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=True,
+            ok=event_type != EventType.CHAT_ERROR,
             payload=payload,
             event_type=event_type,
             metadata=merged_metadata,
@@ -3502,6 +3538,7 @@ class MessageHandler(ABC):
         from jiuwenswarm.common.schema.message import ReqMethod
 
         while self._running:
+            msg = None
             try:
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
@@ -4003,6 +4040,25 @@ class MessageHandler(ABC):
                     )
             except asyncio.CancelledError:
                 break
+            except Exception as exc:  # noqa: BLE001
+                # One malformed channel message must not terminate the single
+                # forwarding loop shared by TUI/Web/IM/A2A.
+                logger.exception(
+                    "[MessageHandler] forward loop message failed: id=%s channel_id=%s error=%s",
+                    getattr(msg, "id", None),
+                    getattr(msg, "channel_id", None),
+                    exc,
+                )
+                if msg is not None:
+                    try:
+                        await self.publish_robot_messages(
+                            self._build_error_out_message(msg, exc)
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "[MessageHandler] failed to publish forward-loop error: id=%s",
+                            getattr(msg, "id", None),
+                        )
 
     async def process_stream(
         self,
@@ -4451,17 +4507,29 @@ class MessageHandler(ABC):
         """启动入队 -> AgentServer -> 出队 的转发任务."""
         if self._forward_task is not None:
             return
-        self._runtime_wake_handler = self.publish_user_messages
+        self._running = True
+        self._runtime_wake_handler = self._publish_runtime_wake
         self._previous_runtime_wake_handler = install_runtime_wake_handler(
             self._runtime_wake_handler
         )
-        self._running = True
         self._forward_task = asyncio.create_task(self._forward_loop())
         logger.info("[MessageHandler] 转发循环已启动 (_user_messages -> AgentServer -> _robot_messages)")
 
     async def stop_forwarding(self) -> None:
         """停止转发任务."""
         self._running = False
+
+        # Detach before awaiting cancellation.  A wake handler already fetched
+        # by another task also checks _running and cannot enqueue into a queue
+        # with no consumer during the shutdown window.
+        runtime_wake_handler = getattr(self, "_runtime_wake_handler", None)
+        if runtime_wake_handler is not None:
+            restore_runtime_wake_handler(
+                runtime_wake_handler,
+                getattr(self, "_previous_runtime_wake_handler", None),
+            )
+            self._runtime_wake_handler = None
+            self._previous_runtime_wake_handler = None
 
         # 取消所有流式任务
         for rid, task in list(self._stream_tasks.items()):
@@ -4497,14 +4565,6 @@ class MessageHandler(ABC):
             except asyncio.CancelledError:
                 pass
             self._forward_task = None
-
-        runtime_wake_handler = getattr(self, "_runtime_wake_handler", None)
-        if runtime_wake_handler is not None:
-            restore_runtime_wake_handler(
-                runtime_wake_handler,
-                getattr(self, "_previous_runtime_wake_handler", None),
-            )
-            self._runtime_wake_handler = None
 
         logger.info("[MessageHandler] 转发循环已停止")
 

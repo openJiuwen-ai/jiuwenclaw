@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -206,6 +207,46 @@ async def test_ensure_scheduler_requires_message_handler() -> None:
     tools = CronTools(agent_client=object(), message_handler=None)
     scheduler = await tools.ensure_scheduler()
     assert scheduler is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_scheduler_uses_explicit_host_factory_once() -> None:
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.started = False
+
+        def is_running(self) -> bool:
+            return self.started
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def reload(self) -> None:
+            return None
+
+    scheduler = _Scheduler()
+    client = object()
+
+    class _Host:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object]] = []
+
+        def create_cron_scheduler(self, store, agent_client):
+            self.calls.append((store, agent_client))
+            return scheduler
+
+    host = _Host()
+    tools = CronTools(agent_client=client, message_handler=host)
+
+    first, second = await asyncio.gather(
+        tools.ensure_scheduler(),
+        tools.ensure_scheduler(),
+    )
+
+    assert first is scheduler
+    assert second is scheduler
+    assert scheduler.started is True
+    assert host.calls == [(tools._local_store, client)]
 
 
 @pytest.mark.asyncio

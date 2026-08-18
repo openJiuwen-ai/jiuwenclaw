@@ -2965,10 +2965,10 @@ async def _watch_team_evolution_and_push(
     if not rail.signal_trigger or rail.auto_save:
         return
 
-    from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+    from jiuwenswarm.runtime.host_services import RuntimeHostPushTransport
 
     push_context = EvolutionPushContext(
-        transport=WebSocketGatewayPushTransport(),
+        transport=RuntimeHostPushTransport(),
         channel_id=channel_id,
         session_id=session_id,
     )

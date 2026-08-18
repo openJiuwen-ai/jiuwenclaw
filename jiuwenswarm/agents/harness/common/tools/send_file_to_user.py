@@ -19,6 +19,8 @@ from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
+from jiuwenswarm.runtime.host_services import send_runtime_push
+
 
 logger = logging.getLogger(__name__)
 
@@ -231,10 +233,6 @@ class SendFileToolkit:
         )
 
         try:
-            from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
-
-            server = AgentWebSocketServer.get_instance()
-
             files_payload = []
             try:
                 from jiuwenswarm.agents.harness.common.tools.web_file_download import (
@@ -267,21 +265,6 @@ class SendFileToolkit:
                     for file_path in valid_files
                 ]
 
-            import time
-            from jiuwenswarm.server.runtime.session.session_history import (
-                append_history_record,
-            )
-            append_history_record(
-                session_id=self.session_id,
-                request_id=self.request_id,
-                channel_id=self.channel_id,
-                role="assistant",
-                event_type="chat.file",
-                content="",
-                timestamp=time.time(),
-                extra={"files": files_payload},
-            )
-
             msg = {
                 "request_id": self.request_id,
                 "channel_id": self.channel_id,
@@ -302,8 +285,39 @@ class SendFileToolkit:
                 merged_meta["send_file_targets"] = list(target_channel_list)
             if merged_meta:
                 msg["metadata"] = merged_meta
-            await server.send_push(msg)
+            if not await send_runtime_push(msg):
+                raise RuntimeError(
+                    "send_file_to_user requires an active Runtime push host"
+                )
+
+            # The host push is the externally visible commit point. Mark it
+            # before best-effort history persistence so a history I/O failure
+            # cannot make a retry deliver the same files twice.
             _mark_files_sent(self.session_id, valid_files)
+            try:
+                import time
+                from jiuwenswarm.server.runtime.session.session_history import (
+                    append_history_record,
+                )
+
+                append_history_record(
+                    session_id=self.session_id,
+                    request_id=self.request_id,
+                    channel_id=self.channel_id,
+                    role="assistant",
+                    event_type="chat.file",
+                    content="",
+                    timestamp=time.time(),
+                    extra={"files": files_payload},
+                )
+            except Exception as history_error:  # noqa: BLE001
+                logger.warning(
+                    "[SendFileToolkit] file delivered but history persistence failed: "
+                    "session_id=%s error=%s",
+                    self.session_id,
+                    history_error,
+                    exc_info=True,
+                )
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if skipped_files:
                 result_parts.append("以下文件已在本次会话发送过，已跳过：")

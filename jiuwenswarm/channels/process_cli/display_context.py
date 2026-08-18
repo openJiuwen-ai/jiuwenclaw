@@ -93,9 +93,9 @@ def select_configured_model_name(
         return None
 
     environment = dotenv or {}
-    # Runtime builds its default model cache in list order. ``is_default``
-    # only disambiguates duplicate configurations of the same model name, so
-    # the displayed name is the first non-empty model name as well.
+    # This is intentionally a lightweight UI preview: it does not construct
+    # model clients or validate credentials. Runtime may therefore select a
+    # later usable entry when the first configured candidate cannot be built.
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -141,7 +141,7 @@ def _legacy_model_name(
 
 
 def resolve_configured_model_name() -> str:
-    """Read the model configured for a new worker without starting Runtime."""
+    """Infer the next worker's configured model without starting Runtime."""
     shell_fallback = str(os.getenv("MODEL_NAME") or "").strip()
     for config_file in _config_file_candidates():
         if not config_file.is_file():

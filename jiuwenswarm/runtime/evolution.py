@@ -20,7 +20,11 @@ def is_evolution_approval_payload(payload: Any) -> bool:
         return False
     if is_evolution_approval_request_id(payload.get("request_id")):
         return True
-    if payload.get("source") in {
+    source = payload.get("source")
+    # Payloads originate at channel boundaries and may be malformed.  Keep the
+    # legacy equality semantics for non-string JSON values instead of hashing
+    # them in a set (lists/dicts are unhashable and must simply not match).
+    if isinstance(source, str) and source in {
         "evolution_interrupt",
         SKILL_EVOLUTION_APPROVAL_SOURCE,
     }:

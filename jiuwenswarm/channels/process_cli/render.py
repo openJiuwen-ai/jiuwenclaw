@@ -13,6 +13,9 @@ from jiuwenswarm.runtime.events import RuntimeEvent
 
 _HUMAN_ERROR_TRANSLATIONS = {
     "process CLI execution timed out": "进程式 CLI 执行超时",
+    "process CLI received an interaction request but interactive input is unavailable": (
+        "当前输出模式无法接收交互输入，请使用交互式 CLI 完成此操作"
+    ),
 }
 
 
@@ -57,6 +60,11 @@ class EventRenderer:
     def interrupted(self) -> None:
         if self.output_format == "human":
             self._human_ui.interrupted()
+
+    def prepare_interaction(self) -> None:
+        """Clear transient status before the Runtime asks the user a question."""
+        if self.output_format == "human":
+            self._human_ui.clear_status()
 
     def render(self, event: RuntimeEvent) -> None:
         data = event.to_dict()

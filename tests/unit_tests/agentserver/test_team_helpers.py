@@ -566,7 +566,7 @@ async def test_team_evolution_monitor_skips_without_pending_signal_approval(
     rail.auto_save = auto_save
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
 
@@ -594,7 +594,7 @@ async def test_team_evolution_monitor_pushes_status_with_real_request_id(monkeyp
     rail = _FakeRail([[reasoning_event, approval_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -639,7 +639,7 @@ async def test_team_evolution_monitor_waits_for_real_request_id(monkeypatch):
     rail = _FakeRail([[reasoning_event], [approval_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -689,7 +689,7 @@ async def test_team_evolution_monitor_starts_cycle_for_started_progress_without_
     rail = _FakeRail([[progress_event], [outcome_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -747,7 +747,7 @@ async def test_team_evolution_monitor_maps_sdk_progress_stages(monkeypatch):
     rail = _FakeRail([[detecting_event], [generating_event], [outcome_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -817,7 +817,7 @@ async def test_team_evolution_monitor_uses_meta_request_id_and_ends_on_cancelled
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -898,7 +898,7 @@ async def test_team_evolution_monitor_filters_progress_by_request_id(monkeypatch
     )
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -940,7 +940,7 @@ async def test_team_evolution_monitor_uses_delivery_context_metadata(monkeypatch
         return message
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -991,7 +991,7 @@ async def test_team_evolution_monitor_reads_terminal_outcome_from_host_events(
     rail = _FakeRail([[outcome_event]], pending_first=True)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1029,7 +1029,7 @@ async def test_team_evolution_monitor_maps_noop_progress_to_no_evolution_generat
     rail = _FakeRail([[progress_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1073,7 +1073,7 @@ async def test_team_evolution_monitor_uses_approval_request_id_without_provision
             return []
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -1113,7 +1113,7 @@ async def test_team_evolution_monitor_keeps_idle_listener_after_timeout(monkeypa
     rail = _FakeRail([], pending_first=True)
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
@@ -1144,7 +1144,7 @@ async def test_team_evolution_monitor_times_out_after_idle_progress(monkeypatch)
     rail = _FakeProgressOnlyRail()
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
@@ -1174,7 +1174,7 @@ async def test_team_evolution_monitor_uses_sdk_timeout_before_legacy_fallback(mo
     rail = _SdkTimeoutProgressRail()
 
     monkeypatch.setattr(
-        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenswarm.runtime.host_services.RuntimeHostPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)

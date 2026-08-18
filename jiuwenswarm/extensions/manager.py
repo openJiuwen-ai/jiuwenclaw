@@ -88,7 +88,7 @@ class ExtensionManager:
                 manifest = self.loader.load_manifest(path)
                 if (
                     not include_transport_extensions
-                    and bool(manifest.get("requires_transport"))
+                    and manifest.get("requires_transport") is True
                 ):
                     logger.info(
                         "[ExtensionManager] Runtime 直连跳过 transport 扩展: %s",

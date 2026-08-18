@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 from typing import Any
 
 import pytest
 
-from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import utils
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
+    utils,
     xiaoyi_gui_tool,
 )
+from jiuwenswarm.gateway.channel_manager.im_platforms.xiaoyi import xiaoyi_connect
 from jiuwenswarm.runtime import host_services
 
 
@@ -19,6 +22,92 @@ def _isolate_runtime_xiaoyi_channel_provider(
 ) -> None:
     """Keep the process-global provider isolated from every other test."""
     monkeypatch.setattr(host_services, "_runtime_xiaoyi_channel_provider", None)
+    monkeypatch.setattr(host_services, "_runtime_xiaoyi_channel_providers", [])
+    monkeypatch.setattr(xiaoyi_connect, "_xiaoyi_channel_instances", {})
+    monkeypatch.setattr(xiaoyi_connect, "_xiaoyi_channel_owners", {})
+    monkeypatch.setattr(
+        xiaoyi_connect,
+        "_runtime_xiaoyi_provider_installed",
+        False,
+    )
+    monkeypatch.setattr(
+        xiaoyi_connect,
+        "_runtime_xiaoyi_provider_previous",
+        None,
+    )
+
+
+def _channel(channel_id: str, *, enabled: bool = True):
+    config = xiaoyi_connect.XiaoyiChannelConfig(
+        enabled=enabled,
+        channel_id=channel_id,
+        mode="xiaoyi_claw",
+    )
+    return xiaoyi_connect.XiaoyiChannel(
+        config,
+        xiaoyi_connect.RobotMessageRouter(),
+    )
+
+
+def test_import_does_not_permanently_install_runtime_provider() -> None:
+    importlib.reload(xiaoyi_connect)
+
+    assert host_services.get_runtime_xiaoyi_channel() is None
+
+
+@pytest.mark.asyncio
+async def test_provider_installs_on_first_start_and_restores_after_last_stop() -> None:
+    fallback = object()
+
+    def fallback_provider(_channel_id: str):
+        return fallback
+
+    host_services.install_runtime_xiaoyi_channel_provider(fallback_provider)
+    first = _channel("xiaoyi-first")
+    second = _channel("xiaoyi-second")
+
+    await first.start()
+    await second.start()
+
+    assert host_services.get_runtime_xiaoyi_channel("xiaoyi-first") is first
+    assert host_services.get_runtime_xiaoyi_channel("xiaoyi-second") is second
+
+    await first.stop()
+
+    assert host_services.get_runtime_xiaoyi_channel("xiaoyi-first") is None
+    assert host_services.get_runtime_xiaoyi_channel("xiaoyi-second") is second
+
+    await second.stop()
+    await asyncio.sleep(0)
+
+    assert host_services.get_runtime_xiaoyi_channel("xiaoyi-second") is fallback
+
+
+@pytest.mark.asyncio
+async def test_same_id_channels_support_out_of_order_stop() -> None:
+    first = _channel("xiaoyi")
+    second = _channel("xiaoyi")
+    never_started = _channel("xiaoyi", enabled=False)
+
+    await never_started.start()
+    assert host_services.get_runtime_xiaoyi_channel() is None
+
+    await first.start()
+    await second.start()
+
+    assert xiaoyi_connect.get_xiaoyi_channel() is second
+
+    await first.stop()
+    await never_started.stop()
+
+    assert xiaoyi_connect.get_xiaoyi_channel() is second
+    assert host_services.get_runtime_xiaoyi_channel() is second
+
+    await second.stop()
+    await asyncio.sleep(0)
+
+    assert xiaoyi_connect.get_xiaoyi_channel() is None
+    assert host_services.get_runtime_xiaoyi_channel() is None
 
 
 def test_runtime_xiaoyi_channel_provider_install_and_lookup() -> None:

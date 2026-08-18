@@ -112,9 +112,9 @@ class ProcessCliUI:
         if self.columns < 48:
             self._write_wrapped(">_ JiuwenSwarm", style=_ANSI_BOLD_CYAN)
             self._write_wrapped("进程式 CLI · 本地 Runtime")
-            self._write_wrapped(f"模型：{model}")
+            self._write_wrapped(f"模型（配置推断）：{model}")
             self._write_wrapped(f"目录：{cwd}")
-            self._write_wrapped(f"模式：{mode}")
+            self._write_wrapped(f"模式（请求推断）：{mode}")
             self._write_wrapped(f"会话：{session}")
             self._write("\n")
         else:
@@ -122,9 +122,9 @@ class ProcessCliUI:
                 (">_ JiuwenSwarm", _ANSI_BOLD_CYAN),
                 ("进程式 CLI · 本地 Runtime", _ANSI_DIM),
                 ("", ""),
-                (f"模型：  {model}", ""),
+                (f"模型（配置推断）：  {model}", ""),
                 (f"目录：  {cwd}", ""),
-                (f"模式：  {mode}", ""),
+                (f"模式（请求推断）：  {mode}", ""),
                 (f"会话：  {session}", ""),
             ]
             self._card(lines)
