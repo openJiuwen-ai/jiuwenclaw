@@ -90,11 +90,41 @@ def test_run_web_search_paid_unavailable(monkeypatch):
         "jiuwenclaw.agentserver.tools.web_search.providers.any_paid_provider_available",
         lambda _order: False,
     )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.orchestrator._free_search_engines",
+        lambda: [("duckduckgo", object)],
+    )
 
     import asyncio
 
     result = asyncio.run(run_web_search("test", search_mode="paid"))
-    assert result == "[ERROR]: paid search unavailable."
+    assert result.startswith("[ERROR]: paid search unavailable")
+    assert "Use search_mode=free instead" in result
+    assert "petal" not in result
+    assert "tavily" not in result
+    assert "bocha" not in result
+    assert "availability" not in result
+    assert "search_source" not in result
+
+
+def test_run_web_search_paid_unavailable_no_free(monkeypatch):
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.providers.any_paid_provider_available",
+        lambda _order: False,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.orchestrator._free_search_engines",
+        lambda: [],
+    )
+
+    import asyncio
+
+    result = asyncio.run(run_web_search("test", search_mode="paid"))
+    assert result.startswith("[ERROR]: paid search unavailable")
+    assert "No search source is available" in result
+    assert "Use search_mode=free" not in result
+    assert "petal" not in result
+    assert "search_source" not in result
 
 
 def test_run_web_search_free_does_not_call_paid(monkeypatch):
@@ -484,11 +514,9 @@ def test_build_web_search_description_contains_configured_providers(monkeypatch)
     from jiuwenclaw.agentserver.tools.web_search.tool import _build_web_search_description
 
     desc = _build_web_search_description()
-    assert "petal, bocha" in desc
-    assert "tavily" not in desc
-    assert "serper" not in desc
-    assert "jina" not in desc
-    assert "perplexity" not in desc
+    for provider in ("petal", "bocha", "tavily", "serper", "jina", "perplexity"):
+        assert provider not in desc
+    assert "search_source" not in desc
 
 
 def test_build_web_search_description_hides_free_mode_when_no_free_engines(monkeypatch):
