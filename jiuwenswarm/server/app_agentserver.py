@@ -275,6 +275,62 @@ async def _run(host: str, port: int) -> None:
         logger.info("[AgentServer] stopped")
 
 
+def _detect_sandbox_local_ip() -> str | None:
+    """Best-effort 检测当前进程所在网络命名空间的非 loopback IPv4。
+
+    用 UDP socket 连一个远端地址(不实际发包),取 ``getsockname()`` 的本端 IP。
+    ISOLATED 沙箱(独立 netns)里拿到 veth 地址;HOST 模式拿到宿主出口 IP。
+    失败或仅有 loopback 时返回 None,由调用方回退 127.0.0.1。
+    """
+    import socket
+
+    # 候选探测目标:先链路本地网关,再公网兜底。UDP connect 不发包,
+    # 仅让内核选出口网卡并解析本端地址,沙箱内无路由也会快速失败。
+    for target in ("169.254.1.1", "1.1.1.1", "8.8.8.8"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(0.2)
+                s.connect((target, 80))
+                ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except OSError:
+            continue
+    return None
+
+
+def _resolve_bind_host() -> str:
+    """决定 agentserver 的 bind host,兼顾单机版与沙箱一体机模式。
+
+    优先级:
+    1. ``AGENT_SERVER_HOST`` 环境变量(显式指定,含 127.0.0.1)——保持单机版与显式配置兼容;
+    2. 沙箱环境(``JIUWENBOX_LISTEN`` 存在,表明处于 jiuwenbox 沙箱管控下)且 env 为空:
+       检测沙箱本地非 loopback IP,ISOLATED 模式拿到 veth 地址,外部可达;
+    3. 其余(单机版 env 为空)回退 127.0.0.1,保持 ``os.getenv("AGENT_SERVER_HOST", "127.0.0.1")``
+       的单机默认语义不变。
+    """
+    env_host = os.getenv("AGENT_SERVER_HOST", "").strip()
+    if env_host:
+        return env_host
+
+    # 沙箱标志:jiuwenbox runtime 起沙箱时设置,单机版直接跑 agentserver 时不存在。
+    if os.getenv("JIUWENBOX_LISTEN"):
+        detected = _detect_sandbox_local_ip()
+        if detected:
+            logger.info(
+                "[AgentServer] AGENT_SERVER_HOST unset in sandbox; "
+                "detected sandbox local IP: %s",
+                detected,
+            )
+            return detected
+        logger.info(
+            "[AgentServer] AGENT_SERVER_HOST unset in sandbox but no non-loopback "
+            "IP detected; falling back to 127.0.0.1"
+        )
+
+    return "127.0.0.1"
+
+
 def main() -> None:
     from jiuwenswarm.dotenv_early import get_parsed_dotenv
 
@@ -308,7 +364,7 @@ def main() -> None:
         # Early parsing failed - error was already printed
         raise SystemExit(1)
 
-    host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
+    host = _resolve_bind_host()
     port = args.port
     if port is None:
         for key in ("AGENT_SERVER_PORT", "AGENT_PORT"):

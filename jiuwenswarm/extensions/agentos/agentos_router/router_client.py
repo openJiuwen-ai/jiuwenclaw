@@ -1493,7 +1493,10 @@ class AgentOSRouterClient(AgentServerClient):
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
-            env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
+            # 不注入 AGENT_SERVER_HOST: 留空让沙箱内 agentserver 自行检测沙箱本地
+            # 非 loopback IP(ISOLATED 模式 bind veth 地址,外部可达;见
+            # app_agentserver._resolve_bind_host)。单机版默认仍 127.0.0.1。
+            env_vars = {"AGENT_SERVER_PORT": f"{port}"}
             # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
             extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
