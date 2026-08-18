@@ -15,6 +15,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import ToolExposure
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
@@ -101,6 +102,11 @@ def _derive_exit_plan_markers() -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 _EXIT_PLAN_RESULT_OPENINGS, _EXIT_PLAN_BODY_HEADINGS = _derive_exit_plan_markers()
 
+# ProgressiveToolRail 只把 exposure=DIRECT 的工具留给模型。这两个生命周期工具
+# 不在上游默认 direct 名单里，会被标成 deferred；计划白名单又不含 tool_search，
+# 模型既看不见它们，也无法搜回来，审批窗因此不会出现。
+_PLAN_LIFECYCLE_TOOLS = frozenset({"enter_plan_mode", "exit_plan_mode"})
+
 
 class CodeAgentModeRail(AgentModeRail):
     """AgentModeRail variant for jiuwenswarm code mode.
@@ -111,10 +117,32 @@ class CodeAgentModeRail(AgentModeRail):
     """
 
     def init(self, agent: "DeepAgent") -> None:
-        """Register tools. No exit_plan_mode patching needed —
-        ``PlanApprovalInterruptRail`` handles the approval gate.
+        """Register tools, then keep plan lifecycle tools on the direct list.
+
+        ``PlanApprovalInterruptRail`` still owns the approval gate. These two
+        tools must be ``DIRECT``; otherwise progressive disclosure hides them
+        and the plan whitelist also drops ``tool_search``, so the model cannot
+        submit a plan.
         """
         super().init(agent)
+        self._mark_plan_lifecycle_tools_direct()
+
+    def _mark_plan_lifecycle_tools_direct(self) -> None:
+        """Force enter/exit_plan_mode onto the progressive direct list."""
+        for tool in self._tools:
+            card = getattr(tool, "card", None)
+            name = getattr(card, "name", "")
+            if card is None or name not in _PLAN_LIFECYCLE_TOOLS:
+                continue
+            card.exposure = ToolExposure.DIRECT
+            set_declared = getattr(card, "set_exposure_declared", None)
+            if callable(set_declared):
+                # AbilityManager 只在注册时写 exposure；标成已声明，避免热更新再改回 deferred。
+                set_declared(True)
+            logger.info(
+                "[CodeAgentModeRail] Marked %s exposure=DIRECT for plan mode",
+                name,
+            )
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Enforce plan-mode write blocks beyond the parent git-only guard."""

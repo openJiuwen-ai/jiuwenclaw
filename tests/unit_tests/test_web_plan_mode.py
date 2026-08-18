@@ -1,8 +1,10 @@
 """Web Plan 的后端行为测试（Adapter 选型、集群不含 Plan、审批动作）。"""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from openjiuwen.core.foundation.tool import ToolExposure
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -401,6 +403,24 @@ async def test_work_rail_keeps_plan_tools_in_plan_mode():
     assert "exit_plan_mode" in visible
     assert "read_file" in visible
     assert "send_file_to_user" not in visible
+
+
+def test_work_rail_init_marks_plan_lifecycle_tools_direct() -> None:
+    """Work 子类复用 CodeAgentModeRail.init，这两个工具同样必须是 DIRECT。"""
+    from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
+        WorkAgentModeRail,
+    )
+
+    rail = WorkAgentModeRail(language="cn")
+    agent = MagicMock()
+    agent.system_prompt_builder.language = "cn"
+    agent.prompt_attachment_manager = None
+
+    rail.init(agent)
+
+    exposures = {tool.card.name: tool.card.exposure for tool in rail._tools}
+    assert exposures["enter_plan_mode"] == ToolExposure.DIRECT
+    assert exposures["exit_plan_mode"] == ToolExposure.DIRECT
 
 
 # ── work plan 白名单：不含代码型子 agent，也不含副作用工具 ──────────────────

@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.foundation.tool import ToolExposure
+
 from jiuwenswarm.agents.harness.code.prompt.plan_approval import PLAN_EXECUTE_CTX_KEY
 from jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail import CodeAgentModeRail
 
@@ -219,3 +221,21 @@ def test_init_no_longer_patches_exit_plan_mode_invoke() -> None:
 
     # Verify the tool's invoke was NOT replaced
     assert tool.invoke is original_invoke
+
+
+def test_init_marks_plan_lifecycle_tools_direct() -> None:
+    """渐进式工具开启时，这两个工具必须是 DIRECT，否则模型看不见、审批窗不弹。"""
+    rail = CodeAgentModeRail(allowed_tools=["enter_plan_mode", "exit_plan_mode"])
+    agent = MagicMock()
+    agent.system_prompt_builder.language = "cn"
+    agent.prompt_attachment_manager = None
+
+    rail.init(agent)
+
+    exposures = {
+        tool.card.name: tool.card.exposure
+        for tool in rail._tools
+        if getattr(tool, "card", None) is not None
+    }
+    assert exposures["enter_plan_mode"] == ToolExposure.DIRECT
+    assert exposures["exit_plan_mode"] == ToolExposure.DIRECT
