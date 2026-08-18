@@ -310,6 +310,28 @@ def test_issue_ephemeral_key_registers_fingerprint():
     assert entry.session_id == "sess-9"
 
 
+def test_issue_container_key_registers_fingerprint():
+    asyncssh = pytest.importorskip("asyncssh")
+
+    channel = SshChannel(
+        SshChannelConfig(
+            enabled=True,
+            auth=SshAuthConfig(enabled=True),
+        ),
+        router=SimpleNamespace(),
+        key_registry=KeyRegistry(),
+    )
+    private_key = channel.issue_container_key(user_id="u1", username="u1")
+    assert "BEGIN OPENSSH PRIVATE KEY" in private_key
+    loaded = asyncssh.import_private_key(private_key.encode("utf-8"))
+    fingerprint = loaded.get_fingerprint()
+    entry = channel.key_registry.lookup(fingerprint)
+    assert entry is not None
+    assert entry.source == "container"
+    assert entry.expires_at is None
+    assert entry.session_id is None
+
+
 @pytest.mark.asyncio
 async def test_submit_relay_uses_metadata_user_id():
     channel = SshChannel(

@@ -27,6 +27,8 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
     ImageInfo,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+    CONTAINER_SSH_PRIVATE_KEY_MODE,
+    CONTAINER_SSH_PRIVATE_KEY_PATH,
     USER_DIRECTORY_ENV_KEY,
     AgentOSRouterClient,
     resolve_agent_workspace,
@@ -53,6 +55,7 @@ class FakeYuanRongClient:
         self.create_calls = 0
         self.create_payloads: list[dict[str, Any]] = []
         self.delete_calls: list[str] = []
+        self.upload_calls: list[dict[str, Any]] = []
         self.config: dict[str, Any] = {}
         self.push_handler = None
         self.ws_connect_uris: list[str] = []
@@ -91,6 +94,26 @@ class FakeYuanRongClient:
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         self.delete_calls.append(sandbox_id)
+
+    async def upload_agent_file(
+        self,
+        instance_id: str,
+        path: str,
+        data: bytes,
+        *,
+        auth_headers: dict[str, str] | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        self.upload_calls.append(
+            {
+                "instance_id": instance_id,
+                "path": path,
+                "data": data,
+                "auth_headers": dict(auth_headers or {}),
+                "mode": mode,
+            }
+        )
+        return {"success": True, "path": path, "size": len(data)}
 
     async def get_agent_info(self, instance_id: str) -> dict:
         return {"instance_id": instance_id, "node_ip": "127.0.0.1", "sandbox_ip": "127.0.0.1"}
@@ -339,6 +362,166 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     assert envelope.channel_context["sandbox_id"] == "sbx-1"
 
     await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_create_jiuwenswarm_uploads_container_ssh_key() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = _router_client(yuanrong, FakeRegistryClient(), AgentManager())
+    private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "CONTAINER\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, **kwargs):
+            del kwargs
+            return "EPHEMERAL"
+
+        def issue_container_key(self, *, user_id, username):
+            assert user_id == "u1"
+            assert username == "u1"
+            return private_key
+
+    client.set_key_issuer(_Issuer())
+    await client.send_request(_envelope())
+    await asyncio.sleep(0.05)
+    await client.shutdown()
+
+    assert yuanrong.create_calls == 1
+    assert yuanrong.upload_calls == [
+        {
+            "instance_id": "sbx-1",
+            "path": CONTAINER_SSH_PRIVATE_KEY_PATH,
+            "data": private_key.encode("utf-8"),
+            "auth_headers": {},
+            "mode": CONTAINER_SSH_PRIVATE_KEY_MODE,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_jiuwenswarm_skips_container_ssh_key_without_issuer() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = _router_client(yuanrong, FakeRegistryClient(), AgentManager())
+    await client.send_request(_envelope())
+    await asyncio.sleep(0.05)
+    await client.shutdown()
+    assert yuanrong.create_calls == 1
+    assert yuanrong.upload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_create_third_party_agent_does_not_upload_container_ssh_key() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_channel_endpoint=_ssh_channel(),
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, **kwargs):
+            del kwargs
+            return "EPHEMERAL"
+
+        def issue_container_key(self, *, user_id, username):
+            del user_id, username
+            raise AssertionError("third-party agents must not mint container keys")
+
+    client.set_key_issuer(_Issuer())
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+    assert response["ok"] is True
+    assert yuanrong.create_calls == 1
+    assert yuanrong.upload_calls == []
+
+
+@pytest.mark.asyncio
+async def test_team_chat_uses_container_ssh_identity_file() -> None:
+    yuanrong = FakeYuanRongClient()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        AgentManager(),
+        ssh_channel_endpoint=_ssh_channel(),
+    )
+    envelope = E2AEnvelope(
+        request_id="req-1",
+        channel="web",
+        user_id="u1",
+        session_id="sess-1",
+        params={"query": "hello", "mode": "team"},
+    )
+    await client.send_request(envelope)
+    await client.shutdown()
+    agents = envelope.params["external_cli_agents"]
+    assert agents[0]["ssh_transport"]["key_file"] == CONTAINER_SSH_PRIVATE_KEY_PATH
+    assert agents[0]["ssh_transport"]["username"] == "u1"
+
+
+@pytest.mark.asyncio
+async def test_delete_jiuwenswarm_revokes_container_ssh_key() -> None:
+    import time
+
+    from jiuwenswarm.extensions.agentos.auth.ssh_key_registry import (
+        KeyRegistry,
+        KeyRegistryEntry,
+    )
+
+    registry = KeyRegistry()
+    now = time.time()
+    registry.register(
+        KeyRegistryEntry(
+            fingerprint="SHA256:container",
+            user_id="u1",
+            username="u1",
+            source="container",
+            session_id=None,
+            expires_at=None,
+            created_at=now,
+        )
+    )
+    registry.register(
+        KeyRegistryEntry(
+            fingerprint="SHA256:tui",
+            user_id="u1",
+            username="u1",
+            source="tui_switch",
+            session_id="s1",
+            expires_at=now + 60,
+            created_at=now,
+        )
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, **kwargs):
+            del kwargs
+            return "E"
+
+        def issue_container_key(self, *, user_id, username):
+            del user_id, username
+            return "K"
+
+        @property
+        def registry(self):
+            return registry
+
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(yuanrong, FakeRegistryClient(), agent_manager)
+    client.set_key_issuer(_Issuer())
+    await client.send_request(_envelope())
+    assert await client.delete_agent("u1", "jiuwenswarm") is True
+    await client.shutdown()
+    assert registry.lookup("SHA256:container") is None
+    assert registry.lookup("SHA256:tui") is not None
 
 
 def test_is_ws_connect_retryable_for_cold_start_proxy_errors() -> None:

@@ -45,6 +45,20 @@ class KeyRegistry:
         """Revoke one registration. Return True when an entry was removed."""
         return self._entries.pop(fingerprint, None) is not None
 
+    def revoke_by_user(self, user_id: str, *, source: str | None = None) -> int:
+        """Revoke entries for ``user_id``, optionally filtered by ``source``."""
+        uid = str(user_id or "").strip()
+        if not uid:
+            return 0
+        to_drop = [
+            fp
+            for fp, entry in self._entries.items()
+            if entry.user_id == uid and (source is None or entry.source == source)
+        ]
+        for fp in to_drop:
+            self._entries.pop(fp, None)
+        return len(to_drop)
+
     def cleanup_expired(self) -> int:
         """Remove expired entries. Return the number removed."""
         expired_fps = [fp for fp, e in self._entries.items() if self._is_expired(e)]

@@ -333,6 +333,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         data: bytes,
         *,
         auth_headers: Mapping[str, str] | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Upload a file into an agent container via POST /api/agent/:id/files/upload."""
         self._ensure_connected()
@@ -348,6 +349,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             normalized_path,
             data,
             dict(auth_headers or {}),
+            str(mode).strip() if mode is not None else "",
         )
         return self._parse_agent_file_upload_response(body, status, normalized_path, len(data))
 
@@ -634,9 +636,13 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         path: str,
         data: bytes,
         auth_headers: dict[str, str],
+        mode: str = "",
     ) -> tuple[int, str]:
+        fields = {"path": path}
+        if mode:
+            fields["mode"] = mode
         payload, content_type = self._encode_multipart_form(
-            {"path": path},
+            fields,
             file_field="file",
             file_bytes=data,
             filename=path.rsplit("/", 1)[-1] or "file",

@@ -39,6 +39,21 @@ class YuanrongFrontendAgentClientProbe(YuanrongFrontendAgentClient):
     ) -> list[dict[str, Any]]:
         return self._parse_agent_file_list_response(body, status)
 
+    def encode_multipart_form(
+        self,
+        fields: dict[str, str],
+        *,
+        file_field: str,
+        file_bytes: bytes,
+        filename: str = "file",
+    ) -> tuple[bytes, str]:
+        return self._encode_multipart_form(
+            fields,
+            file_field=file_field,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+
 
 @pytest.fixture
 def client() -> YuanrongFrontendAgentClientProbe:
@@ -388,3 +403,18 @@ def test_parse_list_faas_error_raises(client: YuanrongFrontendAgentClientProbe):
     body = json.dumps({"body": {"error": "boom"}, "innerCode": "1"})
     with pytest.raises(YuanrongAgentFileError):
         client.parse_agent_file_list_response(body, 200)
+
+
+def test_encode_multipart_form_includes_mode_field(
+    client: YuanrongFrontendAgentClientProbe,
+) -> None:
+    payload, _ = client.encode_multipart_form(
+        {"path": "/home/agentos/.ssh/id_ed25519", "mode": "600"},
+        file_field="file",
+        file_bytes=b"secret",
+        filename="id_ed25519",
+    )
+    text = payload.decode("utf-8", errors="replace")
+    assert 'name="mode"' in text
+    assert "600" in text
+    assert 'name="path"' in text
