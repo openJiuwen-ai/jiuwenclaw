@@ -24,6 +24,10 @@ import {
 } from '../features/teamTaskProgressBaseline';
 import type { AgentSelectionIntent } from '../features/agentManagement/types';
 import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
+import {
+  applyWorkflowUpdate as applyWorkflowUpdateImpl,
+  type WorkflowRun,
+} from '../components/teamArea/workflowTypes';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';

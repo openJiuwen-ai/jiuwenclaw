@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { File, Maximize2, Puzzle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
+import { useChatStore, useSessionStore } from '../../stores';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
 import recentTasksIcon from '../../assets/work-mode/recent-tasks.svg';
 import ListViewIcon from '../../assets/work-mode/view-list.svg?react';
@@ -19,6 +20,7 @@ import {
 import { CompactTaskList } from './CompactTaskList';
 import { getTotalTaskVisualProgressPercent } from './taskProgress';
 import { useAdaptiveTooltip } from '../../hooks/useAdaptiveTooltip';
+import { SwarmflowTreeView } from './SwarmflowTreeView';
 
 type TaskPlanningPanelProps = {
   variant: 'compact' | 'expanded';
@@ -275,6 +277,14 @@ export function TaskPlanningPanel({
 }: TaskPlanningPanelProps) {
   const { t } = useTranslation();
   const [view, setView] = useState<'board' | 'list'>('list');
+  // SwarmFlow: 激活时用树视图替换看板/列表
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const swarmflowActive = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.swarmflowActive ?? false,
+  );
+  const workflowRuns = useSessionStore(
+    (s) => s.runtimes[activeSessionId ?? '']?.workflowRuns ?? [],
+  );
   const groupedTasks = useMemo(() => {
     const groups: Record<TaskColumnKey, SessionTeamTask[]> = {
       waiting: [],
@@ -291,6 +301,32 @@ export function TaskPlanningPanel({
   }, [tasks]);
 
   const progressPercent = getTotalTaskVisualProgressPercent(progressTasks ?? tasks, now ?? Date.now());
+
+  // ── SwarmFlow 激活时：树视图替换看板/列表 ──
+  if (swarmflowActive && workflowRuns.length > 0 && activeSessionId) {
+    return (
+      <div className="flex flex-[2] flex-col overflow-hidden min-h-0">
+        <div className="flex w-full shrink-0 items-center justify-between bg-card px-4 py-3">
+          <div className="flex items-center gap-2">
+            <img src={recentTasksIcon} width={16} height={16} aria-hidden="true" />
+            <span className="text-sm font-medium text-text">
+              {title ?? t('swarmflow.layoutIndented')}
+            </span>
+          </div>
+          {variant === 'compact' && !hideExpandButton && onExpand && (
+            <button
+              onClick={() => onExpand()}
+              className="rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
+              title={t('team.expand')}
+            >
+              <Maximize2 size={12} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+        <SwarmflowTreeView runs={workflowRuns} sessionId={activeSessionId} />
+      </div>
+    );
+  }
 
   if (variant === 'compact') {
     const allTasks = tasks;

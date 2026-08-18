@@ -1,0 +1,838 @@
+/**
+ * SwarmFlow 树视图组件。
+ *
+ * 将 WorkflowRun → Phase → Agent 树结构渲染为可折叠的缩进树或组织架构图。
+ * 参考 TUI 的 workflows.ts 渲染逻辑，适配 web 端 Tailwind 样式。
+ *
+ * 功能：
+ * - 缩进树 / 组织架构图 两种布局可切换
+ * - 状态图标、进度条、模型信息
+ * - Session 节点可展开显示各轮次（Turn 0/1/2...）
+ * - 点击 waiting_for_human agent 重新打开 ask-user 对话框
+ */
+
+import { useCallback, useMemo, useState } from 'react';
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  CircleX,
+  CircleDot,
+  Circle,
+  Square,
+  Smile,
+  Loader2,
+  Network,
+  ListTree,
+  RefreshCw,
+} from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import {
+  type WorkflowRun,
+  type WorkflowPhase,
+  type WorkflowAgent,
+  type WorkflowStatus,
+  groupWorkflowAgentsByName,
+  childPhasesOf,
+  countWaitingForHuman,
+  parseTurnFromCorrelationId,
+  detectAgentLoops,
+  detectPhaseLoops,
+  sortPhasesByExecution,
+  computeLoopStatus,
+  findActiveIterationIndex,
+} from './workflowTypes';
+import { useChatStore } from '../../stores/chatStore';
+import type { AskUserQuestionPayload } from '../../types/websocket';
+import { SwarmflowGraphView } from './SwarmflowGraphView';
+import {
+  AgentDetailModal,
+  buildDetailSections,
+  formatCharCount,
+  accentChipClass,
+  type AgentModalState,
+} from './AgentDetailModal';
+
+// ── 状态图标映射 ──────────────────────────────────────────
+
+function StatusIcon({ status, className }: { status: WorkflowStatus; className?: string }) {
+  const cls = className ?? 'w-4 h-4 shrink-0';
+  switch (status) {
+    case 'completed':
+      return <CircleCheck className={`${cls} text-emerald-500`} />;
+    case 'failed':
+      return <CircleX className={`${cls} text-red-500`} />;
+    case 'running':
+      return <Loader2 className={`${cls} text-blue-500 animate-spin`} />;
+    case 'pending':
+    case 'planned':
+      return <CircleDot className={`${cls} text-gray-400`} />;
+    case 'stopped':
+      return <Square className={`${cls} text-gray-400`} />;
+    case 'waiting_for_human':
+      return <Smile className={`${cls} text-amber-500`} />;
+    default:
+      return <Circle className={`${cls} text-gray-400`} />;
+  }
+}
+
+// ── 状态文本 ──────────────────────────────────────────────
+
+function statusText(status: WorkflowStatus, t: (k: string) => string): string {
+  const map: Record<WorkflowStatus, string> = {
+    planned: t('swarmflow.statusPlanned'),
+    pending: t('swarmflow.statusPending'),
+    running: t('swarmflow.statusRunning'),
+    completed: t('swarmflow.statusCompleted'),
+    failed: t('swarmflow.statusFailed'),
+    stopped: t('swarmflow.statusStopped'),
+    waiting_for_human: t('swarmflow.statusWaitingForHuman'),
+  };
+  return map[status] ?? status;
+}
+
+// ── 进度条 ────────────────────────────────────────────────
+
+function ProgressBar({ completed, total }: { completed: number; total: number }) {
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      <div className="w-16 h-1.5 rounded-full bg-secondary overflow-hidden">
+        <div
+          className="h-full rounded-full bg-blue-500 transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-xs text-text-muted tabular-nums">
+        {completed}/{total} ({pct}%)
+      </span>
+    </div>
+  );
+}
+
+// ── 迭代进度条 ────────────────────────────────────────────
+
+function statusDotColor(status: WorkflowStatus): string {
+  switch (status) {
+    case 'completed': return 'bg-emerald-500';
+    case 'running': return 'bg-blue-500 animate-pulse';
+    case 'failed': return 'bg-red-500';
+    case 'waiting_for_human': return 'bg-amber-500';
+    case 'pending':
+    case 'planned': return 'bg-gray-400';
+    case 'stopped': return 'bg-gray-600';
+    default: return 'bg-gray-400';
+  }
+}
+
+function IterationStrip<T extends { status: WorkflowStatus }>({
+  members,
+  selectedIndex,
+  onSelect,
+}: {
+  members: T[];
+  selectedIndex: number;
+  onSelect: (index: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 shrink-0">
+      {members.map((member, i) => (
+        <button
+          key={i}
+          type="button"
+          className={`w-2.5 h-2.5 rounded-full transition-all hover:scale-125 ${statusDotColor(member.status)} ${
+            i === selectedIndex ? 'ring-2 ring-blue-400 ring-offset-1 ring-offset-card' : ''
+          }`}
+          title={`第${i + 1}轮 · ${member.status}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(i);
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ── Agent 循环节点（场景 A：同名 agent 迭代） ─────────────
+
+function AgentLoopNode({
+  name,
+  members,
+  depth,
+  runId,
+  sessionId,
+}: {
+  name: string;
+  members: WorkflowAgent[];
+  depth: number;
+  runId: string;
+  sessionId: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [selectedIdx, setSelectedIdx] = useState(() => findActiveIterationIndex(members));
+  const loopStatus = useMemo(() => computeLoopStatus(members), [members]);
+  const completedCount = members.filter((m) => m.status === 'completed').length;
+
+  return (
+    <div>
+      {/* 循环头部 */}
+      <div
+        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/50 transition-colors cursor-pointer"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? (
+          <ChevronDown className="w-4 h-4 text-text-muted shrink-0" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
+        )}
+        <RefreshCw className={`w-4 h-4 shrink-0 text-purple-500 ${loopStatus === 'running' ? 'animate-spin' : ''}`} />
+        <span className="text-sm font-medium text-text break-words">{name}</span>
+        <span className="text-xs text-text-muted shrink-0">×{members.length}轮</span>
+        <span className="text-xs text-text-muted shrink-0">
+          {completedCount}/{members.length}
+        </span>
+        <IterationStrip
+          members={members}
+          selectedIndex={selectedIdx}
+          onSelect={setSelectedIdx}
+        />
+      </div>
+
+      {/* 展开内容 */}
+      {expanded && (
+        <div>
+          {members.map((member, i) =>
+            i === selectedIdx ? (
+              <AgentNode
+                key={member.id}
+                agent={member}
+                phaseAgents={members}
+                depth={depth + 1}
+                runId={runId}
+                sessionId={sessionId}
+              />
+            ) : (
+              <div
+                key={member.id}
+                className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-secondary/30 transition-colors cursor-pointer"
+                style={{ paddingLeft: `${(depth + 1) * 20 + 8}px` }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedIdx(i);
+                }}
+              >
+                <div className="w-[18px] shrink-0" />
+                <StatusIcon status={member.status} className="w-3.5 h-3.5" />
+                <span className="text-xs text-text-muted">
+                  第{i + 1}轮
+                </span>
+                {member.outcome && (
+                  <span className="text-xs text-text-muted/70 truncate flex-1">
+                    {member.outcome}
+                  </span>
+                )}
+              </div>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Phase 循环节点（场景 B：前缀+数字后缀 phase） ──────────
+
+function PhaseLoopNode({
+  baseName,
+  members,
+  workflow,
+  depth,
+  runId,
+  sessionId,
+}: {
+  baseName: string;
+  members: WorkflowPhase[];
+  workflow: WorkflowRun;
+  depth: number;
+  runId: string;
+  sessionId: string;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [selectedIdx, setSelectedIdx] = useState(() => findActiveIterationIndex(members));
+  const loopStatus = useMemo(() => computeLoopStatus(members), [members]);
+  const completedCount = members.filter((m) => m.status === 'completed').length;
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/50 transition-colors cursor-pointer"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? (
+          <ChevronDown className="w-4 h-4 text-text-muted shrink-0" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
+        )}
+        <RefreshCw className={`w-4 h-4 shrink-0 text-purple-500 ${loopStatus === 'running' ? 'animate-spin' : ''}`} />
+        <span className="text-sm font-medium text-text break-words">{baseName}</span>
+        <span className="text-xs text-text-muted shrink-0">×{members.length}轮</span>
+        <span className="text-xs text-text-muted shrink-0">
+          {completedCount}/{members.length}
+        </span>
+        <IterationStrip
+          members={members}
+          selectedIndex={selectedIdx}
+          onSelect={setSelectedIdx}
+        />
+      </div>
+
+      {expanded && (
+        <div>
+          {members.map((phase, i) =>
+            i === selectedIdx ? (
+              <PhaseNode
+                key={phase.id}
+                phase={phase}
+                workflow={workflow}
+                depth={depth + 1}
+                runId={runId}
+                sessionId={sessionId}
+              />
+            ) : (
+              <div
+                key={phase.id}
+                className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-secondary/30 transition-colors cursor-pointer"
+                style={{ paddingLeft: `${(depth + 1) * 20 + 8}px` }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedIdx(i);
+                }}
+              >
+                <div className="w-[18px] shrink-0" />
+                <StatusIcon status={phase.status} className="w-3.5 h-3.5" />
+                <span className="text-xs text-text-muted">
+                  第{phase.iteration ?? i + 1}轮
+                </span>
+                <span className="text-xs text-text-muted/70 shrink-0">
+                  {(phase.agents ?? []).filter((a) => a.status === 'completed').length}/
+                  {(phase.agents ?? []).length}
+                </span>
+              </div>
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Agent 节点 ────────────────────────────────────────────
+
+function AgentNode({
+  agent,
+  phaseAgents,
+  depth,
+  runId,
+  sessionId,
+}: {
+  agent: WorkflowAgent;
+  phaseAgents: WorkflowAgent[];
+  depth: number;
+  runId: string;
+  sessionId: string;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(agent.status === 'running');
+  const [showDetail, setShowDetail] = useState(false);
+  const [modalState, setModalState] = useState<AgentModalState | null>(null);
+
+  // 汇总当前 agent 可用的详情 section（标签与弹窗共用同一数据源）
+  const detailSections = useMemo(() => buildDetailSections(agent), [agent]);
+
+  const isSession = agent.node_type === 'agent_session' || agent.node_type === 'human_session';
+  const sessionMembers = useMemo(
+    () =>
+      isSession
+        ? groupWorkflowAgentsByName(phaseAgents).sessions.find(
+            (s) => s.label === agent.name,
+          )?.members ?? []
+        : [],
+    [isSession, agent.name, phaseAgents],
+  );
+  const hasSessionTree = isSession && sessionMembers.length >= 1;
+
+  const handleAgentClick = useCallback(() => {
+    if (agent.status !== 'waiting_for_human') return;
+    const corr = agent.correlation_id ?? agent.id;
+    const payload: AskUserQuestionPayload = {
+      request_id: `swarmflow:${runId}:${corr}`,
+      source: 'swarmflow_human',
+      questions: [
+        {
+          question: agent.human_prompt || '(SwarmFlow is waiting for your input)',
+          header: agent.name,
+          options: [],
+          multi_select: false,
+        },
+      ],
+      swarmflowMeta: {
+        run_id: runId,
+        correlation_id: corr,
+        agent_id: agent.id,
+        agent_name: agent.name,
+      },
+    };
+    useChatStore.getState().setPendingQuestion(sessionId, payload);
+  }, [agent, runId, sessionId]);
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-secondary/50 transition-colors"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={handleAgentClick}
+        role={agent.status === 'waiting_for_human' ? 'button' : undefined}
+        title={agent.status === 'waiting_for_human' ? t('swarmflow.clickToReply') : undefined}
+      >
+        {hasSessionTree && (
+          <button
+            type="button"
+            className="shrink-0 p-0.5 rounded hover:bg-secondary"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+          >
+            {expanded ? (
+              <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5 text-text-muted" />
+            )}
+          </button>
+        )}
+        {!hasSessionTree && <div className="w-[18px] shrink-0" />}
+        <StatusIcon status={agent.status} />
+        <span className="text-sm text-text break-words flex-1">{agent.name}</span>
+        {agent.model && (
+          <span className="text-xs text-text-muted shrink-0">{agent.model}</span>
+        )}
+        {/* 展开 input/output 详情 */}
+        {(agent.prompt || agent.outcome || agent.error) && (
+          <button
+            type="button"
+            className="shrink-0 p-0.5 rounded hover:bg-secondary"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowDetail((v) => !v);
+            }}
+          >
+            {showDetail ? (
+              <ChevronDown className="w-3 h-3 text-text-muted" />
+            ) : (
+              <ChevronRight className="w-3 h-3 text-text-muted" />
+            )}
+          </button>
+        )}
+        {agent.status === 'waiting_for_human' && (
+          <span className="text-xs text-amber-500 shrink-0 animate-pulse">
+            {t('swarmflow.clickToReply')}
+          </span>
+        )}
+      </div>
+
+      {/* Input / Output 详情：子标题标签，点击弹窗查看 */}
+      {showDetail && detailSections.length > 0 && (
+        <div
+          className="mx-2 mb-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-border/50 bg-card/50 px-2 py-1.5"
+          style={{ marginLeft: `${depth * 20 + 28}px` }}
+        >
+          {/* Meta 信息 */}
+          {(agent.model || agent.token_count != null || agent.duration_ms != null || agent.started_at) && (
+            <div className="flex items-center gap-2 text-[10px] text-text-muted/70 mr-auto pr-2">
+              {agent.model && <span className="font-mono">{agent.model}</span>}
+              {agent.token_count != null && <span>{agent.token_count} tok</span>}
+              {agent.duration_ms != null && <span>{(agent.duration_ms / 1000).toFixed(1)}s</span>}
+              {agent.started_at && <span>{new Date(agent.started_at).toLocaleTimeString()}</span>}
+            </div>
+          )}
+
+          {detailSections.map((sec) => (
+            <button
+              key={sec.key}
+              type="button"
+              aria-label={`${sec.label} (${formatCharCount(sec.content)} 字符)`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setModalState({ sections: detailSections, activeKey: sec.key });
+              }}
+              className={`shrink-0 inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${accentChipClass[sec.accent]}`}
+            >
+              <span>{sec.icon} {sec.label}</span>
+              <span className="ml-0.5 px-1 rounded bg-black/10 dark:bg-white/10 text-[9px] tabular-nums opacity-80">
+                {formatCharCount(sec.content)}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 内容弹窗：标题含 Agent 名 + Tab 切换不同 section（共享组件） */}
+      <AgentDetailModal
+        state={modalState}
+        agentName={agent.name}
+        onClose={() => setModalState(null)}
+        onTabChange={(key) => setModalState((prev) => (prev ? { ...prev, activeKey: key } : prev))}
+      />
+
+      {/* Outcome 副文本（详情展开时隐藏） */}
+      {agent.outcome && !showDetail && (
+        <div
+          className="flex items-start gap-1.5 px-2 pb-1 text-xs text-text-muted/60"
+          style={{ paddingLeft: `${depth * 20 + 28}px` }}
+        >
+          <span className="shrink-0 text-text-muted/40">└</span>
+          <span className="truncate">{agent.outcome}</span>
+        </div>
+      )}
+      {agent.error && !showDetail && (
+        <div
+          className="flex items-start gap-1.5 px-2 pb-1 text-xs text-red-400/80"
+          style={{ paddingLeft: `${depth * 20 + 28}px` }}
+        >
+          <span className="shrink-0 text-red-400/40">└</span>
+          <span className="truncate">{agent.error}</span>
+        </div>
+      )}
+
+      {/* Session turns */}
+      {hasSessionTree && expanded && (
+        <div
+          className="border-l border-border/30 ml-4"
+          style={{ marginLeft: `${depth * 20 + 16}px` }}
+        >
+          {sessionMembers.map((member) => {
+            const turn = parseTurnFromCorrelationId(member.correlation_id);
+            return (
+              <div key={member.id} className="relative pl-4">
+                <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+                <div className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-secondary/50">
+                  <StatusIcon status={member.status} className="w-3.5 h-3.5" />
+                  <span className="text-xs text-text-muted">
+                    Turn {turn ?? '?'}
+                  </span>
+                  {member.outcome && (
+                    <span className="text-xs text-text-muted/60 truncate flex-1">
+                      {member.outcome}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Phase 节点 ────────────────────────────────────────────
+
+function PhaseNode({
+  phase,
+  workflow,
+  depth,
+  runId,
+  sessionId,
+}: {
+  phase: WorkflowPhase;
+  workflow: WorkflowRun;
+  depth: number;
+  runId: string;
+  sessionId: string;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(true);
+  const { sessions, oneShots } = useMemo(
+    () => groupWorkflowAgentsByName(phase.agents ?? []),
+    [phase.agents],
+  );
+  // 检测同名 agent 循环（场景 A）
+  const { loops: agentLoops, unique: uniqueAgents } = useMemo(
+    () => detectAgentLoops(oneShots),
+    [oneShots],
+  );
+  const childPhases = useMemo(
+    () => childPhasesOf(workflow, phase),
+    [workflow, phase],
+  );
+  const completedCount = (phase.agents ?? []).filter(
+    (a) => a.status === 'completed',
+  ).length;
+  const totalCount = phase.agents?.length ?? 0;
+  const hasChildren =
+    sessions.length > 0 || uniqueAgents.length > 0 || agentLoops.length > 0 || childPhases.length > 0;
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-secondary/50 transition-colors cursor-pointer"
+        style={{ paddingLeft: `${depth * 20 + 8}px` }}
+        onClick={() => hasChildren && setExpanded((v) => !v)}
+      >
+        {hasChildren ? (
+          expanded ? (
+            <ChevronDown className="w-4 h-4 text-text-muted shrink-0" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
+          )
+        ) : (
+          <div className="w-4 shrink-0" />
+        )}
+        <StatusIcon status={phase.status} />
+        <span className="text-sm font-medium text-text break-words flex-1">
+          {phase.name}
+        </span>
+        {phase.phase_type === 'child' && (
+          <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-500 shrink-0">
+            {t('swarmflow.subWorkflow')}
+          </span>
+        )}
+        <ProgressBar completed={completedCount} total={totalCount} />
+      </div>
+
+      {expanded && hasChildren && (
+        <div
+          className="border-l border-border/30 ml-4"
+          style={{ marginLeft: `${depth * 20 + 16}px` }}
+        >
+          {/* 唯一 agent（非循环） */}
+          {uniqueAgents.map((agent) => (
+            <div key={agent.id} className="relative pl-4">
+              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+              <AgentNode
+                agent={agent}
+                phaseAgents={phase.agents ?? []}
+                depth={0}
+                runId={runId}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+          {/* 同名 agent 循环（场景 A） */}
+          {agentLoops.map((loop) => (
+            <div key={`loop-${loop.name}`} className="relative pl-4">
+              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+              <AgentLoopNode
+                name={loop.name}
+                members={loop.members}
+                depth={0}
+                runId={runId}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+          {/* Session groups — render one representative node that expands to show turns */}
+          {sessions.map((session) => {
+            const representative = session.members[0];
+            if (!representative) return null;
+            return (
+              <div key={representative.id} className="relative pl-4">
+                <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+                <AgentNode
+                  agent={representative}
+                  phaseAgents={phase.agents ?? []}
+                  depth={0}
+                  runId={runId}
+                  sessionId={sessionId}
+                />
+              </div>
+            );
+          })}
+          {/* Child phases (sub-workflows) */}
+          {childPhases.map((child) => (
+            <div key={child.id} className="relative pl-4">
+              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+              <PhaseNode
+                phase={child}
+                workflow={workflow}
+                depth={0}
+                runId={runId}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Run 根节点 ────────────────────────────────────────────
+
+function RunNode({
+  run,
+  sessionId,
+}: {
+  run: WorkflowRun;
+  sessionId: string;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(true);
+  const completedCount = (run.phases ?? []).reduce(
+    (sum, p) => sum + (p.agents ?? []).filter((a) => a.status === 'completed').length,
+    0,
+  );
+  const totalCount =
+    run.agent_count ??
+    (run.phases ?? []).reduce((sum, p) => sum + (p.agents ?? []).length, 0);
+  const waitingCount = countWaitingForHuman(run);
+
+  // 检测 phase 循环（场景 B：前缀+数字后缀）
+  const { loops: phaseLoops, unique: uniquePhases } = useMemo(() => {
+    const sorted = sortPhasesByExecution(run.phases ?? []);
+    const topLevel = sorted.filter((p) => p.phase_type !== 'child');
+    return detectPhaseLoops(topLevel);
+  }, [run.phases]);
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card/50">
+      <div
+        className="flex items-center gap-2 px-3 py-2.5 bg-secondary/30 cursor-pointer hover:bg-secondary/50 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        {expanded ? (
+          <ChevronDown className="w-4 h-4 text-text-muted shrink-0" />
+        ) : (
+          <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
+        )}
+        <StatusIcon status={run.status} className="w-5 h-5" />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-text-strong truncate">
+              {run.name}
+            </span>
+            <span className="text-xs text-text-muted shrink-0">
+              {statusText(run.status, t)}
+            </span>
+          </div>
+          {run.summary && (
+            <p className="text-xs text-text-muted truncate mt-0.5">{run.summary}</p>
+          )}
+        </div>
+        {waitingCount > 0 && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 shrink-0 animate-pulse">
+            {t('swarmflow.waitingForHuman', { count: waitingCount })}
+          </span>
+        )}
+        <ProgressBar completed={completedCount} total={totalCount} />
+        {run.budget && run.budget.total != null && (
+          <span className="text-xs text-text-muted shrink-0 tabular-nums">
+            {Math.round((run.budget.spent ?? 0) / 1000)}K/{Math.round(run.budget.total / 1000)}K
+          </span>
+        )}
+      </div>
+
+      {expanded && (
+        <div className="py-1 border-l border-border/30 ml-4">
+          {/* 唯一 phase（非循环） */}
+          {uniquePhases.map((phase) => (
+            <div key={phase.id} className="relative pl-4">
+              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+              <PhaseNode
+                phase={phase}
+                workflow={run}
+                depth={0}
+                runId={run.id}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+          {/* Phase 循环（场景 B：前缀+数字后缀） */}
+          {phaseLoops.map((loop) => (
+            <div key={`loop-${loop.baseName}`} className="relative pl-4">
+              <div className="absolute left-0 top-1/2 -translate-y-1/2 w-3 border-t border-border/30" />
+              <PhaseLoopNode
+                baseName={loop.baseName}
+                members={loop.members}
+                workflow={run}
+                depth={0}
+                runId={run.id}
+                sessionId={sessionId}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 主组件 ────────────────────────────────────────────────
+
+export interface SwarmflowTreeViewProps {
+  runs: WorkflowRun[];
+  sessionId: string;
+}
+
+export function SwarmflowTreeView({ runs, sessionId }: SwarmflowTreeViewProps) {
+  const { t } = useTranslation();
+  const [layout, setLayout] = useState<'indented' | 'orgchart'>('indented');
+
+  if (runs.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full text-sm text-text-muted">
+        {t('swarmflow.noWorkflow')}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* 布局切换 */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border shrink-0">
+        <button
+          type="button"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
+            layout === 'indented'
+              ? 'bg-blue-500/10 text-blue-500'
+              : 'text-text-muted hover:bg-secondary'
+          }`}
+          onClick={() => setLayout('indented')}
+        >
+          <ListTree className="w-3.5 h-3.5" />
+          {t('swarmflow.layoutIndented')}
+        </button>
+        <button
+          type="button"
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors ${
+            layout === 'orgchart'
+              ? 'bg-blue-500/10 text-blue-500'
+              : 'text-text-muted hover:bg-secondary'
+          }`}
+          onClick={() => setLayout('orgchart')}
+        >
+          <Network className="w-3.5 h-3.5" />
+          {t('swarmflow.layoutOrgChart')}
+        </button>
+      </div>
+
+      {/* 内容区 */}
+      {layout === 'indented' ? (
+        <div className="flex-1 overflow-auto">
+          <div className="flex flex-col gap-2 p-2">
+            {runs.map((run) => (
+              <RunNode key={run.id} run={run} sessionId={sessionId} />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-hidden">
+          <SwarmflowGraphView runs={runs} sessionId={sessionId} />
+        </div>
+      )}
+    </div>
+  );
+}

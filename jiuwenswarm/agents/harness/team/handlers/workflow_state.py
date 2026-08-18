@@ -84,6 +84,7 @@ class WorkflowProgress(BaseModel):
     phase_type: Optional[str] = None
     nested_phase: Optional[str] = None
     parent_phase: Optional[str] = None
+    phase_iteration: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,10 @@ class WorkflowPhaseState(BaseModel):
     agents: list[WorkflowAgentState] = []
     phase_type: Optional[str] = None
     parent_phase: Optional[str] = None
+    iteration: Optional[int] = None
+    """1-based ordinal of this phase title within the run (loop-aware).
+    Same title called N times in a ``for`` loop → N phase cards with
+    iteration 1..N. ``None``/1 on legacy events or planned phases."""
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for event payload."""
@@ -443,43 +448,59 @@ class WorkflowRunState(BaseModel):
         self._agent_slug_counter[slug] = counter
         return f"{slug}-{counter}"
 
-    def _find_phase_by_name(self, phase_name: str) -> Optional[WorkflowPhaseState]:
-        """Find a phase by its name string."""
+    def _find_phase_by_name(
+        self, phase_name: str, iteration: Optional[int] = None,
+    ) -> Optional[WorkflowPhaseState]:
+        """Find a phase by name, optionally disambiguated by iteration.
+
+        When ``iteration`` is given, matches both name and iteration (treating
+        ``None`` iteration on planned phases as 1). When ``None``, matches by
+        name only (legacy behaviour — returns the first match).
+        """
+        if iteration is not None:
+            iter_key = iteration or 1
+            for phase in self.phases:
+                if phase.name == phase_name and (phase.iteration or 1) == iter_key:
+                    return phase
+            return None
         for phase in self.phases:
             if phase.name == phase_name:
                 return phase
         return None
 
     def _switch_to_phase(
-            self, phase_name: str
+            self, phase_name: str, iteration: Optional[int] = None,
     ) -> tuple[WorkflowPhaseState, Optional[WorkflowPhaseState]]:
         """Enter ``phase_name`` (running), sealing the previous phase on change.
 
-        Driven by the ``phase`` field of agent events. When ``phase_name``
-        differs from ``_last_phase.name``, the previous phase — if still
-        ``running`` — is finalized to ``completed`` together with its
-        still-running agents.
-
-        Same-name phase cards are **reused** (one card per phase name, not per
-        iteration): the found card is flipped back to ``running`` regardless of
-        its prior status (planned/running/completed/failed) so the state may
-        jump forward and back across iterations. Agents and counters keep
-        accumulating on that same card — ``agent_count`` /
-        ``completed_agent_count`` are phase-level running totals, not
-        per-iteration.
+        Loop-aware: when ``iteration`` is set, a **new card is created per
+        iteration** (round 1/2/3 of ``phase("生成")`` → 3 distinct cards).
+        Legacy events without ``iteration`` fall back to one-card-per-name.
 
         Returns ``(target_phase, sealed_phase_or_None)``.
         """
-        target = self._find_phase_by_name(phase_name)
+        iter_key = iteration or 1
+        target = self._find_phase_by_name(phase_name, iter_key)
         if target is None:
-            phase_id = self._generate_phase_id(phase_name)
-            target = WorkflowPhaseState(id=phase_id, name=phase_name, status="running")
-            self.phases.append(target)
-            logger.warning("[WF_DBG WorkflowRunState] phase %s not in plan, created on the fly", phase_name)
+            # Fallback: try a planned card with iteration=None (treated as 1)
+            # so the first real phase() call reuses the planned card.
+            if iter_key == 1:
+                target = self._find_phase_by_name(phase_name, None)
+                if target is not None and target.status == "planned":
+                    target.iteration = 1
+            if target is None:
+                phase_id = self._generate_phase_id(phase_name)
+                target = WorkflowPhaseState(
+                    id=phase_id, name=phase_name, status="running", iteration=iter_key,
+                )
+                self.phases.append(target)
+                logger.warning(
+                    "[WF_DBG WorkflowRunState] phase %s#%s not in plan, created on the fly",
+                    phase_name, iter_key,
+                )
+            else:
+                target.status = "running"
         else:
-            # Reuse the same-name card; flip it back to running so the state may
-            # jump (e.g. completed -> running on a later iteration). Agents and
-            # counters keep accumulating on this card.
             target.status = "running"
 
         sealed: Optional[WorkflowPhaseState] = None
@@ -507,6 +528,7 @@ class WorkflowRunState(BaseModel):
             *,
             agent_id: Optional[str] = None,
             correlation_id: Optional[str] = None,
+            iteration: Optional[int] = None,
     ) -> tuple[Optional[WorkflowPhaseState], Optional[WorkflowAgentState]]:
         """Locate an agent node by priority: agent_id -> correlation_id -> label fallback.
 
@@ -516,7 +538,8 @@ class WorkflowRunState(BaseModel):
         2. ``correlation_id`` — cross-phase match (HUMAN_PROMPT /
            HUMAN_REPLIED carry no ``phase``, so this scans every phase).
         3. Fallback — label + last non-terminal instance within the named
-           phase, then every phase. Only for legacy events without ids.
+           phase (disambiguated by ``iteration`` when set), then every phase.
+           Only for legacy events without ids.
 
         Late ``agent_completed`` after a phase seal (node already ``completed``
         with no outcome, and ``agent_id`` may not match) is handled by
@@ -532,7 +555,7 @@ class WorkflowRunState(BaseModel):
                 for agent in phase.agents:
                     if agent.correlation_id == correlation_id:
                         return phase, agent
-        phase = self._find_phase_by_name(phase_name)
+        phase = self._find_phase_by_name(phase_name, iteration)
         if phase is not None:
             agent = self._find_agent_in_phase(phase, agent_label)
             if agent is not None:
@@ -562,6 +585,7 @@ class WorkflowRunState(BaseModel):
         phase, agent = self._resolve_agent(
             phase_name, agent_label,
             agent_id=progress.agent_id, correlation_id=progress.correlation_id,
+            iteration=progress.phase_iteration,
         )
         need_outcome_backfill = (
             (phase is None or agent is None)
@@ -988,7 +1012,9 @@ class WorkflowRunState(BaseModel):
         if child_phase is not None:
             return _attach_child(child_phase, agent_state)
 
-        target_phase, sealed_phase = self._switch_to_phase(progress.phase or _UNNAMED_PHASE)
+        target_phase, sealed_phase = self._switch_to_phase(
+            progress.phase or _UNNAMED_PHASE, iteration=progress.phase_iteration,
+        )
         existing = self._find_agent_in_phase_by_id(target_phase, progress.agent_id) if progress.agent_id else None
         if existing is not None:
             _reuse_existing(existing)

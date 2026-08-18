@@ -672,6 +672,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.interrupt",
     "chat.resume",
     "chat.user_answer",
+    "chat.swarmflow_reply",
     "history.get",
     # "tts.synthesize",
     "skills.marketplace.list",
@@ -5235,6 +5236,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _chat_swarmflow_reply(ws, req_id, params, session_id):
+        # Empty-ack shell — standard 3-layer routing forwards the reply to the
+        # agent adapter, which builds HumanAgentMessage and calls team_manager.
+        await channel.send_response(
+            ws, req_id, ok=True, payload={"accepted": True, "session_id": session_id}
+        )
+
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(params, dict):
@@ -6544,6 +6552,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
+    channel.register_method("chat.swarmflow_reply", _chat_swarmflow_reply)
     channel.register_method("history.get", _history_get)
     channel.register_method("locale.get_conf", _locale_get_conf)
     channel.register_method("locale.set_conf", _locale_set_conf)

@@ -2790,6 +2790,7 @@
     "prev": "上一题",
     "next": "下一题",
     "cancel": "取消",
+    "replyLater": "稍后回复",
     "skip": "跳过",
     "nextStep": "下一步",
     "confirm": "确定",
@@ -3124,5 +3125,21 @@
       "skipped": "上次运行已跳过",
       "cancelled": "上次运行已取消"
     }
+  },
+  "swarmflow": {
+    "statusPlanned": "已规划",
+    "statusPending": "等待中",
+    "statusRunning": "运行中",
+    "statusCompleted": "已完成",
+    "statusFailed": "失败",
+    "statusStopped": "已停止",
+    "statusWaitingForHuman": "等待人工输入",
+    "subWorkflow": "子工作流",
+    "clickToReply": "点击回复",
+    "waitingForHuman": "等待回复 {{count}}",
+    "noWorkflow": "暂无工作流",
+    "layoutIndented": "缩进树",
+    "layoutOrgChart": "架构图",
+    "layoutGraph": "流程图"
   }
 }

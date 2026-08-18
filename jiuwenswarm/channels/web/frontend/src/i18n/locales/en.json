@@ -2812,6 +2812,7 @@
     "prev": "Previous",
     "next": "Next",
     "cancel": "Cancel",
+    "replyLater": "Reply Later",
     "skip": "Skip",
     "nextStep": "Next",
     "confirm": "Confirm",
@@ -3146,5 +3147,21 @@
       "skipped": "Last run skipped",
       "cancelled": "Last run cancelled"
     }
+  },
+  "swarmflow": {
+    "statusPlanned": "Planned",
+    "statusPending": "Pending",
+    "statusRunning": "Running",
+    "statusCompleted": "Completed",
+    "statusFailed": "Failed",
+    "statusStopped": "Stopped",
+    "statusWaitingForHuman": "Waiting for input",
+    "subWorkflow": "Sub-workflow",
+    "clickToReply": "Click to reply",
+    "waitingForHuman": "Waiting for {{count}}",
+    "noWorkflow": "No workflow",
+    "layoutIndented": "Indented Tree",
+    "layoutOrgChart": "Org Chart",
+    "layoutGraph": "Flow Graph"
   }
 }

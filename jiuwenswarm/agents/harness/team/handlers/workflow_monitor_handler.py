@@ -238,6 +238,7 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
                 phase_type=getattr(payload, "phase_type", None),
                 nested_phase=getattr(payload, "nested_phase", None),
                 parent_phase=getattr(payload, "parent_phase", None),
+                phase_iteration=getattr(payload, "phase_iteration", None),
             )
         except Exception:
             logger.warning("[WorkflowMonitorHandler] Failed to extract progress from event")
