@@ -5269,12 +5269,13 @@ export function ConfigPanel({
                   ) : null}
                   <div
                     id="config-group-enable_free_models"
+                    data-testid="config-panel-group-enable_free_models"
                     className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
                   >
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border flex items-center justify-between gap-3">
+                    <div className="px-4 py-3 bg-secondary/30 border-b border-border flex items-center justify-between gap-3" data-testid="config-panel-group-enable_free_models-header">
                       <div className="min-w-0">
-                        <span className="block text-sm font-medium text-text-strong">{t("config.keys.enableFreeModels")}</span>
-                        <span className="block text-xs text-text-muted mt-0.5">{t("config.keyHelp.enableFreeModels")}</span>
+                        <span className="block text-sm font-medium text-text-strong" data-testid="config-panel-group-enable_free_models-label">{t("config.keys.enableFreeModels")}</span>
+                        <span className="block text-xs text-text-muted mt-0.5" data-testid="config-panel-group-enable_free_models-hint">{t("config.keyHelp.enableFreeModels")}</span>
                       </div>
                       <button
                         type="button"
@@ -5283,6 +5284,7 @@ export function ConfigPanel({
                         onClick={() => handleFieldChange("enable_free_models", parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "false" : "true")}
                         title={t("config.keys.enableFreeModels")}
                         className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"}`}
+                        data-testid="config-panel-group-enable_free_models-switch"
                       >
                         <span
                           className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "translate-x-4" : "translate-x-0"}`}

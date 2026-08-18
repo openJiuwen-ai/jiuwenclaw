@@ -286,6 +286,7 @@ export function SessionSidebar({
           onClick={onSetupGuideRequest}
           aria-label={t('modelSetupGuide.open')}
           title={t('modelSetupGuide.open')}
+          data-testid="session-sidebar-setup-guide-button"
         >
           <span className="icon-rail-nav-item__icon">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden>
