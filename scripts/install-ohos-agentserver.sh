@@ -408,7 +408,8 @@ case "${_venv_sp:-}" in
 esac
 _verify_ld=$(ohos_native_ld_library_path 2>/dev/null || true)
 for _mod in openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography; do
-  if env LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
+  # OhOS/HNP 下不要用外部 env 程序包裹 Python。
+  if LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
     "$PYTHON" -c "import ${_mod}" 2>/dev/null; then
     log "  import ${_mod}: OK"
   else

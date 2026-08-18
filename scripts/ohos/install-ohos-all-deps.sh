@@ -530,19 +530,17 @@ PY
 }
 
 verify_pep517_subprocess() {
-  log "PEP517 _in_process simulation (minimal PATH, no MATURIN/RUSTC env):"
+  log "PEP517 _in_process simulation (inherit OhOS runtime, hide MATURIN/RUSTC/CARGO):"
   WHEEL_BUILD_ROOT="${WHEEL_BUILD_ROOT:-}" "$PYTHON" >>"$LOG" 2>&1 <<'PY'
 import os, subprocess, sys
 
-env = {
-    "HOME": os.environ.get("HOME", ""),
-    "PATH": "/usr/bin:/bin",
-    "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
-    "WHEEL_BUILD_ROOT": os.environ.get("WHEEL_BUILD_ROOT", ""),
-    "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-    "TEMP": os.environ.get("TEMP", "/tmp"),
-    "TMP": os.environ.get("TMP", "/tmp"),
-}
+# OhOS/HNP Python 依赖父进程中的运行时环境。
+# 不能构造一个近乎空白的 env，否则动态加载器可能找不到
+# libpython3.12.so.1.0 / libintl.so.8。
+# 这里只移除本测试刻意要隐藏的 Rust/Maturin 变量，其余环境完整继承。
+env = os.environ.copy()
+for key in ("RUSTC", "CARGO", "MATURIN"):
+    env.pop(key, None)
 code = r"""
 import os, importlib
 print("  in_process RUSTC=%s" % os.environ.get("RUSTC", "unset"))
@@ -798,7 +796,8 @@ verify_native_libs() {
   fi
   log "  PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-unset}"
   log "  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-unset}"
-  _cffi=$(env LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$PYTHON" -c "import _cffi_backend; print('OK')" 2>/dev/null || echo "FAIL")
+  # OhOS/HNP 下不要用外部 env 命令包裹 Python，直接继承当前 shell 运行时环境。
+  _cffi=$("$PYTHON" -c "import _cffi_backend; print('OK')" 2>/dev/null || echo "FAIL")
   log "  cffi _cffi_backend import: $_cffi"
 }
 
@@ -1070,26 +1069,27 @@ pip_install() {
   : "${PIP_INDEX_URL:=https://pypi.tuna.tsinghua.edu.cn/simple}"
   : "${PIP_TRUSTED_HOST:=pypi.tuna.tsinghua.edu.cn}"
   _index_args="--index-url $PIP_INDEX_URL --trusted-host $PIP_TRUSTED_HOST"
-  # env 显式传入，避免 pip _in_process 子进程丢失 shell export
-  env \
-    RUSTC="${RUSTC:-}" \
-    CARGO="${CARGO:-}" \
-    MATURIN="${MATURIN:-}" \
-    CC="${CC:-}" \
-    CXX="${CXX:-}" \
-    AR="${AR:-}" \
-    RANLIB="${RANLIB:-}" \
-    RUSTFLAGS="${RUSTFLAGS:-}" \
-    OPENSSL_DIR="${OPENSSL_DIR:-}" \
-    PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}" \
-    WHEEL_BUILD_ROOT="${WHEEL_BUILD_ROOT:-}" \
-    OHOS_TOOLCHAIN_ENV="${OHOS_TOOLCHAIN_ENV:-}" \
-    PYTHONPATH="${PYTHONPATH:-}" \
-    LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
-    PIP_INDEX_URL="$PIP_INDEX_URL" \
-    PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
-    PATH="$PATH" \
-    "$PYTHON" -m pip install --no-cache-dir $_nbi $_find_links $_index_args "$@"
+
+  # OhOS/HNP Python 依赖父 shell 中完整的运行时环境。
+  # 不使用外部 `env ... $PYTHON` 包装，避免 HiShell/HNP 下动态加载环境发生变化，
+  # 导致 libpython3.12.so.1.0 / libintl.so.8 无法解析。
+  export RUSTC="${RUSTC:-}"
+  export CARGO="${CARGO:-}"
+  export MATURIN="${MATURIN:-}"
+  export CC="${CC:-}"
+  export CXX="${CXX:-}"
+  export AR="${AR:-}"
+  export RANLIB="${RANLIB:-}"
+  export RUSTFLAGS="${RUSTFLAGS:-}"
+  export OPENSSL_DIR="${OPENSSL_DIR:-}"
+  export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}"
+  export WHEEL_BUILD_ROOT="${WHEEL_BUILD_ROOT:-}"
+  export OHOS_TOOLCHAIN_ENV="${OHOS_TOOLCHAIN_ENV:-}"
+  export PYTHONPATH="${PYTHONPATH:-}"
+  export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+  export PIP_INDEX_URL PIP_TRUSTED_HOST PATH
+
+  "$PYTHON" -m pip install --no-cache-dir $_nbi $_find_links $_index_args "$@"
 }
 
 try_import() {
@@ -1107,10 +1107,12 @@ try_import() {
     _native_ld="${_native_ld}:${LD_LIBRARY_PATH}"
   fi
   [ -n "$_native_ld" ] || _native_ld=${LD_LIBRARY_PATH:-}
-  env \
-    LD_LIBRARY_PATH="${_native_ld}" \
-    OPENSSL_DIR="${OPENSSL_DIR:-}" \
-    "$PYTHON" -c "
+
+  # 使用 POSIX shell 的临时变量赋值，不调用外部 env 程序。
+  # 这样既能为当前 import 覆盖 native lib 路径，又不会破坏 OhOS/HNP 运行时环境。
+  LD_LIBRARY_PATH="${_native_ld}" \
+  OPENSSL_DIR="${OPENSSL_DIR:-}" \
+  "$PYTHON" -c "
 import importlib, sys
 try:
     importlib.import_module('$mod')
