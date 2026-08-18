@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 import os
 import re
 import signal
@@ -14,6 +15,9 @@ import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, NoReturn
+
+
+logger = logging.getLogger(__name__)
 
 
 class _WindowsWorkerInterruptController:
@@ -220,7 +224,7 @@ def main() -> None:
             raise
         code = 130
     except Exception as exc:  # noqa: BLE001 - command-line boundary
-        print(f"jiuwenswarm-process: 启动失败：{exc}", file=sys.stderr)
+        logger.error("jiuwenswarm-process: 启动失败：%s", exc)
         code = 1
     finally:
         worker_interrupt.restore()
