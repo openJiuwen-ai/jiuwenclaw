@@ -1119,17 +1119,17 @@ try_import() {
   mod=$1
   export_pip_build_env
   _libdir=$("${OHOS_REAL_PYTHON:-$PYTHON}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
-  _native_ld=
+  _detected_ld=
   if [ -n "${OPENSSL_DIR:-}" ] && [ -d "${OPENSSL_DIR}/lib" ]; then
-    _native_ld="${OPENSSL_DIR}/lib"
+    _detected_ld="${OPENSSL_DIR}/lib"
   fi
   if [ -n "$_libdir" ] && [ -d "$_libdir" ]; then
-    _native_ld="${_native_ld:+${_native_ld}:}${_libdir}"
+    _detected_ld="${_detected_ld:+${_detected_ld}:}${_libdir}"
   fi
-  if [ -n "$_native_ld" ] && [ -n "${LD_LIBRARY_PATH:-}" ]; then
-    _native_ld="${_native_ld}:${LD_LIBRARY_PATH}"
+  _native_ld=${LD_LIBRARY_PATH:-}
+  if [ -n "$_detected_ld" ]; then
+    _native_ld="${_native_ld:+${_native_ld}:}${_detected_ld}"
   fi
-  [ -n "$_native_ld" ] || _native_ld=${LD_LIBRARY_PATH:-}
 
   # 使用 POSIX shell 的临时变量赋值，不调用外部 env 程序。
   # 这样既能为当前 import 覆盖 native lib 路径，又不会破坏 OhOS/HNP 运行时环境。

@@ -106,12 +106,19 @@ verify_openssl_for_cryptography() {
 run_import_probe() {
   _pkg=$1
   _import_py=$2
-  _native_ld=$(ohos_native_ld_library_path)
+  _detected_ld=$(ohos_native_ld_library_path)
+  # Keep the parent shell's known-good HNP runtime first. The detected list
+  # is an augmentation, not a replacement for that environment.
+  _native_ld=${LD_LIBRARY_PATH:-}
+  if [ -n "$_detected_ld" ]; then
+    _native_ld="${_native_ld:+${_native_ld}:}${_detected_ld}"
+  fi
   mkdir -p "${REPORT_DIR:-/dev/null}"
   _log="${REPORT_DIR:-.}/native-import-${_pkg}.log"
   # OhOS/HNP Python needs the complete parent shell environment. Do not use
   # an external env wrapper here, because this phase runs before dependency
   # installation and a loader failure would abort the entire install.
+  log "import probe LD_LIBRARY_PATH=$_native_ld"
   if LD_LIBRARY_PATH="$_native_ld" OPENSSL_DIR="${OPENSSL_DIR:-}" \
     "$PYTHON" -c "$_import_py" >>"$_log" 2>&1; then
     log "import $_pkg: OK"
