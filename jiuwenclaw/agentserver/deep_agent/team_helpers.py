@@ -1434,6 +1434,19 @@ async def _apply_resolved_model_to_team(
     leader_harness = getattr(team_agent, 'harness', None)
     if leader_harness is not None and hasattr(leader_harness, 'apply_model_config'):
         leader_harness.apply_model_config(team_model)
+        logger.info(
+            '[TeamHelpers] leader model hot-reloaded: member_type=%s native=%s model_name=%s',
+            type(leader_harness).__name__,
+            getattr(leader_harness, '_native', None) is not None,
+            team_model.model_request_config.model_name
+            if team_model.model_request_config else None,
+        )
+    else:
+        logger.warning(
+            '[TeamHelpers] leader harness not ready for hot-reload: '
+            'leader_harness_is_none=%s',
+            leader_harness is None,
+        )
 
     spawn_mgr = getattr(team_agent, 'spawn_manager', None)
     if spawn_mgr is not None:
@@ -1446,6 +1459,12 @@ async def _apply_resolved_model_to_team(
             member_harness = getattr(member_agent, 'harness', None)
             if member_harness is not None and hasattr(member_harness, 'apply_model_config'):
                 member_harness.apply_model_config(team_model)
+                logger.info(
+                    '[TeamHelpers] teammate model hot-reloaded: member=%s model_name=%s',
+                    member_name,
+                    team_model.model_request_config.model_name
+                    if team_model.model_request_config else None,
+                )
 
     logger.info(
         '[TeamHelpers] model applied to team: team=%s model_name=%s',
@@ -1694,6 +1713,28 @@ async def process_team_message_stream(request: Any,
                     model_name,
                     len(existing_pool),
                 )
+            # ── 覆盖 predefined_members 的 model_name，使 teammate spawn 时
+            #    allocator 能从注入的 pool 命中请求模型 ──
+            #    resolve_member_model 在 model_name 为空时返回 None，teammate 会
+            #    走 agent_spec.model 回退（配置默认 glm-5.2），而非 pool 里的请求
+            #    模型。给每个 predefined member 设 model_name = 请求模型，spawn 时
+            #    get_member_model_ref 拿到该名，resolve_member_model 从 pool 命中。
+            predefined_members = getattr(team_spec, 'predefined_members', None) or []
+            if model_name:
+                for member in predefined_members:
+                    try:
+                        member.model_name = model_name
+                    except Exception:
+                        # PredefinedMemberSpec / BridgeMemberSpec may be frozen;
+                        # skip on failure (non-fatal — teammate falls back to default)
+                        pass
+                if predefined_members:
+                    logger.info(
+                        '[TeamHelpers] predefined members model_name set: '
+                        'model_name=%s count=%d',
+                        model_name,
+                        len(predefined_members),
+                    )
     except Exception as exc:
         logger.exception('[TeamHelpers] TeamAgent create failed: %s', exc)
         yield AgentResponseChunk(
@@ -1705,6 +1746,23 @@ async def process_team_message_stream(request: Any,
         yield AgentResponseChunk(request_id=rid, channel_id=channel_id, payload=None, is_complete=True)
         return
     team_name = team_spec.team_name
+    # ── 运行时模型热重载（对所有路径统一执行） ──
+    # resume_from_pause 场景下 is_first_request=True，但 team runtime 已存在且不会 rebuild，
+    # 此时 spec 覆盖（上文的 agents["leader"].model = ...）不生效，必须靠热重载
+    # `_apply_resolved_model_to_team` → `TeamHarness.apply_model_config` 才能让 leader/
+    # in-process teammate 的 NativeHarness 立即换模型。冷启动时 team 还没 build，
+    # `_apply_resolved_model_to_team` 内部 pool.get 返回 None 会 warning + return（无害），
+    # 此时由上文的 spec 覆盖在 build 时生效。两条路径互补。
+    if _resolved_model_config is not None and team_name:
+        try:
+            await _apply_resolved_model_to_team(team_name, _resolved_model_config)
+        except Exception as exc:
+            logger.warning(
+                '[TeamHelpers] runtime model switch failed: '
+                'session_id=%s error=%s',
+                session_id,
+                exc,
+            )
     try:
         team_manager.ensure_leader_prompt_skills_ready_for_session(
             session_id,
@@ -1745,18 +1803,8 @@ async def process_team_message_stream(request: Any,
                         resume_from_pause,
                     )
                 else:
-                    if _resolved_model_config is not None and team_name:
-                        try:
-                            await _apply_resolved_model_to_team(
-                                team_name, _resolved_model_config,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                '[TeamHelpers] runtime model switch failed: '
-                                'session_id=%s error=%s',
-                                session_id,
-                                exc,
-                            )
+                    # 运行时热重载已在 team_name 解析后统一执行（resume_from_pause /
+                    # follow-up 均覆盖），此处不再重复调用。
                     success, reason = await team_manager.interact(session_id, query)
                     first_request_ready = False
                     boundary_resume = False

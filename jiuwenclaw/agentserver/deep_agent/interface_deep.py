@@ -9228,6 +9228,14 @@ class JiuWenClawDeepAdapter:
                 mode = "team"
             from jiuwenclaw.agentserver.deep_agent.team_helpers import process_team_message_stream
 
+            # team 模式下，只在用户/relay-claw 显式传了 model_name 时才注入
+            # _resolved_model_config（触发 team_helpers 的模型切换路径）。
+            # 没传 model_name 时让 team 走自己的配置默认（leader/teammate 的
+            # glm-5.2，由 TeamConfigLoader 加载），不注入 sidecar 基线
+            # （self._model，agentteam breed 的 defaultModel=glm-5）覆盖 team 默认。
+            _team_params = request.params if isinstance(request.params, dict) else {}
+            _team_requested_model = str(_team_params.get("model_name") or "").strip()
+
             try:
                 resolved_model = self._resolve_model_for_request(request)
             except ValueError as exc:
@@ -9253,9 +9261,13 @@ class JiuWenClawDeepAdapter:
                     is_complete=True,
                 )
                 return
+            # adapter 级字段同步（供 _resolve_model_name / _update_tools_for_mode
+            # 等适配器级查询使用）；不影响 team runtime 的实际模型。
             self._model_request_config = resolved_model.model_config
             self._model_client_config = resolved_model.model_client_config
-            if isinstance(request.params, dict):
+            # 仅在显式传了 model_name 时注入 _resolved_model_config，触发 team_helpers
+            # 的模型切换；未传则不注入，team 用 TeamConfigLoader 的默认（glm-5.2）。
+            if _team_requested_model and isinstance(request.params, dict):
                 request.params["_resolved_model_config"] = {
                     "model_client_config": resolved_model.model_client_config.model_dump(mode="json"),
                     "model_request_config": (
