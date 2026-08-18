@@ -618,9 +618,13 @@ async def test_chat_after_switch_reuses_agent() -> None:
     chat_resp = await client.send_request(chat_envelope)
     await client.shutdown()
 
-    assert switch_resp["ok"] and chat_resp.ok
+    assert switch_resp["ok"] is True
+    # 3rdagent 交互走 SSH，chat/send_request 不再走 agentserver WS。
+    assert not chat_resp.ok
+    assert "does not use websocket" in str(chat_resp.payload)
     assert yuanrong.create_calls == 1
-    assert yuanrong.send_calls == 1
+    assert yuanrong.send_calls == 0
+    assert yuanrong.ws_connect_uris == []
     assert chat_envelope.channel_context["agent_id"] == switch_resp["payload"]["agent_id"]
     assert chat_envelope.channel_context["agent_type"] == "opencode"
 
