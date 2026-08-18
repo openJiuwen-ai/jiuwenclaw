@@ -75,7 +75,10 @@ class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
     def __init__(self) -> None:
         super().__init__()
         self.team_session_ids: list[str] = []
-        self._agent_manager = SimpleNamespace(get_agent_nowait=lambda *_: object())
+        self._agent_manager = SimpleNamespace(
+            get_agent_nowait=lambda *_: object(),
+            cleanup_session_runtime=AsyncMock(return_value=False),
+        )
 
     async def _ensure_persistent_checkpointer_response(self, _request):
         return None
@@ -610,7 +613,7 @@ async def test_plain_disconnect_does_not_emit_root_evict(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_team_switch_dispatches_offload_before_baseline_stop(
+async def test_team_switch_leaves_offload_to_product_task_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
@@ -638,11 +641,11 @@ async def test_team_switch_dispatches_offload_before_baseline_stop(
         previous_session_id="old-session",
     )
 
-    assert events == ["offload", "baseline-stop"]
+    assert events == ["baseline-stop"]
 
 
 @pytest.mark.asyncio
-async def test_local_team_switch_offloads_previous_without_stopping_runtime(
+async def test_local_team_switch_does_not_drive_kvc_or_stop_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = TeamManager()
@@ -670,7 +673,7 @@ async def test_local_team_switch_offloads_previous_without_stopping_runtime(
         previous_session_id="old-session",
     )
 
-    assert events == ["offload"]
+    assert events == []
 
 
 @pytest.mark.asyncio

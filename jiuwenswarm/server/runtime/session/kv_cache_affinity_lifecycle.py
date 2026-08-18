@@ -194,13 +194,8 @@ async def run_session_kv_cache_lifecycle(
         if not callable(action_fn):
             return _result("skipped")
 
-        if action == "evict":
-            previous = _BACKGROUND_TAILS.get(normalized_session_id)
-            if previous is not None and previous is not asyncio.current_task():
-                await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
-
         action_timeout = resolve_kvc_action_timeout(action, "session", timeout)
-        action_call = action_fn(
+        action_kwargs = dict(
             target="session",
             session_id=normalized_session_id,
             parent_session_id=parent_session_id or normalized_session_id,
@@ -209,8 +204,33 @@ async def run_session_kv_cache_lifecycle(
         # OpenAIModelClient owns the whole-action deadline when kv_cache.mode=affinity (including
         # retries/backoff). Product lifecycle code only selects and forwards
         # the shared budget so timeout ownership remains unambiguous.
-        action_result = await action_call
-        ok = bool(action_result)
+        if action == "evict":
+            previous = _BACKGROUND_TAILS.get(normalized_session_id)
+            barrier = asyncio.get_running_loop().create_future()
+            # Register evict as the current tail before waiting for older
+            # actions.  A later offload/prefetch for the same Session will
+            # therefore queue behind this destructive action.
+            _BACKGROUND_TAILS[normalized_session_id] = barrier
+            _EVICT_BARRIERS[normalized_session_id] = barrier
+            succeeded = False
+            try:
+                if previous is not None and previous is not asyncio.current_task():
+                    await asyncio.gather(
+                        asyncio.shield(previous),
+                        return_exceptions=True,
+                    )
+                succeeded = bool(await action_fn(**action_kwargs))
+                ok = succeeded
+            finally:
+                if not barrier.done():
+                    barrier.set_result(_result("ok" if succeeded else "failed"))
+                if _EVICT_BARRIERS.get(normalized_session_id) is barrier:
+                    _EVICT_BARRIERS.pop(normalized_session_id, None)
+                if _BACKGROUND_TAILS.get(normalized_session_id) is barrier:
+                    _BACKGROUND_TAILS.pop(normalized_session_id, None)
+        else:
+            action_result = await action_fn(**action_kwargs)
+            ok = bool(action_result)
     except Exception as exc:
         logger.warning(
             "[KVCacheAffinityLifecycle] %s failed: session_id=%s error=%s",
@@ -237,7 +257,8 @@ async def run_session_kv_cache_lifecycle(
 
 
 _BACKGROUND_ACTIONS: set[asyncio.Task[KVCacheLifecycleResult]] = set()
-_BACKGROUND_TAILS: dict[str, asyncio.Task[KVCacheLifecycleResult]] = {}
+_BACKGROUND_TAILS: dict[str, asyncio.Future[KVCacheLifecycleResult]] = {}
+_EVICT_BARRIERS: dict[str, asyncio.Future[KVCacheLifecycleResult]] = {}
 
 
 def dispatch_session_kv_cache_lifecycle(
@@ -324,6 +345,22 @@ async def cancel_pending_kv_cache_lifecycle_tasks() -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _BACKGROUND_TAILS.clear()
+    _EVICT_BARRIERS.clear()
+
+
+async def wait_for_session_kv_cache_evict(session_id: str) -> None:
+    """Wait only for an in-flight root Session evict.
+
+    Inference deliberately does not wait for offload or prefetch.  This
+    narrow barrier exists solely to prevent a later same-Session step from
+    overtaking a destructive evict.
+    """
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    barrier = _EVICT_BARRIERS.get(normalized_session_id)
+    if barrier is not None:
+        await asyncio.gather(asyncio.shield(barrier), return_exceptions=True)
 
 
 async def prefetch_session_kv_cache(

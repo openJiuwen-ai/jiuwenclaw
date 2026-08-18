@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import MethodType, SimpleNamespace
 
 import pytest
 
 from jiuwenswarm.server.runtime.session import kv_cache_product_hooks
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+
+@pytest.fixture(autouse=True)
+def _clear_kvc_task_guard() -> Iterator[None]:
+    from jiuwenswarm.server.runtime.session.kv_cache_task_guard import (
+        get_session_kv_cache_task_guard,
+    )
+
+    guard = get_session_kv_cache_task_guard()
+    guard.clear()
+    yield
+    guard.clear()
 
 
 class _AgentManager:
@@ -108,9 +121,40 @@ async def test_disabled_plan_delete_does_not_resolve_live_agent(
     ) is False
 
 
+def test_disabled_delete_does_not_mutate_kvc_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "is_kv_cache_affinity_enabled",
+        lambda: False,
+    )
+
+    guard = SimpleNamespace(
+        delete=lambda **_kwargs: pytest.fail("disabled affinity mutated delete state"),
+        restore_after_failed_delete=lambda _session_id: pytest.fail(
+            "disabled affinity mutated failed-delete state"
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_task_guard."
+        "get_session_kv_cache_task_guard",
+        lambda: guard,
+    )
+
+    kv_cache_product_hooks.mark_session_deleted(
+        session_id="sess_agent_001",
+        channel_id="web",
+        is_team=False,
+    )
+    kv_cache_product_hooks.restore_session_after_failed_delete(
+        "sess_agent_001"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("affinity_enabled", [False, True])
-async def test_team_switch_context_and_prefetch_for_both_affinity_states(
+async def test_team_switch_records_foreground_without_navigation_prefetch(
     monkeypatch: pytest.MonkeyPatch,
     affinity_enabled: bool,
 ) -> None:
@@ -149,15 +193,11 @@ async def test_team_switch_context_and_prefetch_for_both_affinity_states(
     assert context.previous_is_team is True
     assert context.resolved_mode == "team"
     assert team_manager.prepare_calls == []
-    assert team_manager.prefetch_calls == (
-        [{"session_id": "team_sess_002", "reason": "session.switch: "}]
-        if affinity_enabled
-        else []
-    )
+    assert team_manager.prefetch_calls == []
 
 
 @pytest.mark.asyncio
-async def test_plan_switch_dispatches_root_signals(
+async def test_plan_navigation_alone_dispatches_no_root_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     offload_calls: list[dict] = []
@@ -207,20 +247,8 @@ async def test_plan_switch_dispatches_root_signals(
         False,
         "agent.plan",
     )
-    assert offload_calls == [
-        {
-            "session_id": "sess_agent_001",
-            "parent_session_id": "sess_agent_001",
-            "agent": None,
-        }
-    ]
-    assert prefetch_calls == [
-        {
-            "session_id": "sess_agent_002",
-            "parent_session_id": "sess_agent_002",
-            "agent": None,
-        }
-    ]
+    assert offload_calls == []
+    assert prefetch_calls == []
 
 
 @pytest.mark.asyncio
@@ -328,7 +356,7 @@ async def test_disabled_affinity_routes_previous_team_to_team_owner(
 
 
 @pytest.mark.asyncio
-async def test_team_prefetch_does_not_resolve_plan_agent(
+async def test_team_navigation_does_not_resolve_plan_agent_or_prefetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_manager = _TeamManager()
@@ -359,9 +387,7 @@ async def test_team_prefetch_does_not_resolve_plan_agent(
         reason="session.switch: ",
     )
 
-    assert team_manager.prefetch_calls == [
-        {"session_id": "team_sess_002", "reason": "session.switch: "}
-    ]
+    assert team_manager.prefetch_calls == []
 
 
 @pytest.mark.asyncio

@@ -141,6 +141,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_session_switch_for_test(self, ws, request, send_lock):
         await self._handle_session_switch(ws, request, send_lock)
 
+    async def handle_session_kvc_prepare_for_test(self, ws, request, send_lock):
+        await self._handle_session_kvc_prepare(ws, request, send_lock)
+
     async def handle_team_delete_for_test(self, ws, request, send_lock):
         await self._handle_team_delete(ws, request, send_lock)
 
@@ -1915,8 +1918,8 @@ async def test_handle_session_switch_delegates_product_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
-    """A slow optional affinity signal must not hold the UI switch response."""
+async def test_handle_session_switch_records_foreground_before_ack(monkeypatch):
+    """The cheap foreground fact is committed before an immediate chat.send."""
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
     kvc_started = asyncio.Event()
@@ -1952,13 +1955,18 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         },
     )
 
-    await server.handle_session_switch_for_test(
-        fake_ws,
-        request,
-        asyncio.Lock(),
+    switch_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            request,
+            asyncio.Lock(),
+        )
     )
     await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+    assert fake_ws.sent == []
 
+    kvc_release.set()
+    await switch_task
     assert fake_ws.sent == [
         {
             "response_id": "req-session-switch-async-kvc",
@@ -1971,8 +1979,58 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         }
     ]
 
-    kvc_release.set()
-    await asyncio.sleep(0)
+
+@pytest.mark.asyncio
+async def test_handle_session_kvc_prepare_is_best_effort(monkeypatch):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    calls = []
+
+    def _prepare(**kwargs):
+        calls.append(kwargs)
+        return "scheduled"
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_product_hooks."
+        "record_session_prepare",
+        _prepare,
+    )
+
+    request = AgentRequest(
+        request_id="req-kvc-prepare",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_KVC_PREPARE,
+        params={
+            "session_id": "sess_002",
+            "intent_id": "intent-1",
+            "mode": "code.normal",
+        },
+    )
+
+    await server.handle_session_kvc_prepare_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+
+    assert calls[0]["session_id"] == "sess_002"
+    assert calls[0]["intent_id"] == "intent-1"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-kvc-prepare",
+            "payload": {
+                "session_id": "sess_002",
+                "scheduled": True,
+                "outcome": "scheduled",
+            },
+            "ok": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
