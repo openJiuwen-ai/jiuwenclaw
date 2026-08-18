@@ -4073,8 +4073,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
-  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
-  const configSaveBlocked = (isProcessing || globalTaskRunning) && mode !== 'team';
+  const configSaveBlocked = isProcessing || globalTaskRunning;
   // 免费模型（如 Opencode Zen）只在对话下拉框展示，不在“模型配置”页编辑--
   // 它们是内存态、不入 config.yaml，在此过滤掉以免误编辑/误提交。
   // 用 useMemo 缓存：只有 availableModels 真正变化才重算，避免每次渲染返回
