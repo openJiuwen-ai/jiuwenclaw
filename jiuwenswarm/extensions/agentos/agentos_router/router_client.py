@@ -1475,25 +1475,21 @@ class AgentOSRouterClient(AgentServerClient):
 
     async def _create_agent(self, agent_info: AgentInfo) -> AgentInfo:
         # runtime_spec 获取方式因 agent_type 而异
+        env_vars: dict[str, str] | None = None
         if agent_info.agent_type == BUILTIN_AGENT_TYPE:
             # jiuwenswarm: 不从注册中心获取镜像信息，使用内置 runtime_spec
-            import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = int(sock.getsockname()[1])
+            port = 18092
             runtime_spec: dict[str, Any] = {
                 "sandbox_type": "supervisor",
                 "runtime": "python3.11",
                 "rootfs": {
                     "imageurl": f"{BUILTIN_AGENT_TYPE}-agent-runtime:latest",
                     "user": "agentos",
-                    "ports": [f"tcp:{port}"]
                 },
                 "cmds": [["sh", "-c", f"exec jiuwenswarm-agentserver --port {port}"]],
                 "cpu": int(os.environ.get("AGENTOS_BUILTIN_AGENT_CPU", "2000")),
                 "memory": int(os.environ.get("AGENTOS_BUILTIN_AGENT_MEMORY", "4096"))
             }
-            env_vars = {"AGENT_SERVER_HOST": "127.0.0.1", "AGENT_SERVER_PORT": f"{port}"}
             # create 后 Gateway 通过 frontend WS 代理直连该端口（不走 invoke）。
             extra_metadata: dict[str, Any] = {"agent_port": port}
         else:
