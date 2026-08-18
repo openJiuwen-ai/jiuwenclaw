@@ -249,24 +249,13 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     # ── [/TEMP-TEMPLATE-BYPASS] ──
 
     from jiuwenswarm.server.runtime.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
-    try:
-        from jiuwenswarm.agents.harness.common.tools.subagent_executor import (
-            get_subagent_parent_session,
-        )
-    except ImportError:
-        def get_subagent_parent_session():
-            return None
-    try:
-        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
-            get_effective_request_workspace_dir,
-            get_effective_request_output_dir,
-        )
-    except ImportError:
-        def get_effective_request_workspace_dir():
-            return None
-
-        def get_effective_request_output_dir():
-            return None
+    from jiuwenswarm.agents.harness.common.tools.subagent_executor import (
+        get_subagent_parent_session,
+    )
+    from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+        get_effective_request_workspace_dir,
+        get_effective_request_output_dir,
+    )
     from openjiuwen.core.session.stream.base import OutputSchema
     from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError
 
