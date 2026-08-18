@@ -165,6 +165,9 @@ class SendFileInput(ConstructionInput):
         attr="request_metadata",
         description="Request metadata mapping.",
     )
+    user_id: str | None = context_field(
+        attr="user_id", description="Authenticated request owner for routed downloads."
+    )
     project_dir: str | None = context_field(
         attr="project_dir",
         description="Active user project directory.",
@@ -215,6 +218,7 @@ def build_send_file_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
             session_id=inp.session_id,
             channel_id=inp.channel_id,
             metadata=inp.request_metadata,
+            user_id=inp.user_id,
             project_dir=inp.project_dir,
             team_workspace_root=inp.team_workspace_root,
         )

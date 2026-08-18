@@ -23,6 +23,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +144,12 @@ class WebFileDownloadManager:
             return None
 
     @staticmethod
-    def generate_download_url(token: str) -> str:
-        return f"/file-api/download?token={token}"
+    def generate_download_url(token: str, user_id: str = "") -> str:
+        query: dict[str, str] = {"token": token}
+        normalized_user_id = str(user_id or "").strip()
+        if normalized_user_id:
+            query["user_id"] = normalized_user_id
+        return f"/file-api/download?{urlencode(query)}"
 
 
 def generate_file_download_token(
@@ -251,9 +256,10 @@ def build_file_download_info(
     file_name: str,
     session_id: str = "",
     expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+    user_id: str = "",
 ) -> dict[str, Any]:
     token = generate_file_download_token(file_path, session_id, expires_in)
-    download_url = WebFileDownloadManager.get_instance().generate_download_url(token)
+    download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
 
     file_size = 0
     mime_type = "application/octet-stream"
