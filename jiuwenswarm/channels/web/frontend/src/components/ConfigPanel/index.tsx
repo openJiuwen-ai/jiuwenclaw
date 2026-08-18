@@ -5031,7 +5031,8 @@ export function ConfigPanel({
           return;
         }
         setExternalCliInstallStatuses({});
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        // 免费模型开关变更后需刷新模型列表（后端已 warm，但前端需重新拉取 models.list）
+        if ((hasModelChanges || "enable_free_models" in configUpdates) && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
@@ -5076,6 +5077,8 @@ export function ConfigPanel({
             return;
           }
           setExternalCliInstallStatuses({});
+          // 免费模型开关变更后需刷新模型列表（后端 config.set 已 warm Zen 免费模型）
+          if ("enable_free_models" in configUpdates && onModelsRefresh) await onModelsRefresh();
         }
       }
   } catch (saveError) {
