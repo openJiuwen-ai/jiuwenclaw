@@ -2515,10 +2515,7 @@ function AppContent() {
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
                       onOpenCodeReview={handleOpenCodeReview}
-                      permissionsMode={
-                        (serverConfig?.permissions_mode as 'full_access' | 'auto' | 'strict' | undefined)
-                        ?? (serverConfig?.permissions_enabled === 'false' ? 'full_access' : 'auto')
-                      }
+                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
