@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import unicodedata
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TextIO
 
@@ -182,6 +183,14 @@ class ProcessCliUI:
 
     def notice(self, message: str) -> None:
         self._write(self._styled(f"\n! {message}\n\n", _ANSI_YELLOW))
+
+    def blank_line(self) -> None:
+        self._write("\n")
+
+    def diagnostics(self, lines: Iterable[str]) -> None:
+        self._write("\n工作进程诊断信息：\n")
+        self._write("\n".join(lines))
+        self._write("\n")
 
     def session(self, session_id: str | None) -> None:
         if session_id:

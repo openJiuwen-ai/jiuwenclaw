@@ -99,6 +99,17 @@ def test_status_shows_model_and_canonical_mode_without_work_mode(monkeypatch) ->
     assert "工作模式" not in text
 
 
+def test_process_cli_diagnostics_use_the_configured_stream() -> None:
+    output = TtyBuffer()
+    ui = ProcessCliUI(output, columns=80)
+
+    ui.diagnostics(["worker failure", "trace tail"])
+
+    assert output.getvalue() == (
+        "\n工作进程诊断信息：\nworker failure\ntrace tail\n"
+    )
+
+
 def test_human_renderer_shows_chinese_runtime_states(monkeypatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     output = TtyBuffer()
