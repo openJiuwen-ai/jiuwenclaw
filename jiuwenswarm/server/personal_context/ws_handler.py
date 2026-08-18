@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -203,16 +204,23 @@ async def _stream_graph(
 
 
 async def _execute(
-    host: PersonalContextHostAPI, request: AgentRequest
+    host: PersonalContextHostAPI,
+    request: AgentRequest,
+    *,
+    runtime_enabled_changed: Callable[[bool], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
     method = request.req_method
     params = request.params
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STATUS:
         return _payload(await host.get_status())
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_START:
-        return _payload(await host.set_runtime_enabled(True))
+        result = await host.set_runtime_enabled(True)
+        await _notify_runtime_enabled(runtime_enabled_changed, True)
+        return _payload(result)
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP:
-        return _payload(await host.set_runtime_enabled(False))
+        result = await host.set_runtime_enabled(False)
+        await _notify_runtime_enabled(runtime_enabled_changed, False)
+        return _payload(result)
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_GET_CONFIG:
         return await host.get_runtime_config()
     if method == ReqMethod.PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG:
@@ -272,11 +280,32 @@ async def _execute(
     raise ValueError("unknown PersonalContext method")
 
 
+async def _notify_runtime_enabled(
+    callback: Callable[[bool], Awaitable[None]] | None,
+    enabled: bool,
+) -> None:
+    """Best-effort notification; a Rail refresh must not fail the API call."""
+
+    if callback is None:
+        return
+    try:
+        await callback(enabled)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "PersonalContext runtime Rail refresh failed: %s",
+            type(exc).__name__,
+        )
+
+
 async def handle_personal_context_request(
     host: PersonalContextHostAPI,
     ws: Any,
     request: AgentRequest,
     send_lock: asyncio.Lock,
+    *,
+    runtime_enabled_changed: Callable[[bool], Awaitable[None]] | None = None,
 ) -> None:
     """Execute one parsed PersonalContext request without introducing a PersonalContext wire protocol."""
 
@@ -288,7 +317,16 @@ async def handle_personal_context_request(
                 )
             await _stream_graph(host, ws, request, send_lock)
             return
-        await _send_result(ws, request, send_lock, await _execute(host, request))
+        await _send_result(
+            ws,
+            request,
+            send_lock,
+            await _execute(
+                host,
+                request,
+                runtime_enabled_changed=runtime_enabled_changed,
+            ),
+        )
     except asyncio.CancelledError:
         raise
     except ValueError as exc:

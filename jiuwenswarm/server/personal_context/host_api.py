@@ -880,6 +880,13 @@ class PersonalContextHostAPI:
                     exc, "PersonalContext runtime could not be started"
                 ) from None
 
+    async def is_runtime_enabled(self) -> bool:
+        """Return the loaded Host switch without reading or parsing YAML."""
+
+        async with self._operation_lock:
+            config = self._config
+            return bool(config is not None and config.enabled)
+
     async def get_status(self) -> PersonalContext.Status:
         """Return the Core's bounded, credential-free status snapshot."""
 

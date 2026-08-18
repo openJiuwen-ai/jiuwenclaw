@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,10 +19,14 @@ class _FakePersonalContextHost:
     def __init__(self, *, home: str | Path) -> None:
         self.home = Path(home)
         self.events: list[tuple[str, object]] = []
+        self.runtime_enabled = False
         self.__class__.instances.append(self)
 
     async def start(self) -> None:
         self.events.append(("start", None))
+
+    async def is_runtime_enabled(self) -> bool:
+        return self.runtime_enabled
 
     async def stop(self, *, timeout_seconds: float = 30.0) -> None:
         self.events.append(("stop", timeout_seconds))
@@ -120,6 +125,40 @@ async def test_start_opens_websocket_without_waiting_for_personal_context(
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+
+@pytest.mark.asyncio
+async def test_start_restores_enabled_personal_context_state_to_agent_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _server(monkeypatch)
+    host = _FakePersonalContextHost.instances[0]
+    host.runtime_enabled = True
+    manager_update = AsyncMock()
+    server._agent_manager.set_personal_context_runtime_enabled = manager_update  # type: ignore[method-assign]
+    events: list[str] = []
+
+    async def _serve(*_args: object, **_kwargs: object) -> _FakeWebSocketServer:
+        events.append("ws-serve")
+        return _FakeWebSocketServer(events)
+
+    monkeypatch.setattr(server_module, "reset_harness_packages_state", lambda: None)
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    async def _checkpointer() -> None:
+        return None
+
+    monkeypatch.setattr(interface_deep, "ensure_persistent_checkpointer", _checkpointer)
+    monkeypatch.setattr("websockets.legacy.server.serve", _serve)
+    monkeypatch.setattr(server, "_bootstrap_internal_jiuwenbox", _noop_async)
+
+    await server.start()
+    task = server._personal_context_start_task  # pylint: disable=protected-access
+    assert task is not None
+    await task
+
+    assert events == ["ws-serve"]
+    manager_update.assert_awaited_once_with(True)
 
 
 @pytest.mark.asyncio

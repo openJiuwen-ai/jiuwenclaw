@@ -434,6 +434,61 @@ async def test_non_graph_methods_call_exact_host_operation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("method", "enabled"),
+    [
+        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_START, True),
+        (ReqMethod.PERSONAL_CONTEXT_RUNTIME_STOP, False),
+    ],
+)
+async def test_runtime_switch_notifies_agent_manager_after_host_success(
+    capture_wire: None,
+    method: ReqMethod,
+    enabled: bool,
+) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+    notifications: list[tuple[bool, list[tuple[str, object]]]] = []
+
+    async def _runtime_changed(value: bool) -> None:
+        notifications.append((value, list(host.calls)))
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(method),
+        asyncio.Lock(),
+        runtime_enabled_changed=_runtime_changed,
+    )
+
+    assert host.calls == [("set_runtime_enabled", enabled)]
+    assert notifications == [(enabled, host.calls)]
+    assert ws.sent[0]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_switch_callback_failure_is_fail_open(
+    capture_wire: None,
+) -> None:
+    _server_instance, host = _server()
+    ws = _FakeWebSocket()
+
+    async def _failed_callback(_enabled: bool) -> None:
+        raise RuntimeError("manager refresh failed")
+
+    await handle_personal_context_request(
+        host,
+        ws,
+        _request(ReqMethod.PERSONAL_CONTEXT_RUNTIME_START),
+        asyncio.Lock(),
+        runtime_enabled_changed=_failed_callback,
+    )
+
+    assert host.calls == [("set_runtime_enabled", True)]
+    assert ws.sent[0]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("method", "invalid_params", "valid_params", "valid_host_call"),
     [
         (

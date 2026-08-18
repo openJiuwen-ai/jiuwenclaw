@@ -301,6 +301,22 @@ async def test_start_without_yaml_keeps_host_unconfigured(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_runtime_enabled_projection_reads_loaded_configuration(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    host, _core = fake_host
+
+    assert await host.is_runtime_enabled() is False
+
+    await host.configure(_config(enabled=enabled, root_dir=tmp_path))
+
+    assert await host.is_runtime_enabled() is enabled
+
+
+@pytest.mark.asyncio
 async def test_unconfigured_projection_and_stop_are_read_only_until_first_start(
     fake_host: tuple[PersonalContextHostAPI, FakeCore],
 ) -> None:

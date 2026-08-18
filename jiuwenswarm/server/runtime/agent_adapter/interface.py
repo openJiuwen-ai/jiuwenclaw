@@ -781,6 +781,10 @@ class JiuWenSwarm:
     def __init__(self) -> None:
         self._prepare_skill_library()
         self._adapter: AgentAdapter | None = None
+        # PersonalContext Rail follows the Host runtime switch.  Keep the
+        # latest snapshot on the facade so a lazily-created adapter inherits
+        # the current state before its first rail synchronization.
+        self._personal_context_runtime_enabled: bool = False
         self._sdk_name: str | None = None
         self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
@@ -852,11 +856,41 @@ class JiuWenSwarm:
             self._adapter = create_adapter(self._sdk_name, mode=mode)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
+            setter = getattr(
+                self._adapter, "set_personal_context_runtime_enabled", None
+            )
+            if callable(setter):
+                setter(self._personal_context_runtime_enabled)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
             logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
         return self._adapter
+
+    def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
+        """Store and forward the PersonalContext Host runtime switch."""
+
+        self._personal_context_runtime_enabled = bool(enabled)
+        adapter = self._adapter
+        setter = (
+            getattr(adapter, "set_personal_context_runtime_enabled", None)
+            if adapter is not None
+            else None
+        )
+        if callable(setter):
+            setter(self._personal_context_runtime_enabled)
+
+    async def refresh_personal_context_rail(self) -> None:
+        """Refresh the PersonalContext Rail without creating an Agent."""
+
+        adapter = self._adapter
+        refresher = (
+            getattr(adapter, "refresh_personal_context_rail", None)
+            if adapter is not None
+            else None
+        )
+        if callable(refresher):
+            await refresher()
 
     @staticmethod
     def _adapter_mode_for_request(request: AgentRequest) -> str:
