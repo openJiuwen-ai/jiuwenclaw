@@ -1558,7 +1558,6 @@ const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
-  OPENAI_ACCOUNT_PROVIDER,
   "OpenRouter",
   "DashScope",
   "SiliconFlow",
@@ -4073,8 +4072,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
-  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
-  const configSaveBlocked = (isProcessing || globalTaskRunning) && mode !== 'team';
+  const configSaveBlocked = isProcessing || globalTaskRunning;
   // 免费模型（如 Opencode Zen）只在对话下拉框展示，不在“模型配置”页编辑--
   // 它们是内存态、不入 config.yaml，在此过滤掉以免误编辑/误提交。
   // 用 useMemo 缓存：只有 availableModels 真正变化才重算，避免每次渲染返回
@@ -4546,12 +4544,14 @@ export function ConfigPanel({
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
-    const externalCliAgentsSupported = parseBoolValue(normalizedConfig[EXTERNAL_CLI_AGENTS_SUPPORTED_KEY] ?? "true");
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
       if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
-      if (tag === "external_cli_agents" && !externalCliAgentsSupported) continue;
+      // 按产品要求暂不在配置页展示三方 Agent，保留后端下发值及运行能力。
+      if (tag === "external_cli_agents") continue;
+      // 按产品要求暂不在配置页展示记忆敏感信息过滤，保留后端下发值及运行能力。
+      if (tag === "memory") continue;
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
       // 飞书配置已迁移到 ChannelsPanel 管理，这里不再展示。
