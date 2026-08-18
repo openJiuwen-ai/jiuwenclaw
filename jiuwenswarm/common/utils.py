@@ -630,15 +630,18 @@ def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
         except OSError:
             return False
         # 新路由 / 旧 router 文案
-        if (
-            "Routes skill creation" in text
-            or "Unified entry point" in text
-            or "统一入口" in text
-            or "创建/修改的**路由**" in text
-            or "创建/修改的**分发器**" in text
-        ):
+        router_markers = (
+            "Routes skill creation",
+            "Unified entry point",
+            "统一入口",
+            "创建/修改的**路由**",
+            "创建/修改的**分发器**",
+        )
+        if any(marker in text for marker in router_markers):
             return False
-        return "name: skill-creator" in text or "name: skill-creator-normal" in text
+        has_legacy_name = "name: skill-creator" in text
+        has_normal_name = "name: skill-creator-normal" in text
+        return has_legacy_name or has_normal_name
 
     try:
         if old_router.is_dir():
