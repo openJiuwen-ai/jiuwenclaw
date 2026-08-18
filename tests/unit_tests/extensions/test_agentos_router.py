@@ -303,14 +303,11 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     spec = yuanrong.create_payloads[0]["runtime_spec"]
     assert spec["sandbox_type"] == "supervisor"
     assert spec["runtime"] == "python3.11"
-    # 动态端口：rootfs.ports 与 env_vars.AGENT_SERVER_PORT 必须一致
-    ports = spec["rootfs"]["ports"]
-    assert len(ports) == 1 and ports[0].startswith("tcp:")
-    dyn_port = ports[0][len("tcp:"):]
-    assert dyn_port.isdigit()
-    # cmds 含动态端口，与 rootfs.ports 一致
+    fixed_port = "18092"
+    # rootfs 不再声明 ports，agentserver 使用固定端口 18092
+    assert "ports" not in spec["rootfs"]
     assert spec["cmds"] == [
-        ["sh", "-c", f"exec jiuwenswarm-agentserver --port {dyn_port}"]
+        ["sh", "-c", f"exec jiuwenswarm-agentserver --port {fixed_port}"]
     ]
     assert spec["cpu"] == 2000
     assert spec["memory"] == 4096
@@ -321,11 +318,11 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     # 沙箱本地非 loopback IP(ISOLATED 模式 bind veth 地址, 见
     # app_agentserver._resolve_bind_host); 单机版默认仍 127.0.0.1。
     assert "AGENT_SERVER_HOST" not in env
-    assert env["AGENT_SERVER_PORT"] == dyn_port
+    assert env == {}
     # create 后通过 frontend WS 代理直连 instance（不走 invoke 链路）。
     assert yuanrong.ws_connect_uris == [
         "ws://yuanrong.test:8888/serverless/v1/ws"
-        f"?instance=sbx-1&tenant_id=default&port={dyn_port}"
+        f"?instance=sbx-1&tenant_id=default&port={fixed_port}"
     ]
     # Agent is registered with the registry (fire-and-forget background task).
     assert len(registry.registered) == 1
@@ -456,9 +453,15 @@ def test_resolve_agent_workspace_rejects_non_directory(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str) -> None:
+    class RegistryWithEnvVars(FakeRegistryClient):
+        async def get_image_info(self, image_name: str) -> ImageInfo:
+            info = await super().get_image_info(image_name)
+            info.metadata["env_vars"] = {"TRACE_ID": "registry-trace", "FEATURE_FLAG": 1}
+            return info
+
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
-    client = _router_client(yuanrong, FakeRegistryClient(), agent_manager)
+    client = _router_client(yuanrong, RegistryWithEnvVars(), agent_manager)
 
     response = await client.send_request(_envelope(agent_type="opencode"))
 
@@ -467,6 +470,10 @@ async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str
     assert yuanrong.create_payloads[0]["workspace"] == str(
         Path(agentos_workspace_root) / "u1"
     )
+    assert yuanrong.create_payloads[0]["env_vars"] == {
+        "TRACE_ID": "registry-trace",
+        "FEATURE_FLAG": "1",
+    }
     assert yuanrong.send_calls == 1
     # 第三方 agent 端口取自 runtime_spec rootfs.ports（tcp:22）。
     assert yuanrong.ws_connect_uris == [
@@ -484,10 +491,16 @@ async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str
 
 @pytest.mark.asyncio
 async def test_agent_switch_creates_without_forwarding_chat() -> None:
+    class RegistryWithEnvVars(FakeRegistryClient):
+        async def get_image_info(self, image_name: str) -> ImageInfo:
+            info = await super().get_image_info(image_name)
+            info.metadata["env_vars"] = {"TRACE_ID": "switch-trace", "ENABLE_FLAG": True}
+            return info
+
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
     client = _router_client(
-        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+        yuanrong, RegistryWithEnvVars(), agent_manager, ssh_channel_endpoint=_ssh_channel()
     )
 
     response = await client.thirdagent_switch(
@@ -504,6 +517,10 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
     assert response["payload"]["sandbox_id"] == "sbx-1"
     assert response["payload"]["ssh_ip"] == "0.0.0.0"
     assert response["payload"]["ssh_port"] == 2222
+    assert yuanrong.create_payloads[0]["env_vars"] == {
+        "TRACE_ID": "switch-trace",
+        "ENABLE_FLAG": "True",
+    }
     agents = await agent_manager.list_user_agents("u1")
     assert len(agents) == 1
     assert agents[0].info.agent_type == "opencode"
