@@ -4105,8 +4105,13 @@ class MessageHandler(ABC):
                             )
 
                 logger.info(
-                    "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
-                    msg.id, msg.channel_id, msg.is_stream,
+                    "[MessageHandler] dispatch: request_id=%s channel=%s session_id=%s user_id=%s is_stream=%s",
+                    msg.id,
+                    msg.channel_id,
+                    msg.session_id,
+                    getattr(msg, "user_id", "") or "",
+                    msg.is_stream,
+                    extra={"session_id": msg.session_id} if msg.session_id else {},
                 )
                 if self._is_interrupt_evolution_approval_chat_send(msg):
                     if self._is_current_pending_evolution_approval(
@@ -4206,8 +4211,9 @@ class MessageHandler(ABC):
         has_processing_status_false = False
         _proc_count = 0
         logger.info(
-            "[MessageHandler] process_stream started: request_id=%s channel=%s session=%s",
+            "[MessageHandler] process_stream started: request_id=%s channel=%s session_id=%s",
             rid, channel_id, session_id,
+            extra={"session_id": session_id} if session_id else {},
         )
         try:
             await self._sync_agentos_cron_jobs(env)

@@ -1054,12 +1054,19 @@ class GatewayServer(BaseWebChannel):
         setattr(ws, "_gateway_user_id", ws_user_id)
         setattr(ws, "_gateway_agent_type", "jiuwenswarm")
         uid_marker = "" if ws_user_id else " uid_empty=yes"
+        handshake_sid = ""
+        try:
+            handshake_sid = str((parse_qs(parsed.query).get("session_id") or [""])[0] or "")
+        except Exception:
+            handshake_sid = ""
         logger.info(
-            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s",
+            "[Gateway] WS handshake X-User-Id: user_id=%r%s channel=%s path=%s session_id=%s",
             ws_user_id,
             uid_marker,
             route.channel_id,
             matched_path,
+            handshake_sid,
+            extra={"session_id": handshake_sid} if handshake_sid else {},
         )
 
         # 触发连接钩子（GatewayServer 自身 + 外部 ws_channel，如 TuiChannel 鉴权）
