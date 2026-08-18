@@ -355,7 +355,8 @@ class PersonalContextHostAPI:
         try:
             if disabling:
                 phase = "replace"
-                assert temporary is not None
+                if temporary is None:
+                    _raise_host_error("PersonalContext configuration staging failed")
                 _replace_yaml(temporary, self._config_path)
                 temporary = None
                 disabled_yaml_published = True
@@ -377,7 +378,8 @@ class PersonalContextHostAPI:
 
             if not disabled_yaml_published:
                 phase = "replace"
-                assert temporary is not None
+                if temporary is None:
+                    _raise_host_error("PersonalContext configuration staging failed")
                 _replace_yaml(temporary, self._config_path)
                 temporary = None
 
@@ -498,7 +500,7 @@ class PersonalContextHostAPI:
     async def set_runtime_enabled(self, enabled: bool) -> dict[str, object]:
         """Persist and apply the whole PersonalContext runtime enable switch."""
 
-        if type(enabled) is not bool:
+        if not isinstance(enabled, bool):
             _raise_host_error("enabled must be a boolean")
         async with self._operation_lock:
             first_start = self._stored_config is None
@@ -757,7 +759,7 @@ class PersonalContextHostAPI:
     ) -> None:
         """Persist and hot-apply the global or one-service fetch switch."""
 
-        if type(enabled) is not bool:
+        if not isinstance(enabled, bool):
             _raise_host_error("enabled must be a boolean")
         if service_id is not None and not isinstance(service_id, str):
             _raise_host_error("service_id must be a string")
@@ -821,14 +823,23 @@ class PersonalContextHostAPI:
                 _raise_host_error(
                     "PersonalContext configuration must be set before provider authorization"
                 )
+            result: dict[str, object] | None = None
+            cancelled: asyncio.CancelledError | None = None
             try:
-                return await self._personal_context.get_authorization_status(provider)
-            except asyncio.CancelledError:
-                raise
+                result = await self._personal_context.get_authorization_status(provider)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
             except Exception as exc:
                 raise _as_host_error(
                     exc, "PersonalContext provider authorization status failed"
                 ) from None
+            if cancelled is not None:
+                raise cancelled
+            if result is None:
+                _raise_host_error(
+                    "PersonalContext provider authorization status returned no result"
+                )
+            return result
 
     async def authorize_provider(self, provider: str) -> dict[str, object]:
         """Check or begin user authorization for a configured provider."""

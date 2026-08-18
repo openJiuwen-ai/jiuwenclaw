@@ -169,14 +169,14 @@ async def _stream_graph(
     events.extend(
         {
             "event_type": "personal_context.graph.nodes",
-            "nodes": nodes[index : index + 200],
+            "nodes": nodes[index: index + 200],
         }
         for index in range(0, len(nodes), 200)
     )
     events.extend(
         {
             "event_type": "personal_context.graph.edges",
-            "edges": edges[index : index + 200],
+            "edges": edges[index: index + 200],
         }
         for index in range(0, len(edges), 200)
     )

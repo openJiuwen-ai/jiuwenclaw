@@ -1071,17 +1071,21 @@ class AgentWebSocketServer:
 
     async def _start_personal_context_best_effort(self) -> None:
         """Start optional PersonalContext without changing AgentServer readiness."""
+        start_cancelled: asyncio.CancelledError | None = None
         try:
             await self._personal_context_host.start()
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as exc:
+            start_cancelled = exc
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentWebSocketServer] optional PersonalContext startup failed: %s",
                 type(exc).__name__,
             )
             return
+        if start_cancelled is not None:
+            raise start_cancelled
 
+        rail_sync_cancelled: asyncio.CancelledError | None = None
         try:
             state_reader = getattr(
                 self._personal_context_host, "is_runtime_enabled", None
@@ -1092,13 +1096,15 @@ class AgentWebSocketServer:
             )
             if callable(manager_setter):
                 await manager_setter(enabled)
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as exc:
+            rail_sync_cancelled = exc
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentWebSocketServer] optional PersonalContext Rail sync failed: %s",
                 type(exc).__name__,
             )
+        if rail_sync_cancelled is not None:
+            raise rail_sync_cancelled
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -1338,15 +1344,18 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] optional PersonalContext startup cleanup failed: %s",
                     type(exc).__name__,
                 )
+        stop_cancelled: asyncio.CancelledError | None = None
         try:
             await self._personal_context_host.stop()
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as exc:
+            stop_cancelled = exc
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[AgentWebSocketServer] optional PersonalContext stop failed: %s",
                 type(exc).__name__,
             )
+        if stop_cancelled is not None:
+            raise stop_cancelled
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""

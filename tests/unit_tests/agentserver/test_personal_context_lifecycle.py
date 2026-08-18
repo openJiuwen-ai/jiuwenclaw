@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -11,6 +12,11 @@ import pytest
 
 from jiuwenswarm.server import agent_ws_server as server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+
+AGENT_WS_SERVER_PATH = (
+    Path(__file__).parents[3] / "jiuwenswarm" / "server" / "agent_ws_server.py"
+)
 
 
 class _FakePersonalContextHost:
@@ -63,6 +69,30 @@ def _server(monkeypatch: pytest.MonkeyPatch) -> AgentWebSocketServer:
         server_module, "PersonalContextHostAPI", _FakePersonalContextHost
     )
     return AgentWebSocketServer(host="127.0.0.1", port=0)
+
+
+def test_personal_context_cancellation_handlers_do_not_raise_inside_except() -> None:
+    tree = ast.parse(AGENT_WS_SERVER_PATH.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+    }
+
+    for function_name in (
+        "_start_personal_context_best_effort",
+        "_stop_personal_context_best_effort",
+    ):
+        function = functions[function_name]
+        for handler in ast.walk(function):
+            if not isinstance(handler, ast.ExceptHandler):
+                continue
+            if ast.unparse(handler.type) != "asyncio.CancelledError":
+                continue
+            assert not any(
+                isinstance(statement, ast.Raise) and statement.exc is None
+                for statement in handler.body
+            ), function_name
 
 
 @pytest.mark.asyncio

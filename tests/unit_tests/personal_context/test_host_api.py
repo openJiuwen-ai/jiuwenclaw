@@ -281,6 +281,35 @@ def test_host_module_imports_personal_context_from_harness() -> None:
     assert imported == ["PersonalContext"]
 
 
+def test_boolean_switches_use_isinstance_guards() -> None:
+    source = HOST_API_PATH.read_text(encoding="utf-8")
+
+    assert source.count("if not isinstance(enabled, bool):") == 2
+    assert "type(enabled) is not bool" not in source
+
+
+def test_authorization_cancellation_is_rethrown_after_exception_handler() -> None:
+    tree = ast.parse(HOST_API_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "get_authorization_status"
+    )
+
+    handlers = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.ExceptHandler)
+        and ast.unparse(node.type) == "asyncio.CancelledError"
+    ]
+    assert len(handlers) == 1
+    assert not any(
+        isinstance(statement, ast.Raise) and statement.exc is None
+        for statement in handlers[0].body
+    )
+
+
 def test_constructor_does_not_read_or_write_yaml(tmp_path: Path) -> None:
     home = tmp_path / "personal_context"
     host = PersonalContextHostAPI(home=home)
@@ -1854,6 +1883,23 @@ async def test_oversized_serialized_candidate_is_rejected_before_file_or_runtime
     assert not host._home.exists()
     assert host._config is None
     assert host._stored_config is None
+
+
+@pytest.mark.asyncio
+async def test_missing_staged_yaml_is_reported_as_host_error(
+    fake_host: tuple[PersonalContextHostAPI, FakeCore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, core = fake_host
+    monkeypatch.setattr(host_module, "_stage_yaml", lambda *_args: None)
+
+    with pytest.raises(PersonalContext.Error) as caught:
+        await host.set_runtime_enabled(True)
+
+    assert "staging" in str(caught.value).lower()
+    assert core.active is False
+    assert host._config is None
+    assert not (host._home / "personal_context.yaml").exists()
 
 
 @pytest.mark.asyncio
