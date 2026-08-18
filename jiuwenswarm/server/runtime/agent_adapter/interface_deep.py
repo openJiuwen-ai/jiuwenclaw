@@ -414,6 +414,7 @@ from jiuwenswarm.server.runtime.skill.skill_whitelist import (
 )
 from jiuwenswarm.common.utils import (
     DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
+    fill_template_defaults,
     get_agent_evolution_trajectories_dir,
     get_agent_root_dir,
     get_agent_skills_dir,
@@ -428,6 +429,8 @@ from jiuwenswarm.common.utils import (
     resolve_tenant_sessions_dir,
     reset_free_search_runtime_flags,
     resolve_agent_registered_skill_dirs,
+    load_yaml_dict,
+    resolve_shipped_template_config_path,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
@@ -1269,7 +1272,11 @@ def _resolve_instance_config_base(config_base: dict[str, Any] | None) -> dict[st
         return get_config()
     if not isinstance(config_base, dict):
         raise TypeError("config_base must be a dict when provided")
-    return resolve_env_vars(config_base)
+    # 外部传入的 config_base（如企业同步的稀疏 override）与 shipped 模板做补缺型
+    # 合并：模板补全缺失键（如 react.subagents），外部显式键与独有键全部保留，
+    # 保证与 config_base=None 时 get_config() 的模板合并语义一致。
+    template = load_yaml_dict(resolve_shipped_template_config_path())
+    return resolve_env_vars(fill_template_defaults(config_base, template))
 
 
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
@@ -9154,6 +9161,120 @@ class JiuWenSwarmDeepAdapter:
             channel_id="",
             session_id="",
         )
+
+    async def spawn_fallback(
+        self,
+        query: str,
+        parent_session: Any | None = None,
+    ) -> str:
+        """执行 SkillTurbo fallback：以隔离 subagent 跑一次任务，返回子代理输出文本。
+
+        复用 openjiuwen 原生 ``create_subagent("general-purpose", ...)``（继承父 agent
+        工具与 SysOperationRail），经 ``invoke_subagent_with_trace`` 阻塞执行。
+        fallback 子代理临时禁用权限审批 rail（spawn 结束后恢复共享实例状态），
+        避免工具调用中断等待审批导致输出为空。
+        抛异常表示子代理执行失败；返回字符串表示已跑完（是否达成节点契约由 handler 判定）。
+        """
+        from jiuwenswarm.server.runtime.debug_trace import invoke_subagent_with_trace
+
+        parent_session_id = ""
+        if parent_session is not None and hasattr(parent_session, "get_session_id"):
+            parent_session_id = str(parent_session.get_session_id() or "")
+        sub_session_id = (
+            f"{parent_session_id or 'skill_turbo'}_skill_turbo_fallback_{uuid.uuid4().hex[:8]}"
+        )
+
+        subagent = self._instance.create_subagent("general-purpose", sub_session_id)
+        restore_rails = self._suspend_subagent_permission_rails(subagent)
+        try:
+            result = await invoke_subagent_with_trace(
+                subagent,
+                inputs={"query": query, "conversation_id": sub_session_id},
+                session=parent_session,
+                source_label="subagent:skill_turbo_fallback",
+            )
+        finally:
+            restore_rails()
+
+        output = ""
+        if isinstance(result, dict):
+            output = result.get("output", "") or ""
+        return str(output)
+
+    @staticmethod
+    def _suspend_subagent_permission_rails(subagent: Any) -> Callable[[], None]:
+        """临时禁用 fallback 子代理继承的权限审批 rail，返回恢复函数。
+
+        general-purpose 子代理与父 agent **共享同一个** PermissionInterruptRail 实例
+        （factory 注入时按引用复制），直接改共享实例会污染父 agent 后续的权限审批，
+        因此采用 suspend/restore：调用方在 spawn 结束后（finally 中）执行恢复。
+        ``resolve_interrupt`` 首次工具调用时会用 ``host.get_permissions_snapshot``
+        刷新配置覆盖本设置，因此该回调也需临时替换。
+        """
+        configured = (
+            subagent.configured_rails()
+            if hasattr(subagent, "configured_rails")
+            else []
+        )
+        rail_names = [rail.__class__.__name__ for rail in configured or []]
+
+        def _disabled_permission_snapshot() -> dict:
+            """临时权限审批快照：返回禁用状态，避免工具调用被审批 rail 中断。"""
+            return {"enabled": False}
+
+        def _make_restore(
+            rail: Any,
+            saved_config: dict,
+            host: Any,
+            saved_snapshot: Any,
+        ) -> Callable[[], None]:
+            """构造恢复函数，捕获当前循环轮次 rail 的挂起状态。"""
+
+            def _restore() -> None:
+                try:
+                    rail.update_config(saved_config)
+                except Exception:
+                    logger.warning(
+                        "[spawn_fallback] failed to restore permission rail config",
+                        exc_info=True,
+                    )
+                if host is not None:
+                    host.get_permissions_snapshot = saved_snapshot
+
+            return _restore
+
+        restore_steps: list[Callable[[], None]] = []
+        for rail in configured or []:
+            cls_name = rail.__class__.__name__
+            if cls_name not in ("PermissionInterruptRail", "SkillTurboPermissionRail"):
+                continue
+            try:
+                saved_config = dict(getattr(rail, "_static_config", None) or {})
+                host = getattr(rail, "_host", None)
+                saved_snapshot = (
+                    host.get_permissions_snapshot if host is not None else None
+                )
+                rail.update_config({"enabled": False})
+                if host is not None:
+                    host.get_permissions_snapshot = _disabled_permission_snapshot
+                restore_steps.append(_make_restore(rail, saved_config, host, saved_snapshot))
+            except Exception:
+                logger.warning(
+                    "[spawn_fallback] failed to suspend permission rail %s",
+                    cls_name,
+                    exc_info=True,
+                )
+        logger.info(
+            "[spawn_fallback] subagent rails=%s suspended_permission_rails=%d",
+            rail_names,
+            len(restore_steps),
+        )
+
+        def restore() -> None:
+            for step in restore_steps:
+                step()
+
+        return restore
 
     @staticmethod
     async def _read_skill_turbo_node_artifacts_summary(session: Any) -> str | None:
