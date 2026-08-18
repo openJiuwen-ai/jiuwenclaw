@@ -1340,7 +1340,7 @@ class TestGenerateRecapModePropagation:
     """The active runtime mode must reach the model recap prompt unchanged."""
 
     @pytest.mark.asyncio
-    async def test_session_adapter_receives_current_mode(self):
+    async def test_root_creates_session_adapter_and_forwards_current_mode(self):
         root = _make_adapter()
         root._is_session_scoped_adapter = False
         root._evict_idle_session_adapters = AsyncMock()
@@ -1349,11 +1349,12 @@ class TestGenerateRecapModePropagation:
         session_adapter.generate_recap = AsyncMock(
             return_value={"status": "ok", "summary": "done"}
         )
-        root._get_cached_session_adapter = MagicMock(return_value=session_adapter)
+        root._get_or_create_session_adapter = AsyncMock(return_value=session_adapter)
 
         result = await root.generate_recap("session-1", current_mode="team")
 
         assert result == {"status": "ok", "summary": "done"}
+        root._get_or_create_session_adapter.assert_awaited_once_with("session-1")
         session_adapter.generate_recap.assert_awaited_once_with(
             session_id="session-1",
             current_mode="team",
@@ -1393,7 +1394,22 @@ class TestInterfaceRecapPassThrough:
 
 class TestHandleCommandRecap:
     @pytest.mark.asyncio
-    async def test_passes_canonical_mode_to_recap(self, server, fake_ws, monkeypatch):
+    @pytest.mark.parametrize(
+        ("requested_mode", "expected_mode", "expected_sub_mode"),
+        [
+            ("team", "team", None),
+            ("code.team", "code", "team"),
+        ],
+    )
+    async def test_passes_canonical_mode_to_recap(
+        self,
+        server,
+        fake_ws,
+        monkeypatch,
+        requested_mode,
+        expected_mode,
+        expected_sub_mode,
+    ):
         mock_agent = MagicMock()
         mock_agent.generate_recap = AsyncMock(
             return_value={"status": "ok", "summary": "team code recap"}
@@ -1410,20 +1426,20 @@ class TestHandleCommandRecap:
             channel_id="tui",
             session_id="session-1",
             req_method=ReqMethod.COMMAND_RECAP,
-            params={"mode": "code.team"},
+            params={"mode": requested_mode},
         )
 
         await server.handle_command_recap_for_test(fake_ws, request, asyncio.Lock())
 
         get_agent.assert_awaited_once_with(
             channel_id="tui",
-            mode="code",
+            mode=expected_mode,
             project_dir=None,
-            sub_mode="team",
+            sub_mode=expected_sub_mode,
         )
         mock_agent.generate_recap.assert_awaited_once_with(
             session_id="session-1",
-            current_mode="code.team",
+            current_mode=requested_mode,
         )
         assert fake_ws.sent[0]["payload"] == {
             "status": "ok",
