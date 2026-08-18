@@ -127,6 +127,9 @@ def find_nested_files_conflict(
 
 def _resolve_workspace_dir() -> Path | None:
     """Resolve agent workspace directory for sandbox rw bind."""
+    user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
+    if user_dir:
+        return Path(user_dir) / "agent" / "workspace"
     try:
         workspace = Path(get_agent_workspace_dir()).expanduser().resolve()
     except OSError as exc:
