@@ -1430,24 +1430,31 @@ async def _apply_resolved_model_to_team(
         return
 
     team_agent = active_team.agent
+    model_name = (
+        team_model.model_request_config.model_name
+        if team_model.model_request_config else None
+    )
 
+    # Leader hot-reload — TeamHarness.apply_model_config logs the per-member
+    # "model config applied" line; no need to duplicate it here.
     leader_harness = getattr(team_agent, 'harness', None)
     if leader_harness is not None and hasattr(leader_harness, 'apply_model_config'):
         leader_harness.apply_model_config(team_model)
-        logger.info(
-            '[TeamHelpers] leader model hot-reloaded: member_type=%s native=%s model_name=%s',
-            type(leader_harness).__name__,
-            getattr(leader_harness, '_native', None) is not None,
-            team_model.model_request_config.model_name
-            if team_model.model_request_config else None,
-        )
     else:
         logger.warning(
             '[TeamHelpers] leader harness not ready for hot-reload: '
-            'leader_harness_is_none=%s',
+            'leader_harness_is_none=%s team=%s',
             leader_harness is None,
+            team_name,
         )
 
+    # Teammate hot-reload only applies to in-process teammates
+    # (spawn_mode='inprocess' / external_cli). The default spawn_mode is
+    # 'process' (subprocess), whose handles carry no agent_ref — those
+    # teammates cannot be hot-reloaded and will pick up the new model on
+    # their next spawn via build_context_from_db (which reads the spec's
+    # predefined_members / model_pool reinjected by TeamRuntimeManager
+    # on RESUME_FROM_PAUSE, or by recover_from_session on COLD_RECOVER).
     spawn_mgr = getattr(team_agent, 'spawn_manager', None)
     if spawn_mgr is not None:
         handles = getattr(spawn_mgr, 'spawned_handles', {}) or {}
@@ -1455,22 +1462,17 @@ async def _apply_resolved_model_to_team(
             handle = handles[member_name]
             member_agent = getattr(handle, 'agent_ref', None)
             if member_agent is None:
+                # subprocess teammate — graceful skip; cold-resume path
+                # (build_context_from_db) will apply the switch on re-spawn.
                 continue
             member_harness = getattr(member_agent, 'harness', None)
             if member_harness is not None and hasattr(member_harness, 'apply_model_config'):
                 member_harness.apply_model_config(team_model)
-                logger.info(
-                    '[TeamHelpers] teammate model hot-reloaded: member=%s model_name=%s',
-                    member_name,
-                    team_model.model_request_config.model_name
-                    if team_model.model_request_config else None,
-                )
 
     logger.info(
         '[TeamHelpers] model applied to team: team=%s model_name=%s',
         team_name,
-        team_model.model_request_config.model_name
-        if team_model.model_request_config else None,
+        model_name,
     )
 
 
@@ -1684,12 +1686,11 @@ async def process_team_message_stream(request: Any,
                 from openjiuwen.agent_teams.schema.team import ModelPoolEntry
                 mcc = _resolved_model_config.get("model_client_config", {})
                 mco = _resolved_model_config.get("model_request_config") or {}
-                _raw_provider = mcc.get('client_provider', '')
-                _provider_str = (
-                    getattr(_raw_provider, 'value', None)
-                    if _raw_provider is not None and not isinstance(_raw_provider, str)
-                    else (str(_raw_provider) if _raw_provider is not None else '')
-                )
+                # client_provider is already a plain string here: interface_deep
+                # serializes the live ModelClientConfig via model_dump(mode="json"),
+                # which stringifies ProviderType enums. No need to handle the enum
+                # branch defensively.
+                _provider_str = mcc.get('client_provider', '') or ''
                 pool_entry = ModelPoolEntry(
                     model_name=model_name,
                     api_key=mcc.get('api_key', ''),
@@ -1724,10 +1725,18 @@ async def process_team_message_stream(request: Any,
                 for member in predefined_members:
                     try:
                         member.model_name = model_name
-                    except Exception:
-                        # PredefinedMemberSpec / BridgeMemberSpec may be frozen;
-                        # skip on failure (non-fatal — teammate falls back to default)
-                        pass
+                    except Exception as exc:
+                        # PredefinedMemberSpec / BridgeMemberSpec are not frozen,
+                        # so an assignment failure here is likely a real bug
+                        # (type mismatch, validation error, etc.) — log it so the
+                        # teammate doesn't silently fall back to the default model.
+                        logger.warning(
+                            '[TeamHelpers] failed to set predefined member model_name: '
+                            'member=%s model_name=%s error=%s',
+                            getattr(member, 'member_name', '?'),
+                            model_name,
+                            exc,
+                        )
                 if predefined_members:
                     logger.info(
                         '[TeamHelpers] predefined members model_name set: '

@@ -9261,13 +9261,17 @@ class JiuWenClawDeepAdapter:
                     is_complete=True,
                 )
                 return
-            # adapter 级字段同步（供 _resolve_model_name / _update_tools_for_mode
-            # 等适配器级查询使用）；不影响 team runtime 的实际模型。
-            self._model_request_config = resolved_model.model_config
-            self._model_client_config = resolved_model.model_client_config
-            # 仅在显式传了 model_name 时注入 _resolved_model_config，触发 team_helpers
-            # 的模型切换；未传则不注入，team 用 TeamConfigLoader 的默认（glm-5.2）。
+            # 仅在显式传了 model_name 时才同步 adapter 级字段并注入
+            # _resolved_model_config，触发 team_helpers 的模型切换；未传
+            # model_name 时让 team 走 TeamConfigLoader 的默认（glm-5.2），
+            # 不用 sidecar 基线（self._model，agentteam breed 的
+            # defaultModel=glm-5）覆盖 _model_request_config /
+            # _model_client_config，否则 _resolve_model_name() /
+            # _update_tools_for_mode() 等适配器级查询会报 glm-5 而非 team
+            # 实际用的模型。
             if _team_requested_model and isinstance(request.params, dict):
+                self._model_request_config = resolved_model.model_config
+                self._model_client_config = resolved_model.model_client_config
                 request.params["_resolved_model_config"] = {
                     "model_client_config": resolved_model.model_client_config.model_dump(mode="json"),
                     "model_request_config": (
@@ -9276,7 +9280,11 @@ class JiuWenClawDeepAdapter:
                     ),
                 }
             if self._runtime_prompt_rail:
-                self._runtime_prompt_rail.set_model_name(resolved_model.model_config.model_name)
+                if _team_requested_model:
+                    self._runtime_prompt_rail.set_model_name(resolved_model.model_config.model_name)
+                # else: keep the rail's existing model_name (avoid sidecar
+                # baseline overwrite) — team's actual model is owned by
+                # TeamHarness, not the adapter.
                 self._runtime_prompt_rail.set_mode(mode)
                 self._runtime_prompt_rail.set_session_id(session_id)
 
