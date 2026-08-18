@@ -255,22 +255,6 @@ def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
     return dict(raw_spec)  # type: ignore[return-value]
 
 
-def _extract_runtime_spec_port(runtime_spec: Mapping[str, Any]) -> int | None:
-    """从 runtime_spec ``rootfs.ports``（如 ``["tcp:18092"]``）取第一个端口."""
-    rootfs = runtime_spec.get("rootfs")
-    ports = rootfs.get("ports") if isinstance(rootfs, Mapping) else None
-    if not isinstance(ports, (list, tuple)):
-        return None
-    for entry in ports:
-        text = str(entry or "")
-        candidate = text.rsplit(":", 1)[-1] if ":" in text else text
-        try:
-            return int(candidate)
-        except ValueError:
-            continue
-    return None
-
-
 def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) -> str:
     """Resolve host workspace bind path for one agent user.
 
@@ -928,6 +912,12 @@ class AgentOSRouterClient(AgentServerClient):
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                return self._routing_error_response(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
@@ -948,6 +938,13 @@ class AgentOSRouterClient(AgentServerClient):
             return
         try:
             runtime.attach_to_envelope(envelope)
+            if not self._uses_direct_yuanrong(runtime.info.agent_type):
+                yield self._routing_error_chunk(
+                    envelope,
+                    f"agent_type={runtime.info.agent_type} does not use websocket; "
+                    "use 3rdagent.switch / SSH",
+                )
+                return
             # create 后通过 YuanRong frontend WS 代理直连 instance，不走 invoke。
             try:
                 ws_client = await self._get_ws_client(runtime)
@@ -1502,9 +1499,12 @@ class AgentOSRouterClient(AgentServerClient):
                 else None
             )
             extra_metadata = {"image_info": dict(image_info.metadata)}
-            agent_port = _extract_runtime_spec_port(runtime_spec)
-            if agent_port is not None:
-                extra_metadata["agent_port"] = agent_port
+            # 3rdagent 走 SSH，不连 agentserver WS；create 的 rootfs 不传 ports。
+            rootfs = runtime_spec.get("rootfs")
+            if isinstance(rootfs, dict) and "ports" in rootfs:
+                runtime_spec["rootfs"] = {
+                    key: value for key, value in rootfs.items() if key != "ports"
+                }
 
         workspace = resolve_agent_workspace(
             agent_info.user_id,
