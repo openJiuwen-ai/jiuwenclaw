@@ -775,6 +775,20 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
     return None
 
 
+def _import_resolve_sandbox() -> Callable[..., Any] | None:
+    """Load ``resolve_sandbox`` from openjiuwen; None when the installed package is older."""
+    try:
+        from openjiuwen.harness.security import resolve_sandbox
+        return resolve_sandbox
+    except ImportError:
+        pass
+    try:
+        from openjiuwen.harness.security.mode import resolve_sandbox
+        return resolve_sandbox
+    except ImportError:
+        return None
+
+
 def _mcc_looks_usable(mcc: dict) -> bool:
     """检查 model_client_config 是否包含有效的 API 凭据。"""
     api_base = str(mcc.get("api_base", "") or "").strip()
@@ -4538,7 +4552,6 @@ class JiuWenSwarmDeepAdapter:
         副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard。
         """
         try:
-            from openjiuwen.harness.security import resolve_sandbox
             from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
                 get_sandbox_intent,
             )
@@ -4547,14 +4560,22 @@ class JiuWenSwarmDeepAdapter:
             sandbox_url = endpoint.get("url") or None
             sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
-            intent = get_sandbox_intent()
             user_enabled = bool(runtime.get("enabled"))
             available = bool(sandbox_url and sandbox_type)
-            resolve, warning = resolve_sandbox(
-                intent,  # type: ignore[arg-type]
-                enabled=user_enabled,
-                available=available,
-            )
+            resolve_sandbox = _import_resolve_sandbox()
+            if resolve_sandbox is None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] resolve_sandbox unavailable in installed "
+                    "openjiuwen; using HOST sys_operation"
+                )
+                resolve, warning = "host", False
+            else:
+                intent = get_sandbox_intent()
+                resolve, warning = resolve_sandbox(
+                    intent,  # type: ignore[arg-type]
+                    enabled=user_enabled,
+                    available=available,
+                )
             if warning:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
