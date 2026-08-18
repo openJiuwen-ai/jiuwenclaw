@@ -256,7 +256,7 @@ class TestValidateTopLevelModels:
 
     @staticmethod
     def test_rejects_duplicate_alias():
-        with pytest.raises(ValueError, match="duplicates"):
+        with pytest.raises(ValueError, match="duplicate alias"):
             _validate_top_level_models([
                 _model_entry("model-a", alias="same-alias"),
                 _model_entry("model-b", alias="same-alias"),

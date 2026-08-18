@@ -269,14 +269,13 @@ def _validate_top_level_models(models_raw: Any) -> list[dict[str, Any]]:
         model_name = str(mcc.get("model_name") or "").strip()
         if not model_name:
             raise ValueError(f"models[{i}].model_client_config.model_name is required")
-        if model_name in seen:
-            raise ValueError(f"models[{i}].model_client_config.model_name duplicate: {model_name!r}")
         alias = str(entry.get("alias") or "").strip()
-        if alias and alias in seen:
-            raise ValueError(f"models[{i}].alias duplicates an existing model_name or alias: {alias!r}")
-        seen.add(model_name)
-        if alias:
-            seen.add(alias)
+        key = alias if alias else model_name
+        if key in seen:
+            raise ValueError(
+                f"models[{i}] duplicate {'alias' if alias else 'model_name'}: {key!r}"
+            )
+        seen.add(key)
         validated.append(entry)
     return validated
 
