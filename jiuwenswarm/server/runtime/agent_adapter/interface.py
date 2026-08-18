@@ -2814,12 +2814,22 @@ class JiuWenSwarm:
                         return
                     async for chunk in adapter.process_message_stream_impl(request, inputs):
                         _put_count += 1
-                        if _put_count <= 3:
-                            _pl = getattr(chunk, "payload", None) or {}
-                            _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        _pl = getattr(chunk, "payload", None) or {}
+                        _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
+                        # 前 3 个 chunk 全量打点；task.* 无论序号都打点，便于确认首跑
+                        # SkillTurbo write_stream 路径是否把任务列表推到外层流。
+                        if _put_count <= 3 or (
+                            isinstance(_et, str) and _et.startswith("task.")
+                        ):
+                            _n_tasks = 0
+                            if isinstance(_pl, dict) and isinstance(_pl.get("tasks"), list):
+                                _n_tasks = len(_pl["tasks"])
                             logger.info(
-                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s",
-                                _put_count, rid, _et,
+                                "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s%s",
+                                _put_count,
+                                rid,
+                                _et,
+                                f" tasks={_n_tasks}" if _n_tasks else "",
                             )
                         await stream_queue.put(("chunk", chunk))
                 except asyncio.CancelledError:

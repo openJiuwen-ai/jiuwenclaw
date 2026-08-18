@@ -9448,6 +9448,7 @@ class JiuWenSwarmDeepAdapter:
                     channel_id=request.channel_id,
                     pending_tool_call_id=resume_ctx["pending_tool_call_id"],
                     user_input=user_input,
+                    task_states=resume_ctx.get("task_states"),
                 ):
                     yield chunk
             except _SkillTurboAbortError as e:
