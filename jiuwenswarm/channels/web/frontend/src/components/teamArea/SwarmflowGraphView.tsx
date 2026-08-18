@@ -21,6 +21,7 @@ import {
   Square,
   Smile,
   Loader2,
+  Pause,
   RefreshCw,
 } from 'lucide-react';
 import {
@@ -61,6 +62,8 @@ function StatusIcon({
       return <CircleCheck className={`${className} text-emerald-500`} />;
     case 'running':
       return <Loader2 className={`${className} text-blue-500 animate-spin`} />;
+    case 'paused':
+      return <Pause className={`${className} text-amber-500`} />;
     case 'failed':
       return <CircleX className={`${className} text-red-500`} />;
     case 'waiting_for_human':
@@ -79,6 +82,7 @@ function StatusIcon({
 function statusBorder(status: WorkflowStatus): string {
   switch (status) {
     case 'running': return 'border-blue-500/60';
+    case 'paused': return 'border-amber-500/60';
     case 'completed': return 'border-emerald-500/40';
     case 'failed': return 'border-red-500/60';
     case 'waiting_for_human': return 'border-amber-500/60';
@@ -93,6 +97,7 @@ function statusDotColor(status: WorkflowStatus): string {
   switch (status) {
     case 'completed': return 'bg-emerald-500';
     case 'running': return 'bg-blue-500 animate-pulse';
+    case 'paused': return 'bg-amber-500';
     case 'failed': return 'bg-red-500';
     case 'waiting_for_human': return 'bg-amber-500';
     case 'pending':

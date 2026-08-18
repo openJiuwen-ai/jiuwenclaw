@@ -24,6 +24,8 @@ import {
   Loader2,
   Network,
   ListTree,
+  Pause,
+  Play,
   RefreshCw,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -43,6 +45,7 @@ import {
   findActiveIterationIndex,
 } from './workflowTypes';
 import { useChatStore } from '../../stores/chatStore';
+import { webRequest } from '../../services/webClient';
 import type { AskUserQuestionPayload } from '../../types/websocket';
 import { SwarmflowGraphView } from './SwarmflowGraphView';
 import {
@@ -64,6 +67,8 @@ function StatusIcon({ status, className }: { status: WorkflowStatus; className?:
       return <CircleX className={`${cls} text-red-500`} />;
     case 'running':
       return <Loader2 className={`${cls} text-blue-500 animate-spin`} />;
+    case 'paused':
+      return <Pause className={`${cls} text-amber-500`} />;
     case 'pending':
     case 'planned':
       return <CircleDot className={`${cls} text-gray-400`} />;
@@ -83,6 +88,7 @@ function statusText(status: WorkflowStatus, t: (k: string) => string): string {
     planned: t('swarmflow.statusPlanned'),
     pending: t('swarmflow.statusPending'),
     running: t('swarmflow.statusRunning'),
+    paused: t('swarmflow.statusPaused'),
     completed: t('swarmflow.statusCompleted'),
     failed: t('swarmflow.statusFailed'),
     stopped: t('swarmflow.statusStopped'),
@@ -116,6 +122,7 @@ function statusDotColor(status: WorkflowStatus): string {
   switch (status) {
     case 'completed': return 'bg-emerald-500';
     case 'running': return 'bg-blue-500 animate-pulse';
+    case 'paused': return 'bg-amber-500';
     case 'failed': return 'bg-red-500';
     case 'waiting_for_human': return 'bg-amber-500';
     case 'pending':
@@ -732,6 +739,43 @@ function RunNode({
           <span className="text-xs text-text-muted shrink-0 tabular-nums">
             {Math.round((run.budget.spent ?? 0) / 1000)}K/{Math.round(run.budget.total / 1000)}K
           </span>
+        )}
+        {(run.status === 'running' || run.status === 'paused') && (
+          <div
+            className="flex items-center gap-1 shrink-0"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              title={t('swarmflow.pauseResumeHint')}
+              className="flex items-center justify-center w-7 h-7 rounded text-text-muted hover:text-amber-500 hover:bg-secondary transition-colors"
+              onClick={() => {
+                const method =
+                  run.status === 'running' ? 'swarmflow.pause' : 'swarmflow.resume';
+                void webRequest(method, { session_id: sessionId, run_id: run.id }).catch(
+                  (err) => console.error('[swarmflow] control failed:', err),
+                );
+              }}
+            >
+              {run.status === 'running' ? (
+                <Pause className="w-4 h-4" />
+              ) : (
+                <Play className="w-4 h-4" />
+              )}
+            </button>
+            <button
+              type="button"
+              title={t('swarmflow.stopHint')}
+              className="flex items-center justify-center w-7 h-7 rounded text-text-muted hover:text-red-500 hover:bg-secondary transition-colors"
+              onClick={() => {
+                void webRequest('swarmflow.stop', { session_id: sessionId, run_id: run.id }).catch(
+                  (err) => console.error('[swarmflow] control failed:', err),
+                );
+              }}
+            >
+              <Square className="w-3.5 h-3.5" />
+            </button>
+          </div>
         )}
       </div>
 

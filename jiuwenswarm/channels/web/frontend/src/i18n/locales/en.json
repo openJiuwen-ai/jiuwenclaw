@@ -3152,6 +3152,7 @@
     "statusPlanned": "Planned",
     "statusPending": "Pending",
     "statusRunning": "Running",
+    "statusPaused": "Paused",
     "statusCompleted": "Completed",
     "statusFailed": "Failed",
     "statusStopped": "Stopped",
@@ -3162,6 +3163,8 @@
     "noWorkflow": "No workflow",
     "layoutIndented": "Indented Tree",
     "layoutOrgChart": "Org Chart",
-    "layoutGraph": "Flow Graph"
+    "layoutGraph": "Flow Graph",
+    "pauseResumeHint": "Pause / Resume",
+    "stopHint": "Stop"
   }
 }

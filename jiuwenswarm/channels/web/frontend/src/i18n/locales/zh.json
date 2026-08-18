@@ -3130,6 +3130,7 @@
     "statusPlanned": "已规划",
     "statusPending": "等待中",
     "statusRunning": "运行中",
+    "statusPaused": "已暂停",
     "statusCompleted": "已完成",
     "statusFailed": "失败",
     "statusStopped": "已停止",
@@ -3140,6 +3141,8 @@
     "noWorkflow": "暂无工作流",
     "layoutIndented": "缩进树",
     "layoutOrgChart": "架构图",
-    "layoutGraph": "流程图"
+    "layoutGraph": "流程图",
+    "pauseResumeHint": "暂停/恢复",
+    "stopHint": "停止"
   }
 }
