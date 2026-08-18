@@ -18,19 +18,6 @@ from typing import Any
 
 from openjiuwen.core.session.agent import Session
 
-try:
-    from jiuwenswarm.agents.harness.common.tools.subagent_models import SubagentTaskSpec
-except ImportError:
-    from dataclasses import dataclass
-
-    @dataclass
-    class SubagentTaskSpec:
-        """Minimal fallback for SubagentTaskSpec when subagent_models is unavailable."""
-
-        role_id: str = ""
-        objective: str = ""
-        prompt: str = ""
-
 logger = logging.getLogger(__name__)
 
 
@@ -108,15 +95,6 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         self._request_id = request_id
         self._channel_id = channel_id
         self._session_id = session_id
-
-    def _get_subagent_executor(self) -> Any:
-        executor = None
-        get_executor = getattr(self._adapter, "_get_fork_agent_executor", None)
-        if callable(get_executor):
-            executor = get_executor()
-        if executor is None:
-            raise RuntimeError("DeepAgent subagent executor not initialized")
-        return executor
 
     @staticmethod
     def _build_fallback_query(
@@ -310,16 +288,10 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         inputs: dict[str, Any],
         error: Exception,
         parent_session: Session | None,
-    ) -> Any:
-        """通过现有 spawn subagent 执行 SkillTurbo fallback。"""
-        executor = self._get_subagent_executor()
+    ) -> str:
+        """通过 adapter 的 ``spawn_fallback`` 执行 SkillTurbo fallback，返回子代理输出文本。"""
         query = self._build_fallback_query(node_name, instruction, inputs, error)
-        task = SubagentTaskSpec(
-            role_id="SkillTurboFallback",
-            objective=f"替代失败的 SkillTurbo 规划节点 {node_name} 完成任务",
-            prompt=query,
-        )
-        return await executor.execute_spawn(task, parent_session=parent_session)
+        return await self._adapter.spawn_fallback(query, parent_session=parent_session)
 
     async def fallback(
         self,
@@ -330,22 +302,28 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
         parent_session: Session | None = None,
     ) -> dict[str, Any]:
         """非流式 fallback 实现。"""
-        result = await self._execute_spawn_fallback(
-            node_name,
-            instruction,
-            inputs,
-            error,
-            parent_session,
-        )
-        success = bool(getattr(result, "success", False))
-        if not success:
-            raise RuntimeError(getattr(result, "error", "fallback subagent failed") or "fallback subagent failed")
-
-        fallback_output = getattr(result, "result", None) or ""
+        try:
+            fallback_output = await self._execute_spawn_fallback(
+                node_name,
+                instruction,
+                inputs,
+                error,
+                parent_session,
+            )
+        except Exception as e:
+            logger.error(
+                "[DeepAgentFallbackHandler] fallback error node=%s error=%s",
+                node_name,
+                e,
+            )
+            raise FallbackContractError(
+                node_name=node_name,
+                reason=f"fallback spawn 执行异常: {e}",
+                original_error=error,
+            ) from e
         logger.warning(
-            "[DeepAgentFallbackHandler] node fallback spawn finished node=%s task_id=%s error=%s",
+            "[DeepAgentFallbackHandler] node fallback spawn finished node=%s error=%s",
             node_name,
-            getattr(result, "task_id", ""),
             error,
         )
         self._log_degraded_result(node_name, fallback_output, error)
@@ -394,9 +372,8 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
     ) -> AsyncIterator[dict[str, Any]]:
         """流式 fallback 的实际实现。
 
-        execute_spawn 会通过 SubagentSessionProxy 将模型流和工具事件写入 parent_session；
-        SkillTurboExecutor._execute_node_stream 已经并发 drain 该 session，因此这里无需手工
-        parse subagent stream，只负责 fallback 生命周期事件和最终结构化结果。
+        adapter.spawn_fallback 为阻塞式 invoke，不向 parent_session 转发子代理流式
+        过程；此处只负责 fallback 生命周期事件和最终结构化结果。
         """
         logger.warning(
             "[DeepAgentFallbackHandler] node fallback_stream via spawn node=%s error=%s",
@@ -411,10 +388,8 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
             "timestamp": int(asyncio.get_event_loop().time() * 1000),
         }
 
-        result = None
-        fallback_error: Exception | None = None
         try:
-            result = await self._execute_spawn_fallback(
+            fallback_output = await self._execute_spawn_fallback(
                 node_name,
                 instruction,
                 inputs,
@@ -422,17 +397,16 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
                 parent_session,
             )
         except Exception as e:
-            fallback_error = e
             logger.error(
                 "[DeepAgentFallbackHandler] fallback_stream error node=%s error=%s",
                 node_name,
                 e,
             )
-            # 与其他失败路径（spawn success=false、契约不达成）保持一致：raise
-            # FallbackContractError 将异常向上传播，让 executor 的 execute_plan_stream
-            # 捕获并终止 plan，最终由 tool 层返回 success=false 给 LLM 触发降级。
-            # 不 yield chat.error：会被 executor 透传并经 tool 转发到父会话，抢先于 tool
-            # result 到达前端终结会话，LLM 来不及转 skill_tool 降级。
+            # 与其他失败路径（契约不达成）保持一致：raise FallbackContractError 将异常
+            # 向上传播，让 executor 的 execute_plan_stream 捕获并终止 plan，最终由 tool
+            # 层返回 success=false 给 LLM 触发降级。不 yield chat.error：会被 executor
+            # 透传并经 tool 转发到父会话，抢先于 tool result 到达前端终结会话，LLM 来不及
+            # 转 skill_tool 降级。
             raise FallbackContractError(
                 node_name=node_name,
                 reason=f"fallback spawn 执行异常: {e}",
@@ -445,26 +419,6 @@ class DeepAgentFallbackHandler(SkillTurboFallbackHandler):
                 "timestamp": int(asyncio.get_event_loop().time() * 1000),
             }
 
-        if fallback_error is not None:
-            return
-
-        success = bool(getattr(result, "success", False))
-        if not success:
-            error_text = getattr(result, "error", "fallback subagent failed") or "fallback subagent failed"
-            logger.error(
-                "[DeepAgentFallbackHandler] node fallback_stream spawn reported failure node=%s error=%s, "
-                "degrading to DeepAgent",
-                node_name,
-                error_text,
-            )
-            # 不 yield chat.error：同上，避免抢先终结前端阻断 LLM 降级。
-            raise FallbackContractError(
-                node_name=node_name,
-                reason=f"fallback subagent 执行失败: {error_text}",
-                original_error=error,
-            )
-
-        fallback_output = getattr(result, "result", None) or ""
         self._log_degraded_result(node_name, fallback_output, error)
 
         # 契约校验：subagent 必须自证达成节点目标，否则视为 fallback 失败，

@@ -365,6 +365,31 @@ def _deep_merge(
     return result
 
 
+def fill_template_defaults(
+    target: dict[str, Any],
+    template: dict[str, Any],
+    depth: int = 0,
+) -> dict[str, Any]:
+    """模板补缺型合并：以 target 为主体，模板仅补全 target 缺失的键。
+
+    与 merge_template_with_override 不同：
+    - target 独有的键（模板中没有）**原样保留**，不做清理；
+    - target 显式设置的值不被模板覆盖；
+    - 双方均为 dict 的键递归补缺（上限 4 层，与 merge_template_with_override 一致）。
+    适用于外部传入的稀疏配置（如企业同步 spec.config）：补齐模板默认值
+    （如 react.subagents）且不丢弃外部配置的任何键。
+    """
+    if depth >= 4:
+        return target
+    result = copy.deepcopy(target)
+    for key, tmpl_val in template.items():
+        if key not in result:
+            result[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(result[key], dict) and isinstance(tmpl_val, dict):
+            result[key] = fill_template_defaults(result[key], tmpl_val, depth + 1)
+    return result
+
+
 def load_yaml_dict(path: Path) -> dict[str, Any]:
     """用 yaml.safe_load 读取 YAML 文件为 dict；不存在或无效时返回空 dict。"""
     if not path.exists():
