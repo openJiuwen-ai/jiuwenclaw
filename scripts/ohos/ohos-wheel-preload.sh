@@ -109,15 +109,35 @@ run_import_probe() {
   _native_ld=$(ohos_native_ld_library_path)
   mkdir -p "${REPORT_DIR:-/dev/null}"
   _log="${REPORT_DIR:-.}/native-import-${_pkg}.log"
-  if env LD_LIBRARY_PATH="$_native_ld" OPENSSL_DIR="${OPENSSL_DIR:-}" \
+  # OhOS/HNP Python needs the complete parent shell environment. Do not use
+  # an external env wrapper here, because this phase runs before dependency
+  # installation and a loader failure would abort the entire install.
+  if LD_LIBRARY_PATH="$_native_ld" OPENSSL_DIR="${OPENSSL_DIR:-}" \
     "$PYTHON" -c "$_import_py" >>"$_log" 2>&1; then
     log "import $_pkg: OK"
     return 0
   fi
   log "import $_pkg: FAIL"
-  env LD_LIBRARY_PATH="$_native_ld" OPENSSL_DIR="${OPENSSL_DIR:-}" \
+  LD_LIBRARY_PATH="$_native_ld" OPENSSL_DIR="${OPENSSL_DIR:-}" \
     "$PYTHON" -c "$_import_py" 2>&1 | while IFS= read -r _line; do log "  $_line"; done
   return 1
+}
+
+normalize_native_extension_permissions() {
+  _site_packages=$("$PYTHON" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
+  if [ -z "$_site_packages" ] || [ ! -d "$_site_packages" ]; then
+    log "WARN: skip native permission normalization (site-packages unavailable)"
+    return 0
+  fi
+
+  # Some HNP deployment paths retain wheels with non-executable .so files.
+  # Normalize only the virtual environment after wheel installation.
+  if find "$_site_packages" -type f -name '*.so*' ! -perm -111 -exec chmod 755 {} \; 2>/dev/null \
+    && find "$_site_packages" -type d ! -perm -111 -exec chmod 755 {} \; 2>/dev/null; then
+    log "native extension permissions normalized: $_site_packages"
+  else
+    log "WARN: unable to normalize native extension permissions: $_site_packages"
+  fi
 }
 
 log "======== preload ohos wheels (first) ========"
@@ -140,6 +160,7 @@ for _base in $OHOS_WHEEL_PACKAGES; do
 done
 
 log "wheels: installed=$_installed skipped=$_skipped"
+normalize_native_extension_permissions
 
 if [ "$VERIFY_WHEEL_IMPORTS" = "1" ]; then
   if find_wheel_file cryptography "$_plat" >/dev/null 2>&1; then
