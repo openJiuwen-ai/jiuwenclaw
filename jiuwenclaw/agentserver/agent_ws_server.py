@@ -75,6 +75,17 @@ from jiuwenclaw.security.ws_origin import (
     get_header_value,
     is_allowed_browser_origin,
 )
+from jiuwenclaw.agentserver.session_id_safe import (
+    normalize_safe_session_id,
+    resolve_session_dir_under_root,
+)
+from jiuwenclaw.agentserver.team.exceptions import (
+    TeamDissolveConflictError,
+    TeamDissolveError,
+    TeamDissolveNameMismatchError,
+    TeamDissolveUnsupportedError,
+)
+from jiuwenclaw.agentserver.team.team_manager import get_team_manager
 
 
 logger = logging.getLogger(__name__)
@@ -275,6 +286,11 @@ _RELAY_TEAM_SCALAR_WHITELIST: tuple[str, ...] = (
     "spawn_mode",
     "enable_swarmflow",
     "max_debate_rounds",
+    # Per-team tool/skill deny-lists (generic knobs; what to disable is the
+    # caller's policy). Merged over the global react.disabled_tools /
+    # disabled_skills at team member assembly.
+    "disabled_tools",
+    "disabled_skills",
     # enable_permissions is intentionally omitted: team rails follow the
     # global permissions.enabled switch (same as plan), not a team-local flag.
 )
@@ -1226,6 +1242,10 @@ class AgentWebSocketServer:
 
         if request.req_method == ReqMethod.SESSION_DELETE:
             await self._handle_session_delete(ws, request, send_lock)
+            return
+
+        if request.req_method == ReqMethod.TEAM_RUNTIME_DISSOLVE:
+            await self._handle_team_runtime_dissolve(ws, request, send_lock)
             return
 
         if request.req_method == ReqMethod.ACP_TOOL_RESPONSE:
@@ -3027,11 +3047,6 @@ class AgentWebSocketServer:
         """处理 session.delete 请求：删除 Agent 本机 sessions 目录下的会话目录。"""
         import shutil
 
-        from jiuwenclaw.agentserver.session_id_safe import (
-            normalize_safe_session_id,
-            resolve_session_dir_under_root,
-        )
-
         logger.info("[AgentServer] session.delete: request_id=%s", request.request_id)
 
         try:
@@ -3079,6 +3094,15 @@ class AgentWebSocketServer:
                         )
                     else:
                         await asyncio.to_thread(shutil.rmtree, session_dir)
+                        # 清理内存中的 agent 实例和缓存绑定
+                        try:
+                            agent_id, service_id = TenantAgentPool.extract_ids(request)
+                            agent_manager = self._agent_manager.get_agent_manager_nowait(agent_id, service_id)
+                            if agent_manager is not None:
+                                channel_id = request.channel_id or "default"
+                                await agent_manager.cleanup_all_modes(channel_id, safe_sid)
+                        except Exception as cleanup_exc:
+                            logger.warning("[AgentServer] session.delete memory cleanup failed: %s", cleanup_exc)
                         resp = AgentResponse(
                             request_id=request.request_id,
                             channel_id=request.channel_id,
@@ -3092,6 +3116,98 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=False,
                 payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_team_runtime_dissolve(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """处理 team.runtime.dissolve：保上下文解散团队 runtime。
+
+        供 relay 在团队配置修改后的下一条消息前调用：停旧 runtime、删静态表、
+        标 db_state=cleaned，保留 checkpoint 对话记忆与 per-session 动态表，
+        使下一轮 dispatch 落 CREATE 用新 spec 重建。
+
+        幂等：session 无团队 runtime 可解散时返回 ok=True 且 dissolved=False，
+        便于 relay 无条件调用。
+        """
+        logger.info(
+            "[AgentServer] team.runtime.dissolve: request_id=%s",
+            request.request_id,
+        )
+
+        try:
+            params = request.params if isinstance(request.params, dict) else {}
+            raw_sid = str(params.get("session_id") or "").strip()
+            team_name = str(params.get("team_name") or "").strip() or None
+            if not raw_sid:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                )
+            else:
+                safe_sid = normalize_safe_session_id(raw_sid)
+                if safe_sid is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
+                    )
+                else:
+                    try:
+                        result = await get_team_manager(
+                            request.channel_id
+                        ).dissolve_session_runtime_keep_context(
+                            safe_sid,
+                            team_name=team_name,
+                        )
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload=result,
+                        )
+                    except TeamDissolveNameMismatchError as e:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": str(e), "code": "BAD_REQUEST"},
+                        )
+                    except TeamDissolveConflictError as e:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": str(e), "code": "CONFLICT"},
+                        )
+                    except TeamDissolveUnsupportedError as e:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": str(e), "code": "UNSUPPORTED_MODE"},
+                        )
+                    except TeamDissolveError as e:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": str(e), "code": "BAD_REQUEST"},
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentServer] team.runtime.dissolve failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e), "code": "INTERNAL"},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)

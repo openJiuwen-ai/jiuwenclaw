@@ -91,6 +91,27 @@ def test_normalize_passes_through_max_debate_rounds() -> None:
     assert "max_debate_rounds" not in without["team"][0]
 
 
+def test_normalize_passes_through_disabled_tools_and_skills() -> None:
+    """Per-team disabled_tools / disabled_skills are whitelisted passthroughs."""
+    out = _normalize_relay_team_payload(
+        {"team": [{
+            "team_name": "t",
+            "disabled_tools": ["deepresearch_stream"],
+            "disabled_skills": ["deepresearch"],
+            "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"},
+        }]}
+    )
+    team = out["team"][0]
+    assert team["disabled_tools"] == ["deepresearch_stream"]
+    assert team["disabled_skills"] == ["deepresearch"]
+    # Absent keys are not invented.
+    bare = _normalize_relay_team_payload(
+        {"team": [{"team_name": "t", "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}
+    )
+    assert "disabled_tools" not in bare["team"][0]
+    assert "disabled_skills" not in bare["team"][0]
+
+
 def test_normalize_does_not_mutate_input() -> None:
     payload = {"team": [{"team_name": "t", "enable_swarmflow": True,
                          "leader": {"member_name": "l", "agent_id": "expert-chief-researcher"}}]}

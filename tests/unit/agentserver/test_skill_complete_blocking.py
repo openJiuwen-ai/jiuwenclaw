@@ -180,7 +180,8 @@ class TestSkillCompleteBlocking:
 
     @pytest.mark.asyncio
     @staticmethod
-    async def test_skill_complete_does_not_emit_empty_task_update():
+    async def test_skill_complete_skip_task_update_when_no_todo():
+        """空 todo_map 时 skill_complete 不应发送 task.update"""
         rail = TaskExecutionRail()
         rail._todo_map = {}
         rail._detect_and_emit_artifact_generated = AsyncMock()
@@ -194,7 +195,8 @@ class TestSkillCompleteBlocking:
 
     @pytest.mark.asyncio
     @staticmethod
-    async def test_other_skill_complete_keeps_empty_task_update():
+    async def test_other_skill_complete_skip_task_update_when_no_todo():
+        """空 todo_map 时非 deepresearch 的 skill_complete 也不应发送 task.update"""
         rail = TaskExecutionRail()
         rail._todo_map = {}
         rail._detect_and_emit_artifact_generated = AsyncMock()
@@ -204,7 +206,7 @@ class TestSkillCompleteBlocking:
             _mk_ctx_with_tool_call("skill_complete", skill_name="another-skill")
         )
 
-        rail._emit_task_update_event.assert_awaited_once()
+        rail._emit_task_update_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     @staticmethod

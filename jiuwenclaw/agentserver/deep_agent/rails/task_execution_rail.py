@@ -442,6 +442,7 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool: dict[str, dict[str, Any]] = {}
         self._active_tasks: dict[str, TaskExecutionContext] = {}
         self._todo_started: set[str] = set()
+        self._stale_todo_ids: set[str] = set()
         self._deep_agent: Any | None = None
 
     def get_current_task_id(self) -> str | None:
@@ -470,9 +471,15 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool = {}
         self._active_tasks = {}
         self._todo_started = set()
+        self._stale_todo_ids = set()
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
+            # fresh turn after stale todo cleanup: record prior todo ids so
+            # _emit_task_update_event can filter them out and prevent
+            # cross-request task/update leakage (BUG0061/0063/0034).
+            if ctx.session is not None and is_skip_invoke_task_update_sync(ctx.session):
+                self._stale_todo_ids = set(self._todo_map.keys())
             has_active_tasks = any(
                 t.get("status") in ("pending", "in_progress")
                 for t in self._todo_map.values()
@@ -634,15 +641,12 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
-            skill_name = ""
-            if isinstance(ctx.inputs.tool_args, dict):
-                skill_name = str(ctx.inputs.tool_args.get("skill_name", "")).strip()
-            if self._todo_map or skill_name != "deepresearch":
+            if self._todo_map:
                 parent_request_id = self._extract_request_id(ctx)
                 await self._emit_task_update_event(ctx.session, parent_request_id)
             else:
                 logger.debug(
-                    "[TaskExecutionRail] skip empty DeepResearch task.update after skill_complete "
+                    "[TaskExecutionRail] skip empty task.update after skill_complete "
                     "session_id=%s",
                     session_id,
                 )
@@ -664,6 +668,7 @@ class TaskExecutionRail(DeepAgentRail):
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if ctx.session is not None:
             clear_skip_invoke_task_update_sync(ctx.session)
+        self._stale_todo_ids = set()
         self._todo_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 
@@ -845,7 +850,7 @@ class TaskExecutionRail(DeepAgentRail):
         mapped: dict[str, dict[str, Any]] = {}
         total = len(items)
         for index, item in enumerate(items):
-            task_id = item.get("id", str(index))
+            task_id = self._get_todo_key(item, index)
             status = item.get("status", "pending")
             normalized_status = status.lower() if isinstance(status, str) else str(status).lower()
             mapped[task_id] = {
@@ -855,6 +860,12 @@ class TaskExecutionRail(DeepAgentRail):
                 "total": total,
             }
         return mapped
+
+    @staticmethod
+    def _get_todo_key(item: dict[str, Any], index: int) -> str:
+        """Generate a stable key for a todo item, used by _build_map_from_todo_items
+        and _emit_task_update_event filtering to ensure consistent fallback logic."""
+        return str(item.get("id", item.get("idx", str(index))))
 
     @staticmethod
     def _has_incomplete_todos(todo_map: dict[str, dict[str, Any]]) -> bool:
@@ -1052,6 +1063,14 @@ class TaskExecutionRail(DeepAgentRail):
         session_id = session.get_session_id()
 
         todo_items = self._load_todo_from_json(session_id)
+
+        # 过滤掉上一轮 request 的残留 todo，防止跨请求串台
+        if self._stale_todo_ids:
+            todo_items = [
+                t for i, t in enumerate(todo_items)
+                if self._get_todo_key(t, i) not in self._stale_todo_ids
+            ]
+
         todo_tasks = self._format_tasks_for_update(todo_items, source="todo")
 
         all_tasks = todo_tasks

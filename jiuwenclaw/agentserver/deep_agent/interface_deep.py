@@ -234,6 +234,8 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillCredentialInjectionRail,
     SkillProtocolPromptRail,
     TaskExecutionRail,
+    coalesce_config_skill_envs,
+    coalesce_skill_envs,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
     RecentToolResultsRail,
@@ -1338,6 +1340,7 @@ class JiuWenClawDeepAdapter:
         self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
         self._latest_config_base: dict[str, Any] | None = None
+        self._last_sync_env: dict[str, Any] | None = None
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: JiuWenSkillUseRail | None = None
         self._qualified_memory_tool_ids: list[str] = []
@@ -1598,13 +1601,44 @@ class JiuWenClawDeepAdapter:
             return name.strip()
         return "unknown"
 
+    @staticmethod
+    def _is_placeholder_model_name(name: str) -> bool:
+        """True for empty / unresolved / template placeholder model ids."""
+        text = str(name or "").strip()
+        if not text or text == "unknown":
+            return True
+        # jiuwenclaw resources/.env.template leaves MODEL_NAME=your-model-name
+        return text.startswith("your-") and text.endswith("-name")
+
+    def _resolve_evolution_model_name(self, config: dict[str, Any] | None = None) -> str:
+        """Prefer the live main-chat model over static config placeholders.
+
+        SkillEvolutionRail previously used ``config['model_name']`` which often
+        stays as the template value ``your-model-name`` while tip/sync env already
+        drives the real chat model (e.g. glm-5.2).
+        """
+        cfg = config if isinstance(config, dict) else (self._config_cache or {})
+        candidates = [
+            self._resolve_model_name(),
+            str(self._default_model_name or "").strip(),
+            str((self._last_sync_env or {}).get("MODEL_NAME") or "").strip(),
+            str(cfg.get("model_name") or "").strip(),
+        ]
+        for name in candidates:
+            if name and not self._is_placeholder_model_name(name):
+                return name
+        logger.warning(
+            "[JiuWenClawDeepAdapter] evolution model unresolved; candidates=%s",
+            candidates,
+        )
+        return "gpt-4"
+
     def _make_rebuild_service(self, store: Any) -> Any:
         """Build ExperienceRebuildService with current LLM for changelog classification."""
         if ExperienceRebuildService is None:
             raise RuntimeError("ExperienceRebuildService is unavailable")
-        model_name = self._resolve_model_name()
-        if model_name in ("", "unknown"):
-            model_name = (self._config_cache or {}).get("model_name", "gpt-4")
+        model_name = self._resolve_evolution_model_name()
+        if self._is_placeholder_model_name(model_name):
             logger.warning(
                 "[JiuWenClawDeepAdapter] model name unresolved, falling back to '%s' "
                 "for changelog classification",
@@ -2463,10 +2497,15 @@ class JiuWenClawDeepAdapter:
             entries = get_default_models(config)
             if entries:
                 base_entry = entries[0]
-                mcc = dict(base_entry.get("model_client_config") or {})
-                mcc["model_name"] = env_model_name
-                mco = base_entry.get("model_config_obj") or {}
-                self._model_cache[env_model_name] = self._build_model_from_entry(mcc, mco)
+            else:
+                # Fallback: use models.default from patched config so that
+                # env_model_name always gets a cache entry even when
+                # get_default_models returns empty.
+                base_entry = config.get("models", {}).get("default", {})
+            mcc = dict(base_entry.get("model_client_config") or {})
+            mcc["model_name"] = env_model_name
+            mco = base_entry.get("model_config_obj") or {}
+            self._model_cache[env_model_name] = self._build_model_from_entry(mcc, mco)
 
         if env_model_name and env_model_name in self._model_cache:
             self._default_model_name = env_model_name
@@ -2574,9 +2613,47 @@ class JiuWenClawDeepAdapter:
                 extra={'user_visible': 'progress'},
             )
             return self._model_cache[requested]
+        # Cache miss: try service-level shared model cache (relay-claw top-level
+        # ``models`` array transparently forwarded via sync_agents_configs) first.
         resolved = self._resolve_from_shared_model_cache(requested)
         if resolved is not None:
             return resolved
+        # Then fall back to rebuilding from the last sync env_overrides
+        # (MODEL_NAME / API_KEY / API_BASE / default_headers). This covers the
+        # scenario where sync delivered real credentials but the cache wasn't
+        # populated (e.g. get_default_models returned empty on first reload);
+        # without it the request would fall back to a placeholder-credential
+        # default model and fail with 401/404. See commit 93b1def7.
+        if self._last_sync_env and self._latest_config_base:
+            sync_model_name = str(self._last_sync_env.get("MODEL_NAME") or "").strip()
+            if sync_model_name == requested:
+                try:
+                    patched = patch_model_config_from_env(
+                        self._latest_config_base, self._last_sync_env)
+                    entries = get_default_models(patched)
+                    base_entry = entries[0] if entries else patched.get("models", {}).get("default", {})
+                    mcc = dict(base_entry.get("model_client_config") or {})
+                    mcc["model_name"] = requested
+                    mco = base_entry.get("model_config_obj") or {}
+                    rebuilt = self._build_model_from_entry(mcc, mco)
+                    self._model_cache[requested] = rebuilt
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] model resolved by name: requested=%s -> rebuilt_from_sync_env",
+                        requested,
+                        extra={'user_visible': 'progress'},
+                    )
+                    return rebuilt
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] model rebuild from sync env failed: "
+                        "requested=%s error=%s",
+                        requested, exc,
+                    )
+        # Both service cache and sync env rebuild missed — raise so the caller
+        # (plan / fast / team entry points) surfaces a chat.error with
+        # code=model_not_found. This avoids silently falling back to the
+        # default model (which may carry placeholder credentials and trigger
+        # 401/404 on the actual API call).
         available = sorted(self._model_cache.keys())
         raise ValueError(
             f"model_name {requested!r} not found in service model cache; "
@@ -2688,6 +2765,12 @@ class JiuWenClawDeepAdapter:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
+        # Keep skill evolution on the same live model as the main conversation.
+        if self._skill_evolution_rail is not None:
+            applied_name = getattr(model.model_config, "model_name", None)
+            if self._is_placeholder_model_name(str(applied_name or "")):
+                applied_name = self._resolve_evolution_model_name()
+            self._skill_evolution_rail.update_llm(model, str(applied_name))
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -3065,16 +3148,19 @@ class JiuWenClawDeepAdapter:
             evolution_auto_save = config.get("evolution", {}).get("auto_save", True)
             trajectory_dir = self._resolve_evolution_trajectory_dir()
             registered_skill_dirs = self._registered_skill_dirs_for_rail()
+            evolution_model = self._resolve_evolution_model_name(config)
             skill_evolution_rail = JiuClawSkillEvolutionRail(
                 skills_dir=registered_skill_dirs,
                 llm=self._model,
-                model=config.get("model_name", "gpt-4"),
+                model=evolution_model,
                 auto_save=evolution_auto_save,
                 trajectory_store=FileTrajectoryStore(trajectory_dir),
             )
             self._skill_evolution_rail = skill_evolution_rail
             logger.info(
-                "[JiuWenClaw] SkillEvolutionRail create success,  trajectory_dir=%s, auto_save=%r",
+                "[JiuWenClaw] SkillEvolutionRail create success, model=%s, "
+                "trajectory_dir=%s, auto_save=%r",
+                evolution_model,
                 trajectory_dir,
                 evolution_auto_save,
                 extra={'user_visible': 'progress'},
@@ -3456,7 +3542,7 @@ class JiuWenClawDeepAdapter:
     ) -> SkillCredentialInjectionRail | None:
         """Build SkillCredentialInjectionRail for per-skill env-var injection."""
         try:
-            skill_envs = config.get("skill_envs", {})
+            skill_envs = coalesce_skill_envs(config.get("skill_envs"), None)
             rail = SkillCredentialInjectionRail(skill_envs=skill_envs)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillCredentialInjectionRail create success "
@@ -3852,8 +3938,14 @@ class JiuWenClawDeepAdapter:
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
         permission_config = config_base.get("permissions", {}) if config_base else {}
-        model_name = (config_base or {}).get("models", {}).get(
-            "default", {}).get("model_client_config", {}).get("model_name", "gpt-4")
+        # Prefer self._model's model_name (already patched by _create_model via
+        # patch_model_config_from_env) over raw config_base which may still hold
+        # unresolved ${MODEL_NAME} or .env baseline values.
+        model_name = (
+            getattr(getattr(self._model, "model_config", None), "model_name", None)
+            or (config_base or {}).get("models", {}).get(
+                "default", {}).get("model_client_config", {}).get("model_name", "")
+        )
         if self._permission_rail is not None:
             self._permission_rail.update_config(
                 permission_config,
@@ -3922,7 +4014,9 @@ class JiuWenClawDeepAdapter:
             new_evolution_rail = self._build_skill_evolution_rail(config)
         elif self._skill_evolution_rail is not None and evolution_enabled:
             # enabled unchanged (on): in-place update LLM / auto_save, rail retained.
-            self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
+            self._skill_evolution_rail.update_llm(
+                self._model, self._resolve_evolution_model_name(config)
+            )
             self._skill_evolution_rail.auto_save = config.get("evolution", {}).get("auto_save", True)
 
         self._skill_rail = self._build_skill_rail(
@@ -3940,8 +4034,25 @@ class JiuWenClawDeepAdapter:
 
         # --- SkillCredentialInjectionRail hot-update (before permission rail) ---
         skill_credential_rail_newly_created = False
-        new_skill_envs = config.get("skill_envs", {})
-        if self._skill_credential_injection_rail is not None:
+        incoming_skill_envs = config.get("skill_envs", {})
+        current_skill_envs = (
+            self._skill_credential_injection_rail.get_skill_envs()
+            if getattr(self, "_skill_credential_injection_rail", None) is not None
+            else None
+        )
+        new_skill_envs = coalesce_skill_envs(incoming_skill_envs, current_skill_envs)
+        if new_skill_envs is not incoming_skill_envs and new_skill_envs:
+            logger.info(
+                "[JiuWenClawDeepAdapter] keeping skill_envs skills=[%s]; "
+                "empty YAML/overlay would wipe catalog credentials",
+                ", ".join(new_skill_envs.keys()),
+            )
+            config["skill_envs"] = new_skill_envs
+            if isinstance(config_base, dict):
+                react_base = config_base.get("react")
+                if isinstance(react_base, dict):
+                    react_base["skill_envs"] = new_skill_envs
+        if getattr(self, "_skill_credential_injection_rail", None) is not None:
             self._skill_credential_injection_rail.update_skill_envs(new_skill_envs)
             logger.info("[JiuWenClawDeepAdapter] skill_envs hot-updated for SkillCredentialInjectionRail")
         else:
@@ -4303,6 +4414,7 @@ class JiuWenClawDeepAdapter:
         # Preserve sealed overlay / agent env ns across the executor thread.
         _cfg_ctx = copy_context()
         config_base = await loop.run_in_executor(None, _cfg_ctx.run, get_config)
+        config_base = coalesce_config_skill_envs(config_base, self._instance_overrides)
         self._latest_config_base = config_base if isinstance(config_base, dict) else None
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
@@ -4494,6 +4606,20 @@ class JiuWenClawDeepAdapter:
         if runtime_tools:
             self._remove_registered_tools(runtime_tools)
         self._cleanup_qualified_runtime_tools()
+        # 显式释放 checkpointer 的 SQLAlchemy AsyncEngine 连接池，
+        # 避免 SQLite 连接泄漏（SDK 未提供 close 方法）。
+        if self._checkpointer is not None:
+            kv_store = getattr(self._checkpointer, "_kv_store", None)
+            if kv_store is not None:
+                engine = getattr(kv_store, "engine", None)
+                if engine is not None:
+                    try:
+                        await engine.dispose()
+                    except Exception as exc:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] checkpointer engine dispose failed: %s", exc
+                        )
+            self._checkpointer = None
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -4704,6 +4830,13 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
+        # When env_overrides is None/empty (e.g., _reload_after_agents_sync or
+        # BEFORE_SYSTEM_PROMPT_BUILD), fall back to the last sync env so that
+        # patch_model_config_from_env applies the correct model_name / api_key
+        # instead of leaving config's ${MODEL_NAME} placeholder unresolved.
+        if not isinstance(env_overrides, dict) or not env_overrides:
+            env_overrides = self._last_sync_env if isinstance(self._last_sync_env, dict) else env_overrides
+
         if _invalidate_memory_cache is None:
             invalidate_memory_cache = self._env_touches_memory(env_overrides)
         else:
@@ -4749,6 +4882,18 @@ class JiuWenClawDeepAdapter:
                 full_config = get_config()
                 merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
                 config_base = merged
+
+            live_skill_envs = (
+                self._skill_credential_injection_rail.get_skill_envs()
+                if getattr(self, "_skill_credential_injection_rail", None) is not None
+                else None
+            )
+            previous_for_skill_envs = (
+                {"react": {"skill_envs": live_skill_envs}}
+                if live_skill_envs
+                else getattr(self, "_latest_config_base", None)
+            )
+            config_base = coalesce_config_skill_envs(config_base, previous_for_skill_envs)
 
             self._latest_config_base = config_base if isinstance(config_base, dict) else None
 
@@ -4826,6 +4971,8 @@ class JiuWenClawDeepAdapter:
 
             model = self._create_model(config_base, env_overrides)
             self._model = model
+            if isinstance(env_overrides, dict) and env_overrides:
+                self._last_sync_env = dict(env_overrides)
             self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
             agent_card_id = self._resolve_agent_card_id()
             agent_card = AgentCard(name=self._agent_name, id=agent_card_id)
@@ -8798,15 +8945,45 @@ class JiuWenClawDeepAdapter:
             raw_result = None
         return decode_html_tool_result(raw_result)
 
+    def _build_deepresearch_rewrite_model(self) -> Model:
+        request_env = get_task_env_overlay()
+        if request_env is None:
+            raise RuntimeError(
+                "DeepResearch rewrite requires a bound request environment"
+            )
+
+        config_base = patch_model_config_from_env(get_config(), request_env)
+        entries = get_default_models(config_base)
+        if not entries:
+            raise ValueError(
+                "DeepResearch rewrite model configuration is unavailable"
+            )
+
+        entry = entries[0]
+        model_client_config = dict(entry.get("model_client_config") or {})
+        model_client_config["claw_config"] = config_base
+        return self._build_model_from_entry(
+            model_client_config,
+            entry.get("model_config_obj") or {},
+        )
+
     async def _try_deepresearch_rewrite_fast_path(
             self,
             query: object,
     ) -> RewriteFastPathResult | None:
         from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
 
+        rewrite_model: Model | None = None
+
+        async def _invoke_request_model(*args, **kwargs):
+            nonlocal rewrite_model
+            if rewrite_model is None:
+                rewrite_model = self._build_deepresearch_rewrite_model()
+            return await rewrite_model.invoke(*args, **kwargs)
+
         return await run_rewrite_fast_path(
             query,
-            model_invoke=self._model.invoke,
+            model_invoke=_invoke_request_model,
             prepare_invoke=rewrite_tools.deepresearch_prepare_rewrite._func,  # pylint: disable=protected-access
             commit_invoke=rewrite_tools.deepresearch_commit_rewrite._func,  # pylint: disable=protected-access
         )

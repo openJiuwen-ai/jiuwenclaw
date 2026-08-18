@@ -42,3 +42,40 @@ def test_parse_json_payload_supports_markdown_fence() -> None:
     assert isinstance(payload, dict)
     assert payload["topic"] == "测试主题"
     assert payload["page_count"] == 6
+
+
+@pytest.mark.unit
+def test_normalize_structural_page_request_maps_auto_and_combos() -> None:
+    assert PptCommon.normalize_structural_page_request("auto") == "section"
+    assert PptCommon.normalize_structural_page_request("agenda") == "agenda"
+    assert PptCommon.normalize_structural_page_request("agenda+section") == "agenda+section"
+    assert PptCommon.normalize_structural_page_request("AGENDA, chapter") == "agenda+chapter"
+    assert PptCommon.normalize_structural_page_request("") == "none"
+    assert PptCommon.normalize_structural_page_request(None) == "none"
+
+
+@pytest.mark.unit
+def test_resolve_structural_page_plan_agenda_only_is_one_toc() -> None:
+    plan = PptCommon.resolve_structural_page_plan("agenda", None, page_count=6)
+    assert plan.need_agenda is True
+    assert plan.agenda_count == 1
+    assert plan.divider_count == 0
+    assert plan.total_middle == 1
+
+
+@pytest.mark.unit
+def test_resolve_structural_page_plan_section_default_uses_ceil() -> None:
+    plan = PptCommon.resolve_structural_page_plan("section", None, page_count=10)
+    assert plan.need_agenda is False
+    assert plan.divider_type == "section"
+    assert plan.divider_count == 3
+    assert plan.divider_count_mode == "default"
+
+
+@pytest.mark.unit
+def test_resolve_structural_page_plan_agenda_plus_section() -> None:
+    plan = PptCommon.resolve_structural_page_plan("agenda+section", None, page_count=10)
+    assert plan.agenda_count == 1
+    assert plan.divider_type == "section"
+    assert plan.divider_count == 3
+    assert plan.total_middle == 4

@@ -195,6 +195,11 @@ class AskUserQuestionRegistry:
         sid = str(session_id or "").strip()
         return bool(sid) and bool(self._session_interactive_ask.get(self._tenant_key(scope, sid)))
 
+    def has_pending_for_session(self, session_id: str) -> bool:
+        """Any ask still awaiting the user for this session (cross-tenant scan)."""
+        sid = str(session_id or "")
+        return bool(sid) and any(rid_sid == sid for rid_sid in self._pending_sessions.values())
+
     def resolve(
         self,
         scope: RuntimeScopeKey,

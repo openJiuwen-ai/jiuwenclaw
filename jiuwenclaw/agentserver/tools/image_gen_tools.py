@@ -361,8 +361,10 @@ def _build_image_gen_model(api_key: str, api_base: str, model_name: str, provide
 
 
 async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
-    apply_image_gen_model_config_from_yaml(get_config())
     api_key, api_base, model_name, provider = _get_image_gen_credentials()
+    if not api_key or not api_base or not model_name:
+        apply_image_gen_model_config_from_yaml(get_config())
+        api_key, api_base, model_name, provider = _get_image_gen_credentials()
     if not api_key:
         return _make_missing_key_error()
     if not api_base or not model_name:

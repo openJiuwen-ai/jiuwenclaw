@@ -28,6 +28,50 @@ from jiuwenclaw.agentserver.permissions.shell_tools import SHELL_PERMISSION_TOOL
 logger = logging.getLogger(__name__)
 
 
+def coalesce_skill_envs(
+    incoming: dict[str, dict[str, str]] | None,
+    current: dict[str, dict[str, str]] | None,
+) -> dict[str, dict[str, str]]:
+    """Prefer an incoming mapping that names skills; keep *current* when incoming is empty.
+
+    ``config.yaml`` ships ``react.skill_envs: {}`` as a placeholder. Catalog sync
+    injects real values such as ``{hwocr: {HWOCR_AK: ...}}``. A later YAML reload
+    must not treat the empty placeholder as "clear all credentials".
+
+    Catalog *can* still clear credentials: it always sends the skill key with
+    empty string values (``{hwocr: {HWOCR_AK: ""}}``), which is a non-empty dict.
+    """
+    incoming_map = incoming if isinstance(incoming, dict) else {}
+    current_map = current if isinstance(current, dict) else {}
+    if incoming_map:
+        return incoming_map
+    return current_map or incoming_map
+
+
+def coalesce_config_skill_envs(config: Any, previous: Any) -> Any:
+    """Keep previous ``react.skill_envs`` when *config* only has the YAML placeholder."""
+    if not isinstance(config, dict):
+        return config
+    react = config.get("react")
+    incoming = react.get("skill_envs") if isinstance(react, dict) else None
+    previous_envs = None
+    if isinstance(previous, dict):
+        prev_react = previous.get("react")
+        if isinstance(prev_react, dict):
+            previous_envs = prev_react.get("skill_envs")
+    resolved = coalesce_skill_envs(
+        incoming if isinstance(incoming, dict) else None,
+        previous_envs if isinstance(previous_envs, dict) else None,
+    )
+    if resolved == incoming or (not resolved and not incoming):
+        return config
+    merged = dict(config)
+    merged_react = dict(react) if isinstance(react, dict) else {}
+    merged_react["skill_envs"] = resolved
+    merged["react"] = merged_react
+    return merged
+
+
 class SkillCredentialInjectionRail(DeepAgentRail):
     """Inject per-skill credentials into shell tool calls via ``tool_args["env"]``.
 

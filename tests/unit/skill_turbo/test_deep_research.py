@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -284,3 +285,304 @@ class TestExtractLlmJsonErrorEnhanced:
             ju.extract_llm_json('{"key": "value"}', expected_type=list)
         # 类型不匹配时，first_error 为 None，走默认报错
         assert "list" in str(exc_info.value)
+
+
+_CLI_PARSE_OUTLINE_PAYLOAD = {
+    "searchMode": "force_search",
+    "totalPages": 4,
+    "contentPageCount": 2,
+    "researchedPages": [2, 3],
+    "structuralPages": [1, 4],
+    "searchedSources": [],
+    "pages": [
+        {
+            "page": 1,
+            "title": "封面",
+            "type": "cover",
+            "isContent": False,
+            "researchQueries": None,
+            "dataNeeds": None,
+        },
+        {
+            "page": 2,
+            "title": "小艺Claw定位",
+            "type": "chapter",
+            "isContent": True,
+            "researchQueries": None,
+            "dataNeeds": None,
+        },
+        {
+            "page": 3,
+            "title": "系统能力",
+            "type": "data",
+            "isContent": True,
+            "researchQueries": None,
+            "dataNeeds": "系统能力数量（2100+）、系统级数据数量（200+）",
+        },
+        {
+            "page": 4,
+            "title": "总结",
+            "type": "ending",
+            "isContent": False,
+            "researchQueries": None,
+            "dataNeeds": None,
+        },
+    ],
+}
+
+
+class TestPagesFromParseOutlinePayload:
+    """测试官方 parse-outline JSON 转下游 pages。"""
+
+    @pytest.mark.unit
+    def test_skips_structural_pages_and_keeps_researched(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        pages = node._pages_from_parse_outline_payload(
+            _CLI_PARSE_OUTLINE_PAYLOAD, _OUTLINE_WITH_BOLD_MARKERS,
+        )
+        assert [p["page_number"] for p in pages] == [2, 3]
+        assert pages[0]["page_type"] == "chapter"
+        assert pages[1]["page_type"] == "data"
+
+    @pytest.mark.unit
+    def test_fills_queries_from_outline_when_cli_field_empty(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        pages = node._pages_from_parse_outline_payload(
+            _CLI_PARSE_OUTLINE_PAYLOAD, _OUTLINE_WITH_BOLD_MARKERS,
+        )
+        p2 = next(p for p in pages if p["page_number"] == 2)
+        assert p2["research_queries"] == [
+            "小艺Claw产品定位与OpenClaw关系",
+            "小艺Claw与传统AI助手差异对比",
+        ]
+
+    @pytest.mark.unit
+    def test_splits_cli_data_needs_string(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        pages = node._pages_from_parse_outline_payload(
+            _CLI_PARSE_OUTLINE_PAYLOAD, _OUTLINE_WITH_BOLD_MARKERS,
+        )
+        p3 = next(p for p in pages if p["page_number"] == 3)
+        assert p3["data_needs"] == [
+            "系统能力数量（2100+）",
+            "系统级数据数量（200+）",
+        ]
+
+    @pytest.mark.unit
+    def test_empty_researched_pages_returns_empty(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        pages = node._pages_from_parse_outline_payload(
+            {"researchedPages": [], "pages": []}, _OUTLINE_WITH_BOLD_MARKERS,
+        )
+        assert pages == []
+
+
+class TestParseOutlinePagesCliPath:
+    """P6.0 主路径走 parse-outline，失败才正则，不走 LLM。"""
+
+    @pytest.mark.unit
+    def test_cli_success_does_not_call_llm(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        llm_called = {"n": 0}
+
+        async def _fake_llm(*_args, **_kwargs):
+            llm_called["n"] += 1
+            return "[]"
+
+        async def _fake_cli(*_args, **_kwargs):
+            return _CLI_PARSE_OUTLINE_PAYLOAD
+
+        node.stream_llm_collect = _fake_llm
+        node._run_parse_outline_cli = _fake_cli
+        pages = asyncio.run(
+            node._parse_outline_pages(
+                _OUTLINE_WITH_BOLD_MARKERS,
+                outline_path="/tmp/outline.md",
+                pptx_root="/tmp/pptx-craft",
+            )
+        )
+        assert llm_called["n"] == 0
+        assert [p["page_number"] for p in pages] == [2, 3]
+
+    @pytest.mark.unit
+    def test_cli_failure_falls_back_to_regex_without_llm(self):
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        llm_called = {"n": 0}
+
+        async def _fake_llm(*_args, **_kwargs):
+            llm_called["n"] += 1
+            return "[]"
+
+        async def _fake_cli(*_args, **_kwargs):
+            return None
+
+        node.stream_llm_collect = _fake_llm
+        node._run_parse_outline_cli = _fake_cli
+        pages = asyncio.run(
+            node._parse_outline_pages(
+                _OUTLINE_WITH_BOLD_MARKERS,
+                outline_path="/tmp/outline.md",
+                pptx_root="/tmp/pptx-craft",
+            )
+        )
+        assert llm_called["n"] == 0
+        assert [p["page_number"] for p in pages] == [2, 3]
+
+
+class TestMinWordsPerPageFloor:
+    """写稿每页最低字数钳在 >= 350。"""
+
+    @pytest.mark.unit
+    def test_l2_ten_pages_is_at_least_350(self):
+        assert dr._compute_min_words_per_page("L2", "force_search", 10) >= 350
+
+    @pytest.mark.unit
+    def test_l3_eighteen_pages_is_at_least_350(self):
+        assert dr._compute_min_words_per_page("L3", "force_search", 18) >= 350
+
+    @pytest.mark.unit
+    def test_floor_is_350_when_formula_would_be_lower(self):
+        # L2 总字数 2000 / 18 页 ≈ 111，旧下限 200，现钳到 350
+        assert dr._compute_min_words_per_page("L2", "auto", 18) == 350
+
+    @pytest.mark.unit
+    def test_keeps_higher_value_when_formula_exceeds_floor(self):
+        # L3 总字数 3500 / 2 页 = 1750
+        assert dr._compute_min_words_per_page("L3", "force_search", 2) == 1750
+
+
+class TestSeedUrls:
+    """用户链接 + 已搜索来源优先进深抓池。"""
+
+    @pytest.mark.unit
+    def test_merge_keeps_user_urls_first_and_dedupes(self):
+        merged = dr._merge_seed_urls(
+            ["https://nea.gov.cn/a", "https://example.com/b"],
+            ["https://example.com/b", "https://cpnn.com.cn/c"],
+        )
+        assert merged == [
+            "https://nea.gov.cn/a",
+            "https://example.com/b",
+            "https://cpnn.com.cn/c",
+        ]
+
+    @pytest.mark.unit
+    def test_extract_user_urls_from_query(self):
+        text = (
+            "参考：\n"
+            "1、https://www.nea.gov.cn/20250221/e10f363cabe3458aaf78ba4558970054/c.html\n"
+            "2、https://m.bjx.com.cn/mnews/20251113/1469854.shtml"
+        )
+        urls = dr._extract_urls(text)
+        assert urls[0].endswith("/c.html")
+        assert "bjx.com.cn" in urls[1]
+
+    @pytest.mark.unit
+    def test_extract_searched_urls_stops_before_page_plan(self):
+        outline = """# 大纲：主题
+
+## 已搜索来源
+
+| URL | 覆盖维度 |
+|-----|---------|
+| https://www.nea.gov.cn/seed.html | 官方数据 |
+
+## 页面规划
+
+### P2:
+- **研究查询**：https://example.com/should-not-count
+"""
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+        assert node._extract_searched_urls(outline) == ["https://www.nea.gov.cn/seed.html"]
+
+    @pytest.mark.unit
+    def test_prepare_merges_query_urls_ahead_of_outline_sources(self, tmp_path: Path):
+        outline = tmp_path / "outline.md"
+        outline.write_text(
+            """# 大纲：主题
+
+## 已搜索来源
+
+| URL |
+|-----|
+| https://www.cpnn.com.cn/outline.html |
+
+## 页面规划
+
+### P1:
+- **类型**：cover
+- **研究需求**：❌
+- **标题**：封面
+- **内容概要**：封面
+- **研究查询**：-
+- **数据需求**：-
+
+### P2:
+- **类型**：data
+- **研究需求**：✅
+- **标题**：数据页
+- **内容概要**：数据
+- **研究查询**：2024 装机
+- **数据需求**：装机容量
+
+### P3:
+- **类型**：ending
+- **研究需求**：❌
+- **标题**：结束
+- **内容概要**：结束
+- **研究查询**：-
+- **数据需求**：-
+""",
+            encoding="utf-8",
+        )
+        node = dr.PrepareNode.__new__(dr.PrepareNode)
+
+        async def _no_search(*_args, **_kwargs):
+            return True
+
+        async def _read(_path: str) -> str:
+            return outline.read_text(encoding="utf-8")
+
+        node._should_search = _no_search
+        node._read_file = _read
+        result = asyncio.run(
+            node._execute(
+                {
+                    "output_dir": str(tmp_path),
+                    "search_mode": "force_search",
+                    "research_depth": "L2",
+                    "query": "基于 https://www.nea.gov.cn/user.html 写汇报",
+                }
+            )
+        )
+        assert result["prepare_status"] == "ok"
+        assert result["searched_urls"] == [
+            "https://www.nea.gov.cn/user.html",
+            "https://www.cpnn.com.cn/outline.html",
+        ]
+
+    @pytest.mark.unit
+    def test_score_keeps_seed_sources_ahead_of_search_hits(self):
+        node = dr.PageWorkerNode.__new__(dr.PageWorkerNode)
+
+        async def _fake_llm(**_kwargs):
+            return '{"1": "B+", "2": "A"}'
+
+        node.stream_llm_collect = _fake_llm
+        node.extract_json = lambda _raw, expected_type=dict: {"1": "B+", "2": "A"}
+        sources = [
+            {"url": "https://seed.example/a", "from_existing": True},
+            {"url": "https://search.example/b", "title": "hit-b"},
+            {"url": "https://search.example/c", "title": "hit-c"},
+        ]
+        ranked = asyncio.run(
+            node._score_sources_for_page({"page_number": 2}, sources)
+        )
+        assert ranked[0]["url"] == "https://seed.example/a"
+        assert ranked[0].get("from_existing") is True
+        assert [item["url"] for item in ranked[1:]] == [
+            "https://search.example/c",
+            "https://search.example/b",
+        ]
+
+

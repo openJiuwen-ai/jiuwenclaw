@@ -23,13 +23,6 @@ from jiuwenclaw.agentserver.skill_turbo.skill_codes.ppt.utils.bash_utils import 
 
 _PLAYWRIGHT_INSTALL_TIMEOUT = 600
 
-_NPM_INSTALL_MARKERS = (
-    "npm 依赖未安装",
-    "npm 依赖缺失",
-    "node_modules 目录为空",
-    "playwright 依赖缺失",
-    "npm install",
-)
 _PLAYWRIGHT_INSTALL_MARKERS = (
     "Chromium 未安装",
     "Chromium Headless Shell 未安装",
@@ -143,12 +136,6 @@ async def _bash(
         )
     except BashExecError as exc:
         raise PipelineInitError(str(exc)) from exc
-
-
-def _needs_npm_install(check_output: str) -> bool:
-    if "→ 安装: cd " in check_output and "npm install" in check_output:
-        return True
-    return any(marker in check_output for marker in _NPM_INSTALL_MARKERS)
 
 
 def _needs_playwright_install(check_output: str) -> bool:

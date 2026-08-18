@@ -238,6 +238,122 @@ class TestRegistrationTracking:
         assert captured_cfgs[1] is not shared_mcp_cfg
         assert captured_cfgs[0] is not captured_cfgs[1]
 
+    def test_two_stdio_servers_same_tool_name_get_qualified_names(
+        self, tool_manager, mock_agent
+    ):
+        """两个 stdio MCP 暴露同名工具时，agent.ability_manager.add 收到带 server 前缀的
+        qualified card，resource_mgr.add_tool 收到带 raw_tool_name 的 EphemeralStdioMcpTool。
+        """
+        from openjiuwen.core.foundation.tool import ToolCard
+
+        from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
+            EphemeralStdioMcpTool,
+        )
+
+        captured_cards: list = []
+        captured_ephemeral: list = []
+
+        def fake_add_tool(tool, *, tag):
+            captured_ephemeral.append((tool, tag))
+            return None  # 视为成功
+
+        async def fake_list_stdio(params):
+            return [
+                {"name": "execute_sql", "description": "Run SQL", "input_params": {}},
+                {"name": "list_tables", "description": "List tables", "input_params": {}},
+            ]
+
+        def fake_eph_class(card, getter, *, raw_tool_name=None):
+            # 断言构造时确实收到了 raw_tool_name
+            assert raw_tool_name is not None, "raw_tool_name must be passed"
+            inst = MagicMock(spec=EphemeralStdioMcpTool)
+            inst._card = card
+            inst._raw_tool_name = raw_tool_name
+            return inst
+
+        with patch("jiuwenclaw.agentserver.tool_manager.list_stdio_mcp_tool_defs",
+                   new=fake_list_stdio), \
+             patch("jiuwenclaw.agentserver.tool_manager.EphemeralStdioMcpTool",
+                   new=fake_eph_class), \
+             patch("jiuwenclaw.agentserver.tool_manager.Runner") as mock_runner:
+            mock_runner.resource_mgr.add_tool = fake_add_tool
+
+            def fake_add(card):
+                captured_cards.append(card)
+
+            mock_agent.ability_manager.add = fake_add
+
+            result = asyncio.run(tool_manager.register_request_scoped_mcp(
+                {
+                    "mcpServers": {
+                        "orders-3": {"command": "npx", "args": ["-y", "supabase"]},
+                        "members": {"command": "npx", "args": ["-y", "supabase"]},
+                    }
+                },
+                request_id="req_X",
+            ))
+
+        # 验证：每个 server 都成功注册（不抛错），且工具数 = 2 server * 2 tool
+        assert len(result["tools"]) == 2
+        assert len(captured_cards) == 4
+        assert len(captured_ephemeral) == 4
+
+        names_added_to_ability = [c.name for c in captured_cards]
+        ids_added_to_ability = [c.id for c in captured_cards]
+
+        # 关键断言 1：qualified name 出现且不重复
+        assert "orders-3__execute_sql" in names_added_to_ability
+        assert "members__execute_sql" in names_added_to_ability
+        assert "orders-3__list_tables" in names_added_to_ability
+        assert "members__list_tables" in names_added_to_ability
+        assert len(set(names_added_to_ability)) == 4, names_added_to_ability
+
+        # 关键断言 2：card.id 仍是全限定形式，资源侧不会撞 key
+        assert "orders-3::req_X.orders-3.execute_sql" in ids_added_to_ability
+        assert "members::req_X.members.execute_sql" in ids_added_to_ability
+
+        # 关键断言 3：EphemeralStdioMcpTool 收到的是 raw name（去前缀后）
+        for tool, _tag in captured_ephemeral:
+            assert tool._raw_tool_name in {"execute_sql", "list_tables"}
+            # card.name 是 qualified 形式
+            assert tool._card.name.startswith(("orders-3__", "members__"))
+
+    def test_unregister_stdio_uses_qualified_name(self, tool_manager, mock_agent):
+        """unregister 路径按 qualified name 调 ability_manager.remove，与 add 时一致。"""
+        tool_manager._request_registrations["req_X"] = [
+            {
+                "kind": "stdio",
+                "server_name": "orders-3",
+                "server_id": "orders-3::req_X",
+                "tool_ids": [
+                    "orders-3::req_X.orders-3.execute_sql",
+                    "orders-3::req_X.orders-3.list_tables",
+                ],
+                "tool_names": ["orders-3__execute_sql", "orders-3__list_tables"],
+            },
+            {
+                "kind": "stdio",
+                "server_name": "members",
+                "server_id": "members::req_X",
+                "tool_ids": [
+                    "members::req_X.members.execute_sql",
+                ],
+                "tool_names": ["members__execute_sql"],
+            },
+        ]
+
+        with patch("jiuwenclaw.agentserver.tool_manager.Runner") as mock_runner:
+            mock_runner.resource_mgr.remove_tool = MagicMock()
+            asyncio.run(tool_manager.unregister_request_scoped_mcp("req_X"))
+
+        removed_names = [c.args[0] for c in mock_agent.ability_manager.remove.call_args_list]
+        assert removed_names == [
+            "orders-3__execute_sql",
+            "orders-3__list_tables",
+            "members__execute_sql",
+        ]
+        assert "req_X" not in tool_manager._request_registrations
+
 
 class TestExtractRequestMcpPayload:
     def _make_request(self, params: dict):

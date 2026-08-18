@@ -389,11 +389,13 @@ def dedicated_multimodal_model_configured(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> bool:
-    """Whether ``models.{model_type}`` has its own non-empty ``api_key`` (after YAML env resolution).
+    """Whether ``models.{model_type}`` has a dedicated non-empty ``api_key``.
 
     Used to gate image / video / **audio** tools (含 ``audio_metadata`` 与 LLM 音频能力)，在未配置
     ``models.{type}.model_config`` 独立 ``api_key`` 时不挂载，避免仅存在主对话 ``API_KEY`` 时误注册。
     Groups disabled via env omission reconcile return False even when yaml still has literal ``api_key``.
+    YAML 解析后若已是空字面量，再看该组独立环境变量（如 ``IMAGE_GEN_API_KEY``），
+    不回退主对话 ``API_KEY``。
     （``apply_*_model_config_from_yaml`` 仍可能回落到 embed / 主 API 写环境变量，与是否注册工具无关。）
     与 ``get_mcp_tools`` 仅注册 ``web_search`` 作为搜索入口同理。
     """
@@ -408,7 +410,9 @@ def dedicated_multimodal_model_configured(
     mc = _get_model_config(config_base, model_type)
     raw_api_key = mc.get("api_key")
     api_key = str(resolve_env_vars(raw_api_key) if raw_api_key is not None else "").strip()
-    return bool(api_key)
+    if api_key:
+        return True
+    return bool(str(read_env(MULTIMODAL_ENV_ANCHOR_KEYS[model_type])).strip())
 
 
 def _get_embed_model_name(embed_cfg: dict[str, Any], model_type: str) -> str:
@@ -642,11 +646,13 @@ def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -
         if not provider and allow_fallback:
             provider = read_env("MODEL_PROVIDER", "").strip()
 
-    if api_key:
+    # Fill gaps only. Do not overwrite catalog/ns values with .env placeholders
+    # resolved from get_config() (e.g. IMAGE_GEN_MODEL_NAME=your-image-gen-model-name).
+    if api_key and not str(read_env("IMAGE_GEN_API_KEY")).strip():
         set_os_environ("IMAGE_GEN_API_KEY", api_key)
-    if api_base:
+    if api_base and not str(read_env("IMAGE_GEN_API_BASE")).strip():
         set_os_environ("IMAGE_GEN_API_BASE", api_base)
-    if model_name:
+    if model_name and not str(read_env("IMAGE_GEN_MODEL_NAME")).strip():
         set_os_environ("IMAGE_GEN_MODEL_NAME", model_name)
-    if provider:
+    if provider and not str(read_env("IMAGE_GEN_PROVIDER")).strip():
         set_os_environ("IMAGE_GEN_PROVIDER", provider)

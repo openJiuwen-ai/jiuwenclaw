@@ -30,6 +30,9 @@ from jiuwenclaw.agentserver.sync_agents_configs import (
     validate_sync_payload,
 )
 from jiuwenclaw.agentserver.tenant_catalog_registry import TenantCatalogRegistry
+from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail import (
+    coalesce_config_skill_envs,
+)
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     infer_multimodal_env_removals,
     sync_multimodal_env_omission_state,
@@ -68,11 +71,12 @@ class TenantAgentPool:
 
     def __init__(
         self,
-        cache_max_size: int | None = None,
-        cache_ttl: int | None = None,
+        cache_max_size: int | None = 100,
+        cache_ttl: int | None = 14400,
     ) -> None:
         # LRU 缓存: key=(agent_id, service_id), value=AgentManager 实例
-        # 默认 None：不限制容量与 TTL，避免长阻塞（如 ask_user_question）期间误淘汰 AgentManager
+        # 限制容量与 TTL，避免 AgentManager 实例永驻内存导致内存泄漏。
+        # 活跃 AgentManager 通过 _refresh_agent_manager_cache 的 touch 机制保持存活。
         self._agent_wrappers = AsyncLRUCache(
             max_size=cache_max_size,
             ttl_seconds=cache_ttl,
@@ -363,6 +367,8 @@ class TenantAgentPool:
             if isinstance(config, dict)
             else (existing.config if existing is not None else {})
         )
+        if existing is not None:
+            config_snapshot = coalesce_config_skill_envs(config_snapshot, existing.config)
         runtime_snapshot = existing.runtime if existing is not None else {}
         env_snapshot = effective_tip(service_id, agent_id)
         registry.upsert(

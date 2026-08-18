@@ -474,9 +474,96 @@ def test_p43_completes_and_writes_outline(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_p43_raises_on_empty_llm() -> None:
-    node = _make_p43_node(llm_responses=[""])
+    node = _make_p43_node(llm_responses=["", ""])
     ctx = _base_ctx(page_count=2, focus_areas="AI")
     with pytest.raises(cp.ContentPlanError, match="LLM 返回为空"):
+        asyncio.run(node._execute(ctx))
+
+
+@pytest.mark.unit
+def test_p43_retries_once_on_structural_mismatch(tmp_path: Path) -> None:
+    bad = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("chapter", "第一章", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    good = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "目录", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    prompts: list[str] = []
+    node = cp.P43OutlineGenNode()
+    llm_queue = [bad, good]
+
+    async def _mock_call_llm(prompt: str, system_prompt: str = "", **_: Any) -> str:
+        prompts.append(prompt)
+        if not llm_queue:
+            raise RuntimeError("unexpected extra llm call")
+        return llm_queue.pop(0)
+
+    async def _mock_stream_llm(
+        prompt: str, system_prompt: str = "", node_name: str | None = None, **_: Any,
+    ) -> AsyncIterator[str]:
+        text = await _mock_call_llm(prompt, system_prompt=system_prompt)
+        yield text
+
+    async def _mock_call_tool(tool_name: str, **kwargs: Any) -> Any:
+        if tool_name == "write_file":
+            return _mock_write_file(**kwargs)
+        if tool_name == "read_file":
+            return _mock_read_file(**kwargs)
+        raise ValueError(f"unknown tool: {tool_name}")
+
+    node.set_runtime_callbacks(
+        has_tool=lambda name: name in ("write_file", "read_file"),
+        use_tool=_mock_call_tool,
+        call_llm=_mock_call_llm,
+        stream_llm=_mock_stream_llm,
+    )
+    ctx = _base_ctx(
+        output_dir=str(tmp_path),
+        topic="新能源汽车行业分析",
+        page_count=1,
+        structural_page_request="agenda",
+        focus_areas="产销",
+    )
+    result = asyncio.run(node._execute(ctx))
+    assert result["p4_outline_gen_status"] == "completed"
+    assert len(prompts) == 2
+    assert "上次失败原因" not in prompts[0]
+    assert "上次失败原因" in prompts[1]
+    assert "结构页类型不匹配" in prompts[1]
+    content = Path(result["outline_path"]).read_text(encoding="utf-8")
+    assert "**类型**：agenda" in content
+    assert "**类型**：chapter" not in content
+
+
+@pytest.mark.unit
+def test_p43_raises_after_structural_retry_exhausted(tmp_path: Path) -> None:
+    bad = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("chapter", "第一章", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    node = _make_p43_node(llm_responses=[bad, bad])
+    ctx = _base_ctx(
+        output_dir=str(tmp_path),
+        topic="新能源汽车行业分析",
+        page_count=1,
+        structural_page_request="agenda",
+        focus_areas="产销",
+    )
+    with pytest.raises(cp.ContentPlanError, match="结构页类型不匹配"):
         asyncio.run(node._execute(ctx))
 
 
@@ -616,3 +703,165 @@ def test_content_plan_retries_once_on_validate_failure(tmp_path: Path, monkeypat
     assert attempts["p44"] == 2
     assert result["content_plan_status"] == "completed"
     assert result["p4_retry_count"] == 1
+
+
+def _structural_outline(
+    *,
+    topic: str = "新能源汽车行业分析",
+    pages: list[tuple[str, str, str]],
+) -> str:
+    blocks: list[str] = []
+    content_count = 0
+    for index, (page_type, title, research) in enumerate(pages, start=1):
+        if research == "✅":
+            content_count += 1
+            queries = '"query-a", "query-b"'
+            data_need = "产销量、渗透率"
+            summary = "内容页要点"
+        else:
+            queries = "-"
+            data_need = "-"
+            summary = "结构页"
+        blocks.append(
+            f"""### P{index}: {title}
+- **类型**：{page_type}
+- **研究需求**：{research}
+- **标题**：{title}
+- **内容概要**：{summary}
+- **研究查询**：{queries}
+- **数据需求**：{data_need}"""
+        )
+    body = "\n\n".join(blocks)
+    return f"""# 大纲：{topic}
+
+**受众**：商务人士
+**总页数**：{len(pages)}
+**叙事主线**：从概况到展望
+**输入类型**：outline
+**搜索模式**：force_search
+
+## 页面规划
+
+{body}
+"""
+
+
+@pytest.mark.unit
+def test_agenda_only_directive_is_global_toc_not_chapter_groups() -> None:
+    text = cp._build_structural_page_directive(
+        {"structural_page_request": "agenda", "structural_page_count": None, "page_count": 6}
+    )
+    assert "类型=agenda，数量=1" in text
+    assert "cover → agenda → 内容页 → ending" in text
+    assert "结构页放在每个内容组之前" not in text
+    assert "ceil(page_count/4)" not in text
+    assert "第一部分" not in text
+
+
+@pytest.mark.unit
+def test_section_default_directive_uses_official_ceil() -> None:
+    text = cp._build_structural_page_directive(
+        {"structural_page_request": "section", "structural_page_count": None, "page_count": 10}
+    )
+    assert "类型=section，数量=3" in text
+    assert "结构页放在每个内容组之前" in text
+    assert "cover → 结构页 1 → 内容组 1" in text
+    assert "cover → agenda" not in text
+
+
+@pytest.mark.unit
+def test_validate_agenda_only_accepts_single_toc() -> None:
+    outline = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "目录", "❌"),
+            ("data", "产销规模", "✅"),
+            ("technology", "技术路线", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    cp._validate_outline_markdown_basic(
+        outline,
+        topic="新能源汽车行业分析",
+        page_count=2,
+        structural_page_request="agenda",
+        structural_page_count=None,
+    )
+
+
+@pytest.mark.unit
+def test_validate_agenda_only_does_not_ban_descriptive_titles() -> None:
+    outline = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "第一部分：行业概况与技术路线", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    cp._validate_outline_markdown_basic(
+        outline,
+        topic="新能源汽车行业分析",
+        page_count=1,
+        structural_page_request="agenda",
+    )
+
+
+@pytest.mark.unit
+def test_validate_agenda_only_rejects_second_agenda() -> None:
+    outline = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "目录", "❌"),
+            ("data", "产销规模", "✅"),
+            ("technology", "技术路线", "✅"),
+            ("agenda", "第二部分：政策支持与未来展望", "❌"),
+            ("data", "政策支持", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    with pytest.raises(cp.ContentPlanError, match="目录页（agenda）数量应为 1"):
+        cp._validate_outline_markdown_basic(
+            outline,
+            topic="新能源汽车行业分析",
+            page_count=3,
+            structural_page_request="agenda",
+        )
+
+
+@pytest.mark.unit
+def test_validate_agenda_only_rejects_extra_section_page() -> None:
+    outline = _structural_outline(
+        pages=[
+            ("cover", "新能源汽车行业分析", "❌"),
+            ("agenda", "目录", "❌"),
+            ("section", "第一章 行业概况", "❌"),
+            ("data", "产销规模", "✅"),
+            ("ending", "感谢聆听", "❌"),
+        ]
+    )
+    with pytest.raises(cp.ContentPlanError, match="结构页类型不匹配"):
+        cp._validate_outline_markdown_basic(
+            outline,
+            topic="新能源汽车行业分析",
+            page_count=1,
+            structural_page_request="agenda",
+        )
+
+
+@pytest.mark.unit
+def test_validate_section_default_requires_ceil_count() -> None:
+    pages = [("cover", "封面", "❌")]
+    for index in range(10):
+        if index in {0, 4, 8}:
+            pages.append(("section", f"第{index // 4 + 1}章", "❌"))
+        pages.append(("data", f"内容{index + 1}", "✅"))
+    pages.append(("ending", "感谢聆听", "❌"))
+    outline = _structural_outline(topic="2025 AI 趋势", pages=pages)
+    cp._validate_outline_markdown_basic(
+        outline,
+        topic="2025 AI 趋势",
+        page_count=10,
+        structural_page_request="section",
+        structural_page_count=None,
+    )

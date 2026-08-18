@@ -334,6 +334,35 @@ async def test_agent_manager_syncs_memory_cache_after_reload():
 
 
 @pytest.mark.asyncio
+async def test_reload_agents_config_keeps_catalog_skill_envs_when_yaml_is_empty():
+    """config.yaml ``skill_envs: {}`` must not erase catalog-injected hwocr credentials."""
+    manager = AgentManager(agent_id="a1", service_id="s1")
+    manager._latest_config_base = {
+        "react": {
+            "skill_envs": {"hwocr": {"HWOCR_AK": "ak", "HWOCR_PROJECT_ID": "p1"}},
+        }
+    }
+    with patch.object(AgentManager, "is_working", return_value=True):
+        await manager.reload_agents_config(
+            {"react": {"skill_envs": {}, "agent_name": "main"}},
+            {},
+        )
+    assert manager._latest_config_base["react"]["skill_envs"]["hwocr"]["HWOCR_AK"] == "ak"
+
+
+@pytest.mark.asyncio
+async def test_apply_sync_config_catalog_clear_replaces_skill_envs():
+    manager = AgentManager(agent_id="a1", service_id="s1")
+    manager._latest_config_base = {
+        "react": {"skill_envs": {"hwocr": {"HWOCR_AK": "ak"}}},
+    }
+    catalog = {"react": {"skill_envs": {"hwocr": {"HWOCR_AK": "", "HWOCR_SK": ""}}}}
+    with patch.object(AgentManager, "is_working", return_value=True):
+        await manager.apply_sync_config(catalog, {})
+    assert manager._latest_config_base["react"]["skill_envs"]["hwocr"]["HWOCR_AK"] == ""
+
+
+@pytest.mark.asyncio
 async def test_agent_manager_reload_stages_env_without_os_write():
     manager = AgentManager(agent_id="a1", service_id="s1")
     os.environ["API_KEY"] = "before"
@@ -444,6 +473,7 @@ class _DeepAdapterReloadHarness:
                     adapter._pending_reload = pending_reload
                     adapter._reload_lock = asyncio.Lock()
                     adapter._working_checker = None
+                    adapter._last_sync_env = None
                     adapter.set_working_checker(lambda: working_checker)
                     return adapter
 
