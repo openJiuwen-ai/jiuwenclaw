@@ -272,6 +272,7 @@ _SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_adapter_token"
 _SKILL_TURBO_METADATA_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_metadata_token"
 _SKILL_TURBO_WORKSPACE_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_workspace_token"
 _SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY = "_jiuwenswarm_skill_turbo_interactive_ask_token"
+_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY = "_jiuwenswarm_subagent_parent_session_token"
 
 
 def _reset_skill_turbo_adapter_token(ctx: AgentCallbackContext) -> None:
@@ -312,6 +313,16 @@ def _reset_skill_turbo_interactive_ask_token(ctx: AgentCallbackContext) -> None:
             reset_interactive_ask,
         )
         reset_interactive_ask(token)
+
+
+def _reset_subagent_parent_session_token(ctx: AgentCallbackContext) -> None:
+    """Restore subagent parent session ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+            reset_subagent_parent_session,
+        )
+        reset_subagent_parent_session(token)
 
 
 class JiuSwarmStreamEventRail(DeepAgentRail):
@@ -720,6 +731,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
 
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
@@ -990,11 +1002,28 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 ia_token = set_interactive_ask(bool(_ia))
                 ctx.extra[_SKILL_TURBO_INTERACTIVE_ASK_TOKEN_EXTRA_KEY] = ia_token
 
+        # Parent session for subagent / SkillTurbo event forwarding: tools such as
+        # skill_acceleration_exec read get_subagent_parent_session() and write_stream
+        # internal chunks back to the DeepAgent main session for frontend + history.
+        parent_bind_session = session
+        if parent_bind_session is not None:
+            if not hasattr(ctx, "extra"):
+                ctx.extra = {}
+            from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                set_subagent_parent_session,
+            )
+
+            actual_session = getattr(parent_bind_session, "_parent", parent_bind_session)
+            parent_token = set_subagent_parent_session(actual_session)
+            ctx.extra[_SUBAGENT_PARENT_SESSION_TOKEN_EXTRA_KEY] = parent_token
+
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        _reset_subagent_parent_session_token(ctx)
+
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
@@ -1083,6 +1112,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         _reset_skill_turbo_metadata_token(ctx)
         _reset_skill_turbo_workspace_token(ctx)
         _reset_skill_turbo_interactive_ask_token(ctx)
+        _reset_subagent_parent_session_token(ctx)
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx)
