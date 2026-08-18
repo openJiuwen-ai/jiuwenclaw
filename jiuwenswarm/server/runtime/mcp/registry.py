@@ -105,6 +105,52 @@ def _load_index_entry(name: str) -> dict[str, Any]:
     return {}
 
 
+def _connector_meta_by_name(name: str) -> dict[str, Any]:
+    """Load display metadata for a connector MCP by marketplace name.
+    """
+    n = str(name or "").strip()
+    if not n:
+        return {}
+    return _load_index_entry(n)
+
+
+def get_connector_catalog_display(name: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``(displayName, displayDescription)`` for equipment show cards.
+
+    Values are ``{zh, en}`` dicts aligned with extension catalog cards.
+    Unknown connectors fall back to the connector id and empty description.
+    """
+    n = str(name or "").strip()
+    if not n:
+        return {"zh": "", "en": ""}, {"zh": "", "en": ""}
+    meta = _connector_meta_by_name(n)
+    display_name = {
+        "zh": str(
+            meta.get("display_name")
+            or meta.get("name")
+            or meta.get("name_zh")
+            or n
+        ),
+        "en": str(
+            meta.get("name_en")
+            or meta.get("display_name_en")
+            or meta.get("name")
+            or meta.get("display_name")
+            or n
+        ),
+    }
+    display_desc = {
+        "zh": str(meta.get("description_zh") or meta.get("description") or ""),
+        "en": str(
+            meta.get("description")
+            or meta.get("description_en")
+            or meta.get("description_zh")
+            or ""
+        ),
+    }
+    return display_name, display_desc
+
+
 def _bundled_skill_names(pkg_dir: Path) -> list[str]:
     """Bundled skill runtime names (handles nested + flat marketplace layouts)."""
     skills_dir = pkg_dir / "skills"
@@ -1219,6 +1265,7 @@ def save_mcp_credentials(name: str, tokens: dict[str, Any]) -> dict[str, Any]:
 __all__ = [
     "list_marketplace_mcps",
     "get_mcp",
+    "get_connector_catalog_display",
     "get_mcp_skills",
     "build_config_entry",
     "connect_mcp",

@@ -222,6 +222,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+from jiuwenswarm.server.runtime import extension_package_manager as equipment
 
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
@@ -1379,6 +1380,10 @@ class JiuWenSwarmDeepAdapter:
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
         self._channel_id: str | None = None
+        # (name, load_record, manifest.version)
+        self._loaded_agent_template: tuple[str, Any, str] | None = None
+        # name → (load_record, manifest.version)
+        self._loaded_plugins: dict[str, tuple[Any, str]] = {}
 
     def _schedule_runtime_state_write(
         self,
@@ -1457,6 +1462,280 @@ class JiuWenSwarmDeepAdapter:
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
+
+    # chat.send equipment: apply package load/unload at the fresh-turn boundary.
+    _SKIP_EXTENSION_MODES: "frozenset[str]" = frozenset(
+        {"team", "team.plan", "code.team", "auto_harness"}
+    )
+
+    @staticmethod
+    def _equipment_error_response(request: AgentRequest, message: str) -> AgentResponse:
+        """Build a terminal chat.error AgentResponse for equipment failures."""
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=False,
+            payload={"event_type": "chat.error", "error": message},
+            metadata=request.metadata,
+        )
+
+    async def _ensure_chat_extensions(self, request: AgentRequest) -> AgentResponse | None:
+        """Apply agent_template / plugin equipment for the upcoming turn."""
+        params = request.params if isinstance(request.params, dict) else {}
+        mode = str(params.get("mode") or "").strip() or "agent"
+        if mode in self._SKIP_EXTENSION_MODES:
+            return None
+
+        has_at = "agent_template_name" in params
+        has_pl = "plugin_names" in params
+        if not has_at and not has_pl:
+            return None
+
+        marketplace_error = self._marketplace_equipment_gate(
+            params, has_at, has_pl
+        )
+        if marketplace_error is not None:
+            return self._equipment_error_response(request, marketplace_error)
+
+        connector_error = self._connector_equipment_gate(params, has_at, has_pl)
+        if connector_error is not None:
+            return self._equipment_error_response(request, connector_error)
+
+        would_change, reason = self._equipment_would_change(params, has_at, has_pl)
+        if would_change:
+            attach_goal = self._wants_attach_goal(params)
+            if attach_goal or self._is_session_live(request.session_id):
+                return self._equipment_error_response(
+                    request, f"equipment change rejected at non-fresh turn: {reason}"
+                )
+
+        try:
+            await self._unload_plugins_for_request(params, has_pl)
+            await self._unload_agent_template_for_request(params, has_at)
+            await self._load_agent_template_for_request(
+                params, has_at, request
+            )
+            await self._load_plugins_for_request(
+                params, has_pl, request
+            )
+        except (ValueError, RuntimeError) as exc:
+            return self._equipment_error_response(request, str(exc))
+        return None
+
+    @staticmethod
+    def _marketplace_equipment_gate(
+        params: dict,
+        has_at: bool,
+        has_pl: bool,
+    ) -> str | None:
+        """Hard-reject non-empty equipment that marketplace does not allow.
+
+        ``""`` / ``[]`` / missing fields skip this check (unload / no-op paths).
+        """
+        if has_at:
+            v = params.get("agent_template_name")
+            if isinstance(v, str) and v != "":
+                if not equipment.is_agent_template_installed(v):
+                    return f"agent_template not installed: {v}"
+        if has_pl:
+            v = params.get("plugin_names")
+            if isinstance(v, list):
+                for item in v:
+                    if not isinstance(item, str) or item == "":
+                        continue
+                    if not equipment.is_plugin_allowed(item):
+                        return f"plugin not installed: {item}"
+        return None
+
+    @staticmethod
+    def _connector_equipment_gate(
+        params: dict,
+        has_at: bool,
+        has_pl: bool,
+    ) -> str | None:
+        """Hard-reject when declared connectors are not connected (read-only).
+
+        Runs after marketplace gate. Does not initiate auth; points users to
+        the MCP management page to reconnect.
+        """
+        agent_id = None
+        plugin_ids: list[str] = []
+        if has_at:
+            v = params.get("agent_template_name")
+            if isinstance(v, str) and v != "":
+                agent_id = v
+        if has_pl:
+            v = params.get("plugin_names")
+            if isinstance(v, list):
+                plugin_ids = [item for item in v if isinstance(item, str) and item != ""]
+        pending = equipment.unready_connectors(
+            equipment.collect_connectors_for_packages(
+                agent_template_id=agent_id,
+                plugin_ids=plugin_ids,
+            )
+        )
+        if not pending:
+            return None
+        return (
+            f"connector not connected: {', '.join(pending)}; "
+            "reconnect from the MCP management page"
+        )
+
+    def _equipment_would_change(
+        self, params: dict, has_at: bool, has_pl: bool
+    ) -> tuple[bool, str]:
+        """Return whether passed equipment fields differ from the session handle."""
+        if has_at:
+            v = params["agent_template_name"]
+            if not isinstance(v, str):
+                return True, "agent_template_name illegal type"
+            current = self._loaded_agent_template[0] if self._loaded_agent_template else None
+            if v != current:
+                return True, f"agent_template_name {current!r}→{v!r}"
+        if has_pl:
+            v = params["plugin_names"]
+            if not isinstance(v, list):
+                return True, "plugin_names illegal type"
+            loaded = set(self._loaded_plugins)
+            desired = set(v)
+            if loaded != desired:
+                return True, "plugin set changed"
+        return False, ""
+
+    async def _unload_agent_template_for_request(self, params: dict, has_at: bool) -> None:
+        """Unload the current expert when switching, clearing, or version drifts."""
+        if not has_at:
+            return
+        v = params["agent_template_name"]
+        if not isinstance(v, str):
+            return
+        current = self._loaded_agent_template
+        if current is None:
+            return
+        if v != "" and v == current[0]:
+            desired_version = equipment.read_manifest_version(
+                equipment.resolve_agent_template_dir(v)
+            )
+            if desired_version == current[2]:
+                return
+        if self._instance is not None:
+            await self._instance.unload_extension(current[1])
+        self._loaded_agent_template = None
+
+    async def unload_equipment_if_loaded(self, kind: str, package_id: str) -> None:
+        """Unload ``package_id`` from this adapter and live sessions.
+
+        Not loaded is a no-op. Unload failure raises so uninstall does not
+        delete the package directory.
+        """
+        pid = str(package_id or "").strip()
+        if not pid:
+            return
+        try:
+            if kind == "agent_templates":
+                current = self._loaded_agent_template
+                if current is not None and current[0] == pid:
+                    if self._instance is not None:
+                        await self._instance.unload_extension(current[1])
+                    self._loaded_agent_template = None
+            elif kind == "plugin_packages":
+                entry = self._loaded_plugins.get(pid)
+                if entry is not None:
+                    if self._instance is not None:
+                        await self._instance.unload_extension(entry[0])
+                    self._loaded_plugins.pop(pid, None)
+        except Exception as exc:
+            raise RuntimeError(
+                f"unload equipment failed: kind={kind} id={pid}: {exc}"
+            ) from exc
+        # Session-scoped adapters only unload themselves; root fans out.
+        if getattr(self, "_is_session_scoped_adapter", False):
+            return
+        for adapter in list(getattr(self, "_session_adapters", {}).values()):
+            if adapter is not self:
+                await adapter.unload_equipment_if_loaded(kind, pid)
+
+    async def _load_agent_template_for_request(
+        self,
+        params: dict,
+        has_at: bool,
+        request: AgentRequest,
+    ) -> None:
+        """Load the expert when name or manifest.version differs from the handle."""
+        if not has_at:
+            return
+        v = params["agent_template_name"]
+        if not isinstance(v, str):
+            raise ValueError(f"agent_template_name must be str, got {type(v).__name__}")
+        if v == "":
+            return
+        pkg_dir = equipment.resolve_agent_template_dir(v)
+        desired_version = equipment.read_manifest_version(pkg_dir)
+        current = self._loaded_agent_template
+        if (
+            current is not None
+            and current[0] == v
+            and current[2] == desired_version
+        ):
+            return
+        if self._instance is None:
+            raise RuntimeError("DeepAgent instance not ready for equipment load")
+        record = await self._instance.load_agent_template(str(pkg_dir))
+        self._loaded_agent_template = (v, record, desired_version)
+
+    async def _unload_plugins_for_request(self, params: dict, has_pl: bool) -> None:
+        """Unload plugins removed from the set or whose manifest.version drifted."""
+        if not has_pl:
+            return
+        v = params["plugin_names"]
+        if not isinstance(v, list):
+            return
+        desired = set(v)
+        to_unload: list[str] = []
+        for name, (_record, loaded_version) in self._loaded_plugins.items():
+            if name not in desired:
+                to_unload.append(name)
+                continue
+            desired_version = equipment.read_manifest_version(
+                equipment.resolve_plugin_dir(name)
+            )
+            if loaded_version != desired_version:
+                to_unload.append(name)
+        for name in to_unload:
+            entry = self._loaded_plugins.pop(name, None)
+            if entry is not None and self._instance is not None:
+                await self._instance.unload_extension(entry[0])
+
+    async def _load_plugins_for_request(
+        self,
+        params: dict,
+        has_pl: bool,
+        request: AgentRequest,
+    ) -> None:
+        """Load desired plugins missing from the handle or with a new version."""
+        if not has_pl:
+            return
+        v = params["plugin_names"]
+        if not isinstance(v, list):
+            raise ValueError(f"plugin_names must be list, got {type(v).__name__}")
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError(f"plugin_names element must be str, got {type(item).__name__}")
+        to_load: list[tuple[str, str, Path]] = []
+        for name in v:
+            pkg_dir = equipment.resolve_plugin_dir(name)
+            desired_version = equipment.read_manifest_version(pkg_dir)
+            entry = self._loaded_plugins.get(name)
+            if entry is not None and entry[1] == desired_version:
+                continue
+            to_load.append((name, desired_version, pkg_dir))
+        if not to_load:
+            return
+        if self._instance is None:
+            raise RuntimeError("DeepAgent instance not ready for equipment load")
+        for name, desired_version, pkg_dir in to_load:
+            record = await self._instance.load_plugin(str(pkg_dir))
+            self._loaded_plugins[name] = (record, desired_version)
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
@@ -9702,6 +9981,10 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
 
+        equipment_error = await self._ensure_chat_extensions(request)
+        if equipment_error is not None:
+            return equipment_error
+
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
             session_id=request.session_id,
@@ -10271,6 +10554,24 @@ class JiuWenSwarmDeepAdapter:
                     goal_payload=goal_obj if isinstance(goal_obj, dict) else None,
                 )
             return payload
+
+        equipment_error = await self._ensure_chat_extensions(request)
+        if equipment_error is not None:
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "chat.error",
+                    "error": (
+                        equipment_error.payload.get("error", "equipment error")
+                        if isinstance(equipment_error.payload, dict)
+                        else "equipment error"
+                    ),
+                },
+                is_complete=True,
+                metadata=request.metadata if isinstance(request.metadata, dict) else {},
+            )
+            return
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,

@@ -873,6 +873,7 @@ def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
         )
 
 
+
 class AgentWebSocketServer:
     """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
 
@@ -2182,14 +2183,12 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _is_stateless_method_request(request: AgentRequest) -> bool:
-        """skills / skilldev / plugins / symphony 为无状态 RPC，无需 mode 解析与 adapter.
-
-        恢复 5084467df 引入、8f54b26a7 合入 team 时误删的短路判定。
-        """
+        """Return True for prefix-matched read-only RPCs that skip adapter setup."""
         return (
             request.req_method is not None
             and request.req_method.value.startswith(
-                ("skills.", "skilldev.", "plugins.", "symphony.")
+                ("skills.", "skilldev.", "plugins.", "symphony.",
+                 "agent_templates.", "plugin_packages.")
             )
         )
 
