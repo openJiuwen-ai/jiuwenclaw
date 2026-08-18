@@ -27,6 +27,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
     ImageInfo,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
+    USER_DIRECTORY_ENV_KEY,
     AgentOSRouterClient,
     resolve_agent_workspace,
     _is_ws_connect_retryable,
@@ -318,7 +319,7 @@ async def test_swarm_request_creates_builtin_supervisor_runtime() -> None:
     # 沙箱本地非 loopback IP(ISOLATED 模式 bind veth 地址, 见
     # app_agentserver._resolve_bind_host); 单机版默认仍 127.0.0.1。
     assert "AGENT_SERVER_HOST" not in env
-    assert env == {}
+    assert env == {USER_DIRECTORY_ENV_KEY: yuanrong.create_payloads[0]["workspace"]}
     # create 后通过 frontend WS 代理直连 instance（不走 invoke 链路）。
     assert yuanrong.ws_connect_uris == [
         "ws://yuanrong.test:8888/serverless/v1/ws"
@@ -475,6 +476,7 @@ async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str
         "TRACE_ID": "registry-trace",
         "FEATURE_FLAG": "1",
     }
+    assert USER_DIRECTORY_ENV_KEY not in yuanrong.create_payloads[0]["env_vars"]
     spec = yuanrong.create_payloads[0]["runtime_spec"]
     assert "ports" not in spec["rootfs"]
     assert yuanrong.send_calls == 0
@@ -512,6 +514,7 @@ async def test_agent_switch_creates_without_forwarding_chat() -> None:
     assert response["ok"] is True
     assert yuanrong.create_calls == 1
     assert yuanrong.send_calls == 0
+    assert USER_DIRECTORY_ENV_KEY not in yuanrong.create_payloads[0]["env_vars"]
     assert response["payload"]["agent_type"] == "opencode"
     assert response["payload"]["sandbox_id"] == "sbx-1"
     assert response["payload"]["ssh_ip"] == "0.0.0.0"
@@ -1348,6 +1351,7 @@ async def test_create_uses_configured_workspace_root(tmp_path) -> None:
         )
         assert response["ok"] is True
         assert yuanrong.create_payloads[0]["workspace"] == str(ws_user)
+        assert USER_DIRECTORY_ENV_KEY not in yuanrong.create_payloads[0]["env_vars"]
     finally:
         await client.shutdown()
 
