@@ -1002,6 +1002,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(400, {"error": "missing_token"})
             return
 
+        # AgentOS 的浏览器入口是本静态服务（通常 5173），而实际能够按用户
+        # sandbox 下载文件的是 WebChannel（api_target，通常 19000）。send_file
+        # 已在 URL 中附带 user_id；直接将同一请求转发到 WebChannel，避免再按
+        # 单机 AgentServer HTTP bridge（18092）解析并错误返回 503。
+        if _uses_agentos_routing() and query.get("user_id", "").strip():
+            self._proxy_http()
+            return
+
         try:
             from jiuwenswarm.agents.harness.common.tools.web_file_download import (
                 validate_file_download_token,

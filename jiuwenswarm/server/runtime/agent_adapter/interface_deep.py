@@ -6225,6 +6225,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
@@ -6236,6 +6237,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
                 )
 
