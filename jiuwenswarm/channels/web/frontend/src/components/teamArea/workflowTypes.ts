@@ -10,6 +10,7 @@ export type WorkflowStatus =
   | 'planned'
   | 'pending'
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -100,6 +101,8 @@ export function workflowStatusIcon(status: WorkflowStatus): string {
       return '\u00D7';
     case 'running':
       return '\u25D0';
+    case 'paused':
+      return '\u2016';
     case 'pending':
       return '\u25CB';
     case 'stopped':
@@ -515,6 +518,7 @@ export function computeLoopStatus<T extends { status: WorkflowStatus }>(
   if (members.length === 0) return 'planned';
   const statuses = members.map((m) => m.status);
   if (statuses.includes('running')) return 'running';
+  if (statuses.includes('paused')) return 'paused';
   if (statuses.includes('waiting_for_human')) return 'waiting_for_human';
   if (statuses.includes('failed')) return 'failed';
   if (statuses.includes('pending')) return 'pending';
@@ -532,7 +536,7 @@ export function findActiveIterationIndex<T extends { status: WorkflowStatus }>(
 ): number {
   for (let i = members.length - 1; i >= 0; i--) {
     const s = members[i].status;
-    if (s === 'running' || s === 'waiting_for_human' || s === 'pending' || s === 'planned') {
+    if (s === 'running' || s === 'paused' || s === 'waiting_for_human' || s === 'pending' || s === 'planned') {
       return i;
     }
   }
