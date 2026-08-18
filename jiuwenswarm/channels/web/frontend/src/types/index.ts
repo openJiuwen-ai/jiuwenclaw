@@ -43,7 +43,7 @@ export interface Session {
 
 export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
-export type Permission = 'default' | 'full_access';
+export type Permission = 'full_access' | 'auto' | 'strict';
 
 export interface ModelEntry {
   model_name: string;
@@ -66,6 +66,8 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
+  /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
+  is_free?: boolean;
 }
 
 export interface OffloadFileListResponse {

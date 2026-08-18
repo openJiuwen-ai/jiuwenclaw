@@ -2,8 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Switch } from '../Switch';
 
+type BrowserType = 'auto' | 'chrome' | 'msedge';
+
 interface BrowserPathPayload {
   chrome_path?: unknown;
+  browser_type?: unknown;
   headless?: unknown;
 }
 
@@ -18,6 +21,15 @@ function normalizeChromePath(payload: unknown): string {
   return typeof data.chrome_path === 'string' ? data.chrome_path : '';
 }
 
+function normalizeBrowserType(payload: unknown): BrowserType {
+  if (!payload || typeof payload !== 'object') return 'auto';
+  const data = payload as BrowserPathPayload;
+  const raw = typeof data.browser_type === 'string' ? data.browser_type.trim().toLowerCase() : 'auto';
+  if (raw === 'chrome') return 'chrome';
+  if (raw === 'msedge' || raw === 'edge') return 'msedge';
+  return 'auto';
+}
+
 function normalizeHeadless(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return true;
   const data = payload as BrowserPathPayload;
@@ -28,6 +40,8 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const { t } = useTranslation();
   const [chromePath, setChromePath] = useState('');
   const [initialPath, setInitialPath] = useState('');
+  const [browserType, setBrowserType] = useState<BrowserType>('auto');
+  const [initialBrowserType, setInitialBrowserType] = useState<BrowserType>('auto');
   const [headless, setHeadless] = useState(true);
   const [initialHeadless, setInitialHeadless] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -36,8 +50,11 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
   const [success, setSuccess] = useState<string | null>(null);
 
   const hasChanges = useMemo(
-    () => chromePath !== initialPath || headless !== initialHeadless,
-    [chromePath, initialPath, headless, initialHeadless]
+    () =>
+      chromePath !== initialPath ||
+      browserType !== initialBrowserType ||
+      headless !== initialHeadless,
+    [chromePath, initialPath, browserType, initialBrowserType, headless, initialHeadless]
   );
 
   const clearFeedback = () => {
@@ -51,9 +68,12 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
     try {
       const payload = await request<BrowserPathPayload>('path.get');
       const value = normalizeChromePath(payload);
+      const typeValue = normalizeBrowserType(payload);
       const headlessValue = normalizeHeadless(payload);
       setChromePath(value);
       setInitialPath(value);
+      setBrowserType(typeValue);
+      setInitialBrowserType(typeValue);
       setHeadless(headlessValue);
       setInitialHeadless(headlessValue);
     } catch (loadError) {
@@ -86,11 +106,18 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
     clearFeedback();
     try {
       const nextPath = chromePath.trim();
-      const payload = await request<BrowserPathPayload>('path.set', { chrome_path: nextPath, headless });
+      const payload = await request<BrowserPathPayload>('path.set', {
+        chrome_path: nextPath,
+        browser_type: browserType,
+        headless,
+      });
       const savedPath = normalizeChromePath(payload) || nextPath;
+      const savedType = normalizeBrowserType(payload);
       const savedHeadless = normalizeHeadless(payload);
       setChromePath(savedPath);
       setInitialPath(savedPath);
+      setBrowserType(savedType);
+      setInitialBrowserType(savedType);
       setHeadless(savedHeadless);
       setInitialHeadless(savedHeadless);
       setSuccess(t('browser.success.pathSaved'));
@@ -141,8 +168,26 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
             <span className="text-xs text-text-muted tracking-wider font-medium" data-testid="browser-panel-config-help">{t('browser.pathConfigHelp')}</span>
           </div>
           <div className="p-4 space-y-4">
+            <label className="block space-y-1.5">
+              <span className="text-xs uppercase tracking-wide text-text-muted">{t('browser.browserType')}</span>
+              <select
+                value={browserType}
+                onChange={(event) => {
+                  setBrowserType(event.target.value as BrowserType);
+                  if (error) setError(null);
+                }}
+                className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
+                disabled={loading || saving}
+              >
+                <option value="auto">{t('browser.browserTypeAuto')}</option>
+                <option value="chrome">{t('browser.browserTypeChrome')}</option>
+                <option value="msedge">{t('browser.browserTypeEdge')}</option>
+              </select>
+              <p className="text-xs text-text-muted">{t('browser.browserTypeHelp')}</p>
+            </label>
+
             <label className="block space-y-1.5" data-testid="browser-panel-field-chrome-path">
-              <span className="text-xs uppercase tracking-wide text-text-muted" data-testid="browser-panel-field-chrome-path-label">chrome_path</span>
+              <span className="text-xs uppercase tracking-wide text-text-muted" data-testid="browser-panel-field-chrome-path-label">{t('browser.binaryPath')}</span>
               <input
                 type="text"
                 value={chromePath}
@@ -175,6 +220,7 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => {
                   setChromePath(initialPath);
+                  setBrowserType(initialBrowserType);
                   setHeadless(initialHeadless);
                   clearFeedback();
                 }}

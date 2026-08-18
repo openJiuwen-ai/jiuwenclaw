@@ -9,6 +9,9 @@ import {
   buildGoalCompletedContent,
   isGoalCompletedContent,
 } from '../components/GoalBar/goalCompletedMessage';
+import { HistoryRecordReassembler } from './historyRecordReassembler';
+
+export { HistoryRecordReassembler };
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -139,8 +142,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** 从历史记录中提取随本步落盘的模型思考文本（reasoning_content 可能在顶层或 payload 内）。 */
+/** 主动推荐消息的记录：source 落在 payload.source（或顶层 source）。 */
+function isProactiveRecommendationRecord(record: Record<string, unknown>): boolean {
+  const direct = typeof record.source === 'string' ? record.source : '';
+  if (direct === 'proactive_recommendation') return true;
+  const payload = record.payload;
+  if (isRecord(payload)) {
+    const nested = typeof payload.source === 'string' ? payload.source : '';
+    if (nested === 'proactive_recommendation') return true;
+  }
+  return false;
+}
+
+/**
+ * 从历史记录中提取随本步落盘的模型思考文本（reasoning_content 可能在顶层或 payload 内）。
+ *
+ * 主动推荐消息（主 agent 跑指令式 query 生成话术那轮）也会落盘 reasoning_content，
+ * 但它不是用户这一轮的思考流——segment 无 messageId 绑定、按时间戳并入上一轮 turn，
+ * 重建后会污染上一条用户消息的思考状态（"已完成" → "已完成 N 次思考"），故跳过。
+ */
 function extractHistoryReasoningText(record: Record<string, unknown>): string {
+  if (isProactiveRecommendationRecord(record)) return '';
   const direct = record.reasoning_content;
   if (typeof direct === 'string' && direct.trim()) {
     return direct.trim();
@@ -1164,6 +1186,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   let disposed = false;
   let finalized = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  const reassembler = new HistoryRecordReassembler();
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1187,17 +1210,21 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     const raw = extractHistoryMessagePayload(payload);
     const record = normalizeHistoryContent(raw, options.onError);
     if (record) {
-      const entry = parseHistoryTimelineEntry(record, options.sessionId);
+      const full = reassembler.feed(record);
+      if (!full) {
+        return;
+      }
+      const entry = parseHistoryTimelineEntry(full, options.sessionId);
       if (entry) {
         entries.unshift(entry);
       }
-      const reasoningText = extractHistoryReasoningText(record);
+      const reasoningText = extractHistoryReasoningText(full);
       if (reasoningText) {
         entries.unshift({
           kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
+          at: recordTimestampIso(full) ?? '',
           text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
+          updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }
     }
@@ -1228,6 +1255,7 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
   function finalize(): void {
     if (disposed || finalized) return;
     finalized = true;
+    reassembler.flush();
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);
@@ -1309,6 +1337,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   let disposed = false;
   let finalized = false;
   let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+  const reassembler = new HistoryRecordReassembler();
 
   const unsubscribe = webClient.on(HISTORY_MESSAGE_EVENT, (event: WsEvent) => {
     if (disposed) {
@@ -1332,17 +1361,21 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     const raw = extractHistoryMessagePayload(payload);
     const record = normalizeHistoryContent(raw, options.onError);
     if (record) {
-      const entry = parseHistoryTimelineEntry(record, options.sessionId);
+      const full = reassembler.feed(record);
+      if (!full) {
+        return;
+      }
+      const entry = parseHistoryTimelineEntry(full, options.sessionId);
       if (entry) {
         entries.unshift(entry);
       }
-      const reasoningText = extractHistoryReasoningText(record);
+      const reasoningText = extractHistoryReasoningText(full);
       if (reasoningText) {
         entries.unshift({
           kind: 'reasoning',
-          at: recordTimestampIso(record) ?? '',
+          at: recordTimestampIso(full) ?? '',
           text: reasoningText,
-          updatedAt: extractHistoryReasoningUpdatedAt(record),
+          updatedAt: extractHistoryReasoningUpdatedAt(full),
         });
       }
     }
@@ -1368,6 +1401,7 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
   function finalize(): void {
     if (disposed || finalized) return;
     finalized = true;
+    reassembler.flush();
 
     const { messages, toolReplay, harnessReplay, teamReplay, reasoningReplay } =
       materializeHistoryTimeline(entries);

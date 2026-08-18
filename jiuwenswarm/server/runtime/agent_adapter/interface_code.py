@@ -442,6 +442,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._is_code_agent: bool = True
         self._runtime_language_override: str | None = None
         self._force_english_runtime_prompt: bool = True
+        self._channel_id: str | None = None
 
     # ─── Language override ────────────────────────
 
@@ -487,6 +488,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
+        # Channel id drives the MCP load strategy (see the init gate below and
+        # JiuWenSwarmDeepAdapter._sync_mcp_servers_for_runtime): TUI loads the
+        # global-default set on init, web loads nothing. Mirror the deep
+        # adapter so session children inherit it via _new_session_scoped_adapter.
+        self._channel_id = str(
+            (config or {}).get("channel_id") if isinstance(config, dict) else ""
+            or ""
+        ).strip() or getattr(self, "_channel_id", "")
 
         await self.set_checkpoint()
 
@@ -617,9 +626,16 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
-        await self._register_mcp_servers_from_config(config_base, tag="code")
+        # MCP load strategy by channel (see JiuWenSwarmDeepAdapter.create_instance):
+        # TUI loads the global-default set (config.yaml ∪ state.json enabled) on init;
+        # web loads nothing (session-level via chat.send's ``mcp`` field).
+        if getattr(self, "_channel_id", "") != "web":
+            await self._register_mcp_servers_from_config(config_base, tag="code")
         logger.info("[JiuwenSwarmCodeAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
+        # 恢复已激活的 harness packages（skills, rails, tools）——与 DeepAdapter
+        # create_instance 对齐，否则 code 模式新建实例时不携带已激活扩展。
+        await self._load_active_packages()
         await self.load_user_rails()
 
     # ─── Rails 构建 ──────────────────────────
@@ -926,12 +942,20 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     # ─── 配置驱动的 Rail/Tool 构建代理 ──────────
 
     def _build_skill_rail_via_config(self) -> Any:
-        """构建 SkillUseRail（从 config 读取参数）."""
+        """构建 SkillUseRail（从 config 读取参数）.
+
+        同步挂到 ``_skill_rail``：父类 ``refresh_skill_rails`` 只认该属性，
+        否则 reconcile 选中/取消 cli/skill MCP 后 rail 不刷新，会话级 bundled
+        skills 隔离失效。
+        """
         include_tools = not self._is_acp_tool_profile(self._instance_overrides)
-        return self._build_skill_rail(
+        rail = self._build_skill_rail(
             self._config_cache,
             include_tools=include_tools,
         )
+        if rail is not None:
+            self._skill_rail = rail
+        return rail
 
     def _build_context_assemble_rail(self) -> Any:
         """构建 ContextEngineeringRail."""

@@ -88,6 +88,16 @@ class ReqMethod(Enum):
     AGENT_SWITCH = "3rdagent.switch"
     AGENT_LIST = "3rdagent.list"
 
+    # mcp management.
+    MCP_LIST = "mcp.list"
+    MCP_SHOW = "mcp.show"
+    MCP_CONNECT = "mcp.connect"
+    MCP_WAIT_AUTH = "mcp.wait_auth"
+    MCP_DISCONNECT = "mcp.disconnect"
+    MCP_REGISTER_CUSTOM = "mcp.register_custom"
+    MCP_DELETE_CUSTOM = "mcp.delete_custom"
+    MCP_SAVE_CREDENTIALS = "mcp.save_credentials"
+
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
@@ -167,6 +177,8 @@ class ReqMethod(Enum):
     PERMISSIONS_RULES_DELETE = "permissions.rules.delete"
     PERMISSIONS_APPROVAL_OVERRIDES_GET = "permissions.approval_overrides.get"
     PERMISSIONS_APPROVAL_OVERRIDES_DELETE = "permissions.approval_overrides.delete"
+    PERMISSIONS_MODE_GET = "permissions.mode.get"
+    PERMISSIONS_MODE_SET = "permissions.mode.set"
 
     CHANNEL_FEISHU_GET_CONF = "channel.feishu.get_conf"
     CHANNEL_FEISHU_SET_CONF = "channel.feishu.set_conf"

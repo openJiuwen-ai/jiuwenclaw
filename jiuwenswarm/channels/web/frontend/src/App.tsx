@@ -347,6 +347,7 @@ function AppContent() {
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const [sidebarMorePanelOpen, setSidebarMorePanelOpen] = useState(false);
   const [modelSetupGuideStep, setModelSetupGuideStep] = useState<ModelSetupGuideStep | null>(null);
+  const [modelSetupGuideManual, setModelSetupGuideManual] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -985,7 +986,8 @@ function AppContent() {
         modelSetupGuideEvaluatedRef.current = true;
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
           setActiveNav('chat');
-          setModelSetupGuideStep(1);
+          setModelSetupGuideManual(false);
+          setModelSetupGuideStep(0);
         }
       }
     } catch (error) {
@@ -2275,8 +2277,9 @@ function AppContent() {
     if (nav === 'channels') setHasVisitedChannels(true);
   }, [modelSetupGuideStep]);
 
-  const dismissModelSetupGuide = useCallback(() => {
+  const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
 
     void request('config.set', { setup_guide_enabled: 'false' })
       .then(() => {
@@ -2289,6 +2292,42 @@ function AppContent() {
         console.error('Failed to disable setup guide:', error);
       });
   }, [request]);
+
+  const quickSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+    // 显式指定使用 huawei-cloud-maas-setup skill，避免 agent 自行上网搜索
+    void handleSendMessage(
+      '请使用 huawei-cloud-maas-setup 技能帮我配置华为云 MaaS 服务。'
+      + '严格按照其中的步骤引导我完成购买、获取 API Key 和配置写入。'
+    );
+  }, [handleSendMessage]);
+
+  const manualSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(1);
+  }, []);
+
+  const acknowledgeModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+
+    void request('config.set', { setup_guide_enabled: 'false' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'false',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to disable setup guide:', error);
+      });
+  }, [request]);
+
+  const openModelSetupGuide = useCallback(() => {
+    setActiveNav('chat');
+    setModelSetupGuideManual(true);
+    setModelSetupGuideStep(0);
+  }, []);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2399,13 +2438,17 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
+        onSetupGuideRequest={openModelSetupGuide}
       />
 
-      {modelSetupGuideStep ? (
+      {modelSetupGuideStep !== null ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
-          onAcknowledge={dismissModelSetupGuide}
-          onSkip={dismissModelSetupGuide}
+          manual={modelSetupGuideManual}
+          onAcknowledge={acknowledgeModelSetupGuide}
+          onSkip={skipModelSetupGuide}
+          onQuickSetup={quickSetupModelSetupGuide}
+          onManualSetup={manualSetupModelSetupGuide}
         />
       ) : null}
 
@@ -2472,7 +2515,10 @@ function AppContent() {
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
                       onOpenCodeReview={handleOpenCodeReview}
-                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                      permissionsMode={
+                        (serverConfig?.permissions_mode as 'full_access' | 'auto' | 'strict' | undefined)
+                        ?? (serverConfig?.permissions_enabled === 'false' ? 'full_access' : 'auto')
+                      }
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}
