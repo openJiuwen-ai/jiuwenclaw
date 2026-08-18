@@ -207,7 +207,7 @@ def _log_background_session_kvc_failure(task: asyncio.Task) -> None:
 _SERVER_PLAN_CONTROLLER = PlanModeController()
 # Compatibility aliases for existing diagnostics/tests. Runtime semantics live
 # in PlanModeController and are shared by AgentServer and process-style CLI.
-_session_mode_sync_locks = _SERVER_PLAN_CONTROLLER._sync_locks
+_session_mode_sync_locks = _SERVER_PLAN_CONTROLLER.sync_locks
 
 # Serialize switch owner preparation and acknowledgements per client
 # connection. AgentServer handles WebSocket frames in independent tasks, so
@@ -225,13 +225,13 @@ _session_team_binding_locks: WeakValueDictionary[str, asyncio.Lock] = (
 # Sessions that have successfully exited plan mode via exit_plan_mode tool.
 # Set by _check_post_process_plan_exit, consumed by _ensure_code_mode_state
 # to prevent TUI-race re-entrance to plan mode.
-_plan_exited_sessions = _SERVER_PLAN_CONTROLLER._exited_sessions
+_plan_exited_sessions = _SERVER_PLAN_CONTROLLER.exited_sessions
 
 # 本进程内曾进入过 plan 的 work 单 agent 会话。work 的准入面覆盖 IM / 定时任务 /
 # CLI / Web work 的每一条普通消息，而其中绝大多数会话从未开过 Plan；有这个标记
 # 才需要去同步 plan 状态。跨重启的情况另有一道判据（会话 metadata 里上一轮的
 # canonical mode），见 ``_session_may_hold_plan_state``。
-_plan_active_sessions = _SERVER_PLAN_CONTROLLER._active_sessions
+_plan_active_sessions = _SERVER_PLAN_CONTROLLER.active_sessions
 
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
@@ -617,7 +617,7 @@ def _reject_extra_sandbox_files_params(params: dict[str, Any]) -> None:
 
 def _inject_plan_mode_activation_reminder(request: AgentRequest) -> None:
     """Compatibility alias for the shared Runtime plan controller."""
-    PlanModeController._inject_activation_reminder(request)
+    PlanModeController.inject_activation_reminder(request)
 
 
 class AgentWebSocketServer:
@@ -1706,15 +1706,15 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _should_sync_code_mode_state(request: AgentRequest) -> bool:
-        return PlanModeController._should_sync(request)
+        return PlanModeController.should_sync(request)
 
     @staticmethod
     def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
-        return PlanModeController._is_explicit_entry(request)
+        return PlanModeController.is_explicit_entry(request)
 
     @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
-        return _SERVER_PLAN_CONTROLLER._lock(session_id)
+        return _SERVER_PLAN_CONTROLLER.lock_for(session_id)
 
     @staticmethod
     def _session_team_binding_lock(session_id: str) -> asyncio.Lock:
@@ -1839,14 +1839,14 @@ class AgentWebSocketServer:
 
     @staticmethod
     def _session_may_hold_plan_state(request: AgentRequest, session_id: str) -> bool:
-        return _SERVER_PLAN_CONTROLLER._may_hold_state(request, session_id)
+        return _SERVER_PLAN_CONTROLLER.may_hold_state(request, session_id)
 
     @staticmethod
     async def _open_plan_state_session(
         agent: Any,
         session_id: str | None,
     ) -> tuple[Any, Any, bool]:
-        return await PlanModeController._open_state_session(agent, session_id)
+        return await PlanModeController.open_state_session(agent, session_id)
 
     async def _ensure_code_mode_state(
         self,

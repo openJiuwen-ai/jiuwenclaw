@@ -115,8 +115,10 @@ async def _run_worker(
             stderr=asyncio.subprocess.PIPE,
             creationflags=creationflags,
         )
-        assert process.stderr is not None
-        log_task = asyncio.create_task(_drain_runtime_logs(process.stderr))
+        process_stderr = process.stderr
+        if process_stderr is None:
+            raise RuntimeError("process CLI worker stderr pipe is unavailable")
+        log_task = asyncio.create_task(_drain_runtime_logs(process_stderr))
         try:
             return_code = await process.wait()
         except asyncio.CancelledError:
@@ -131,8 +133,8 @@ async def _run_worker(
             if value:
                 next_session = value
         if return_code != 0 and not result_path.exists() and log_tail:
-            print("\n工作进程诊断信息：", file=sys.stderr)
-            print("\n".join(log_tail), file=sys.stderr)
+            sys.stderr.write("\n工作进程诊断信息：\n")
+            sys.stderr.write("\n".join(log_tail) + "\n")
         return return_code, next_session
 
 
@@ -160,7 +162,7 @@ async def run_repl(args: argparse.Namespace) -> int:
         try:
             prompt = (await _read_prompt(prompt_session)).strip()
         except EOFError:
-            print()
+            sys.stdout.write("\n")
             return 0
         if not prompt:
             continue

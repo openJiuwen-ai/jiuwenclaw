@@ -147,7 +147,9 @@ def main() -> None:
                     args,
                     stdout=data_stdout,
                     stderr=(
-                        data_stdout if args._interactive_worker else diagnostic_stderr
+                        data_stdout
+                        if getattr(args, "_interactive_worker", False)
+                        else diagnostic_stderr
                     ),
                 )
             )

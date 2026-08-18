@@ -44,39 +44,59 @@ class PlanModeController:
         self._exited_sessions: set[str] = set()
         self._active_sessions: set[str] = set()
 
+    @property
+    def sync_locks(self) -> WeakValueDictionary[str, asyncio.Lock]:
+        """Expose the weak lock cache for compatibility diagnostics."""
+        return self._sync_locks
+
+    @property
+    def exited_sessions(self) -> set[str]:
+        """Expose sessions that explicitly exited plan mode."""
+        return self._exited_sessions
+
+    @property
+    def active_sessions(self) -> set[str]:
+        """Expose sessions known to have entered plan mode."""
+        return self._active_sessions
+
     def reset_session(self, session_id: str) -> None:
         self._exited_sessions.discard(session_id)
         self._active_sessions.discard(session_id)
 
     @staticmethod
-    def _should_sync(request: AgentRequest) -> bool:
+    def should_sync(request: AgentRequest) -> bool:
+        """Return whether the request participates in plan-state syncing."""
         return request.req_method is None or request.req_method in CHAT_TURN_METHODS
 
     @staticmethod
-    def _is_explicit_entry(request: AgentRequest) -> bool:
+    def is_explicit_entry(request: AgentRequest) -> bool:
+        """Return whether the current request explicitly enters plan mode."""
         return (
             isinstance(request.params, dict)
             and request.params.get("plan_entry_source") in PLAN_ENTRY_SOURCES
         )
 
-    def _lock(self, session_id: str) -> asyncio.Lock:
+    def lock_for(self, session_id: str) -> asyncio.Lock:
+        """Return the synchronization lock owned by one Runtime session."""
         lock = self._sync_locks.get(session_id)
         if lock is None:
             lock = asyncio.Lock()
             self._sync_locks[session_id] = lock
         return lock
 
-    def _may_hold_state(self, request: AgentRequest, session_id: str) -> bool:
+    def may_hold_state(self, request: AgentRequest, session_id: str) -> bool:
+        """Return whether the session may retain plan state."""
         if session_id in self._active_sessions:
             return True
         params = request.params if isinstance(request.params, dict) else {}
         return is_plan_mode(params.get(PREVIOUS_SESSION_MODE_KEY))
 
     @staticmethod
-    async def _open_state_session(
+    async def open_state_session(
         agent: Any,
         session_id: str | None,
     ) -> tuple[Any, Any, bool]:
+        """Open the agent state session used for plan-mode coordination."""
         from openjiuwen.core.single_agent import create_agent_session
 
         from jiuwenswarm.agents.harness.common.session_ops_service import (
@@ -102,7 +122,8 @@ class PlanModeController:
         return {"event_type": PLAN_MODE_EXITED_EVENT_TYPE, "mode": mode}
 
     @staticmethod
-    def _inject_activation_reminder(request: AgentRequest) -> None:
+    def inject_activation_reminder(request: AgentRequest) -> None:
+        """Inject the plan-mode constraint into an explicit plan request."""
         if not isinstance(request.params, dict):
             return
         reminder = (
@@ -150,17 +171,17 @@ class PlanModeController:
         if (
             not is_code_single
             and target_state == "normal"
-            and not self._may_hold_state(request, session_id)
+            and not self.may_hold_state(request, session_id)
         ):
             return PlanStateResult()
-        if not self._should_sync(request) or is_interrupt_resume_payload(
+        if not self.should_sync(request) or is_interrupt_resume_payload(
             request.params
         ):
             return PlanStateResult()
 
         events: list[dict[str, Any]] = []
-        async with self._lock(session_id):
-            deep_agent, session, live = await self._open_state_session(
+        async with self.lock_for(session_id):
+            deep_agent, session, live = await self.open_state_session(
                 agent,
                 request.session_id,
             )
@@ -170,7 +191,7 @@ class PlanModeController:
             if previous_state != target_state:
                 if previous_state == "normal" and target_state == "plan":
                     blocked = False
-                    if self._is_explicit_entry(request):
+                    if self.is_explicit_entry(request):
                         self._exited_sessions.discard(session_id)
                     elif session_id in self._exited_sessions:
                         self._exited_sessions.discard(session_id)
@@ -205,7 +226,7 @@ class PlanModeController:
                     live,
                 )
             if target_state == "plan" and changed_to_plan:
-                self._inject_activation_reminder(request)
+                self.inject_activation_reminder(request)
         return PlanStateResult(
             restored=bool(previous_state == "plan" and target_state == "normal"),
             events=events,
@@ -225,7 +246,7 @@ class PlanModeController:
             request.params["mode"] = resolved.canonical_mode
         if resolved.is_team or not resolved.is_plan:
             return []
-        deep_agent, session, _live = await self._open_state_session(agent, session_id)
+        deep_agent, session, _live = await self.open_state_session(agent, session_id)
         state = deep_agent.load_state(session)
         if state.plan_mode.mode != "normal":
             return []

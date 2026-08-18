@@ -254,7 +254,8 @@ class HumanRunUI:
         self._frame_index = 0
         self._assistant_visible = False
 
-    def start(self) -> None:
+    @staticmethod
+    def start() -> None:
         """Keep Runtime initialization silent until request processing begins."""
 
     def working(self) -> None:

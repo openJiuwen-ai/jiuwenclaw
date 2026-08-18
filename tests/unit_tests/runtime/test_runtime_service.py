@@ -91,6 +91,13 @@ class FakeAgent:
         )
 
 
+class CancellingAgent(FakeAgent):
+    async def process_message_stream(self, request: AgentRequest):
+        if False:
+            yield
+        raise asyncio.CancelledError
+
+
 class FakePlanController:
     def __init__(self) -> None:
         self.reset_calls: list[str] = []
@@ -258,6 +265,42 @@ async def test_stream_uses_selected_existing_agent_and_runtime_events() -> None:
     assert [event.event_type for event in events] == ["chat.delta", "chat.final"]
     assert events[-1].is_complete is True
     assert manager.foreground_calls == ["begin", "end"]
+
+
+@pytest.mark.asyncio
+async def test_stream_preserves_cancellation_and_skips_plan_exit_check() -> None:
+    manager = FakeAgentManager()
+    manager.agent = CancellingAgent()
+    plan = FakePlanController()
+    plan.check_post_process_exit = AsyncMock(return_value=[])
+
+    async def initialize() -> None:
+        return None
+
+    runtime = AgentRuntime(
+        agent_manager=manager,
+        initializer=initialize,
+        plan_controller=plan,
+    )
+
+    async def no_hook(request: AgentRequest) -> None:
+        return None
+
+    runtime._trigger_before_chat_request_hook = no_hook
+    request = AgentRequest(
+        request_id="cancelled-stream-request",
+        channel_id="process_cli",
+        session_id=None,
+        req_method=ReqMethod.CHAT_SEND,
+        params={"query": "hello", "mode": "agent", "work_mode": "work"},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _event in runtime.stream(request):
+            pass
+
+    assert manager.foreground_calls == ["begin", "end"]
+    plan.check_post_process_exit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

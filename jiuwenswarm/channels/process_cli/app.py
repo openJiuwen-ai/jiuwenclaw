@@ -77,13 +77,13 @@ def _interaction_answer(
     stream: TextIO,
 ) -> tuple[str, list[dict[str, Any]]]:
     prompt = str(payload.get("question") or payload.get("message") or "需要输入")
-    print(f"\n? {prompt}", file=stream)
+    stream.write(f"\n? {prompt}\n")
     options = [item for item in payload.get("options", []) if isinstance(item, dict)]
     for index, option in enumerate(options, 1):
         label = option.get("label") or option.get("value") or "?"
         description = option.get("description") or ""
         suffix = f" — {description}" if description else ""
-        print(f"  {index}. {label}{suffix}", file=stream)
+        stream.write(f"  {index}. {label}{suffix}\n")
     stream.write("请输入选项或自定义内容：")
     stream.flush()
     answer = sys.stdin.readline().strip()

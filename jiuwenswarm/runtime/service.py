@@ -214,8 +214,6 @@ class AgentRuntime:
                     default_complete=True,
                 )
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001
             events.append(
                 RuntimeEvent.error(
@@ -265,6 +263,7 @@ class AgentRuntime:
         readonly_goal_get = self._is_readonly_goal_get_request(request)
         stateless = self._is_stateless_method_request(request)
         error: Exception | None = None
+        cancellation: asyncio.CancelledError | None = None
         cancelled = False
         try:
             if stateless:
@@ -295,18 +294,16 @@ class AgentRuntime:
                     session_id=request.session_id,
                     default_agent_ref=request.agent_ref,
                 )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             cancelled = True
-            raise
+            cancellation = exc
         except Exception as exc:  # noqa: BLE001
             error = exc
         finally:
-            if (
-                not cancelled
-                and agent is not None
-                and not stateless
-                and not readonly_goal_get
-            ):
+            should_check_plan_exit = (
+                agent is not None and not stateless and not readonly_goal_get
+            )
+            if not cancelled and should_check_plan_exit:
                 for event in self._control_events(
                     request,
                     await self._plan_controller.check_post_process_exit(
@@ -317,6 +314,8 @@ class AgentRuntime:
                     yield event
             if foreground:
                 await self._agent_manager.end_foreground_chat()
+        if cancellation is not None:
+            raise cancellation
         if error is not None:
             yield RuntimeEvent.error(
                 request_id=request.request_id,

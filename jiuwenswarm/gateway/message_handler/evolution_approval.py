@@ -22,6 +22,7 @@ from jiuwenswarm.runtime.evolution import (
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class EvolutionApprovalChunkDecision:
     should_publish_chunk: bool = True
