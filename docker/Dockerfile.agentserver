@@ -16,6 +16,7 @@ RUN sed -i '/openjiuwen_runtime_management/d' packages/jiuwenclaw-ee/gateway/ext
 
 RUN pip install -e . \
     git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    ./observability \
     --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 

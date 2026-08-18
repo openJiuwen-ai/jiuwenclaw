@@ -33,6 +33,10 @@ class TelemetryConfig:
     metrics_endpoint: str = "http://localhost:4317"
     metrics_protocol: str = "grpc"  # grpc / http
     metrics_headers: dict[str, str] = field(default_factory=dict)
+    logs_exporter: str = "none"     # otlp / console / none
+    logs_endpoint: str = "http://localhost:4317"
+    logs_protocol: str = "grpc"     # grpc / http
+    logs_headers: dict[str, str] = field(default_factory=dict)
     log_messages: bool = True       # record full message content in span events
     service_name: str = "jiuwenclaw"
     claw_id: str | None = None
@@ -194,6 +198,29 @@ def load_telemetry_config() -> TelemetryConfig:
         _yaml_signal_value(yaml_cfg, "metrics", "headers") or common_headers,
     )
 
+    logs_exporter = _normalize_exporter(
+        _str_env(
+            "OTEL_LOGS_EXPORTER",
+            str(_yaml_signal_value(yaml_cfg, "logs", "exporter") or common_exporter),
+        ),
+        common_exporter,
+    )
+    logs_endpoint = _str_env(
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        str(_yaml_signal_value(yaml_cfg, "logs", "endpoint") or common_endpoint),
+    )
+    logs_protocol = _normalize_protocol(
+        _str_env(
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+            str(_yaml_signal_value(yaml_cfg, "logs", "protocol") or common_protocol),
+        ),
+        common_protocol,
+    )
+    logs_headers = _headers_env(
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        _yaml_signal_value(yaml_cfg, "logs", "headers") or common_headers,
+    )
+
     return TelemetryConfig(
         enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", False)),
         exporter=common_exporter,
@@ -208,6 +235,10 @@ def load_telemetry_config() -> TelemetryConfig:
         metrics_endpoint=metrics_endpoint,
         metrics_protocol=metrics_protocol,
         metrics_headers=metrics_headers,
+        logs_exporter=logs_exporter,
+        logs_endpoint=logs_endpoint,
+        logs_protocol=logs_protocol,
+        logs_headers=logs_headers,
         log_messages=_bool_env("OTEL_LOG_MESSAGES", yaml_cfg.get("log_messages", True)),
         service_name=os.getenv(
             "OTEL_SERVICE_NAME",

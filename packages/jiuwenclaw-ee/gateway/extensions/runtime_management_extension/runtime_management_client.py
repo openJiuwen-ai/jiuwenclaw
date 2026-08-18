@@ -663,6 +663,21 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         e,
                         agent_custom_envs,
                     )
+
+            if _env_bool("OTEL_ENABLED", False):
+                base.update(
+                    {
+                        "OTEL_ENABLED": os.getenv("OTEL_ENABLED"),
+                        "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                        "OTEL_EXPORTER_TYPE": "otlp",
+                        "OTEL_EXPORTER_OTLP_PROTOCOL": os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http"),
+                        "OTEL_TRACES_EXPORTER": "otlp",
+                        "OTEL_METRICS_EXPORTER": "otlp",
+                        "OTEL_LOGS_EXPORTER": "otlp",
+                        "OTEL_LOG_MESSAGES": "true",
+                        "OTEL_SERVICE_NAME": container_name,
+                    }
+                )
             return base
 
         _client = self  # 捕获外层 RuntimeManagementAgentClient 实例，供内部类使用

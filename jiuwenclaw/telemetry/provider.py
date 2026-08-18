@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from opentelemetry import trace, metrics
+from opentelemetry import trace, metrics, _logs as logs
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
@@ -17,6 +17,8 @@ from opentelemetry.sdk.metrics.export import (
     ConsoleMetricExporter,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, ConsoleLogExporter
 from opentelemetry.sdk.metrics._internal.instrument import (
     Counter,
     Histogram,
@@ -43,6 +45,7 @@ from jiuwenclaw.telemetry.config import TelemetryConfig
 class ProviderBundle:
     tracer_provider: TracerProvider | None = None
     meter_provider: MeterProvider | None = None
+    logger_provider: LoggerProvider | None = None
     resource: Resource | None = None  # 暴露 Resource 供 metrics 获取 claw_id
 
 
@@ -72,9 +75,11 @@ def build_default_providers(cfg: TelemetryConfig) -> ProviderBundle:
 
     tracer_provider = _build_tracer_provider(cfg, resource)
     meter_provider = _build_meter_provider(cfg, resource)
+    logger_provider = _build_logger_provider(cfg, resource)
     return ProviderBundle(
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
+        logger_provider=logger_provider,
         resource=resource,
     )
 
@@ -85,6 +90,8 @@ def install_providers(bundle: ProviderBundle) -> None:
         trace.set_tracer_provider(bundle.tracer_provider)
     if bundle.meter_provider is not None:
         metrics.set_meter_provider(bundle.meter_provider)
+    if bundle.logger_provider is not None:
+        logs.set_logger_provider(bundle.logger_provider)
 
 
 def _coerce_provider_bundle(value: Any) -> ProviderBundle:
@@ -231,3 +238,35 @@ def _create_otlp_metric_exporter(cfg: TelemetryConfig, signal: str = "metrics"):
             headers=headers,
             preferred_temporality=_CUMULATIVE_TEMPORALITY,
         )
+
+
+def _build_logger_provider(cfg: TelemetryConfig, resource: Resource) -> LoggerProvider:
+    logger_provider = LoggerProvider(resource=resource)
+    exporter = cfg.logs_exporter
+
+    if exporter == "otlp":
+        log_exporter = _create_otlp_log_exporter(cfg, signal="logs")
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(log_exporter)
+        )
+    elif exporter == "console":
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(ConsoleLogExporter())
+        )
+    elif exporter != "none":
+        raise ValueError(f"Unsupported logs exporter: {exporter}")
+
+    return logger_provider
+
+
+def _create_otlp_log_exporter(cfg: TelemetryConfig, signal: str = "logs"):
+    """Create OTLP log exporter based on protocol config."""
+    protocol = getattr(cfg, f"{signal}_protocol")
+    endpoint = getattr(cfg, f"{signal}_endpoint")
+    headers = getattr(cfg, f"{signal}_headers")
+    if protocol == "http":
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        return OTLPLogExporter(endpoint=f"{endpoint}/v1/logs", headers=headers)
+    else:
+        from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+        return OTLPLogExporter(endpoint=endpoint, headers=headers)

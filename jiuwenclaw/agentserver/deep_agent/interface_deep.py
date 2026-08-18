@@ -1858,6 +1858,18 @@ class JiuWenClawDeepAdapter:
         return rail
 
     @staticmethod
+    def _build_audit_rail() -> Any | None:
+        """Build AuditRail for security/compliance auditing."""
+        try:
+            from jiuwenclaw.telemetry.instrumentors.audit_rail import AuditRail
+            rail = AuditRail()
+            logger.info("[JiuWenClawDeepAdapter] AuditRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] AuditRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_extension_config_debug_rail() -> Any | None:
         """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
         try:
@@ -2146,6 +2158,8 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
+            # AuditRail - priority 20, runs after TelemetryRail so trace_id is available
+            _RailBuildInfo("_audit_rail", self._build_audit_rail),
             _RailBuildInfo(
                 "_runtime_prompt_rail",
                 self._build_runtime_prompt_rail,
@@ -4577,11 +4591,20 @@ class JiuWenClawDeepAdapter:
 
         # Set telemetry context for OpenTelemetry span creation
         if self._telemetry_rail is not None:
+            from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+            _t_gid, _t_bid, _t_uid = extract_routing_triple(request)
+            from jiuwenclaw.telemetry.instrumentors.agent import RoutingCtx
             self._telemetry_rail.set_telemetry_context(
-                channel_id=request.channel_id or "",
-                session_id=request.session_id or "",
-                request_id=request.request_id or "",
+                RoutingCtx(
+                    channel_id=request.channel_id or "",
+                    session_id=request.session_id or "",
+                    request_id=request.request_id or "",
+                    user_id=_t_uid or "",
+                    group_id=_t_gid or "",
+                    bot_id=_t_bid or "",
+                ),
                 metadata=request.metadata,
+                is_resume=bool(request.params.get("answers") if isinstance(request.params, dict) else False),
             )
 
         try:
@@ -4736,11 +4759,20 @@ class JiuWenClawDeepAdapter:
 
         # Set telemetry context for OpenTelemetry span creation
         if self._telemetry_rail is not None:
+            from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+            _t_gid, _t_bid, _t_uid = extract_routing_triple(request)
+            from jiuwenclaw.telemetry.instrumentors.agent import RoutingCtx
             self._telemetry_rail.set_telemetry_context(
-                channel_id=request.channel_id or "",
-                session_id=request.session_id or "",
-                request_id=request.request_id or "",
+                RoutingCtx(
+                    channel_id=request.channel_id or "",
+                    session_id=request.session_id or "",
+                    request_id=request.request_id or "",
+                    user_id=_t_uid or "",
+                    group_id=_t_gid or "",
+                    bot_id=_t_bid or "",
+                ),
                 metadata=request.metadata,
+                is_resume=bool(request.params.get("answers") if isinstance(request.params, dict) else False),
             )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
@@ -5068,6 +5100,28 @@ class JiuWenClawDeepAdapter:
 
         logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
                     rid, session_id, summary)
+
+        try:
+            from jiuwenclaw.telemetry.metrics import record_genai_token_usage
+            from jiuwenclaw.gateway.cron.enterprise_gate import extract_routing_triple
+            _t_mname = getattr(getattr(self._model, "model_config", None), "model_name", "") or ""
+            _t_mcc = getattr(self._model, "model_client_config", None)
+            _t_sys = str(getattr(_t_mcc, "client_provider", "") or "").lower() or "unknown"
+            _t_gid, _t_bid, _t_uid = extract_routing_triple(
+                getattr(request, "params", None) or {}, getattr(request, "metadata", None) or {},
+            )
+            record_genai_token_usage(
+                input_tokens=usage_accumulator.get("input_tokens", 0) or 0,
+                output_tokens=usage_accumulator.get("output_tokens", 0) or 0,
+                model_name=_t_mname,
+                system=_t_sys,
+                channel_id=cid or "",
+                user_id=_t_uid or "",
+                group_id=_t_gid or "",
+                bot_id=_t_bid or "",
+            )
+        except Exception:
+            logger.debug("[JiuWenClawDeepAdapter] gen_ai token metric record skipped", exc_info=True)
 
         if usage_accumulator["total_tokens"] > 0:
             yield AgentResponseChunk(

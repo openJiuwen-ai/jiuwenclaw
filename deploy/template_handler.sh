@@ -193,7 +193,7 @@ add_resource_if_set() {
     local file=$2
     local kind_type="Deployment"
 
-    if [[ "${module}" == "MYSQL" || "${module}" == "POSTGRES" ]]; then
+    if [[ "${module}" == "MYSQL" || "${module}" == "POSTGRES" || "${module}" == "OTEL" || "${module}" == "LOKI" ]]; then
         kind_type="StatefulSet"
     fi
 

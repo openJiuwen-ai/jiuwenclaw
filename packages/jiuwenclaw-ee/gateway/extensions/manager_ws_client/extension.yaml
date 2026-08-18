@@ -4,10 +4,7 @@ version: 0.1.0
 description: Gateway-only WebSocket client for Claw Manager config.push (agent_server must not load; GATEWAY_* in repo root .env)
 author: openjiuwen
 min_jiuwenclaw_version: "0.1.0"
-dependencies:
-  websockets: ">=12.0,<16"
-  pydantic-settings: ">=2.0"
-  python-dotenv: ">=1.0"
+dependencies: {}
 config_schema:
   type: object
   properties:

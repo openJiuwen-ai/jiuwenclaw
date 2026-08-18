@@ -1,0 +1,72 @@
+{
+  "common": {
+    "ok": "OK",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "create": "Create",
+    "search": "Search",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "empty": "No data",
+    "yes": "Yes",
+    "no": "No",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "detail": "Detail",
+    "view": "View",
+    "actions": "Actions",
+    "all": "All",
+    "reload": "Reload",
+    "retry": "Retry"
+  },
+  "brand": {
+    "title": "{{productName}}",
+    "sub": "Observability"
+  },
+  "nav": {
+    "observability": "Observability"
+  },
+  "observability": {
+    "statInputTokens": "Total input tokens",
+    "statOutputTokens": "Total output tokens",
+    "statCallsTotal": "Total LLM calls",
+    "chartTokenUsage": "Cumulative token usage",
+    "chartCallCount": "Cumulative LLM call count",
+    "chartLlmLatency": "LLM call latency (seconds, avg)",
+    "chartAgentLatency": "Agent invoke latency (seconds, avg)",
+    "tabs": {
+      "tokenUsage": "Token Usage",
+      "trace": "Trace",
+      "auditLog": "Audit Log"
+    },
+    "placeholderHint": "Content of this tab is to be determined.",
+    "rangeLabel": "Time range",
+    "dimensionLabel": "Dimension",
+    "searchPlaceholder": "Type a {{field}} value to search (e.g. alice / bot_main / g_demo_sales)",
+    "tokenUsageOverall": "Cumulative token usage (by input / output)",
+    "tokenUsageFor": "Cumulative token usage for {{field}} = {{id}} (by input / output)",
+    "totalTokens": "Total tokens",
+    "topNTitle": "Top {{n}} · {{field}}",
+    "unknownId": "(unknown id)",
+    "clickToFilter": "Click to filter by {{id}}",
+    "howToUseTitle": "How to use",
+    "howToUseSearch": "Use the dropdown above to switch dimension (user_id / bot_id / group_id); type a specific id to view its token usage curve.",
+    "howToUseRanking": "The three cards below show the top 5 cumulative token usage per dimension within the selected range.",
+    "howToUseLabel": "Source: gen_ai.client.token.usage metric, augmented with jiuwenclaw.user.id / jiuwenclaw.group.id / jiuwenclaw.bot.id labels."
+  },
+  "trace": {
+    "searchPlaceholder": "TraceID or user_id:3 bot_id:3 group_id:3 start_time:2026-08-12",
+    "recentTraces": "Recent 20 requests",
+    "searchResults": "Search results",
+    "traceDetail": "Trace detail",
+    "selectHint": "← Click a trace on the left to view details",
+    "duration": "Duration",
+    "startTime": "Start time",
+    "model": "Model",
+    "toolName": "Tool",
+    "agentName": "Agent",
+    "iteration": "Iteration"
+  }
+}

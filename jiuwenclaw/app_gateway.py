@@ -851,7 +851,8 @@ async def _run(
     logger.info("[App] extensions loaded: %d", len(extension_manager.list_extensions()))
 
     # ---------- Telemetry 初始化 ----------
-    init_telemetry()
+    if os.getenv("GATEWAY_TELEMETRY_ENABLED", "true").lower() in ("true", "1", "yes"):
+        init_telemetry()
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))

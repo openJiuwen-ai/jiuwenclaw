@@ -1,0 +1,30 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG AGENT_RUNTIME_REPOS
+ARG AGENT_RUNTIME_BRANCH
+
+ARG VITE_PRODUCT_NAME=JiuwenSwarm
+ENV VITE_PRODUCT_NAME=${VITE_PRODUCT_NAME}
+
+RUN useradd --create-home --shell /bin/bash app
+
+WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+RUN chown -R app:app /app/jiuwenclaw
+
+RUN pip install -e "./observability" \
+    git+${AGENT_RUNTIME_REPOS}@${AGENT_RUNTIME_BRANCH}#subdirectory=foundation \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+USER app
+WORKDIR /app/jiuwenclaw/observability/web
+RUN npm install
+RUN npm run build
+
+WORKDIR /app/jiuwenclaw/observability
+ENV PATH=$PATH:/home/app/.local/bin
+
+EXPOSE 5274
+CMD ["jiuwenclaw-observability"]

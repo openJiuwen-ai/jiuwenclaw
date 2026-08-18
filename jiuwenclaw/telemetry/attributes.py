@@ -35,6 +35,8 @@ JIUWENCLAW_CLAW_ID = "jiuwenclaw.claw.id"
 JIUWENCLAW_CHANNEL_ID = "jiuwenclaw.channel.id"
 JIUWENCLAW_SESSION_ID = "jiuwenclaw.session.id"
 JIUWENCLAW_USER_ID = "jiuwenclaw.user.id"
+JIUWENCLAW_GROUP_ID = "jiuwenclaw.group.id"
+JIUWENCLAW_BOT_ID = "jiuwenclaw.bot.id"
 JIUWENCLAW_REQUEST_ID = "jiuwenclaw.request.id"
 JIUWENCLAW_AGENT_NAME = "jiuwenclaw.agent.name"
 

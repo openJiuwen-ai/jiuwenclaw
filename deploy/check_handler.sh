@@ -141,10 +141,11 @@ check_if_mysql_up() {
     info "Use built-in MySQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="3306"
-    DEPLOY_VARS["MANAGER_DB_USER"]="root"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    for module in MANAGER GATEWAY OBSERVABILITY
+    do
+        DEPLOY_VARS["${module}_DB_USER"]="root"
+        DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    done
 }
 
 check_if_postgresql_up() {
@@ -172,10 +173,12 @@ check_if_postgresql_up() {
     info "Use built-in PostgreSQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="5432"
-    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+
+    for module in MANAGER GATEWAY OBSERVABILITY
+    do
+        DEPLOY_VARS["${module}_DB_USER"]="postgres"
+        DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    done
 }
 
 
@@ -188,34 +191,24 @@ check_if_db_up() {
     check_if_${db_type}_up
 
     if [[ "${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}" == "true" || "${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}" == "true" ]]; then
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
+        for module in MANAGER GATEWAY OBSERVABILITY
+        do
+            if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+                DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+            fi
 
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            error "Please set up MANAGER_DB_USER or DB_USER."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+                error "Please set up ${module}_DB_USER or DB_USER."
+            fi
 
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            error "Please set up MANAGER_DB_PASSWORD or DB_PASSWORD."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+                DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+            fi
 
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            error "Please set up GATEWAY_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+                error "Please set up ${module}_DB_PASSWORD or DB_PASSWORD."
+            fi
+        done
     fi
 }
 
@@ -299,6 +292,62 @@ check_if_rabbitmq_up() {
     DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
 }
 
+check_if_otel_up() {
+    local name="${DEPLOY_VARS["OTEL_NAME"]}"
+
+    # Check if external Opentelemetry Collector
+    if [ -n "${DEPLOY_VARS["OTEL_EXPORTER_OTLP_ENDPOINT"]:-}" ]; then
+        info "Use external Opentelemetry Collector"
+        DEPLOY_VARS["ENABLE_EXTERNAL_OTEL"]="true"
+        return
+    fi
+
+    info "Use built-in Opentelemetry Collector"
+    DEPLOY_VARS["OTEL_EXPORTER_OTLP_ENDPOINT"]="http://${name}:4318"
+}
+
+check_if_prometheus_up() {
+    local name="${DEPLOY_VARS["PROMETHEUS_NAME"]}"
+
+    # Check if external Prometheus server
+    if [ -n "${DEPLOY_VARS["PROMETHEUS_URL"]:-}" ]; then
+        info "Use external Prometheus server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_PROMETHEUS"]="true"
+        return
+    fi
+    
+    info "Use built-in Prometheus server"
+    DEPLOY_VARS["PROMETHEUS_URL"]="http://${name}:9090"
+}
+
+check_if_tempo_up() {
+    local name="${DEPLOY_VARS["TEMPO_NAME"]}"
+
+    # Check if external Tempo server
+    if [ -n "${DEPLOY_VARS["TEMPO_URL"]:-}" ]; then
+        info "Use external Tempo server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_TEMPO"]="true"
+        return
+    fi
+
+    info "Use built-in Tempo server"
+    DEPLOY_VARS["TEMPO_URL"]="http://${name}:3100"
+}
+
+check_if_loki_up() {
+    local name="${DEPLOY_VARS["LOKI_NAME"]}"
+
+    # Check if external Loki server
+    if [ -n "${DEPLOY_VARS["LOKI_URL"]:-}" ]; then
+        info "Use external Loki server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_LOKI"]="true"
+        return
+    fi
+
+    info "Use built-in Loki server"
+    DEPLOY_VARS["LOKI_URL"]="http://${name}:3100"
+}
+
 check_nfs_up_dependency(){
     if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
         return
@@ -335,44 +384,13 @@ check_mysql_up_dependency(){
     fi
 }
 
-check_postgresql_up_dependency(){
-    local pg_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["POSTGRES_NAME"]}"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
-    check_if_nfs_up
-
-    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
-        return
-    fi
-
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-        info "Preparing PostgreSQL data directory: ${pg_path}"
-        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-
-        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
-        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
-        success "PostgreSQL directory created successfully in NFS Pod!"
-    fi
+postgresql_up_dependency(){
+    prepare_nfs_path "${DEPLOY_VARS["POSTGRES_NAME"]}" "root" "root"
 }
 
 check_minio_up_dependency(){
-    local minio_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["MINIO_NAME"]}"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-
-    check_if_nfs_up
-
-    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
-        return
-    fi
-
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-        info "Preparing Minio data directory: ${minio_path}"
-        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-
-        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${minio_path}\""
-        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${minio_path}"
-        success "Minio directory created successfully in NFS Pod!"
-    fi
+    prepare_nfs_path "${DEPLOY_VARS["MINIO_NAME"]}" "root" "root"
 }
 
 check_redis_up_dependency() {
@@ -380,23 +398,7 @@ check_redis_up_dependency() {
 }
 
 check_rabbitmq_up_dependency(){
-    local rabbit_path="${DEPLOY_VARS["NFS_POD_PATH"]}/${DEPLOY_VARS["RABBITMQ_NAME"]}"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-
-    check_if_nfs_up
-
-    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
-        return
-    fi
-
-    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
-        info "Preparing RabbitMQ data directory: ${rabbit_path}"
-        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-
-        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
-        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
-        success "RabbitMQ directory created successfully in NFS Pod!"
-    fi
+    prepare_nfs_path "${DEPLOY_VARS["RABBITMQ_NAME"]}" "root" "root"
 }
 
 check_log_up_dependency(){
@@ -418,19 +420,9 @@ check_jina_up_dependency() {
 }
 
 check_gateway_up_dependency(){
-    local jiuwenclaw_path="${DEPLOY_VARS["NFS_POD_PATH"]}/jiuwenclaw"
-    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     if [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "nfs" ]; then
-        check_if_nfs_up
-
-        if [[ "${DEPLOY_VARS["RENDER_ONLY"]}" != "true" && "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]]; then
-            info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
-            local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-            info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
-            kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
-            success "JiuwenClaw directory created successfully in NFS Pod!"
-        fi
+        prepare_nfs_path "jiuwenclaw" "1000" "1000"
     elif [ "${DEPLOY_VARS["CLAW_MOUNT_TYPE"]}" == "pvc" ]; then
         check_if_nfs_sc_up
     fi
@@ -438,6 +430,7 @@ check_gateway_up_dependency(){
     check_if_db_up
     check_if_redis_up
     check_if_jina_up
+    check_if_otel_up
 }
 
 check_web_up_dependency(){
@@ -451,4 +444,46 @@ check_web_up_dependency(){
 check_manager_up_dependency(){
     #check_if_rabbitmq_up
     check_if_db_up
+}
+
+check_monitor_up_dependency(){
+    if [ "${DEPLOY_VARS["OTEL_ENABLED"]}" == "false" ]; then
+        return
+    fi
+
+    check_if_db_up
+    check_if_otel_up
+    check_if_prometheus_up
+    check_if_tempo_up
+    check_if_loki_up
+
+    prepare_nfs_path "${DEPLOY_VARS["PROMETHEUS_NAME"]}" "root" "root"
+    prepare_nfs_path "${DEPLOY_VARS["TEMPO_NAME"]}" "root" "root"
+    prepare_nfs_path "${DEPLOY_VARS["LOKI_NAME"]}" "root" "root"
+}
+
+
+
+prepare_nfs_path() {
+    local name="$1"
+    local user="$2"
+    local group="$3"
+    local path="${DEPLOY_VARS["NFS_POD_PATH"]}/${name}"
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    if [ "${DEPLOY_VARS["RENDER_ONLY"]}" == "true" ]; then
+        return
+    fi
+
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "true" ]; then
+        return
+    fi
+
+    info "Preparing ${module} data directory: ${path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${path} && chown -R ${user}:${group} ${path} && chmod -R 755 ${path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${path} && chown -R ${user}:${group} ${path} && chmod -R 755 ${path}"
+    success "${module} directory created successfully in NFS Pod!"
 }

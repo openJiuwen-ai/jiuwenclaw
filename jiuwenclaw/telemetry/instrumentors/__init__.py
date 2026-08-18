@@ -86,6 +86,7 @@ def apply_instrumentors(
         set_log_messages(log_messages)
 
         logger.info("[Telemetry] telemetry_rail instrumentor configured")
+        logger.info("[Telemetry] audit_rail instrumentor available (wired in JiuWenClawDeepAdapter)")
 
         from jiuwenclaw.telemetry.instrumentors.session import instrument_session
         instrument_session(

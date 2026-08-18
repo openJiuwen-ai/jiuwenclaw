@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry import context, trace
@@ -16,14 +17,28 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_CONVERSATION_ID,
     GEN_AI_SPAN_TYPE,
     JIUWENCLAW_AGENT_NAME,
+    JIUWENCLAW_BOT_ID,
     JIUWENCLAW_CHANNEL_ID,
+    JIUWENCLAW_GROUP_ID,
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
+    JIUWENCLAW_USER_ID,
 )
 from jiuwenclaw.telemetry.context_propagation import extract_trace_context
 from jiuwenclaw.telemetry.metrics import record_agent_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.agent")
+
+
+@dataclass
+class RoutingCtx:
+    """Routing identity fields for a single request."""
+    channel_id: str = ""
+    session_id: str = ""
+    request_id: str = ""
+    user_id: str = ""
+    group_id: str = ""
+    bot_id: str = ""
 
 
 def instrument_agent() -> None:
@@ -47,7 +62,14 @@ def instrument_agent() -> None:
         ) as span:
             _store_agent_ctx(
                 self, trace.set_span_in_context(span),
-                request.channel_id or "", request.session_id or "", request.request_id or "",
+                RoutingCtx(
+                    channel_id=request.channel_id or "",
+                    session_id=request.session_id or "",
+                    request_id=request.request_id or "",
+                    user_id=_resolve_routing_field(request, "user_id"),
+                    group_id=_resolve_routing_field(request, "group_id"),
+                    bot_id=_resolve_routing_field(request, "bot_id"),
+                ),
             )
             start = time.monotonic()
             try:
@@ -74,7 +96,17 @@ def instrument_agent() -> None:
             attributes=_build_attrs(self, request),
         )
         ctx = trace.set_span_in_context(span)
-        _store_agent_ctx(self, ctx, request.channel_id or "", request.session_id or "", request.request_id or "")
+        _store_agent_ctx(
+            self, ctx,
+            RoutingCtx(
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                user_id=_resolve_routing_field(request, "user_id"),
+                group_id=_resolve_routing_field(request, "group_id"),
+                bot_id=_resolve_routing_field(request, "bot_id"),
+            ),
+        )
         token = context.attach(ctx)
         start = time.monotonic()
         try:
@@ -99,24 +131,72 @@ def instrument_agent() -> None:
 
 
 def _store_agent_ctx(
-    jiuwenclaw_server, ctx, channel_id: str = "", session_id: str = "", request_id: str = "",
+    jiuwenclaw_server, ctx, routing: RoutingCtx,
 ) -> None:
-    """Store agent span context, channel_id, session_id and request_id on the JiuClawReActAgent instance.
+    """Store agent span context and routing fields on the JiuClawReActAgent instance.
 
     JiuWenClaw._instance is JiuClawReActAgent — LLM/tool instrumentors
     read self.otel_agent_ctx, self.otel_channel_id, self.otel_session_id
-    and self.otel_request_id from that same instance.
+    and self.otel_request_id from that same instance. Routing identity
+    (user_id/group_id/bot_id) is also exposed so the LLM instrumentor can
+    attach them as metric labels on gen_ai.client.token.usage.
     """
     instance = getattr(jiuwenclaw_server, "_instance", None)
     if instance is not None:
         instance.otel_agent_ctx = ctx
-        instance.otel_channel_id = channel_id
-        instance.otel_session_id = session_id
-        instance.otel_request_id = request_id
+        instance.otel_channel_id = routing.channel_id
+        instance.otel_session_id = routing.session_id
+        instance.otel_request_id = routing.request_id
+        instance.otel_user_id = routing.user_id
+        instance.otel_group_id = routing.group_id
+        instance.otel_bot_id = routing.bot_id
+
+
+def _coerce_routing_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _routing_field_sources(request: Any) -> list[dict[str, Any]]:
+    """Collect routing field sources in priority order: params → metadata → metadata.query."""
+    sources: list[dict[str, Any]] = []
+    params = getattr(request, "params", None)
+    if isinstance(params, dict):
+        sources.append(params)
+    metadata = getattr(request, "metadata", None)
+    if isinstance(metadata, dict):
+        sources.append(metadata)
+        query = metadata.get("query")
+        if isinstance(query, dict):
+            sources.append(query)
+    return sources
+
+
+def _resolve_routing_field(request: Any, field: str) -> str:
+    """Extract a routing field (user_id / group_id / bot_id) from the request.
+
+    Mirrors manager_ws_client.core.enterprise_config.loader._resolve_routing_field
+    so the core telemetry package can stay decoupled from the EE gateway extension.
+    ``chat_id`` is used as a fallback for ``group_id`` to match gateway behavior.
+    """
+    for source in _routing_field_sources(request):
+        if field not in source:
+            continue
+        coerced = _coerce_routing_field(source[field])
+        if coerced:
+            return coerced
+    if field == "group_id":
+        return _coerce_routing_field(getattr(request, "chat_id", None))
+    return ""
 
 
 def _build_attrs(agent_server, request) -> dict[str, Any]:
-    return {
+    attrs: dict[str, Any] = {
         JIUWENCLAW_AGENT_NAME: getattr(agent_server, "_agent_name", ""),
         JIUWENCLAW_SESSION_ID: request.session_id or "",
         JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
@@ -125,3 +205,13 @@ def _build_attrs(agent_server, request) -> dict[str, Any]:
         GEN_AI_CONVERSATION_ID: request.session_id or "",
         GEN_AI_SPAN_TYPE: "agent",
     }
+    user_id = _resolve_routing_field(request, "user_id")
+    group_id = _resolve_routing_field(request, "group_id")
+    bot_id = _resolve_routing_field(request, "bot_id")
+    if user_id:
+        attrs[JIUWENCLAW_USER_ID] = user_id
+    if group_id:
+        attrs[JIUWENCLAW_GROUP_ID] = group_id
+    if bot_id:
+        attrs[JIUWENCLAW_BOT_ID] = bot_id
+    return attrs
