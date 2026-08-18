@@ -122,6 +122,9 @@ from jiuwenclaw.agentserver.permissions.config_loader import (
     reset_permissions_session_scope,
     setup_permissions_session_scope,
 )
+from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_registry import (
+    SubagentApprovalKind,
+)
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.agentserver.tools.multimodal_config import (
@@ -249,6 +252,12 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
         "bash",
         "code",
     }
+)
+
+#: 子 Agent 委托审批卡的 source 集合，从审批类型枚举派生，新增类型自动同步。
+_SUBAGENT_APPROVAL_SOURCES = frozenset(
+    f"subagent_{kind.value}"
+    for kind in SubagentApprovalKind
 )
 
 
@@ -5264,7 +5273,11 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _is_ask_user_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+        if not isinstance(payload, dict) or payload.get("event_type") != "chat.ask_user_question":
+            return False
+        # 子 Agent委托审批在子协程内等待Future，不是主 Agent checkpoint。
+        # 反向排除这些委托source，保留所有主Agent类型和缺source旧协议的HITL语义。
+        return payload.get("source") not in _SUBAGENT_APPROVAL_SOURCES
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
@@ -5546,6 +5559,12 @@ class JiuWenClawDeepAdapter:
                 if chunk_type == "chat.ask_user_question":
                     return {
                         "event_type": "chat.ask_user_question",
+                        **(payload if isinstance(payload, dict) else {}),
+                    }
+
+                if chunk_type == "chat.ask_user_question_expired":
+                    return {
+                        "event_type": "chat.ask_user_question_expired",
                         **(payload if isinstance(payload, dict) else {}),
                     }
 

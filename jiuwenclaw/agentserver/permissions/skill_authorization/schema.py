@@ -17,13 +17,28 @@ SKILL_AUTHORIZATION_ENABLED_ENV = "SKILL_AUTHORIZATION_ENABLED"
 
 logger = logging.getLogger(__name__)
 
+#: ``permissions.enabled`` 废弃提示只打一次（validate 会被反复调用）。
+_enabled_field_deprecation_logged = False
+
+
+def _log_enabled_field_deprecated_once() -> None:
+    """``permissions.enabled`` 是废弃的冗余字段：保留兼容但不生效，提示一次。"""
+    global _enabled_field_deprecation_logged
+    if not _enabled_field_deprecation_logged:
+        logger.info(
+            "[skill_authorization] permissions.enabled 为冗余字段，可不配置；"
+            "配置了也不参与权限裁决，不影响功能",
+        )
+        _enabled_field_deprecation_logged = True
+
 _LEVEL_VALUES = frozenset({"allow", "ask", "deny"})
 _RISK_LEVEL_VALUES = frozenset({"low", "medium", "high"})
 
 #: 顶层结构固定为 ``risk + permissions``；不兼容扁平权限声明。
 _ALLOWED_TOP_KEYS = frozenset({"risk", "permissions"})
 
-#: ``permissions.enabled`` 是既有格式元数据；其余三项构成 overlay。
+#: ``permissions.enabled`` 已废弃：仅为兼容既有声明而保留（配了不报错），不参与
+#: 任何裁决逻辑，推荐不再配置；其余三项构成 overlay。
 _ALLOWED_PERMISSIONS_KEYS = frozenset({"enabled", "tools", "rules", "file_guard"})
 
 #: 单独成集合以便命中时报更具体的错误。
@@ -171,8 +186,8 @@ def validate_skill_permission(data: Any) -> None:
         if unknown:
             errors.append("permissions 存在不允许的键: " + ", ".join(unknown))
         enabled = permissions.get("enabled")
-        if enabled is not None and not isinstance(enabled, bool):
-            errors.append("permissions.enabled 必须是布尔值")
+        if enabled is not None:
+            _log_enabled_field_deprecated_once()
 
     payload = _extract_permissions_payload(data)
 
