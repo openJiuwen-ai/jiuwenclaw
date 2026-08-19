@@ -28,6 +28,8 @@ import {
   useSessionStore,
   useWorkspaceStore,
   resolveChatModelSelection,
+  modelSelectKey,
+  modelDisplayName,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -3663,7 +3665,7 @@ function ModelSelector({
             <ModelProviderIcon model={selectedModel} />
           </span>
           <span className="chat-mode-select__label">
-            {selectedModel.alias || selectedModel.model_name}
+            {modelDisplayName(selectedModel)}
           </span>
         </span>
         {!disabled && (
@@ -3693,8 +3695,8 @@ function ModelSelector({
                 <>
                   <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
                   {models.map((m, idx) => {
-                    const key = m.alias || m.model_name;
-                    const isActive = key === (selectedModel.alias || selectedModel.model_name);
+                    const key = modelSelectKey(m);
+                    const isActive = key === modelSelectKey(selectedModel);
                     return (
                       <button
                         type="button"
@@ -3713,7 +3715,7 @@ function ModelSelector({
                           <span className="chat-mode-select__icon" aria-hidden="true">
                             <ModelProviderIcon model={m} />
                           </span>
-                          <span className="chat-mode-select__label">{key}</span>
+                          <span className="chat-mode-select__label">{modelDisplayName(m)}</span>
                           {m.is_agentos === true && (
                             <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border ml-1">{t('chat.modelSelector.backup')}</span>
                           )}
