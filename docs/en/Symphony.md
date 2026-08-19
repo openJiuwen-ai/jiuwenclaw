@@ -177,8 +177,8 @@ Left sidebar -> Skills -> Skill Graph
 | Area | Purpose |
 |------|---------|
 | **Left panel** | Shows visible skill/edge counts, search, minimum confidence, and the skill list |
-| **Canvas** | Shows the relationship graph. Drag to pan, scroll to zoom, and click a node to inspect it |
-| **Right details** | Shows the selected skill's ID, in-degree, out-degree, description, inputs, outputs, tasks, and related edges |
+| **Canvas** | Shows the relationship graph. Drag to pan, scroll to zoom, or use the top-right zoom-out, zoom percentage, and zoom-in controls; click a node to inspect it |
+| **Right details** | Shows the selected skill's ID, in-degree, out-degree, description, inputs, outputs, tasks, and related edges. On narrower screens, it opens as a right-side overlay drawer without shrinking the canvas |
 
 In **Related edges**:
 
@@ -190,17 +190,17 @@ In **Related edges**:
 
 | Action | Description |
 |--------|-------------|
-| **Search skills** | Enter keywords in the left search box to show matching skills and related relationships |
+| **Search skills** | Enter keywords in the left search box to filter both the list and graph while keeping linked nodes for matches |
 | **Adjust minimum confidence** | Hide lower-confidence edges so you can focus on stronger skill handoffs |
 | **Read graph** | Reload the existing built skill graph |
 | **Incremental build** | Update the score after adding, removing, or changing skills |
 | **Cancel build** | Cancel a long-running graph build while keeping completed cache and checkpoints |
-| **Full rebuild** | Recompute everything when the score looks stale or incorrect |
-| **Fit view** | Re-center and scale the visible graph |
+| **Full build** | Recompute everything when the score looks stale or incorrect |
+| **Adjust view** | Re-center and scale the visible graph |
 
 #### Minimum confidence
 
-The minimum confidence slider only filters the already loaded graph locally. It can hide edges below the current threshold, but it does not recompute relationships and cannot reveal edges below the build-time acceptance threshold. To regenerate candidate relationships, run an incremental build or full rebuild.
+The minimum confidence slider only filters the already loaded graph locally. It can hide edges below the current threshold, but it does not recompute relationships and cannot reveal edges below the build-time acceptance threshold. To regenerate candidate relationships, run an incremental build or full build.
 
 ### 5. Use Skill Retrieval in chat
 
@@ -279,7 +279,7 @@ After seeing the route, you can respond in one of these ways:
 
 ## Configuration
 
-In the Web UI, **Enable skill orchestration** is on the Skill Graph page and controls skill-graph and orchestration tools. The separate **Enable Skill Retrieval** switch remains on the configuration page and controls skill-tree retrieval tools. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Graph page provides graph reading, incremental build, cancel build, and full rebuild operations.
+In the Web UI, **Enable skill orchestration** is on the Skill Graph page and controls skill-graph and orchestration tools. The separate **Enable Skill Retrieval** switch remains on the configuration page and controls skill-tree retrieval tools. The Skill Index page provides index build, rebuild, cancel, status, and tree viewing operations. The Skill Graph page provides graph reading, incremental build, cancel build, full build, and adjust-view operations.
 
 Advanced build, retrieval, and orchestration settings are configured in the user runtime config file:
 
