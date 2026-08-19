@@ -418,6 +418,13 @@ async def test_evolution_helpers_broadcast_progress_skips_non_stream_evolution_e
             "content": "No evolution signals detected",
         },
     )
+    scan_progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {"event_kind": "progress", "stage": "started"},
+            "content": "[Skill Evolution] starting regular skill evolution review",
+        },
+    )
     stream = SimpleNamespace(
         type="llm_reasoning",
         payload={"content": "thinking"},
@@ -427,7 +434,7 @@ async def test_evolution_helpers_broadcast_progress_skips_non_stream_evolution_e
     await evolution_helpers.broadcast_evolution_progress(
         "web",
         "sess-1",
-        [approval, outcome, terminal, stream],
+        [approval, outcome, terminal, scan_progress, stream],
         parse_stream_chunk=lambda evt: {
             "event_type": "chat.reasoning",
             "content": evt.payload["content"],
@@ -463,6 +470,13 @@ async def test_evolution_helpers_push_progress_skips_non_stream_evolution_events
             "content": "No evolution signals detected",
         },
     )
+    scan_progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {"event_kind": "progress", "stage": "detecting_signals"},
+            "content": "[Skill Evolution] checking regular skill(s)",
+        },
+    )
     stream = SimpleNamespace(
         type="llm_reasoning",
         payload={"content": "thinking"},
@@ -488,7 +502,7 @@ async def test_evolution_helpers_push_progress_skips_non_stream_evolution_events
             session_id="sess-1",
         ),
         "stream-rid",
-        [approval, outcome, terminal, stream, ignored],
+        [approval, outcome, terminal, scan_progress, stream, ignored],
         parse_stream_chunk=lambda evt: (
             None
             if not evt.payload.get("content")

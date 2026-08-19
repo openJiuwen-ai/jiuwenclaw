@@ -105,6 +105,7 @@ class SkillTurbo:
         channel_id: str,
         pending_tool_call_id: str,
         user_input: Any,
+        task_states: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[AgentResponseChunk]:
         """从 HITL 中断点恢复执行：跳过 planner，直接重放 plan_code。
 
@@ -112,6 +113,7 @@ class SkillTurbo:
         - 中断时保存的 ``plan_code`` / ``inputs``
         - 中断时记录的 ``pending_tool_call_id``
         - 用户审批回复（``ConfirmPayload`` / dict / etc.）
+        - 可选 ``task_states``：中断时任务快照，resume 复用同一套 ``task_id``
 
         二次执行时 ``SkillTurboExecutor`` 重放到同一 tool_call_id，将 ``user_input``
         注入 ctx.extra[RESUME_USER_INPUT_KEY]，``PermissionInterruptRail`` 据此
@@ -120,6 +122,7 @@ class SkillTurbo:
         self._executor.set_pending_resume(
             expected_tool_call_id=pending_tool_call_id,
             user_input=user_input,
+            task_states=task_states,
         )
         try:
             async for chunk in self._executor.execute_plan_stream(

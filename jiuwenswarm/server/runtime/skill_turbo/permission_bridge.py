@@ -234,21 +234,27 @@ async def save_resume_ctx(
     plan_code: str,
     inputs: dict[str, Any],
     pending_tool_call_id: str,
+    task_states: list[dict[str, Any]] | None = None,
 ) -> None:
     """中断时保存断点上下文到 session state（checkpointer 持久化）。
 
     调用方应已 pre_run（executor 在 _persist_node_artifacts 中 pre_run 过），
     本函数负责 update_state + post_run 完成落盘（与 node_artifacts 共一次 post_run）。
+
+    ``task_states``：中断时的二层任务全量快照（含稳定 ``task_id``）。
+    resume 时复用同一套 id，避免前端 taskRuns 因新 UUID 叠出两套 Stage。
     """
     if session is None:
         logger.warning("[SkillTurboResume] save_resume_ctx: session is None, skipping")
         return
     sid = _get_sid(session)
-    entry = {
+    entry: dict[str, Any] = {
         "plan_code": plan_code,
         "inputs": dict(inputs),
         "pending_tool_call_id": pending_tool_call_id,
     }
+    if task_states:
+        entry["task_states"] = copy.deepcopy(task_states)
     # 与 save_node_artifacts 一致：pre_run 后 update_state 才能经 checkpointer 持久化。
     # 调用方若已在 pre_run 上下文里，重复 pre_run 是 no-op。
     try:
@@ -265,8 +271,11 @@ async def save_resume_ctx(
         )
         raise
     logger.info(
-        "[SkillTurboResume] save_resume_ctx: sid=%s tcid=%s plan_code_len=%d",
-        sid, pending_tool_call_id, len(plan_code or ""),
+        "[SkillTurboResume] save_resume_ctx: sid=%s tcid=%s plan_code_len=%d task_states=%d",
+        sid,
+        pending_tool_call_id,
+        len(plan_code or ""),
+        len(entry.get("task_states") or []),
     )
     try:
         await session.post_run()
