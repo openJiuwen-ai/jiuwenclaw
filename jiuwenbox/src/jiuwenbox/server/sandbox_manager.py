@@ -199,6 +199,19 @@ class SandboxStateError(Exception):
         logger.error("%s: %s", self.__class__.__name__, str(self))
 
 
+class CodePolicyDenialError(Exception):
+    """Raised when code-level policy enforcement denies a file operation.
+
+    Fallback defense when ACL/Landlock cannot be applied (e.g. Windows ACL
+    WRITE_DAC denied on owner-mismatched folders like D:/software where
+    SetNamedSecurityInfo fails with WinError 5). See ``_enforce_path_policy``.
+    """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        logger.warning("%s: %s", self.__class__.__name__, str(self))
+
+
 class SandboxConflictError(Exception):
     """Raised for expected request conflicts such as duplicate sandbox IDs."""
 
@@ -982,6 +995,11 @@ class SandboxManager:
                 )
             self._mark_active(ref)
 
+        # Code-level policy enforcement: ACL fallback for paths where
+        # SetNamedSecurityInfo failed (e.g. D:/agent when ACL is intact this
+        # is a no-op; when ACL failed this is the only defense).
+        await self._enforce_path_policy(sandbox_id, sandbox_path, op="write")
+
         # One audit row per upload, emitted after the call returns so the
         # payload covers both intent (path/size) and outcome (ok, error,
         # which transport landed it). The earlier pre-call event was
@@ -1111,6 +1129,12 @@ class SandboxManager:
                 )
             self._mark_active(ref)
 
+        # Code-level policy enforcement: ACL fallback for deny_read paths
+        # (e.g. D:/software where SetNamedSecurityInfo WinError 5 left no
+        # Deny ACE on the folder; without this check the daemon happily
+        # reads the file since the sandbox uid has Authenticated Users read).
+        await self._enforce_path_policy(sandbox_id, sandbox_path, op="read")
+
         # Mirror of ``upload_file_to_sandbox``: a single post-result row
         # carrying intent + outcome. ``size`` is filled in on success
         # (from the actual bytes returned), 0 otherwise.
@@ -1233,6 +1257,14 @@ class SandboxManager:
                     f"Cannot list files in sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
             self._mark_active(ref)
+
+        # Code-level policy enforcement: deny_read fallback. The HTTP API
+        # endpoint ``GET /sandboxes/{id}/files?sandbox_path=...`` walks the
+        # directory in-process via the daemon, which inherits the sandbox
+        # token. If the Deny Read ACE failed to apply (D:/software case),
+        # the daemon still has directory-list permission via Authenticated
+        # Users - this check blocks the listing at the API layer.
+        await self._enforce_path_policy(sandbox_id, request.sandbox_path, op="read")
 
         # Fast path: ask the daemon to walk the directory in-process.
         # Saves the python3 cold start and the fork+exec that the legacy
@@ -1359,6 +1391,13 @@ class SandboxManager:
         pattern: str,
         exclude_patterns: list[str] | None = None,
     ) -> list[dict[str, object]]:
+        # Code-level policy enforcement: deny_read fallback (mirrors
+        # ``list_files_in_sandbox``). ``search_files_in_sandbox`` delegates
+        # to ``exec_in_sandbox`` running an in-sandbox python3 walker, which
+        # inherits the sandbox token - if Deny Read ACE failed to apply on
+        # the search root, the walker would still enumerate the subtree.
+        await self._enforce_path_policy(sandbox_id, sandbox_path, op="read")
+
         script = textwrap.dedent(
             """
             import datetime
@@ -1436,6 +1475,89 @@ class SandboxManager:
         async with self._lock:
             self._get_sandbox(sandbox_id)
             return self.audit.read_logs_raw(sandbox_id)
+
+    # ------------------------------------------------------------------
+    # Code-level path policy enforcement (ACL/Landlock fallback)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_policy_path(path: str) -> str:
+        """归一化路径用于大小写不敏感比较.
+
+        - ``os.path.normpath``: 统一分隔符 + 消除 ``..`` / ``.`` / 重复分隔
+        - Windows: 转小写 (NTFS 大小写不敏感)
+        - 不调用 ``Path.resolve()`` (会要求路径存在, 上传新文件路径可能不存在)
+        """
+        p = os.path.normpath(path)
+        if sys.platform == "win32":
+            p = p.lower()
+        return p
+
+    @staticmethod
+    def _path_matches_rule(path_norm: str, rule_norm: str) -> bool:
+        """路径是否命中规则 (规则路径本身或其子路径).
+
+        子路径匹配要求紧接分隔符, 避免 ``D:/software`` 误匹配 ``D:/softwarefoo``.
+        """
+        if path_norm == rule_norm:
+            return True
+        return path_norm.startswith(rule_norm + os.sep)
+
+    async def _enforce_path_policy(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        op: str,
+    ) -> None:
+        """代码层路径策略校验 (ACL/Landlock 失效时的 fallback 防御).
+
+        复用沙箱 per-sandbox SecurityPolicy 的 ``windows.filesystem.deny_read`` /
+        ``deny_write`` 列表, 在 HTTP API 入口对 ``sandbox_path`` 做权限判定.
+        ACL 设置失败时 (典型: ``D:/software`` owner 不是当前用户,
+        ``SetNamedSecurityInfo`` WinError 5), 这层校验仍能拦截.
+
+        仅校验 ``deny_*`` 黑名单规则 (用户需求: deny_read / deny_write 拦截).
+        不做 ``allow_*`` 白名单检查 — ACL 语义中 ``allow_read`` 是叠加在预装系统
+        读 ACL (C:/Windows, Python stdlib 等, 见 ``win_setup.get_preinstalled_read_paths``)
+        之上的增量授权, 此处无法枚举预装路径, 强行白名单会误拦沙箱运行所必需的
+        系统目录读访问.
+
+        - 命中 ``deny_*`` → 拒绝 (raise CodePolicyDenialError → HTTP 403)
+        - 其余放行 (留给 ACL/Landlock 决定, 与现有行为一致)
+
+        含 ``{{ workspace }}`` 等占位符的规则跳过 (workspace per-sandbox 路径
+        此处不可得, workspace 是用户自有目录, ACL 通常生效, 不需要代码层兜底).
+        """
+        if op not in ("read", "write"):
+            raise ValueError(f"invalid op {op!r}, must be 'read' or 'write'")
+
+        policy = await self.get_policy(sandbox_id)
+        if policy is None:
+            return  # 无策略 = 无可校验, 放行 (与 ACL 缺失策略时同语义)
+
+        windows = getattr(policy, "windows", None)
+        fs = getattr(windows, "filesystem", None) if windows else None
+        if fs is None:
+            return
+
+        if op == "read":
+            deny_rules = list(getattr(fs, "deny_read", None) or [])
+        else:
+            deny_rules = list(getattr(fs, "deny_write", None) or [])
+
+        # 含占位符的规则跳过 (workspace per-sandbox 路径此处不可得, ACL 兜底)
+        deny_rules = [r for r in deny_rules if r and "{{" not in r]
+        if not deny_rules:
+            return  # 无可校验规则
+
+        target_norm = self._normalize_policy_path(sandbox_path)
+
+        # 命中 deny → 拒绝 (deny 优先级最高)
+        for rule in deny_rules:
+            if self._path_matches_rule(target_norm, self._normalize_policy_path(rule)):
+                raise CodePolicyDenialError(
+                    f"Code-enforced policy denial: {op} '{sandbox_path}' "
+                    f"matched deny rule '{rule}' (sandbox={sandbox_id})"
+                )
 
     async def get_policy(self, sandbox_id: str) -> SecurityPolicy | None:
         async with self._lock:

@@ -1181,8 +1181,8 @@ def install(
                     logger.warning("grant 失败 (打包目录, 非致命): %s=%s", _p, exc)
 
         # 用户 policy 的 deny/allow 路径 (allow_read/deny_read/allow_write/deny_write)
+        _acl_paths: list[str] = []
         if _current_user_sid and policy_path:
-            _acl_paths: list[str] = []
             try:
                 _acl_paths = _load_policy_acl_paths(policy_path)
             except Exception as exc:  # noqa: BLE001
@@ -1231,6 +1231,13 @@ def install(
         _reg_set_str(
             const.REG_VALUE_PREINSTALLED_PATHS,
             json.dumps(sorted({os.path.expandvars(p) for p in paths_to_preinstall})),
+        )
+        # 记录本次已预授 WRITE_DAC 的 deny/allow 路径集, 供 ensure_windows_setup
+        # 增量检测: 用户改 policy 新增 deny_read/deny_write 路径时自动弹 UAC 补授权.
+        _acl_paths_for_reg = sorted({os.path.expandvars(p) for p in _acl_paths}) if _current_user_sid and policy_path and _acl_paths else []
+        _reg_set_str(
+            const.REG_VALUE_ACL_POLICY_PATHS,
+            json.dumps(_acl_paths_for_reg),
         )
         logger.info("Windows 沙箱安装完成")
     except Exception:
@@ -1288,6 +1295,53 @@ def collect_preinstall_paths(policy) -> list[str]:
     return paths
 
 
+def ensure_acl_policy_paths_authorized(
+    acl_paths: list[str],
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    policy_path: str | None = None,
+) -> None:
+    """确保 deny/allow 路径已预授 WRITE_DAC, 未授权则弹 UAC 补授权.
+
+    _create_windows 创建沙箱时调: 对 per-sandbox policy 的 deny/allow 路径
+    做增量检测, 发现新路径 (owner 非当前用户, 需管理员预授 WRITE_DAC) 时
+    自动弹 UAC 补授权. 避免运行时 grant_ace WinError 5 → Deny Read 不生效.
+
+    Args:
+        acl_paths: 本次沙箱的所有 deny/allow 路径 (allow_read/deny_read/
+            allow_write/deny_write 合并去重后的展开路径).
+        proxy_port_start/end: 透传给 _elevate_and_run_install.
+        policy_path: windows-policy.yaml 路径, 透传给 install.
+    """
+    _require_windows()
+    if reg_get_str(const.REG_VALUE_INSTALLED) != "1":
+        return
+    acl_recorded_raw = reg_get_str(const.REG_VALUE_ACL_POLICY_PATHS)
+    acl_recorded: set[str] = set()
+    if acl_recorded_raw:
+        try:
+            acl_recorded = set(json.loads(acl_recorded_raw))
+        except (ValueError, TypeError):
+            acl_recorded = set()
+    new_acl_paths = {
+        os.path.expandvars(p) for p in acl_paths if p
+    } - acl_recorded
+    if not new_acl_paths:
+        return
+    logger.info(
+        "检测到新增 deny/allow 路径未预授 WRITE_DAC: %s. "
+        "自动弹 UAC 补授权 (否则运行时 grant_ace 会 WinError 5).",
+        sorted(new_acl_paths),
+    )
+    _elevate_and_run_install(
+        force=True,
+        preinstall_paths=[],
+        proxy_port_start=proxy_port_start,
+        proxy_port_end=proxy_port_end,
+        policy_path=policy_path,
+    )
+
+
 def ensure_windows_setup(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
@@ -1306,6 +1360,8 @@ def ensure_windows_setup(
             生效; 已安装则忽略.
         proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
             (根 policy 的 ``windows.proxy.port_range_*``).
+        policy_path: windows-policy.yaml 路径; 已安装时用于增量检测
+            deny/allow 路径变更, 新增路径会自动弹 UAC 补授权 WRITE_DAC.
     """
     _require_windows()
     try:
@@ -1324,14 +1380,33 @@ def ensure_windows_setup(
                 except (ValueError, TypeError):
                     recorded = set()
             new_paths = self_check_paths - recorded
-            if new_paths:
+            # 增量检测: 用户 policy 的 deny/allow 路径变更 (allow_read/deny_read/allow_write/deny_write).
+            # install 阶段给这些路径预授 WRITE_DAC, 运行时 box-server 才能改 DACL 施加 Deny/Allow ACE.
+            # 若 runtime policy 新增了路径但未预授 WRITE_DAC → grant_ace WinError 5 → Deny Read 不生效.
+            new_acl_paths: set[str] = set()
+            if policy_path:
+                try:
+                    runtime_acl_paths = {
+                        os.path.expandvars(p) for p in _load_policy_acl_paths(policy_path)
+                    }
+                    acl_recorded_raw = reg_get_str(const.REG_VALUE_ACL_POLICY_PATHS)
+                    acl_recorded: set[str] = set()
+                    if acl_recorded_raw:
+                        try:
+                            acl_recorded = set(json.loads(acl_recorded_raw))
+                        except (ValueError, TypeError):
+                            acl_recorded = set()
+                    new_acl_paths = runtime_acl_paths - acl_recorded
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("增量检测 deny/allow 路径变更失败 (非致命): %s", exc)
+            if new_paths or new_acl_paths:
                 # relay-claw / officeace 是终端产品, 不能让用户手动跑
                 # --install --force. 这里自动走 UAC 提权子进程补预装新路径
-                # 的读 ACL (最多弹一次 UAC, 用户授权即可).
+                # 的读 ACL + 预授新 deny/allow 路径的 WRITE_DAC (最多弹一次 UAC, 用户授权即可).
                 logger.info(
-                    "Windows 沙箱已安装, 但检测到新增预装路径未预装读 ACL: %s. "
-                    "自动弹 UAC 提权补预装 (CreateProcessAsUserW 否则会 WinError 2/5).",
-                    sorted(new_paths),
+                    "Windows 沙箱已安装, 但检测到新增路径: 预装=%s, deny/allow=%s. "
+                    "自动弹 UAC 提权补预装+预授权 (否则运行时 grant_ace 会 WinError 5).",
+                    sorted(new_paths), sorted(new_acl_paths),
                 )
                 _elevate_and_run_install(
                     force=True,
