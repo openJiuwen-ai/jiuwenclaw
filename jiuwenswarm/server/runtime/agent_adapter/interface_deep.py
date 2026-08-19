@@ -170,7 +170,10 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
-from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
+from jiuwenswarm.agents.harness.common.auto_harness import (
+    AutoHarnessService,
+    validate_harness_config,
+)
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     build_permission_rail,
@@ -4301,6 +4304,16 @@ class JiuWenSwarmDeepAdapter:
 
         loaded: list[str] = []
         for config_path in config_paths:
+            # Skip packages failing the hot-load guards.
+            try:
+                validate_harness_config(Path(config_path))
+            except ValueError as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] Skipping active package %s: %s",
+                    config_path,
+                    exc,
+                )
+                continue
             try:
                 resources = await self._instance.load_harness_config(config_path)
                 if resources:
@@ -4337,6 +4350,12 @@ class JiuWenSwarmDeepAdapter:
         try:
             if operation == "deactivate":
                 return await self._instance.unload_harness_config(config_path)
+            # Never activate a package failing the hot-load guards.
+            # load_harness_config would spawn a declared subprocess (mcps) or
+            # exec an out-of-package .py (escaped path). The import-time
+            # guard blocks new imports; this catches packages that slipped
+            # through before it existed or were placed on disk directly.
+            validate_harness_config(Path(config_path))
             return await self._instance.load_harness_config(config_path)
         except Exception as exc:
             logger.error(
