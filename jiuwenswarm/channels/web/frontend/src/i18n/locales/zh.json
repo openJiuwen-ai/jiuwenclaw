@@ -2552,5 +2552,20 @@
   },
   "qaSummary": {
     "title": "问题澄清"
+  },
+  "auth": {
+    "title": "登录 JiuwenSwarm",
+    "subtitle": "输入你的账号与密码以继续",
+    "username": "账号",
+    "usernamePlaceholder": "输入账号",
+    "password": "密码",
+    "passwordPlaceholder": "输入密码",
+    "login": "登录",
+    "loggingIn": "登录中…",
+    "invalidCredentials": "账号或密码错误",
+    "loginFailed": "登录失败,请稍后重试",
+    "authRequired": "需要登录后才能访问",
+    "secureHint": "登录后将自动保持登录状态",
+    "logout": "登出"
   }
 }
