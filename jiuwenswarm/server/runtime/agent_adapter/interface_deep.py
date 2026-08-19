@@ -5618,8 +5618,9 @@ class JiuWenSwarmDeepAdapter:
 
         Returns:
             The live DeepAgent, or None when this session has not started one yet
-            (first turn of a session) — the caller should then fall back to the
-            checkpointer, which ``start_interaction`` reads on creation.
+            (first turn of a session). Prefer :meth:`ensure_live_session_instance`
+            when the caller is about to write plan state: that starts the same
+            session the chat turn will reuse, instead of a throwaway Session.
         """
         if self._is_session_scoped_adapter:
             return self._instance
@@ -5629,6 +5630,17 @@ class JiuWenSwarmDeepAdapter:
         # 子适配器一定是 session 级的（``_new_session_scoped_adapter`` 建完就
         # ``mark_as_session_scoped``），所以这一跳递归只会走上面那个分支返回它自己的
         # 实例，不会再往下递归。
+        return adapter.get_live_session_instance(session_id)
+
+    async def ensure_live_session_instance(self, session_id: str | None) -> Any | None:
+        """Start the session-scoped adapter if needed and return its DeepAgent.
+
+        Plan-mode sync must write onto the Session ``start_interaction`` binds.
+        A throwaway Session only updates the checkpointer; a concurrent first
+        ``chat.send`` / ``command.goal`` can already have bound a normal-mode
+        snapshot that the running turn keeps using.
+        """
+        adapter = await self._get_or_create_session_adapter(session_id)
         return adapter.get_live_session_instance(session_id)
 
     async def ensure_instance(self) -> Any:
