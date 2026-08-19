@@ -1075,14 +1075,6 @@ class WebChannel(BaseWsChannel):
         connection_user_id, _user_id = self._resolve_ws_identity(
             ws, _flat_query, remote, route_type="ws",
         )
-        uid_marker = "" if connection_user_id else " uid_empty=yes"
-        logger.info(
-            "WebChannel 新连接: remote=%s query=%s user_id=%r%s",
-            remote,
-            query,
-            connection_user_id,
-            uid_marker,
-        )
 
         # ── V2: 从 query 提取身份字段，构造默认 RoutingKey ──
         # session_id 和 agent_id 可能在首条消息中更新
@@ -1090,6 +1082,16 @@ class WebChannel(BaseWsChannel):
         _mode = _flat_query.get("mode", "agent")
         _agent_id = _flat_query.get("agent_id", "default")
         _initial_sid = _flat_query.get("session_id", self._make_session_id())
+        uid_marker = "" if connection_user_id else " uid_empty=yes"
+        logger.info(
+            "[WebChannel] ws.connect user_id=%s session_id=%s channel=web remote=%s path=%s%s",
+            connection_user_id or "",
+            _initial_sid,
+            remote,
+            request_path,
+            uid_marker,
+            extra={"session_id": _initial_sid} if _initial_sid else {},
+        )
         _initial_rk = RoutingKey(
             user_id=_user_id,
             channel_id=self.channel_id,
@@ -1218,10 +1220,12 @@ class WebChannel(BaseWsChannel):
         await self.register_ws(ws, _rk)
 
         logger.info(
-            "[WebChannel] /ws/git 新连接: remote=%s user_id=%r session_id=%s",
-            remote,
-            connection_user_id,
+            "[WebChannel] ws.connect user_id=%s session_id=%s channel=web remote=%s path=/ws/git%s",
+            connection_user_id or "",
             _session_id,
+            remote,
+            "" if connection_user_id else " uid_empty=yes",
+            extra={"session_id": _session_id} if _session_id else {},
         )
 
         try:
