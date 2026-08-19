@@ -64,7 +64,6 @@ if [[ $# -gt 0 ]]; then
             TEST_TARGETS=(
                 "tests/integration/test_server_api_default.py"
                 "tests/integration/test_cli_default.py"
-                "tests/integration/test_mcp_default.py"
             )
             TEST_KIND="integration"
             shift

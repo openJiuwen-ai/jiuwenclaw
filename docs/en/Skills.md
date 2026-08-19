@@ -11,7 +11,7 @@
 A Skill is a module that extends JiuwenSwarm with specific capabilities. You can think of it as an **installable, manageable, reusable capability package**.
 
 Like apps on a phone extend device capabilities, skills extend the agent’s capability boundaries.
-![Skill list](../assets/images/技能列表与检索.png)
+![Skills Page](../assets/images/current-ui-en/04-Skills-Page.png)
 
 ### Skill directory and `SKILL.md` (typical layout)
 
@@ -79,7 +79,7 @@ Built-in skills are skill resources packaged with JiuwenSwarm.
 1. **Install**
 
    Left sidebar → **Skills** → **Skill Marketplace** → **Built-in**, find the target skill and click **Install**.  
-   ![Skill install](../assets/images/技能安装.png)
+   ![Skill install](../assets/images/current-ui-en/13-Skills-Marketplace.png)
 
 #### Install from SkillNet
 
@@ -94,7 +94,7 @@ SkillNet is based on GitHub-hosted skill repositories.
 1. **(Optional) Configure GitHub token**
 
    Open left sidebar → **Configuration** → **Other** → **Third-party service configuration**, then fill in `github_token` (optional; improves GitHub API quota and stability).
-   ![github token set](../assets/images/github_token配置.png)
+   ![github token set](../assets/images/current-ui-en/09-Configuration-Other-Tab.png)
 
    Or set it in `~/.jiuwenswarm/config/.env`:
 
@@ -108,7 +108,7 @@ SkillNet is based on GitHub-hosted skill repositories.
 
    Install from the web UI:  
    Left sidebar → **Skills** → **Skill Marketplace** → **Skills online search**, click **Source management** in the top-right, choose **SkillNet**, then type a keyword in the search box and click **Install** to the right of the target skill.
-   ![skillnet search](../assets/images/skillNet搜索.png)
+   ![skillnet search](../assets/images/current-ui-en/13-Skills-Marketplace.png)
 
 3. **Confirm success**
 
@@ -132,10 +132,10 @@ ClawHub URL: https://clawhub.ai/skills
 
    Left sidebar → **Skills** → **Source management** in the top-right → choose **ClawHub**.  
    On first use, fill in the CLI token obtained from the ClawHub platform and save it:
-   ![clawhub token config](../assets/images/CliToken配置.png)
+   ![clawhub token config](../assets/images/current-ui-en/09-Configuration-Other-Tab.png)
 
    Once configured, go to **Skill Marketplace** → **Skills online search**, search for the target skill, and click **Install**:
-   ![clawhub install](../assets/images/技能搜索安装.png)
+   ![clawhub install](../assets/images/current-ui-en/13-Skills-Marketplace.png)
 
 #### Import local skills
 
@@ -160,15 +160,19 @@ Best for:
 2. **Local import (web UI)**
 
    Left sidebar → **Skills** → **Import local skill** in the top-right, enter the server-side local skill path (a `SKILL.md` file or a skill directory) in the dialog, then confirm.
-   ![Local skill import](../assets/images/本地导入skill.png)
+   ![Local skill import](../assets/images/current-ui-en/12-Skills-My-Skills.png)
 
 3. **Manual copy (optional)**
 
    Copy skill folder into:
 
    ```text
-   C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+   ~/.jiuwenswarm/agent/workspace/skills/
    ```
+
+   > **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
+
+   > **Agent Team mode shares this same library**: teams and team members keep no `skills/` directory and no copies of their own, only a visibility declaration stating which skills of this library they may see (by default, all of them). Installing a skill once therefore makes it available to single agents and team members alike. See the "Team Skills" section of [Agent Team](AgentTeam.md) for how to narrow a member's visibility.
 
 4. **Verify**
 
@@ -187,7 +191,7 @@ The Skills management page is the main place to manage and browse all skills. Op
 | **Skill Graph** | Visualize capability relationships among installed skills; see [Symphony](symphony.md) |
 | **Skill Index** | Build a local skill retrieval index and find matching skills by task need; see [Symphony](symphony.md) |
 
-![Skills management page](../assets/images/skill_page_auto.png)
+![Skills management page](../assets/images/current-ui-en/04-Skills-Page.png)
 
 #### What the page shows
 
@@ -206,10 +210,10 @@ In the **My Skills** list, each entry shows:
 In the list, use **View skill experience** to browse evolution entries for that skill, one record at a time.
 
 **Each entry typically includes:**
-- **Source**: where the entry came from (e.g. detected signal, chat, or execution context)
-- **Time**: when the record was created or written
-- **Context**: session/task background that triggered the entry
-- **Experience content**: the concrete change text, corresponding to the `change.content` field
+- **Type**: the content category, such as usage instructions, examples, or troubleshooting
+- **Improvement target**: the Skill area the experience improves, such as the description, body, or scripts
+- **Created at**: when the experience record was generated
+- **Experience content**: the concrete improvement guidance
 
 > **How to see data:** When a skill already has saved evolution experience, **View skill experience** becomes available in the skill list. If there is no data yet, that skill has no saved evolution records. Records can be generated manually with `/evolve <skill_name> [user_query]`, or automatically in failure/correction scenarios after enabling **Auto-detect evolution signals** under **Self-Evolution Configuration**. See [Configuration](Configuration.md) and [Skill self-evolution](SkillSelfEvolution.md).
 
@@ -231,8 +235,6 @@ Path: left sidebar → **Skills** → **Source management** in the top-right.
 |------|------|
 | **Choose SkillNet** | Skills online search retrieves from SkillNet (open-source skill registry); the dialog includes network and GitHub API rate-limit tips—if it fails frequently, go to the configuration page and fill in `github_token` |
 | **Choose ClawHub** | Skills online search retrieves from ClawHub (enterprise skill registry); on first use, fill in and save the CLI token in the dialog |
-
-![Skill source](../assets/images/skillNet搜索.png)
 
 > **Tip:** Built-in skills (Skill Marketplace → Built-in) and SwarmSkills online search do not depend on source management and can be used directly. Switching the source does not affect already installed skills.
 
@@ -259,10 +261,12 @@ The agent lists installed skill names, sources, versions, and related info.
 **Method 3: File path**
 
 ```text
-C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
+~/.jiuwenswarm/agent/workspace/skills/
 ```
 
 Each subfolder is one skill.
+
+> **Path note**: `~` represents the user home directory. On Windows, the actual path is `C:\Users\<username>\.jiuwenswarm\agent\workspace\skills\`; on Linux/macOS, it's `/home/<username>/.jiuwenswarm/agent/workspace/skills/`. In container deployment mode, the path may vary depending on mount configuration.
 
 #### View skill details
 
@@ -276,13 +280,12 @@ Ask the agent to show a skill’s details, for example:
 Show details for gitcode-pr skill.
 ```
 
-The agent summarizes key fields in the conversation (similar to the screenshot below).
-![Skill details in chat](../assets/images/对话技能详情.png)
+The agent summarizes key fields in the conversation.
 
 **Method 2: From the web UI**
 
 Path: left sidebar → **Skills** → **My Skills** → **click the target skill** to open its detail page.
-![Skill detail page](../assets/images/技能详情gitcode-pr.png)
+![Skill detail page](../assets/images/current-ui-en/12-Skills-My-Skills.png)
 
 Details include:
 - **Source / version / author**: where the skill came from (local / built-in / skillnet / clawhub, etc.) and version info
@@ -297,7 +300,7 @@ The uninstall entry is on the **skill detail page**:
 
 1. In the **My Skills** list, click the target skill to open its detail page.
 2. Click the **Uninstall** button in the top-right of the detail page and confirm.
-   ![Skill uninstall](../assets/images/技能卸载.png)
+   ![Skill uninstall](../assets/images/current-ui-en/12-Skills-My-Skills.png)
 
 After uninstall:
 - Skill files are removed from the `skills` directory
@@ -612,11 +615,8 @@ When this skill is selected, follow the instructions below.
 
 ### Before optimization
 The output only includes basic items such as temperature, wind speed, precipitation probability, and clothing advice.
-![Skill effect](../assets/images/skill首次效果.png)
 
 ### Through chat with JiuwenSwarm: "Optimize the weather skill and add UV intensity display", the skill is updated
-![Skill improved](../assets/images/skill优化完成.png)
 
 ### After optimization
 When you call it again, the output includes not only temperature and wind speed, but also UV intensity.
-![Skill effect after improved](../assets/images/skill优化后效果.png)

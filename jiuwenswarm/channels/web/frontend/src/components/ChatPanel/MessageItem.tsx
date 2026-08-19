@@ -15,6 +15,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { contextCompressionRunningText } from '../../utils/contextCompression';
 import {
   Message,
   FileDownloadItem,
@@ -23,7 +24,7 @@ import {
 } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
-import { MediaRenderer } from './MediaRenderer';
+import { MediaRenderer, stripUploadDocumentBlocks } from './MediaRenderer';
 import { A2UIMessageContent } from '../../features/a2ui/A2UIMessageContent';
 import { QaSummaryCard } from '../InteractionSlot/QaSummaryCard';
 import { isQaSummaryContent } from '../InteractionSlot/qaSummary';
@@ -37,6 +38,10 @@ import { MarkdownRenderer } from '../../components/MarkdownRenderer';
 import { isTeamP2PMessageToUser, parseTeamEventMessage } from './teamEventUtils';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
+import { fileArtifactId } from '../ArtifactsPanel';
+import { openArtifactPanel } from '../../features/teamPanelState';
+import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
+import { FileIcon } from '../FileIcon';
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -68,13 +73,12 @@ export function TeamMemberMessageFrame({
   contentClassName?: string;
 }) {
   return (
-    <div className="team-member-message animate-fade-in">
-      {showAvatar && (
-        <div className="team-member-message__header">
-          <TeamMemberAvatar member={member} />
-        </div>
-      )}
-      <div className={clsx('team-member-message__body', !showAvatar && 'is-continued', contentClassName)}>
+    <div className="team-member-message animate-fade-in" data-testid="chat-panel-team-member-message">
+      {/* 始终占住头像列，避免 showAvatar 在多轮/折叠间切换时整列塌掉看起来像「头像消失」。 */}
+      <div className="team-member-message__header" aria-hidden={!showAvatar} data-testid="chat-panel-team-member-message-header">
+        {showAvatar ? <TeamMemberAvatar member={member} /> : null}
+      </div>
+      <div className={clsx('team-member-message__body', contentClassName)} data-testid="chat-panel-team-member-message-body">
         {children}
       </div>
     </div>
@@ -104,15 +108,18 @@ function TeamLeaderPlainTextMessage({
       showAvatar={showAvatar}
     >
       {fileItems && fileItems.length > 0 && (
-        <FileDownloadList files={fileItems} className="w-full md:w-1/2" />
+        <FileDownloadList
+          files={fileItems}
+          className="chat-message-file-list"
+          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+        />
       )}
-      <div className="team-member-message__plain">
+      <div className="team-member-message__plain" data-testid="chat-panel-team-leader-message-plain">
         <A2UIMessageContent
           content={content}
           messageId={messageId}
           isStreaming={isStreaming}
           disableInteraction={disableA2UIInteraction}
-          testId="team-leader-message-body"
         />
       </div>
     </TeamMemberMessageFrame>
@@ -141,14 +148,20 @@ export function ContextCompressionLines({
     .join('\n');
 
   return (
-    <div className="context-compression-lines">
+    <div className="context-compression-lines" data-testid="chat-panel-context-compression-lines">
       {showRuntime && (
-        <div className={clsx(
-          'mt-2 flex items-center gap-1.5 text-xs',
-          isFailed ? 'text-danger' : 'text-text-muted'
-        )}>
+        <div
+          className={clsx(
+            'mt-2 flex items-center gap-1.5 text-xs',
+            isFailed ? 'text-danger' : 'text-text-muted'
+          )}
+          data-testid="chat-panel-context-compression-runtime"
+          data-variant={isRunning ? 'running' : isFailed ? 'failed' : 'done'}
+        >
           <span className={clsx(isRunning && 'context-compression-running-text')}>
-            {runtime?.summary}
+            {isRunning
+              ? contextCompressionRunningText(t, runtime?.processor, runtime?.summary ?? '')
+              : runtime?.summary}
           </span>
         </div>
       )}
@@ -156,6 +169,7 @@ export function ContextCompressionLines({
         <div
           className="mt-2 flex items-center gap-1.5 text-xs text-text-muted"
           title={detailText || undefined}
+          data-testid="chat-panel-context-compression-summary"
         >
           <Info className="h-3.5 w-3.5" strokeWidth={1.8} />
           <span>
@@ -179,7 +193,12 @@ function renderRichContent(content: string): ReactNode[] {
       parts.push(content.slice(lastIndex, match.index));
     }
     parts.push(
-      <span key={`skill-${key++}`} className="chat-message-skill-chip">
+      <span
+        key={`skill-${key++}`}
+        className="chat-message-skill-chip"
+        data-testid="chat-panel-message-skill-chip"
+        data-variant={match[1]}
+      >
         <span className="chat-message-skill-chip__icon" aria-hidden="true" />
         <span className="chat-message-skill-chip__label">{match[1]}</span>
       </span>
@@ -193,6 +212,11 @@ function renderRichContent(content: string): ReactNode[] {
 }
 
 export function getMessageActor(message: Message): string | null {
+  // team-leader 气泡偶发会落成 assistant；按 id 识别，避免 team 聚类把头像判丢。
+  if (message.id?.startsWith('team-leader-')) {
+    return 'team_leader';
+  }
+
   if (message.role !== 'system') {
     return null;
   }
@@ -200,10 +224,6 @@ export function getMessageActor(message: Message): string | null {
   if (message.content?.startsWith('team.event:')) {
     const event = parseTeamEventMessage(message);
     return event?.fromMember || null;
-  }
-
-  if (message.id?.startsWith('team-leader-')) {
-    return 'team_leader';
   }
 
   return null;
@@ -214,6 +234,8 @@ interface MessageItemProps {
   autoSpeak?: boolean;
   showAvatar?: boolean;
   disableA2UIInteraction?: boolean;
+  hideMeta?: boolean;
+  enableAssistantAvatar?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -221,6 +243,8 @@ export const MessageItem = memo(function MessageItem({
   autoSpeak = false,
   showAvatar = true,
   disableA2UIInteraction = false,
+  hideMeta = false,
+  enableAssistantAvatar = false,
 }: MessageItemProps) {
   const { t } = useTranslation();
   const {
@@ -318,7 +342,9 @@ export const MessageItem = memo(function MessageItem({
 
   const handleCopy = useCallback(async () => {
     if (!content) return;
-    const copyContent = a2uiContentToText(content) || content;
+    const raw = role === 'user' ? stripUploadDocumentBlocks(content) : content;
+    if (!raw) return;
+    const copyContent = a2uiContentToText(raw) || raw;
     try {
       await navigator.clipboard.writeText(copyContent);
     } catch {
@@ -333,7 +359,7 @@ export const MessageItem = memo(function MessageItem({
     }
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
-  }, [content]);
+  }, [content, role]);
 
   // 自动朗读新消息（仅助手消息，由父组件通过 autoSpeak 控制）
   useEffect(() => {
@@ -356,9 +382,23 @@ export const MessageItem = memo(function MessageItem({
     });
   }, [stopGeneratedAudio, stop]);
 
-  // 主动推荐消息 - 使用特殊卡片样式
+  // 主动推荐消息 - 使用特殊卡片样式。外层沿用正常 agent 回复的布局（avatar 占位
+  // + gap + chat-bubble-wrapper），使卡片左右边缘与回复正文气泡对齐，避免卡片
+  // 左缘超出回复列。
   if (message.isProactiveRecommendation) {
-    return <ProactiveRecommendationCard message={message} />;
+    const withAssistantAvatar = enableAssistantAvatar;
+    return (
+      <div className={clsx('flex animate-rise justify-start', withAssistantAvatar && 'assistant-row')}>
+        {withAssistantAvatar && (
+          <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-proactive-avatar">
+            {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+          </div>
+        )}
+        <div className="chat-bubble-wrapper max-w-[82%] min-w-0 flex-1" data-testid="chat-panel-proactive-bubble-wrapper">
+          <ProactiveRecommendationCard message={message} />
+        </div>
+      </div>
+    );
   }
 
   // 工具调用/结果消息
@@ -393,10 +433,11 @@ export const MessageItem = memo(function MessageItem({
  	         const { description, result } = sessionData;
  	         
  	         return (
- 	           <div className="chat-tool-card animate-rise">
+ 	           <div className="chat-tool-card animate-rise" data-testid="chat-panel-session-result-card">
  	             <div
  	               className="cursor-pointer"
  	               onClick={() => setIsExpanded(!isExpanded)}
+	               data-testid="chat-panel-session-result-card-header"
  	             >
  	               <div className="flex items-center gap-2">
  	                 <span className="w-5 h-5 rounded bg-accent-2-subtle text-accent-2 flex items-center justify-center text-sm">
@@ -404,7 +445,7 @@ export const MessageItem = memo(function MessageItem({
  	                     <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V19.5a2.25 2.25 0 002.25 2.25h.75m0-3h-3.75m0 0h-3.75m0 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9m1.5 3h3.75m-3.75 0H9" />
  	                   </svg>
  	                 </span>
- 	                 <span className="font-mono text-sm font-medium text-text">
+ 	                 <span className="font-mono text-sm font-medium text-text" data-testid="chat-panel-session-result-card-title">
  	                   会话任务：【{description || '未知任务'}】已完成
  	                 </span>
  	                 <span className="text-text-muted text-sm">
@@ -413,9 +454,9 @@ export const MessageItem = memo(function MessageItem({
  	               </div>
  	             </div>
  	             {isExpanded && (
- 	               <div className="mt-2 p-2 rounded-md bg-card border border-border">
+ 	               <div className="mt-2 p-2 rounded-md bg-card border border-border" data-testid="chat-panel-session-result-card-details">
  	                 {description && (
- 	                   <div className="mb-2">
+ 	                   <div className="mb-2" data-testid="chat-panel-session-result-card-description">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Description:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap">
  	                       {description}
@@ -423,7 +464,7 @@ export const MessageItem = memo(function MessageItem({
  	                   </div>
  	                 )}
  	                 {result && (
- 	                   <div>
+ 	                   <div data-testid="chat-panel-session-result-card-result">
  	                     <div className="font-mono text-xs text-text-muted mb-1">Result:</div>
  	                     <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
  	                       {result}
@@ -437,7 +478,7 @@ export const MessageItem = memo(function MessageItem({
  	       } catch (e) {
  	         // 如果解析失败，显示原始内容
  	         return (
- 	           <div className="flex justify-center my-4 animate-fade-in">
+ 	           <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-session-result-fallback">
  	             <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
  	               {content}
  	             </div>
@@ -468,21 +509,21 @@ export const MessageItem = memo(function MessageItem({
 	               member={event.fromMember}
 	               showAvatar={showAvatar}
 	             >
-	               <div className="team-member-message__card">
-	                 <div className="team-member-message__content">
+	               <div className="team-member-message__card" data-testid="chat-panel-team-event-card">
+	                 <div className="team-member-message__content" data-testid="chat-panel-team-event-card-content">
 	                   {event.isP2P && event.toMember && (
-	                     <span className="team-event-group-chip team-event-group-chip--p2p">
+	                     <span className="team-event-group-chip team-event-group-chip--p2p" data-testid="chat-panel-team-event-chip-p2p">
 	                       @{event.toMember}
 	                     </span>
 	                   )}
 	                   {event.isBroadcast && (
-	                     <span className="team-event-group-chip team-event-group-chip--broadcast">
+	                     <span className="team-event-group-chip team-event-group-chip--broadcast" data-testid="chat-panel-team-event-chip-broadcast">
 	                       {t('chat.teamBroadcastTarget')}
 	                     </span>
 	                   )}
 	                   <MarkdownMessageBody
 	                     content={event.content}
-	                     className="team-message-markdown team-message-markdown--inline"
+	                     className="team-message-markdown team-message-markdown--inline" data-testid="chat-panel-team-event-card-body"
 	                   />
 	                 </div>
 	               </div>
@@ -490,7 +531,7 @@ export const MessageItem = memo(function MessageItem({
 	           );
 	       }
 	       return (
-	         <div className="flex justify-center my-4 animate-fade-in">
+	         <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-team-event-fallback">
 	           <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
 	             {content}
 	           </div>
@@ -527,7 +568,7 @@ export const MessageItem = memo(function MessageItem({
 	     }
 	     
     return (
-      <div className="flex justify-center my-4 animate-fade-in">
+      <div className="flex justify-center my-4 animate-fade-in" data-testid="chat-panel-system-message-bubble">
         <div className="px-4 py-2 rounded-full bg-secondary border border-border text-text-muted text-sm">
           {content}
         </div>
@@ -537,24 +578,48 @@ export const MessageItem = memo(function MessageItem({
 
   // 用户/助手消息
   const isUser = role === 'user';
+  const displayContent = isUser ? stripUploadDocumentBlocks(content) : content;
   const showTTS = Boolean(
     !isUser && !isStreaming && content && (ttsSupported || audioBase64)
   );
-  const showCopy = Boolean(content) && !isStreaming;
+  const showCopy = Boolean(isUser ? displayContent : content) && !isStreaming;
   const isPlaying = audioBase64 ? isAudioPlaying : isSpeaking;
   const visibleMediaItems = mediaItems?.length ? mediaItems : null;
   const visibleFileItems = fileItems?.length ? fileItems : null;
-  const hasBubbleContent =
-    isUser || Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
+  const hasDisplayText = Boolean(displayContent);
+  const hasBubbleContent = isUser
+    ? hasDisplayText || isStreaming
+    : Boolean(content) || Boolean(visibleMediaItems) || Boolean(visibleFileItems);
+
+  const withAssistantAvatar = !isUser && enableAssistantAvatar;
 
   return (
-    <div className={clsx(
-      'flex mb-3 animate-rise',
-      isUser ? 'justify-end' : 'justify-start'
+    <div
+    data-testid="chat-panel-message-row"
+    className={clsx(
+      'flex animate-rise',
+      isUser ? 'justify-end' : 'justify-start',
+      withAssistantAvatar && 'assistant-row'
     )}>
-      <div className="chat-bubble-wrapper max-w-[82%] min-w-0">
+      {withAssistantAvatar && (
+        // 始终保留头像占位，与 team 布局一致，避免连续气泡时整列消失。
+        <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-assistant-row-avatar">
+          {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+        </div>
+      )}
+      <div
+        className={clsx(
+          'chat-bubble-wrapper max-w-[82%] min-w-0',
+          !isUser && visibleFileItems && 'chat-bubble-wrapper--with-files'
+        )}
+        data-testid="chat-panel-bubble-wrapper"
+      >
         {!isUser && (
-          <div className="hidden" data-testid="thinking-summary" aria-hidden="true" />
+          <div className="hidden" data-testid="chat-panel-thinking-summary" aria-hidden="true" />
+        )}
+
+        {isUser && visibleMediaItems && (
+          <MediaRenderer items={visibleMediaItems} align="end" variant="above" />
         )}
 
         {hasBubbleContent && (
@@ -565,39 +630,47 @@ export const MessageItem = memo(function MessageItem({
               !isUser && !isStreaming && 'markdown',
               isStreaming && 'streaming'
             )}
-            data-testid={!isUser ? 'thinking-panel' : undefined}
+            data-testid="chat-panel-message-bubble"
+            data-variant={isUser ? 'user' : 'assistant'}
+            data-state={isStreaming ? 'streaming' : 'final'}
           >
             {isStreaming ? (
               isUser ? (
-                <StreamingContent content={content} isStreaming={true} />
+                <StreamingContent content={displayContent} />
               ) : (
                 <A2UIMessageContent
+                  key={`${id}-streaming`}
                   content={content}
                   messageId={id}
                   isStreaming={true}
                   disableInteraction={disableA2UIInteraction}
-                  testId="thinking-body"
                 />
               )
             ) : (
               <>
                 {isUser ? (
-                  <div className="chat-text">
-                    <span className="whitespace-pre-wrap">{renderRichContent(content)}</span>
-                  </div>
+                  hasDisplayText ? (
+                    <div className="chat-text" data-testid="chat-panel-message-text">
+                      <span className="whitespace-pre-wrap">{renderRichContent(displayContent)}</span>
+                    </div>
+                  ) : null
                 ) : (
                   <A2UIMessageContent
+                    key={`${id}-final`}
                     content={content}
                     messageId={id}
                     disableInteraction={disableA2UIInteraction}
-                    testId="thinking-body"
                   />
                 )}
-                {visibleMediaItems && (
-                  <MediaRenderer items={visibleMediaItems} />
+                {!isUser && visibleMediaItems && (
+                  <MediaRenderer items={visibleMediaItems} align="start" />
                 )}
                 {visibleFileItems && (
-                  <FileDownloadList files={visibleFileItems} />
+                  <FileDownloadList
+                    files={visibleFileItems}
+                    className="chat-message-file-list"
+                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                  />
                 )}
               </>
             )}
@@ -606,7 +679,7 @@ export const MessageItem = memo(function MessageItem({
 
         {/* Token usage summary */}
         {!isUser && !isStreaming && message.usageSummary && message.usageSummary.total_tokens > 0 && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-text-muted mt-1 mb-0.5" data-testid="chat-panel-message-usage-summary">
             <span>
               {message.usageSummary.input_tokens.toLocaleString()} in /{' '}
               {message.usageSummary.output_tokens.toLocaleString()} out /{' '}
@@ -622,30 +695,32 @@ export const MessageItem = memo(function MessageItem({
           </div>
         )}
 
-        {!isStreaming && (
+        {!isStreaming && !hideMeta && (
           <div
+            data-testid="chat-panel-message-meta"
             className={clsx(
               'flex items-center gap-3 text-sm mt-2 text-text-muted',
               isUser ? 'justify-end' : 'justify-start'
             )}
           >
-            <span>{formatTimestamp(timestamp)}</span>
+            <span data-testid="chat-panel-message-timestamp">{formatTimestamp(timestamp)}</span>
 
             {isUser && isGoalObjectiveMessage && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted">
+              <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs text-text-muted" data-testid="chat-panel-message-goal-badge">
                 <Target className="w-3 h-3" strokeWidth={2} />
                 {t('goal.badge')}
               </span>
             )}
 
             {showCopy && (
-              <div className="relative">
+              <div className="relative" data-testid="chat-panel-message-copy">
                 {copied && (
-                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md">
+                  <span className="animate-fade-in absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-xs text-text shadow-md" data-testid="chat-panel-message-copied-tip">
                     {t('chatUi.copied')}
                   </span>
                 )}
                 <button
+                  data-testid="chat-panel-message-copy-btn"
                   onClick={handleCopy}
                   className={clsx(
                     'p-1.5 rounded-md ',
@@ -664,6 +739,8 @@ export const MessageItem = memo(function MessageItem({
 
             {showTTS && (
               <button
+                data-testid="chat-panel-message-tts-btn"
+                data-variant={isPlaying ? 'playing' : 'idle'}
                 onClick={handleSpeak}
                 className={clsx(
                   'p-1.5 rounded-md ',
@@ -702,47 +779,14 @@ function getFileExtension(name: string): string {
   return parts[parts.length - 1].toUpperCase();
 }
 
-function getFileTypeConfig(mimeType: string | undefined, name: string) {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  const mt = mimeType || '';
-  if (mt.startsWith('image/') || ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'].includes(ext))
-    return { label: 'IMG', bg: 'bg-[#3370ff]', icon: '🖼' };
-  if (mt.startsWith('audio/') || ['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext))
-    return { label: 'AUDIO', bg: 'bg-[#7b67ee]', icon: '🎵' };
-  if (mt.startsWith('video/') || ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext))
-    return { label: 'VIDEO', bg: 'bg-[#f77234]', icon: '🎬' };
-  if (mt.includes('pdf') || ext === 'pdf')
-    return { label: 'PDF', bg: 'bg-[#f54a45]', icon: '📄' };
-  if (mt.includes('presentation') || mt.includes('ppt') || ['ppt', 'pptx'].includes(ext))
-    return { label: 'PPT', bg: '#FFFFFF', icon: (
-      <svg viewBox="0 0 1024 1024" className="w-7 h-7">
-        <path d="M145.6 0C100.8 0 64 36.8 64 81.6v860.8C64 987.2 100.8 1024 145.6 1024h732.8c44.8 0 81.6-36.8 81.6-81.6V324.8L657.6 0h-512z" fill="#E34221" />
-        <path d="M960 326.4v16H755.2s-100.8-20.8-99.2-108.8c0 0 4.8 92.8 97.6 92.8H960z" fill="#DC3119" />
-        <path d="M657.6 0v233.6c0 25.6 17.6 92.8 97.6 92.8H960L657.6 0z" fill="#FFFFFF" opacity=".5" />
-        <path d="M304 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V686.4c0-9.6 8-17.6 17.6-17.6H304c38.4 0 59.2 25.6 59.2 57.6S340.8 784 304 784z m-3.2-94.4h-51.2v73.6h51.2c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8zM480 784h-54.4v67.2c0 6.4-4.8 11.2-11.2 11.2-6.4 0-11.2-4.8-11.2-11.2V686.4c0-9.6 6.4-17.6 16-17.6H480c38.4 0 59.2 25.6 59.2 57.6S518.4 784 480 784z m-3.2-94.4h-49.6v73.6h49.6c22.4 0 38.4-16 38.4-36.8 0-22.4-16-36.8-38.4-36.8z m225.6 0h-52.8v161.6c0 6.4-4.8 11.2-11.2 11.2-6.4 0-12.8-4.8-12.8-11.2V689.6h-51.2c-6.4 0-11.2-4.8-11.2-11.2 0-4.8 4.8-9.6 11.2-9.6h128c6.4 0 11.2 4.8 11.2 11.2 0 4.8-4.8 9.6-11.2 9.6z" fill="#FFFFFF" />
-      </svg>
-    ) };
-  if (mt.includes('spreadsheet') || mt.includes('excel') || mt.includes('xlsx') || ['xls', 'xlsx', 'csv'].includes(ext))
-    return { label: 'XLS', bg: 'bg-[#2b9348]', icon: '📗' };
-  if (mt.includes('word') || mt.includes('document') || mt.includes('docx') || ['doc', 'docx'].includes(ext))
-    return { label: 'DOC', bg: 'bg-[#3370ff]', icon: '📝' };
-  if (mt.includes('zip') || mt.includes('compressed') || mt.includes('archive') || ['zip', 'rar', '7z', 'tar', 'gz'].includes(ext))
-    return { label: 'ZIP', bg: 'bg-[#8b5cf6]', icon: '📦' };
-  if (['txt', 'md', 'log'].includes(ext))
-    return { label: 'TXT', bg: 'bg-[#6b7280]', icon: '📃' };
-  if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg'].includes(ext))
-    return { label: 'CFG', bg: 'bg-[#6b7280]', icon: '⚙' };
-  if (['py', 'js', 'ts', 'java', 'go', 'rs', 'cpp', 'c', 'h'].includes(ext))
-    return { label: 'CODE', bg: 'bg-[#6b7280]', icon: '�' };
-  return { label: 'FILE', bg: 'bg-[#6b7280]', icon: '��' };
-}
-
 function FileDownloadList({
   files,
   className,
+  onPreview,
 }: {
   files: FileDownloadItem[];
   className?: string;
+  onPreview?: (index: number) => void;
 }) {
   const { t } = useTranslation();
   const [expiredSet, setExpiredSet] = useState<Set<number>>(new Set());
@@ -768,13 +812,15 @@ function FileDownloadList({
   const handleDownload = async (file: FileDownloadItem, index: number) => {
     if (expiredSet.has(index)) return;
 
-    // 检查是否在 PyWebView 环境中（exe 模式）
-    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => Promise<boolean> | boolean } } }).pywebview?.api;
+    // 检查是否在 PyWebView 桌面环境中
+    const pywebviewApi = (window as Window & { pywebview?: { api?: { download_file?: (url: string, filename: string) => DesktopSaveApiResult } } }).pywebview?.api;
     if (pywebviewApi?.download_file) {
-      // exe 模式：通过 webview API 下载
-      const success = await pywebviewApi.download_file(file.download_url, file.name || 'download');
-      if (!success) {
-        console.error('Download failed via pywebview API');
+      // 桌面端：通过 webview API 下载
+      const outcome = await executeDesktopSave(() =>
+        pywebviewApi.download_file!(file.download_url, file.name || 'download')
+      );
+      if (outcome === 'failed') {
+        window.alert(t('artifacts.downloadFailed', { name: file.name }));
       }
       return;
     }
@@ -788,50 +834,73 @@ function FileDownloadList({
   };
 
   return (
-    <div className={clsx('mt-2 space-y-2', className)}>
+    <div data-testid="chat-panel-file-download-list"
+    className={clsx('mt-2 space-y-2', className)}>
       {files.map((file, index) => {
-        const typeConfig = getFileTypeConfig(file.mime_type, file.name);
         const ext = getFileExtension(file.name);
         const expired = expiredSet.has(index);
         return (
           <div
             key={`${file.name}-${index}`}
+            data-testid="chat-panel-file-download-item"
+            data-variant={file.name}
             className={clsx(
               'flex items-center gap-3 rounded-lg border px-3 py-2.5  ',
               expired
                 ? 'border-border/50 bg-card/50 cursor-not-allowed opacity-60'
-                : 'border-border bg-card hover:shadow-md hover:border-border-hover cursor-pointer group'
+                : clsx(
+                  'border-border bg-card',
+                  onPreview && 'cursor-pointer group hover:border-border-hover hover:shadow-md'
+                )
             )}
-            onClick={() => handleDownload(file, index)}
+            onClick={() => {
+              if (!expired) onPreview?.(index);
+            }}
           >
-            <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeConfig.bg} flex items-center justify-center`}>
-              {typeof typeConfig.icon === 'string' ? (
-                <span className="text-white text-base leading-none select-none">{typeConfig.icon}</span>
-              ) : (
-                typeConfig.icon
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-text leading-snug truncate">{file.name}</div>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none">
-                  {ext || typeConfig.label}
-                </span>
-                <span className="text-xs text-text-muted">{formatFileSize(file.size)}</span>
-                {expired && (
-                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none">
-                    {t('chatUi.fileExpired')}
+            <button
+              type="button"
+              data-testid="chat-panel-file-download-preview"
+              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+              disabled={expired || !onPreview}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview?.(index);
+              }}
+              title={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+              aria-label={onPreview ? t('artifacts.openPreview', { name: file.name }) : undefined}
+            >
+              <FileIcon fileName={file.name} size={40} className="flex-shrink-0 select-none" />
+              <div className="flex-1 min-w-0" data-testid="chat-panel-file-download-info">
+                <div className="text-sm font-medium text-text leading-snug truncate" data-testid="chat-panel-file-download-name">{file.name}</div>
+                <div className="flex items-center gap-1.5 mt-0.5" data-testid="chat-panel-file-download-meta">
+                  <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-text-muted bg-secondary leading-none" data-testid="chat-panel-file-download-ext">
+                    {ext || 'FILE'}
                   </span>
-                )}
+                  <span className="text-xs text-text-muted" data-testid="chat-panel-file-download-size">{formatFileSize(file.size)}</span>
+                  {expired && (
+                    <span className="inline-flex items-center px-1 py-px rounded text-[10px] font-mono font-medium text-danger bg-danger/10 leading-none" data-testid="chat-panel-file-download-expired">
+                      {t('chatUi.fileExpired')}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-            <div
+            </button>
+            <button
+              type="button"
+              data-testid="chat-panel-file-download-btn"
               className={clsx(
                 'flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center  ',
                 expired
                   ? 'text-text-muted/40'
-                  : 'text-text-muted group-hover:text-accent group-hover:bg-accent-subtle'
+                  : 'text-text-muted hover:text-accent hover:bg-accent-subtle'
               )}
+              disabled={expired}
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleDownload(file, index);
+              }}
+              title={t('artifacts.download')}
+              aria-label={t('artifacts.download')}
             >
               {expired ? (
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -842,7 +911,7 @@ function FileDownloadList({
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                 </svg>
               )}
-            </div>
+            </button>
           </div>
         );
       })}

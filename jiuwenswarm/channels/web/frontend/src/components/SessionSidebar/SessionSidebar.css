@@ -232,7 +232,7 @@
 }
 
 .icon-rail-more-panel {
-  position: fixed;
+  position: absolute;
   top: 0;
   bottom: 0;
   left: 64px;
@@ -311,7 +311,6 @@
   min-height: 8px;
 }
 
-/* Last bottom item gets more spacing */
-.icon-rail-spacer + .icon-rail-nav-item {
+.icon-rail-settings-button {
   margin-bottom: 12px;
 }

@@ -32,8 +32,9 @@ What this script catches (deterministic):
     - scripts/workflow.py, when present, satisfies the executable SwarmFlow
       safety envelope: standalone shape, literal META, inline prompts, safe
       imports, phase/agent consistency, human/session call discipline,
-      permissive schemas, and blocked runtime patterns. The full authoring
-      constraint list lives in
+      portable child-workflow paths and one-level composition, budget access
+      discipline, permissive schemas, and blocked runtime patterns. The full
+      authoring constraint list lives in
       templates/scripts/workflow.py.template.
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
@@ -50,7 +51,7 @@ import builtins
 import sys
 import re
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -495,10 +496,12 @@ SUPPORTED_SWARMFLOW_OPERATORS = {
     "phase",
     "pipeline",
     "pmap",
+    "workflow",
 }
 
 SUPPORTED_SWARMFLOW_TYPES = {"AgentSession", "HumanSession"}
 PROTECTED_SWARMFLOW_NAMES = SUPPORTED_SWARMFLOW_OPERATORS
+DEFERRED_THUNK_OPERATORS = {"map_parallel", "parallel", "pipeline", "pmap"}
 NON_DETERMINISTIC_IMPORTS = {"random", "time", "datetime"}
 FILESYSTEM_CALLS = {"open"}
 PATH_IO_METHODS = {"read_text", "write_text", "read_bytes", "write_bytes", "open"}
@@ -552,7 +555,7 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _is_inside_parallel_lambda(node: ast.AST) -> bool:
+def _is_inside_deferred_lambda(node: ast.AST) -> bool:
     current = _parent(node)
     while current is not None:
         if isinstance(current, ast.Lambda):
@@ -560,7 +563,7 @@ def _is_inside_parallel_lambda(node: ast.AST) -> bool:
             container = _parent(lambda_node)
             while container is not None:
                 if isinstance(container, ast.Call):
-                    return _call_name(container) == "parallel"
+                    return _call_name(container) in DEFERRED_THUNK_OPERATORS
                 if isinstance(container, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     return False
                 container = _parent(container)
@@ -893,6 +896,226 @@ def _has_notify_schema_conflict(node: ast.Call) -> bool:
     return not _is_literal_none(schema_kw.value)
 
 
+def _workflow_path_argument(node: ast.Call) -> ast.AST | None:
+    if node.args:
+        return node.args[0]
+    keyword = _keyword(node, "name_or_path")
+    return keyword.value if keyword is not None else None
+
+
+def _workflow_path_is_missing_or_empty(node: ast.AST | None) -> bool:
+    if node is None:
+        return True
+    if not isinstance(node, ast.Constant):
+        return False
+    return not isinstance(node.value, str) or not node.value.strip()
+
+
+def _single_assignment_bindings(tree: ast.Module) -> dict[str, ast.AST]:
+    candidates: dict[str, list[ast.AST]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                candidates.setdefault(target.id, []).append(value)
+    return {
+        name: values[0]
+        for name, values in candidates.items()
+        if len(values) == 1
+    }
+
+
+def _unwrap_path_expression(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+    seen: set[str] | None = None,
+) -> ast.AST:
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id != "str":
+            return node
+        if len(node.args) != 1 or node.keywords:
+            return node
+        return _unwrap_path_expression(node.args[0], bindings, seen)
+    if isinstance(node, ast.Name) and node.id in bindings:
+        visited = set() if seen is None else set(seen)
+        if node.id in visited:
+            return node
+        visited.add(node.id)
+        return _unwrap_path_expression(bindings[node.id], bindings, visited)
+    return node
+
+
+def _split_path_join(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+) -> tuple[ast.AST, list[str]] | None:
+    node = _unwrap_path_expression(node, bindings)
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+        return node, []
+    left = _split_path_join(node.left, bindings)
+    part = _string_literal(node.right)
+    if left is None or part is None:
+        return None
+    base, parts = left
+    return base, [*parts, part]
+
+
+def _is_installed_skills_root(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Subscript):
+        return False
+    if _literal_or_none(node.slice) != 2:
+        return False
+    parents = node.value
+    if not isinstance(parents, ast.Attribute) or parents.attr != "parents":
+        return False
+    resolved_file = parents.value
+    if not isinstance(resolved_file, ast.Call):
+        return False
+    if resolved_file.args or resolved_file.keywords:
+        return False
+    if not isinstance(resolved_file.func, ast.Attribute):
+        return False
+    if resolved_file.func.attr != "resolve":
+        return False
+    path_file = resolved_file.func.value
+    if not isinstance(path_file, ast.Call):
+        return False
+    if path_file.keywords or len(path_file.args) != 1:
+        return False
+    if not isinstance(path_file.func, ast.Name) or path_file.func.id != "Path":
+        return False
+    path_argument = path_file.args[0]
+    return isinstance(path_argument, ast.Name) and path_argument.id == "__file__"
+
+
+def _is_portable_child_workflow_path(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+) -> bool:
+    node = _unwrap_path_expression(node, bindings)
+    if not isinstance(node, ast.Call):
+        return False
+    if node.args or node.keywords:
+        return False
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr != "resolve":
+        return False
+    split = _split_path_join(node.func.value, bindings)
+    if split is None:
+        return False
+    base, parts = split
+    if not _is_installed_skills_root(base) or len(parts) != 3:
+        return False
+    if parts[1:] != ["scripts", "workflow.py"]:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", parts[0]))
+
+
+def _is_absolute_path_literal(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _is_budget_attribute(node: ast.AST, name: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == name
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "budget"
+    )
+
+
+def _is_none_literal(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _proves_budget_total_available(node: ast.AST) -> bool:
+    if _is_budget_attribute(node, "total"):
+        return True
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+        return any(_proves_budget_total_available(value) for value in node.values)
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+        return False
+
+    op = node.ops[0]
+    comparator = node.comparators[0]
+    if not isinstance(op, (ast.IsNot, ast.NotEq)):
+        return False
+    return (
+        _is_budget_attribute(node.left, "total") and _is_none_literal(comparator)
+    ) or (
+        _is_none_literal(node.left) and _is_budget_attribute(comparator, "total")
+    )
+
+
+def _is_guarded_by_budget_total(node: ast.AST) -> bool:
+    current = node
+    parent = _parent(current)
+    while parent is not None:
+        if isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.And):
+            current_index = parent.values.index(current)
+            if any(
+                _proves_budget_total_available(value)
+                for value in parent.values[:current_index]
+            ):
+                return True
+        elif isinstance(parent, (ast.If, ast.While)):
+            if current in parent.body and _proves_budget_total_available(parent.test):
+                return True
+        elif isinstance(parent, ast.IfExp):
+            if current is parent.body and _proves_budget_total_available(parent.test):
+                return True
+        current = parent
+        parent = _parent(current)
+    return False
+
+
+def _budget_remaining_is_numeric(node: ast.Call) -> bool:
+    current: ast.AST = node
+    parent = _parent(current)
+    while isinstance(parent, (ast.UnaryOp, ast.BinOp)):
+        current = parent
+        parent = _parent(current)
+    if isinstance(parent, ast.Compare):
+        return any(
+            isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+            for op in parent.ops
+        )
+    return isinstance(current, (ast.UnaryOp, ast.BinOp))
+
+
+def _has_guarded_budget_remaining(test: ast.AST) -> bool:
+    return any(
+        isinstance(candidate, ast.Call)
+        and _call_name(candidate) == "budget.remaining"
+        and _budget_remaining_is_numeric(candidate)
+        and _is_guarded_by_budget_total(candidate)
+        for candidate in ast.walk(test)
+    )
+
+
+def _caught_exception_names(node: ast.AST | None) -> set[str]:
+    if node is None:
+        return {"<bare>"}
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, ast.Attribute):
+        return {node.attr}
+    if isinstance(node, ast.Tuple):
+        names: set[str] = set()
+        for element in node.elts:
+            names.update(_caught_exception_names(element))
+        return names
+    return set()
+
+
 def _is_asyncio_orchestration_alias_call(node: ast.Call, asyncio_modules: set[str]) -> bool:
     if not isinstance(node.func, ast.Attribute):
         return False
@@ -907,6 +1130,7 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     asyncio_modules, asyncio_functions = _asyncio_orchestration_aliases(tree)
+    bindings = _single_assignment_bindings(tree)
     session_names = _session_variable_names(tree)
     imported_swarmflow_types = _swarmflow_imported_names(tree) & SUPPORTED_SWARMFLOW_TYPES
 
@@ -927,7 +1151,7 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     f"line {getattr(node, 'lineno', '?')}: imports non-deterministic module "
                     f"{module!r}; pass values via args"
                 )
-        elif isinstance(node, ast.While):
+        elif isinstance(node, ast.While) and not _has_guarded_budget_remaining(node.test):
             warnings.append(
                 f"line {getattr(node, 'lineno', '?')}: loop must document a stop condition "
                 "(max_rounds, dry_count, budget guard, or input cap)"
@@ -937,6 +1161,13 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 warnings.append(
                     f"line {getattr(node, 'lineno', '?')}: avoid module-level mutable state; "
                     "keep run state inside run(args)"
+                )
+        elif isinstance(node, ast.ExceptHandler):
+            caught = _caught_exception_names(node.type)
+            if caught & {"<bare>", "BaseException", "BudgetExhausted"}:
+                warnings.append(
+                    f"line {getattr(node, 'lineno', '?')}: exception handler may catch "
+                    "budget exhaustion; use finally for cleanup and let BudgetExhausted propagate"
                 )
         elif isinstance(node, ast.Call):
             line = getattr(node, "lineno", "?")
@@ -951,18 +1182,71 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 errors.append(f"line {line}: use swarmflow.log(), not print()")
             elif call_name == "budget":
                 errors.append(f"line {line}: budget is an imported singleton; use budget.remaining(), not budget()")
+            elif call_name == "budget.total":
+                errors.append(f"line {line}: budget.total is a property; do not call it")
+            elif call_name == "budget.remaining":
+                if _budget_remaining_is_numeric(node) and not _is_guarded_by_budget_total(node):
+                    errors.append(
+                        f"line {line}: guard budget.remaining() numeric use with "
+                        "budget.total or `budget.total is not None`"
+                    )
+            elif call_name == "workflow":
+                path_argument = _workflow_path_argument(node)
+                resolved_path_argument = (
+                    _unwrap_path_expression(path_argument, bindings)
+                    if path_argument is not None
+                    else None
+                )
+                path_literal = (
+                    _string_literal(resolved_path_argument)
+                    if resolved_path_argument is not None
+                    else None
+                )
+                if _workflow_path_is_missing_or_empty(resolved_path_argument):
+                    errors.append(
+                        f"line {line}: workflow() requires a non-empty child workflow name/path"
+                    )
+                elif path_literal is not None and _is_absolute_path_literal(path_literal):
+                    errors.append(
+                        f"line {line}: workflow() must not hardcode an absolute machine path; "
+                        "derive a portable absolute child path from Path(__file__).resolve()"
+                    )
+                elif path_literal is not None:
+                    errors.append(
+                        f"line {line}: workflow() does not accept a bare Skill name or relative "
+                        "path; derive an absolute child path from Path(__file__).resolve()"
+                    )
+                elif resolved_path_argument is not None and not _is_portable_child_workflow_path(
+                    resolved_path_argument,
+                    bindings,
+                ):
+                    warnings.append(
+                        f"line {line}: dynamic child workflow path cannot be validated; "
+                        "require an absolute .py path and validate its allowed location"
+                    )
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: workflow() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
             elif call_name == "agent":
                 if node.args and _string_literal(node.args[0]) == "":
                     errors.append(f"line {line}: agent prompt must not be an empty string")
-                if not _is_directly_awaited(node) and not _is_inside_parallel_lambda(node):
-                    errors.append(f"line {line}: agent() must be awaited or returned from a parallel thunk")
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: agent() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
             elif call_name == "human":
                 if node.args and _string_literal(node.args[0]) == "":
                     errors.append(f"line {line}: human prompt must not be an empty string")
                 if _keyword(node, "notify") is not None:
                     errors.append(f"line {line}: human() does not accept notify; use human_session().send()")
-                if not _is_directly_awaited(node) and not _is_inside_parallel_lambda(node):
-                    errors.append(f"line {line}: human() must be awaited or returned from a parallel thunk")
+                if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
+                    errors.append(
+                        f"line {line}: human() must be awaited or returned from a "
+                        "deferred SwarmFlow thunk"
+                    )
             elif call_name in {"agent_session", "human_session"}:
                 if _is_directly_awaited(node):
                     errors.append(f"line {line}: {call_name}() is synchronous and must not be awaited")
@@ -1006,6 +1290,24 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                 warnings.append(
                     f"line {line}: avoid direct filesystem access via Path.{node.func.attr} in workflow.py"
                 )
+        elif isinstance(node, ast.Attribute):
+            line = getattr(node, "lineno", "?")
+            if _is_budget_attribute(node, "total") and isinstance(
+                node.ctx,
+                (ast.Store, ast.Del),
+            ):
+                errors.append(f"line {line}: budget.total is read-only")
+            elif (
+                node.attr in {"remaining", "spent"}
+                and _is_budget_attribute(node, node.attr)
+                and isinstance(node.ctx, ast.Load)
+            ):
+                parent = _parent(node)
+                if not (isinstance(parent, ast.Call) and parent.func is node):
+                    errors.append(
+                        f"line {line}: budget.{node.attr} is a method; "
+                        f"use budget.{node.attr}()"
+                    )
 
     return sorted(set(errors)), sorted(set(warnings))
 

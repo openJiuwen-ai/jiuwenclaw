@@ -14,9 +14,14 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, Agen
 
 AgentCreator = Callable[[AgentInfo], Awaitable[AgentInfo | None]]
 AgentKey = tuple[str, ...]
-SUPPORTED_AGENT_TYPES = frozenset({"jiuwenswarm", "opencode", "claude"})
+BUILTIN_AGENT_TYPE = "jiuwenswarm"
 SUPPORTED_AGENT_KEY_FIELDS = frozenset({"user_id", "agent_type", "session_id"})
 DEFAULT_AGENT_KEY_FIELDS = ("user_id", "agent_type")
+
+
+def is_third_party_agent_type(agent_type: str) -> bool:
+    """True when *agent_type* is not the builtin swarm type."""
+    return str(agent_type or "").strip().lower() not in {"", BUILTIN_AGENT_TYPE}
 
 
 def normalize_agent_key_fields(raw: Any = None) -> tuple[str, ...]:
@@ -65,6 +70,10 @@ class AgentDeleted(RuntimeError):
     """Agent was deleted while creation was in flight."""
 
 
+class AgentCreateFailed(RuntimeError):
+    """Previous create failed; automatic retry is disabled to avoid double create."""
+
+
 @dataclass
 class AgentRuntime:
     """In-process agent record: business info plus create-wait signaling."""
@@ -72,6 +81,14 @@ class AgentRuntime:
     info: AgentInfo
     key: AgentKey
     creating_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Sandbox activity accounting: task_count is held for the whole lifetime
+    # of a chat request / stream / SSH relay; the idle clock only starts once
+    # it drops back to zero.
+    task_count: int = 0
+    last_active_at: float = field(default_factory=time.time)
+
+    def touch(self) -> None:
+        self.last_active_at = time.time()
 
     def is_ready(self) -> bool:
         return self.info.status is AgentStatus.READY
@@ -87,19 +104,18 @@ class AgentRuntime:
 
     def snapshot(self) -> AgentRuntime:
         """Return a detached runtime view for callers (info only)."""
-        return AgentRuntime(info=self.info.copy(), key=self.key)
+        return AgentRuntime(
+            info=self.info.copy(),
+            key=self.key,
+            task_count=self.task_count,
+            last_active_at=self.last_active_at,
+        )
 
     def attach_to_envelope(self, envelope: E2AEnvelope) -> None:
         envelope.channel_context["agent_id"] = self.info.agent_id
         envelope.channel_context["agent_type"] = self.info.agent_type
         if self.info.sandbox_id:
             envelope.channel_context["sandbox_id"] = self.info.sandbox_id
-
-    def reset_for_retry(self) -> None:
-        self.info.status = AgentStatus.CREATING
-        self.info.error = None
-        self.info.updated_at = time.time()
-        self.creating_event = asyncio.Event()
 
     @staticmethod
     def apply_creator_result(created: AgentInfo | None, *, base: AgentInfo) -> AgentInfo:
@@ -137,10 +153,9 @@ class AgentRuntime:
 
     @staticmethod
     def normalize_agent_type(raw: Any) -> str:
-        agent_type = str(raw or "jiuwenswarm").strip().lower()
-        if agent_type not in SUPPORTED_AGENT_TYPES:
-            raise ValueError(f"unsupported agent_type: {agent_type}")
-        return agent_type
+        """Normalize agent_type; any non-empty name is accepted (no allowlist)."""
+        agent_type = str(raw or "").strip().lower()
+        return agent_type or BUILTIN_AGENT_TYPE
 
     @staticmethod
     def normalize_session_id(raw: Any) -> str:
@@ -223,10 +238,39 @@ class AgentManager:
         self._runtimes: dict[AgentKey, AgentRuntime] = {}
         self._runtimes_lock = asyncio.Lock()
         self._creating_timeout_seconds = max(0.1, float(creating_timeout_seconds))
+        # 用户连接计数：user_id → 当前活跃连接数
+        self._user_connection_counts: dict[str, int] = {}
 
     @property
     def key_fields(self) -> tuple[str, ...]:
         return self._key_fields
+
+    @staticmethod
+    def _failed_message(runtime: AgentRuntime, key_desc: str) -> str:
+        detail = str(runtime.info.error or "").strip() or "unknown error"
+        return f"AGENT_CREATE_FAILED: {key_desc}: {detail}"
+
+    # ── 用户连接计数 ──
+
+    def increment_user_connections(self, user_id: str) -> None:
+        """递增用户连接计数。"""
+        uid = str(user_id or "").strip()
+        self._user_connection_counts[uid] = self._user_connection_counts.get(uid, 0) + 1
+
+    def decrement_user_connections(self, user_id: str) -> int:
+        """递减用户连接计数，返回递减后的值（最小为 0）。"""
+        uid = str(user_id or "").strip()
+        count = self._user_connection_counts.get(uid, 0) - 1
+        if count <= 0:
+            self._user_connection_counts.pop(uid, None)
+            return 0
+        self._user_connection_counts[uid] = count
+        return count
+
+    def get_user_connection_count(self, user_id: str) -> int:
+        """获取用户当前连接数。"""
+        uid = str(user_id or "").strip()
+        return self._user_connection_counts.get(uid, 0)
 
     def _make_key(
         self,
@@ -246,6 +290,12 @@ class AgentManager:
         values = dict(zip(self._key_fields, key, strict=False))
         return values["user_id"], values["agent_type"]
 
+    @staticmethod
+    def _acquire_locked(runtime: AgentRuntime) -> None:
+        """Increment task holding under ``_runtimes_lock``."""
+        runtime.task_count += 1
+        runtime.touch()
+
     async def get_or_create_agent(
         self,
         user_id: str,
@@ -255,8 +305,15 @@ class AgentManager:
         creator: AgentCreator | None = None,
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
+        acquire: bool = False,
     ) -> AgentRuntime:
-        """Get a READY Agent runtime or create one, waiting for in-flight creation."""
+        """Get a READY Agent runtime or create one, waiting for in-flight creation.
+
+        With ``acquire=True`` the stored runtime's ``task_count`` is
+        incremented atomically before the snapshot is returned, so the idle
+        reaper can never reclaim an agent between resolve and use. Callers
+        must pair it with :meth:`release`.
+        """
 
         key = self._make_key(user_id, agent_type, key_values=key_values)
         key_user_id, key_agent_type = self._identity_from_key(key)
@@ -272,6 +329,12 @@ class AgentManager:
             async with self._runtimes_lock:
                 existing = self._runtimes.get(key)
                 if existing is not None and existing.is_ready():
+                    if acquire:
+                        self._acquire_locked(existing)
+                    else:
+                        # Plain resolve (e.g. 3rdagent.switch) still counts as
+                        # activity for the idle clock.
+                        existing.touch()
                     return existing.snapshot()
 
                 if existing is None:
@@ -286,13 +349,21 @@ class AgentManager:
                 else:
                     runtime = existing
                     if runtime.is_failed():
-                        runtime.reset_for_retry()
-                        owner = True
+                        # Do not reset_for_retry: a cancelled/failed create may
+                        # still have provisioned a YuanRong sandbox; retrying
+                        # here would spawn a second one.
+                        raise AgentCreateFailed(
+                            self._failed_message(runtime, key_desc)
+                        )
                 creator_base = runtime.info.copy()
 
             if owner:
                 return await self._run_creator(
-                    key, creator_base, creator, owner_runtime=runtime
+                    key,
+                    creator_base,
+                    creator,
+                    owner_runtime=runtime,
+                    acquire=acquire,
                 )
 
             try:
@@ -303,6 +374,8 @@ class AgentManager:
                 ) from exc
             if runtime.is_deleted():
                 raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
+            if runtime.is_failed():
+                raise AgentCreateFailed(self._failed_message(runtime, key_desc))
 
     async def get_agent(
         self,
@@ -310,11 +383,23 @@ class AgentManager:
         agent_type: str,
         *,
         key_values: Mapping[str, Any] | None = None,
+        acquire: bool = False,
     ) -> AgentRuntime | None:
+        """Return a snapshot of an existing runtime, or ``None``.
+
+        With ``acquire=True`` and a READY runtime, increment ``task_count``
+        under the lock (same contract as :meth:`get_or_create_agent`) so the
+        idle reaper cannot reclaim the sandbox between resolve and use.
+        Callers must pair it with :meth:`release`.
+        """
         key = self._make_key(user_id, agent_type, key_values=key_values)
         async with self._runtimes_lock:
             runtime = self._runtimes.get(key)
-            return runtime.snapshot() if runtime is not None else None
+            if runtime is None:
+                return None
+            if acquire and runtime.is_ready():
+                self._acquire_locked(runtime)
+            return runtime.snapshot()
 
     async def delete_agent(
         self,
@@ -328,6 +413,49 @@ class AgentManager:
             runtime = self._runtimes.pop(key, None)
         if runtime is not None:
             runtime.mark_deleted()
+
+    async def release(self, key: AgentKey) -> None:
+        """Drop one task holding acquired via ``get_or_create_agent`` / ``get_agent``.
+
+        No-op when the runtime is already gone (e.g. explicitly deleted).
+        """
+        async with self._runtimes_lock:
+            runtime = self._runtimes.get(key)
+            if runtime is None:
+                return
+            runtime.task_count = max(0, runtime.task_count - 1)
+            runtime.touch()
+
+    async def pop_if_idle(
+        self,
+        key: AgentKey,
+        idle_timeout_seconds: float,
+    ) -> AgentRuntime | None:
+        """Atomically remove a READY runtime idle beyond the timeout.
+
+        Returns a detached snapshot (status DELETED) when reclaimed so the
+        caller can release the underlying sandbox, or ``None`` when the
+        runtime is missing, still held (``task_count > 0``), not READY, or
+        not idle long enough.
+        """
+        timeout = float(idle_timeout_seconds)
+        if timeout <= 0:
+            return None
+        async with self._runtimes_lock:
+            runtime = self._runtimes.get(key)
+            if runtime is None or not runtime.is_ready():
+                return None
+            if runtime.task_count > 0:
+                return None
+            if time.time() - runtime.last_active_at < timeout:
+                return None
+            self._runtimes.pop(key, None)
+        runtime.mark_deleted()
+        return runtime.snapshot()
+
+    async def list_keys(self) -> list[AgentKey]:
+        async with self._runtimes_lock:
+            return list(self._runtimes.keys())
 
     async def list_user_agents(self, user_id: str) -> list[AgentRuntime]:
         normalized_user_id = str(user_id or "").strip()
@@ -357,6 +485,7 @@ class AgentManager:
         creator: AgentCreator | None,
         *,
         owner_runtime: AgentRuntime,
+        acquire: bool = False,
     ) -> AgentRuntime:
         key_desc = AgentRuntime.format_key(key, self._key_fields)
         try:
@@ -366,6 +495,8 @@ class AgentManager:
                 if self._runtimes.get(key) is not owner_runtime:
                     raise AgentDeleted(f"AGENT_DELETED: {key_desc}")
                 owner_runtime.mark_ready(resolved)
+                if acquire:
+                    self._acquire_locked(owner_runtime)
                 return owner_runtime.snapshot()
         except asyncio.CancelledError as exc:
             await self._mark_creator_failed(

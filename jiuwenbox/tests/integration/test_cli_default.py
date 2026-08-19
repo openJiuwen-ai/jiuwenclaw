@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -28,8 +29,39 @@ import uuid
 from pathlib import Path
 
 import pytest
+import yaml
+
+from jiuwenbox.bundled_configs import default_policy_path
 
 pytestmark = pytest.mark.integration
+
+_DEFAULT_FILESYSTEM_POLICY = yaml.safe_load(
+    default_policy_path().read_text(encoding="utf-8")
+)["filesystem_policy"]
+_DEFAULT_BIND_MOUNTS = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["bind_mounts"])
+_DEFAULT_DIRECTORIES = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["directories"])
+
+
+def _with_runtime_support(policy: dict) -> dict:
+    """Ensure override policies expose host python/runtime paths via bind_mounts.
+
+    ``read_only`` alone only affects Landlock remounts; bubblewrap only exposes
+    host paths listed in ``bind_mounts``. Mount list matches the bundled
+    default policy used by successful server-api override tests — not the
+    outdated ``conftest.SYSTEM_BIND_MOUNTS`` (which incorrectly includes
+    ``/etc/ssl/openssl.cnf``).
+    """
+    runtime_policy = copy.deepcopy(policy)
+    filesystem_policy = runtime_policy.setdefault("filesystem_policy", {})
+    bind_mounts = filesystem_policy.setdefault("bind_mounts", [])
+    for mount in _DEFAULT_BIND_MOUNTS:
+        if mount not in bind_mounts:
+            bind_mounts.append(copy.deepcopy(mount))
+    directories = filesystem_policy.setdefault("directories", [])
+    for directory in _DEFAULT_DIRECTORIES:
+        if directory not in directories:
+            directories.append(copy.deepcopy(directory))
+    return runtime_policy
 
 
 def _resolve_jiuwenbox_bin() -> str:
@@ -703,6 +735,317 @@ def test_cli_policy_get_not_found(server_url):
     assert b"HTTP 404" in proc.stderr
 
 
+def test_cli_policy_update_override(server_url, tracking_sandboxes, client):
+    """``policy update --policy`` override 后 stdout 与 ``policy get`` 一致。"""
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+
+    policy_fragment = json.dumps({
+        "network": {
+            "egress": {
+                "default": "deny",
+                "allowed_domains": ["example.com"],
+                "allowed_ips": ["198.51.100.10/32"],
+                "allowed_ports": [443],
+            },
+            "ingress": {
+                "default": "allow",
+                "blocked_ports": [22],
+            },
+        },
+    })
+    _, updated = _run_cli_json(
+        [
+            "policy", "update", sandbox_id,
+            "--policy-mode", "override",
+            "--policy", policy_fragment,
+        ],
+        base_url=server_url,
+    )
+    assert isinstance(updated, dict)
+    assert updated["network"]["egress"]["default"] == "deny"
+    assert updated["network"]["egress"]["allowed_domains"] == ["example.com"]
+    assert updated["network"]["egress"]["allowed_ips"] == ["198.51.100.10/32"]
+    assert updated["network"]["egress"]["allowed_ports"] == [443]
+    assert updated["network"]["ingress"]["blocked_ports"] == [22]
+
+    _, fetched = _run_cli_json(
+        ["policy", "get", sandbox_id], base_url=server_url,
+    )
+    assert fetched["network"]["egress"] == updated["network"]["egress"]
+    assert fetched["network"]["ingress"] == updated["network"]["ingress"]
+
+
+def test_cli_policy_update_append_via_policy_file(
+    server_url, tracking_sandboxes, client, tmp_path,
+):
+    """``policy update --policy-file --policy-mode append`` 列表追加去重。"""
+    create_policy = tmp_path / "create-isolated.json"
+    create_policy.write_text(
+        json.dumps(_with_runtime_support({
+            "name": "cli-update-append",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "network": {
+                "mode": "isolated",
+                "egress": {
+                    "default": "allow",
+                    "allowed_domains": ["baidu.com"],
+                },
+                "ingress": {
+                    "default": "allow",
+                    "allowed_ports": [8080],
+                },
+            },
+        })),
+        encoding="utf-8",
+    )
+    _, created = _run_cli_json(
+        [
+            "sandbox", "create",
+            "--policy-mode", "override",
+            "--policy-file", str(create_policy),
+        ],
+        base_url=server_url,
+    )
+    sandbox_id = created["id"]
+    tracking_sandboxes.append(sandbox_id)
+    _wait_phase(client, sandbox_id, "ready")
+
+    update_policy = tmp_path / "update-append.json"
+    update_policy.write_text(
+        json.dumps({
+            "network": {
+                "egress": {
+                    "allowed_domains": ["example.com", "baidu.com"],
+                },
+                "ingress": {
+                    "allowed_ports": [9090, 8080],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    _, updated = _run_cli_json(
+        [
+            "policy", "update", sandbox_id,
+            "--policy-mode", "append",
+            "--policy-file", str(update_policy),
+        ],
+        base_url=server_url,
+    )
+    assert updated["network"]["egress"]["default"] == "allow"
+    assert updated["network"]["egress"]["allowed_domains"] == [
+        "baidu.com",
+        "example.com",
+    ]
+    assert updated["network"]["ingress"]["allowed_ports"] == [8080, 9090]
+
+
+def test_cli_policy_update_requires_policy_arg(server_url, tracking_sandboxes, client):
+    """未传 ``--policy`` / ``--policy-file`` → 本地错误 exit 3。"""
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+
+    proc = _run_cli(
+        ["policy", "update", sandbox_id],
+        base_url=server_url,
+    )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"--policy or --policy-file is required" in proc.stderr
+
+
+def test_cli_policy_update_rejects_both_policy_args(
+    server_url, tracking_sandboxes, client, tmp_path,
+):
+    """同时传 ``--policy`` 与 ``--policy-file`` → 本地错误 exit 3。"""
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+    policy_file = tmp_path / "frag.json"
+    policy_file.write_text(
+        json.dumps({"network": {"egress": {"default": "allow"}}}),
+        encoding="utf-8",
+    )
+
+    proc = _run_cli(
+        [
+            "policy", "update", sandbox_id,
+            "--policy", '{"network":{"egress":{"default":"allow"}}}',
+            "--policy-file", str(policy_file),
+        ],
+        base_url=server_url,
+    )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"pass only one of --policy / --policy-file" in proc.stderr
+
+
+def test_cli_policy_update_invalid_json(server_url, tracking_sandboxes, client):
+    """``--policy`` 非法 JSON → 本地错误 exit 3。"""
+    sandbox_id = _create_sandbox_via_cli(server_url, tracking_sandboxes)
+    _wait_phase(client, sandbox_id, "ready")
+
+    proc = _run_cli(
+        [
+            "policy", "update", sandbox_id,
+            "--policy", "{not-json",
+        ],
+        base_url=server_url,
+    )
+    assert proc.returncode == 3, (proc.stdout, proc.stderr)
+    assert b"--policy is not valid JSON" in proc.stderr
+
+
+def test_cli_policy_update_not_found(server_url):
+    """更新不存在的 sandbox → HTTP 404 → exit 1。"""
+    proc = _run_cli(
+        [
+            "policy", "update", "nonexistent-policy-target-9999",
+            "--policy", json.dumps({
+                "network": {"egress": {"default": "allow"}},
+            }),
+        ],
+        base_url=server_url,
+    )
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert b"HTTP 404" in proc.stderr
+    assert b"Sandbox 'nonexistent-policy-target-9999' not found" in proc.stderr
+
+
+def test_cli_policy_update_rejects_host_mode(
+    server_url, tracking_sandboxes, client, tmp_path,
+):
+    """host 模式沙箱动态更新 → HTTP 400, stderr 含完整 error。"""
+    create_policy = tmp_path / "host-policy.json"
+    create_policy.write_text(
+        json.dumps(_with_runtime_support({
+            "name": "cli-host-update-reject",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "network": {
+                "mode": "host",
+                "egress": {"default": "allow"},
+            },
+        })),
+        encoding="utf-8",
+    )
+    _, created = _run_cli_json(
+        [
+            "sandbox", "create",
+            "--policy-mode", "override",
+            "--policy-file", str(create_policy),
+        ],
+        base_url=server_url,
+    )
+    sandbox_id = created["id"]
+    tracking_sandboxes.append(sandbox_id)
+    _wait_phase(client, sandbox_id, "ready")
+
+    proc = _run_cli(
+        [
+            "policy", "update", sandbox_id,
+            "--policy", json.dumps({
+                "network": {"egress": {"default": "deny"}},
+            }),
+        ],
+        base_url=server_url,
+    )
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert b"HTTP 400" in proc.stderr
+    expected = (
+        f"Cannot update network rules for sandbox '{sandbox_id}': "
+        "network.mode is 'host' "
+        "(only isolated sandboxes support dynamic network updates)"
+    )
+    assert expected.encode("utf-8") in proc.stderr
+
+
+def test_cli_policy_update_all(server_url, tracking_sandboxes, client, tmp_path):
+    """``policy update-all`` 对 isolated 写入 updated, host 写入 skipped。"""
+    isolated_policy = tmp_path / "isolated.json"
+    isolated_policy.write_text(
+        json.dumps(_with_runtime_support({
+            "name": "cli-batch-isolated",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "network": {
+                "mode": "isolated",
+                "egress": {"default": "allow"},
+            },
+        })),
+        encoding="utf-8",
+    )
+    host_policy = tmp_path / "host.json"
+    host_policy.write_text(
+        json.dumps(_with_runtime_support({
+            "name": "cli-batch-host",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "network": {
+                "mode": "host",
+                "egress": {"default": "allow"},
+            },
+        })),
+        encoding="utf-8",
+    )
+
+    _, isolated = _run_cli_json(
+        [
+            "sandbox", "create",
+            "--policy-mode", "override",
+            "--policy-file", str(isolated_policy),
+        ],
+        base_url=server_url,
+    )
+    _, host = _run_cli_json(
+        [
+            "sandbox", "create",
+            "--policy-mode", "override",
+            "--policy-file", str(host_policy),
+        ],
+        base_url=server_url,
+    )
+    tracking_sandboxes.extend([isolated["id"], host["id"]])
+    _wait_phase(client, isolated["id"], "ready")
+    _wait_phase(client, host["id"], "ready")
+
+    _, result = _run_cli_json(
+        [
+            "policy", "update-all",
+            "--policy-mode", "override",
+            "--policy", json.dumps({
+                "network": {
+                    "egress": {
+                        "default": "deny",
+                        "allowed_ips": ["127.0.0.1/32"],
+                    },
+                },
+            }),
+        ],
+        base_url=server_url,
+    )
+    assert isinstance(result, dict)
+    assert isolated["id"] in result["updated"]
+    assert {
+        "sandbox_id": host["id"],
+        "reason": "network.mode is host",
+    } in result["skipped"]
+    assert result["failed"] == []
+
+    _, fetched = _run_cli_json(
+        ["policy", "get", isolated["id"]], base_url=server_url,
+    )
+    assert fetched["network"]["egress"]["default"] == "deny"
+    assert fetched["network"]["egress"]["allowed_ips"] == ["127.0.0.1/32"]
+
+
 # ────────────────────────────── global / parsing ──────────────────────────────
 
 
@@ -750,3 +1093,201 @@ def test_cli_verbose_debug_logs(server_url):
     err = proc.stderr
     assert b"DEBUG" in err, err
     assert b"GET" in err and b"/health" in err, err
+
+# ────────────────────────────── proxy Basic auth ──────────────────────────────
+
+
+@pytest.fixture
+def tracking_proxy_routes(client):
+    """Register proxy route names created via CLI; best-effort delete on teardown."""
+    names: list[str] = []
+    yield names
+    for name in reversed(names):
+        try:
+            client.post(f"/api/v1/proxies/{name}/stop")
+            client.delete(f"/api/v1/proxies/{name}")
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class TestCliProxyBasicAuth:
+    """CLI ``proxy create``/``update`` Basic auth options (P2)."""
+
+    @staticmethod
+    def _unique_prefix() -> str:
+        return f"/cli-basic-{uuid.uuid4().hex[:8]}"
+
+    def test_cli_proxy_create_basic_password_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password`` create: detail/list output is redacted (no plaintext)."""
+        secret = "cli-secret-pw-AAAA"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["username"] == "neo4j"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        out = proc.stdout.decode("utf-8")
+        assert secret not in out
+
+        proc, listing = _run_cli_json(["proxy", "ls"], base_url=server_url)
+        entry = next(r for r in listing if r["name"] == name)
+        assert entry["route"]["auth_type"] == "basic"
+        assert "password" not in entry["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    def test_cli_proxy_create_basic_password_stdin(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``--password-stdin`` reads stdin, sends via REST; secret not in argv."""
+        secret = "stdin-secret-pw-BBBB"
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=secret.encode("utf-8") + b"\n",
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+
+    def test_cli_proxy_create_basic_password_file(
+        self, server_url, tracking_proxy_routes, tmp_path
+    ):
+        """``--password-file`` passes a server-side path; CLI never reads it."""
+        secret = "file-secret-pw-CCCC"
+        pw_file = tmp_path / "neo4j_pw"
+        pw_file.write_text(secret + "\n")
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        proc, data = _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://upstream:7474",
+             "--username", "neo4j", "--password-file", str(pw_file)],
+            base_url=server_url,
+        )
+        assert data["name"] == name
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_file"] == str(pw_file)
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_password_sources_mutually_exclusive(server_url):
+        secret = "leakcheck-value-XYZ"
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux1", "--target", "http://up:7474",
+             "--username", "u", "--password", secret, "--password-file", "/tmp/x"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        err = proc.stderr.decode("utf-8")
+        assert "mutually exclusive" in err
+        assert secret not in err  # rejected password value is not echoed
+
+    @staticmethod
+    def test_cli_proxy_basic_password_and_stdin_mutually_exclusive(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/mux2", "--target", "http://up:7474",
+             "--username", "u", "--password", "p", "--password-stdin"],
+            base_url=server_url,
+            input_bytes=b"q\n",
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_username_required(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nouser", "--target", "http://up:7474",
+             "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "username" in proc.stderr.decode("utf-8").lower()
+
+    @staticmethod
+    def test_cli_proxy_basic_password_source_required(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/nosrc", "--target", "http://up:7474",
+             "--username", "u"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "one of --password, --password-file or --password-stdin" in proc.stderr.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_basic_api_key_mutex(server_url):
+        proc = _run_cli(
+            ["proxy", "create", "--prefix", "/keymux", "--target", "http://up:7474",
+             "--api-key", "sk", "--username", "u", "--password", "p"],
+            base_url=server_url,
+        )
+        assert proc.returncode != 0
+        assert "mutually exclusive" in proc.stderr.decode("utf-8")
+
+    def test_cli_proxy_update_basic_redacted(
+        self, server_url, tracking_proxy_routes
+    ):
+        """``proxy update`` accepts Basic options; output stays redacted."""
+        prefix = self._unique_prefix()
+        name = prefix.lstrip("/").replace("/", "-")
+        tracking_proxy_routes.append(name)
+
+        _run_cli_json(
+            ["proxy", "create", "--prefix", prefix, "--target", "http://up:7474"],
+            base_url=server_url,
+        )
+        secret = "upd-secret-pw-DDDD"
+        proc, _ = _run_cli_json(
+            ["proxy", "update", name, "--prefix", prefix, "--target", "http://up:7474",
+             "--username", "neo4j", "--password", secret],
+            base_url=server_url,
+        )
+        assert secret not in proc.stdout.decode("utf-8")
+        assert secret not in proc.stderr.decode("utf-8")
+
+        proc, detail = _run_cli_json(["proxy", "get", name], base_url=server_url)
+        assert detail["route"]["auth_type"] == "basic"
+        assert detail["route"]["basic_auth"]["password_configured"] is True
+        assert "password" not in detail["route"]["basic_auth"]
+        assert secret not in proc.stdout.decode("utf-8")
+
+    @staticmethod
+    def test_cli_proxy_help_documents_basic_options():
+        """Help lists Basic options and the --password dev/test warning."""
+        proc = _run_cli(["proxy", "create", "--help"], base_url="http://127.0.0.1:8321")
+        assert proc.returncode == 0, proc.stderr
+        text = proc.stdout.decode("utf-8")
+        assert "--username" in text
+        assert "--password" in text
+        assert "--password-file" in text
+        assert "--password-stdin" in text
+        assert "DEV/TEST" in text or "dev/test" in text.lower()

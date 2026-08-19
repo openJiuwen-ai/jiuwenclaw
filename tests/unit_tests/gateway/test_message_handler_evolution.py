@@ -264,8 +264,15 @@ def _set_evolution_auto_save(
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
-        lambda: enabled,
+        lambda _config=None: enabled,
     )
+    original_init = MessageHandler.__init__
+
+    def _init_with_cached_auto_save(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._evolution_auto_save_enabled = enabled
+
+    monkeypatch.setattr(MessageHandler, "__init__", _init_with_cached_auto_save)
 
 
 async def _deliver_evolution_question(
@@ -962,3 +969,132 @@ async def test_fire_and_forget_cancel_publishes_interrupt_result() -> None:
     }
     await asyncio.sleep(0)
     assert len(_FakeAgentClient.sent_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_cancel_forwards_cancelled_tools() -> None:
+    """Background interrupt must still push chat.tool_result for cancelled tools."""
+    handler = _TestMessageHandler.create()
+    old_payload = dict(_FakeAgentClient.response_payload)
+    _FakeAgentClient.response_payload = {
+        "event_type": "chat.interrupt_result",
+        "intent": "cancel",
+        "success": True,
+        "message": "任务已取消",
+        "cancelled_tools": [
+            {
+                "tool_name": "task_tool",
+                "tool_call_id": "call_spin",
+                "result": "[Interrupted] Tool execution cancelled by user.",
+                "status": "error",
+            }
+        ],
+    }
+    try:
+        await handler.cancel_agent_work_for_session(
+            _control_message(),
+            "sess-1",
+            agent_notify="fire_and_forget",
+        )
+
+        interrupt_out = await handler.consume_robot_messages(timeout=0)
+        assert interrupt_out is not None
+        assert interrupt_out.payload["event_type"] == "chat.interrupt_result"
+
+        # Wait for fire-and-forget task to publish tool_result
+        tool_out = None
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while asyncio.get_running_loop().time() < deadline:
+            tool_out = await handler.consume_robot_messages(timeout=0.05)
+            if tool_out is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tool_out is not None
+        assert tool_out.event_type.value == "chat.tool_result"
+        assert tool_out.payload["tool_result"]["tool_call_id"] == "call_spin"
+        assert "[Interrupted]" in tool_out.payload["tool_result"]["result"]
+    finally:
+        _FakeAgentClient.response_payload = old_payload
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_cancel_intent_uses_fire_and_forget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CHAT_CANCEL intent=cancel 必须 fire_and_forget，避免堵 _forward_loop。"""
+    handler = _TestMessageHandler.create()
+    notify_modes: list[str] = []
+
+    async def _spy_cancel(msg, old_sid, **kwargs):
+        notify_modes.append(str(kwargs.get("agent_notify", "await")))
+
+    monkeypatch.setattr(handler, "_cancel_agent_work_for_session", _spy_cancel)
+    await handler.start_forwarding()
+    try:
+        cancel_msg = Message(
+            id="cancel-fire-and-forget",
+            type="req",
+            channel_id="web",
+            session_id="sess-1",
+            params={"intent": "cancel", "session_id": "sess-1"},
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(cancel_msg)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while not notify_modes and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert notify_modes == ["fire_and_forget"]
+    finally:
+        await handler.stop_forwarding()
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_supplement_forwards_new_input_to_interrupt() -> None:
+    """AgentServer needs the text marker to discard a superseded ask_user round."""
+    handler = _TestMessageHandler.create()
+    await handler.start_forwarding()
+    try:
+        supplement_msg = Message(
+            id="supplement-ask-user",
+            type="req",
+            channel_id="tui",
+            session_id="sess-ask-user",
+            params={
+                "intent": "supplement",
+                "new_input": "再执行一次",
+                "mode": "agent.plan",
+            },
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(supplement_msg)
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            not _FakeAgentClient.sent_requests
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+
+        assert _FakeAgentClient.sent_requests
+        interrupt_request = _FakeAgentClient.sent_requests[0]
+        assert interrupt_request.params["intent"] == "supplement"
+        assert interrupt_request.params["new_input"] == "再执行一次"
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            not _FakeAgentClient.sent_stream_requests
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.01)
+        assert len(_FakeAgentClient.sent_stream_requests) == 1
+        follow_up_request = _FakeAgentClient.sent_stream_requests[0]
+        assert follow_up_request.params["supplement_input"] == "再执行一次"
+    finally:
+        await handler.stop_forwarding()

@@ -7,6 +7,7 @@ remove / restore / pinned_sessions + session.pin + 兼容性(session.create / re
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +31,73 @@ class _FakeWebChannel:
     async def send_response(self, ws, req_id, *, ok, payload=None, error=None, code=None):
         self.responses.append(
             {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
+        )
+
+
+class _FakeSessionCreateAgentClient:
+    """AgentServer boundary fake backed by the production binding helpers."""
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+        self._sequence = 0
+
+    async def send_request(self, request):
+        self.requests.append(request)
+        params = dict(request.params or {})
+
+        from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, is_default_project_id
+        from jiuwenswarm.server.runtime.session import project_store
+        from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+        from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
+
+        binding = resolve_session_work_mode_params(params, channel_id="web")
+        if binding.error:
+            return SimpleNamespace(
+                ok=False,
+                payload={"error": binding.error, "code": binding.code},
+            )
+        project_id, project_dir, error, code = project_store.resolve_session_project_binding(
+            binding.project_id, binding.project_dir
+        )
+        if error:
+            return SimpleNamespace(ok=False, payload={"error": error, "code": code})
+
+        work_mode = binding.work_mode
+        if not is_default_project_id(project_id):
+            project = project_store.get_project_by_id(project_id, cache_bust=True)
+            if project is None:
+                return SimpleNamespace(
+                    ok=False,
+                    payload={
+                        "error": f"project not found: {project_id}",
+                        "code": "NOT_FOUND",
+                    },
+                )
+            work_mode = project.work_mode or DEFAULT_WEB_WORK_MODE
+
+        self._sequence += 1
+        session_id = f"web_test_{self._sequence:03d}"
+        init_session_metadata(
+            session_id=session_id,
+            channel_id="web",
+            user_id=str(params.get("user_id") or ""),
+            title=str(params.get("title") or ""),
+            mode=str(params.get("mode") or "agent"),
+            project_dir=project_dir,
+            project_id=project_id,
+            work_mode=work_mode,
+        )
+        return SimpleNamespace(
+            ok=True,
+            payload={
+                "sessionId": session_id,
+                "session_id": session_id,
+                "projectId": project_id,
+                "projectDir": project_dir,
+                "workMode": work_mode,
+                "prewarm_hit": True,
+                "prewarm_status": "ready",
+            },
         )
 
 
@@ -71,7 +139,10 @@ def registered_channel(sessions_dir, project_store_dir):
         _register_web_handlers,
     )
     channel = _FakeWebChannel()
-    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    channel.agent_client = _FakeSessionCreateAgentClient()
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, agent_client=channel.agent_client)
+    )
     return channel
 
 
@@ -117,8 +188,10 @@ def _make_project(name, project_dir, *, pinned=False, pin_order=0, hidden=False)
 
 
 def _abspath(tmp_path, name):
-    """平台无关的绝对路径,用于 project.create 的 isabs 校验。"""
-    return str(tmp_path / name)
+    """平台无关的已存在目录绝对路径,用于 project.create 的 isabs / isdir 校验。"""
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 # ===========================================================================
@@ -232,6 +305,35 @@ class TestProjectInfo:
         resp_h = await _call(registered_channel, "project.info", {"project_id": hidden_proj.project_id})
         assert resp_h["ok"] is False
         assert resp_h["code"] == "NOT_FOUND"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_real_project_git_payload_backfills_new_error_fields(
+        registered_channel, tmp_path,
+    ):
+        """旧 Project.git 快照缺少 error_code/hint 时,响应层补齐默认值。"""
+        from jiuwenswarm.server.runtime.session.project_store import save_project
+
+        pa = _abspath(tmp_path, "legacy")
+        proj = _make_project("旧项目", pa)
+        proj.git = {
+            "enabled": True,
+            "repo_root": pa,
+            "initialized_by_jiuwenswarm": False,
+            "detected_at": 1,
+            "status": "error",
+            "branch": "",
+            "error": "legacy error",
+            "is_dirty": False,
+        }
+        save_project(proj)
+
+        resp = await _call(registered_channel, "project.info", {"project_id": proj.project_id})
+
+        assert resp["ok"] is True
+        assert resp["payload"]["git"]["error"] == "legacy error"
+        assert resp["payload"]["git"]["error_code"] == ""
+        assert resp["payload"]["git"]["hint"] == ""
 
 
 # ===========================================================================
@@ -373,6 +475,18 @@ class TestProjectCreate:
                 {"name": "", "project_dir": _abspath(tmp_path, "x")},
             )
             assert resp["code"] == "BAD_REQUEST"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_rejects_missing_existing_project_dir(registered_channel, tmp_path):
+        """传 project_dir 表示选择现有项目,目录不存在时拒绝创建项目记录。"""
+        missing = str(tmp_path / "missing")
+        resp = await _call(
+            registered_channel, "project.create", {"name": "P", "project_dir": missing}
+        )
+        assert resp["ok"] is False
+        assert resp["code"] == "PROJECT_DIR_MISSING"
+        assert resp["error"] == "project directory does not exist"
 
 
 # ===========================================================================
@@ -629,20 +743,26 @@ class TestCompat:
         """不传 project_dir → 归入默认项目,project_dir="" 兜底,行为不变。"""
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "sess_compat_1", "title": "兼容", "mode": "code.normal", "channel_id": "web"},
+            {
+                "title": "兼容",
+                "mode": "code.normal",
+                "channel_id": "web",
+                "create_token": "compat-create-1",
+            },
         )
         assert resp["ok"] is True
-        assert resp["payload"]["session_id"] == "sess_compat_1"
+        allocated_id = resp["payload"]["session_id"]
+        assert allocated_id.startswith("web_test_")
         # metadata 中 project_dir 为空
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        meta = get_session_metadata("sess_compat_1", cache_bust=True)
+        meta = get_session_metadata(allocated_id, cache_bust=True)
         assert meta["project_dir"] == ""
         # 该会话出现在默认项目
         resp2 = await _call(
             registered_channel, "project.get_sessions", {"project_id": "default"}
         )
         ids = [s["session_id"] for s in resp2["payload"]["sessions"]]
-        assert "sess_compat_1" in ids
+        assert allocated_id in ids
 
 
 # ===========================================================================
@@ -729,14 +849,19 @@ class TestSessionCreateProjectIdValidation:
         proj = _make_project("P", pa)
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_valid", "project_id": proj.project_id, "channel_id": "web"},
+            {
+                "project_id": proj.project_id,
+                "channel_id": "web",
+                "create_token": "valid-project-create",
+            },
         )
         assert resp["ok"] is True
+        allocated_id = resp["payload"]["session_id"]
         # 归属到该项目
         r = await _call(
             registered_channel, "project.get_sessions", {"project_id": proj.project_id}
         )
-        assert [s["session_id"] for s in r["payload"]["sessions"]] == ["s_valid"]
+        assert [s["session_id"] for s in r["payload"]["sessions"]] == [allocated_id]
 
     @staticmethod
     @pytest.mark.asyncio
@@ -746,24 +871,21 @@ class TestSessionCreateProjectIdValidation:
     ])
     async def test_create_with_invalid_project_id(registered_channel, tmp_path, sessions_dir, scenario):
         """传无效 project_id(不存在 / 已隐藏)→ NOT_FOUND,不创建会话。"""
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
         if scenario == "nonexistent":
             target_id = "proj_nonexistent"
-            target_sid = "s_nope"
         else:  # hidden
             pa = _abspath(tmp_path, "app")
             proj = _make_project("P", pa, hidden=True)
             target_id = proj.project_id
-            target_sid = "s_hidden"
 
         resp = await _call(
             registered_channel, "session.create",
-            {"session_id": target_sid, "project_id": target_id},
+            {"project_id": target_id, "create_token": f"invalid-{scenario}"},
         )
         assert resp["ok"] is False
         assert resp["code"] == "NOT_FOUND"
         # 会话目录不应被创建(metadata 为空)
-        assert not get_session_metadata(target_sid, cache_bust=True)
+        assert not any(sessions_dir.iterdir())
 
 
 # ===========================================================================
@@ -785,17 +907,21 @@ class TestSessionCreateProjectDirConsistency:
         # 仅 project_id → 自动补齐
         resp1 = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_autofill", "project_id": proj.project_id},
+            {"project_id": proj.project_id, "create_token": "autofill-create"},
         )
         assert resp1["ok"] is True
         from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        meta = get_session_metadata("s_autofill", cache_bust=True)
+        meta = get_session_metadata(resp1["payload"]["session_id"], cache_bust=True)
         assert meta.get("project_id") == proj.project_id
         assert meta.get("project_dir") == pa
         # project_id + 一致 path → 成功
         resp2 = await _call(
             registered_channel, "session.create",
-            {"session_id": "s_match", "project_id": proj.project_id, "project_dir": pa},
+            {
+                "project_id": proj.project_id,
+                "project_dir": pa,
+                "create_token": "matching-create",
+            },
         )
         assert resp2["ok"] is True
 
@@ -812,17 +938,15 @@ class TestSessionCreateProjectDirConsistency:
         other = _abspath(tmp_path, "other")
         if scenario == "mismatched":
             proj = _make_project("P", pa)
-            sid = "s_mismatch"
-            params = {"session_id": sid, "project_id": proj.project_id, "project_dir": other}
+            params = {"project_id": proj.project_id, "project_dir": other}
         elif scenario == "path_only":
-            sid = "s_pathonly"
-            params = {"session_id": sid, "project_dir": pa}
+            params = {"project_dir": pa}
         else:  # default_with_path
-            sid = "s_def_path"
-            params = {"session_id": sid, "project_id": "default", "project_dir": pa}
+            params = {"project_id": "default", "project_dir": pa}
+
+        params["create_token"] = f"inconsistent-{scenario}"
 
         resp = await _call(registered_channel, "session.create", params)
         assert resp["ok"] is False
         assert resp["code"] == "BAD_REQUEST"
-        from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
-        assert not get_session_metadata(sid, cache_bust=True)
+        assert not any(sessions_dir.iterdir())

@@ -8,6 +8,11 @@ from jiuwenswarm.common.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     normalize_work_mode,
 )
+from jiuwenswarm.common.mode_matrix import (
+    TEAM_PLAN_CODE_MODE,
+    TEAM_PLAN_NORMAL_MODE,
+    is_team_mode,
+)
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
 
 
@@ -75,6 +80,8 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent.plan",  # legacy（归一到 agent）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
+        TEAM_PLAN_NORMAL_MODE,
+        TEAM_PLAN_CODE_MODE,
         "code.team",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
@@ -86,10 +93,16 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
 # Canonical default when create/update/runtime do not specify mode.
 CRON_JOB_DEFAULT_MODE: str = "agent"
 
+# 名称/描述最大长度（前后端保持一致，见 CronTaskDrawer.tsx 同名常量）。
+# 名称对齐 ConfigPanel 里 Agent 名称字段的 64；描述对齐产品确认的 500。
+CRON_JOB_NAME_MAX_LENGTH: int = 64
+CRON_JOB_DESCRIPTION_MAX_LENGTH: int = 500
+
 _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
     "agent.plan": "agent",
     "agent.fast": "agent",
+    "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
 
 
@@ -136,8 +149,6 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
         "max_timeout_seconds": CRON_MAX_TIMEOUT_SECONDS,
     }
 
-
-_TEAM_CRON_MODES: frozenset[str] = frozenset({"team", "team.plan", "code.team"})
 
 CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
 CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
@@ -200,8 +211,7 @@ def resolve_cron_job_timeout_seconds(job: "CronJob") -> float:
 
 def is_team_cron_mode(mode: str | None) -> bool:
     """Return True when a cron job should run via Team + SwarmFlow streaming."""
-    value = str(mode or "").strip().lower()
-    return value in _TEAM_CRON_MODES
+    return is_team_mode(mode)
 
 
 @dataclass(frozen=True)
@@ -263,6 +273,10 @@ class CronJob:
     model_name: str | None = None
     # 飞书多应用场景：创建该定时任务的 app_id，用于推送时定位到正确的 app 配置
     app_id: str = ""
+    # 创建者标识（web 端 user_id）。执行时透传给 faas 的 X-Session-Context，
+    # 否则 CreateSandbox 拉不起导致 60s 超时（见 plan-cron-user-id）。
+    # 默认空串兼容旧数据；语义=创建者，创建后不可变。
+    user_id: str = ""
     # 工作模式派生快照：由 project_id 归属推导（"code" / "work"）。
     # 不作为独立隔离维度，任务归属仍以 project_id 为准。
     # from_dict 仅做 normalize + 兜底 "work"，不做跨层 Project 反查；
@@ -304,6 +318,8 @@ class CronJob:
             d["model_name"] = self.model_name
         if self.app_id:
             d["app_id"] = self.app_id
+        if self.user_id:
+            d["user_id"] = self.user_id
         return d
 
     @staticmethod
@@ -326,6 +342,10 @@ class CronJob:
         description = str(data.get("description") or "").strip()
         if not description:
             raise ValueError("description is required")
+        if len(description) > CRON_JOB_DESCRIPTION_MAX_LENGTH:
+            raise ValueError(
+                f"description must be at most {CRON_JOB_DESCRIPTION_MAX_LENGTH} characters"
+            )
 
         # targets 新格式是字符串；旧格式是 list[dict]，此处做兼容。
         targets_raw = data.get("targets", "")
@@ -350,6 +370,8 @@ class CronJob:
             raise ValueError("id is required")
         if not name:
             raise ValueError("name is required")
+        if len(name) > CRON_JOB_NAME_MAX_LENGTH:
+            raise ValueError(f"name must be at most {CRON_JOB_NAME_MAX_LENGTH} characters")
         if not cron_expr:
             raise ValueError("cron_expr is required")
         if not timezone:
@@ -398,6 +420,10 @@ class CronJob:
         app_id_raw = data.get("app_id", "")
         job_app_id = str(app_id_raw).strip() if isinstance(app_id_raw, str) else ""
 
+        # user_id：老数据兜底（无 user_id → ""）
+        job_user_id_raw = data.get("user_id", "")
+        job_user_id = str(job_user_id_raw).strip() if isinstance(job_user_id_raw, str) else ""
+
         # work_mode：仅做 normalize + 兜底 "work"，不做跨层 Project 反查
         # （gateway.cron.models 是底层数据模型，不应反向依赖 server.runtime.session.project_store）
         # 精确值由创建/更新路径从 Project 记录注入，或由展示层二次查询覆盖。
@@ -424,6 +450,7 @@ class CronJob:
             last_session_id=last_session_id,
             model_name=job_model_name,
             app_id=job_app_id,
+            user_id=job_user_id,
             work_mode=job_work_mode,
         )
 

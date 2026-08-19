@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -11,6 +11,20 @@ from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 class _AgentManager:
     def get_agent_nowait(self, _channel_id: str):
         return None
+
+
+def _session_switch_lifecycle_owner(
+    agent_manager: _AgentManager | None = None,
+) -> SimpleNamespace:
+    """Stub owner with lifecycle helpers bound after prepare/dispatch split."""
+    owner = SimpleNamespace(_agent_manager=agent_manager or _AgentManager())
+    owner._prepare_session_switch_owner = MethodType(
+        AgentWebSocketServer._prepare_session_switch_owner, owner
+    )
+    owner._dispatch_session_switch_kvc = MethodType(
+        AgentWebSocketServer._dispatch_session_switch_kvc, owner
+    )
+    return owner
 
 
 class _TeamManager:
@@ -132,7 +146,7 @@ async def test_team_switch_context_and_prefetch_for_both_affinity_states(
     )
 
     assert context.target_is_team is True
-    assert context.previous_is_team is affinity_enabled
+    assert context.previous_is_team is True
     assert context.resolved_mode == "team"
     assert team_manager.prepare_calls == []
     assert team_manager.prefetch_calls == (
@@ -213,16 +227,10 @@ async def test_plan_switch_dispatches_root_signals(
 async def test_disabled_plan_switch_skips_kvc_and_preserves_resolved_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    previous_lookup = SimpleNamespace(called=False)
-
-    def _metadata(_session_id: str) -> dict[str, str]:
-        previous_lookup.called = True
-        raise AssertionError("disabled affinity must not read session metadata")
-
     monkeypatch.setattr(
         kv_cache_product_hooks.session_metadata,
         "get_session_metadata",
-        _metadata,
+        lambda _session_id: {},
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
@@ -246,7 +254,77 @@ async def test_disabled_plan_switch_skips_kvc_and_preserves_resolved_mode(
         "code.normal",
     )
     assert context.affinity_enabled is False
-    assert previous_lookup.called is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_affinity_keeps_previous_team_fact_for_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        kv_cache_product_hooks.session_metadata,
+        "get_session_metadata",
+        lambda session_id: {
+            "mode": "team" if session_id == "team_sess_001" else "agent.plan"
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "is_kv_cache_affinity_enabled",
+        lambda: False,
+    )
+
+    context = kv_cache_product_hooks.resolve_session_switch_context(
+        target_session_id="plan_sess_002",
+        previous_session_id="team_sess_001",
+        params={"mode": "agent.plan"},
+    )
+
+    assert context.affinity_enabled is False
+    assert context.target_is_team is False
+    assert context.previous_is_team is True
+    assert context.resolved_mode == "agent.plan"
+
+
+@pytest.mark.asyncio
+async def test_disabled_affinity_routes_previous_team_to_team_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_manager = _TeamManager()
+    owner = _session_switch_lifecycle_owner()
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.get_team_manager",
+        lambda _channel_id: team_manager,
+    )
+    monkeypatch.setattr(
+        kv_cache_product_hooks.session_metadata,
+        "get_session_metadata",
+        lambda session_id: {
+            "mode": "team" if session_id == "team_sess_001" else "agent.plan"
+        },
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle."
+        "is_kv_cache_affinity_enabled",
+        lambda: False,
+    )
+
+    result = await AgentWebSocketServer._prepare_session_switch_owner(
+        owner,
+        channel_id="web",
+        target_session_id="plan_sess_002",
+        previous_session_id="team_sess_001",
+        params={"mode": "agent.plan"},
+        reason="session.switch: ",
+    )
+
+    assert result[:2] == (False, "agent.plan")
+    assert team_manager.prepare_calls == [
+        {
+            "session_id": "plan_sess_002",
+            "reason": "session.switch: ",
+            "previous_session_id": "team_sess_001",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -346,7 +424,7 @@ async def test_team_product_switch_survives_kvc_context_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_manager = _TeamManager()
-    owner = SimpleNamespace(_agent_manager=_AgentManager())
+    owner = _session_switch_lifecycle_owner()
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.get_team_manager",
         lambda _channel_id: team_manager,
@@ -357,7 +435,7 @@ async def test_team_product_switch_survives_kvc_context_failure(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("kvc unavailable")),
     )
 
-    result = await AgentWebSocketServer._apply_session_switch_lifecycle(
+    result = await AgentWebSocketServer._prepare_session_switch_owner(
         owner,
         channel_id="web",
         target_session_id="team_sess_002",
@@ -366,7 +444,7 @@ async def test_team_product_switch_survives_kvc_context_failure(
         reason="session.switch: ",
     )
 
-    assert result == (True, "team")
+    assert result[:2] == (True, "team")
     assert team_manager.prepare_calls == [
         {
             "session_id": "team_sess_002",
@@ -379,14 +457,14 @@ async def test_team_product_switch_survives_kvc_context_failure(
 async def test_plan_product_switch_preserves_canonical_mode_when_kvc_hook_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    owner = SimpleNamespace(_agent_manager=_AgentManager())
+    owner = _session_switch_lifecycle_owner()
     monkeypatch.setattr(
         kv_cache_product_hooks,
         "resolve_session_switch_context",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("kvc unavailable")),
     )
 
-    result = await AgentWebSocketServer._apply_session_switch_lifecycle(
+    result = await AgentWebSocketServer._prepare_session_switch_owner(
         owner,
         channel_id="web",
         target_session_id="plan_sess_002",
@@ -395,4 +473,4 @@ async def test_plan_product_switch_preserves_canonical_mode_when_kvc_hook_fails(
         reason="session.switch: ",
     )
 
-    assert result == (False, "code.normal")
+    assert result[:2] == (False, "code.normal")

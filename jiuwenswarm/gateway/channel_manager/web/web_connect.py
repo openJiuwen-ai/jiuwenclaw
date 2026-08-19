@@ -24,7 +24,7 @@ import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
-from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -48,11 +48,15 @@ _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 
+_STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
+_STREAM_COALESCE_MAX_FRAMES = 32
+
 _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
     {
         "connection.ack",
         "todo.updated",
         "chat.tool_call",
+        "chat.tool_update",
         "chat.tool_result",
         "chat.processing_status",
         "chat.interrupt_result",
@@ -74,6 +78,9 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "security.alert",
         "goal.snapshot",
         "goal.updated",
+        # Web 的 Plan 开关靠该事件在计划执行后自动复位，需要完整 payload
+        # 才能拿到退出后应回到的 mode。
+        "plan.mode_exited",
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
@@ -83,8 +90,6 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
-# 连接钩子签名: (ws) -> None | Awaitable[None]
-ConnectHook = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,9 @@ class WebChannelConfig:
     port: int = 19000
     path: str = "/ws"
     allow_from: list[str] = field(default_factory=list)
+    # True: uvicorn+FastAPI on the same port (WS now; HTTP routes can be added later).
+    # False: legacy websockets.serve only (rollback).
+    dual_protocol: bool = True
 
 
 class WebChannel(BaseWsChannel):
@@ -126,6 +134,7 @@ class WebChannel(BaseWsChannel):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
         self._server: Any = None
+        self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
@@ -139,6 +148,90 @@ class WebChannel(BaseWsChannel):
         # Git diff 监控注册表(设计文档阶段10):由 app_gateway 在启动期注入,
         # handler 通过 ``getattr(channel, "git_watcher_registry", None)`` 防御性读取。
         self.git_watcher_registry: Any = None
+        # AgentOSRouterClient for same-port HTTP container file APIs (set by handlers).
+        self.container_file_client: Any = None
+
+    @staticmethod
+    def _coalescible_stream_frame(
+        frame: Any,
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return (decoded frame, content) for a merge-safe stream frame.
+
+        帧已是 dict（入队时不预序列化），故无需 json.loads；返回 decoded 与
+        content 供 _coalesce 直接在 dict 层合并，省去 str↔dict 往返。
+        """
+        if not isinstance(frame, dict) or frame.get("type") != "event":
+            return None
+        if frame.get("event") not in _STREAM_COALESCE_EVENT_TYPES:
+            return None
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return None
+        return frame, content
+
+    @staticmethod
+    def _same_stream_identity(
+        a: dict[str, Any],
+        b: dict[str, Any],
+    ) -> bool:
+        """两帧除 payload.content 外是否同流（可合并）。
+
+        逐键比对 payload 非 content 字段 + 外层 event 等键，避免构造 comparable
+        dict 副本与整 dict 哈希比对的开销。
+        """
+        a_payload = a["payload"]
+        b_payload = b["payload"]
+        if a.get("event") != b.get("event"):
+            return False
+        if a.get("type") != b.get("type"):
+            return False
+        for key in set(a_payload) | set(b_payload):
+            if key == "content":
+                continue
+            if a_payload.get(key) != b_payload.get(key):
+                return False
+        return True
+
+    def _coalesce(
+        self,
+        first_frame: Any,
+        queue: asyncio.Queue,
+    ) -> list[Any]:
+        """Merge only contiguous stream frames with identical non-content data."""
+        parsed = self._coalescible_stream_frame(first_frame)
+        if parsed is None:
+            return [first_frame]
+
+        decoded, merged_content = parsed
+        merged_count = 1
+        trailing: list[Any] = []
+
+        while merged_count < _STREAM_COALESCE_MAX_FRAMES:
+            try:
+                candidate = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if candidate is None:
+                trailing.append(None)
+                break
+            candidate_parsed = self._coalescible_stream_frame(candidate)
+            if (
+                candidate_parsed is None
+                or not self._same_stream_identity(decoded, candidate_parsed[0])
+            ):
+                trailing.append(candidate)
+                break
+            merged_content += candidate_parsed[1]
+            merged_count += 1
+
+        if merged_count == 1:
+            return [first_frame, *trailing]
+
+        merged_payload = {**decoded["payload"], "content": merged_content}
+        return [{**decoded, "payload": merged_payload}, *trailing]
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -161,17 +254,6 @@ class WebChannel(BaseWsChannel):
         handler 应通过 `send_response` / `send_event` 向客户端回复。
         """
         self._method_handlers[method] = handler
-
-    def on_connect(self, callback: ConnectHook) -> None:
-        """注册连接建立钩子，新客户端接入时依次调用."""
-        self._connect_hooks.append(callback)
-
-    def on_disconnect(self, callback: ConnectHook) -> None:
-        """注册连接断开钩子，客户端断连时依次调用.
-
-        callback 签名: ``async def callback(ws, session_ids: set[str]) -> None``
-        """
-        self._disconnect_hooks.append(callback)
 
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册消息接收回调（替代默认的 router.publish_user_messages）。"""
@@ -212,7 +294,7 @@ class WebChannel(BaseWsChannel):
             if code:
                 frame["code"] = code
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -242,7 +324,7 @@ class WebChannel(BaseWsChannel):
         if stream_id is not None:
             frame["stream_id"] = stream_id
         try:
-            self._enqueue_send(ws, json.dumps(frame, ensure_ascii=False))
+            self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -280,13 +362,21 @@ class WebChannel(BaseWsChannel):
         return connection_user_id
 
     @staticmethod
-    def _connection_user_id(ws: Any) -> str | None:
+    def connection_user_id(ws: Any) -> str | None:
         """返回 Web 连接建立时缓存的 user_id（query 或 X-User-Id Header）。"""
         uid = getattr(ws, _WEB_CONNECTION_USER_ID_ATTR, None)
         if uid is None:
             return None
         text = str(uid).strip()
         return text or None
+
+    @staticmethod
+    def _connection_user_id(ws: Any) -> str | None:
+        return WebChannel.connection_user_id(ws)
+
+    def _extract_ws_user_id(self, ws: Any) -> str:
+        """WebChannel: 从 ws 提取连接级 user_id。"""
+        return self._connection_user_id(ws) or ""
 
     @staticmethod
     def _routing_key_user_id(connection_user_id: str | None, remote: Any) -> str:
@@ -454,6 +544,41 @@ class WebChannel(BaseWsChannel):
             logger.warning("WebChannel 未启用（enabled=False）")
             return
 
+        if self.config.dual_protocol:
+            await self._start_dual_protocol()
+            return
+        await self._start_websockets_legacy()
+
+    async def _start_dual_protocol(self) -> None:
+        """Same port: FastAPI/uvicorn (WS today; HTTP routes can be mounted later)."""
+        import uvicorn
+
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
+        from jiuwenswarm.gateway.channel_manager.web.web_channel_app import build_web_channel_app
+
+        app = build_web_channel_app(self)
+        uv_cfg = uvicorn.Config(
+            app,
+            host=self.config.host,
+            port=self.config.port,
+            log_level="info",
+            access_log=False,
+            ws_max_size=WEB_WS_MAX_MESSAGE_BYTES,
+            ws_ping_interval=20.0,
+            ws_ping_timeout=60.0,
+        )
+        self._uvicorn_server = uvicorn.Server(uv_cfg)
+        self._running = True
+        logger.info(
+            "WebChannel 已启动(dual_protocol): ws://%s:%s%s (HTTP-ready same port)",
+            self.config.host,
+            self.config.port,
+            self.config.path,
+        )
+        await self._uvicorn_server.serve()
+
+    async def _start_websockets_legacy(self) -> None:
+        """Rollback path: pure websockets.serve (no HTTP on this port)."""
         try:
             from websockets.legacy.server import serve as ws_serve
         except Exception:  # pragma: no cover
@@ -461,20 +586,23 @@ class WebChannel(BaseWsChannel):
 
             ws_serve = websockets.serve
 
-        ws_max_size = 8 * 2**20  # 8 MB — matches AgentServer link
+        from jiuwenswarm.common.ws_limits import WEB_WS_MAX_MESSAGE_BYTES
 
         self._server = await ws_serve(
-            self._connection_handler,
+            self.handle_connection,
             self.config.host,
             self.config.port,
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=60,
-            max_size=ws_max_size,
+            max_size=WEB_WS_MAX_MESSAGE_BYTES,
         )
         self._running = True
         logger.info(
-            f"WebChannel 已启动: ws://{self.config.host}:{self.config.port}{self.config.path}"
+            "WebChannel 已启动(legacy): ws://%s:%s%s",
+            self.config.host,
+            self.config.port,
+            self.config.path,
         )
         await self._server.wait_closed()
 
@@ -488,6 +616,9 @@ class WebChannel(BaseWsChannel):
             await asyncio.gather(*close_tasks, return_exceptions=True)
         self._clients_by_key.clear()
 
+        if self._uvicorn_server is not None:
+            self._uvicorn_server.should_exit = True
+            self._uvicorn_server = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -545,6 +676,17 @@ class WebChannel(BaseWsChannel):
             or event_name.startswith("harness.")
         )
 
+    @staticmethod
+    def _should_backfill_request_id(event_name: str) -> bool:
+        # goal.snapshot/goal.updated/execution.error 原来没有回填 request_id，导致 Web
+        # 前端的事件去重逻辑只能靠内容比对，分不清"同一次操作的重复投递"和"不同操作但
+        # 内容碰巧相同"（bug001：同一 session 短时间内被 resume 两次，第二次自己的
+        # goal.snapshot 因为跟第一次内容相同被误判为重复丢弃，导致编辑/暂停按钮卡死）。
+        # runtime.accepted 的 payload 本身已经带了 request_id（见
+        # interface_deep.py `_yield_runtime_accepted`），调用处的 "request_id" not in
+        # payload 判断会自动跳过它，不会重复赋值。
+        return event_name.startswith("chat.") or event_name.startswith("goal.") or event_name == "execution.error"
+
     @classmethod
     def _build_event_payload(cls, msg: Message, event_name: str) -> dict[str, Any]:
         """Build the Web event payload without dropping structured control fields."""
@@ -553,7 +695,8 @@ class WebChannel(BaseWsChannel):
                 payload = {**msg.payload}
                 if "session_id" not in payload and msg.session_id:
                     payload["session_id"] = msg.session_id
-                if event_name.startswith("chat.") and "request_id" not in payload and msg.id:
+                needs_request_id = "request_id" not in payload and msg.id
+                if cls._should_backfill_request_id(event_name) and needs_request_id:
                     payload["request_id"] = msg.id
                 return payload
 
@@ -564,7 +707,13 @@ class WebChannel(BaseWsChannel):
                 "session_id": msg.session_id,
                 "content": content,
             }
-            for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
+            for _key in (
+                "role", "member_name", "member_action", "source_channel", "user_id", "display_name",
+                # 主动推荐标记需透传到所有 chunk 事件（chat.delta/chat.reasoning/…），
+                # 否则前端无法按 source 短路：proactive 的 chat.reasoning 会被当作
+                # 用户轮思考流追加进 reasoningSegments，污染上一条消息的思考状态。
+                "source", "proactive_type", "proactive_target",
+            ):
                 _val = msg.payload.get(_key)
                 if _val is not None:
                     payload[_key] = _val
@@ -573,16 +722,12 @@ class WebChannel(BaseWsChannel):
                 if isinstance(cron_extra, dict):
                     payload["cron"] = cron_extra
                 source = msg.payload.get("source")
-                if source:
-                    payload["source"] = source
-                ptype = msg.payload.get("proactive_type")
-                if ptype:
-                    payload["proactive_type"] = ptype
                 if source == "proactive_recommendation":
                     logger.info(
                         "[WebChannel] proactive push frame: source=%s proactive_type=%s "
                         "content_len=%d payload_keys=%s",
-                        source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        source, msg.payload.get("proactive_type"),
+                        len(str(payload.get("content", ""))), list(payload.keys()),
                     )
             return payload
 
@@ -617,7 +762,7 @@ class WebChannel(BaseWsChannel):
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
         # 与 wechat 等 IM 渠道在 send() 中对 HEARTBEAT_RELAY 的专属分支对齐。
         if msg.event_type == EventType.HEARTBEAT_RELAY:
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -636,7 +781,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and isinstance(msg.payload.get("cron"), dict)
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -657,7 +802,7 @@ class WebChannel(BaseWsChannel):
             and isinstance(msg.payload, dict)
             and msg.payload.get("source") == "proactive_notification"
         ):
-            frame = self._serialize_frame(msg, None)  # 已是 json 字符串
+            frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
             clients = self.clients
             for w in clients:
                 self._enqueue_send(w, frame)
@@ -871,6 +1016,10 @@ class WebChannel(BaseWsChannel):
 
     # ── 内部实现 ──────────────────────────────────────────
 
+    async def handle_connection(self, ws: Any, path: str | None = None) -> None:
+        """Public entry for serving one accepted WebSocket (dual-protocol / adapters)."""
+        await self._connection_handler(ws, path=path)
+
     async def _connection_handler(self, ws: Any, path: str | None = None) -> None:
         raw_path = path if path is not None else getattr(ws, "path", "")
         parsed = urlparse(raw_path)
@@ -923,6 +1072,9 @@ class WebChannel(BaseWsChannel):
         # 注：此 sid 仅为传输层占位，首条 chat.send 携带真实 session_id 时会 re-register 覆盖。
         setattr(ws, "_jiuwen_initial_sid", _initial_sid)
 
+        # 上报连接事件
+        self.report_connect(ws)
+
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
             try:
@@ -940,8 +1092,19 @@ class WebChannel(BaseWsChannel):
                 )
 
         try:
+            inflight: set[Any] = set()
             async for raw in ws:
-                await self._handle_raw_message(ws, raw, query)
+                task = asyncio.create_task(self._handle_raw_message(ws, raw, query))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
+            # connection closing: let in-flight handlers finish (bounded) to avoid
+            # truncating responses mid-flight; cancel if they exceed a grace period.
+            if inflight:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*inflight, return_exceptions=True), timeout=5.0)
+                except asyncio.TimeoutError:
+                    for t in inflight:
+                        t.cancel()
         except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
             logger.info(
                 "WebChannel 连接关闭: %s",
@@ -962,6 +1125,9 @@ class WebChannel(BaseWsChannel):
             )
         finally:
             await self.unregister_ws(ws)
+
+            # 上报断连事件
+            self.report_disconnect(ws)
 
             logger.info(
                 "WebChannel 连接清理完成: %s",
@@ -1110,13 +1276,15 @@ class WebChannel(BaseWsChannel):
         )
         session_id = _explicit_session_id if has_explicit_session else self._make_session_id()
 
-        # 追踪 ws → session_id 映射，用于断连时清理
-        ws_id = id(ws)
-        sessions = self._ws_sessions.get(ws_id)
-        if sessions is None:
-            sessions = set()
-            self._ws_sessions[ws_id] = sessions
-        sessions.add(session_id)
+        # 追踪 ws → 真实 session_id，用于断连清理/日志。
+        # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
+        if has_explicit_session:
+            ws_id = id(ws)
+            sessions = self._ws_sessions.get(ws_id)
+            if sessions is None:
+                sessions = set()
+                self._ws_sessions[ws_id] = sessions
+            sessions.add(session_id)
 
         params = await self._process_files(params)
 
@@ -1203,12 +1371,14 @@ class WebChannel(BaseWsChannel):
             )
 
     async def _broadcast_to(self, frame: dict[str, Any], clients: set[Any]) -> None:
-        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）."""
-        data = json.dumps(frame, ensure_ascii=False)
+        """向指定 clients 集合广播帧（走 per-ws writer，非阻塞入队）.
+
+        入队 dict，由 writer 统一序列化一次，避免此处预 dumps。
+        """
         if not clients:
             return
         for client in clients:
-            self._enqueue_send(client, data)
+            self._enqueue_send(client, frame)
 
     # ── BaseWsChannel 抽象方法 ──
 
@@ -1218,8 +1388,8 @@ class WebChannel(BaseWsChannel):
         routing_target: RoutingTarget | None = None,
         *,
         member_names: list[str] | None = None,
-    ) -> str:
-        """将 Message 序列化为 Web 前端 JSON 帧."""
+    ) -> dict[str, Any]:
+        """将 Message 转为 Web 前端帧 dict（由 writer 统一序列化）."""
         event_name = "chat.final"
         if getattr(msg, "event_type", None) is not None:
             event_name = msg.event_type.value
@@ -1250,7 +1420,7 @@ class WebChannel(BaseWsChannel):
             "event": event_name,
             "payload": payload,
         }
-        return json.dumps(frame, ensure_ascii=False)
+        return frame
 
     @staticmethod
     def _parse_req_method(method: str) -> ReqMethod | None:

@@ -40,6 +40,10 @@ def test_code_system_prompt_has_task_planning_section():
     assert "don't batch" not in text.lower()
 
 
+def test_code_system_prompt_references_explore_agent():
+    assert "explore_agent" in build_code_system_prompt()
+
+
 def test_all_code_todo_tools_registered():
     assert set(CODE_TODO_TOOL_PROMPTS) == {
         "todo_create",

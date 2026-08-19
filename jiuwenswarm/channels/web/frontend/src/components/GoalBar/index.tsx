@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
 import { useChatStore, useGoalStore, useSessionStore } from '../../stores';
-import type { GoalStatus } from '../../types';
+import type { GoalRecord, GoalStatus } from '../../types';
 import { EditGoalModal } from './EditGoalModal';
 import './GoalBar.css';
 
@@ -40,14 +40,35 @@ const STATUS_TONE: Record<string, DisplayTone> = {
   blocked: 'blocked',
 };
 
-function formatElapsed(createdAtIso: string | undefined, now: number): string {
-  if (!createdAtIso) return '0s';
-  const startMs = new Date(createdAtIso).getTime();
-  const seconds = Math.max(0, Math.floor((now - startMs) / 1000));
+// 暂时隐藏暂停/恢复按钮的展示入口，功能逻辑（onPauseGoal/onResumeGoal 等）保留不动，
+// 后续要恢复展示只需把这个开关改回 true。
+const SHOW_PAUSE_RESUME_BUTTON = false;
+
+function formatSeconds(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   const remainSeconds = seconds % 60;
   return remainSeconds > 0 ? `${minutes}m ${remainSeconds}s` : `${minutes}m`;
+}
+
+// 旧口径兜底：后端没下发 time_used_seconds 时，退回"创建到现在"的总时长近似
+// （created_at 后端不下发，实际几乎总是走 localCreatedAt，见 goalStore.ts 里的说明）。
+function formatElapsedFallback(createdAtIso: string | undefined, now: number): string {
+  if (!createdAtIso) return '0s';
+  const startMs = new Date(createdAtIso).getTime();
+  return formatSeconds((now - startMs) / 1000);
+}
+
+// 新口径：time_used_seconds 是后端已结算的累计耗时，active_started_at 是当前 active 计时段
+// 的起点；只有 active 时才叠加"从 active_started_at 到浏览器当前时间"这段实时增量。
+// 见 Goal持续目标Web前端对接4.md「前端耗时展示对接」。
+function formatElapsedFromGoal(goal: GoalRecord, now: number): string {
+  const base = goal.time_used_seconds ?? 0;
+  if (goal.status !== 'active' || !goal.active_started_at) return formatSeconds(base);
+  const activeStartMs = Date.parse(goal.active_started_at);
+  const activeElapsed = Number.isNaN(activeStartMs) ? 0 : Math.max(0, Math.floor((now - activeStartMs) / 1000));
+  return formatSeconds(base + activeElapsed);
 }
 
 export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: GoalBarProps) {
@@ -73,8 +94,10 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const [optimisticPausable, setOptimisticPausable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // completed/blocked 是终态，不再有新的 attempt，耗时不该继续跳字——冻结在跳变那一刻附近的值
-    if (!goal || goal.status === 'completed' || goal.status === 'blocked') return;
+    // 不管有没有后端计时字段，只有 active 才跳字——paused/blocked/completed 一律冻结在当前
+    // 展示值上，不再继续走（就算是没有 time_used_seconds 兜底走旧口径的场景，也不该在非
+    // active 期间继续累加）。
+    if (!goal || goal.status !== 'active') return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [goal]);
@@ -123,19 +146,24 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
   const displayAsPausable = optimisticPausable ?? isPausable;
 
   return (
-    <div className="goal-bar-attached">
-      <div className={`goal-bar goal-bar--tone-${tone}`}>
-        <Target size={16} strokeWidth={2} className="goal-bar__icon" />
-        <div className="goal-bar__main">
-          <span className={`goal-bar__status goal-bar__status--${tone}`}>
+    <div className="goal-bar-attached" data-testid="goal-bar-attached">
+      <div className={`goal-bar goal-bar--tone-${tone}`} data-testid="goal-bar" data-variant={tone}>
+        <Target size={16} strokeWidth={2} className="goal-bar__icon" data-testid="goal-bar-icon" />
+        <div className="goal-bar__main" data-testid="goal-bar-main">
+          <span className={`goal-bar__status goal-bar__status--${tone}`} data-testid="goal-bar-status" data-variant={tone}>
             {t(`goal.status.${degraded ?? goal.status}`, degraded ?? goal.status)}
           </span>
-          <span className="goal-bar__objective" title={goal.objective}>
+          <span className="goal-bar__objective" title={goal.objective} data-testid="goal-bar-objective">
             {goal.objective}
           </span>
-          <span className="goal-bar__elapsed">· {formatElapsed(goal.created_at ?? localCreatedAt, now)}</span>
+          <span className="goal-bar__elapsed" data-testid="goal-bar-elapsed">
+            ·{' '}
+            {goal.time_used_seconds !== undefined
+              ? formatElapsedFromGoal(goal, now)
+              : formatElapsedFallback(goal.created_at ?? localCreatedAt, now)}
+          </span>
         </div>
-        <div className="goal-bar__actions">
+        <div className="goal-bar__actions" data-testid="goal-bar-actions">
           {goal.status !== 'completed' && (
             <button
               type="button"
@@ -143,11 +171,12 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
               className="goal-bar__action-btn"
               disabled={isDisabled}
               onClick={() => setEditing(true)}
+              data-testid="goal-bar-edit-button"
             >
               <Pencil size={14} strokeWidth={2} />
             </button>
           )}
-          {(isPausable || isResumable) && (
+          {SHOW_PAUSE_RESUME_BUTTON && (isPausable || isResumable) && (
             <button
               type="button"
               title={displayAsPausable ? t('goal.action.pauseTooltip') : t('goal.action.resumeTooltip')}
@@ -162,6 +191,8 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
                   onResumeGoal(activeSessionId);
                 }
               }}
+              data-testid="goal-bar-pause-resume-button"
+              data-variant={displayAsPausable ? 'pause' : 'resume'}
             >
               {displayAsPausable ? <Pause size={14} strokeWidth={2} /> : <Play size={14} strokeWidth={2} />}
             </button>
@@ -172,6 +203,7 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
             className="goal-bar__action-btn goal-bar__action-btn--danger"
             disabled={isDisabled}
             onClick={() => onClearGoal(activeSessionId)}
+            data-testid="goal-bar-delete-button"
           >
             <Trash2 size={14} strokeWidth={2} />
           </button>
@@ -179,28 +211,30 @@ export function GoalBar({ onSetGoal, onPauseGoal, onResumeGoal, onClearGoal }: G
       </div>
 
       {editing && (
-        <EditGoalModal
-          initialObjective={goal.objective}
-          onCancel={() => setEditing(false)}
-          onSave={(objective) => {
-            // 防御性兜底：正常情况下上面那个 useEffect 会在目标转 completed 的瞬间就关掉弹窗，
-            // 这里理论上不会命中，但保存动作本身是不可逆的（会把已完成的目标复活），多一层检查
-            // 成本很低。
-            const latestGoal = useGoalStore.getState().runtimes[activeSessionId]?.goal;
-            if (!latestGoal || latestGoal.goal_id !== goal.goal_id || latestGoal.status === 'completed') {
+        <div data-testid="goal-bar-edit-modal-slot">
+          <EditGoalModal
+            initialObjective={goal.objective}
+            onCancel={() => setEditing(false)}
+            onSave={(objective) => {
+              // 防御性兜底：正常情况下上面那个 useEffect 会在目标转 completed 的瞬间就关掉弹窗，
+              // 这里理论上不会命中，但保存动作本身是不可逆的（会把已完成的目标复活），多一层检查
+              // 成本很低。
+              const latestGoal = useGoalStore.getState().runtimes[activeSessionId]?.goal;
+              if (!latestGoal || latestGoal.goal_id !== goal.goal_id || latestGoal.status === 'completed') {
+                setEditing(false);
+                useChatStore.getState().addMessage(activeSessionId, {
+                  id: `error-${Date.now()}`,
+                  role: 'system',
+                  content: t('goal.editStaleWarning'),
+                  timestamp: new Date().toISOString(),
+                });
+                return;
+              }
+              onSetGoal(activeSessionId, objective);
               setEditing(false);
-              useChatStore.getState().addMessage(activeSessionId, {
-                id: `error-${Date.now()}`,
-                role: 'system',
-                content: t('goal.editStaleWarning'),
-                timestamp: new Date().toISOString(),
-              });
-              return;
-            }
-            onSetGoal(activeSessionId, objective);
-            setEditing(false);
-          }}
-        />
+            }}
+          />
+        </div>
       )}
     </div>
   );

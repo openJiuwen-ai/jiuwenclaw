@@ -1,3 +1,6 @@
 from __future__ import annotations
 
-__version__ = "0.2.3"
+from jiuwenswarm.common._build_config import VERSION
+
+
+__version__ = VERSION

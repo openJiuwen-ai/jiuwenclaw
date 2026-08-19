@@ -21,7 +21,7 @@
 | **同窗口新消息** | 在同一窗口（相同 `session_id`）再次发送聊天，仍会取消该 session 上旧的流式任务。 |
 | **与 ACP 差异** | ACP 仍为 single-user channel（新消息会取消同 channel 上所有进行中任务）；TUI/CLI 已改为按 session 隔离。 |
 
-**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复特定会话时使用 `--session <id>` 或 `/resume`。
+**打开多窗口**：在多个终端分别运行 `jiuwenswarm-tui` 或 `jiuwenswarm-cli` 即可。需要恢复或指定会话时使用 `--session <id>`（启动时，详见下文 [CLI 参考](#cli-参考) 中的 `--session` 小节）或运行时 `/resume`。注意：同一 `--session <id>` 在两个窗口同时启动会被 Gateway 拒绝（`SESSION_IN_USE`），需先关闭另一窗口。
 
 > **与「单机多实例」的区别**：[单机多实例运行](单机多实例运行.md) 指不同工作区、不同端口的独立后端；**多窗口 TUI** 指多个终端共享同一 Gateway 后端。二者可同时使用（例如 `dev` 实例上开两个 TUI 窗口），但不要混淆端口与工作区。
 
@@ -36,14 +36,57 @@
 | `jiuwenswarm-tui` | 通过 `jiuwenswarm-tui` PyPI 包启动时，由包装器拉起对应平台的二进制（见 `packages/jiuwenswarm-tui`）。 |
 | `jiuwenswarm-cli` | 源码/开发路径下，在 `jiuwenswarm/cli` 执行 `npm run dev` 或 `npm run start` 后使用 `jiuwenswarm-cli`（见 `package.json` 的 `bin`）。 |
 
-以下 **命令行标志** 由 `jiuwenswarm/cli/src/index.ts` 中的 `parseArgs` 定义：
+以下 **命令行标志** 由 `jiuwenswarm/channels/tui/frontend/src/index.ts` 中的 `parseArgs` 定义：
 
 | 标志 | 说明 | 默认值 | 示例 |
 |------|------|--------|------|
 | `--url <url>` | Gateway 的 CLI WebSocket 地址 | `ws://127.0.0.1:19001/tui` | `jiuwenswarm-cli --url ws://192.168.1.10:19001/tui` |
-| `--session <id>` | 启动时恢复指定会话 ID | 无 | `jiuwenswarm-cli --session abc-123` |
+| `--session <id>` | 启动时按 id **恢复或新建**会话（详见下节） | 无 | `jiuwenswarm-tui --session tui_myproj_001` |
 | `--token <token>` | 鉴权令牌（若 Gateway 需要） | 空字符串 | `jiuwenswarm-cli --token YOUR_TOKEN` |
 | `-h`, `--help` | 打印帮助并退出 | - | `jiuwenswarm-cli -h` |
+
+### `--session`：按 id 恢复或新建会话
+
+`--session <id>` 让 TUI 在启动时**以指定 session id 为身份**连接后端。连接建立后，TUI 统一向 AgentServer 注册该 id；由于身份来自外部，这条兼容路径明确绕过预热池。
+
+| id 状态 | 启动行为 | 后端 RPC |
+|------|------|------|
+| **已存在** | AgentServer 保留已落盘的项目与模式绑定，执行切换生命周期，随后前端拉取并回显历史 | 显式 ID 的 `session.create` + `history.get` + `session.rename`（取标题） |
+| **不存在** | AgentServer 校验 id，在该 id 的互斥锁内解析 TUI 项目并写入 `metadata.json`，以空历史启动且不领取预热实例 | 显式 ID 的 `session.create` + `history.get`（空）|
+
+显式 ID 的 `session.create` 仅对 TUI 开放且保持幂等，AgentServer 会记录该兼容请求绕过预热。该逻辑在收到 `connection.ack` 后由 `app-state.ts` 的 `initializeBootSession` 放行，重连时只执行一次；普通启动、`/new` 和 `/clear` 不传 `session_id`，仍由 AgentServer 分配新 ID。
+
+**示例**：
+
+```bash
+# 首次用某 id 启动 → 不存在 → 新建落盘
+jiuwenswarm-tui --session tui_myproj_001
+# 在 TUI 内对话若干轮后退出。该 id 已落盘到 ~/.jiuwenswarm/agent/sessions/tui_myproj_001/
+
+# 再次用同 id 启动 → 已存在 → 恢复并回显历史
+jiuwenswarm-tui --session tui_myproj_001
+```
+
+**与运行时 `/resume` 的关系**：`--session` 是**启动时**的外部 id 兼容入口，调用显式 ID 的 `session.create`；`/resume` 是 TUI 已启动后切换到已有会话的命令，调用 `session.switch`。
+
+**id 命名约束**（前端在启动前校验，不合规直接报错退出，不进入 TUI）：
+
+| 约束 | 值 | 原因 |
+|------|------|------|
+| 长度上限 | ≤ 128 字符 | `session_id` 直接作为目录名落地（`~/.jiuwenswarm/agent/sessions/<id>/`），受文件系统单项 255 字符限制，留路径前缀余量 |
+| 允许字符 | `A-Z a-z 0-9 . _ -` | 与 `generateSessionId` 产出的 `tui_<hex>_<hex>` 同字符集 |
+| 禁止字符 | 中文、空格、`/ \ : * ? " < > \|` 等 | 防止目录注入（`/` 会建出嵌套目录导致会话丢失）与跨平台 `mkdir` 失败 |
+
+不合规示例：
+
+```bash
+jiuwenswarm-tui --session 测试会话       # 含中文 → 启动即退出：--session <id> 含非法字符
+jiuwenswarm-tui --session "my session"   # 含空格 → 同上
+jiuwenswarm-tui --session a/b            # 含 / → 同上
+jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超限
+```
+
+**不传 `--session`**：前端生成随机 id（`generateSessionId` → `tui_<hex>_<hex>`），后端目录在**首条对话写入历史时**懒创建。即未传参启动、未发消息即退出 → 后端无目录、`/sessions` 列表不显示该 id（空会话不污染列表）。传 `--session` 启动即建目录，**即使不发言也会出现在列表**，方便下次恢复——这是两者关键行为差异。
 
 ### 连接到非标准端口（端口冲突回退后）
 
@@ -83,7 +126,7 @@
 
 当前 **已注册** 的顶层命令来自 `createBuiltinCommands()`（`registry.ts`），按名称排序如下表。
 
-> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/cli/src/core/commands/builtins/` 下另有 **`switch.ts`（`/switch`）**、**`cancel.ts`（`/cancel`）**、**`new.ts`（`/new` 独立建会话）**、**`sessions.ts`（会话列表 RPC）** 等实现，但 **当前 `registry.ts` 未注册**这些顶层命令，输入后会得到 `Unknown command`。中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。Gateway 侧受控指令仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
+> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/channels/tui/frontend/src/core/commands/builtins/` 下另有 `cancel.ts`、`new.ts`、`sessions.ts` 等实现文件，但当前没有把它们注册为独立顶层命令。`/new` 仍然可用，因为它是 `/clear` 的别名；默认构建没有独立 `/cancel`，中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。`/switch` 仅在 `agentos-tui` 托管环境（`AGENTOS_TUI_SUPERVISED=1`）中注册，用于 `/switch claude`、`/switch list` 等第三方 TUI handoff；它不同于 Gateway 受控频道的模式切换指令。Gateway 侧行为仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
 
 ### 命令总表
 
@@ -127,6 +170,10 @@
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
 | `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
 | `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
+| `/swarmflow` | - | SwarmFlow 开关/状态/预算（`on`/`off`/`--budget`） | `/swarmflow on` | **推荐 `team`** |
+| `/swarmflows` | `/swarmworkflows` | 全屏 SwarmFlow 运行树 | `/swarmflows` | **推荐 `team`**（需 `/swarmflow on`） |
+
+> SwarmFlow 完整说明见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
@@ -172,7 +219,7 @@
 
 #### `/workspace`（可信目录）
 
-- 系统默认工作空间：`~/.jiuwenswarm/agent/jiuwenswarm_workspace`（始终可用）。
+- 系统默认工作空间：`~/.jiuwenswarm/agent/workspace`（始终可用）。
 - `add`：默认路径为当前工作目录；成功后会 `command.add_dir` 同步到服务端并 `remember: true`。
 - `set`：重置为单个可信目录；若已有列表会二次确认。
 - 详见 [Slash命令表.md](Slash命令表.md) 的 `/workspace` 小节。
@@ -361,7 +408,7 @@
 
 - 别名：`/fork`。
 - 约束：当前会话忙时或无对话记录时拒绝执行。
-- 行为：生成新 `session_id` 并调用 `session.fork`；TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
+- 行为：TUI 调用 `session.fork` 时发送当前 `source_session_id` 与可选标题，由 AgentServer 分配并返回新 `session_id`；随后 TUI 自动切换到新分支会话，清空 transcript 并恢复分支历史。提示用户可用 `/resume <原会话ID>` 返回原会话。
 - 示例：`/branch`、`/branch fix-login-bug`。
 
 #### `/btw`（旁路提问）
@@ -414,6 +461,7 @@
   - code mode：`memory_enabled`（记忆功能总开关）、`auto_coding_memory`（每轮对话后自动提取记忆（需总开关开启））、`memory_forbidden_enabled`（过滤敏感信息）。
   - 切换后若需重启会话生效会给出提示。
 - Tab 补全：`/memory edit ` 后显示文件列表（路径用 `getDisplayPath` 展示，去重）；`/memory toggle ` 后显示当前 mode 的 key 列表；均支持前缀过滤。
+- `/memory edit <path>` 只允许打开已存在且通过记忆目录路径校验的文件，不负责创建缺失文件；运行时 auto/coding memory 文件为只读。
 - 示例：`/memory`（打开控制台）、`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
 
 #### `/sandbox`（沙箱模式管理）
@@ -428,7 +476,7 @@
   - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
   - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
 - 自动配置路径：当前工作路径。`preserve_file_sharing_mode` 仅支持 `mount`。
-- `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
+- `excluded_commands` 的匹配：按 simple-command 叶子做 fnmatch；写 glob 时建议覆盖参数（例如 `"git *"`）。混合管道会本地/远端拆分执行，不安全结构则整条进沙箱。本质仍是沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
 - 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
@@ -489,6 +537,8 @@
 #### `/clear` 与忙状态
 
 - 若 `session is busy`（正在处理），`/clear` 会拒绝执行，需先中断任务（**`Ctrl+C`** 第一次中断；默认构建无 `/cancel` 命令）。
+- `/clear` 会调用后端 `session.create` 创建全新会话，由 AgentServer 分配并返回新的 `session_id`，随后切换会话、清空 transcript 并恢复新会话的空历史；它不是只清理当前屏幕。
+- `/new`、`/reset` 是 `/clear` 的别名，执行相同的新建会话流程。若 `session.create` 失败，TUI 保持在原会话，不会先行切换到一个本地生成的 ID。
 
 ---
 
@@ -722,3 +772,9 @@
 - [MCP配置](MCP配置.md)
 - [配置信息](配置信息.md)
 - [Claude Code CLI 参考（结构参考）](https://code.claude.com/docs/zh-CN/cli-reference)
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

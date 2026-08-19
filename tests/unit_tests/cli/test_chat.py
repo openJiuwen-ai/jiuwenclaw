@@ -23,6 +23,7 @@ from jiuwenswarm.cli.chat import (
     _generate_session_id,
     _get_persisted_external_dirs,
     _load_state,
+    _normalize_dir,
     _remove_dir_from_config,
     _save_state,
     _validate_args,
@@ -46,7 +47,8 @@ class TestResolveMode:
         assert resolve_mode("code.plan") == "code.plan"
         assert resolve_mode("code.team") == "code.team"
         assert resolve_mode("team") == "team"
-        assert resolve_mode("team.plan") == "team.plan"
+        assert resolve_mode("team.plan.normal") == "team.plan.normal"
+        assert resolve_mode("team.plan.code") == "team.plan.code"
 
     @staticmethod
     def test_alias_resolution():
@@ -55,6 +57,7 @@ class TestResolveMode:
         assert resolve_mode("agent.plan") == "agent"
         assert resolve_mode("agent.fast") == "agent"
         assert resolve_mode("code") == "code.normal"
+        assert resolve_mode("team.plan") == "team.plan.normal"
 
     @staticmethod
     def test_case_insensitive():
@@ -136,6 +139,22 @@ class TestBuildRequest:
         assert req["params"]["cwd"].endswith("test_cwd")
         assert req["params"]["project_dir"].endswith("test_cwd")
         assert req["params"]["session_id"].startswith("cli-")
+        assert req["params"]["supports_user_interaction"] is False
+
+    @staticmethod
+    def test_repl_request_supports_user_interaction(monkeypatch):
+        monkeypatch.setattr(os, "getcwd", lambda: "/tmp/test_cwd")
+        args = argparse.Namespace(
+            mode="code.normal",
+            session=None,
+            cwd=None,
+            project_dir=None,
+            trusted_dir=None,
+        )
+
+        req = _build_request(args, "hello", supports_user_interaction=True)
+
+        assert req["params"]["supports_user_interaction"] is True
 
     @staticmethod
     def test_with_session(monkeypatch):
@@ -786,6 +805,41 @@ class TestInteractiveLoop:
         assert code == 1
 
     @pytest.mark.asyncio
+    async def test_non_interactive_request_rejects_ask_user_event(self):
+        messages = [
+            {
+                "type": "event",
+                "event": "chat.ask_user_question",
+                "payload": {
+                    "question": "A or B?",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                },
+            },
+        ]
+
+        from jiuwenswarm.cli.chat import _run_interactive_loop
+
+        client = await self._make_connected_client(messages)
+        renderer = HumanRenderer()
+        request = {
+            "type": "req",
+            "id": "r1",
+            "method": "chat.send",
+            "is_stream": True,
+            "params": {
+                "session_id": "s1",
+                "content": "hi",
+                "query": "hi",
+                "mode": "code.normal",
+                "supports_user_interaction": False,
+            },
+        }
+
+        code = await _run_interactive_loop(client, renderer, request)
+
+        assert code == 4
+
+    @pytest.mark.asyncio
     async def test_keepalive_final_does_not_terminate(self):
         messages = [
             {"type": "event", "event": "chat.processing_status", "payload": {"is_processing": True}},
@@ -1041,11 +1095,46 @@ class TestExternalDirs:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
         dirs = _get_persisted_external_dirs()
-        assert "/Users/hwz/mcore/foo" in dirs
-        assert "/opt/baz" in dirs
-        assert "/tmp/bar" not in dirs
+        assert _normalize_dir("/Users/hwz/mcore/foo") in dirs
+        assert _normalize_dir("/opt/baz") in dirs
+        assert _normalize_dir("/tmp/bar") not in dirs
         assert "*" not in dirs
         assert len(dirs) == 2
+
+    @staticmethod
+    def test_get_persisted_dirs_from_file_guard_paths(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "external_directory": {"*": "ask"},
+                    "file_guard": {
+                        "enabled": True,
+                        "paths": [
+                            {
+                                "path": "/trusted/a",
+                                "read": "allow",
+                                "write": "allow",
+                                "exec": "ask",
+                            },
+                            {
+                                "path": "/trusted/ro",
+                                "read": "allow",
+                                "write": "ask",
+                                "exec": "ask",
+                            },
+                        ],
+                    },
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        dirs = _get_persisted_external_dirs()
+        assert _normalize_dir("/trusted/a") in dirs
+        assert _normalize_dir("/trusted/ro") not in dirs
 
     @staticmethod
     def test_remove_dir_from_config(monkeypatch, tmp_path):
@@ -1066,6 +1155,33 @@ class TestExternalDirs:
         )
         monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", save_cfg_path)
         assert _remove_dir_from_config("/Users/hwz/mcore/foo") is True
+        assert _get_persisted_external_dirs() == []
+
+    @staticmethod
+    def test_remove_dir_from_file_guard_paths(monkeypatch, tmp_path):
+        cfg_path = tmp_path / "config.yaml"
+        from ruamel.yaml import YAML
+        yaml = YAML()
+        yaml.dump(
+            {
+                "permissions": {
+                    "file_guard": {
+                        "enabled": True,
+                        "paths": [
+                            {
+                                "path": "/trusted/a",
+                                "read": "allow",
+                                "write": "allow",
+                                "exec": "ask",
+                            }
+                        ],
+                    }
+                }
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", cfg_path)
+        assert _remove_dir_from_config("/trusted/a") is True
         assert _get_persisted_external_dirs() == []
 
     @staticmethod

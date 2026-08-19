@@ -35,10 +35,10 @@ issues:
   - id: ISSUE-001
     dimension: test_coverage
     severity: medium
-    status: open
-    summary: "Direct tests do not lock AgentManager selection arguments."
-    evidence: "Tests assert returned mode/sub_mode and only that get_agent was awaited, not channel_id, mapped mode, project_dir, or sub_mode. The interrupt-resume case now duplicates the happy path because approval gates were removed."
-    suggested_action: "Add direct _prepare_code_mode_chat_turn assertions for get_agent(channel_id, mode, project_dir, sub_mode), including params project_dir, metadata project_dir, auto_harness.plan mapping, and None-agent failure."
+    status: fixed
+    summary: "Direct tests now lock the relevant AgentManager selection arguments."
+    evidence: "Team selection and stale agent/code-workspace tests assert channel_id, mode, project_dir, and sub_mode; auto_harness and None-agent boundaries remain separate pending coverage."
+    suggested_action: "Retain the exact cache-identity assertions when extending mode handling."
   - id: ISSUE-002
     dimension: observability
     severity: low
@@ -61,15 +61,15 @@ details: {}
 
 ## Actual Role
 
-Resolves and canonicalizes a chat request's mode, maps logical `auto_harness` to AgentManager mode `"agent"` for instance selection, resolves the stable project directory, and returns the logical mode, sub-mode, and selected agent for unary or streaming chat handling. It mutates `request.params["mode"]` through `_apply_resolved_mode_to_request` and raises `ValueError` if AgentManager returns no agent.
+Reads locked Session `work_mode` (falling back to the request), canonicalizes single-Agent runtime identity, resolves the stable project directory, awaits any claimed prewarm task, and selects the matching AgentManager root. A stale `mode=agent` code request therefore selects `(code, normal, project)` rather than constructing a second Session child under another root.
 
 ## Key Signals
 
 - Input: `AgentRequest` plus resolved `channel_id`.
 - Output: Tuple of logical mode, sub-mode, and resolved agent.
 - Main side effects: Canonicalizes `request.params["mode"]`; may create or reuse an agent through `AgentManager.get_agent`.
-- Main risk: Its broad all-mode selection contract and exact manager arguments are only partially pinned by tests.
-- Related tests: Two direct tests exist, but one is a legacy duplicate and neither asserts manager arguments or failure. Local execution is blocked at collection by missing `openjiuwen.auto_harness`; the dedicated plan-exit flow remains pending.
+- Main risk: It performs an additional metadata read to restore canonical identity and still has a broad all-mode contract.
+- Related tests: direct tests now assert exact AgentManager arguments for team and stale-agent/code-workspace requests; failure and auto-harness boundaries remain partial.
 
 ## Detail Index
 

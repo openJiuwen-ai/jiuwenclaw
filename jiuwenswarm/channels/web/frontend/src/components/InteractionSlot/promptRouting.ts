@@ -46,7 +46,10 @@ export function classifyPrompt(pq: AskUserQuestionPayload | null | undefined): P
   // 无 source 但带权限式选项时按授权处理；否则按交互处理。
   const firstOptions = pq.questions?.[0]?.options ?? [];
   const looksLikePermission = firstOptions.some((o) =>
-    ['本次允许', '总是允许', '拒绝', 'allow_once', 'always_allow', 'reject'].includes(
+    [
+      '本次允许', '总是允许', '永久记住', '会话内记住', '拒绝',
+      'allow_once', 'always_allow', 'allow_always', 'session_allow', 'reject',
+    ].includes(
       (o.value || o.label || '').trim(),
     ),
   );
@@ -55,20 +58,27 @@ export function classifyPrompt(pq: AskUserQuestionPayload | null | undefined): P
 
 // ── 授权选项语义识别 ────────────────────────────────────────────
 
-export type AuthSemantic = 'allow-once' | 'allow-always' | 'reject' | 'other';
+export type AuthSemantic = 'allow-once' | 'allow-always' | 'session-allow' | 'reject' | 'other';
 
 const ALLOW_ONCE_LABELS = new Set([
   '本次允许', '接收', '接受', '激活', '批准', '开始执行',
   'allow_once', 'Allow Once', 'Approve', 'Proceed',
 ]);
 // 'allow_always' 是技能演进审批接口下发的 value（与旧有的 'always_allow' 别名并存）。
-const ALLOW_ALWAYS_LABELS = new Set(['总是允许', 'always_allow', 'allow_always', 'Always Allow']);
+// 「永久记住」为权限中断写盘选项；「总是允许」为产品常用别名。
+const ALLOW_ALWAYS_LABELS = new Set([
+  '总是允许', '永久记住', 'always_allow', 'allow_always', 'Always Allow',
+]);
+const SESSION_ALLOW_LABELS = new Set([
+  '会话内记住', 'session_allow', 'Session Allow',
+]);
 const REJECT_LABELS = new Set(['拒绝', 'reject', 'Reject']);
 
 export function classifyAuthOption(label: string): AuthSemantic {
   const key = (label || '').trim();
   if (ALLOW_ONCE_LABELS.has(key)) return 'allow-once';
   if (ALLOW_ALWAYS_LABELS.has(key)) return 'allow-always';
+  if (SESSION_ALLOW_LABELS.has(key)) return 'session-allow';
   if (REJECT_LABELS.has(key)) return 'reject';
   return 'other';
 }

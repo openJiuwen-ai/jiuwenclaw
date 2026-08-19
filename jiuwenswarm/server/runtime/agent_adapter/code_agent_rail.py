@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """CodeAgentRail — 管理 /agents 创建的自定义子智能体。
 
 与 SubagentRail 共存：SubagentRail 管理内置 agent（explore/plan/code/browser），
@@ -243,7 +245,12 @@ class AgentTool(Tool):
             "workspace": workspace,
             "skills": spec.skills,
             "backend": spec.backend if spec.backend is not None else parent_config.backend,
-            "sys_operation": None,  # 子 agent 不继承 sys_operation
+            # 子 agent 必须复用父 agent 的 SysOperation：它才是用户配置的文件系统边界
+            # （本地全量访问 / jiuwenbox 沙箱 / allow-deny 路径）。传 None 会让
+            # create_deep_agent 另建一个 LOCAL SysOperation，并按 restrict_to_work_dir
+            # 打开 restrict_to_sandbox——本地模式下子 agent 反而被锁进 workspace，沙箱
+            # 模式下子 agent 又逃出沙箱直接落到宿主机。
+            "sys_operation": getattr(parent_config, "sys_operation", None),
             "language": spec.language if spec.language is not None else parent_config.language,
             "prompt_mode": spec.prompt_mode if spec.prompt_mode is not None else parent_config.prompt_mode,
             "subagents": None,

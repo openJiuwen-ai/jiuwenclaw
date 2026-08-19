@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional
 
-from json_repair import repair_json
+from jiuwenswarm.common.reasoning_injector import inject_reasoning_params
+
+LLM_IDENTITY_SCHEMA_VERSION = "JiuwenSwarm-llm-identity-v1"
 
 
 @dataclass(frozen=True)
@@ -35,16 +40,21 @@ class LLMConfig:
             models = {}
         default_models = models.get("defaults")
         has_default_model = (
-            isinstance(default_models, list)
-            and bool(default_models)
+            isinstance(default_models, list) and bool(default_models)
         ) or isinstance(models.get("default"), dict)
         if not has_default_model:
-            raise RuntimeError("No JiuwenSwarm default model is configured in config.yaml.")
+            raise RuntimeError(
+                "No JiuwenSwarm default model is configured in config.yaml."
+            )
 
         defaults = get_default_models(config)
         if not defaults:
-            raise RuntimeError("No JiuwenSwarm default model is configured in config.yaml.")
-        entry = next((item for item in defaults if item.get("is_default") is True), defaults[0])
+            raise RuntimeError(
+                "No JiuwenSwarm default model is configured in config.yaml."
+            )
+        entry = next(
+            (item for item in defaults if item.get("is_default") is True), defaults[0]
+        )
         return cls.from_model_entry(entry or {})
 
     @classmethod
@@ -57,8 +67,8 @@ class LLMConfig:
             client_config = {}
         if not isinstance(request_config, dict):
             request_config = {}
-        client_config = dict(client_config)
-        request_config = dict(request_config)
+        client_config = deepcopy(client_config)
+        request_config = deepcopy(request_config)
         model = str(
             request_config.get("model")
             or client_config.get("model_name")
@@ -73,6 +83,17 @@ class LLMConfig:
             raise RuntimeError("JiuwenSwarm default model is missing api_key.")
         if not str(client_config.get("client_provider") or "").strip():
             raise RuntimeError("JiuwenSwarm default model is missing client_provider.")
+        request_config = inject_reasoning_params(
+            model_client_config=client_config,
+            model_config_obj=request_config,
+        )
+        request_config.pop("reasoning_effort", None)
+        extra_body = request_config.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        extra_body = deepcopy(extra_body)
+        extra_body.update(thinking_disabled_request_overrides()["extra_body"])
+        request_config["extra_body"] = extra_body
         request_config["model"] = model
         return cls(
             model=model,
@@ -90,17 +111,43 @@ class LLMConfig:
         return str(client_config.get("api_base") or "").strip().rstrip("/")
 
     def model_client_kwargs(self) -> Dict[str, Any]:
-        client_config = dict(self.model_client_config or {})
+        client_config = deepcopy(self.model_client_config or {})
         if self.base_url:
             client_config["api_base"] = self.base_url
         return client_config
 
     def model_request_kwargs(self) -> Dict[str, Any]:
-        request_config = dict(self.model_config_obj or {})
+        request_config = deepcopy(self.model_config_obj or {})
         request_config["model"] = self.model
         request_config["temperature"] = self.temperature
         request_config["top_p"] = self.top_p
         return request_config
+
+    def create_model(self):
+        """Create the native openJiuwen model used by orchestration."""
+
+        from openjiuwen.core.foundation.llm import (
+            Model,
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        return Model(
+            model_client_config=ModelClientConfig(**self.model_client_kwargs()),
+            model_config=ModelRequestConfig(**self.model_request_kwargs()),
+        )
+
+    def identity_digest(self) -> str:
+        """Hash every effective client/request setting without exposing values."""
+
+        return _stable_identity_sha256(
+            {
+                "schema_version": LLM_IDENTITY_SCHEMA_VERSION,
+                "backend": self.backend,
+                "client_config": self.model_client_kwargs(),
+                "request_config": self.model_request_kwargs(),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -218,6 +265,31 @@ def create_llm_client(config: LLMConfig) -> "JiuwenSwarmChatClient":
     return JiuwenSwarmChatClient(config)
 
 
+def create_model_response_observer(config: LLMConfig):
+    """Bridge native orchestration model responses to the existing usage tracker."""
+
+    def observe(response: Any, stage: str, operation: str | None) -> None:
+        with llm_usage_context(stage, operation):
+            _record_usage_from_response(
+                config=config,
+                response=response,
+                operation=operation or "orchestration",
+            )
+
+    return observe
+
+
+def thinking_disabled_request_overrides() -> Dict[str, Any]:
+    """Return isolated provider-compatible controls that disable thinking."""
+    return {
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    }
+
+
 class JiuwenSwarmChatClient:
     """Adapter over openjiuwen's async model invocation."""
 
@@ -266,6 +338,8 @@ class JiuwenSwarmChatClient:
         ]
 
     def _json_content_from_response(self, response: Any, error_context: str) -> str:
+        from json_repair import repair_json
+
         content = extract_message_content(response)
         if not content:
             raise RuntimeError(f"{error_context} response content is empty.")
@@ -284,19 +358,8 @@ class JiuwenSwarmChatClient:
         timeout: Optional[int],
         request_overrides: Optional[Dict[str, Any]],
     ) -> Any:
-        from openjiuwen.core.foundation.llm import (
-            Model,
-            ModelClientConfig,
-            ModelRequestConfig,
-        )
-
         if self._model is None:
-            self._model = Model(
-                model_client_config=ModelClientConfig(
-                    **self.config.model_client_kwargs()
-                ),
-                model_config=ModelRequestConfig(**self.config.model_request_kwargs()),
-            )
+            self._model = self.config.create_model()
 
         invoke_kwargs: Dict[str, Any] = {}
         if timeout is not None:
@@ -313,6 +376,41 @@ class JiuwenSwarmChatClient:
             ],
             **invoke_kwargs,
         )
+
+
+def _stable_identity_sha256(value: Any) -> str:
+    canonical = _canonical_identity_value(value)
+    serialized = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _canonical_identity_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_identity_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_identity_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_canonical_identity_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _record_usage_from_response(

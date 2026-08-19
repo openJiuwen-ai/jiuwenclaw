@@ -128,16 +128,7 @@ def resolve_session_switch_context(
         )
 
     target_mode_params = {"mode": params.get("mode"), "team": params.get("team")}
-    target_is_team = is_team_params(target_mode_params)
-    requested_mode = str(params.get("mode") or "agent.plan")
-    if not affinity_enabled:
-        return SessionSwitchContext(
-            target_is_team=target_is_team,
-            previous_is_team=False,
-            resolved_mode="team" if target_is_team else requested_mode,
-            affinity_enabled=False,
-        )
-
+    previous_mode_params = {"mode": params.get("previous_mode")}
     target_metadata: dict[str, Any] = {}
     previous_metadata: dict[str, Any] = {}
     try:
@@ -164,7 +155,6 @@ def resolve_session_switch_context(
                 exc,
             )
 
-    previous_mode_params = {"mode": params.get("previous_mode")}
     target_is_team = is_team_params(target_mode_params) or is_team_params(target_metadata)
     previous_is_team = (
         is_team_params(previous_mode_params) or is_team_params(previous_metadata)

@@ -205,6 +205,17 @@ def rewind_session(
     # 在截断 history 之前，记录目标 turn 的时间戳（用于后续清理 file_ops）
     cut_timestamp = history[cut_index].get("timestamp")
 
+    # 同样必须在下面 update_session_metadata 之前解析项目目录：metadata.json 是
+    # 非原子的原地覆写且走后台线程，之后再让 truncate_file_ops 自己去推断，会撞上
+    # 半截文件 → JSONDecodeError → 静默返回 None → 扫不到 file_ops → 清理无声失效。
+    project_dir: str | None = None
+    try:
+        from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+        project_dir = get_diff_service().resolve_project_dir(session_id)
+    except Exception as exc:
+        logger.warning("rewind_session: failed to resolve project_dir: %s", exc)
+
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 
     from jiuwenswarm.server.runtime.session.session_metadata import update_session_metadata
@@ -216,11 +227,16 @@ def rewind_session(
 
     # 清理 session-specific file_ops 日志，使 turn diff 显示与截断后的 history 一致
     # 必须在 truncate_history_records 之后调用，但传入截断前获取的时间戳
+    #
+    # soft=True: 本函数只回退对话、不动工作区文件。硬删除快照会让这些文件永久
+    # 失去回滚能力（后续 /rewind 选 code 找不到它们，却仍报告成功）。
     if cut_timestamp is not None:
         try:
             from jiuwenswarm.server.utils.diff_service import get_diff_service
 
-            get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+            get_diff_service().truncate_file_ops_by_timestamp(
+                session_id, cut_timestamp, project_dir=project_dir, soft=True,
+            )
         except Exception as exc:
             logger.warning("rewind_session: failed to truncate file_ops: %s", exc)
 
@@ -284,15 +300,27 @@ def compact_partial_session(
     if direction == "from":
         cut_timestamp = history[target_user_index].get("timestamp")
         summarized_count = len(history) - target_user_index
+        # 在 update_session_metadata 之前解析（同 rewind_session，避免元数据写入竞态）
+        compact_project_dir: str | None = None
+        try:
+            from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+            compact_project_dir = get_diff_service().resolve_project_dir(session_id)
+        except Exception as exc:
+            logger.warning("compact_partial_session: failed to resolve project_dir: %s", exc)
 
         result = truncate_history_records(session_id=session_id, cut_index=target_user_index)
         remaining = result["remaining_records"]
         removed = result["removed_records"]
 
+        # soft=True: 摘要化同样只改对话、不动工作区文件（同 rewind_session）
         if cut_timestamp is not None:
             try:
                 from jiuwenswarm.server.utils.diff_service import get_diff_service
-                get_diff_service().truncate_file_ops_by_timestamp(session_id, cut_timestamp)
+                get_diff_service().truncate_file_ops_by_timestamp(
+                    session_id, cut_timestamp,
+                    project_dir=compact_project_dir, soft=True,
+                )
             except Exception as exc:
                 logger.warning("compact_partial_session: failed to truncate file_ops: %s", exc)
 
@@ -586,7 +614,9 @@ def restore_session_files(
             if info["action"] == "write":
                 # 文件在目标 turn 前已有内容，写回 old_content
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(info["restore_content"], encoding="utf-8")
+                path.write_text(
+                    info["restore_content"], encoding="utf-8", newline=""
+                )
                 restored.append(file_path)
             elif info["action"] == "delete":
                 # 文件由 agent 在目标 turn 后创建，删除
@@ -614,79 +644,131 @@ def restore_session_files(
     }
 
 
-async def rewind_session_context(
+def redo_session_files(
     *,
-    deep_agent: "DeepAgent",
     session_id: str,
     turn_index: int,
-) -> bool:
-    """Rebuild context_engine from truncated history.json and persist to checkpointer.
+    project_dir: str | None = None,
+    extra_history_roots: list[str] | None = None,
+) -> dict[str, Any]:
+    """重新应用指定 turn 被 discard(soft) 撤销的文件修改.
 
-    The context_engine buffer only holds a sliding window (older messages are
-    compressed by ``round_level_compressor`` / ``dialogue_compressor``), so we
-    cannot simply slice the in-memory buffer.  Instead we reload the truncated
-    history.json, convert its records to openjiuwen messages, tear down the old
-    context, and build a fresh one.
+    与 ``restore_session_files`` 对称:后者写回 old_content(撤销),
+    本方法写回 new_content(重新应用)。
+
+    注意:当 ``get_files_to_redo`` 返回空(例如 file_ops 缺失/损坏/没被打
+    ``discarded_out`` 标记)时,本方法返回 ``redone_files=[] deleted_files=[]
+    errors=[]``。这种"空成功"不应被当作真正的成功——调用方(如 redo handler)
+    应自行判断空结果并返回 ``REDO_HISTORY_MISSING``,避免误清 discarded 状态。
+
+    Args:
+        session_id: 会话 ID
+        turn_index: 目标重新应用轮次(1-based)
+        project_dir: 项目目录路径(可选)
+    """
+    from jiuwenswarm.server.utils.diff_service import get_diff_service
+
+    diff_service = get_diff_service()
+    files_to_redo = diff_service.get_files_to_redo(
+        session_id,
+        turn_index,
+        project_dir=project_dir,
+        extra_history_roots=extra_history_roots,
+    )
+
+    if not files_to_redo:
+        return {
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "redone_files": [],
+            "deleted_files": [],
+            "errors": [],
+        }
+
+    redone: list[str] = []
+    deleted: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    for file_path, info in files_to_redo.items():
+        path = Path(file_path)
+        try:
+            if info["action"] == "write":
+                # 写回 agent 修改后的内容(new_content)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    info["content"], encoding="utf-8", newline=""
+                )
+                redone.append(file_path)
+            elif info["action"] == "delete":
+                # 文件被 agent 删除,redo 时重新删除。
+                # 文件不存在属于"目标状态已满足"(redo 后状态 == discard 前状态),
+                # 仍记为已处理,避免 handler 把这种正常情况误判成 REDO_HISTORY_MISSING。
+                if path.exists():
+                    path.unlink()
+                deleted.append(file_path)
+        except Exception as exc:
+            errors.append({"file": file_path, "error": str(exc)})
+            logger.warning(
+                "redo_session_files: failed to redo %s: %s",
+                file_path, exc,
+            )
+
+    logger.info(
+        "redo_session_files: session=%s turn=%s redone=%d deleted=%d errors=%d",
+        session_id, turn_index, len(redone), len(deleted), len(errors),
+    )
+
+    return {
+        "session_id": session_id,
+        "turn_index": turn_index,
+        "redone_files": redone,
+        "deleted_files": deleted,
+        "errors": errors,
+    }
+
+
+def _build_context_messages_from_history(
+    history_records: list[dict[str, Any]],
+) -> tuple[list[Any], int]:
+    """Convert history.jsonl records into a list of openjiuwen BaseMessage.
+
+    history.json stores raw streaming events, NOT clean messages.
+    A single user turn produces many records across multiple LLM API calls:
+
+      Per LLM call:
+        chat.reasoning (N chunks)  → thinking text (concatenated)
+        chat.usage_metadata         → end-of-call marker (skip)
+        EITHER:
+          chat.tool_call (1..N)     → AssistantMessage(reasoning + tool_calls)
+          chat.tool_result (per tc) → ToolMessage
+        OR:
+          chat.delta (N chunks)     → skip (fragments of chat.final)
+          chat.final                → AssistantMessage(reasoning + content)
+
+      Other events (all skipped):
+        chat.tool_update            → intermediate tool progress
+        chat.usage_summary          → turn-level usage stats
+        chat.ask_user_question      → UI interaction event
+
+    Aligned with claude-code's approach: preserve thinking (reasoning),
+    tool_call/tool_result structure, and final text to fully reconstruct
+    the conversation context for the LLM.
+
+    State machine:
+      - reasoning_buffer: accumulates chat.reasoning text chunks
+      - current_tool_calls: collects tool_calls for the current LLM call
+      - When a NEW reasoning chunk arrives after tool_calls were collected,
+        flush the pending AssistantMessage (one LLM call boundary crossed)
+      - Consecutive tool_calls without reasoning between them belong to
+        the same LLM call (parallel tool execution)
+
+    Returns ``(context_messages, skipped_record_count)``.
     """
     from openjiuwen.core.foundation.llm.schema.message import (
         UserMessage,
         AssistantMessage,
         ToolMessage,
     )
-    from openjiuwen.core.single_agent import create_agent_session
-
-    react_agent = deep_agent.react_agent
-    if react_agent is None:
-        logger.warning("rewind_session_context: no react_agent for %s", session_id)
-        return False
-
-    # --- 1. Load truncated history.json (already cut by caller) ---
-    history_path = get_read_history_path(session_id)
-    if not history_path.exists():
-        logger.warning("rewind_session_context: history not found for %s", session_id)
-        return False
-
-    try:
-        history_records = load_history_records(session_id)
-    except OSError as exc:
-        logger.warning("rewind_session_context: failed to read history for %s: %s", session_id, exc)
-        return False
-
-    if not isinstance(history_records, list) or not history_records:
-        logger.info("rewind_session_context: empty history for %s", session_id)
-        return True
-
-    # --- 2. Convert history.json records → openjiuwen BaseMessage list ---
-    #
-    # history.json stores raw streaming events, NOT clean messages.
-    # A single user turn produces many records across multiple LLM API calls:
-    #
-    #   Per LLM call:
-    #     chat.reasoning (N chunks)  → thinking text (concatenated)
-    #     chat.usage_metadata         → end-of-call marker (skip)
-    #     EITHER:
-    #       chat.tool_call (1..N)     → AssistantMessage(reasoning + tool_calls)
-    #       chat.tool_result (per tc) → ToolMessage
-    #     OR:
-    #       chat.delta (N chunks)     → skip (fragments of chat.final)
-    #       chat.final                → AssistantMessage(reasoning + content)
-    #
-    #   Other events (all skipped):
-    #     chat.tool_update            → intermediate tool progress
-    #     chat.usage_summary          → turn-level usage stats
-    #     chat.ask_user_question      → UI interaction event
-    #
-    # Aligned with claude-code's approach: preserve thinking (reasoning),
-    # tool_call/tool_result structure, and final text to fully reconstruct
-    # the conversation context for the LLM.
-    #
-    # State machine:
-    #   - reasoning_buffer: accumulates chat.reasoning text chunks
-    #   - current_tool_calls: collects tool_calls for the current LLM call
-    #   - When a NEW reasoning chunk arrives after tool_calls were collected,
-    #     flush the pending AssistantMessage (one LLM call boundary crossed)
-    #   - Consecutive tool_calls without reasoning between them belong to
-    #     the same LLM call (parallel tool execution)
 
     context_messages: list[Any] = []
     skipped = 0
@@ -825,7 +907,7 @@ async def rewind_session_context(
     if reasoning_buffer or current_tool_calls:
         _flush_pending_assistant()
 
-    # --- 2b. Post-processing (aligned with claude-code's deserialization pipeline) ---
+    # --- Post-processing (aligned with claude-code's deserialization pipeline) ---
 
     # Filter out AssistantMessages whose tool_calls have no matching ToolMessage.
     # Analogous to claude-code's filterUnresolvedToolUses — these occur when
@@ -858,12 +940,154 @@ async def rewind_session_context(
                     tool_calls=resolved if resolved else None,
                 )
         filtered_messages.append(msg)
-    context_messages = filtered_messages
 
     if removed_unresolved > 0:
         logger.info(
-            "rewind_session_context: removed %d unresolved tool_call(s)", removed_unresolved
+            "_build_context_messages_from_history: removed %d unresolved tool_call(s)",
+            removed_unresolved,
         )
+
+    return filtered_messages, skipped
+
+
+async def warmup_session_context(
+    *,
+    deep_agent: "DeepAgent",
+    session_id: str,
+) -> bool:
+    """Restart-safe restore of context_engine messages from on-disk history.
+
+    对话消息只存在于 context_engine 的进程内存（``_context_pool``），不落
+    checkpointer。server 重启或 session adapter 被空闲驱逐后重建时 pool 为
+    空，而 chat.send 主路径不会把磁盘 history.jsonl 回灌给模型，导致
+    "能看到历史列表但继续对话失忆"。
+
+    在新建 session adapter（``start_interaction`` 之后）调用：若内存 context
+    缺失且磁盘上有历史记录，则将全量 history 转换为 openjiuwen 消息并灌回
+    context_engine。与 ``rewind_session_context`` 的区别：不截断 history、
+    不清理 Session state（agent/workflow 状态已由 checkpointer 在 pre_run
+    恢复）、不强写 checkpointer（消息持久化本就由 history.jsonl 承担）。
+    """
+    react_agent = getattr(deep_agent, "react_agent", None)
+    if react_agent is None:
+        logger.warning("warmup_session_context: no react_agent for %s", session_id)
+        return False
+
+    context_engine = react_agent.context_engine
+    if context_engine.get_context(session_id=session_id) is not None:
+        # 内存上下文已存在（进程未重启 / 已 warmup / rewind 重建过）
+        return True
+
+    if not history_exists(session_id):
+        # 全新会话，磁盘无历史，静默跳过
+        return False
+
+    try:
+        history_records = load_history_records(session_id)
+    except OSError as exc:
+        logger.warning("warmup_session_context: failed to read history for %s: %s", session_id, exc)
+        return False
+
+    if not isinstance(history_records, list) or not history_records:
+        return False
+
+    context_messages, skipped = _build_context_messages_from_history(history_records)
+    if not context_messages:
+        logger.info(
+            "warmup_session_context: no rebuildable messages in history for %s", session_id
+        )
+        return False
+
+    session = resolve_live_agent_session(deep_agent, session_id)
+    if session is None:
+        # 正常调用点（start_interaction 之后）live session 必在；兜底临时 Session。
+        try:
+            from openjiuwen.core.single_agent import create_agent_session
+
+            session = create_agent_session(
+                session_id=session_id, card=getattr(deep_agent, "card", None)
+            )
+            await session.pre_run(inputs=None)
+        except Exception as exc:
+            logger.warning("warmup_session_context: pre_run failed for %s: %s", session_id, exc)
+            return False
+
+    try:
+        await context_engine.create_context(
+            session=session,
+            history_messages=context_messages,
+        )
+    except Exception as exc:
+        logger.warning("warmup_session_context: create_context failed for %s: %s", session_id, exc)
+        return False
+
+    logger.info(
+        "warmup_session_context: session=%s restored context from disk history with %d messages "
+        "(skipped %d streaming/metadata records)",
+        session_id, len(context_messages), skipped,
+    )
+    return True
+
+
+async def rewind_session_context(
+    *,
+    deep_agent: "DeepAgent",
+    session_id: str,
+    turn_index: int,
+) -> bool:
+    """Rebuild context_engine from truncated history.json and persist to checkpointer.
+
+    The context_engine buffer only holds a sliding window (older messages are
+    compressed by ``round_level_compressor`` / ``dialogue_compressor``), so we
+    cannot simply slice the in-memory buffer.  Instead we reload the truncated
+    history.json, convert its records to openjiuwen messages, tear down the old
+    context, and build a fresh one.
+
+    When DeepAgent has a live ``_interaction_session`` for this session_id, the
+    rebuild mutates that Session in place (commit, not post_run) so the next
+    chat round does not reload stale pre-rewind messages from memory.
+    """
+    from openjiuwen.core.foundation.llm.schema.message import (
+        UserMessage,
+        AssistantMessage,
+    )
+
+    react_agent = deep_agent.react_agent
+    if react_agent is None:
+        logger.warning("rewind_session_context: no react_agent for %s", session_id)
+        return False
+
+    # --- 1. Load truncated history.json (already cut by caller) ---
+    history_path = get_read_history_path(session_id)
+    if not history_path.exists():
+        logger.warning("rewind_session_context: history not found for %s", session_id)
+        return False
+
+    try:
+        history_records = load_history_records(session_id)
+    except OSError as exc:
+        logger.warning("rewind_session_context: failed to read history for %s: %s", session_id, exc)
+        return False
+
+    if not isinstance(history_records, list):
+        logger.warning("rewind_session_context: invalid history for %s", session_id)
+        return False
+
+    # Empty history (e.g. rewind removed every turn) still requires clearing the
+    # live context — otherwise the next chat.send keeps the rewound turns.
+    if not history_records:
+        logger.info("rewind_session_context: empty history for %s; clearing live context", session_id)
+        return await _apply_rewound_context(
+            deep_agent=deep_agent,
+            react_agent=react_agent,
+            session_id=session_id,
+            turn_index=turn_index,
+            context_messages=[],
+            skipped=0,
+        )
+
+    # --- 2. Convert history.json records → openjiuwen BaseMessage list ---
+    context_messages, skipped = _build_context_messages_from_history(history_records)
 
     # If conversation ends with an AssistantMessage, append a synthetic
     # continuation user message so the next API call has proper role
@@ -873,11 +1097,131 @@ async def rewind_session_context(
             content="[Continue from where the conversation was rewound.]"
         ))
 
-    if not context_messages:
-        logger.info("rewind_session_context: no convertible messages in history for %s", session_id)
-        return True
+    return await _apply_rewound_context(
+        deep_agent=deep_agent,
+        react_agent=react_agent,
+        session_id=session_id,
+        turn_index=turn_index,
+        context_messages=context_messages,
+        skipped=skipped,
+    )
 
-    # --- 3. Tear down old context (discard compressed summaries & stale state) ---
+
+def resolve_live_agent_session(deep_agent: "DeepAgent", session_id: str) -> Any | None:
+    """Return DeepAgent's long-lived Session if it matches ``session_id``.
+
+    Chat rounds reuse ``_interaction_session`` (pre_run once). Writing through a
+    fresh Session only updates the checkpointer; the next turn still reads the
+    stale in-memory snapshot cached on the bound session — this bites both the
+    rewound context and ``DeepAgentState.plan_mode``.
+    """
+    for attr in ("_interaction_session", "_loop_session"):
+        session_obj = getattr(deep_agent, attr, None)
+        if session_obj is None:
+            continue
+        get_sid = getattr(session_obj, "get_session_id", None)
+        if not callable(get_sid):
+            continue
+        try:
+            if str(get_sid()) == str(session_id):
+                return session_obj
+        except Exception as exc:
+            # Skip this candidate and try the next attr / fall back to a temp
+            # Session; a broken get_session_id must not abort the caller.
+            logger.warning(
+                "resolve_live_agent_session: get_session_id failed on %s for %s: %s",
+                attr, session_id, exc,
+            )
+            continue
+    return None
+
+
+async def _wipe_session_runtime_state(
+    *,
+    session: Any,
+    react_agent: Any,
+    session_id: str,
+) -> None:
+    """Clear context / deep-agent / HITL keys on a live or temp Session."""
+    from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
+
+    try:
+        session.update_state({"context": None})
+        session.update_state({_SESSION_STATE_KEY: None})
+        try:
+            from openjiuwen.core.single_agent.interrupt.state import (
+                INTERRUPTION_KEY,
+                INTERRUPT_AUTO_CONFIRM_KEY,
+            )
+            session.update_state({INTERRUPTION_KEY: None})
+            session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: None})
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: HITL interrupt wipe failed for %s: %s",
+                session_id, int_exc,
+            )
+        try:
+            hitl_handler = getattr(react_agent, "_hitl_handler", None)
+            if hitl_handler is not None:
+                hitl_handler.clear(session)
+        except Exception as int_exc:
+            logger.warning(
+                "rewind_session_context: in-memory HITL clear failed for %s: %s",
+                session_id, int_exc,
+            )
+    except Exception as exc:
+        logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
+
+
+async def _persist_rewound_session(
+    *,
+    session: Any,
+    deep_agent: "DeepAgent",
+    context_engine: Any,
+    session_id: str,
+    is_live_session: bool,
+) -> bool:
+    """Save rebuilt context; commit live sessions without post_run side effects."""
+    try:
+        await context_engine.save_contexts(session)
+        try:
+            deep_agent.save_state(session)
+        except Exception as save_exc:
+            logger.warning(
+                "rewind_session_context: deep_agent.save_state failed for %s: %s",
+                session_id, save_exc,
+            )
+        if is_live_session:
+            # post_run closes the interaction stream and marks the session done;
+            # chat must keep using the same Session object.
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                await commit()
+            else:
+                await session.post_run()
+        else:
+            await session.post_run()
+        return True
+    except Exception as exc:
+        logger.warning(
+            "rewind_session_context: checkpointer persist failed for %s: %s",
+            session_id, exc,
+        )
+        return False
+
+
+async def _apply_rewound_context(
+    *,
+    deep_agent: "DeepAgent",
+    react_agent: Any,
+    session_id: str,
+    turn_index: int,
+    context_messages: list[Any],
+    skipped: int,
+) -> bool:
+    """Clear + rebuild context_engine and sync the Session the next turn will use."""
+    from openjiuwen.core.single_agent import create_agent_session
+
     context_engine = react_agent.context_engine
     context = context_engine.get_context(session_id=session_id)
     if context is not None:
@@ -887,22 +1231,27 @@ async def rewind_session_context(
         )
     await context_engine.clear_context(session_id=session_id)
 
-    # --- 4. Build fresh context from truncated history ---
-    try:
-        session = create_agent_session(session_id=session_id, card=deep_agent.card)
-        await session.pre_run(inputs=None)
-    except Exception as exc:
-        logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
-        return False
+    live_session = resolve_live_agent_session(deep_agent, session_id)
+    is_live_session = live_session is not None
+    if is_live_session:
+        session = live_session
+        logger.info(
+            "rewind_session_context: reusing live interaction session for %s",
+            session_id,
+        )
+    else:
+        try:
+            session = create_agent_session(session_id=session_id, card=deep_agent.card)
+            await session.pre_run(inputs=None)
+        except Exception as exc:
+            logger.warning("rewind_session_context: pre_run failed for %s: %s", session_id, exc)
+            return False
 
-    # Wipe stale context / deepagent state in the checkpointer so
-    # _load_state_from_session + the agent loop start from our rebuild.
-    from openjiuwen.harness.schema.state import _SESSION_STATE_KEY
-    try:
-        session.update_state({"context": None})
-        session.update_state({_SESSION_STATE_KEY: None})
-    except Exception as exc:
-        logger.warning("rewind_session_context: state wipe failed for %s: %s", session_id, exc)
+    await _wipe_session_runtime_state(
+        session=session,
+        react_agent=react_agent,
+        session_id=session_id,
+    )
 
     try:
         await context_engine.create_context(
@@ -913,29 +1262,18 @@ async def rewind_session_context(
         logger.warning("rewind_session_context: create_context failed for %s: %s", session_id, exc)
         return False
 
-    # --- 5. Persist fresh context to checkpointer ---
-    persist_ok = False
-    try:
-        await context_engine.save_contexts(session)
-        try:
-            deep_agent.save_state(session)
-        except Exception as save_exc:
-            logger.warning(
-                "rewind_session_context: deep_agent.save_state failed for %s: %s",
-                session_id, save_exc,
-            )
-        await session.post_run()
-        persist_ok = True
-    except Exception as exc:
-        logger.warning(
-            "rewind_session_context: checkpointer persist failed for %s: %s",
-            session_id, exc,
-        )
+    persist_ok = await _persist_rewound_session(
+        session=session,
+        deep_agent=deep_agent,
+        context_engine=context_engine,
+        session_id=session_id,
+        is_live_session=is_live_session,
+    )
 
     logger.info(
         "rewind_session_context: session=%s turn=%d rebuilt context with %d messages "
-        "(skipped %d streaming/metadata records) persist=%s",
-        session_id, turn_index, len(context_messages), skipped, persist_ok,
+        "(skipped %d streaming/metadata records) persist=%s live_session=%s",
+        session_id, turn_index, len(context_messages), skipped, persist_ok, is_live_session,
     )
     return True
 

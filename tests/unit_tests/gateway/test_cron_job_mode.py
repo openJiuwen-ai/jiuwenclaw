@@ -20,7 +20,13 @@ from jiuwenswarm.gateway.cron.models import (
 
 @pytest.mark.parametrize("mode", sorted(CRON_JOB_MODES))
 def test_normalize_cron_job_mode_accepts_supported_values(mode: str) -> None:
-    expected = "agent" if mode in {"plan", "agent.plan", "agent.fast"} else mode
+    expected = (
+        "agent"
+        if mode in {"plan", "agent.plan", "agent.fast"}
+        else "team.plan.normal"
+        if mode == "team.plan"
+        else mode
+    )
     assert normalize_cron_job_mode(mode) == expected
     assert normalize_cron_job_mode(mode.upper()) == expected
 
@@ -38,7 +44,7 @@ def test_normalize_cron_job_mode_rejects_unknown() -> None:
 
 @pytest.mark.parametrize(
     "mode",
-    ["team", "team.plan", "code.team", "TEAM"],
+    ["team", "team.plan", "team.plan.normal", "team.plan.code", "code.team", "TEAM"],
 )
 def test_is_team_cron_mode_true(mode: str) -> None:
     assert is_team_cron_mode(mode) is True

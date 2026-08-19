@@ -21,7 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
-    SUPPORTED_AGENT_TYPES,
+    BUILTIN_AGENT_TYPE,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.models import AgentInfo, ImageInfo
 
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 KIND_THIRD_PARTY = "三方"
 KIND_JIUWEN = "九问"
 _JIUWEN_FRAMEWORKS = frozenset({"jiuwenswarm", "jiuwen-report"})
+# Offline registry stub default list when no framework filter is given.
+_LOCAL_STUB_FRAMEWORKS = frozenset({BUILTIN_AGENT_TYPE})
 
 
 @dataclass(frozen=True)
@@ -326,7 +328,7 @@ class RegistryClient:
             names = (
                 [str(framework).strip()]
                 if framework and str(framework).strip()
-                else sorted(SUPPORTED_AGENT_TYPES)
+                else sorted(_LOCAL_STUB_FRAMEWORKS)
             )
             return [
                 ImageEntry(
@@ -609,13 +611,41 @@ class RegistryClient:
         self._registered_agents[info.agent_id] = info
         self._agent_service_ids[info.agent_id] = service_id
 
-    async def unregister_agent(self, agent_id: str) -> None:
-        """Unregister by local ``agent_id`` mapping or treat value as ``service_id``."""
+    async def unregister_agent(
+        self,
+        agent_id: str,
+        *,
+        user_id: str | None = None,
+        agent_type: str | None = None,
+    ) -> None:
+        """Unregister via ``DELETE /api/instances/{service_id}``.
+
+        Resolves ``service_id`` from the local ``agent_id`` map, then
+        ``(user_id, agent_type)``, so callers can unregister even when the
+        async register task has not finished writing the map yet.
+        """
         key = str(agent_id or "").strip()
-        if not key:
+        cached = self._registered_agents.pop(key, None) if key else None
+        mapped = self._agent_service_ids.pop(key, None) if key else None
+        if user_id is not None:
+            uid = str(user_id).strip()
+        elif cached is not None:
+            uid = str(cached.user_id or "").strip()
+        else:
+            uid = ""
+        if agent_type is not None:
+            framework = str(agent_type).strip()
+        elif cached is not None:
+            framework = str(cached.agent_type or "").strip()
+        else:
+            framework = ""
+        service_id = (
+            mapped
+            or (instance_service_id(uid, framework) if uid and framework else "")
+            or key
+        )
+        if not service_id:
             return
-        service_id = self._agent_service_ids.pop(key, None) or key
-        self._registered_agents.pop(key, None)
         if self.enabled:
             await self.unregister_instance(service_id)
 

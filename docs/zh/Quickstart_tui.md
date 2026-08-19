@@ -88,9 +88,9 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -100,14 +100,14 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start
     ```
 
-  - 动态运行前端服务（适合生开发调试）
+  - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     uv run jiuwenswarm-init
     uv run jiuwenswarm-start dev
     ```
@@ -115,9 +115,9 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   运行完成后即可在网页前端访问JiuwenSwarm服务。
 
 - 安装TUI依赖
-  另外打开新终端界面，进入TUI目录 jiuwenswarm/channels/tui/frontend 安装依赖：
+  另外打开新终端界面，进入项目根目录后，再进入 TUI 目录 `channels/tui/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 
@@ -151,9 +151,9 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
 
 - 安装前端依赖
 
-  进入前端目录 jiuwenswarm/channels/web/frontend 安装依赖：
+  进入前端目录 `channels/web/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/web/frontend
+  cd channels/web/frontend
   npm install
   ```
 
@@ -163,14 +163,14 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   - 静态运行前端服务（适合生产环境部署）
     ```bash
     npm run build
-    cd ../../
+    cd ../../../
     jiuwenswarm-init
     jiuwenswarm-start
     ```
 
-  - 动态运行前端服务（适合生开发调试）
+  - 动态运行前端服务（适合开发调试）
     ```bash
-    cd ../../
+    cd ../../../
     # 直接启动（不使用 uv run）
     jiuwenswarm-init
     jiuwenswarm-start dev
@@ -179,9 +179,9 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   运行完成后即可在网页前端访问JiuwenSwarm服务。
 
 - 安装TUI依赖
-  另外打开新终端界面，进入TUI目录 jiuwenswarm/channels/tui/frontend 安装依赖：
+  另外打开新终端界面，进入项目根目录后，再进入 TUI 目录 `channels/tui/frontend` 安装依赖：
   ```bash
-  cd jiuwenswarm/channels/tui/frontend
+  cd channels/tui/frontend
   npm install
   ```
 
@@ -192,3 +192,9 @@ JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
   ```
 
   可在多个终端重复运行 TUI，连接同一 Gateway 实现多窗口并行会话（详见 [TUI 使用指南 — 多窗口 TUI](TUI使用指南.md#多窗口-tui)）。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

@@ -57,8 +57,8 @@ export function TextWithDefaults({
     : additionalStyles;
 
   return (
-    <div className="a2ui-text" style={hostWeightStyle(node.weight)}>
-      <section className={classes} style={textStyle}>
+    <div className="a2ui-text" data-testid="a2ui-text" style={hostWeightStyle(node.weight)}>
+      <section className={classes} data-testid="a2ui-text-content" data-variant={usageHint} style={textStyle}>
         <ReactMarkdown remarkPlugins={[remarkGfm]}>
           {textValue}
         </ReactMarkdown>

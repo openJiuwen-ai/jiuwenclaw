@@ -64,6 +64,8 @@ export interface CommandContext {
   clearBtwOverlay?: () => void;
   /** 设置 BTW 活动状态（加载中或 overlay 可见），用于 Esc 优先级判断 */
   setBtwActive?: (active: boolean) => void;
+  /** 设置 /btw 正在回答的问题；null 表示加载已结束。 */
+  setBtwPendingQuestion?: (question: string | null) => void;
   clearEntries: () => void;
   restoreHistory: (sessionId: string) => Promise<void>;
   exitApp: () => void;
@@ -110,7 +112,14 @@ export interface CommandContext {
     mode?: "edit" | "reset",
   ) => void;
   enterStatusView?: (tab?: StatusViewTab) => void;
-  openInEditor?: (filePath: string) => void;
+  /**
+   * Open a file in the user's external editor. The promise resolves after the
+   * editor closes. While it is open the TUI is frozen (non-operable),
+   * mirroring Claude Code's editFileInEditor. When the editor exits, onDone is
+   * called so the caller can report completion exactly once. A false result
+   * means neither the configured nor fallback editor launched.
+   */
+  openInEditor?: (filePath: string, onDone?: (success?: boolean) => void) => Promise<void>;
   /** Open a folder in system file explorer (Windows: explorer, macOS: open -R, Linux: xdg-open).
    * Returns true if an explorer was launched; false if no GUI explorer is
    * available (e.g. headless Linux server), so the caller can fall back to
@@ -130,8 +139,8 @@ export interface CommandContext {
 
   /** HandoffPort 预检：校验托管标记、动作退出码和目标能力。 */
   checkHandoff?: (target: HandoffTarget) => HandoffCheckResult;
-  /** HandoffPort 请求：二次校验后调用统一顶层关闭路径。 */
-  requestHandoff?: (target: HandoffTarget) => Promise<void>;
+  /** HandoffPort 请求：二次校验后调用统一顶层关闭路径，输出 handoff JSON 到 stdout。 */
+  requestHandoff?: (target: HandoffTarget, switchContent: string) => Promise<void>;
   /** TaskLifecyclePort：统一任务快照；/switch 用于判断是否需要询问中断。 */
   hasServerTask?: () => boolean;
   /** TaskLifecyclePort：等待型取消；只供 /switch 等生命周期动作使用。 */
@@ -173,6 +182,8 @@ export interface SlashCommand {
   argGuide?: string;
   /** 在/help中隐藏，但仍可执行 */
   hidden?: boolean;
+  /** 仅在后端开启技能自演进时显示在 help/补全中；直接输入仍可执行。 */
+  requiresSkillEvolution?: boolean;
   isSafeConcurrent?: boolean;
   kind: CommandKind;
   action: (ctx: CommandContext, args: string) => void | Promise<void>;

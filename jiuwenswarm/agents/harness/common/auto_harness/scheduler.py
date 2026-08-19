@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
+from openjiuwen.rsi.auto_harness.pipelines import META_EVOLVE_PIPELINE
 from openjiuwen.core.foundation.llm import Model
 
 from .run_log_status import has_terminal_session_event
@@ -73,12 +73,10 @@ class Scheduler:
         """Build model cache from jiuwenswarm config.yaml (reuse interface_deep logic)."""
         try:
             from jiuwenswarm.common.config import get_config, get_default_models
-            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
+            # Use the same model building function as interface_deep
+            from jiuwenswarm.server.runtime.agent_adapter.interface_deep import build_model_from_entry
 
             config = get_config()
-
-            # Use the same model building method as interface_deep
-            build_model_from_entry = getattr(JiuWenSwarmDeepAdapter, '_build_model_from_entry')
 
             # Build from models.defaults list
             for entry in get_default_models(config):

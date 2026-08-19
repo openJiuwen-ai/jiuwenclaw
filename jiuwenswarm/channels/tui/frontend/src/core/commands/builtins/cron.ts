@@ -52,7 +52,13 @@ function isValidCronMode(modes: string[], mode: string): boolean {
   return modes.includes(mode.trim().toLowerCase());
 }
 
-const TEAM_MODES = new Set(["team", "team.plan", "code.team"]);
+const TEAM_MODES = new Set([
+  "team",
+  "team.plan",
+  "team.plan.normal",
+  "team.plan.code",
+  "code.team",
+]);
 
 function resolveDefaultTimeoutSeconds(job: Pick<CronJobPayload, "mode">, cronMeta: CronJobMetaPayload): number {
   const mode = String(job.mode || cronMeta.default_mode || "agent.fast").trim().toLowerCase();

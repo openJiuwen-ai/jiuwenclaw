@@ -14,7 +14,7 @@ import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
-import { InputArea } from './InputArea';
+import { InputArea, type InputAreaHandle } from './InputArea';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -27,29 +27,50 @@ import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
-import { HistoryPagerBar } from './HistoryPagerBar';
 import { HarnessProgressBar } from './HarnessProgressBar';
 import { AgentTeamActivityCard } from './TeamEventGroupDisplay';
 import { isTeamActivityMessage, parseTeamEventMessage } from './teamEventUtils';
-import { isTeamLeaderMember } from '../../utils/teamMemberAvatar';
+import { isTeamLeaderMember, type TeamMemberIdentity } from '../../utils/teamMemberAvatar';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
-import welcomeBanner from '../../assets/home-banner.svg';
+import welcomeBanner from '../../assets/home-banner-workswarm.png';
 import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
+import { turnDiffKey } from '../../features/code-mode/turnChangeState';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
+import {
+  canLoadOlderHistory,
+  shouldShowHistoryRetry,
+} from '../../features/historyPagination';
+import {
+  DESKTOP_FILE_DRAG_EVENT,
+  DESKTOP_LOCAL_FILES_EVENT,
+  isDesktopShell,
+  normalizePicks,
+  registerDesktopLocalFilesConsumer,
+  type DesktopLocalFilesEventDetail,
+  type LocalFilePick,
+} from '../../features/workspace/localFilePicker';
+import { useDesktopLocalFilePickerReady } from '../../hooks';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
   totalPages: number;
   loadingMore: boolean;
   prepending?: boolean;
+  retryAvailable?: boolean;
   onLoadMore: () => void | Promise<void>;
 }
 
 interface ChatPanelProps {
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
+    content?: string;
+    query?: string;
+    media_items?: Record<string, unknown>[];
+    files?: Record<string, unknown>;
+  }>;
+  onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<{
     content?: string;
     query?: string;
     media_items?: Record<string, unknown>[];
@@ -90,23 +111,13 @@ interface ChatPanelProps {
   onDrainTaskQueueIfIdle?: (sessionId: string) => void;
 }
 
-function ThinkingIndicator() {
-  return (
-    <div className="flex justify-start animate-rise">
-      <div className="chat-bubble assistant chat-reading-indicator">
-        <div className="chat-reading-indicator__dots">
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-    </div>
-  );
-}
+// 邀请指令只对 human_agent 成员存在（见 upsertHumanShareCommandFromEvent 的
+// mode === 'human' 闸门），所以这两处直接断言身份，不依赖成员名册是否已到齐。
+const HUMAN_SHARE_IDENTITY: TeamMemberIdentity = { role: 'human_agent' };
 
 function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }) {
   return (
-    <button className="chat-suggestion-card" onClick={onClick}>
+    <button className="chat-suggestion-card" data-testid="chat-panel-welcome-suggestion" data-variant={text} onClick={onClick}>
       <Sparkles className="chat-suggestion-card__icon" strokeWidth={2} />
       <span className="chat-suggestion-card__text">{text}</span>
       <ArrowRight className="chat-suggestion-card__arrow" strokeWidth={2} />
@@ -127,6 +138,7 @@ function InterruptResultBubble() {
     <div
       className="chat-interrupt-bubble chat-interrupt-bubble--error"
       role="alert"
+      data-testid="chat-panel-interrupt-result"
     >
       {message}
     </div>
@@ -168,7 +180,7 @@ function ActiveTeamGroupEntry({ isProcessing, teamAreaExpanded }: { isProcessing
 }
 
 /** 单 Agent 模式的消息队列卡片，展示在输入框上方 */
-function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string) => void }) {
+function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProcessing: boolean; onSendTask?: (content: string, mediaItems?: MediaItem[]) => void }) {
   const [expanded, setExpanded] = useState(true);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -205,7 +217,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     const nextTask = runtime?.taskQueue[0];
     if (nextTask) {
       removeFromTaskQueue(sid, nextTask.id);
-      onSendTask?.(nextTask.content);
+      onSendTask?.(nextTask.content, nextTask.mediaItems);
     }
   };
 
@@ -217,23 +229,41 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
     }
   };
 
-  const handleEditTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleEditTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItemCount = 0,
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
+      // Editing restores only the text into the input; attachments cannot follow
+      // and will be removed together with the task — confirm first.
+      if (
+        mediaItemCount > 0 &&
+        !window.confirm(t('chat.editTaskDropAttachments', { count: mediaItemCount }))
+      ) {
+        return;
+      }
       setInputValue(sid, content);
       removeFromTaskQueue(sid, taskId);
       window.dispatchEvent(new CustomEvent('chat-input-sync', { detail: { sessionId: sid, value: content } }));
     }
   };
 
-  const handleSendTask = (e: React.MouseEvent, taskId: string, content: string) => {
+  const handleSendTask = (
+    e: React.MouseEvent,
+    taskId: string,
+    content: string,
+    mediaItems?: MediaItem[],
+  ) => {
     e.stopPropagation();
     const sid = useChatStore.getState().activeSessionId;
     if (sid) {
       removeFromTaskQueue(sid, taskId);
     }
-    onSendTask?.(content);
+    onSendTask?.(content, mediaItems);
   };
 
   const handleDragStart = (index: number) => {
@@ -265,18 +295,19 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
   };
 
   return (
-    <div className="chat-active-team-group animate-rise">
+    <div className="chat-active-team-group animate-rise" data-testid="chat-panel-task-queue">
       <div className="team-event-group team-event-group--activity">
         <button
           type="button"
           className="team-event-group-summary"
+          data-testid="chat-panel-task-queue-header"
           onClick={() => setExpanded(prev => !prev)}
           aria-expanded={expanded}
         >
           <span className="team-event-group-summary__main">
             <span className="team-event-group-summary__title">{t('chatUi.messageQueue')}</span>
             {queuePaused && (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
+              <span data-testid="chat-panel-task-queue-paused-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '8px' }}>
                 <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--color-chat-paused)', flexShrink: 0 }} />
                 <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>{t('chat.paused')}</span>
               </span>
@@ -287,6 +318,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
               role="button"
               tabIndex={0}
               className="team-event-group-summary__activity"
+              data-testid="chat-panel-task-queue-resume"
               style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', marginLeft: 'auto', justifyContent: 'end', flexShrink: 0, cursor: 'pointer' }}
               onClick={handleResume}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleResume(e as unknown as React.MouseEvent); } }}
@@ -302,6 +334,8 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
               <div
                 key={task.id}
                 className="team-event-group-row team-event-group-row--activity"
+                data-testid="chat-panel-task-queue-item"
+                data-variant={task.id}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -322,6 +356,7 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                     draggable
                     onDragStart={() => handleDragStart(index)}
                     className="queue-drag-handle"
+                    data-testid="chat-panel-task-queue-item-drag"
                     title={t('chat.dragTask')}
                   />
                   <div className="team-event-group-row__avatar" style={{ display: 'flex', alignItems: 'center' }}>
@@ -330,27 +365,49 @@ function AgentActivityCard({ isProcessing: _isProcessing, onSendTask }: { isProc
                   <span className="team-event-group-row__member" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {task.content}
                   </span>
+                  {(task.mediaItems?.length ?? 0) > 0 && (
+                    <span
+                      title={(task.mediaItems ?? [])
+                        .map((item) => item.filename)
+                        .filter(Boolean)
+                        .join('\n')}
+                      data-testid="chat-panel-task-queue-item-attachment-count"
+                      style={{
+                        flexShrink: 0,
+                        fontSize: '12px',
+                        color: 'var(--color-text-secondary)',
+                        background: 'var(--color-surface-hover)',
+                        borderRadius: '6px',
+                        padding: '0 6px',
+                      }}
+                    >
+                      📎{task.mediaItems?.length}
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--send"
+                    data-testid="chat-panel-task-queue-item-send"
                     title={t('chat.sendTask')}
-                    onClick={(e) => handleSendTask(e, task.id, task.content)}
+                    onClick={(e) => handleSendTask(e, task.id, task.content, task.mediaItems)}
                   >
                     <img src={loadSendIcon} alt="" className="w-3.5 h-3.5" />
                   </button>
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--edit"
+                    data-testid="chat-panel-task-queue-item-edit"
                     title={t('chat.editTask')}
-                    onClick={(e) => handleEditTask(e, task.id, task.content)}
+                    onClick={(e) => handleEditTask(e, task.id, task.content, task.mediaItems?.length ?? 0)}
                   >
                     <img src={editIcon} alt="" className="w-3 h-3" />
                   </button>
                   <button
                     type="button"
                     className="chat-input-task-action chat-input-task-action--delete"
+                    data-testid="chat-panel-task-queue-item-delete"
                     title={t('chat.removeTask')}
                     onClick={(e) => handleRemoveTask(e, task.id)}
                   >
@@ -403,14 +460,14 @@ function WelcomeHeading() {
   if (isZh) {
     return (
       <>
-        JiuwenSwarm 轻松解决工作每个问题！
+        WorkSwarm 轻松解决工作每个问题！
       </>
     );
   }
 
   return (
     <>
-      JiuwenSwarm makes work easier!
+      WorkSwarm makes work easier!
     </>
   );
 }
@@ -490,26 +547,27 @@ function HumanSharePanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby="human-share-title"
+        data-testid="chat-panel-human-share-modal"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="human-share-modal__header">
+        <div className="human-share-modal__header" data-testid="chat-panel-human-share-modal-header">
           <div>
             <div className="human-share-modal__title-row">
-              <h2 id="human-share-title" className="human-share-modal__title">{t('humanShare.title')}</h2>
+              <h2 id="human-share-title" className="human-share-modal__title" data-testid="chat-panel-human-share-modal-title">{t('humanShare.title')}</h2>
             </div>
-            <p className="human-share-modal__summary">
+            <p className="human-share-modal__summary" data-testid="chat-panel-human-share-modal-summary">
               {allJoined
                 ? t('humanShare.allJoined', { count: sortedCommands.length })
                 : t('humanShare.waiting', { joined: joinedCount, total: sortedCommands.length })}
             </p>
           </div>
-          <button type="button" className="human-share-modal__close" onClick={onClose} aria-label={t('common.close')}>
+          <button type="button" className="human-share-modal__close" data-testid="chat-panel-human-share-modal-close" onClick={onClose} aria-label={t('common.close')}>
             <X size={18} />
           </button>
         </div>
 
-        <div className="human-share-modal__body">
-          <div className="human-share-modal__notice" role="note">
+        <div className="human-share-modal__body" data-testid="chat-panel-human-share-modal-member-list">
+          <div className="human-share-modal__notice" role="note" data-testid="chat-panel-human-share-modal-notice">
             <Info size={18} strokeWidth={2.4} />
             <span>{t('humanShare.instructionHint')}</span>
           </div>
@@ -518,25 +576,30 @@ function HumanSharePanel({
             const copied = copiedKey === `join:${command.memberName}`;
             const shouldShowJoinCommand = command.status !== 'joined' && Boolean(command.joinCommand);
             return (
-              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item">
-                <div className="human-share-modal__member">
-                  <TeamMemberAvatar member={command.memberName} className="human-share-modal__avatar" />
+              <section key={`${command.sessionId}:${command.memberName}`} className="human-share-modal__item" data-testid="chat-panel-human-share-modal-member" data-variant={command.memberName}>
+                <div className="human-share-modal__member" data-testid="chat-panel-human-share-modal-member-info">
+                  <TeamMemberAvatar
+                    member={command.memberName}
+                    identity={HUMAN_SHARE_IDENTITY}
+                    className="human-share-modal__avatar"
+                  />
                   <div className="human-share-modal__member-copy">
                     <div className="human-share-modal__member-name">{displayName}</div>
                     {displayName !== command.memberName && (
                       <div className="human-share-modal__member-id">{command.memberName}</div>
                     )}
                   </div>
-                  <span className={getHumanShareStatusClass(command)}>
+                  <span className={getHumanShareStatusClass(command)} data-testid="chat-panel-human-share-modal-member-status" data-variant={command.status}>
                     {getHumanShareStatusLabel(command, t)}
                   </span>
                 </div>
                 {shouldShowJoinCommand ? (
-                  <div className="human-share-modal__command-row">
-                    <code className="human-share-modal__command">{command.joinCommand}</code>
+                  <div className="human-share-modal__command-row" data-testid="chat-panel-human-share-modal-member-join" data-variant="pending">
+                    <code className="human-share-modal__command" data-testid="chat-panel-human-share-modal-member-join-command">{command.joinCommand}</code>
                     <button
                       type="button"
                       className="human-share-modal__copy"
+                      data-testid="chat-panel-human-share-modal-member-copy"
                       onClick={() => void copyText(`join:${command.memberName}`, command.joinCommand)}
                     >
                       {copied ? <CheckCircle2 size={15} /> : <Copy size={15} />}
@@ -550,6 +613,8 @@ function HumanSharePanel({
                         ? 'human-share-modal__command-note--joined'
                         : 'human-share-modal__command-note--pending'
                     }`}
+                    data-testid="chat-panel-human-share-modal-member-note"
+                    data-variant={command.status === 'joined' ? 'joined' : 'pending'}
                   >
                     {command.status === 'joined' ? <CheckCircle2 size={15} /> : <ClipboardList size={15} />}
                     <span>
@@ -564,13 +629,14 @@ function HumanSharePanel({
           })}
 
           {exitCommand && (
-            <section className="human-share-modal__exit">
-              <div className="human-share-modal__exit-title">{t('humanShare.exitTitle')}</div>
+            <section className="human-share-modal__exit" data-testid="chat-panel-human-share-modal-exit">
+              <div className="human-share-modal__exit-title" data-testid="chat-panel-human-share-modal-exit-title">{t('humanShare.exitTitle')}</div>
               <div className="human-share-modal__command-row">
-                <code className="human-share-modal__command">{exitCommand}</code>
+                <code className="human-share-modal__command" data-testid="chat-panel-human-share-modal-exit-command">{exitCommand}</code>
                 <button
                   type="button"
                   className="human-share-modal__copy"
+                  data-testid="chat-panel-human-share-modal-exit-copy"
                   onClick={() => void copyText('exit', exitCommand)}
                 >
                   {copiedKey === 'exit' ? <CheckCircle2 size={15} /> : <Copy size={15} />}
@@ -600,42 +666,49 @@ function HumanShareCard({
   );
   const joinedCount = sortedCommands.filter((command) => command.status === 'joined').length;
   const pendingCount = sortedCommands.filter((command) => command.status !== 'joined').length;
-  const previewMembers = sortedCommands.slice(0, 3).map((command) => command.displayName || command.memberName);
+  // 保留整条 command：头像要按 member_id 解析（人类成员才认得出人类头像，
+  // 传展示名会查不到名册、退回哈希插画，还会和弹窗里同一个人对不上），
+  // 名字才用 displayName。
+  const previewCommands = sortedCommands.slice(0, 3);
 
   if (sortedCommands.length === 0) {
     return null;
   }
 
   return (
-    <section className="human-share-card" data-testid="human-share-card">
-      <div className="human-share-card__icon" aria-hidden="true">
+    <section className="human-share-card" data-testid="chat-panel-human-share-card">
+      <div className="human-share-card__icon" aria-hidden="true" data-testid="chat-panel-human-share-card-icon">
         <ClipboardList size={18} strokeWidth={2} />
       </div>
-      <div className="human-share-card__content">
-        <div className="human-share-card__title">{t('humanShare.cardTitle')}</div>
-        <div className="human-share-card__summary">
+      <div className="human-share-card__content" data-testid="chat-panel-human-share-card-content">
+        <div className="human-share-card__title" data-testid="chat-panel-human-share-card-title">{t('humanShare.cardTitle')}</div>
+        <div className="human-share-card__summary" data-testid="chat-panel-human-share-card-summary">
           {t('humanShare.cardSummary', {
             pending: pendingCount,
             joined: joinedCount,
             total: sortedCommands.length,
           })}
         </div>
-        <div className="human-share-card__members">
-          {previewMembers.map((member) => (
-            <span key={member} className="human-share-card__member-pill">
-              <TeamMemberAvatar member={member} className="human-share-card__avatar" />
-              <span>{member}</span>
+        <div className="human-share-card__members" data-testid="chat-panel-human-share-card-members">
+          {previewCommands.map((command) => (
+            <span key={command.memberName} className="human-share-card__member-pill" data-testid="chat-panel-human-share-card-member-pill" data-variant={command.memberName}>
+              <TeamMemberAvatar
+                member={command.memberName}
+                identity={HUMAN_SHARE_IDENTITY}
+                className="human-share-card__avatar"
+              />
+              <span>{command.displayName || command.memberName}</span>
             </span>
           ))}
-          {sortedCommands.length > previewMembers.length ? (
-            <span className="human-share-card__more">+{sortedCommands.length - previewMembers.length}</span>
+          {sortedCommands.length > previewCommands.length ? (
+            <span className="human-share-card__more" data-testid="chat-panel-human-share-card-more">+{sortedCommands.length - previewCommands.length}</span>
           ) : null}
         </div>
       </div>
       <button
         type="button"
         className="human-share-card__button"
-        data-testid="human-share-card-trigger"
+        data-testid="chat-panel-human-share-card-trigger"
         onClick={onShare}
       >
         <Share2 size={15} strokeWidth={2} />
@@ -660,6 +733,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 export function ChatPanel({
   onSendMessage,
   onPersistMedia,
+  onPersistDocuments,
   onInterrupt,
   onCancel,
   onSwitchMode,
@@ -699,6 +773,9 @@ export function ChatPanel({
   ));
   const teamHumanShareCommands = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHumanShareCommands ?? []);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const inputAreaRef = useRef<InputAreaHandle>(null);
+  const desktopFileDropAcceptUntilRef = useRef(0);
+  const lastConsumedDesktopDropIdRef = useRef<string | null>(null);
   const historyLayoutSnapshotRef = useRef<{
     sessionId: string;
     loadedPages: number;
@@ -708,27 +785,31 @@ export function ChatPanel({
   const suppressNextScrollToEndRef = useRef(false);
   const stickToBottomUntilStableRef = useRef(false);
   const [isSending, setIsSending] = React.useState(false);
+  const isDesktopAttachmentDropEnabled = useDesktopLocalFilePickerReady();
   const hasTimelineContent = messages.length > 0 || toolExecutionOrder.length > 0;
   const hasConversation = Boolean(isHistoryRestoring || historyPager || hasTimelineContent);
   const historyLoadedPages = historyPager?.loadedPages ?? 0;
   const historyTotalPages = historyPager?.totalPages ?? 0;
   const historyLoadingMore = historyPager?.loadingMore ?? false;
   const historyPrepending = historyPager?.prepending ?? false;
+  const historyRetryAvailable = historyPager?.retryAvailable ?? false;
   const historyOnLoadMore = historyPager?.onLoadMore;
   const hasHistoryPager = Boolean(historyPager);
-  const canLoadOlderHistory = Boolean(
-    historyOnLoadMore &&
-    historyLoadedPages < historyTotalPages &&
-    !historyLoadingMore &&
-    !historyPrepending
+  const historyLoadMoreState = {
+    loadedPages: historyLoadedPages,
+    totalPages: historyTotalPages,
+    loadingMore: historyLoadingMore,
+    prepending: historyPrepending,
+  };
+  const canRequestOlderHistory = Boolean(
+    historyOnLoadMore && canLoadOlderHistory(historyLoadMoreState)
   );
-  const showHistoryPager = Boolean(
-    !isHistoryRestoring &&
-    historyPager && (
-      historyLoadingMore ||
-      historyLoadedPages < historyTotalPages ||
-      !hasTimelineContent
-    )
+  const showHistoryRetry = Boolean(
+    historyOnLoadMore &&
+      shouldShowHistoryRetry({
+        ...historyLoadMoreState,
+        retryAvailable: historyRetryAvailable,
+      })
   );
   const chatContentClassName = hasConversation
     ? `chat-content${mode === 'team' ? ' chat-content--team' : ''}`
@@ -746,6 +827,12 @@ export function ChatPanel({
     turnsByMessageId: codeTurnsByMessageId,
     loading: codeTurnHistoryLoading,
     reload: reloadCodeTurnHistory,
+    latestTurnKey: latestCodeTurnKey,
+    turnChangeOperation,
+    turnChangeError,
+    turnChangeNotice,
+    discardLatestTurn,
+    redoLatestTurn,
   } = useCodeTurnDiffHistory({
     project: sessionProject,
     sessionId: activeSessionId,
@@ -755,16 +842,37 @@ export function ChatPanel({
   const renderCodeChangesAfterMessage = useCallback((message: Message) => {
     const turns = codeTurnsByMessageId.get(message.id);
     if (!turns?.length) return null;
-    return turns.map(turn => (
-      <CodeChangesCard
-        key={turn.change_set_id || `turn-${turn.turn_index}`}
-        diff={turn}
-        refreshing={codeTurnHistoryLoading}
-        onRefresh={() => void reloadCodeTurnHistory()}
-        onReview={target => onOpenCodeReview?.(target)}
-      />
-    ));
-  }, [codeTurnHistoryLoading, codeTurnsByMessageId, onOpenCodeReview, reloadCodeTurnHistory]);
+    return turns.map(turn => {
+      const turnKey = turnDiffKey(turn);
+      const isLatest = turnKey === latestCodeTurnKey;
+      return (
+        <CodeChangesCard
+          key={turnKey}
+          diff={turn}
+          refreshing={codeTurnHistoryLoading}
+          isLatest={isLatest}
+          isProcessing={isProcessing}
+          operation={isLatest ? turnChangeOperation?.action ?? null : null}
+          operationError={turnChangeError?.turnKey === turnKey ? turnChangeError.message : null}
+          onRefresh={() => void reloadCodeTurnHistory()}
+          onReview={target => onOpenCodeReview?.(target)}
+          onDiscard={() => void discardLatestTurn()}
+          onRedo={() => void redoLatestTurn()}
+        />
+      );
+    });
+  }, [
+    codeTurnHistoryLoading,
+    codeTurnsByMessageId,
+    discardLatestTurn,
+    isProcessing,
+    latestCodeTurnKey,
+    onOpenCodeReview,
+    redoLatestTurn,
+    reloadCodeTurnHistory,
+    turnChangeError,
+    turnChangeOperation,
+  ]);
 
   // 跟踪用户是否正在查看历史消息（不在底部）
   const userScrolledUpRef = useRef(false);
@@ -819,10 +927,10 @@ export function ChatPanel({
     rememberSessionScrollTop(currentSessionId, el);
 
     // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canLoadOlderHistory && historyOnLoadMore) {
+    if (el.scrollTop <= LOAD_OLDER_THRESHOLD_PX && canRequestOlderHistory && historyOnLoadMore) {
       void historyOnLoadMore();
     }
-  }, [activeSessionId, canLoadOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
+  }, [activeSessionId, canRequestOlderHistory, historyOnLoadMore, rememberSessionScrollTop]);
 
   useEffect(() => {
     const el = scrollContainerRef.current;
@@ -854,14 +962,14 @@ export function ChatPanel({
     if (e.deltaY < 0) {
       stickToBottomUntilStableRef.current = false;
     }
-    if (e.deltaY < 0 && canLoadOlderHistory && historyOnLoadMore) {
+    if (e.deltaY < 0 && canRequestOlderHistory && historyOnLoadMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
       const el = scrollContainerRef.current;
       if (el && el.scrollTop <= LOAD_OLDER_THRESHOLD_PX) {
         void historyOnLoadMore();
       }
     }
-  }, [canLoadOlderHistory, historyOnLoadMore]);
+  }, [canRequestOlderHistory, historyOnLoadMore]);
 
   // 监听浏览器 tab 可见性变化：隐藏时记录位置，恢复可见时抑制自动滚底
   useEffect(() => {
@@ -997,27 +1105,157 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
+
+  const markDesktopFileDropZoneActive = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = Date.now() + 1200;
+  }, []);
+
+  const clearDesktopFileDropZone = useCallback(() => {
+    desktopFileDropAcceptUntilRef.current = 0;
+  }, []);
+
+  const canAcceptDesktopFileDrag = useCallback(() => {
+    return isDesktopAttachmentDropEnabled || isDesktopShell();
+  }, [isDesktopAttachmentDropEnabled]);
+
+  const handleDesktopFileDragEnter = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      // OS file drags require copy; move/none show the forbidden cursor in WebView2.
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const handleDesktopFileDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  const ingestDesktopLocalFiles = useCallback(
+    (detail: DesktopLocalFilesEventDetail | null | undefined, files: LocalFilePick[]) => {
+      if (detail?.source && detail.source !== 'drop') return;
+      if (!files.length) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const dropId = typeof detail?.dropId === 'string' ? detail.dropId : null;
+      if (dropId && lastConsumedDesktopDropIdRef.current === dropId) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      const acceptByTime = Date.now() <= desktopFileDropAcceptUntilRef.current;
+      const clientX = detail?.clientX;
+      const clientY = detail?.clientY;
+      const hasCoords = typeof clientX === 'number' && typeof clientY === 'number';
+      let inZone = false;
+      if (hasCoords) {
+        const hit = document.elementFromPoint(clientX, clientY);
+        inZone = Boolean(
+          hit?.closest('.chat-panel-shell') || hit?.closest('.chat-layout__surface'),
+        );
+      }
+      // Native bridge trusted=true always accepts (coords from WebView2 are often wrong).
+      const trusted = detail?.trusted === true;
+      if (!trusted && !acceptByTime && !inZone) {
+        clearDesktopFileDropZone();
+        return;
+      }
+
+      if (dropId) lastConsumedDesktopDropIdRef.current = dropId;
+      inputAreaRef.current?.appendLocalFilePicks(files);
+      clearDesktopFileDropZone();
+    },
+    [clearDesktopFileDropZone],
+  );
+
+  const handleDesktopFileDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!canAcceptDesktopFileDrag()) return;
+      if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      markDesktopFileDropZoneActive();
+      // Files arrive via the durable ingest bridge invoked by desktop_app run_js.
+      // Do NOT call pywebview APIs here: a JS->Python call racing the Python-side
+      // drop handler's run_js deadlocks the UI thread (window freezes).
+    },
+    [canAcceptDesktopFileDrag, markDesktopFileDropZoneActive],
+  );
+
+  useEffect(() => {
+    // Durable bridge lives in localFilePicker; ChatPanel only registers a consumer.
+    // Never delete window.__JIUWEN_INGEST_LOCAL_FILES__ — Python run_js requires it.
+    const unregister = registerDesktopLocalFilesConsumer((detail, files) => {
+      ingestDesktopLocalFiles(detail, files);
+    });
+
+    const onDesktopLocalFiles = (event: Event) => {
+      const detail = (event as CustomEvent<DesktopLocalFilesEventDetail>).detail;
+      ingestDesktopLocalFiles(detail, normalizePicks(detail?.files));
+    };
+
+    const onDesktopFileDrag = (event: Event) => {
+      const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active);
+      if (active) {
+        markDesktopFileDropZoneActive();
+      }
+    };
+
+    window.addEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+    window.addEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    return () => {
+      unregister();
+      window.removeEventListener(DESKTOP_LOCAL_FILES_EVENT, onDesktopLocalFiles as EventListener);
+      window.removeEventListener(DESKTOP_FILE_DRAG_EVENT, onDesktopFileDrag as EventListener);
+    };
+  }, [ingestDesktopLocalFiles, markDesktopFileDropZoneActive]);
+
   return (
-    <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
+    <div
+      className="chat-panel-shell flex flex-col h-full"
+      data-testid="chat-panel"
+      onDragEnter={handleDesktopFileDragEnter}
+      onDragOver={handleDesktopFileDragOver}
+      onDrop={handleDesktopFileDrop}
+    >
+      {turnChangeNotice ? (
+        <div className="code-turn-change-toast" role="status" aria-live="polite" data-testid="chat-panel-code-turn-change-toast">
+          <CheckCircle2 size={17} aria-hidden="true" />
+          <span>{turnChangeNotice}</span>
+        </div>
+      ) : null}
       {shouldShowChatHeader && (
-        <div className="chat-panel-header">
-          <div className="chat-panel-header__meta">
-            <div className="chat-panel-header__title" title={sessionTitle}>
+        <div className="chat-panel-header" data-testid="chat-panel-header">
+          <div className="chat-panel-header__meta" data-testid="chat-panel-header-meta">
+            <div className="chat-panel-header__title" title={sessionTitle} data-testid="chat-panel-header-title">
               {sessionTitle}
             </div>
             {sessionProjectName && (
-              <div className="chat-panel-header__project" title={sessionProjectName}>
+              <div className="chat-panel-header__project" title={sessionProjectName} data-testid="chat-panel-header-project">
                 <span className="chat-config-icon chat-config-icon--folder" aria-hidden="true" />
                 <span>{sessionProjectName}</span>
               </div>
             )}
           </div>
-          <div className="chat-panel-header__actions">
+          <div className="chat-panel-header__actions" data-testid="chat-panel-header-actions">
             {shouldShowShareExport && (
               <button
                 type="button"
                 className={`icon-btn share-export-btn ${isExportingShare ? 'share-export-btn--loading' : ''}`}
-                data-testid="share-export"
+                data-testid="chat-panel-share-export"
+                data-variant={isExportingShare ? 'exporting' : 'ready'}
                 title={shareExportTitle}
                 aria-label={shareExportTitle}
                 aria-busy={isExportingShare}
@@ -1029,7 +1267,7 @@ export function ChatPanel({
                 {isExportingShare ? (
                   <>
                     <LoaderCircle className="share-export-btn__spinner" size={14} strokeWidth={2} />
-                    <span className="share-export-btn__label">{t('share.generating')}</span>
+                    <span className="share-export-btn__label" data-testid="chat-panel-share-export-loading-label">{t('share.generating')}</span>
                   </>
                 ) : (
                   <Share2 size={14} strokeWidth={2} />
@@ -1040,6 +1278,7 @@ export function ChatPanel({
               <button
                 type="button"
                 className="chat-header-icon-btn"
+                data-testid="chat-panel-human-share-trigger"
                 onClick={() => setHumanShareOpen(true)}
                 title={t('humanShare.title')}
               >
@@ -1049,6 +1288,8 @@ export function ChatPanel({
             <button
               type="button"
               className={`chat-header-icon-btn ${!teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              data-testid="chat-panel-header-chat-toggle"
+              data-variant="collapse"
               onClick={() => onToggleTeamArea?.(false)}
             >
               <img src={chatIcon} alt="" className="chat-header-icon-btn__icon" />
@@ -1056,6 +1297,8 @@ export function ChatPanel({
             <button
               type="button"
               className={`chat-header-icon-btn ${teamAreaExpanded ? 'chat-header-icon-btn--active' : ''}`}
+              data-testid="chat-panel-header-expand-toggle"
+              data-variant="expand"
               onClick={() => onToggleTeamArea?.(true)}
             >
               <img src={expandIcon} alt="" className="chat-header-icon-btn__icon" />
@@ -1064,7 +1307,7 @@ export function ChatPanel({
         </div>
       )}
       {hasHarnessProgress && (
-        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+        <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm" data-testid="chat-panel-harness-progress-mount">
           <HarnessProgressBar />
         </div>
       )}
@@ -1074,17 +1317,21 @@ export function ChatPanel({
           onClose={() => setHumanShareOpen(false)}
         />
       )}
-      <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
-        <div className={chatContentClassName}>
+      <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" data-testid="chat-panel-scroll" onScroll={handleScroll} onWheel={handleWheel}>
+        <div className={chatContentClassName} data-testid="chat-panel-content">
           {hasConversation ? (
             <>
-              {showHistoryPager && historyPager && (
-                <HistoryPagerBar
-                  loadedPages={historyPager.loadedPages}
-                  totalPages={historyPager.totalPages}
-                  loadingMore={historyPager.loadingMore}
-                  onLoadMore={historyPager.onLoadMore}
-                />
+              {showHistoryRetry && historyOnLoadMore && (
+                <div className="flex justify-center pb-3">
+                  <button
+                    type="button"
+                    className="btn !px-3 !py-1.5 text-xs"
+                    data-testid="chat-panel-history-retry"
+                    onClick={() => void historyOnLoadMore()}
+                  >
+                    {t('chat.historyLoadMore')}
+                  </button>
+                </div>
               )}
               {hasTimelineContent ? (
                 <>
@@ -1098,33 +1345,33 @@ export function ChatPanel({
                   <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
-                  {/* 思考中指示器 */}
-                  {isThinking && <ThinkingIndicator />}
                   <ContextCompressionLines
                     runtime={contextCompressionRuntime}
                     summary={contextCompressionSummary}
                   />
                 </>
-              ) : (
-                <div className="flex items-center justify-center h-32">
-                  <div className="text-text-muted text-sm">
-                    {t('connection.loadingConfig')}
+              ) : isHistoryRestoring ? (
+                <div className="flex h-32 items-center justify-center" role="status" aria-live="polite" data-testid="chat-panel-history-loading">
+                  <div className="text-sm text-text-muted">
+                    {t('chat.historyLoading')}
                   </div>
                 </div>
-              )}
+              ) : null}
             </>
           ) : (
-            <div className="chat-welcome">
-              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} />
-              <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
-              <div className="chat-welcome__composer">
+            <div className="chat-welcome" data-testid="chat-panel-welcome">
+              <img className="chat-welcome__banner" src={welcomeBanner} alt={t('chat.welcomeLogoAlt')} data-testid="chat-panel-welcome-banner" />
+              <h2 className="chat-welcome__heading" data-testid="chat-panel-welcome-heading"><WelcomeHeading /></h2>
+              <div className="chat-welcome__composer" data-testid="chat-panel-welcome-composer">
                 <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 <InputArea
+                  ref={inputAreaRef}
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
+                  onPersistDocuments={onPersistDocuments}
                   onInterrupt={onInterrupt}
                   onCancel={onCancel}
                   onSwitchMode={onSwitchMode}
@@ -1137,7 +1384,7 @@ export function ChatPanel({
                   onClearGoal={onClearGoal}
                 />
               </div>
-              <div className="chat-suggestions">
+              <div className="chat-suggestions" data-testid="chat-panel-welcome-suggestions">
                 {suggestions.map((text) => (
                   <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
                 ))}
@@ -1149,7 +1396,7 @@ export function ChatPanel({
       </div>
 
       {hasConversation && (
-        <div className="chat-compose">
+        <div className="chat-compose" data-testid="chat-panel-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
           <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
           <InterruptResultBubble />
@@ -1163,8 +1410,10 @@ export function ChatPanel({
             />
           )}
           <InputArea
+            ref={inputAreaRef}
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
+            onPersistDocuments={onPersistDocuments}
             onInterrupt={onInterrupt}
             onCancel={onCancel}
             onSwitchMode={onSwitchMode}
@@ -1179,7 +1428,7 @@ export function ChatPanel({
           />
         </div>
       )}
-      <div className="chat-ai-disclaimer" data-testid="ai-disclaimer">
+      <div className="chat-ai-disclaimer" data-testid="chat-panel-ai-disclaimer">
         {t('share.aiNotice')}
       </div>
     </div>

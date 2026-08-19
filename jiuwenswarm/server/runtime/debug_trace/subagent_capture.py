@@ -21,45 +21,10 @@ lifetime, see ``interface_deep.JiuWenSwarmDeepAdapter``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-
-def _ensure_observability_rail(subagent: Any) -> None:
-    """Attach ``ObservabilityRail`` to *subagent* for correct OTel scoping.
-
-    Without this rail, a harness-built subagent has no agent-level OTel span, so
-    its LLM/tool spans fall back to the parent agent's span and carry no
-    ``agentteam.agent.id`` (the SDK's ``_attach_observability_rail`` docstring
-    describes exactly this gap — it is only applied on the team-manifest path,
-    not the harness ``create_subagent`` path that TaskTool uses).
-
-    Build-time attachment on the spec is unreliable: the parent agent is
-    constructed once, typically *before* observability is initialized, so
-    ``maybe_observability_rail()`` would return ``None``. At run time (here,
-    inside a request) observability is already up, so we attach via
-    ``add_rail``; the subagent's upcoming ``stream()/invoke()`` ->
-    ``_ensure_initialized()`` registers it before ``before_invoke`` fires.
-
-    Idempotent, and a no-op when observability is off or *subagent* lacks the
-    DeepAgent rail API. Best-effort: never raises.
-    """
-    try:
-        from openjiuwen.agent_teams.observability.rail import (
-            ObservabilityRail,
-            maybe_observability_rail,
-        )
-
-        rail = maybe_observability_rail()
-        if rail is None:
-            return  # observability not initialized -> nothing to trace
-        configured = subagent.configured_rails() if hasattr(subagent, "configured_rails") else []
-        if any(isinstance(r, ObservabilityRail) for r in configured):
-            return  # already attached (e.g. build-time succeeded) — don't double-add
-        if hasattr(subagent, "add_rail"):
-            subagent.add_rail(rail)
-    except Exception:
-        # Never break the subagent run over tracing instrumentation.
-        pass
+_logger = logging.getLogger(__name__)
 
 
 async def invoke_subagent_with_trace(
@@ -81,15 +46,28 @@ async def invoke_subagent_with_trace(
         An invoke-style result dict (``{"output": ..., "result_type": ...}``),
         matching what ``subagent.invoke`` would have returned.
     """
-    # Attach the OTel ObservabilityRail so the subagent gets its own agent-level
-    # span (agent.<type>.invoke) with correct nesting + agentteam.agent.id in
-    # the OTLP trace. Done at run time (not build time) because the parent agent
-    # is built once, often before observability is initialized.
-    _ensure_observability_rail(subagent)
+    # Safety net for a subagent that reached here without going through the
+    # create_subagent hook (a host-built instance, say). Idempotent, so the
+    # normal path — where the hook already attached the rail — pays nothing.
+    from jiuwenswarm.agents.harness.agent_observability import (
+        attach_subagent_observability,
+    )
 
-    from jiuwenswarm.server.runtime.debug_trace.context import get_debug_trace_logger
+    attach_subagent_observability(subagent)
+
+    from jiuwenswarm.server.runtime.debug_trace.context import (
+        get_debug_trace_logger,
+        get_debug_trace_logger_for_session,
+    )
 
     dbg = get_debug_trace_logger()
+    if dbg is None:
+        # Same task-boundary gap as TaskTool: this helper can be reached from the
+        # custom AgentTool path inside the DeepAgent's supervisor task, where the
+        # per-request ContextVar isn't visible. Fall back to a session lookup.
+        sid = session.get_session_id() if hasattr(session, "get_session_id") else None
+        if sid:
+            dbg = get_debug_trace_logger_for_session(sid)
     if dbg is None or not dbg.captures_subagent_flow():
         # No debug run, or capture disabled — original path, unchanged.
         return await subagent.invoke(inputs, session=session)
