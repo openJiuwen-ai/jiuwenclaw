@@ -1,6 +1,10 @@
 import base64
 import os
 
+import pytest
+
+pytest.importorskip("webview")
+
 from jiuwenswarm.channels.desktop import desktop_app
 
 
