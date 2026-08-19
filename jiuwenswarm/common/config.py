@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import json
 import logging
@@ -23,14 +23,25 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
     set_default_model_provider_in_entries,
     validate_affinity_invariant,
 )
-from jiuwenswarm.common.utils import get_config_dir, get_config_file
+from jiuwenswarm.common.utils import (
+    get_config_dir,
+    get_config_file,
+)
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+SWARMFLOW_BUDGET_CONFIG_PATH = ("modes", "team", "jiuwen_team", "swarmflow_budget")
 DEFAULT_SWARMFLOW_ENABLED = False
+EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY = "external_cli_publish_url"
+EXTERNAL_CLI_AGENTS_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_cli_agents")
+EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_transport")
+_ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
+# Keep progressive tool search enabled by default for existing user workspaces
+# whose config.yaml predates this switch.
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -84,6 +95,26 @@ def resolve_env_vars(value: Any) -> Any:
 
         return re.sub(pattern, replace_env, value)
     elif isinstance(value, dict):
+        # mcp.servers entries hold ${VAR} placeholders in headers/env that
+        # are meant for the CredentialStore (resolved at McpServerConfig build
+        # time), NOT for the process env. If resolve_env_vars touches them
+        # here, an unset env var collapses ${GITHUB_TOKEN} to "" and the
+        # adapter receives ``Authorization: "Bearer "`` — an empty token that
+        # httpx rejects as ``Illegal header value b'Bearer '``. Preserve these
+        # credential subtrees verbatim on mcp server entries (identified by
+        # the transport + name + url/command shape, or the server_id_scope
+        # stamp the mcp registry adds).
+        mcp_credential_keys = ("headers", "env", "staticHeaders", "static_headers")
+        is_mcp_server_entry = (
+            "transport" in value
+            and "name" in value
+            and ("url" in value or "command" in value)
+        ) or "server_id_scope" in value
+        if is_mcp_server_entry:
+            return {
+                k: (v if k in mcp_credential_keys else resolve_env_vars(v))
+                for k, v in value.items()
+            }
         return {k: resolve_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
         return [resolve_env_vars(item) for item in value]
@@ -211,6 +242,21 @@ def get_config():
     return config_base
 
 
+def get_configured_read_image_multimodal(
+    config: dict[str, Any] | None = None,
+) -> bool | None:
+    """Return the explicit native-image policy, or ``None`` for auto mode."""
+
+    resolved = config if isinstance(config, dict) else get_config()
+    react = resolved.get("react")
+    value = (
+        react.get("enable_read_image_multimodal")
+        if isinstance(react, dict)
+        else None
+    )
+    return value if isinstance(value, bool) else None
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)
@@ -231,79 +277,67 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
-def _get_bool_env(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    return value.lower() in ("true", "1", "yes")
-
-
 def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the canonical ``react.evolution`` mapping.
+
+    Evolution settings deliberately have one source of truth.  In particular,
+    the historical top-level ``evolution`` mapping and the old environment
+    overrides are not consulted here; this keeps a stale deployment variable
+    from changing a running agent's capability set.
+    """
     if not isinstance(config, dict):
         return {}
     react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
+    if not isinstance(react_config, dict):
+        return {}
+    evolution_config = react_config.get("evolution")
+    return evolution_config if isinstance(evolution_config, dict) else {}
 
 
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan") is True
+def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
+    """Return the canonical ``react.evolution.skill_evolution`` switch."""
+    return _get_evolution_config(config).get("skill_evolution") is True
 
 
-def get_evolution_signal_trigger_enabled(
-    config: dict[str, Any] | None,
-    *,
-    fallback: bool = False,
-) -> bool:
-    env_signal_trigger = _get_bool_env(os.getenv("EVOLUTION_SIGNAL_TRIGGER"))
-    if env_signal_trigger is not None:
-        return env_signal_trigger
-    signal_trigger = _get_evolution_config(config).get("signal_trigger")
-    if isinstance(signal_trigger, bool):
-        return signal_trigger
-    return fallback
+def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether the ProgressiveToolRail is enabled for an agent.
 
+    The switch is the top-level ``progressive_tool_enabled`` key in
+    ``config.yaml``.  A missing key keeps the historical enabled-by-default
+    behavior for workspaces initialized before this setting was introduced.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_PROGRESSIVE_TOOL_ENABLED
 
-def get_evolution_review_trigger_enabled(
-    config: dict[str, Any] | None,
-    *,
-    fallback: bool = False,
-) -> bool:
-    env_review_trigger = _get_bool_env(os.getenv("EVOLUTION_REVIEW_TRIGGER"))
-    if env_review_trigger is not None:
-        return env_review_trigger
-    review_trigger = _get_evolution_config(config).get("review_trigger")
-    if isinstance(review_trigger, bool):
-        return review_trigger
-    return fallback
-
-
-def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
-    if env_skill_create is not None:
-        return env_skill_create
-    return _get_evolution_config(config).get("skill_create", False)
+    value = config.get("progressive_tool_enabled", DEFAULT_PROGRESSIVE_TOOL_ENABLED)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
-    """Return whether evolution approvals may auto-save without user action."""
-    try:
-        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
-        if env_auto_save is not None:
-            return env_auto_save
-        if config is None:
-            config = get_config()
-        if not isinstance(config, dict):
-            return False
-        return _get_evolution_config(config).get("auto_save") is True
-    except Exception:
-        return False
+    """Return canonical ``react.evolution.auto_save`` without disk/env reads."""
+    return _get_evolution_config(config).get("auto_save") is True
+
+
+def update_skill_evolution_enabled_in_config(enabled: bool) -> None:
+    """Atomically update the canonical evolution capability switch."""
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        react = data.get("react")
+        if not isinstance(react, dict):
+            react = {}
+            data["react"] = react
+        evolution = react.get("evolution")
+        if not isinstance(evolution, dict):
+            evolution = {}
+            react["evolution"] = evolution
+        evolution["skill_evolution"] = bool(enabled)
+        return data
+
+    update_config(mutator)
 
 
 def set_auto_memory_enabled(enabled: bool) -> None:
@@ -719,6 +753,19 @@ def update_setup_guide_enabled_in_config(value: bool) -> None:
             section = {}
             data["setup_guide"] = section
         section["enabled"] = value
+        return data
+
+    update_config(mutator)
+
+
+def update_enable_free_models_in_config(value: bool) -> None:
+    """原子更新 models.enable_free_models（Opencode Zen 免费模型开关）。"""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("models")
+        if not isinstance(section, dict):
+            section = {}
+            data["models"] = section
+        section["enable_free_models"] = value
         return data
 
     update_config(mutator)
@@ -1186,7 +1233,34 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
     # 新格式：已有 defaults 列表
     if "defaults" in models and isinstance(models["defaults"], list) and models["defaults"]:
-        return _decrypt_model_entries(models["defaults"])
+        entries = _decrypt_model_entries(models["defaults"])
+        # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
+        # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
+        # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
+        # 列表语义：models.agentos 是列表，可配多个备份模型（同名/异名皆可，填写约束为
+        # (model_name, api_base, api_key) 三元组唯一）。非 list 视为未配置。
+        agentos_raw = models.get("agentos")
+        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
+        for agentos_block in agentos_list:
+            if not isinstance(agentos_block, dict):
+                continue
+            mcc = agentos_block.get("model_client_config")
+            if not (isinstance(mcc, dict) and mcc.get("model_name")):
+                continue
+            agentos_entry = deepcopy(agentos_block)
+            agentos_entry["is_default"] = False
+            # _source 注入到 model_config_obj 内部，使其经
+            # build_reasoning_model_request_kwargs -> _model_config_to_dict
+            # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
+            # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的输出侧
+            # kwargs 里挪到 extra 键 _agentos_ctx_window（随选中 Model 带入缓存，
+            # 供 _deep_agent_context_engine_config 从选中条目精确取值），绝不作为
+            # 输出上限发往厂商。
+            agentos_mco = agentos_entry.setdefault("model_config_obj", {})
+            if isinstance(agentos_mco, dict):
+                agentos_mco["_source"] = "agentos"
+            entries.append(agentos_entry)
+        return entries
 
     # 旧格式：单个 default 对象 → 包装为列表
     if "default" in models and isinstance(models["default"], dict):
@@ -1420,10 +1494,15 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
 
         transformed_team: dict[str, Any] = {}
         for key, value in team_raw.items():
-            if key in {"leader", "teammate", "predefined_members"}:
+            if key in {"leader", "teammate", "predefined_members", EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY}:
                 continue
             transformed_team[key] = value
         transformed_team["team_name"] = team_name
+        _normalize_external_cli_team_config(
+            transformed_team,
+            publish_url=team_raw.get(EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY),
+            field_name=f"team[{team_index}].external_cli_agents",
+        )
 
         leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
         transformed_team["leader"] = {
@@ -1498,6 +1577,79 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
         team_mapping[team_name] = transformed_team
 
     return team_mapping
+
+
+def _normalize_external_cli_team_config(
+    transformed_team: dict[str, Any],
+    *,
+    publish_url: Any,
+    field_name: str,
+) -> None:
+    external_cli_agents = transformed_team.get("external_cli_agents")
+    normalized_cli_agents = _normalize_external_cli_agents(external_cli_agents, field_name)
+    if normalized_cli_agents:
+        transformed_team["external_cli_agents"] = normalized_cli_agents
+    else:
+        transformed_team.pop("external_cli_agents", None)
+
+    has_codex = any(item["cli_agent"] == "codex" for item in normalized_cli_agents)
+    if not has_codex:
+        transformed_team.pop("external_transport", None)
+        return
+
+    if isinstance(transformed_team.get("external_transport"), dict):
+        external_transport = transformed_team["external_transport"]
+    else:
+        external_transport = {}
+
+    transport_type = str(external_transport.get("type") or "").strip()
+    params = external_transport.get("params")
+    params = dict(params) if isinstance(params, dict) else {}
+    if transport_type and transport_type != "hybrid":
+        raise ValueError(f"{field_name} includes codex but external_transport.type must be hybrid")
+
+    if not params.get("external_publish_url"):
+        url = str(publish_url or "").strip()
+        if not url:
+            raise ValueError(f"{field_name} includes codex but external_cli_publish_url is empty")
+        params["external_publish_url"] = url
+
+    transformed_team["external_transport"] = {"type": "hybrid", "params": params}
+
+
+def _normalize_external_cli_agents(value: Any, field_name: str) -> list[dict[str, str]]:
+    if value is None or value == "":
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be an array")
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            cli_agent = item.strip()
+        elif isinstance(item, dict):
+            cli_agent = str(item.get("cli_agent") or "").strip()
+        else:
+            raise ValueError(f"{field_name}[{index}] must be an object or string")
+        if not cli_agent:
+            continue
+        if cli_agent not in _ALLOWED_EXTERNAL_CLI_AGENTS:
+            allowed = ", ".join(sorted(_ALLOWED_EXTERNAL_CLI_AGENTS))
+            raise ValueError(f"{field_name}[{index}].cli_agent must be one of: {allowed}")
+        if cli_agent in seen:
+            continue
+        seen.add(cli_agent)
+        normalized_item = {"cli_agent": cli_agent}
+        if isinstance(item, dict):
+            cli_path = str(item.get("cli_path") or "").strip()
+            legacy_codex_bin = str(item.get("codex_bin") or "").strip()
+            if cli_path:
+                normalized_item["cli_path"] = cli_path
+            elif cli_agent == "codex" and legacy_codex_bin:
+                normalized_item["cli_path"] = legacy_codex_bin
+        normalized.append(normalized_item)
+    return normalized
 
 
 def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1583,16 +1735,126 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], publish_url: str | None = None) -> None:
+    """Update the external CLI agent switches for the default team."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+
+    normalized_agents = _normalize_external_cli_agents(agents, "external_cli_agents")
+    if normalized_agents:
+        current[EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1]] = normalized_agents
+    else:
+        current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None)
+
+    if any(item["cli_agent"] == "codex" for item in normalized_agents):
+        external_transport = current.get(EXTERNAL_TRANSPORT_CONFIG_PATH[-1])
+        if isinstance(external_transport, dict):
+            transport_type = str(external_transport.get("type") or "").strip()
+            params = external_transport.get("params")
+            params = dict(params) if isinstance(params, dict) else {}
+        else:
+            transport_type = ""
+            params = {}
+        if transport_type and transport_type != "hybrid":
+            raise ValueError("external_cli_agents includes codex but external_transport.type must be hybrid")
+        if not params.get("external_publish_url"):
+            url = str(publish_url or "").strip()
+            if not url:
+                raise ValueError("external_cli_agents includes codex but external_cli_publish_url is empty")
+            params["external_publish_url"] = url
+        current[EXTERNAL_TRANSPORT_CONFIG_PATH[-1]] = {"type": "hybrid", "params": params}
+    else:
+        current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None)
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_swarmflow_budget_in_config(budget: str) -> None:
+    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml.
+
+    Pass an empty string or ``"none"`` to remove the budget ceiling.
+    """
+    clear_budget = not budget or budget.strip().lower() in ("none", "null")
+    if clear_budget:
+        data = load_yaml_round_trip(CONFIG_YAML_PATH)
+        current = data
+        for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+            if segment not in current or not isinstance(current, dict):
+                return  # path doesn't exist, nothing to clear
+            current = current[segment]
+        current.pop(SWARMFLOW_BUDGET_CONFIG_PATH[-1], None)
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return
+
+    try:
+        value = int(budget)
+    except (ValueError, TypeError):
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {budget!r}") from None
+    if value <= 0:
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {value}")
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+        current = _ensure_config_object(current, segment, ".".join(SWARMFLOW_BUDGET_CONFIG_PATH))
+    current[SWARMFLOW_BUDGET_CONFIG_PATH[-1]] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def get_mcp_servers() -> list[dict[str, Any]]:
-    """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
+    """合并 config.yaml mcp.servers（command.mcp/TUI 手填）+ mcp/state.json（连接器）。
+
+    两套事实源永久并存（非迁移期重叠）：
+    - config.yaml mcp.servers 是 command.mcp（TUI channel）手动管理 MCP 的
+      事实源；add/remove/enable/disable 经 agent_ws_server 的 command.mcp
+      handler 直接读写 config.yaml。这条链路不动。
+    - mcp/state.json 是MCP（marketplace + custom）的事实源；
+      connect/disconnect/enable/disable 经 mcp handler 写 state.json。
+    """
+    # A. config.yaml — 手填 MCP（raw, no env resolve）.
+    data = get_config_raw()
+    mcp_cfg = data.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        servers_yaml: list[dict[str, Any]] = []
+    else:
+        servers_yaml = [item for item in mcp_cfg.get("servers", [])
+                        if isinstance(item, dict)]
+
+    # B. mcp/state.json — 已连接 MCP（state==connected）.
+    state_mcps: list[dict[str, Any]] = []
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_connected_mcps,
+            record_to_mcp_entry,
+        )
+        for rec in list_connected_mcps():
+            name = rec.get("name", "")
+            if not name:
+                continue
+            entry = record_to_mcp_entry(name, rec)
+            # skill-only MCPs return None
+            if entry is not None:
+                state_mcps.append(entry)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[config] failed to merge mcp state.json: %s", exc)
+
+    # Merge: state.json wins on name conflict (dedup by name, state first).
+    state_names = {s["name"] for s in state_mcps}
+    merged = [s for s in servers_yaml if s.get("name") not in state_names]
+    merged.extend(state_mcps)
+    return merged
+
+
+def get_config_yaml_mcp_servers() -> list[dict[str, Any]]:
+    """只读 config.yaml 的 mcp.servers（TUI/command.mcp 手配）。"""
     data = get_config_raw()
     mcp_cfg = data.get("mcp", {})
     if not isinstance(mcp_cfg, dict):
         return []
-    servers = mcp_cfg.get("servers", [])
-    if not isinstance(servers, list):
-        return []
-    return [item for item in servers if isinstance(item, dict)]
+    return [item for item in mcp_cfg.get("servers", []) if isinstance(item, dict)]
 
 
 def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -1679,6 +1941,103 @@ def remove_mcp_server_in_config(name: str) -> dict[str, Any]:
         dump_yaml_round_trip(CONFIG_YAML_PATH, data)
         return removed
     raise KeyError(f"MCP server '{target}' not found")
+
+
+def _mcp_name_in_state(name: str) -> bool:
+    """Whether state.json has a record for ``name`` (any state)."""
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import get_mcp_record
+        return get_mcp_record(name) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mcp_name_in_config_yaml(name: str) -> bool:
+    """Whether config.yaml mcp.servers has an entry for ``name``."""
+    return any(str(s.get("name", "")).strip() == name
+               for s in get_config_yaml_mcp_servers())
+
+
+def upsert_mcp_server(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Upsert a TUI-managed MCP, routing by source: update in place if the
+    name already lives in config.yaml (legacy stock) or state.json (TUI-
+    created / web-connected); otherwise create new in state.json.
+
+    TUI ``add``/``update`` lands here. New MCPs always go to state.json
+    (``enabled`` defaults to the payload's ``enabled``, True for TUI add) —
+    config.yaml is no longer a creation target, only legacy stock edited
+    in place. Returns ``(entry, created)``. Raises ``ValueError`` if no name.
+    """
+    name = str(server.get("name", "")).strip()
+    if not name:
+        raise ValueError("MCP server name is required")
+    # Legacy stock in config.yaml: update in place (keeps its source).
+    if _mcp_name_in_config_yaml(name):
+        return upsert_mcp_server_in_config(server)
+    # Else state.json is the creation/update home for TUI MCPs.
+    from jiuwenswarm.server.runtime.mcp.state_store import upsert_mcp_record
+    prior = _mcp_name_in_state(name)
+    enabled = bool(server.get("enabled", True)) if "enabled" in server else None
+    rec = upsert_mcp_record(name, server, state="connected",
+                            integration_type=_integration_type_for(server),
+                            enabled=enabled)
+    # Shape a config-like entry for the response (carries enabled through).
+    entry = dict(rec)
+    entry["name"] = name
+    if "enabled" not in entry:
+        entry["enabled"] = bool(server.get("enabled", True))
+    return entry, (not prior)
+
+
+def set_mcp_server_enabled(name: str, enabled: bool) -> dict[str, Any]:
+    """Flip a TUI-managed MCP's ``enabled`` flag, routing by source: state.json
+    first (TUI-created / web-connected), then config.yaml (legacy stock).
+
+    Only the TUI channel reads ``enabled``; web ignores it. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            get_mcp_record, set_mcp_enabled,
+        )
+        set_mcp_enabled(target, enabled=enabled)
+        rec = get_mcp_record(target) or {}
+        entry = dict(rec)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return set_mcp_server_enabled_in_config(target, enabled)
+
+
+def remove_mcp_server(name: str) -> dict[str, Any]:
+    """Remove a TUI-managed MCP, routing by source: state.json first, then
+    config.yaml (legacy stock). Returns the removed entry. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import remove_mcp_record
+        removed = remove_mcp_record(target) or {}
+        entry = dict(removed)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return remove_mcp_server_in_config(target)
+
+
+def _integration_type_for(server: dict[str, Any]) -> str:
+    """Derive the state.json integration_type from a TUI payload's transport."""
+    t = str(server.get("transport", "")).strip().lower()
+    if t == "stdio":
+        return "stdio-mcp"
+    if t in {"sse", "http", "streamable-http", "streamable_http"}:
+        return "remote-mcp"
+    return "remote-mcp"
 
 
 # ---------------------------------------------------------------------------

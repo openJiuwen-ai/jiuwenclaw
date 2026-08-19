@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from copy import deepcopy
 from typing import Any, Optional
@@ -397,9 +398,158 @@ def _extract_legacy_params(
         context_mode = getattr(context, "mode", None)
         mode_resolved = context_mode or data.get("mode") or CRON_JOB_DEFAULT_MODE
         out["mode"] = coerce_cron_job_mode(mode_resolved, default=CRON_JOB_DEFAULT_MODE)
+
+        # 从 context 取 user_id，agent 内部调 cron_create_job 时无 web 连接来源，
+        # 靠 _bind_runtime_cron_context 从会话 metadata.user_id 注入。
+        context_user_id = getattr(context, "user_id", None)
+        if isinstance(context_user_id, str) and context_user_id.strip():
+            out["user_id"] = context_user_id.strip()
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: added user_id=%s from context",
+                out["user_id"],
+            )
+
         return out
 
+    # 非 legacy 格式(直接传参): 同样从 context 注入 user_id
+    _user_id = getattr(context, "user_id", None)
+    if isinstance(_user_id, str) and _user_id.strip():
+        if "user_id" not in data:
+            data["user_id"] = _user_id.strip()
+            logger.info(
+                "[CronRuntimeBridge] _extract_legacy_params: added user_id=%s from context (flat params)",
+                data["user_id"],
+            )
     return data
+
+
+# --- openjiuwen cron 工具描述中的 dow 语义修正 ---
+# openjiuwen 的 cron 工具描述（openjiuwen/harness/prompts/tools/cron.py）把星期字段
+# 声明为 Quartz 的 1=SUN...7=SAT，而 jiuwenswarm 后端调度（gateway/cron 用 croniter）
+# 与前端 CronPanel 统一按 0=SUN...6=SAT 解析。LLM 照描述用数字 dow 生成时（例如把
+# "周三、周五"写成 4,6），会被解析成周四、周六，整体偏移 +1 天（见 bugfix：
+# cron-dow-schema-description）。这里在工具注册前对 ToolCard 的描述做精确替换修正，
+# 并推荐字母缩写（WED/FRI）彻底消除歧义。
+# 替换对以"核心子串"为锚点（不带行首装饰符），openjiuwen 改版导致失配时保留原文
+# 并打 warning，避免静默失效。
+_CRON_DOW_SEMANTIC_FIXES: tuple[tuple[str, str], ...] = (
+    # cn：范围声明
+    (
+        "周(1-7或?)",
+        "周(0-6或?，0=周日…6=周六；推荐用字母缩写 SUN/MON/…/SAT 避免歧义)",
+    ),
+    # cn：整除规则句（工具级描述与 cron_create_job 描述共用）
+    (
+        "周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。",
+        "周(0-6)：*/X 仅支持 X 整除7的值：1/7。编号0=周日…6=周六，"
+        "与系统解析(croniter)一致，注意不是Quartz的1=SUN；推荐用字母缩写（如WED/FRI）避免歧义。",
+    ),
+    # cn：schedule.expr 字段描述（小写 c 开头）
+    (
+        "cron表达式(Quartz格式)。7段式：秒 分 时 日 月 周 年。",
+        "cron表达式(7段式)。字段顺序：秒 分 时 日 月 周 年。星期编号0=周日…6=周六"
+        "（与系统解析croniter一致，非Quartz的1=SUN），推荐字母缩写，"
+        "如每周三、周五17:30 -> '0 30 17 ? * WED,FRI *'。",
+    ),
+    # cn：cron_expr 字段描述（大写 C 开头，legacy 扁平字段）
+    (
+        "Cron表达式(Quartz格式)。7段式：秒 分 时 日 月 周 年。",
+        "Cron表达式(7段式)。字段顺序：秒 分 时 日 月 周 年。星期编号0=周日…6=周六"
+        "（与系统解析croniter一致，非Quartz的1=SUN），推荐字母缩写，"
+        "如每周三、周五17:30 -> '0 30 17 ? * WED,FRI *'。",
+    ),
+    # en：范围声明
+    (
+        "dow(1-7 or ?)",
+        "dow(0-6 or ?; 0=SUN...6=SAT; "
+        "prefer alpha abbreviations like WED/FRI to avoid ambiguity)",
+    ),
+    # en：整除规则句（工具级描述与 cron_create_job 描述共用）
+    (
+        "Dow(1-7): */X only works for X dividing 7: 1/7. 1=SUN, 7=SAT.",
+        "Dow(0-6): */X only works for X dividing 7: 1/7. "
+        "Numbering is 0=SUN...6=SAT (croniter convention, NOT Quartz 1=SUN); "
+        "prefer alpha abbreviations like WED/FRI to avoid ambiguity.",
+    ),
+    # en：expr 字段描述（schedule.expr 与 legacy cron_expr 共用同一文本）
+    (
+        "Cron expression (Quartz format). 7-field: second minute hour day month dow year. ",
+        "Cron expression (7-field). 7-field: second minute hour day month dow year. "
+        "Dow numbering is 0=SUN...6=SAT (croniter convention, NOT Quartz 1=SUN); "
+        "prefer alpha abbreviations, e.g. every Wed/Fri 17:30 -> '0 30 17 ? * WED,FRI *'. ",
+    ),
+)
+
+
+def _apply_cron_dow_fix(text: str) -> str:
+    """对单段文本应用 dow 语义替换（幂等）。"""
+    fixed = str(text or "")
+    for old, new in _CRON_DOW_SEMANTIC_FIXES:
+        if old in fixed:
+            fixed = fixed.replace(old, new)
+    return fixed
+
+
+def _patch_cron_dow_semantics(value: Any) -> Any:
+    """递归修正 cron 工具描述中的 dow 编号语义（str 应用替换，dict/list 递归重建）。"""
+    if isinstance(value, str):
+        return _apply_cron_dow_fix(value)
+    if isinstance(value, dict):
+        return {key: _patch_cron_dow_semantics(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_patch_cron_dow_semantics(item) for item in value]
+    return value
+
+
+def _collect_string_blob(value: Any, *, out: list[str]) -> None:
+    """收集 value 内所有字符串（用于残留告警检查）。"""
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _collect_string_blob(item, out=out)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_string_blob(item, out=out)
+
+
+# 旧的 Quartz dow 声明模式（1=SUN...7=SAT / 范围写成 1-7）。
+# 用于残留检测：修正文本中的解释性"非 Quartz 的 1=SUN"不会误命中
+# （它没有 ",7=SAT" 后缀，也不是 "(1-7" 范围声明）。
+_QUARTZ_DOW_DECLARATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"1\s*[=＝]\s*SUN\s*[,，]\s*7\s*[=＝]\s*SAT"),
+    re.compile(r"[Dd]ow\s*\(\s*1\s*-\s*7"),
+    re.compile(r"周\s*\(\s*1\s*-\s*7"),
+)
+
+
+def _patch_cron_tool_cards(tools: list[Any]) -> list[Any]:
+    """修正 cron 工具 ToolCard 的 description/input_params 中的 dow 语义，返回修正后的 tools。"""
+    for tool in tools:
+        card = getattr(tool, "card", None)
+        if card is None:
+            continue
+        new_description = _apply_cron_dow_fix(str(getattr(card, "description", None) or ""))
+        if new_description != getattr(card, "description", None):
+            card.description = new_description
+        if getattr(card, "input_params", None) is not None:
+            card.input_params = _patch_cron_dow_semantics(card.input_params)
+    # 残留告警：openjiuwen 文本若改版导致替换失配，残留的 Quartz dow 声明
+    # 说明语义修正未完全生效
+    for tool in tools:
+        card = getattr(tool, "card", None)
+        if card is None:
+            continue
+        blob: list[str] = []
+        _collect_string_blob(getattr(card, "description", None) or "", out=blob)
+        _collect_string_blob(getattr(card, "input_params", None) or {}, out=blob)
+        if any(pattern.search(text) for text in blob for pattern in _QUARTZ_DOW_DECLARATION_PATTERNS):
+            logger.warning(
+                "[CronRuntimeBridge] openjiuwen cron 工具描述中的 dow 语义修正未完全生效，"
+                "仍残留 Quartz 声明（1=SUN...7=SAT）：tool=%s",
+                getattr(card, "name", None),
+            )
+    return tools
 
 
 class CronRuntimeBridge:
@@ -465,6 +615,10 @@ class CronRuntimeBridge:
             agent_id=agent_id,
             language=language,
         )
+        tools = list(tools or [])
+        # 修正 openjiuwen 工具描述中的 dow 编号语义（1=SUN→0=SUN，与 croniter 一致），
+        # 见模块顶部 _CRON_DOW_SEMANTIC_FIXES 说明。
+        tools = _patch_cron_tool_cards(tools)
         logger.info("[CronRuntimeBridge] Built %d cron tools: %s", 
                     len(tools), 
                     [tool.card.name if hasattr(tool, 'card') else str(tool) for tool in tools])

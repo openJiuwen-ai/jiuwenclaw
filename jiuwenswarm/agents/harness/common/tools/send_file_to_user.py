@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import logging
+import shutil
+from pathlib import Path
 from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
@@ -73,6 +75,8 @@ class SendFileToolkit:
         channel_id: str,
         *,
         metadata: dict[str, Any] | None = None,
+        project_dir: str | None = None,
+        team_workspace_root: str | None = None,
     ) -> None:
         """Initialize SendFileToolkit.
 
@@ -86,6 +90,10 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
+        self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
+        self._team_workspace_root = (
+            str(Path(team_workspace_root).resolve()) if team_workspace_root else None
+        )
         logger.debug(
             "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -101,6 +109,8 @@ class SendFileToolkit:
         session_id: str,
         channel_id: str,
         metadata: dict[str, Any] | None = None,
+        project_dir: str | None = None,
+        team_workspace_root: str | None = None,
     ) -> None:
         """Update per-request runtime context without recreating the toolkit/tool.
         """
@@ -108,6 +118,10 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
+        self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
+        self._team_workspace_root = (
+            str(Path(team_workspace_root).resolve()) if team_workspace_root else None
+        )
         logger.debug(
             "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -115,6 +129,94 @@ class SendFileToolkit:
             channel_id,
             bool(self._request_metadata),
         )
+
+    def _resolve_project_dir(self) -> str | None:
+        """Resolve the project root, including persistent session fallback."""
+        if self._project_dir:
+            return self._project_dir
+        if not self.session_id:
+            return None
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            metadata = get_session_metadata(
+                self.session_id,
+                cache_bust=True,
+                enable_writeback=False,
+            )
+            project_dir = str((metadata or {}).get("project_dir") or "").strip()
+            if project_dir:
+                self._project_dir = str(Path(project_dir).resolve())
+        except Exception as exc:
+            logger.warning(
+                "[SendFileToolkit] failed to resolve project_dir from session metadata: %s",
+                exc,
+            )
+        return self._project_dir
+
+    @staticmethod
+    def _infer_team_workspace_root(source: Path) -> Path | None:
+        """Recognize an OpenJiuwen ``.agent_teams/*/team-workspace`` path."""
+        for candidate in (source, *source.parents):
+            if (
+                candidate.name == "team-workspace"
+                and candidate.parent.parent.name == ".agent_teams"
+            ):
+                return candidate
+        return None
+
+    def _materialize_team_deliverable(self, file_path: str) -> str:
+        """Copy a team-workspace deliverable into the active user project.
+
+        The team workspace is an internal collaboration area.  Files selected
+        for user delivery are project artifacts, so preserve their path
+        relative to the team workspace under the current project before
+        building download metadata.  Files outside the team workspace keep
+        their original path.
+        """
+        project_dir = self._resolve_project_dir()
+        if not project_dir:
+            return file_path
+
+        source = Path(file_path).resolve()
+        configured_team_root = (
+            Path(self._team_workspace_root) if self._team_workspace_root else None
+        )
+        team_root = configured_team_root or self._infer_team_workspace_root(source)
+        if team_root is None:
+            return file_path
+        project_root = Path(project_dir)
+        try:
+            relative_path = source.relative_to(team_root)
+        except ValueError:
+            return file_path
+
+        destination = (project_root / relative_path).resolve()
+        try:
+            destination.relative_to(project_root)
+        except ValueError as exc:
+            raise OSError(
+                f"project delivery path escapes the project root: {destination}"
+            ) from exc
+        if destination == source:
+            return str(source)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            if destination.is_file() and source.read_bytes() == destination.read_bytes():
+                return str(destination)
+            raise FileExistsError(
+                f"refusing to overwrite an existing project file: {destination}"
+            )
+        shutil.copy2(source, destination)
+        logger.info(
+            "[SendFileToolkit] materialized team deliverable source=%s destination=%s",
+            source,
+            destination,
+        )
+        return str(destination)
 
     @staticmethod
     def _normalize_target_channels(target_channels: Any) -> list[str]:
@@ -194,6 +296,24 @@ class SendFileToolkit:
             else:
                 missing_files.append(fp)
                 logger.warning("[SendFileToolkit] 文件不存在: %s", fp)
+
+        source_files = list(valid_files)
+        materialized_files: list[str] = []
+        for fp in valid_files:
+            try:
+                materialized_files.append(self._materialize_team_deliverable(fp))
+            except OSError as exc:
+                logger.error(
+                    "[SendFileToolkit] 团队交付文件复制到项目目录失败: %s: %s",
+                    fp,
+                    exc,
+                )
+                return f"发送文件失败：无法将团队交付文件写入当前项目目录\n  - {fp}: {exc}"
+        valid_files = materialized_files
+        copied_to_project = any(
+            Path(source).resolve() != Path(delivered).resolve()
+            for source, delivered in zip(source_files, valid_files)
+        )
 
         if not valid_files:
             msg_parts = ["发送文件失败：所有文件均不存在"]
@@ -305,6 +425,10 @@ class SendFileToolkit:
             await server.send_push(msg)
             _mark_files_sent(self.session_id, valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
+            if copied_to_project:
+                result_parts.append("最终交付文件已位于当前项目目录：")
+                for delivered_path in valid_files:
+                    result_parts.append(f"  - {delivered_path}")
             if skipped_files:
                 result_parts.append("以下文件已在本次会话发送过，已跳过：")
                 for sf in skipped_files:

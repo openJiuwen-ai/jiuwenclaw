@@ -233,6 +233,11 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
                 node_type=getattr(payload, "node_type", None),
                 agent_id=getattr(payload, "agent_id", None),
                 answer=getattr(payload, "answer", None),
+                tokens=getattr(payload, "tokens", None),
+                budget=getattr(payload, "budget", None),
+                phase_type=getattr(payload, "phase_type", None),
+                nested_phase=getattr(payload, "nested_phase", None),
+                parent_phase=getattr(payload, "parent_phase", None),
             )
         except Exception:
             logger.warning("[WorkflowMonitorHandler] Failed to extract progress from event")

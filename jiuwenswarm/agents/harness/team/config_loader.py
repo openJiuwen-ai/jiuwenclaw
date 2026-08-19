@@ -463,16 +463,36 @@ def _build_predefined_members(team_raw: dict[str, Any]) -> list[dict[str, Any]]:
     return predefined_members
 
 
-def _resolve_enable_permissions(config_base: dict[str, Any], team_raw: dict[str, Any]) -> bool:
-    """Resolve the effective team-permission toggle.
+def _resolve_enable_permissions(config_base: dict[str, Any]) -> bool:
+    """Use the global permission switch for every Team runtime."""
+    return bool((config_base.get("permissions") or {}).get("enabled", False))
 
-    The effective value is ``permissions.enabled`` (global) AND
-    ``enable_permissions`` (team-level). Both must be true for
-    TeamPermissionRail to mount on teammates.
+
+def _apply_swarmflow_budget(spec_dict: dict[str, Any], raw_value: Any) -> None:
+    """Validate and apply ``swarmflow_budget`` to *spec_dict* in-place.
+
+    Only positive integers are accepted. Invalid / non-positive values are
+    logged and silently dropped (the key is removed from *spec_dict*).
     """
-    global_enabled = bool((config_base.get("permissions") or {}).get("enabled", False))
-    team_enabled = bool(team_raw.get("enable_permissions", False))
-    return global_enabled and team_enabled
+    if raw_value is None:
+        return
+    try:
+        budget_value = int(raw_value)
+    except (ValueError, TypeError):
+        logger.warning(
+            "[TeamConfigLoader] invalid swarmflow_budget %r, ignored",
+            raw_value,
+        )
+        spec_dict.pop("swarmflow_budget", None)
+        return
+    if budget_value <= 0:
+        logger.warning(
+            "[TeamConfigLoader] swarmflow_budget must be positive, got %r, ignored",
+            raw_value,
+        )
+        spec_dict.pop("swarmflow_budget", None)
+        return
+    spec_dict["swarmflow_budget"] = budget_value
 
 
 def load_team_spec_dict(
@@ -524,7 +544,8 @@ def load_team_spec_dict(
     spec_dict["teammate_mode"] = team_raw.get("teammate_mode", "build_mode")
     spec_dict["spawn_mode"] = team_raw.get("spawn_mode", "inprocess")
     spec_dict["enable_hitt"] = team_raw.get("enable_hitt", True)
-    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base, team_raw)
+    spec_dict["enable_permissions"] = _resolve_enable_permissions(config_base)
+    _apply_swarmflow_budget(spec_dict, team_raw.get("swarmflow_budget"))
     spec_dict["leader"] = _build_leader_spec(team_raw)
     spec_dict["agents"] = agents
     spec_dict["language"] = str(config_base.get("preferred_language", "zh")).strip().lower()

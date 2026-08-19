@@ -170,6 +170,10 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 | `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
 | `/security-review` | - | 安全审查当前分支待定变更 | `/security-review`、`/security-review 重点关注认证` | 全部 |
 | `/simplify` | - | 代码精简审查（复用性、质量、效率），自动修复问题 | `/simplify`、`/simplify src/auth/` | **仅 `code.*`** |
+| `/swarmflow` | - | SwarmFlow 开关/状态/预算（`on`/`off`/`--budget`） | `/swarmflow on` | **推荐 `team`** |
+| `/swarmflows` | `/swarmworkflows` | 全屏 SwarmFlow 运行树 | `/swarmflows` | **推荐 `team`**（需 `/swarmflow on`） |
+
+> SwarmFlow 完整说明见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
@@ -215,7 +219,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 
 #### `/workspace`（可信目录）
 
-- 系统默认工作空间：`~/.jiuwenswarm/agent/jiuwenswarm_workspace`（始终可用）。
+- 系统默认工作空间：`~/.jiuwenswarm/agent/workspace`（始终可用）。
 - `add`：默认路径为当前工作目录；成功后会 `command.add_dir` 同步到服务端并 `remember: true`。
 - `set`：重置为单个可信目录；若已有列表会二次确认。
 - 详见 [Slash命令表.md](Slash命令表.md) 的 `/workspace` 小节。
@@ -472,7 +476,7 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
   - `landlock` — jiuwenbox Landlock 支持情况（`supported` + `compatibility`）。
   - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略，显示 `(rw)` / `(ro)`。
 - 自动配置路径：当前工作路径。`preserve_file_sharing_mode` 仅支持 `mount`。
-- `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
+- `excluded_commands` 的匹配：按 simple-command 叶子做 fnmatch；写 glob 时建议覆盖参数（例如 `"git *"`）。混合管道会本地/远端拆分执行，不安全结构则整条进沙箱。本质仍是沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
 - add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
 - 写入策略：`allow` / `deny` 控制写访问（rw/ro），不是 Unix 八进制权限；支持「父 allow + 子 deny」，不支持「子 allow + 父 deny」。
 - 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/`、`/sandbox exclude add "git *"`。
@@ -768,3 +772,9 @@ jiuwenswarm-tui --session "$(printf 'a%.0s' {1..200})"  # 超 128 → 长度超�
 - [MCP配置](MCP配置.md)
 - [配置信息](配置信息.md)
 - [Claude Code CLI 参考（结构参考）](https://code.claude.com/docs/zh-CN/cli-reference)
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

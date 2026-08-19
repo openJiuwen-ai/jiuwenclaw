@@ -74,6 +74,8 @@ export interface ModelEntry {
   vendor_key?: string;
   /** 该条目所属的 plan 分桶（'token_plan'|'coding_plan'|'custom_api'|'custom'）。提示性。 */
   plan?: string;
+  /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
+  is_free?: boolean;
 }
 
 /** 厂商预设：vendors.list RPC 返回的单个厂商卡片。 */

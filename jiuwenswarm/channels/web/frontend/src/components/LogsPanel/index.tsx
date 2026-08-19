@@ -159,17 +159,19 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
   }, [content, error]);
 
   return (
-    <div className="flex-1 min-h-0">
-      <div className="card main-panel-card w-full h-full flex flex-col">
-        <div className="flex items-center justify-between gap-4 mb-4">
+    <div data-testid="logs-panel" className="flex-1 min-h-0">
+      <div data-testid="logs-panel-card" className="card main-panel-card w-full h-full flex flex-col">
+        <div data-testid="logs-panel-header" className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">{t('logsPanel.title')}</h2>
-            <p className="text-sm text-text-muted mt-1">
+            <h2 data-testid="logs-panel-title" className="text-lg font-semibold">{t('logsPanel.title')}</h2>
+            <p data-testid="logs-panel-source" className="text-sm text-text-muted mt-1">
               {t('logsPanel.dataSource')}: <span className="mono text-xs">agent/.logs/ws-dev.log</span>
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div data-testid="logs-panel-actions" className="flex items-center gap-2">
             <button
+              data-testid="logs-panel-debug-toggle"
+              aria-pressed={wsDisableCompress}
               onClick={() => void toggleWsDisableCompress()}
               className={`btn ${wsDisableCompress ? 'primary' : ''} !px-3 !py-1.5`}
               disabled={wsConfigLoading}
@@ -181,24 +183,26 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
                   : t('logsPanel.debugOff')}
             </button>
             <button
+              data-testid="logs-panel-auto-refresh-toggle"
+              aria-pressed={autoRefresh}
               onClick={() => setAutoRefresh((prev) => !prev)}
               className={`btn ${autoRefresh ? 'primary' : ''} !px-3 !py-1.5`}
             >
               {autoRefresh ? t('logsPanel.autoRefreshOn') : t('logsPanel.autoRefreshOff')}
             </button>
-            <button onClick={() => void fetchLogs()} className="btn !px-3 !py-1.5">
+            <button data-testid="logs-panel-refresh" onClick={() => void fetchLogs()} className="btn !px-3 !py-1.5">
               {t('common.refresh')}
             </button>
           </div>
         </div>
 
         {error ? (
-          <div className="text-sm text-danger flex-1 min-h-0">{error}</div>
+          <div data-testid="logs-panel-error" className="text-sm text-danger flex-1 min-h-0">{error}</div>
         ) : (
-          <div className="border border-border rounded-lg bg-secondary/30 flex-1 min-h-0 flex flex-col">
-            <div className="px-3 py-2 text-xs text-text-muted border-b border-border flex items-center justify-between">
-              <span>{t('logsPanel.recentLogs')}</span>
-              <span>
+          <div data-testid="logs-panel-viewer" className="border border-border rounded-lg bg-secondary/30 flex-1 min-h-0 flex flex-col">
+            <div data-testid="logs-panel-viewer-header" className="px-3 py-2 text-xs text-text-muted border-b border-border flex items-center justify-between">
+              <span data-testid="logs-panel-recent-label">{t('logsPanel.recentLogs')}</span>
+              <span data-testid="logs-panel-count">
                 {loading
                   ? t('common.loading')
                   : wsDisableCompress
@@ -206,7 +210,7 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
                     : t('logsPanel.countVisibleTotal', { visible: visibleEntries.length, total: entries.length })}
               </span>
             </div>
-            <pre ref={preRef} className="m-0 p-3 text-xs mono overflow-auto flex-1 min-h-0 whitespace-pre-wrap break-all">
+            <pre ref={preRef} data-testid="logs-panel-content" className="m-0 p-3 text-xs mono overflow-auto flex-1 min-h-0 whitespace-pre-wrap break-all">
               {content || t('logsPanel.empty')}
             </pre>
           </div>

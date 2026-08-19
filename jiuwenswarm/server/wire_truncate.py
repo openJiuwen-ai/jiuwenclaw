@@ -33,6 +33,10 @@ _HISTORY_WIRE_METADATA_STRING_LIMIT = 256
 _HISTORY_WIRE_LIST_LIMIT = 100
 _HISTORY_WIRE_DEPTH_LIMIT = 8
 _HISTORY_WIRE_RECORD_MAX_BYTES = 64 * 1024
+# 单条 chat.final record 切片时每片的 content 最大字节数（外层 frame overhead 留足余量）
+_HISTORY_WIRE_RECORD_PART_BYTES = 32 * 1024
+# 仅这些 event_type 走切片流；其余 event_type 仍走旧 _sanitize_history_record_for_wire
+_HISTORY_SPLIT_EVENT_TYPES = frozenset({"chat.final"})
 _TEAM_HISTORY_DEFAULT_LIMIT = 500
 _TEAM_HISTORY_MAX_LIMIT = 1000
 _TEAM_HISTORY_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
@@ -50,6 +54,7 @@ _TRUNCATE_SUFFIX = " [truncated]"
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
+        "chat.reasoning",
         "chat.final",
         "chat.tool_call",
         "chat.tool_result",
@@ -93,6 +98,7 @@ _WORKFLOW_SNAPSHOT_KEEP_KEYS = {
     "duration_ms",
     "token_count",
     "estimated_token_count",
+    "budget",
 }
 
 _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
@@ -106,6 +112,7 @@ _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
     "duration_ms",
     "token_count",
     "estimated_token_count",
+    "budget",
 )
 
 
@@ -224,6 +231,85 @@ def _sanitize_history_record_for_wire(record: Any) -> dict[str, Any]:
     if _json_wire_size(sanitized) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
         return sanitized
     return _collapse_oversized_history_record(sanitized)
+
+
+def split_history_record_for_stream(
+    record: Any,
+    *,
+    part_bytes: int = _HISTORY_WIRE_RECORD_PART_BYTES,
+) -> list[dict[str, Any]]:
+    """把单条 record 切成 ``history.get`` 流友好的多个分片帧。
+
+    只有 ``chat.final`` record（白名单 ``_HISTORY_SPLIT_EVENT_TYPES``）才会被切片——
+    它是用户最直接看到的回复正文，截断损失最大。其他 event_type
+    （``chat.reasoning`` / ``chat.tool_call`` / ``chat.tool_result`` 等）
+    仍走 ``_sanitize_history_record_for_wire``，维持原来的 collapse / string-truncate
+    行为不变。
+
+    对可切片的 record，顶层 ``content`` 字符串**保留原文**——
+    ``_sanitize_history_wire_value`` 会把它砍到 16KB，那切片就没意义了。
+    其他元数据字段照常 sanitize（短字符串几乎不会被截）。
+    切完后的整体若 ≤ 单条 record wire 预算（64KB），返回单帧、不带 ``_part``
+    字段，与旧协议完全兼容。否则把 content 按 ``part_bytes`` 字节切成 N 片，
+    每片带完整元数据 + ``_part = {{record_id, part_idx, total_parts}}`` 标记，
+    供前端按 record_id 重组。若可切片的 record 没有 string content 字段，
+    退化到 sanitize 路径，仍能发出一帧（极少见，防漏）。
+    """
+    event_type = record.get("event_type") if isinstance(record, dict) else None
+    if event_type not in _HISTORY_SPLIT_EVENT_TYPES:
+        # 非白名单 event_type（思考、工具调用等）→ 不切片，走旧 sanitize 路径
+        return [_sanitize_history_record_for_wire(record)]
+
+    if not isinstance(record, dict):
+        return [_sanitize_history_record_for_wire(record)]
+
+    content = record.get("content")
+    if not isinstance(content, str) or not content:
+        # chat.final 无可用 string content → 走 sanitize（内部会 collapse 到元数据 stub）
+        return [_sanitize_history_record_for_wire(record)]
+
+    # 元数据照常 sanitize；content 保留原文
+    metadata = {
+        key: _sanitize_history_wire_value(value)
+        for key, value in record.items()
+        if key != "content"
+    }
+    full = {**metadata, "content": content}
+
+    if _json_wire_size(full) <= _HISTORY_WIRE_RECORD_MAX_BYTES:
+        # 不超预算 → 单帧，不带 _part，与旧协议兼容
+        return [full]
+
+    # 取 record_id 供前端重组：优先用 id，其次 request_id，最后兜底 hist-<objid>
+    record_id = (
+        full.get("id")
+        or full.get("request_id")
+        or f"hist-{id(full)}"
+    )
+    if not isinstance(record_id, str) or not record_id:
+        record_id = f"hist-{id(full)}"
+    else:
+        record_id = str(record_id)
+
+    # 按字符切而非按字节切：避免多字节 UTF-8（中文 3 字节、emoji 4 字节）
+    # 在切片边界被切到一半导致丢字符。Python 字符串切片按字符边界走，
+    # 直接 content[i:j] 就是第 i..j-1 个字符拼成的字符串，天然合法 UTF-8。
+    # 每片字符数：用 part_bytes / 4 估算（UTF-8 单字符最多 4 字节），
+    # 最坏情况（全 4 字节字符）每片仍 ≤ part_bytes ≤ 64KB wire 预算，安全。
+    chars_per_part = max(256, part_bytes // 4)
+    total = max(1, (len(content) + chars_per_part - 1) // chars_per_part)
+    chunks: list[dict[str, Any]] = []
+    for idx in range(total):
+        slice_chars = content[idx * chars_per_part:(idx + 1) * chars_per_part]
+        chunk = {**metadata}
+        chunk["content"] = slice_chars
+        chunk["_part"] = {
+            "record_id": record_id,
+            "part_idx": idx,
+            "total_parts": total,
+        }
+        chunks.append(chunk)
+    return chunks
 
 
 def _select_history_record_page(
@@ -346,6 +432,8 @@ def _workflow_agent_for_collapse(agent: dict[str, Any]) -> dict[str, Any]:
         "status": agent.get("status", "running"),
         "kind": agent.get("kind", "agent"),
     }
+    if agent.get("token_count") is not None:
+        collapsed_agent["token_count"] = agent["token_count"]
     if agent.get("model"):
         collapsed_agent["model"] = agent["model"]
     if agent.get("correlation_id"):
@@ -409,6 +497,9 @@ def _collapse_oversized_workflow_snapshot_item(item: dict[str, Any]) -> dict[str
                 "agent_count": phase.get("agent_count", 0),
                 "completed_agent_count": phase.get("completed_agent_count", 0),
             }
+            for child_key in ("phase_type", "nested_phase", "parent_phase"):
+                if child_key in phase:
+                    collapsed_phase[child_key] = phase[child_key]
             agents = phase.get("agents")
             if isinstance(agents, list):
                 collapsed_agents = []
@@ -543,11 +634,18 @@ def _workflow_list_summary_phase(phase: dict[str, Any]) -> dict[str, Any]:
 
 def _workflow_list_summary_item(item: dict[str, Any]) -> dict[str, Any]:
     """Compact workflow row for ``command.workflows`` list — omits large text fields."""
-    summary: dict[str, Any] = {
-        key: _compact_wire_metadata_value(item.get(key))
-        for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
-        if item.get(key) is not None
-    }
+    summary: dict[str, Any] = {}
+    for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS:
+        value = item.get(key)
+        if value is None:
+            continue
+        # budget is a small dict object; must not be str()'d by
+        # _compact_wire_metadata_value, or the frontend receives a string
+        # instead of an object and cannot read spent/total/remaining.
+        if key == "budget" and isinstance(value, dict):
+            summary[key] = value
+        else:
+            summary[key] = _compact_wire_metadata_value(value)
     for key in ("summary", "error", "result"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
@@ -764,6 +862,8 @@ __all__ = [
     "_HISTORY_WIRE_LIST_LIMIT",
     "_HISTORY_WIRE_DEPTH_LIMIT",
     "_HISTORY_WIRE_RECORD_MAX_BYTES",
+    "_HISTORY_WIRE_RECORD_PART_BYTES",
+    "_HISTORY_SPLIT_EVENT_TYPES",
     "_TEAM_HISTORY_DEFAULT_LIMIT",
     "_TEAM_HISTORY_MAX_LIMIT",
     "_TEAM_HISTORY_DEFAULT_MAX_BYTES",
@@ -785,6 +885,7 @@ __all__ = [
     "_collapse_oversized_history_record",
     "_minimal_history_record_for_wire",
     "_sanitize_history_record_for_wire",
+    "split_history_record_for_stream",
     "_select_history_record_page",
     "_is_waiting_human_agent",
     "_extract_waiting_human_prompts",

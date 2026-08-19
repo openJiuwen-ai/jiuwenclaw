@@ -93,6 +93,8 @@ export interface ReasoningSegment {
   text: string;
   startedAt: number;
   closed: boolean;
+  /** 最近一个 delta 到达时刻；即使 final 丢失，耗时终点也能落在最后一个真实帧。 */
+  updatedAt?: number;
   /** 收尾时刻；用于延迟折进 streak。历史可省略。 */
   closedAt?: number;
 }
@@ -134,6 +136,11 @@ export interface ChatRuntime {
   taskQueue: TaskItem[];
   queuePaused: boolean;
   pendingQuestion: AskUserQuestionPayload | null;
+  /**
+   * 忙碌时设目标：用户气泡暂存在此（界面不立刻显示）；
+   * 空 chat.final / processing 结束再正式入 messages。
+   */
+  pendingGoalObjectiveBubble: { content: string; timestamp: string } | null;
   inputValue: string;
   /** evolutionStatus 自动清除定时器，按 session 隔离 */
   evolutionStatusClearTimer: ReturnType<typeof setTimeout> | null;
@@ -176,6 +183,7 @@ function createEmptyRuntime(): ChatRuntime {
     taskQueue: [],
     queuePaused: false,
     pendingQuestion: null,
+    pendingGoalObjectiveBubble: null as ChatRuntime['pendingGoalObjectiveBubble'],
     inputValue: '',
     evolutionStatusClearTimer: null,
     interruptResultClearTimer: null,
@@ -220,7 +228,7 @@ interface ChatState {
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
   closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
-  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string }[]) => void;
+  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string; updatedAt?: number }[]) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
   finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
@@ -258,6 +266,9 @@ interface ChatState {
   removeFromTaskQueue: (sessionId: string, id: string) => void;
   reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
   setPendingQuestion: (sessionId: string, question: AskUserQuestionPayload | null) => void;
+  setPendingGoalObjectiveBubble: (sessionId: string, content: string | null) => void;
+  flushPendingGoalObjectiveBubble: (sessionId: string) => void;
+  queueOrAddGoalObjectiveMessage: (sessionId: string, content: string) => void;
   setInputValue: (sessionId: string, value: string) => void;
   setSessionError: (sessionId: string, error: string | null) => void;
   setUsageSummary: (sessionId: string, messageId: string, usage: UsageSummary) => void;
@@ -329,8 +340,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
-            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
-          },
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: runtime.reasoningSegments.filter((s) => s.closed) } : {}),
+          },  
         },
       };
     });
@@ -374,6 +385,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             },
             taskQueue: [],
             pendingQuestion: null,
+            pendingGoalObjectiveBubble: null,
           },
         },
       };
@@ -437,12 +449,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           : Date.now();
       let next: ReasoningSegment[];
       if (last && !last.closed) {
-        next = segments.slice(0, -1).concat({ ...last, text: last.text + content });
+        // 每个 delta 都推进 updatedAt，使耗时终点不依赖 closeReasoning 收尾事件
+        next = segments.slice(0, -1).concat({ ...last, text: last.text + content, updatedAt: atMs });
       } else {
         next = segments.concat({
           id: createReasoningSegmentId(),
           text: content,
           startedAt: atMs,
+          updatedAt: atMs,
           closed: false,
         });
       }
@@ -475,6 +489,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               ...last,
               closed: true,
               closedAt: atMs,
+              updatedAt: atMs,
             }),
           },
         },
@@ -500,6 +515,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           return;
         }
         const startedAt = parsed - 1;
+        // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt，
+        // 使异常结束的耗时终点也能落在最后一个真实帧。
+        const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
+        const updatedAt =
+          Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
+            ? replayUpdatedAt
+            : startedAt;
         segments.push({
           id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
           text,
@@ -507,6 +529,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           closed: true,
           // 历史已结束：closedAt 用 startedAt，立刻 settled，且比魔法 0 更可解释。
           closedAt: startedAt,
+          updatedAt,
         });
       });
       segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -731,6 +754,10 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         },
       };
     });
+    // 整轮空闲：把忙碌时暂存的目标用户气泡正式入列（空 final 主路径之外的兜底）
+    if (!status) {
+      get().flushPendingGoalObjectiveBubble(sessionId);
+    }
   },
 
   setSessionError: (sessionId, error) => {
@@ -1432,6 +1459,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             },
             taskQueue: [],
             pendingQuestion: null,
+            pendingGoalObjectiveBubble: null,
           },
         },
       };
@@ -1521,6 +1549,104 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         },
       };
     });
+  },
+
+  setPendingGoalObjectiveBubble: (sessionId, content) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      const trimmed = content && content.trim() ? content.trim() : null;
+      const next = trimmed
+        ? {
+            content: trimmed,
+            timestamp: runtime.pendingGoalObjectiveBubble?.content === trimmed
+              ? runtime.pendingGoalObjectiveBubble.timestamp
+              : new Date().toISOString(),
+          }
+        : null;
+      if (
+        runtime.pendingGoalObjectiveBubble?.content === next?.content &&
+        runtime.pendingGoalObjectiveBubble?.timestamp === next?.timestamp &&
+        state.runtimes[sessionId]
+      ) {
+        return state;
+      }
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, pendingGoalObjectiveBubble: next },
+        },
+      };
+    });
+  },
+
+  flushPendingGoalObjectiveBubble: (sessionId) => {
+    const runtime = get().runtimes[sessionId];
+    const pending = runtime?.pendingGoalObjectiveBubble;
+    if (!pending?.content) {
+      return;
+    }
+    const already = (runtime.messages ?? []).some(
+      (message) =>
+        message.role === 'user' &&
+        message.isGoalObjectiveMessage &&
+        message.content === pending.content
+    );
+    set((state) => {
+      const current = state.runtimes[sessionId];
+      if (!current) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...current, pendingGoalObjectiveBubble: null },
+        },
+      };
+    });
+    if (!already) {
+      get().addMessage(sessionId, {
+        id: `user-goal-${Date.now()}`,
+        role: 'user',
+        content: pending.content,
+        // 入列时刻与后端 defer flush 对齐（上一轮收尾之后）
+        timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
+      });
+    }
+  },
+
+  queueOrAddGoalObjectiveMessage: (sessionId, content) => {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return;
+    }
+    const runtime = get().runtimes[sessionId] ?? createEmptyRuntime();
+    // 暂存的目的是"避免插进当前回答中间拆轮"——只有存在可被拆的 assistant 轮次时才有意义。
+    // 后端 _should_defer_goal_objective_history 也是精确判断"有无活跃 user round / 并发任务"，
+    // idle 时不 defer（test_should_not_defer_when_idle）。这里用"已有 assistant 消息且仍在处理"
+    // 对齐该语义：新会话首次设目标时 messages 里没有 assistant 消息，即便
+    // registerCreatedConversation 把 isProcessing 乐观置 true 也不暂存，立即落地，避免用户
+    // 气泡被推迟到 agent 回复完成之后才 append 到末尾（顺序错乱、时间戳变落地时刻）。
+    const hasAssistantTurn = (runtime.messages ?? []).some((message) => message.role === 'assistant');
+    const busy = hasAssistantTurn && Boolean(runtime.isProcessing || runtime.currentStreamId);
+    if (busy) {
+      get().setPendingGoalObjectiveBubble(sessionId, trimmed);
+      return;
+    }
+    get().setPendingGoalObjectiveBubble(sessionId, null);
+    const already = (runtime.messages ?? []).some(
+      (message) =>
+        message.role === 'user' &&
+        message.isGoalObjectiveMessage &&
+        message.content === trimmed
+    );
+    if (!already) {
+      get().addMessage(sessionId, {
+        id: `user-goal-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: new Date().toISOString(),
+        isGoalObjectiveMessage: true,
+      });
+    }
   },
 
   setInputValue: (sessionId, value) => {

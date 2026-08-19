@@ -29,8 +29,14 @@ MIME_TO_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "
 MIN_DIMENSION = 80
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 FETCH_WORKERS = 10
-FILTER_BATCH = 5
+FILTER_BATCH = 3
 FILTER_WORKERS = 3
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+WORK_ROOT = SCRIPT_DIR / "work"
+OPERATION_TIMEOUT_SECONDS = 600
+BILIBILI_DOWNLOAD_ATTEMPTS = 3
+BILIBILI_CHUNK_SIZE = 64 * 1024
 
 
 # ── JSON helpers ─────────────────────────────────────────────────────────────
@@ -40,8 +46,11 @@ def load_json(path: pathlib.Path) -> dict:
 
 
 def write_json(path: pathlib.Path, data: dict) -> None:
+    """Atomically publish stage JSON so downstream readers never see partial data."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def strip_json_fence(text: str) -> str:
@@ -75,7 +84,31 @@ def url_to_slug(url: str) -> str:
 
 
 def work_path(slug: str, filename: str) -> pathlib.Path:
-    return pathlib.Path("work") / slug / filename
+    """Return a work path anchored to this skill, independent of shell cwd."""
+    return WORK_ROOT / slug / filename
+
+
+def resolve_work_slug_for_url(url: str) -> str:
+    """Reuse the newest stage01 slug associated with url; otherwise derive one."""
+    normalized = url.rstrip("/")
+    matches: list[tuple[float, str]] = []
+    if WORK_ROOT.exists():
+        for stage01_path in WORK_ROOT.glob("*/stage01.json"):
+            try:
+                data = load_json(stage01_path)
+            except (OSError, ValueError, TypeError):
+                continue
+            candidates = [data.get("url", ""), *(data.get("video_urls") or [])]
+            if any(str(candidate).rstrip("/") == normalized for candidate in candidates):
+                slug = str(data.get("slug") or stage01_path.parent.name)
+                try:
+                    modified = stage01_path.stat().st_mtime
+                except OSError:
+                    modified = 0.0
+                matches.append((modified, slug))
+    if matches:
+        return max(matches)[1]
+    return url_to_slug(url)
 
 
 def image_ext(url: str, mime: str) -> str:
@@ -151,8 +184,15 @@ def strip_hallucinated_images(md: str, valid_paths: set[str]) -> str:
 # ── Video download ────────────────────────────────────────────────────────────
 
 def _download_bilibili_wbi(bvid: str, tmp_dir: pathlib.Path) -> pathlib.Path:
-    """Download a Bilibili video via public API with WBI signing."""
+    """Download a Bilibili video via public API with persistent Range resume."""
     logger.info("[video] Bilibili detected, using public API with WBI signing (bvid=%s)", bvid)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out = tmp_dir / "video.mp4"
+    partial = tmp_dir / "video.mp4.part"
+    if out.exists() and out.stat().st_size > 0:
+        logger.info("[video] reusing completed Bilibili download (%d bytes)", out.stat().st_size)
+        return out
+
     _bili_headers = {
         "User-Agent": STEALTH_UA,
         "Referer": "https://www.bilibili.com/",
@@ -160,7 +200,7 @@ def _download_bilibili_wbi(bvid: str, tmp_dir: pathlib.Path) -> pathlib.Path:
     }
     nav = requests.get(
         "https://api.bilibili.com/x/web-interface/nav",
-        headers=_bili_headers, timeout=10,
+        headers=_bili_headers, timeout=OPERATION_TIMEOUT_SECONDS,
     ).json()
     wbi_img = nav.get("data", {}).get("wbi_img", {})
     img_key = wbi_img.get("img_url", "").rsplit("/", 1)[-1].split(".")[0]
@@ -170,34 +210,34 @@ def _download_bilibili_wbi(bvid: str, tmp_dir: pathlib.Path) -> pathlib.Path:
         33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
         61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
     ]
-    mixin_key = reduce(lambda s, i: s + (img_key + sub_key)[i], _mixin_tab, "")[:32]
+    mixin_key = reduce(lambda text, index: text + (img_key + sub_key)[index], _mixin_tab, "")[:32]
 
     def _wbi_sign(params: dict) -> dict:
-        p = dict(params)
-        p["wts"] = int(time.time())
-        p = dict(sorted(p.items()))
-        qs = urllib.parse.urlencode(
-            {k: "".join(c for c in str(v) if c not in "!'()*") for k, v in p.items()}
+        signed_params = dict(params)
+        signed_params["wts"] = int(time.time())
+        signed_params = dict(sorted(signed_params.items()))
+        query = urllib.parse.urlencode(
+            {key: "".join(char for char in str(value) if char not in "!'()*") for key, value in signed_params.items()}
         )
-        p["w_rid"] = hashlib.md5((qs + mixin_key).encode()).hexdigest()
-        return p
+        signed_params["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+        return signed_params
 
     view = requests.get(
         f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
-        headers=_bili_headers, timeout=30,
+        headers=_bili_headers, timeout=OPERATION_TIMEOUT_SECONDS,
     ).json()
     cid = (view.get("data") or {}).get("cid")
     if not cid:
         code = view.get("code", "?")
-        msg = view.get("message", "?")
+        message = view.get("message", "?")
         hint = " (视频需要登录/大会员，暂不支持)" if code in (62012, -101, -400) else ""
-        raise RuntimeError(f"Bilibili view API error code={code} message={msg}{hint}")
+        raise RuntimeError(f"Bilibili view API error code={code} message={message}{hint}")
 
-    for qn in (80, 64, 32, 16):
-        signed = _wbi_sign({"bvid": bvid, "cid": cid, "qn": qn, "fnval": 1})
+    for quality in (80, 64, 32, 16):
+        signed = _wbi_sign({"bvid": bvid, "cid": cid, "qn": quality, "fnval": 1})
         play = requests.get(
             "https://api.bilibili.com/x/player/playurl",
-            params=signed, headers=_bili_headers, timeout=30,
+            params=signed, headers=_bili_headers, timeout=OPERATION_TIMEOUT_SECONDS,
         ).json()
         play_data = play.get("data", {})
         if play_data.get("durl") or play_data.get("dash", {}).get("video"):
@@ -205,28 +245,103 @@ def _download_bilibili_wbi(bvid: str, tmp_dir: pathlib.Path) -> pathlib.Path:
     else:
         raise RuntimeError(f"Bilibili playurl API returned no streams: {play.get('message')}")
 
+    expected_size: int | None = None
     if play_data.get("durl"):
-        cdn_url = play_data["durl"][0]["url"]
-    else:
-        cdn_url = play_data["dash"]["video"][0]["baseUrl"]
-
-    _dl_headers = {**_bili_headers, "Accept-Encoding": "identity"}
-    out = tmp_dir / "video.mp4"
-    for attempt in range(3):
+        stream = play_data["durl"][0]
+        cdn_url = stream["url"]
         try:
-            resp = requests.get(cdn_url, headers=_dl_headers, timeout=300, stream=True)
-            resp.raise_for_status()
-            with open(out, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    if chunk:
-                        f.write(chunk)
-            if out.stat().st_size > 0:
-                logger.info("[video] Bilibili API OK (%d bytes)", out.stat().st_size)
-                return out
-        except Exception:
-            if attempt == 2:
-                raise
-    raise RuntimeError("Bilibili download failed after 3 attempts")
+            expected_size = int(stream.get("size") or 0) or None
+        except (TypeError, ValueError):
+            expected_size = None
+    else:
+        stream = play_data["dash"]["video"][0]
+        cdn_url = stream["baseUrl"]
+
+    download_headers = {**_bili_headers, "Accept-Encoding": "identity"}
+    last_error: Exception | None = None
+    for attempt in range(1, BILIBILI_DOWNLOAD_ATTEMPTS + 1):
+        resume_from = partial.stat().st_size if partial.exists() else 0
+        if expected_size and resume_from == expected_size:
+            os.replace(partial, out)
+            logger.info("[video] Bilibili resume already complete (%d bytes)", out.stat().st_size)
+            return out
+        if expected_size and resume_from > expected_size:
+            partial.unlink()
+            resume_from = 0
+
+        headers = dict(download_headers)
+        if resume_from:
+            headers["Range"] = f"bytes={resume_from}-"
+            logger.info(
+                "[video] Bilibili resume attempt %d/%d from byte %d",
+                attempt,
+                BILIBILI_DOWNLOAD_ATTEMPTS,
+                resume_from,
+            )
+        else:
+            logger.info("[video] Bilibili download attempt %d/%d", attempt, BILIBILI_DOWNLOAD_ATTEMPTS)
+
+        try:
+            with requests.get(
+                cdn_url,
+                headers=headers,
+                timeout=OPERATION_TIMEOUT_SECONDS,
+                stream=True,
+            ) as response:
+                if response.status_code == 416 and expected_size and resume_from >= expected_size:
+                    os.replace(partial, out)
+                    logger.info("[video] Bilibili API OK (%d bytes)", out.stat().st_size)
+                    return out
+                response.raise_for_status()
+
+                append = resume_from > 0 and response.status_code == 206
+                mode = "ab" if append else "wb"
+                if not append:
+                    resume_from = 0
+
+                response_total: int | None = None
+                content_range = response.headers.get("Content-Range", "")
+                match = re.search(r"/(\d+)$", content_range)
+                if match:
+                    response_total = int(match.group(1))
+                elif response.headers.get("Content-Length"):
+                    try:
+                        response_total = resume_from + int(response.headers["Content-Length"])
+                    except ValueError:
+                        response_total = None
+
+                with open(partial, mode) as handle:
+                    for chunk in response.iter_content(chunk_size=BILIBILI_CHUNK_SIZE):
+                        if chunk:
+                            handle.write(chunk)
+
+            final_size = partial.stat().st_size
+            required_size = expected_size or response_total
+            if required_size and final_size < required_size:
+                raise IOError(f"incomplete Bilibili download: {final_size}/{required_size} bytes")
+            if final_size <= 0:
+                raise IOError("Bilibili download produced an empty file")
+
+            os.replace(partial, out)
+            logger.info("[video] Bilibili API OK (%d bytes)", out.stat().st_size)
+            return out
+        except Exception as exc:
+            last_error = exc
+            saved = partial.stat().st_size if partial.exists() else 0
+            logger.warning(
+                "[video] Bilibili attempt %d/%d interrupted; preserved %d bytes for resume: %s",
+                attempt,
+                BILIBILI_DOWNLOAD_ATTEMPTS,
+                saved,
+                exc,
+            )
+            if attempt < BILIBILI_DOWNLOAD_ATTEMPTS:
+                time.sleep(min(attempt * 2, 5))
+
+    raise RuntimeError(
+        f"Bilibili download failed after {BILIBILI_DOWNLOAD_ATTEMPTS} attempts; "
+        f"partial file kept at {partial}"
+    ) from last_error
 
 
 _YT_DLP_BASE = [
@@ -251,10 +366,19 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
         logger.info("[video] normalized XiaoHongShu URL to explore format: %s", url)
 
     logger.info("[video] Downloading: %s", url)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     bvid_match = re.search(r"bilibili\.com/video/(BV[A-Za-z0-9]+)", url)
     if bvid_match:
         return _download_bilibili_wbi(bvid_match.group(1), tmp_dir)
+
+    completed = sorted(
+        path for path in tmp_dir.glob("video.*")
+        if path.is_file() and not path.name.endswith(".part") and path.stat().st_size > 0
+    )
+    if completed:
+        logger.info("[video] reusing completed download: %s", completed[0])
+        return completed[0]
 
     out_template = str(tmp_dir / "video.%(ext)s")
     last_err = ""
@@ -274,8 +398,12 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
                 url,
             ]
             result = subprocess.run(
-                cmd, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=600,
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=OPERATION_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 videos = list(tmp_dir.glob("video.*"))
@@ -294,8 +422,12 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
             url,
         ]
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=600,
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=OPERATION_TIMEOUT_SECONDS,
         )
         if result.returncode == 0:
             videos = list(tmp_dir.glob("video.*"))
@@ -306,7 +438,7 @@ def download_video(url: str, tmp_dir: pathlib.Path, max_minutes: int | None = No
 
     logger.info("[video] trying direct HTTP...")
     try:
-        r = requests.get(url, timeout=60, stream=True, headers={"User-Agent": STEALTH_UA})
+        r = requests.get(url, timeout=OPERATION_TIMEOUT_SECONDS, stream=True, headers={"User-Agent": STEALTH_UA})
         r.raise_for_status()
         out = tmp_dir / "video.mp4"
         out.write_bytes(r.content)

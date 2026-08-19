@@ -228,11 +228,9 @@ The frontend shows the following options under **Self-Evolution Configuration**:
 
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
-| **Enable Skills Self-Evolution** (master switch) | `react.evolution.enabled` | `true` | Master switch for self-evolution. When off, the entire self-evolution chain (including the `/evolve` manual command) is unavailable |
-| **Auto-detect evolution signals** | `react.evolution.auto_scan` | `false` | When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. Env `EVOLUTION_AUTO_SCAN` takes precedence |
-| **Auto-suggest new skill creation** | `react.evolution.skill_create` | `false` | When enabled, the system can propose creating a new Skill when no suitable Skill exists. Env `SKILL_CREATE` takes precedence |
+| **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
 
-> 💡 **Note**: `react.evolution.enabled` is the master switch (on by default, determines whether self-evolution is available), `auto_scan` / `skill_create` are sub-switches (off by default, determine whether to trigger automatically). Even with the master switch on, `auto_scan` only controls automatic scanning of failure/correction signals; `skill_create` independently controls whether to auto-suggest new skill creation. When both are off, the system only responds to manual `/evolve` commands.
+> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
@@ -354,7 +352,7 @@ The system automatically identifies and filters the following types of sensitive
 
 ## 9. Skill Symphony and Skill Retrieval Configuration
 
-Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill score to organize candidates into a confirmable, executable skill chain.
+Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill graph to organize candidates into a confirmable, executable skill chain.
 
 ### 9.1 Frontend switches
 
@@ -363,11 +361,11 @@ The configuration panel exposes two related switches:
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
-| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_score`, `symphony_refresh_score`, and `symphony_compose_score` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill graph and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
 
-The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
+The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill graph, but candidate skills do not automatically come from Skill Retrieval.
 
-### 9.2 Skill index and skill score
+### 9.2 Skill index and skill graph
 
 Related pages are under **Skills** in the left sidebar:
 
@@ -388,25 +386,25 @@ Advanced build, retrieval, and orchestration parameters are configured in the us
 
 Common settings:
 
+The retained `symphony.fingerprint.scan` and `symphony.fingerprint.extraction`
+settings are mapped by the JiuwenSwarm Adapter to agent-core's
+`SkillFolderScanner` and `FingerprintService` configuration.
+
 | Setting | Default | Description |
 | --- | --- | --- |
 | `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
-| `symphony.paths.score_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
-| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
-| `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
-| `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |
-| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit for fingerprint extraction; empty means the runtime default is used |
-| `symphony.fingerprint.normalization.workers` | `4` | Skill fingerprint normalization concurrency |
-| `symphony.fingerprint.normalization.batch_size` | `2` | Skill fingerprint normalization batch size |
-| `symphony.fingerprint.normalization.duplicate_name_similarity_threshold` | `0.8` | Similarity threshold for detecting near-duplicate skill names |
-| `symphony.fingerprint.normalization.max_vocab_size` | Empty | Maximum dynamic vocabulary size; empty means the runtime default is used |
-| `symphony.build.workers` | `4` | Skill score build concurrency |
-| `symphony.build.batch_size` | `16` | Skill score build batch size |
+| `symphony.paths.graph_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
+| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth mapped to agent-core `SkillFolderScanner`; empty means the runtime default is used |
+| `symphony.fingerprint.extraction.workers` | `4` | Fingerprint extraction concurrency mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.batch_size` | `2` | Fingerprint extraction batch size mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit mapped to agent-core `FingerprintService`; empty means the runtime default is used |
+| `symphony.build.workers` | `4` | Skill graph build concurrency |
+| `symphony.build.batch_size` | `16` | Skill graph build batch size |
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
-| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
+| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill graph |
 | `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
 | `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
-| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
+| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-graph edge confidence preferred by orchestration |
 | `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |
 | `symphony.skill_retrieval.build.branching_factor` | `128` | Skill-tree split-threshold base; controls how coarse or fine the tree is |
 | `symphony.skill_retrieval.build.max_depth` | `6` | Maximum skill-tree depth |
@@ -424,13 +422,13 @@ Common settings:
 | `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
 | `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |
 
-> 📖 For details about Skill Retrieval, the skill score, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
+> 📖 For details about Skill Retrieval, the skill graph, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
 
 ---
 
 ## 10. Advanced Configuration
 
-Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
 
 ```text
 ~/.jiuwenswarm/config/config.yaml
@@ -446,7 +444,6 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 | `models.*.model_client_config.timeout` | Model request timeout (seconds) | `1800` |
 | `models.*.model_client_config.verify_ssl` | Verify SSL | `false` |
 | `models.*.model_config_obj.temperature` | Temperature | `0.95` |
-| `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
 | `react.context_engine_config.dialogue_compressor_config.tokens_threshold` | Dialogue compression token threshold | `100000` |
 | `react.context_engine_config.round_level_compressor_config.trigger_context_ratio` | Round-level compression trigger ratio of the effective context budget | `0.9` |
 

@@ -4,13 +4,15 @@ import { useTranslation } from 'react-i18next';
 import { TeamMemberAvatar } from '../../components/TeamMemberAvatar';
 import './ModelSetupGuide.css';
 
-export type ModelSetupGuideStep = 1 | 2;
+export type ModelSetupGuideStep = 0 | 1 | 2;
 
 interface ModelSetupGuideProps {
   step: ModelSetupGuideStep;
-  manual: boolean;
+  manual?: boolean;
   onAcknowledge: () => void;
   onSkip: () => void;
+  onQuickSetup: () => void;
+  onManualSetup: () => void;
 }
 
 interface SpotlightRect {
@@ -22,7 +24,7 @@ interface SpotlightRect {
   height: number;
 }
 
-const TARGET_SELECTORS: Record<ModelSetupGuideStep, string> = {
+const TARGET_SELECTORS: Record<1 | 2, string> = {
   1: '[data-model-setup-guide-target="more"]',
   2: '#config-group-model_default',
 };
@@ -66,16 +68,19 @@ function findVerticalScrollContainer(target: Element): HTMLElement | null {
 
 export function ModelSetupGuide({
   step,
-  manual,
   onAcknowledge,
   onSkip,
+  onQuickSetup,
+  onManualSetup,
 }: ModelSetupGuideProps) {
   const { t } = useTranslation();
   const [spotlight, setSpotlight] = useState<SpotlightRect | null>(null);
   const acknowledgementRef = useRef<HTMLButtonElement>(null);
   const hasSpotlightTarget = spotlight !== null;
+  const isWelcomeStep = step === 0;
 
   useLayoutEffect(() => {
+    if (isWelcomeStep) return;
     const selector = TARGET_SELECTORS[step];
     let resizeObserver: ResizeObserver | null = null;
     let observedTarget: Element | null = null;
@@ -113,7 +118,7 @@ export function ModelSetupGuide({
   }, [step]);
 
   useLayoutEffect(() => {
-    if (step !== 2 || !hasSpotlightTarget) return;
+    if (isWelcomeStep || step !== 2 || !hasSpotlightTarget) return;
 
     const target = document.querySelector(TARGET_SELECTORS[step]);
     if (!target) return;
@@ -130,6 +135,7 @@ export function ModelSetupGuide({
   }, [hasSpotlightTarget, step]);
 
   useEffect(() => {
+    if (isWelcomeStep) return;
     const target = document.querySelector<HTMLElement>(TARGET_SELECTORS[step]);
     if (!target) return;
 
@@ -184,10 +190,104 @@ export function ModelSetupGuide({
     };
   }, [spotlight, step]);
 
+  // Welcome step: centered card with config choices, no spotlight
+  if (isWelcomeStep) {
+    return createPortal(
+      <div className="model-setup-guide model-setup-guide--welcome" aria-live="polite" data-testid="model-setup-guide-welcome">
+        <div className="model-setup-guide__mask" style={{ inset: 0 }} data-testid="model-setup-guide-welcome-mask" />
+        <section className="model-setup-guide__welcome-card" aria-labelledby="model-setup-guide-title-0" data-testid="model-setup-guide-welcome-card">
+          <div className="model-setup-guide__welcome-header" data-testid="model-setup-guide-welcome-header">
+            <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" data-testid="model-setup-guide-welcome-avatar" />
+            <div className="model-setup-guide__copy" data-testid="model-setup-guide-welcome-copy">
+              <h2 id="model-setup-guide-title-0" className="model-setup-guide__title" data-testid="model-setup-guide-welcome-title">
+                {t('modelSetupGuide.steps.0.title')}
+              </h2>
+              <p className="model-setup-guide__description" data-testid="model-setup-guide-welcome-description">
+                {t('modelSetupGuide.steps.0.description')}
+              </p>
+            </div>
+          </div>
+          <div className="model-setup-guide__choices" data-testid="model-setup-guide-welcome-choices">
+            <div className="model-setup-guide__quick-setup-card" data-testid="model-setup-guide-welcome-quick-setup-card">
+              <button
+                type="button"
+                className="model-setup-guide__choice model-setup-guide__choice--primary"
+                onClick={onQuickSetup}
+                data-testid="model-setup-guide-welcome-quick-setup-button"
+              >
+                <span className="model-setup-guide__choice-title">
+                  {t('modelSetupGuide.quickSetup.title')}
+                </span>
+                <span className="model-setup-guide__choice-desc">
+                  {t('modelSetupGuide.quickSetup.description')}
+                </span>
+              </button>
+              <div className="model-setup-guide__quick-setup-footer" data-testid="model-setup-guide-welcome-quick-setup-footer">
+                <p className="model-setup-guide__agreement" data-testid="model-setup-guide-welcome-agreement">
+                  {t('modelSetupGuide.quickSetup.agreementPrefix')}
+                  <a
+                    href="https://www.huaweicloud.com/declaration/modelartsstudio.html"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="model-setup-guide__agreement-link"
+                    data-testid="model-setup-guide-welcome-agreement-link"
+                    data-variant="maas"
+                  >
+                    {t('modelSetupGuide.quickSetup.agreementMaas')}
+                  </a>
+                  {t('modelSetupGuide.quickSetup.agreementAnd')}
+                  <a
+                    href="https://www.huaweicloud.com/declaration/sa_cua_computing.html"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="model-setup-guide__agreement-link"
+                    data-testid="model-setup-guide-welcome-agreement-link"
+                    data-variant="cloud"
+                  >
+                    {t('modelSetupGuide.quickSetup.agreementCloud')}
+                  </a>
+                  {t('modelSetupGuide.quickSetup.agreementSuffix')}
+                </p>
+                <p className="model-setup-guide__billing-note" data-testid="model-setup-guide-welcome-billing-note">
+                  {t('modelSetupGuide.quickSetup.billingNote')}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="model-setup-guide__choice"
+              onClick={onManualSetup}
+              data-testid="model-setup-guide-welcome-manual-setup-button"
+            >
+              <span className="model-setup-guide__choice-title">
+                {t('modelSetupGuide.manualSetup.title')}
+              </span>
+              <span className="model-setup-guide__choice-desc">
+                {t('modelSetupGuide.manualSetup.description')}
+              </span>
+            </button>
+          </div>
+          <button
+            type="button"
+            className="model-setup-guide__skip"
+            onClick={onSkip}
+            aria-label={t('modelSetupGuide.skip')}
+            title={t('modelSetupGuide.skip')}
+            data-testid="model-setup-guide-skip"
+            data-variant="welcome"
+          >
+            {t('modelSetupGuide.skip')}
+          </button>
+        </section>
+      </div>,
+      document.body
+    );
+  }
+
   if (!spotlight || !calloutStyle) return null;
 
   return createPortal(
-    <div className="model-setup-guide" aria-live="polite">
+    <div className="model-setup-guide" aria-live="polite" data-testid="model-setup-guide">
       <div
         className="model-setup-guide__mask"
         style={{ top: 0, right: 0, height: spotlight.top, left: 0 }}
@@ -223,52 +323,56 @@ export function ModelSetupGuide({
           height: spotlight.height,
         }}
         aria-hidden
+        data-testid="model-setup-guide-spotlight"
       />
       <section
         key={step}
-        className={`model-setup-guide__callout${manual ? ' model-setup-guide__callout--manual' : ''}`}
+        className="model-setup-guide__callout"
         style={calloutStyle}
         aria-labelledby={`model-setup-guide-title-${step}`}
         aria-describedby={`model-setup-guide-description-${step}`}
+        data-testid="model-setup-guide-callout"
+        data-variant={step}
       >
-        {manual ? (
-          <button
-            type="button"
-            className="model-setup-guide__skip"
-            onClick={onSkip}
-            aria-label={t('modelSetupGuide.skip')}
-            title={t('modelSetupGuide.skip')}
-          >
-            {t('modelSetupGuide.skip')}
-          </button>
-        ) : null}
-        <div className="model-setup-guide__content">
+        <button
+          type="button"
+          className="model-setup-guide__skip"
+          onClick={onSkip}
+          aria-label={t('modelSetupGuide.skip')}
+          title={t('modelSetupGuide.skip')}
+          data-testid="model-setup-guide-skip"
+          data-variant="spotlight"
+        >
+          {t('modelSetupGuide.skip')}
+        </button>
+        <div className="model-setup-guide__content" data-testid="model-setup-guide-content">
           <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" />
-          <div className="model-setup-guide__copy">
-            <h2 id={`model-setup-guide-title-${step}`} className="model-setup-guide__title">
+          <div className="model-setup-guide__copy" data-testid="model-setup-guide-copy">
+            <h2 id={`model-setup-guide-title-${step}`} className="model-setup-guide__title" data-testid="model-setup-guide-title" data-variant={step}>
               {t(`modelSetupGuide.steps.${step}.title`)}
             </h2>
-            <p id={`model-setup-guide-description-${step}`} className="model-setup-guide__description">
+            <p id={`model-setup-guide-description-${step}`} className="model-setup-guide__description" data-testid="model-setup-guide-description">
               {t(`modelSetupGuide.steps.${step}.description`)}
             </p>
           </div>
         </div>
-        <footer className="model-setup-guide__footer">
+        <footer className="model-setup-guide__footer" data-testid="model-setup-guide-footer">
           {step === 2 ? (
-            <div className="model-setup-guide__actions">
+            <div className="model-setup-guide__actions" data-testid="model-setup-guide-actions">
               <button
                 ref={acknowledgementRef}
                 type="button"
                 className="model-setup-guide__text-button model-setup-guide__text-button--primary"
                 onClick={onAcknowledge}
+                data-testid="model-setup-guide-acknowledge"
               >
                 {t('modelSetupGuide.acknowledge')}
               </button>
             </div>
           ) : (
-            <p className="model-setup-guide__hint">{t('modelSetupGuide.clickMore')}</p>
+            <p className="model-setup-guide__hint" data-testid="model-setup-guide-hint">{t('modelSetupGuide.clickMore')}</p>
           )}
-          <span className="model-setup-guide__progress">{t('modelSetupGuide.progress', { current: step, total: 2 })}</span>
+          <span className="model-setup-guide__progress" data-testid="model-setup-guide-progress">{t('modelSetupGuide.progress', { current: step, total: 2 })}</span>
         </footer>
       </section>
     </div>,

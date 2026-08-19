@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +57,8 @@ class AgentRuntimeSpec(TypedDict, total=False):
     rootfs: AgentRootfsSpec
     cpu: int
     memory: int
+    code_path: str
+    cmds: list[list[str]]
 
 
 @dataclass
@@ -68,6 +72,28 @@ class SandboxInfo:
 
 class YuanrongAgentApiError(RuntimeError):
     """Raised when YuanRong /api/agent returns a non-success response."""
+
+
+@dataclass(frozen=True)
+class AgentFileDownloadChunk:
+    """One chunk from GET /api/agent/:instanceId/files/download."""
+
+    data: bytes
+    path: str
+    offset: int
+    chunk_size: int
+    size: int
+    content_type: str
+    eof: bool
+
+
+class YuanrongAgentFileError(RuntimeError):
+    """Raised when YuanRong agent file upload/download fails."""
+
+    def __init__(self, message: str, *, http_status: int = 500, error_code: str = "INTERNAL_ERROR") -> None:
+        super().__init__(message)
+        self.http_status = int(http_status)
+        self.error_code = str(error_code)
 
 
 class YuanrongFrontendAgentClient(AgentServerClient):
@@ -108,6 +134,10 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     @property
     def agent_namespace(self) -> str:
         return self._agent_namespace
+
+    @property
+    def frontend_endpoint(self) -> str:
+        return self._frontend_endpoint
 
     def set_or_update_server_config(
         self,
@@ -178,6 +208,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             normalized["cpu"] = int(runtime_spec["cpu"])
         if runtime_spec.get("memory") is not None:
             normalized["memory"] = int(runtime_spec["memory"])
+        cmds = runtime_spec.get("cmds")
+        if isinstance(cmds, list) and cmds:
+            normalized["cmds"] = cmds
         return normalized
 
     async def create_sandbox(
@@ -278,6 +311,118 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             normalized_sandbox_id,
         )
 
+    async def get_agent_info(self, instance_id: str) -> dict[str, Any]:
+        """Query agent instance info via GET /api/agent/:instanceId.
+
+        Returns the ``instance`` dict (contains node_ip, sandbox_ip,
+        sandbox_type, rootfs, workspace, env_vars, etc.).
+        """
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to get agent info")
+        status, body = await asyncio.to_thread(self._do_agent_get, normalized_id)
+        parsed = self._parse_agent_api_response(body, status)
+        instance = parsed.get("instance")
+        return instance if isinstance(instance, dict) else {}
+
+    async def upload_agent_file(
+        self,
+        instance_id: str,
+        path: str,
+        data: bytes,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Upload a file into an agent container via POST /api/agent/:id/files/upload."""
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        normalized_path = str(path or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to upload agent file")
+        if not normalized_path:
+            raise ValueError("path is required to upload agent file")
+        status, body = await asyncio.to_thread(
+            self._do_agent_file_upload,
+            normalized_id,
+            normalized_path,
+            data,
+            dict(auth_headers or {}),
+        )
+        return self._parse_agent_file_upload_response(body, status, normalized_path, len(data))
+
+    async def download_agent_file(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int = 65536,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> AgentFileDownloadChunk:
+        """Download a file chunk from GET /api/agent/:id/files/download (Range)."""
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        normalized_path = str(path or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to download agent file")
+        if not normalized_path:
+            raise ValueError("path is required to download agent file")
+        resolved_offset = max(int(offset), 0)
+        resolved_limit = max(int(limit), 1)
+        status, data, content_type, total_size = await asyncio.to_thread(
+            self._do_agent_file_download,
+            normalized_id,
+            normalized_path,
+            resolved_offset,
+            resolved_limit,
+            dict(auth_headers or {}),
+        )
+        if status in {404, 413} or status >= 500 or not (200 <= status < 300):
+            self._raise_agent_file_http_error(status, data)
+        chunk_size = len(data)
+        if total_size <= 0:
+            total_size = resolved_offset + chunk_size
+        eof = resolved_offset + chunk_size >= total_size
+        return AgentFileDownloadChunk(
+            data=data,
+            path=normalized_path,
+            offset=resolved_offset,
+            chunk_size=chunk_size,
+            size=total_size,
+            content_type=content_type or "application/octet-stream",
+            eof=eof,
+        )
+
+    async def list_agent_files(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        recursive: bool = False,
+        max_depth: int = 0,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List files in an agent container via GET /api/agent/:id/files/list."""
+        self._ensure_connected()
+        normalized_id = str(instance_id or "").strip()
+        normalized_path = str(path or "").strip()
+        if not normalized_id:
+            raise ValueError("instance_id is required to list agent files")
+        if not normalized_path:
+            raise ValueError("path is required to list agent files")
+        if int(max_depth) < 0:
+            raise ValueError("max_depth must be >= 0")
+        status, body = await asyncio.to_thread(
+            self._do_agent_file_list,
+            normalized_id,
+            normalized_path,
+            bool(recursive),
+            int(max_depth),
+            dict(auth_headers or {}),
+        )
+        return self._parse_agent_file_list_response(body, status)
+
     def _ensure_connected(self) -> None:
         if not self._connected:
             raise RuntimeError("client not connected")
@@ -288,6 +433,305 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     def _agent_delete_url(self, instance_id: str) -> str:
         encoded = urllib.parse.quote(instance_id, safe="")
         return f"{self._frontend_endpoint}/api/agent/{encoded}"
+
+    def _agent_files_upload_url(self, instance_id: str) -> str:
+        encoded = urllib.parse.quote(instance_id, safe="")
+        return f"{self._frontend_endpoint}/api/agent/{encoded}/files/upload"
+
+    def _agent_files_download_url(self, instance_id: str, path: str) -> str:
+        encoded_id = urllib.parse.quote(instance_id, safe="")
+        encoded_path = urllib.parse.quote(path, safe="")
+        return (
+            f"{self._frontend_endpoint}/api/agent/{encoded_id}/files/download"
+            f"?path={encoded_path}"
+        )
+
+    def _agent_files_list_url(
+        self,
+        instance_id: str,
+        path: str,
+        *,
+        recursive: bool,
+        max_depth: int,
+    ) -> str:
+        encoded_id = urllib.parse.quote(instance_id, safe="")
+        query = urllib.parse.urlencode(
+            {
+                "path": path,
+                "recursive": "true" if recursive else "false",
+                "max_depth": str(int(max_depth)),
+            }
+        )
+        return f"{self._frontend_endpoint}/api/agent/{encoded_id}/files/list?{query}"
+
+    @staticmethod
+    def _merge_auth_headers(base_headers: dict[str, str], auth_headers: dict[str, str]) -> dict[str, str]:
+        merged = dict(base_headers)
+        for key, value in auth_headers.items():
+            if value is not None and str(value).strip():
+                merged[str(key)] = str(value)
+        return merged
+
+    @staticmethod
+    def _encode_multipart_form(
+        fields: dict[str, str],
+        *,
+        file_field: str,
+        file_bytes: bytes,
+        filename: str = "file",
+    ) -> tuple[bytes, str]:
+        boundary = f"----YuanrongFormBoundary{uuid.uuid4().hex}"
+        body = bytearray()
+        for name, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            body.extend(str(value).encode("utf-8"))
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode()
+        )
+        body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+        body.extend(file_bytes)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+        return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+    @staticmethod
+    def _parse_content_range_total(content_range: str, *, fallback_size: int) -> int:
+        text = str(content_range or "").strip()
+        match = re.match(r"bytes\s+\d+-\d+/(\d+|\*)", text, flags=re.IGNORECASE)
+        if not match:
+            return fallback_size
+        total_text = match.group(1)
+        if total_text == "*":
+            return fallback_size
+        try:
+            return int(total_text)
+        except ValueError:
+            return fallback_size
+
+    @staticmethod
+    def _parse_agent_file_error_body(raw: bytes | str) -> str:
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = str(raw or "")
+        text = text.strip()
+        if not text:
+            return "agent file request failed"
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(parsed, dict):
+            return str(parsed.get("error") or parsed.get("message") or text)
+        return text
+
+    def _agent_file_http_error(self, status: int, body: bytes | str) -> YuanrongAgentFileError:
+        message = self._parse_agent_file_error_body(body)
+        if status == 404:
+            lowered = message.lower()
+            if "file not found" in lowered:
+                code = "file_not_found"
+            else:
+                code = "instance_not_found"
+        elif status == 413:
+            code = "file_too_large"
+        elif status == 400:
+            code = "BAD_REQUEST"
+        else:
+            code = "INTERNAL_ERROR"
+        return YuanrongAgentFileError(message, http_status=status, error_code=code)
+
+    def _raise_agent_file_http_error(self, status: int, body: bytes | str) -> None:
+        raise self._agent_file_http_error(status, body)
+
+    def _parse_agent_file_upload_response(
+        self,
+        body: str,
+        status: int,
+        path: str,
+        uploaded_size: int,
+    ) -> dict[str, Any]:
+        if not (200 <= status < 300):
+            raise self._agent_file_http_error(status, body)
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError as exc:
+            raise YuanrongAgentFileError(
+                f"invalid upload response: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise YuanrongAgentFileError(
+                f"invalid upload response shape: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            )
+        if parsed.get("success") is True:
+            return {
+                "success": True,
+                "path": str(parsed.get("path") or path),
+                "size": int(parsed.get("size") or uploaded_size),
+            }
+        error = str(parsed.get("error") or parsed.get("message") or "upload failed")
+        raise self._agent_file_http_error(status or 500, json.dumps({"error": error}))
+
+    def _parse_agent_file_list_response(self, body: str, status: int) -> list[dict[str, Any]]:
+        if not (200 <= status < 300):
+            raise self._agent_file_http_error(status, body)
+        try:
+            parsed = json.loads(body) if body else []
+        except json.JSONDecodeError as exc:
+            raise YuanrongAgentFileError(
+                f"invalid list response: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            ) from exc
+        # Frontend GET /files/list 返回的是 FaaS invoke 外壳
+        # {"body": {"items": [...]}, "innerCode": "0", ...}
+        # chat invoke 已经剥这层；list 必须同样处理，否则 gateway 看到空列表
+        if isinstance(parsed, dict) and self._is_faas_envelope(parsed):
+            parsed, faas_err = self._normalize_faas_body(parsed)
+            if faas_err:
+                raise self._agent_file_http_error(
+                    status or 500,
+                    json.dumps({"error": f"faas list failed: innerCode={faas_err}"}),
+                )
+        if isinstance(parsed, list):
+            items = parsed
+        elif isinstance(parsed, dict):
+            if parsed.get("success") is False:
+                error = str(parsed.get("error") or parsed.get("message") or "list failed")
+                raise self._agent_file_http_error(status or 500, json.dumps({"error": error}))
+            raw_items = parsed.get("items")
+            if raw_items is None:
+                raw_items = parsed.get("files")
+            if raw_items is None:
+                raw_items = parsed.get("data")
+            if raw_items is None:
+                raw_items = []
+            if not isinstance(raw_items, list):
+                raise YuanrongAgentFileError(
+                    f"invalid list response shape: {body!r}",
+                    http_status=status,
+                    error_code="INTERNAL_ERROR",
+                )
+            items = raw_items
+        else:
+            raise YuanrongAgentFileError(
+                f"invalid list response shape: {body!r}",
+                http_status=status,
+                error_code="INTERNAL_ERROR",
+            )
+        return [item for item in items if isinstance(item, dict)]
+
+    def _do_agent_file_upload(
+        self,
+        instance_id: str,
+        path: str,
+        data: bytes,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, str]:
+        payload, content_type = self._encode_multipart_form(
+            {"path": path},
+            file_field="file",
+            file_bytes=data,
+            filename=path.rsplit("/", 1)[-1] or "file",
+        )
+        headers = self._merge_auth_headers({"Content-Type": content_type}, auth_headers)
+        req = urllib.request.Request(
+            self._agent_files_upload_url(instance_id),
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+            raise_on_timeout=True,
+        )
+
+    def _do_agent_file_download(
+        self,
+        instance_id: str,
+        path: str,
+        offset: int,
+        limit: int,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, bytes, str, int]:
+        headers = self._merge_auth_headers({"Accept": "*/*"}, auth_headers)
+        end = offset + limit - 1
+        headers["Range"] = f"bytes={offset}-{end}"
+        req = urllib.request.Request(
+            self._agent_files_download_url(instance_id, path),
+            headers=headers,
+            method="GET",
+        )
+        resolved_timeout = float(self._agent_timeout_s)
+        try:
+            with urllib.request.urlopen(req, timeout=resolved_timeout) as resp:
+                status = int(getattr(resp, "status", 200))
+                data = resp.read()
+                content_type = str(resp.headers.get("Content-Type") or "application/octet-stream")
+                content_range = str(resp.headers.get("Content-Range") or "")
+                content_length = int(resp.headers.get("Content-Length") or len(data) or 0)
+                total_size = self._parse_content_range_total(
+                    content_range,
+                    fallback_size=offset + content_length,
+                )
+                return status, data, content_type, total_size
+        except urllib.error.HTTPError as err:
+            body = err.read() if err.fp else b""
+            status = int(getattr(err, "code", 500) or 500)
+            logger.error(
+                "[YuanrongFrontendAgentClient] file download HTTP error: "
+                "instance=%s path=%s code=%d",
+                instance_id,
+                path,
+                status,
+            )
+            return status, body, "application/octet-stream", 0
+        except Exception as err:
+            logger.error(
+                "[YuanrongFrontendAgentClient] file download failed: "
+                "instance=%s path=%s error=%s",
+                instance_id,
+                path,
+                err,
+            )
+            if self._is_timeout_error(err):
+                raise YuanrongAgentApiError(
+                    f"file download timeout after {resolved_timeout}s: {err}"
+                ) from err
+            return 500, str(err).encode("utf-8"), "application/octet-stream", 0
+
+    def _do_agent_file_list(
+        self,
+        instance_id: str,
+        path: str,
+        recursive: bool,
+        max_depth: int,
+        auth_headers: dict[str, str],
+    ) -> tuple[int, str]:
+        headers = self._merge_auth_headers({"Accept": "application/json"}, auth_headers)
+        req = urllib.request.Request(
+            self._agent_files_list_url(
+                instance_id,
+                path,
+                recursive=recursive,
+                max_depth=max_depth,
+            ),
+            headers=headers,
+            method="GET",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
+            raise_on_timeout=True,
+        )
 
     @staticmethod
     def _parse_agent_api_response(body: str, status: int) -> dict[str, Any]:
@@ -379,6 +823,17 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             req,
             timeout=self._agent_timeout_s,
             raise_on_timeout=True,
+        )
+
+    def _do_agent_get(self, instance_id: str) -> tuple[int, str]:
+        req = urllib.request.Request(
+            self._agent_delete_url(instance_id),  # same URL: /api/agent/{instanceId}
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        return self._urlopen_request(
+            req,
+            timeout=self._agent_timeout_s,
         )
 
     def _invoke_url(self) -> str:
@@ -628,7 +1083,7 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         )
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
-        return self._urlopen_request(req)
+        return self._urlopen_request(req, raise_on_timeout=True)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         """发送非流式请求.
@@ -642,12 +1097,21 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._ensure_connected()
         payload = self._build_invoke_payload(envelope, stream=False)
         session_id = envelope.session_id or ""
-        status, body = await asyncio.to_thread(
-            self._do_invoke,
-            payload,
-            session_id,
-            envelope.user_id,
-        )
+        try:
+            status, body = await asyncio.to_thread(
+                self._do_invoke,
+                payload,
+                session_id,
+                envelope.user_id,
+            )
+        except YuanrongAgentApiError as e:
+            logger.warning("[YuanrongFrontendAgentClient] invoke failed: %s", e)
+            return AgentResponse(
+                request_id=envelope.request_id,
+                channel_id=envelope.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
         # 仍需 AgentRequest 形状供 _parse_invoke_response 填充 request_id/channel_id 兜底
         request = e2a_to_agent_request(envelope)
         return self._parse_invoke_response(body, status, request)

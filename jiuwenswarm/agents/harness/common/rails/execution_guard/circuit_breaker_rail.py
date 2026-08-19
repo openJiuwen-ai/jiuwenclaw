@@ -378,8 +378,10 @@ class CircuitBreakerRail(DeepAgentRail):
         async with self._get_lock(sid):
             history = self._get_history(sid)
             history.append(ToolCallRecord(
-                tool_name=tool_name, args_hash=args_hash,
-                result_hash=result_hash, timestamp=time.time(),
+                tool_name=tool_name,
+                args_hash=args_hash,
+                result_hash=result_hash,
+                timestamp=time.time(),
                 has_error=has_error,
             ))
             if len(history) > self._config.history_size:

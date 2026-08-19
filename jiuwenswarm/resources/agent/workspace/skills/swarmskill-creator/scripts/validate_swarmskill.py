@@ -32,8 +32,9 @@ What this script catches (deterministic):
     - scripts/workflow.py, when present, satisfies the executable SwarmFlow
       safety envelope: standalone shape, literal META, inline prompts, safe
       imports, phase/agent consistency, human/session call discipline,
-      workflow composition, budget access discipline, permissive schemas, and
-      blocked runtime patterns. The full authoring constraint list lives in
+      portable child-workflow paths and one-level composition, budget access
+      discipline, permissive schemas, and blocked runtime patterns. The full
+      authoring constraint list lives in
       templates/scripts/workflow.py.template.
 
 What this script does NOT catch (judgment calls — see reference/compliance-checklist.md):
@@ -50,7 +51,7 @@ import builtins
 import sys
 import re
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -910,6 +911,118 @@ def _workflow_path_is_missing_or_empty(node: ast.AST | None) -> bool:
     return not isinstance(node.value, str) or not node.value.strip()
 
 
+def _single_assignment_bindings(tree: ast.Module) -> dict[str, ast.AST]:
+    candidates: dict[str, list[ast.AST]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                candidates.setdefault(target.id, []).append(value)
+    return {
+        name: values[0]
+        for name, values in candidates.items()
+        if len(values) == 1
+    }
+
+
+def _unwrap_path_expression(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+    seen: set[str] | None = None,
+) -> ast.AST:
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name) or node.func.id != "str":
+            return node
+        if len(node.args) != 1 or node.keywords:
+            return node
+        return _unwrap_path_expression(node.args[0], bindings, seen)
+    if isinstance(node, ast.Name) and node.id in bindings:
+        visited = set() if seen is None else set(seen)
+        if node.id in visited:
+            return node
+        visited.add(node.id)
+        return _unwrap_path_expression(bindings[node.id], bindings, visited)
+    return node
+
+
+def _split_path_join(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+) -> tuple[ast.AST, list[str]] | None:
+    node = _unwrap_path_expression(node, bindings)
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+        return node, []
+    left = _split_path_join(node.left, bindings)
+    part = _string_literal(node.right)
+    if left is None or part is None:
+        return None
+    base, parts = left
+    return base, [*parts, part]
+
+
+def _is_installed_skills_root(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Subscript):
+        return False
+    if _literal_or_none(node.slice) != 2:
+        return False
+    parents = node.value
+    if not isinstance(parents, ast.Attribute) or parents.attr != "parents":
+        return False
+    resolved_file = parents.value
+    if not isinstance(resolved_file, ast.Call):
+        return False
+    if resolved_file.args or resolved_file.keywords:
+        return False
+    if not isinstance(resolved_file.func, ast.Attribute):
+        return False
+    if resolved_file.func.attr != "resolve":
+        return False
+    path_file = resolved_file.func.value
+    if not isinstance(path_file, ast.Call):
+        return False
+    if path_file.keywords or len(path_file.args) != 1:
+        return False
+    if not isinstance(path_file.func, ast.Name) or path_file.func.id != "Path":
+        return False
+    path_argument = path_file.args[0]
+    return isinstance(path_argument, ast.Name) and path_argument.id == "__file__"
+
+
+def _is_portable_child_workflow_path(
+    node: ast.AST,
+    bindings: dict[str, ast.AST],
+) -> bool:
+    node = _unwrap_path_expression(node, bindings)
+    if not isinstance(node, ast.Call):
+        return False
+    if node.args or node.keywords:
+        return False
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr != "resolve":
+        return False
+    split = _split_path_join(node.func.value, bindings)
+    if split is None:
+        return False
+    base, parts = split
+    if not _is_installed_skills_root(base) or len(parts) != 3:
+        return False
+    if parts[1:] != ["scripts", "workflow.py"]:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", parts[0]))
+
+
+def _is_absolute_path_literal(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
 def _is_budget_attribute(node: ast.AST, name: str) -> bool:
     return (
         isinstance(node, ast.Attribute)
@@ -1017,6 +1130,7 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     asyncio_modules, asyncio_functions = _asyncio_orchestration_aliases(tree)
+    bindings = _single_assignment_bindings(tree)
     session_names = _session_variable_names(tree)
     imported_swarmflow_types = _swarmflow_imported_names(tree) & SUPPORTED_SWARMFLOW_TYPES
 
@@ -1078,19 +1192,37 @@ def _runtime_call_issues(tree: ast.Module) -> tuple[list[str], list[str]]:
                     )
             elif call_name == "workflow":
                 path_argument = _workflow_path_argument(node)
-                path_literal = (
-                    _string_literal(path_argument)
+                resolved_path_argument = (
+                    _unwrap_path_expression(path_argument, bindings)
                     if path_argument is not None
                     else None
                 )
-                if _workflow_path_is_missing_or_empty(path_argument):
+                path_literal = (
+                    _string_literal(resolved_path_argument)
+                    if resolved_path_argument is not None
+                    else None
+                )
+                if _workflow_path_is_missing_or_empty(resolved_path_argument):
                     errors.append(
                         f"line {line}: workflow() requires a non-empty child workflow name/path"
                     )
-                elif path_literal is None:
+                elif path_literal is not None and _is_absolute_path_literal(path_literal):
+                    errors.append(
+                        f"line {line}: workflow() must not hardcode an absolute machine path; "
+                        "derive a portable absolute child path from Path(__file__).resolve()"
+                    )
+                elif path_literal is not None:
+                    errors.append(
+                        f"line {line}: workflow() does not accept a bare Skill name or relative "
+                        "path; derive an absolute child path from Path(__file__).resolve()"
+                    )
+                elif resolved_path_argument is not None and not _is_portable_child_workflow_path(
+                    resolved_path_argument,
+                    bindings,
+                ):
                     warnings.append(
                         f"line {line}: dynamic child workflow path cannot be validated; "
-                        "prefer a stable string literal and validate external input"
+                        "require an absolute .py path and validate its allowed location"
                     )
                 if not _is_directly_awaited(node) and not _is_inside_deferred_lambda(node):
                     errors.append(

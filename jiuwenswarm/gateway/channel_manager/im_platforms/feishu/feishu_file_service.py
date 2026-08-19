@@ -370,17 +370,23 @@ class FeishuFileService:
         """
         下载音频文件。
 
-        飞书音频消息的原生格式为 Opus，messageResource 返回的也是 opus 编码数据。
+        飞书音频消息(msg_type=audio)的 file_key 同为 file.create 上传产物，
+        下载 type 取 "file"（与视频/普通文件一致，非图片资源统一用 file）。
         """
         try:
             from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+            logger.info(
+                "飞书音频下载: message_id=%s file_key=%s",
+                message_id, file_key,
+            )
 
             def _do_download():
                 request = (
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
                     .file_key(file_key)
-                    .type("audio")
+                    .type("file")
                     .build()
                 )
                 return self._api_client.im.v1.message_resource.get(request)
@@ -428,17 +434,25 @@ class FeishuFileService:
         """
         下载视频/媒体文件。
 
-        飞书视频消息通过 messageResource 接口下载。
+        飞书视频消息(msg_type=media)的 content.file_key 实为 file.create
+        上传返回的文件 key（前缀 file_v3_），下载时 GetMessageResource
+        的 type 参数应传 "file"。传 "media"/"video" 均会被服务端拒绝，
+        返回 234001 Invalid request param。
         """
         try:
             from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+            logger.info(
+                "飞书视频下载: message_id=%s file_key=%s",
+                message_id, file_key,
+            )
 
             def _do_download():
                 request = (
                     GetMessageResourceRequest.builder()
                     .message_id(message_id)
                     .file_key(file_key)
-                    .type("media")
+                    .type("file")
                     .build()
                 )
                 return self._api_client.im.v1.message_resource.get(request)

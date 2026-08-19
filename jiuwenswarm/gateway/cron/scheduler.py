@@ -330,6 +330,7 @@ class CronSchedulerService:
         ``cron_{job_id}`` 与真实会话不匹配，cancel 请求落不到点上。
         """
         target_session_id = (state.exec_session_id or "").strip() or f"cron_{state.job_id}"
+        job = self._jobs.get(state.job_id)
         try:
             interrupt_env = e2a_from_agent_fields(
                 request_id=f"cron-cancel-{state.run_id}",
@@ -339,6 +340,7 @@ class CronSchedulerService:
                 params={"cron": {"job_id": state.job_id, "run_id": state.run_id}},
                 is_stream=False,
                 timestamp=self._now_fn(),
+                user_id=str(getattr(job, "user_id", "") or "").strip() or None,
             )
             await self._agent_client.send_request(interrupt_env)
             logger.info(
@@ -571,6 +573,7 @@ class CronSchedulerService:
         project_dir: str,
         run_id: str,
     ) -> str:
+        cron_user_id = str(job.user_id or "").strip()
         env = e2a_from_agent_fields(
             request_id=f"cron-session-create-{run_id}",
             channel_id="__cron__",
@@ -584,9 +587,11 @@ class CronSchedulerService:
                 "work_mode": job.work_mode or DEFAULT_WEB_WORK_MODE,
                 "model_name": job.model_name or None,
                 "cron_id": job.id,
+                "user_id": cron_user_id,
             },
             is_stream=False,
             timestamp=self._now_fn(),
+            user_id=cron_user_id or None,
         )
         response = await self._agent_client.send_request(env)
         payload = dict(response.payload or {}) if isinstance(response.payload, dict) else {}
@@ -737,6 +742,7 @@ class CronSchedulerService:
                     is_stream=False,
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": ev.run_id}},
+                    user_id=str(job.user_id or "").strip() or None,
                 )
                 resp = await self._agent_client.send_request(envelope)
 
@@ -1000,7 +1006,14 @@ class CronSchedulerService:
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
                     metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    user_id=job.user_id,
                 )
+                if not str(job.user_id or "").strip():
+                    logger.warning(
+                        "[Cron] job has no user_id, faas X-Session-Context will be omitted: "
+                        "job_id=%s",
+                        job.id,
+                    )
                 if is_team_cron_mode(mode):
                     timeout_seconds = resolve_cron_job_timeout_seconds(job)
                     text, ok = await self._run_team_stream_job(

@@ -21,6 +21,7 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import { stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -51,10 +52,15 @@ const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
-  const normalized = mode.trim().toLowerCase();
-  if (normalized === 'team') return 'team';
+  // 后端 session.mode 可能带 `.plan` 后缀（`agent.plan` / `team.plan.normal` /
+  // `team.plan.code`），先剥掉再归一化。否则 `team.plan.*` 会落进下面的兜底分支
+  // 被误判成单 agent，把团队会话的 runtime mode 覆盖成 agent（setCurrentSession 等
+  // 路径会把归一化结果写回 runtime）。
+  const normalized = stripPlanSuffix(mode.trim().toLowerCase());
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
-  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
   return 'agent';
 }
 
@@ -86,7 +92,16 @@ export function resolveEffectiveModel(
 ): ModelEntry | null {
   if (chatAvailableModels.length === 0) return null;
   const displayed = selectedModelName || defaultModelName;
+  // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
+  // 也可能存的是真实 API id（后端 session.metadata.model 回传恢复时是
+  // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
+  // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
+  // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
+  // 完成后下拉框自动切回配置的模型"。
   return (
+    chatAvailableModels.find(
+      (m) => m.alias === displayed || m.model_name === displayed,
+    ) ??
     chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
     chatAvailableModels[0]
   );
@@ -219,6 +234,19 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  /** TeamRole 值：leader / teammate / human_agent / bridge_agent / worker */
+  role?: string;
+  /** 外部 CLI 后端名（claude / codex / ...），普通成员为空 */
+  cli_agent?: string | null;
+}
+
+/** 增量成员事件里的空字段不得覆盖已知值：返回 next，空则回退 prev。 */
+function keepKnownMemberField(
+  next: string | null | undefined,
+  prev: string | null | undefined
+): string | undefined {
+  if (typeof next === 'string' && next.trim() !== '') return next;
+  return typeof prev === 'string' && prev.trim() !== '' ? prev : undefined;
 }
 
 export type HumanShareStatus = 'pending' | 'joined' | 'left';
@@ -430,13 +458,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (runtime.mode === 'team') return state.defaultModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
-    // 参数与界面上显示的模型永远一致（bug003）。
+    // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
+    //
+    // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
+    // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
+    // "Laguna S 2.1"），后端无法据此解析，会回退到默认模型。
     const resolved = resolveEffectiveModel(
       state.chatAvailableModels,
       runtime.selectedModelName,
       state.defaultModelName,
     );
-    return resolved ? (resolved.alias || resolved.model_name) : runtime.selectedModelName;
+    return resolved ? resolved.model_name : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -908,13 +940,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (existingIndex >= 0) {
         const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
+        // 每类成员事件只带自己关心的字段（如 team.member.spawned 不带 name），
+        // 直接展开覆盖会把已知的展示名/模式抹成 undefined，界面就退回显示
+        // member_id。空值一律不覆盖已有值，规则同 ToolPanel 的 mergeById。
         updatedMembers[existingIndex] = {
           ...existingMember,
           ...member,
-          status:
-            typeof member.status === 'string' && member.status.trim() !== ''
-              ? member.status
-              : existingMember.status,
+          name: keepKnownMemberField(member.name, existingMember.name),
+          status: keepKnownMemberField(member.status, existingMember.status) ?? '',
+          execution_status: keepKnownMemberField(
+            member.execution_status,
+            existingMember.execution_status
+          ),
+          mode: keepKnownMemberField(member.mode, existingMember.mode),
+          role: keepKnownMemberField(member.role, existingMember.role),
+          cli_agent: keepKnownMemberField(member.cli_agent, existingMember.cli_agent),
         };
         return {
           runtimes: {
@@ -1171,7 +1211,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableModels: (models, activeModel) => {
     set(() => {
-      const chatModels = models.filter((m) => m.is_default !== false);
+      const defaultModels = models.filter((m) => m.is_default !== false);
+      // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
+      // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
+      const chatModels = defaultModels.length > 0 ? defaultModels : models;
       // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const selected = matchedModel

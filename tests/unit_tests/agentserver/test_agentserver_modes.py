@@ -53,7 +53,9 @@ def _is_regular_skill_evolution_rail(rail):
         ("agent.fast", ("agent", None, "agent")),
         ("code.plan", ("code", "plan", "code.plan")),
         ("code.team", ("code", "team", "code.team")),
-        ("team.plan", ("code", "team", "team.plan")),
+        ("team.plan", ("team", "plan", "team.plan.normal")),
+        ("team.plan.normal", ("team", "plan", "team.plan.normal")),
+        ("team.plan.code", ("code", "team", "team.plan.code")),
         (None, ("agent", None, "agent")),
     ],
 )
@@ -458,7 +460,7 @@ def test_build_inputs_maps_team_plan_confirm_interrupt_answers_to_interactive_in
             "feedback": "",
         }
     }
-    assert raw_query == ""
+    assert raw_query.text is inputs["query"]
 
 
 def test_build_inputs_maps_team_plan_reject_answers_to_interactive_input(monkeypatch):
@@ -494,7 +496,7 @@ def test_build_inputs_maps_team_plan_reject_answers_to_interactive_input(monkeyp
             "feedback": "把任务拆得再细一点",
         }
     }
-    assert raw_query == ""
+    assert raw_query.text is inputs["query"]
 
 
 def test_build_inputs_preserves_original_request_on_ask_user_answers(monkeypatch):
@@ -1151,7 +1153,8 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
     # task itself; DeepAgent interaction owns session concurrency, so
     # SessionManager.submit_task is no longer used on this path.
     assert FakeSessionManager.submit_task_calls == []
-    assert fake_adapter.seen_inputs["query"] == "你好"
+    delivered = fake_adapter.seen_inputs["query"]
+    assert json.loads(delivered[delivered.index("{"):])["content"] == "你好"
     assert chunks[0].payload == {"event_type": "chat.done"}
     assert chunks[-1].is_complete is True
 
@@ -1252,7 +1255,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True},
+        "react": {"evolution": {"skill_evolution": True}},
         "context_engineering": {"enabled": False},
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1357,7 +1360,7 @@ def test_deep_adapter_unregisters_evolution_runtime_rails_when_leaving_plan(monk
     adapter._skill_evolution_rail = "skill-evolution-rail"
     adapter._context_assemble_rail = "agent-context-assemble-rail"
     adapter._context_assemble_mode = "agent"
-    adapter._config_cache = {"evolution": {"enabled": True}}
+    adapter._config_cache = {"react": {"evolution": {"skill_evolution": True}}}
 
     ask_user_rail = object()
     monkeypatch.setattr(adapter, "_handle_memory_rail_by_config", _noop)
@@ -1548,7 +1551,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1580,7 +1583,7 @@ def test_deep_adapter_reconfigures_plan_evolution_rails_idempotently(monkeypatch
         if _is_regular_skill_evolution_rail(rail)
     )
     assert skill_evolution_rail.signal_trigger is False
-    assert skill_evolution_rail.review_trigger is False
+    assert skill_evolution_rail.review_trigger is True
 
 
 def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkeypatch, tmp_path):
@@ -1653,7 +1656,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     adapter = JiuWenSwarmDeepAdapter()
     adapter._instance = FakeInstance()
     adapter._config_cache = {
-        "evolution": {"enabled": True, "auto_scan": False},
+        "react": {"evolution": {"skill_evolution": True}},
         "model_name": "configured-model",
     }
     adapter._skill_manager = FakeSkillManager()
@@ -1700,6 +1703,7 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     )
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     request = AgentRequest(
         request_id="req-answer",
         channel_id="tui",
@@ -1737,6 +1741,7 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
             pytest.fail("team simplify approval must not use regular SkillEvolutionRail")
 
     adapter = JiuWenSwarmDeepAdapter()
+    adapter._is_session_scoped_adapter = True
     adapter._skill_evolution_rail = FailingRegularRail()
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,
@@ -2110,11 +2115,11 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     assert {
         "create_instance_mode": "code",
         "sub_mode": "team",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 
-def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
+def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
@@ -2159,12 +2164,12 @@ def test_agent_manager_creates_code_adapter_for_team_plan(monkeypatch):
 
     canonical_mode = asyncio.run(run_case())
 
-    assert canonical_mode == "team.plan"
-    assert {"adapter_mode": "code"} in calls
+    assert canonical_mode == "team.plan.normal"
+    assert {"adapter_mode": "team"} in calls
     assert {
-        "create_instance_mode": "code",
-        "sub_mode": "team",
-        "config": {},
+        "create_instance_mode": "team",
+        "sub_mode": "plan",
+        "config": {"channel_id": "tui"},
     } in calls
 
 

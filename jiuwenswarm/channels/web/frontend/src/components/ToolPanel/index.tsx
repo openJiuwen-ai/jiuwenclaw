@@ -139,12 +139,14 @@ function ExpandedSingleAgentArea({
   ];
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-card">
-      <div className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
-        <div className="flex items-center gap-2">
+    <div data-testid="tool-panel-expanded-body" className="flex h-full flex-col overflow-hidden bg-card">
+      <div data-testid="tool-panel-expanded-header" className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
+        <div data-testid="tool-panel-expanded-tabs" className="flex items-center gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
+              data-testid="tool-panel-tab"
+              data-variant={tab.key}
               className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
                 resolvedTab === tab.key
                   ? 'bg-secondary font-medium text-text'
@@ -160,6 +162,7 @@ function ExpandedSingleAgentArea({
 
         <button
           onClick={onCollapse}
+          data-testid="tool-panel-collapse"
           className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
           title={t('team.collapse')}
         >
@@ -167,13 +170,13 @@ function ExpandedSingleAgentArea({
         </button>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div data-testid="tool-panel-expanded-content" className="flex min-h-0 flex-1 overflow-hidden">
         {resolvedTab === 'artifacts' ? (
-          <div className="flex min-w-0 flex-1 overflow-hidden">
+          <div data-testid="tool-panel-artifacts-pane" data-variant="artifacts" className="flex min-w-0 flex-1 overflow-hidden">
             <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
         ) : resolvedTab === 'review' && reviewPanel ? (
-          <div className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
+          <div data-testid="tool-panel-review-pane" data-variant="review" className="flex min-w-0 flex-1 overflow-hidden">{reviewPanel}</div>
         ) : (
           <TaskPlanningPanel
             variant="expanded"
@@ -234,7 +237,7 @@ export function ToolPanel({
     enabled: canReviewCode,
   });
   const codeReviewPanel = canReviewCode && codeProject && sessionId
-    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} />
+    ? <CodeReviewPanel project={codeProject} sessionId={sessionId} target={codeReviewTarget} diffWatch={codeGitDiffWatch} isProcessing={isProcessing} />
     : undefined;
   const todoTeamTasks = useMemo(() => todos.map(todoItemToTeamTask), [todos]);
   const todoCompletedTasks = useMemo(
@@ -435,7 +438,7 @@ export function ToolPanel({
     if (mode !== 'team') {
       return (
         <div
-          data-testid="tool-panel"
+          data-testid="tool-panel-expanded-single-agent"
           className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
         >
           <div className="h-full bg-panel flex flex-col overflow-hidden">
@@ -459,7 +462,7 @@ export function ToolPanel({
     // 展开模式 - 更宽的面板，只显示 TeamArea
     return (
       <div
-        data-testid="tool-panel"
+        data-testid="tool-panel-expanded-team"
         className="bg-panel h-full overflow-hidden flex-1 flex flex-col"
       >
         <div className="h-full bg-panel flex flex-col overflow-hidden">
@@ -489,21 +492,21 @@ export function ToolPanel({
   // 收起模式 - 原始宽度
   return (
     <div
-      data-testid="tool-panel"
+      data-testid="tool-panel-collapsed"
       className="bg-panel border-l border-border h-full overflow-hidden py-3 shrink-0"
       style={{ width: 'var(--tool-panel-width)' }}
     >
       <div className="h-full bg-panel flex flex-col overflow-hidden">
         {/* Auto-harness extension file tree */}
         {mode === 'auto_harness' ? (
-          <div className="flex-1 overflow-hidden mb-3">
+          <div data-testid="tool-panel-harness-tree-pane" className="flex-1 overflow-hidden mb-3">
             <div className="overflow-hidden h-full flex flex-col px-3">
               <HarnessExtensionTree />
             </div>
           </div>
         ) : mode === 'team' ? (
           /* 团队任务概览和成员列表 */
-          <div className="flex-1 overflow-hidden mb-3">
+          <div data-testid="tool-panel-team-pane" className="flex-1 overflow-hidden mb-3">
             <div className="overflow-hidden h-full flex flex-col">
               <TeamArea
                 members={teamMembers}
@@ -520,7 +523,7 @@ export function ToolPanel({
           </div>
         ) : (
           /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
-          <div className="flex-1 overflow-hidden mb-3">
+          <div data-testid="tool-panel-planning-pane" className="flex-1 overflow-hidden mb-3">
             <TaskPlanningPanel
               variant="compact"
               tasks={todoTeamTasks}
@@ -555,8 +558,8 @@ export function ToolPanel({
         {!teamAreaExpanded && (
           <>
             <hr className="border-0 border-t border-border m-0" />
-            <div className="toolpanel-status-card px-3">
-            <h3 className="toolpanel-status-card__title">
+            <div data-testid="tool-panel-status-card" className="toolpanel-status-card px-3">
+            <h3 data-testid="tool-panel-status-title" className="toolpanel-status-card__title">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
                 <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
@@ -565,11 +568,11 @@ export function ToolPanel({
               {t('toolPanel.status')}
             </h3>
             <div className="space-y-2">
-              <div className="toolpanel-status-card__row">
+              <div data-testid="tool-panel-status-context-compression" className="toolpanel-status-card__row">
                 <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
                 <span className="mono text-text">{compressionDisplay}</span>
               </div>
-              <div className="toolpanel-status-card__row">
+              <div data-testid="tool-panel-status-memory" className="toolpanel-status-card__row">
                 <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
                 <span className="mono text-text">{memoryDisplay}</span>
               </div>

@@ -22,7 +22,6 @@
   - [Slash Commands Reference](SlashCommands.md)
   - [Slash Command Architecture](SlashCommandArchitecture.md)
   - [Tool Permissions & Security](ToolPermissionsSecurity.md)
-  - [Heartbeat](Heartbeat.md)
   - [Scheduled tasks](ScheduledTasks.md)
   - [Task planning](TaskPlanning.md)
   - [Memory](Memory.md)
