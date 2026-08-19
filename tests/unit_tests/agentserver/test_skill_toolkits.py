@@ -11,7 +11,9 @@ from jiuwenswarm.agents.harness.common.recommendation.situation_report import (
 )
 
 
-def test_uninstall_skill_removes_local_skill_without_plugin_record(tmp_path):
+def test_uninstall_skill_removes_local_skill_without_plugin_record(
+    tmp_path, allow_macos_pytest_temp_sources
+):
     manager = SkillManager(workspace_dir=str(tmp_path / "workspace"))
     toolkit = SkillToolkit(manager)
 
