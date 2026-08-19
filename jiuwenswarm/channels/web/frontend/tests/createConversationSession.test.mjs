@@ -39,9 +39,12 @@ test('uses the AgentServer-returned ID', async () => {
   const created = await createConversationSession(request, {
     create_token: 'stable-token',
     mode: 'agent',
+    persist_session: true,
   });
   assert.equal(created.session_id, 'web_real');
+  assert.equal(created.persist_session, false);
   assert.equal(calls[0].params.session_id, undefined);
+  assert.equal(calls[0].params.persist_session, true);
   assert.equal(calls[0].options.timeoutMs, SESSION_CREATE_TIMEOUT_MS);
 });
 
@@ -54,7 +57,7 @@ test('response-loss retry reuses the same create_token', async () => {
       error.code = 'REQUEST_TIMEOUT';
       throw error;
     }
-    return { session_id: 'web_retry' };
+    return { session_id: 'web_retry', persist_session: true };
   };
   const created = await createConversationSession(
     request,
@@ -62,9 +65,14 @@ test('response-loss retry reuses the same create_token', async () => {
     fastRetryOptions,
   );
   assert.equal(created.session_id, 'web_retry');
+  assert.equal(created.persist_session, true);
   assert.deepEqual(calls.map((call) => call.params.create_token), [
     'retry-token',
     'retry-token',
+  ]);
+  assert.deepEqual(calls.map((call) => call.params.persist_session), [
+    undefined,
+    undefined,
   ]);
 });
 
