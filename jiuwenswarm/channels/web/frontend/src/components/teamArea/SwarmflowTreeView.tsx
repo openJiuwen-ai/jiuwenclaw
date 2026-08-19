@@ -11,7 +11,7 @@
  * - 点击 waiting_for_human agent 重新打开 ask-user 对话框
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -36,6 +36,7 @@ import {
   type WorkflowStatus,
   groupWorkflowAgentsByName,
   childPhasesOf,
+  findWorkflowAgent,
   countWaitingForHuman,
   parseTurnFromCorrelationId,
   detectAgentLoops,
@@ -45,6 +46,7 @@ import {
   findActiveIterationIndex,
 } from './workflowTypes';
 import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { webRequest } from '../../services/webClient';
 import type { AskUserQuestionPayload } from '../../types/websocket';
 import { SwarmflowGraphView } from './SwarmflowGraphView';
@@ -373,26 +375,49 @@ function AgentNode({
 
   const handleAgentClick = useCallback(() => {
     if (agent.status !== 'waiting_for_human') return;
-    const corr = agent.correlation_id ?? agent.id;
-    const payload: AskUserQuestionPayload = {
-      request_id: `swarmflow:${runId}:${corr}`,
-      source: 'swarmflow_human',
-      questions: [
-        {
-          question: agent.human_prompt || '(SwarmFlow is waiting for your input)',
-          header: agent.name,
-          options: [],
-          multi_select: false,
+    void (async () => {
+      let question = agent.human_prompt?.trim();
+      if (!question) {
+        // Phase summary 可能未携带 prompt——按需拉单个 agent 完整体（get_agent）。
+        const store = useSessionStore.getState();
+        const lookup = findWorkflowAgent(
+          store.runtimes[sessionId]?.workflowRuns ?? [],
+          runId,
+          agent.id,
+        );
+        if (lookup) {
+          await store
+            .loadAgentDetail(sessionId, runId, lookup.phase.id, agent.id)
+            .catch(() => undefined);
+          const refreshed = findWorkflowAgent(
+            useSessionStore.getState().runtimes[sessionId]?.workflowRuns ?? [],
+            runId,
+            agent.id,
+          );
+          question = refreshed?.agent.human_prompt?.trim();
+        }
+      }
+      const corr = agent.correlation_id ?? agent.id;
+      const payload: AskUserQuestionPayload = {
+        request_id: `swarmflow:${runId}:${corr}`,
+        source: 'swarmflow_human',
+        questions: [
+          {
+            question: question || '(SwarmFlow is waiting for your input)',
+            header: agent.name,
+            options: [],
+            multi_select: false,
+          },
+        ],
+        swarmflowMeta: {
+          run_id: runId,
+          correlation_id: corr,
+          agent_id: agent.id,
+          agent_name: agent.name,
         },
-      ],
-      swarmflowMeta: {
-        run_id: runId,
-        correlation_id: corr,
-        agent_id: agent.id,
-        agent_name: agent.name,
-      },
-    };
-    useChatStore.getState().setPendingQuestion(sessionId, payload);
+      };
+      useChatStore.getState().setPendingQuestion(sessionId, payload);
+    })();
   }, [agent, runId, sessionId]);
 
   return (
@@ -581,6 +606,16 @@ function PhaseNode({
   const totalCount = phase.agents?.length ?? 0;
   const hasChildren =
     sessions.length > 0 || uniqueAgents.length > 0 || agentLoops.length > 0 || childPhases.length > 0;
+
+  // 历史恢复后 get_workflow 只给 phase 骨架（无 agents）——展开时按需拉完整 agents。
+  const needsAgents = phase.agents === undefined && (phase.agent_count ?? 0) > 0;
+  useEffect(() => {
+    if (!expanded || !needsAgents) return;
+    void useSessionStore
+      .getState()
+      .loadPhaseAgents(sessionId, runId, phase.id)
+      .catch(() => undefined);
+  }, [expanded, needsAgents, sessionId, runId, phase.id]);
 
   return (
     <div>

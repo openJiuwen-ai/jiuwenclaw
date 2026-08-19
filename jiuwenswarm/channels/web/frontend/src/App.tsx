@@ -58,6 +58,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages, useResponsiveLayout, useResponsivePanelResize } from './hooks';
 import { webRequest } from './services/webClient';
+import type { WorkflowRun } from './components/teamArea/workflowTypes';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
 import { useSingleAgentPanelState } from './features/singleAgentPanelState';
@@ -1748,6 +1749,72 @@ function AppContent({
     setHistoryLoadingMore(false);
     
     setLoadingHistory(sessionId, true);
+
+    // 历史消息恢复只回放白名单事件类型，workflow.updated 不在其中——
+    // 后端把完整 workflow 快照存在 session metadata（persist_workflow_runs），
+    // 恢复完成后主动拉 command.workflows 列表 + 每个工作流的首页 phase 摘要，
+    // 把已执行过的工作流重新灌入 sessionStore.workflowRuns，否则刷新/切回后树视图空白。
+    const restoreWorkflowSnapshot = (sid: string) => {
+      void (async () => {
+        try {
+          const payload = await webRequest<{
+            workflows?: unknown[];
+            total?: number;
+            has_more?: boolean;
+          }>('command.workflows', { session_id: sid, action: 'list' });
+          const list = Array.isArray(payload?.workflows) ? payload.workflows : [];
+          const ids = list.map((w) => {
+            if (w && typeof w === 'object') {
+              const item = w as { id?: string; name?: string; status?: string };
+              return { id: item.id, name: item.name, status: item.status };
+            }
+            return undefined;
+          });
+          console.log(
+            '[history.restore] workflow snapshot sid=%s total=%s has_more=%s listLen=%d items=%o',
+            sid, payload?.total, payload?.has_more, list.length, ids,
+          );
+          if (list.length === 0) return;
+          const store = useSessionStore.getState();
+          for (const item of list) {
+            if (item && typeof item === 'object' && (item as { id?: unknown }).id) {
+              store.applyWorkflowUpdate(sid, item as WorkflowRun);
+            }
+          }
+          // List 返回的是 summary（无 phases）——对每个工作流拉首页 get_workflow，
+          // 拿到 phase 摘要后灌入 store，树视图才有 phase 卡片可渲染。
+          for (const item of list) {
+            const wfId = (item as { id?: string } | null)?.id;
+            if (!wfId) continue;
+            try {
+              const detail = await webRequest<{
+                workflow?: WorkflowRun;
+                phase_total?: number;
+                has_more?: boolean;
+              }>('command.workflows', {
+                session_id: sid,
+                action: 'get_workflow',
+                workflow_id: wfId,
+                phase_offset: 0,
+              });
+              if (detail?.workflow && (detail.workflow as { id?: string }).id) {
+                store.applyWorkflowUpdate(sid, detail.workflow as WorkflowRun);
+              }
+            } catch {
+              // 单个工作流详情失败不阻断整体恢复。
+            }
+          }
+          const after = useSessionStore.getState().runtimes[sid];
+          console.log(
+            '[history.restore] workflow snapshot applied sid=%s swarmflowActive=%s workflowRunsLen=%d',
+            sid, after?.swarmflowActive, after?.workflowRuns?.length,
+          );
+        } catch (error) {
+          console.warn('[history.restore] workflow snapshot failed', error);
+        }
+      })();
+    };
+
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
@@ -1769,6 +1836,7 @@ function AppContent({
         });
         setLoadingHistory(sessionId, false);
         startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
+        restoreWorkflowSnapshot(sessionId);
         queueMicrotask(() => {
           if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
             historyRestoreHandlesRef.current.delete(sessionId);
@@ -1793,6 +1861,7 @@ function AppContent({
         }
         setLoadingHistory(sessionId, false);
         startBackgroundHistoryPrefetch(sessionId, 1, restoredTotalPages);
+        restoreWorkflowSnapshot(sessionId);
         if (historyRestoreHandlesRef.current.get(sessionId) === restoreHandle) {
           historyRestoreHandlesRef.current.delete(sessionId);
         }

@@ -24,14 +24,23 @@ export interface WorkflowBudget {
   exhausted: boolean;
 }
 
+export interface WorkflowAgentPart {
+  part_idx: number;
+  total_parts: number;
+  content: string;
+}
+
 export interface WorkflowAgent {
   id: string;
   name: string;
   status: WorkflowStatus;
   model?: string;
   prompt?: string;
+  /** Reassembled from ``prompt_parts`` when the field exceeds the wire part limit. */
+  prompt_parts?: WorkflowAgentPart[];
   activity?: WorkflowAgentActivity[];
   outcome?: string;
+  outcome_parts?: WorkflowAgentPart[];
   error?: string;
   started_at?: string;
   completed_at?: string;
@@ -43,7 +52,10 @@ export interface WorkflowAgent {
   /** ``{phase}:{label}:{turn}`` on ``agent_session`` / ``human_session`` (and ``human()`` one-shots); absent on plain ``agent()``. */
   correlation_id?: string;
   human_prompt?: string;
+  human_prompt_parts?: WorkflowAgentPart[];
   human_reply?: string;
+  human_reply_parts?: WorkflowAgentPart[];
+  activity_parts?: WorkflowAgentPart[];
 }
 
 export interface WorkflowPhase {
@@ -53,11 +65,16 @@ export interface WorkflowPhase {
   status: WorkflowStatus;
   agent_count?: number;
   completed_agent_count?: number;
-  agents: WorkflowAgent[];
+  /** Absent on phase summaries from ``action=get_workflow`` (fetch via ``action=get_phase``). */
+  agents?: WorkflowAgent[];
   /** "child" for sub-workflow cards, null/undefined for author phases. */
   phase_type?: "child" | null;
   /** Parent author phase name (set on child phase declarations). */
   parent_phase?: string | null;
+  /** Phase summary only — full agents not yet fetched via ``action=get_phase``. */
+  detail_pending?: boolean;
+  agent_total?: number;
+  has_more?: boolean;
 }
 
 export interface WorkflowRun {
@@ -78,11 +95,12 @@ export interface WorkflowRun {
   estimated_token_count?: number | null;
   /** Leader-shared budget snapshot. This is deliberately not a per-run budget. */
   budget?: WorkflowBudget | null;
-  phases: WorkflowPhase[];
-  /** List summary only — full detail not yet fetched via ``action=get``. */
+  /** Absent on list summaries from ``action=list`` (fetch via ``action=get_workflow``). */
+  phases?: WorkflowPhase[];
+  /** List summary only — full detail not yet fetched via ``action=get_workflow``. */
   detail_pending?: boolean;
-  /** Wire payload was size-reduced (fields may be missing or clipped). */
-  truncated?: boolean;
+  phase_total?: number;
+  has_more?: boolean;
 }
 
 export interface WorkflowAgentLookup {
@@ -380,7 +398,7 @@ export function normalizeWorkflowRun(workflow: WorkflowRun): WorkflowRun {
       ? workflow.phases.map((phase) => ({
           ...phase,
           agents: Array.isArray(phase.agents)
-            ? phase.agents.map((agent) => ({
+            ? phase.agents.map((agent) => reassembleAgentFieldParts({
                 ...agent,
                 activity: Array.isArray(agent.activity)
                   ? agent.activity.filter(
@@ -391,26 +409,53 @@ export function normalizeWorkflowRun(workflow: WorkflowRun): WorkflowRun {
                     )
                   : undefined,
               }))
-            : [],
+            : phase.agents,
         }))
-      : [],
+      : workflow.phases,
   };
+}
+
+const SPLITTABLE_AGENT_FIELDS = [
+  "prompt",
+  "outcome",
+  "human_prompt",
+  "human_reply",
+  "activity",
+] as const;
+
+/** Reassemble ``{field}_parts`` arrays back into the base string field. */
+export function reassembleAgentFieldParts(agent: WorkflowAgent): WorkflowAgent {
+  let out = agent;
+  for (const field of SPLITTABLE_AGENT_FIELDS) {
+    const partsKey = `${field}_parts`;
+    const parts = (out as unknown as Record<string, unknown>)[partsKey];
+    if (!Array.isArray(parts) || parts.length === 0) continue;
+    const sorted = [...parts].sort((a, b) => {
+      const ai = (a as WorkflowAgentPart).part_idx;
+      const bi = (b as WorkflowAgentPart).part_idx;
+      return ai - bi;
+    });
+    const joined = sorted
+      .map((p) => (p as WorkflowAgentPart).content ?? "")
+      .join("");
+    const next: WorkflowAgent = { ...out, [field]: joined } as WorkflowAgent;
+    delete (next as unknown as Record<string, unknown>)[partsKey];
+    out = next;
+  }
+  return out;
 }
 
 function mergeWorkflowAgent(
   existing: WorkflowAgent | undefined,
   incoming: WorkflowAgent,
 ): WorkflowAgent {
+  const reassembled = reassembleAgentFieldParts(incoming);
   return {
     ...existing,
-    ...incoming,
-    activity: incoming.activity ?? existing?.activity,
-    human_prompt: preferHumanPrompt(existing?.human_prompt, incoming.human_prompt),
+    ...reassembled,
+    activity: reassembled.activity ?? existing?.activity,
+    human_prompt: preferHumanPrompt(existing?.human_prompt, reassembled.human_prompt),
   };
-}
-
-export function isHumanPromptTruncated(text?: string): boolean {
-  return Boolean(text?.includes("[truncated]"));
 }
 
 export function mergeHumanPromptText(existing?: string, incoming?: string): string {
@@ -422,8 +467,6 @@ function preferHumanPrompt(existing?: string, incoming?: string): string | undef
   const right = incoming?.trim();
   if (!left) return right || undefined;
   if (!right) return left;
-  if (isHumanPromptTruncated(right) && !isHumanPromptTruncated(left)) return left;
-  if (isHumanPromptTruncated(left) && !isHumanPromptTruncated(right)) return right;
   return right.length > left.length ? right : left;
 }
 
@@ -431,6 +474,11 @@ function mergeWorkflowPhase(
   existing: WorkflowPhase | undefined,
   incoming: WorkflowPhase,
 ): WorkflowPhase {
+  const incomingHasAgents = Object.prototype.hasOwnProperty.call(incoming, "agents");
+  if (!incomingHasAgents) {
+    // Phase summary (action=get_workflow) — keep existing agents, update meta only.
+    return { ...existing, ...incoming, agents: existing?.agents };
+  }
   const existingAgents = existing?.agents ?? [];
   const mergedAgents = [...existingAgents];
 
@@ -494,15 +542,15 @@ export function mergeWorkflowRun(
   const detailLoaded = workflowHasAgentDetails(merged);
   if (detailLoaded) {
     delete merged.detail_pending;
-    if (!Object.prototype.hasOwnProperty.call(incoming, "truncated")) {
-      delete merged.truncated;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(incoming, "truncated")) {
-    merged.truncated = incoming.truncated;
   }
   if (Object.prototype.hasOwnProperty.call(incoming, "detail_pending")) {
     merged.detail_pending = incoming.detail_pending;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, "has_more")) {
+    merged.has_more = incoming.has_more;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, "phase_total")) {
+    merged.phase_total = incoming.phase_total;
   }
 
   return merged;
