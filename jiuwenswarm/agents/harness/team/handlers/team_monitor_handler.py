@@ -216,17 +216,22 @@ class TeamMonitorHandler(BaseMonitorHandler):
         })
         return base
 
-    async def _lookup_task_body(self, task_id: str) -> tuple[str, str] | None:
-        """Re-query the task's title/content via the monitor's public API.
+    async def _lookup_task_body(self, task_id: str) -> tuple[str | None, str | None, str | None] | None:
+        """Re-query the task's title/content/assignee via the monitor's public API.
 
         Args:
             task_id: The DB task id carried by the monitor event.
 
         Returns:
-            ``(title, content)`` when the task exists, else ``None``. On any
-            exception (monitor None / query error) logs a warning and returns
-            ``None`` so the caller can still emit the event with ``task_id`` +
-            ``status`` (no body) — never blocks the event stream.
+            ``(title, content, assignee)`` when the task exists, else ``None``.
+            On any exception (monitor None / query error) logs a warning and
+            returns ``None`` so the caller can still emit the event with
+            ``task_id`` + ``status`` (no body) — never blocks the event stream.
+            ``assignee`` is included so ``_handle_task`` can backfill the
+            assignee on ``TASK_CREATED`` / ``TASK_UPDATED`` (whose monitor
+            events carry no ``member_name``), letting the frontend attach a
+            freshly-created task to its assignee's card without waiting for a
+            later ``TASK_CLAIMED`` event.
         """
         if self._monitor is None or not task_id:
             return None
@@ -241,7 +246,7 @@ class TeamMonitorHandler(BaseMonitorHandler):
             return None
         if task is None:
             return None
-        return task.title, task.content
+        return task.title, task.content, getattr(task, "assignee", None)
 
     async def _handle_task(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
         """Converge every task event into the frontend-ready task shape.
@@ -279,6 +284,14 @@ class TeamMonitorHandler(BaseMonitorHandler):
                 content_field = _task_text_field("content", body[1])
                 base.update(title_field)
                 base.update(content_field)
+                # TASK_CREATED/TASK_UPDATED 的 monitor 事件不带 member_name（见
+                # events.py：TaskCreatedEvent 不设 member_name），故 _convert_event_to_dict
+                # 不会写入 member_id。此处从 DB 补认领人进 assignee 字段，使前端在
+                # leader 创建任务当下即把任务挂到对应成员卡，无需等 TASK_CLAIMED。
+                # 仅当事件本身未携带 member_id 时回填，避免覆盖 claim 等事件自带的权威认领人。
+                assignee = body[2]
+                if assignee and "member_id" not in base:
+                    base["assignee"] = assignee
         return base
 
     async def _handle_message(self, base: dict[str, Any], event: MonitorEvent) -> dict[str, Any]:
