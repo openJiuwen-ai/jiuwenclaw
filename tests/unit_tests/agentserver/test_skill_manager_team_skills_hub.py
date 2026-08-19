@@ -311,13 +311,47 @@ async def test_handle_skills_swarm_skills_hub_recommend_keeps_item_on_enrich_err
 
 
 @pytest.mark.asyncio
-async def test_handle_skills_swarm_skills_hub_recommend_requires_auth(tmp_path, monkeypatch):
+async def test_handle_skills_swarm_skills_hub_recommend_unauth_falls_back_to_list(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("TEAM_SKILLS_HUB_SYSTEM_TOKEN", raising=False)
     monkeypatch.delenv("TEAM_SKILLS_HUB_USER_TOKEN", raising=False)
     manager = TeamSkillsHubHarnessSkillManager(workspace_dir=str(tmp_path))
+
+    async def _fake_get_data(path, **kwargs):  # noqa: ANN001
+        assert path == "/api/v1/plugins"
+        assert kwargs["params"]["order_by"] == "recommend"
+        assert kwargs["params"]["page_size"] == 3
+        assert "asset_id" not in kwargs["params"]
+        return {
+            "items": [
+                {
+                    "asset_id": "list-skill",
+                    "name": "list-skill",
+                    "display_name": "List Skill",
+                    "short_desc": "from list",
+                    "latest_version": "2.0.0",
+                    "update_time": 99,
+                    "plugin_type": "skill",
+                    "tags": ["demo"],
+                }
+            ]
+        }
+
+    async def _should_not_post(path, **kwargs):  # noqa: ANN001
+        raise AssertionError(f"unauth path must not POST recommend, got {path}")
+
+    manager.set_mock_get_data(_fake_get_data)
+    manager.set_mock_post_data(_should_not_post)
     payload = await manager.handle_skills_swarm_skills_hub_recommend({"top_k": 3})
-    assert payload["success"] is False
-    assert payload["detail_key"] == "skills.swarmskillshub.errors.recommendFailed"
+    assert payload["success"] is True
+    assert payload["source"] == "list_recommend"
+    assert payload["user_id"] == ""
+    assert payload["count"] == 1
+    assert payload["skills"][0]["asset_id"] == "list-skill"
+    assert payload["skills"][0]["display_name"] == "List Skill"
+    assert payload["skills"][0]["summary"] == "from list"
+    assert payload["skills"][0]["plugin_type"] == "skill"
 
 
 @pytest.mark.asyncio

@@ -1915,18 +1915,14 @@ class SkillManager:
     async def handle_skills_swarm_skills_hub_recommend(self, params: dict) -> dict:
         """转发 Swarm Skills Hub 个性化推荐（POST /api/v1/recommend）。
 
+        无 token / system_token（含环境变量）时 fallback：
+        GET /api/v1/plugins?order_by=recommend（与 SkillHub 市场未登录「推荐精选」一致，
+        冷启动下载量兜底，无需鉴权）。
+
         Hub 推荐本身不带 plugin_type；若传入 plugin_type/skill_type，则在 enrich
         后按 plugins 元数据过滤（对齐 SkillHub 市场 list + order_by=recommend）。
         enrich 时 plugins 查不到的项（下架/不可见）会丢掉；HTTP 失败则保留原项。
         """
-        auth = self._resolve_teamskills_hub_auth_with_env(params)
-        if auth.get("error"):
-            return {
-                "success": False,
-                "detail": str(auth["error"]),
-                "detail_key": "skills.swarmskillshub.errors.recommendFailed",
-            }
-
         top_k_raw = params.get("top_k", params.get("limit", 10))
         try:
             top_k = max(1, min(int(top_k_raw), 500))
@@ -1957,6 +1953,18 @@ class SkillManager:
         fetch_k = top_k
         if plugin_types:
             fetch_k = min(500, max(top_k * 5, top_k))
+
+        auth = self._resolve_teamskills_hub_auth_with_env(params)
+        if auth.get("error"):
+            # 未鉴权：走列表推荐路径（无需凭证），不要直接失败把前端滤空。
+            return await self._recommend_via_plugins_list(
+                top_k=top_k,
+                fetch_k=fetch_k,
+                request_id=request_id,
+                category_id=category_id,
+                plugin_types=plugin_types,
+                base_url=base_url,
+            )
 
         body: dict[str, Any] = {
             "user_id": user_id,
@@ -2035,6 +2043,86 @@ class SkillManager:
             }
         except Exception as exc:
             logger.error("Swarm Skills Hub 推荐失败: %s", exc)
+            return {
+                "success": False,
+                "detail": str(exc)[:500],
+                "detail_key": "skills.swarmskillshub.errors.recommendFailed",
+            }
+
+    async def _recommend_via_plugins_list(
+        self,
+        *,
+        top_k: int,
+        fetch_k: int,
+        request_id: str,
+        category_id: str,
+        plugin_types: list[str],
+        base_url: str,
+    ) -> dict:
+        """未鉴权冷启动：GET /plugins?order_by=recommend（无需凭证）。"""
+        query_params: dict[str, Any] = {
+            "page": 1,
+            "page_size": fetch_k,
+            "order_by": "recommend",
+            "desc": "true",
+        }
+        # 不带 category_id：与 SkillHub「推荐精选」一致，走列表内推荐路径。
+        # 带了 category_id 时 SkillHub 会回退 install_count，仍可按类目出列表。
+        if category_id:
+            query_params["category_id"] = category_id
+        if plugin_types:
+            query_params["plugin_type"] = ",".join(plugin_types)
+
+        try:
+            data = await self._team_skills_hub_http_get_data(
+                "/api/v1/plugins",
+                params=query_params,
+                timeout=_TEAM_SKILLS_HUB_MARKET_TIMEOUT,
+                base_url=base_url,
+            )
+            items = data.get("items", []) if isinstance(data, dict) else []
+            skills: list[dict[str, Any]] = []
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                asset_id = str(item.get("asset_id", "")).strip()
+                if not asset_id:
+                    continue
+                name = str(item.get("name", "")).strip() or asset_id
+                plugin_type = self._normalize_hub_plugin_type(str(item.get("plugin_type") or ""))
+                if plugin_types and plugin_type not in set(plugin_types):
+                    continue
+                # 列表无分数：用位次作稳定降序分，便于前端排序展示。
+                score = float(max(top_k - idx, 1))
+                skills.append(
+                    {
+                        "asset_id": asset_id,
+                        "score": score,
+                        "name": name,
+                        "display_name": str(item.get("display_name", "")).strip() or name,
+                        "summary": str(item.get("short_desc", "")).strip(),
+                        "version": str(item.get("latest_version", "")).strip(),
+                        "updated_at": int(item.get("update_time") or 0),
+                        "plugin_type": plugin_type,
+                        "tags": self._coerce_str_list(item.get("tags")),
+                    }
+                )
+                if len(skills) >= top_k:
+                    break
+
+            return {
+                "success": True,
+                "request_id": request_id,
+                "user_id": "",
+                "source": "list_recommend",
+                "category_id": category_id,
+                "plugin_type": ",".join(plugin_types) if plugin_types else "",
+                "count": len(skills),
+                "skills": skills,
+                "items": skills,
+            }
+        except Exception as exc:
+            logger.error("Swarm Skills Hub 列表推荐 fallback 失败: %s", exc)
             return {
                 "success": False,
                 "detail": str(exc)[:500],
