@@ -144,6 +144,7 @@ class ReqMethod(Enum):
     SKILLS_TEAMSKILLS_HUB_INSTALL = "skills.teamskillshub.install"
     SKILLS_TEAMSKILLS_HUB_PUBLISH = "skills.teamskillshub.publish"
     SKILLS_TEAMSKILLS_HUB_DELETE = "skills.teamskillshub.delete"
+    SKILLS_SWARMSKILLS_HUB_DETAIL = "skills.swarmskillshub.detail"
     SKILLS_RETRIEVAL_STATUS = "skills.retrieval.status"
     SKILLS_RETRIEVAL_INDEX_BUILD = "skills.retrieval.index_build"
     SKILLS_RETRIEVAL_INDEX_CANCEL = "skills.retrieval.index_cancel"
