@@ -1594,7 +1594,8 @@
     "setEnabledSuccess": "已启用技能 {name}",
     "setDisabledSuccess": "已禁用技能 {name}",
     "marketplaceTabs": {
-      "builtin": "预置"
+      "builtin": "预置",
+      "skillhub": "SkillHub"
     },
     "swarmskills": {
       "title": "SwarmSkills在线搜索",
@@ -1642,6 +1643,7 @@
       "goToChat": "去聊天",
       "goTry": "去试试",
       "publish": "发布",
+      "rebuild": "重建",
       "synthesizeNewVersion": "重建技能",
       "synthesizeTooltip": "将积累的技能经验与原技能合成，生成新的版本"
     },
@@ -1731,6 +1733,15 @@
     "detail": {
       "basicInfo": "基本信息",
       "versionManage": "版本管理",
+      "versionsLoadFailed": "版本加载失败",
+      "noVersions": "暂无版本记录",
+      "fileTree": "文件列表",
+      "filesLoadFailed": "文件列表加载失败",
+      "noFiles": "暂无文件",
+      "binaryFileDownload": "此文件无法文本预览，请点击下载",
+      "noPreview": "无法预览此文件",
+      "contentPreview": "内容预览",
+      "selectFileToPreview": "请选择左侧文件进行预览",
       "tabs": {
         "contentDetail": "内容详情",
         "filePreview": "文件预览",

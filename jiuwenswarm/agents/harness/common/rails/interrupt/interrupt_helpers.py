@@ -133,6 +133,7 @@ def build_permission_rail(
         persist_user_overlay_from_effective,
     )
     from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+        SKILLS_REBUILD_SILENT,
         TOOL_PERMISSION_CHANNEL_ID,
         TOOL_PERMISSION_SESSION_ID,
     )
@@ -242,6 +243,23 @@ def build_permission_rail(
         async def _request_permission_confirmation(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
+            # skills.rebuild 静默 follow-up 使用临时 session，无法弹 UI 审批；
+            # 若返回 "interrupt"，Agent 会停在 bash/write 上却仍被当成重建成功。
+            rebuild_sid = (TOOL_PERMISSION_SESSION_ID.get() or "").strip()
+            if rebuild_sid.startswith("skills-rebuild:"):
+                tool_name = getattr(getattr(req, "tool_call", None), "name", "") or ""
+                logger.info(
+                    "[InterruptHelpers] auto-approve permission for silent skills.rebuild "
+                    "session_id=%s tool=%s",
+                    rebuild_sid,
+                    tool_name,
+                )
+                return PermissionConfirmResponse(
+                    approved=True,
+                    auto_confirm=False,
+                    feedback="",
+                )
+
             channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
             if channel != "acp":
                 return "interrupt"
@@ -323,6 +341,12 @@ def build_permission_rail(
                 )
             return None
 
+        def _is_silent_skills_rebuild_session() -> bool:
+            if SKILLS_REBUILD_SILENT.get():
+                return True
+            sid = (TOOL_PERMISSION_SESSION_ID.get() or "").strip()
+            return sid.startswith("skills-rebuild:")
+
         async def _permission_scene_hook(
             inp: PermissionSceneHookInput,
         ) -> tuple[str, ...] | None:
@@ -331,6 +355,10 @@ def build_permission_rail(
                 check_avatar_permission,
                 _resolve_owner_scope_level,
             )
+
+            # skills.rebuild 静默 Agent 无法弹权限卡片；在 tiered 判定前直接放行。
+            if _is_silent_skills_rebuild_session():
+                return ("approve",)
 
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
 
@@ -391,6 +419,18 @@ def build_permission_rail(
                 or (TOOL_PERMISSION_SESSION_ID.get() or "").strip()
                 or None
             )
+            if SKILLS_REBUILD_SILENT.get() or (
+                isinstance(sid, str) and sid.startswith("skills-rebuild:")
+            ):
+                from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+                    _FALLBACK_MODE_PRESETS,
+                )
+
+                return {
+                    "enabled": True,
+                    "mode": "full_access",
+                    **_FALLBACK_MODE_PRESETS["full_access"],
+                }
             try:
                 return compose_host_effective_permissions(session_id=sid)
             except Exception:

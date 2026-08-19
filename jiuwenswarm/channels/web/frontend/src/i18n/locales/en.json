@@ -1596,7 +1596,8 @@
     "setEnabledSuccess": "Skill {name} enabled",
     "setDisabledSuccess": "Skill {name} disabled",
     "marketplaceTabs": {
-      "builtin": "Built-in"
+      "builtin": "Built-in",
+      "skillhub": "SkillHub"
     },
     "swarmskills": {
       "title": "SwarmSkills Online Search",
@@ -1644,6 +1645,7 @@
       "goToChat": "Go to Chat",
       "goTry": "Try It",
       "publish": "Publish",
+      "rebuild": "Rebuild",
       "synthesizeNewVersion": "Rebuild Skill",
       "synthesizeTooltip": "Synthesize accumulated skill experience with the original skill to generate a new version"
     },
@@ -1733,6 +1735,15 @@
     "detail": {
       "basicInfo": "Basic Info",
       "versionManage": "Version Management",
+      "versionsLoadFailed": "Failed to load versions",
+      "noVersions": "No version history",
+      "fileTree": "File list",
+      "filesLoadFailed": "Failed to load file list",
+      "noFiles": "No files",
+      "binaryFileDownload": "This file cannot be previewed as text. Please download it.",
+      "noPreview": "Cannot preview this file",
+      "contentPreview": "Content preview",
+      "selectFileToPreview": "Select a file on the left to preview",
       "tabs": {
         "contentDetail": "Content Details",
         "filePreview": "File Preview",

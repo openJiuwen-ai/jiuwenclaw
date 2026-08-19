@@ -318,14 +318,14 @@ def test_detect_skill_type_priority(tmp_path: Path) -> None:
     (swarm / "a.png").write_bytes(b"1")
     assert detect_skill_type(swarm) == SKILL_TYPE_SWARM
 
-    # kind: team-skill 不再判为 swarm_skill
+    # kind: team-skill 与 swarm-skill 等价，判为 swarm_skill
     team_kind = tmp_path / "team-kind"
     team_kind.mkdir()
     (team_kind / "SKILL.md").write_text(
         "---\nname: team-demo\nkind: team-skill\n---\nbody\n",
         encoding="utf-8",
     )
-    assert detect_skill_type(team_kind) == SKILL_TYPE_SKILL
+    assert detect_skill_type(team_kind) == SKILL_TYPE_SWARM
 
     # 仅有 workflow.md / roles 目录、无 swarm-skill kind 时，不再判为 swarm
     legacy_layout = tmp_path / "legacy-layout"

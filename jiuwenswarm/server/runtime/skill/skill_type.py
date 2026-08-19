@@ -3,7 +3,7 @@
 """根据 Skill frontmatter / 资源识别 skill_type.
 
 优先级固定：swarm_skill > multimodal_skill > skill。
-swarm 判定依据 frontmatter ``kind: swarm-skill``。
+swarm 判定依据 frontmatter ``kind: swarm-skill`` 或兼容别名 ``kind: team-skill``。
 扫描多媒体时排除根级 ``.archive/``。
 """
 
@@ -20,7 +20,8 @@ SKILL_TYPE_SKILL = "skill"
 SKILL_TYPE_SWARM = "swarm_skill"
 SKILL_TYPE_MULTIMODAL = "multimodal_skill"
 
-_SWARM_KIND = "swarm-skill"
+# ``team-skill`` 为 Swarm Skill 的兼容别名（文档 / 存量包沿用）。
+_SWARM_KINDS = frozenset({"swarm-skill", "team-skill"})
 
 _MULTIMEDIA_SUFFIXES = frozenset(
     {
@@ -53,8 +54,8 @@ def detect_skill_type(skill_dir: Path | None) -> str:
 
 
 def _frontmatter_kind_is_swarm(skill_dir: Path) -> bool:
-    """SKILL.md frontmatter 的 kind 是否为 ``swarm-skill``."""
-    return _read_frontmatter_kind(skill_dir) == _SWARM_KIND
+    """SKILL.md frontmatter 的 kind 是否为 ``swarm-skill`` / ``team-skill``."""
+    return _read_frontmatter_kind(skill_dir) in _SWARM_KINDS
 
 
 def _read_frontmatter_kind(skill_dir: Path) -> str:

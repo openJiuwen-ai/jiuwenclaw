@@ -23,6 +23,9 @@ from typing import Any, AsyncIterator, Tuple
 
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
 
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    SKILLS_REBUILD_SILENT,
+)
 from jiuwenswarm.server.runtime.agent_adapter.agent_adapters import (
     AgentAdapter,
     create_adapter,
@@ -1611,8 +1614,12 @@ class JiuWenSwarm:
             )
             adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(chat_request))
             inputs, _, _ = self._build_inputs(chat_request)
-            async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
-                pass
+            silent_token = SKILLS_REBUILD_SILENT.set(True)
+            try:
+                async for _chunk in adapter.process_message_stream_impl(chat_request, inputs):
+                    pass
+            finally:
+                SKILLS_REBUILD_SILENT.reset(silent_token)
 
             if skill_dir is not None and content_root is not None and should_write_back:
                 # Agent 改写 workspace 后回写目标版本副本
