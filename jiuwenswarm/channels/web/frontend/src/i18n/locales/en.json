@@ -2481,12 +2481,10 @@
     "image": "Image",
     "code": "Code",
     "moreActions": "More diagram actions",
-    "downloadSource": "Download source",
     "downloadImage": "Download as image",
     "copyCode": "Copy code",
     "copied": "Copied",
     "copyFailed": "Copy failed",
-    "downloadSourceFailed": "Could not save source file",
     "preparingImage": "Preparing image…",
     "downloadImageFailed": "Could not save image"
   },

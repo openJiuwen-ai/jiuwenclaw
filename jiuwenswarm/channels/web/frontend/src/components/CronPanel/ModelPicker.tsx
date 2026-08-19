@@ -9,6 +9,7 @@ interface ModelPickerProps {
   value: string | null;
   onChange: (modelName: string) => void;
   disabled?: boolean;
+  lockedToDefault?: boolean;
 }
 
 // 定时任务抽屉里的"模型"选择器。视觉和交互照搬会话界面输入框工具栏的模型选择器
@@ -18,7 +19,7 @@ interface ModelPickerProps {
 // 不同——会话那边是直接绑死 activeSessionId 的 session 级状态，抽屉里需要一个独立于会话的
 // 受控字段（编辑已有任务时展示的是该任务自己存的 model_name，不是当前会话选中的模型），
 // 所以这里照抄样式和交互，不能照搬组件实例。
-export default function ModelPicker({ value, onChange, disabled = false }: ModelPickerProps) {
+export default function ModelPicker({ value, onChange, disabled = false, lockedToDefault = false }: ModelPickerProps) {
   const { t } = useTranslation();
   const availableModels = useSessionStore((s) => s.availableModels);
   const [open, setOpen] = useState(false);
@@ -64,7 +65,7 @@ export default function ModelPicker({ value, onChange, disabled = false }: Model
         className="chat-mode-select__trigger"
         onClick={handleTriggerClick}
         disabled={disabled}
-        title={t('chat.modelSelector.tooltip')}
+        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
         aria-haspopup="menu"
         aria-expanded={open}
         data-testid="cron-model-picker-trigger"

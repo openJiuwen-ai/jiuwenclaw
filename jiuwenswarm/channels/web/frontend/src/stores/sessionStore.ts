@@ -103,6 +103,37 @@ export function resolveEffectiveModel(
   );
 }
 
+/**
+ * Resolve the model shown by the chat selector.
+ *
+ * Team mode is locked to the main-chat default model, so a stale model kept by
+ * the previous single-agent runtime must not win the selector lookup.
+ */
+export function resolveChatModelSelection(
+  chatAvailableModels: ModelEntry[],
+  selectedModelName: string | null,
+  defaultModelName: string | null,
+  lockedToDefault: boolean,
+): ModelEntry | null {
+  return resolveEffectiveModel(
+    chatAvailableModels,
+    lockedToDefault ? null : selectedModelName,
+    defaultModelName,
+  );
+}
+
+/** Resolve a configured display name to the model ID required by backend RPCs. */
+export function resolveConfiguredModelName(
+  availableModels: ModelEntry[],
+  configuredModelName: string | null,
+): string | null {
+  const normalizedName = configuredModelName?.trim();
+  if (!normalizedName) return null;
+  return availableModels.find(
+    (model) => model.alias === normalizedName || model.model_name === normalizedName,
+  )?.model_name ?? null;
+}
+
 const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
 
 function normalizeExecutionContent(content?: string): string {
@@ -344,7 +375,7 @@ interface SessionState {
   availableModels: ModelEntry[];
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
-  /** 后端配置的默认模型（alias 优先），供新建会话取用，不受任何会话手动切换模型影响 */
+  /** 后端配置的默认模型 ID，供集群模式和新建会话取用，不受任何会话手动切换模型影响 */
   defaultModelName: string | null;
 
   // B 类 session 级字段
@@ -538,10 +569,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const selectedModelName = normalizedMode === 'team'
+        ? state.defaultModelName
+        : runtime.selectedModelName;
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode },
+          [sessionId]: { ...runtime, mode: normalizedMode, selectedModelName },
         },
       };
     });
@@ -1206,20 +1240,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setAvailableModels: (models, activeModel) => {
-    set(() => {
+    set((state) => {
       const defaultModels = models.filter((m) => m.is_default !== false);
       // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
       // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
       const chatModels = defaultModels.length > 0 ? defaultModels : models;
-      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
+      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；状态统一保存真实
+      // model_name，alias 只用于界面展示，避免集群模式把 alias 直接发给后端。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
-      const selected = matchedModel
-        ? (matchedModel.alias || matchedModel.model_name)
-        : (chatModels[0] ? (chatModels[0].alias || chatModels[0].model_name) : null);
+      const selected = (matchedModel ?? chatModels[0])?.model_name ?? null;
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected };
+      const runtimes = Object.fromEntries(
+        Object.entries(state.runtimes).map(([sessionId, runtime]) => [
+          sessionId,
+          runtime.mode === 'team' ? { ...runtime, selectedModelName: selected } : runtime,
+        ]),
+      );
+      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected, runtimes };
     });
   },
 

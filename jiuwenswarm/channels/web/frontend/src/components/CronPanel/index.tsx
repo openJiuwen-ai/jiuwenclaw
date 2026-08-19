@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronLeft, ChevronRight, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
-import { useCronStore } from '../../stores';
+import { resolveConfiguredModelName, useCronStore, useSessionStore } from '../../stores';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
@@ -219,6 +219,12 @@ function isTeamCronModeValue(raw: string | undefined | null): boolean {
     value === 'team.plan.code' ||
     value === 'code.team'
   );
+}
+
+function resolveSubmittedCronModelName(value: CronTaskFormValue): string | null {
+  if (value.mode !== 'team') return value.modelName;
+  const { availableModels, defaultModelName } = useSessionStore.getState();
+  return resolveConfiguredModelName(availableModels, defaultModelName);
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
@@ -526,6 +532,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   const expiredCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'expired').length, [jobs]);
 
   async function handleCreateSubmit(value: CronTaskFormValue) {
+    const modelName = resolveSubmittedCronModelName(value);
     try {
       await webRequest<{ job: CronJobDTO }>('cron.job.create', {
         name: value.name.trim(),
@@ -546,7 +553,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         // 优先信任显式 project_id，只传 project_dir 需要多一层反查（见 CronTaskFormValue.projectId 注释）。
         // 未选项目（projectId 为 null）时不传这个 key，走 project_dir 空串的既有归默认项目逻辑。
         ...(value.projectId ? { project_id: value.projectId } : {}),
-        ...(value.modelName ? { model_name: value.modelName } : {}),
+        ...(modelName ? { model_name: modelName } : {}),
         mode: value.mode,
         session_id: sessionId,
       });
@@ -572,6 +579,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }
 
   async function handleEditSubmit(jobId: string, value: CronTaskFormValue) {
+    const modelName = resolveSubmittedCronModelName(value);
     try {
       const isProactive = jobId === PROACTIVE_AUTO_JOB_ID;
       // proactive 自动维护 job 只允许改 cron_expr 和 timezone；enabled/mode/name/description/
@@ -587,7 +595,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             targets: value.targets.trim() || 'web',
             enabled: value.enabled,
             wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
-            ...(value.modelName ? { model_name: value.modelName } : {}),
+            ...(modelName ? { model_name: modelName } : {}),
             mode: value.mode,
           };
       await webRequest<{ job: CronJobDTO }>('cron.job.update', {
