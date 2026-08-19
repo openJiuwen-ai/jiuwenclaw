@@ -497,10 +497,12 @@ function parseHistoryTimelineEntry(
 
   if (role === 'user') {
     const rawContent = record.content ?? record.text ?? record.body;
-    if (isA2UIClientEventContent(rawContent)) {
-      return null;
-    }
-    const content = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
+    const content =
+      typeof rawContent === 'string'
+        ? rawContent
+        : isA2UIClientEventContent(rawContent)
+          ? (JSON.stringify(rawContent) as string)
+          : String(rawContent ?? '');
     const mediaItems = extractHistoryMediaItems(record);
     if (!content.trim() && mediaItems.length === 0) {
       return null;

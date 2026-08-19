@@ -473,6 +473,9 @@ export function ChatTimelineList({
     <div className="chat-timeline" data-testid="chat-panel-timeline">
       {renderItems.map((item) => {
         if (item.type === 'message') {
+          if (item.hidden) {
+            return null;
+          }
           const meta = item.turnId >= 0 ? turnWorkMeta.get(item.turnId) : undefined;
           const turnFoldable = Boolean(meta?.completed && meta.hasWork && item.hideMeta);
           const turnOpen = !turnFoldable || Boolean(expandedTurns[item.turnId]);

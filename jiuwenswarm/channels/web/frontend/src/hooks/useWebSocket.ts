@@ -1546,6 +1546,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       userInputVersionRef.current += 1;
       stopAllTts();
 
+      useChatStore.getState().addMessage(sessionId, {
+        id: `a2ui-user-${Date.now()}`,
+        role: 'user',
+        content: JSON.stringify(content) as string,
+        timestamp: new Date().toISOString(),
+      });
+
       useChatStore.getState().setProcessing(sessionId, true);
       useChatStore.getState().setThinking(sessionId, true);
 
