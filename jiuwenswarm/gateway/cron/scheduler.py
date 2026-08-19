@@ -609,7 +609,7 @@ class CronSchedulerService:
         self._seq += 1
         ev = _Event(at_ts=at_ts, seq=self._seq, kind=kind, job_id=job_id, run_id=run_id)
         heapq.heappush(self._events, (ev.at_ts, ev.seq, ev))
-        # 若事件已在 1 秒内到期（如 push_update 补发），需唤醒主循环，否则会等到 timeout（可能 10 分钟）
+        # 若事件已在 1 秒内到期（如 push_update 补发），需唤醒主循环，否则会等到 timeout（可能 1 小时）
         if at_ts <= self._now_fn() + 1.0:
             self._reload_event.set()
 
@@ -1005,7 +1005,13 @@ class CronSchedulerService:
                     params=params,
                     is_stream=is_team_cron_mode(mode),
                     timestamp=self._now_fn(),
-                    metadata={"cron": {"job_id": job.id, "run_id": run_id}},
+                    metadata={
+                        "cron": {"job_id": job.id, "run_id": run_id},
+                        # 真实推送渠道（普通模式 channel 是内部 "__cron__"）。
+                        # AgentServer 用它注册 send_file 等按渠道开关的工具，并作为
+                        # 文件推送的 channel_id，与 cron 文本结果推送到同一批渠道。
+                        "targets": str(job.targets or "").strip(),
+                    },
                     user_id=job.user_id,
                 )
                 if not str(job.user_id or "").strip():
@@ -1211,7 +1217,7 @@ class CronSchedulerService:
         request_metadata.setdefault("cron", cron_meta)
 
         round_state = new_cron_team_round_state()
-        consume_meta: dict[str, Any] = {"ok": True, "ended_early": False}
+        consume_meta: dict[str, Any] = {"ok": True, "ended_early": False, "error_text": ""}
         stream_gen = self._agent_client.send_request_stream(envelope)
 
         async def _consume() -> tuple[str, bool]:
@@ -1234,8 +1240,24 @@ class CronSchedulerService:
                     event_type = str((payload or {}).get("event_type") or "").strip()
                     if payload:
                         apply_cron_team_round_event(round_state, payload)
-                        if event_type == "chat.error":
+                        if event_type in ("chat.error", "execution.error"):
                             consume_meta["ok"] = False
+                            err = str(
+                                (payload.get("error") or payload.get("message") or "").strip()
+                            )
+                            if err:
+                                consume_meta["error_text"] = err
+                            # 模型/round 级终端错误：本轮已失败且不会再有 chat.final，
+                            # 提前停止，避免一直等到超时才返回"任务执行超时"。
+                            logger.warning(
+                                "[Cron] team stream hit terminal error event=%s error=%s "
+                                "request_id=%s",
+                                event_type,
+                                err or "(empty)",
+                                getattr(envelope, "request_id", ""),
+                            )
+                            consume_meta["ended_early"] = not chunk.is_complete
+                            break
                         # _extract_workflow_result_text normalizes result JSON and
                         # walks phases; run it after apply_cron_team_round_event so
                         # the richer value wins over the plain summary fallback.
@@ -1259,6 +1281,10 @@ class CronSchedulerService:
                 leader_text=str(round_state.get("leader_text") or ""),
                 workflow_text=str(round_state.get("workflow_text") or ""),
             )
+            if consume_meta.get("error_text"):
+                # 轮次错误必须始终对外可见，且失败后不再混入此前的部分输出，
+                # 以免用户将不完整内容误认为成功报告。
+                return f"[cron] 任务执行失败: {consume_meta['error_text']}", False
             if _is_cron_team_result_insufficient(text=text):
                 return "[cron] 定时任务未产生有效报告", False
             return text, bool(consume_meta["ok"])
