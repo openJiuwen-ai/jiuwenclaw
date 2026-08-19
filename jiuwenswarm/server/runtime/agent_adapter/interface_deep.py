@@ -9431,7 +9431,13 @@ class JiuWenSwarmDeepAdapter:
             raw_interactive = params.get(
                 "interactive_ask", params.get("interactiveAsk")
             )
-            interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
+            from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
+                apply_interactive_ask_to_inputs,
+            )
+            resume_inputs = apply_interactive_ask_to_inputs(
+                resume_ctx.get("inputs", inputs),
+                raw_interactive,
+            )
             try:
                 await _skill_turbo_clear_resume_ctx(session)
                 try:
@@ -9443,7 +9449,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                 async for chunk in skill_turbo.resume_stream(
                     plan_code=resume_ctx["plan_code"],
-                    inputs=resume_ctx.get("inputs", inputs),
+                    inputs=resume_inputs,
                     request_id=request.request_id,
                     channel_id=request.channel_id,
                     pending_tool_call_id=resume_ctx["pending_tool_call_id"],
@@ -9547,8 +9553,9 @@ class JiuWenSwarmDeepAdapter:
         interaction_output = _skill_turbo_build_interaction_output(abort_exc)
         if interaction_output is not None:
             try:
+                raw_interaction = getattr(interaction_output, "payload", interaction_output)
                 ask_payload = convert_interactions_to_ask_user_question([
-                    interaction_output
+                    raw_interaction
                 ])
                 if ask_payload:
                     if isinstance(ask_payload, dict):

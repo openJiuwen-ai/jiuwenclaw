@@ -57,6 +57,9 @@ from jiuwenswarm.server.runtime.skill_turbo.permission_bridge import (
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.server.runtime.skill_turbo.json_utils import extract_llm_json
 from jiuwenswarm.server.runtime.skill_turbo.fallback_handler import FallbackContractError
+from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
+    resolve_interactive_ask_from_inputs,
+)
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
 from jiuwenswarm.server.runtime.skill_turbo.validator import (
     PlanCodeValidationError,
@@ -89,6 +92,8 @@ try:
         set_effective_request_workspace_dir,
         get_effective_request_workspace_dir,
         get_effective_request_output_dir,
+        set_interactive_ask,
+        reset_interactive_ask,
     )
 except ImportError:
     # Fallback no-ops for environments without subagent_executor
@@ -106,6 +111,12 @@ except ImportError:
 
     def get_effective_request_output_dir(*args, **kwargs):
         return None
+
+    def set_interactive_ask(*args, **kwargs):
+        pass
+
+    def reset_interactive_ask(*args, **kwargs):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -901,6 +912,28 @@ class SkillTurboExecutor:
                 "[SkillTurboExecutor] set send_file request context failed: %s", exc
             )
 
+        # Guided mode / outline-review skip 判定读 get_interactive_ask() ContextVar。
+        # DeepAgent 的 StreamEventRail 与 Executor 自己的 rail 不是同一实例；
+        # 必须在本执行上下文绑定，并注入 executor rail，供 before_tool_call 转绑。
+        metadata = inputs.get("metadata")
+        meta_copy = dict(metadata) if isinstance(metadata, dict) else {}
+        interactive_ask = resolve_interactive_ask_from_inputs(inputs)
+        if interactive_ask is not None:
+            meta_copy["interactive_ask"] = interactive_ask
+        if meta_copy:
+            self._stream_event_rail.set_skill_turbo_request_metadata(meta_copy)
+        if interactive_ask is not None:
+            try:
+                tokens["interactive_ask"] = set_interactive_ask(interactive_ask)
+                logger.info(
+                    "[SkillTurboExecutor] interactive_ask ContextVar bound: %s",
+                    interactive_ask,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[SkillTurboExecutor] set interactive_ask context failed: %s", exc
+                )
+
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():
             try:
@@ -950,6 +983,13 @@ class SkillTurboExecutor:
             except Exception as exc:
                 logger.warning(
                     "[SkillTurboExecutor] reset send_file request context failed: %s", exc
+                )
+        if "interactive_ask" in tokens:
+            try:
+                reset_interactive_ask(tokens["interactive_ask"])
+            except Exception as exc:
+                logger.warning(
+                    "[SkillTurboExecutor] reset interactive_ask context failed: %s", exc
                 )
         _channel_id_var.reset(tokens["channel"])
         _request_id_var.reset(tokens["request"])
