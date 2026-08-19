@@ -29,13 +29,38 @@ class UserHookRail(DeepAgentRail):
         self._config = hooks_config
         self._executor = HookExecutor()
 
+    # 与 StreamEventRail 一致的会话键：主 agent 的 before_invoke 阶段
+    # StreamEventRail 会把 conversation_id 写入 ctx.extra（子 agent 不触发
+    # 自己的 before_invoke，此时 ctx.session 也为 None，最终回退为空串）。
+    # 详见 StreamEventRail.before_invoke / StreamEventRail._SID_KEY。
+    _SESSION_ID_KEY = "__jiuwenswarm_session_id__"
+
     @staticmethod
-    def _session_id(ctx: AgentCallbackContext) -> str:
+    def _resolve_session_id(ctx: AgentCallbackContext) -> str:
+        """从回调 ctx 中解析会话 id.
+
+        AgentCallbackContext 没有 session_id 字段（只有 session 对象），
+        ToolCallInputs / ModelCallInputs 也没有 conversation_id，因此直接
+        getattr(ctx, "session_id", "") 恒返回空串。这里按优先级回退：
+          1. StreamEventRail 在 before_invoke 写入 ctx.extra 的会话 id
+             （主 agent；"default" 哨兵值视为未设置）；
+          2. ctx.session.get_session_id()（agent 内部 uuid，兜底）。
+        """
+        extra = getattr(ctx, "extra", None)
+        sid = extra.get(UserHookRail._SESSION_ID_KEY, "") if isinstance(extra, dict) else ""
+        if isinstance(sid, str) and sid and sid != "default":
+            return sid
         session = getattr(ctx, "session", None)
-        if session is None:
-            return ""
-        get_session_id = getattr(session, "get_session_id", None)
-        return get_session_id() if callable(get_session_id) else ""
+        if session is not None:
+            try:
+                get_session_id = getattr(session, "get_session_id", None)
+                if callable(get_session_id):
+                    got = get_session_id()
+                    if isinstance(got, str) and got:
+                        return got
+            except Exception:
+                logger.debug("UserHookRail: get_session_id() failed", exc_info=True)
+        return ""
 
     # ---- PreToolUse: BEFORE_TOOL_CALL ----
 
@@ -55,7 +80,7 @@ class UserHookRail(DeepAgentRail):
                 "event": "PreToolUse",
                 "tool_name": tool_name,
                 "tool_input": tool_args,
-                "session_id": self._session_id(ctx),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -98,7 +123,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "tool_result": ctx.inputs.tool_result,
-                "session_id": self._session_id(ctx),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -131,7 +156,7 @@ class UserHookRail(DeepAgentRail):
                 "tool_name": tool_name,
                 "tool_input": ctx.inputs.tool_args,
                 "error": str(getattr(ctx, "exception", "")),
-                "session_id": self._session_id(ctx),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -147,7 +172,7 @@ class UserHookRail(DeepAgentRail):
             hook_input={
                 "event": "Stop",
                 "final_response": getattr(ctx.inputs, "result", None),
-                "session_id": self._session_id(ctx),
+                "session_id": self._resolve_session_id(ctx),
             },
         )
 
@@ -155,3 +180,71 @@ class UserHookRail(DeepAgentRail):
             if r.outcome == "blocking":
                 ctx.extra["_stop_hook_feedback"] = r.error
                 logger.info("UserHookRail: Stop hook feedback: %s", r.error[:200])
+
+    # ---- BeforeModelCall: BEFORE_MODEL_CALL ----
+    # 注：模型调用在 Rail 层无“跳过本次调用”的安全短路机制
+    # （不同于 before_tool_call 的 _skip_tool），因此这里仅作为非阻塞观察者：
+    # 执行用户 hook、汇集 additional_context；若 hook 返回 blocking 仅记录日志
+    # 与 feedback，不强制终止，避免破坏模型调用流程。
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        hook_configs = self._config.match(HookEvent.BEFORE_MODEL_CALL.value)
+        if not hook_configs:
+            return
+
+        inputs = ctx.inputs
+        messages = getattr(inputs, "messages", None) or []
+        tools = getattr(inputs, "tools", None) or []
+
+        results = await self._executor.run_all(
+            hook_configs,
+            hook_input={
+                "event": "BeforeModelCall",
+                "messages": messages,
+                "tools": tools,
+                "session_id": self._resolve_session_id(ctx),
+            },
+        )
+
+        for r in results:
+            if r.outcome == "blocking":
+                ctx.extra["_before_model_hook_feedback"] = r.error
+                logger.info(
+                    "UserHookRail: BeforeModelCall hook blocked (advisory) reason=%s",
+                    r.error,
+                )
+            if r.additional_context:
+                existing = ctx.extra.get("_hook_additional_context", "")
+                ctx.extra["_hook_additional_context"] = existing + "\n" + r.additional_context
+
+    # ---- AfterModelCall: AFTER_MODEL_CALL ----
+
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        hook_configs = self._config.match(HookEvent.AFTER_MODEL_CALL.value)
+        if not hook_configs:
+            return
+
+        inputs = ctx.inputs
+        messages = getattr(inputs, "messages", None) or []
+        response = getattr(inputs, "response", None)
+
+        results = await self._executor.run_all(
+            hook_configs,
+            hook_input={
+                "event": "AfterModelCall",
+                "messages": messages,
+                "response": response,
+                "session_id": self._resolve_session_id(ctx),
+            },
+        )
+
+        for r in results:
+            if r.outcome == "blocking":
+                ctx.extra["_after_model_hook_feedback"] = r.error
+                logger.info(
+                    "UserHookRail: AfterModelCall hook blocked (advisory) reason=%s",
+                    r.error,
+                )
+            if r.additional_context:
+                existing = ctx.extra.get("_hook_additional_context", "")
+                ctx.extra["_hook_additional_context"] = existing + "\n" + r.additional_context

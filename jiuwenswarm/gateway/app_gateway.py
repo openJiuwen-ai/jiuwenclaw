@@ -1618,6 +1618,16 @@ async def _run(
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
 
+    # 触发 Setup / InstructionsLoaded hooks：Gateway 启动时系统完成初始化(Setup)、
+    # 系统指令(AGENTS.md 等)视为已加载(InstructionsLoaded)。fire-and-forget。
+    # 这两个事件归类为 Gateway 事件(hooks_config._GATEWAY_EVENTS)；AGENTS.md 的逐
+    # 会话加载发生在 AgentServer，Gateway 进程无独立加载点，故在启动点触发。
+    try:
+        message_handler.trigger_setup_hook(source="gateway")
+        message_handler.trigger_instructions_loaded_hook(source="AGENTS.md")
+    except Exception:
+        logger.warning("[App] trigger setup/instructions hooks failed", exc_info=True)
+
     # IM Pipeline 初始化（数字分身）
     from jiuwenswarm.gateway.im_pipeline.im_inbound import IMInboundPipeline
     from jiuwenswarm.gateway.im_pipeline.im_outbound import IMOutboundPipeline

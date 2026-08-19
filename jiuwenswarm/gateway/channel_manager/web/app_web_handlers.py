@@ -2756,10 +2756,18 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 reload_options=change_set.reload_options,
             )
             if inspect.isawaitable(callback_result):
-                return bool(await callback_result)
-            return bool(callback_result)
-        await _clear_agent_config_cache(_resolve(agent_client))
-        return True
+                ok = bool(await callback_result)
+            else:
+                ok = bool(callback_result)
+        else:
+            await _clear_agent_config_cache(_resolve(agent_client))
+            ok = True
+        # 配置应用成功后触发 ConfigChange hook（fire-and-forget，永不阻塞）
+        if ok:
+            _mh = _resolve(message_handler)
+            if _mh:
+                _mh.trigger_config_change_hook(sorted(change_set.updated_keys))
+        return ok
 
     def _build_models_defaults_from_frontend(raw_models: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_models, list) or not raw_models:
@@ -3643,6 +3651,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             error=None if response.ok else str(payload.get("error") or "session.create failed"),
             code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
         )
+        # 触发 SessionStart hook：Web 的 session.create 直达 AgentServer，绕过
+        # MessageHandler 新建会话分支(message_handler.py:1591 仅覆盖 IM 渠道)，
+        # 因此在此显式触发，否则配置在 hooks.SessionStart 下的脚本永不执行。
+        # 仅在创建成功时触发，复用 GatewayHookHandler._active_sessions 去重，
+        # 避免对“切回已有会话”重复触发。详见 MessageHandler.trigger_session_start_hook。
+        if response.ok:
+            _new_sid = str(payload.get("session_id") or payload.get("sessionId") or "")
+            _hook_mh = _resolve(message_handler)
+            if _new_sid and _hook_mh is not None:
+                try:
+                    _hook_mh.trigger_session_start_hook(
+                        _new_sid, source=channel.channel_id or "web",
+                    )
+                except Exception:
+                    logger.warning(
+                        "web session.create: trigger_session_start_hook failed for %s",
+                        _new_sid,
+                        exc_info=True,
+                    )
 
     async def _session_rename(ws, req_id, params, session_id):
         """重命名会话标题(查询/设置/清除三种语义),复用 apply_session_rename。
@@ -3734,6 +3761,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 if resp.ok:
                     pl = resp.payload if isinstance(resp.payload, dict) else {}
                     await channel.send_response(ws, req_id, ok=True, payload=pl)
+                    # 触发 SessionEnd hook（转发删除成功）
+                    _mh = _resolve(message_handler)
+                    if _mh:
+                        _mh.trigger_session_end_hook(session_id_to_delete, reason="delete")
                     return
                 pl = resp.payload if isinstance(resp.payload, dict) else {}
                 await channel.send_response(
@@ -3796,6 +3827,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
         shutil.rmtree(session_dir)
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_delete})
+        # 触发 SessionEnd hook（本地删除成功）
+        _mh = _resolve(message_handler)
+        if _mh:
+            _mh.trigger_session_end_hook(session_id_to_delete, reason="delete")
 
     async def _project_list(ws, req_id, params, session_id):
         """获取项目列表(含统计),已排序,包含默认项目。
