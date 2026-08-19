@@ -76,6 +76,9 @@ SPAWN_ENV_KEYS: frozenset[str] = frozenset(
         "OTEL_LOG_MESSAGES",
         "PATH",
         "AGENT_RUNTIME",
+        # Unified tool switch (blacklist); config.yaml references ${DISABLED_TOOLS-...}.
+        # Defaults to disabling search_skill / install_skill / uninstall_skill.
+        "DISABLED_TOOLS",
         # launchEnv / config.yaml ${EXTENSION_DIRS}; process-shared (relay RELAYCLAW_SHARED_ENV_KEYS TBD).
         "EXTENSION_DIRS",
     }

@@ -579,6 +579,16 @@ react:
     enabled: true                    # 总开关（未配置时默认 false）
     skill_name: pptx-craft           # PPT skill 外部目录名
     skill_checksum: ""               # 外部 skill 目录 SHA256 校验值（空=跳过校验）
+  # ============ 统一工具开关（黑名单 disabled_tools）============
+  # 列出的工具名将在 agent init 后从注册表注销，模型不可见；未列出者默认注册。
+  # 两种格式二选一：
+  #   1) YAML 列表：disabled_tools: ["search_skill", "install_skill"]
+  #   2) 环境变量：disabled_tools: ${DISABLED_TOOLS-默认列表}
+  #      在 .env 中设置：DISABLED_TOOLS=search_skill,install_skill（逗号/分号分隔）
+  # 默认禁用 search_skill / install_skill / uninstall_skill（技能广场界面安装不受影响，
+  # 那条链路走 SkillManager.handle_skills_install，不经模型工具）。
+  # 单横线 ``-`` 仅在变量未设置时使用默认值；显式 DISABLED_TOOLS= 可清空黑名单。
+  disabled_tools: ${DISABLED_TOOLS-search_skill,install_skill,uninstall_skill}
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
