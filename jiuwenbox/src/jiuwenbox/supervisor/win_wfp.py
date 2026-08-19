@@ -133,7 +133,13 @@ def _guid_from_str(s: str) -> Guid:
     再 2 字节 = Data3, 最后 8 字节 = Data4 (big-endian, 逐字节).
     """
     import uuid
-    u = uuid.UUID(s)
+    try:
+        u = uuid.UUID(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"WFP filter_key 不是合法 UUID: {s!r} "
+            f"(若含 '-UDP'/'-TCP' 后缀, 请更新 win_wfp.py 至含 _dns_filter_guid_str 的版本)"
+        ) from exc
     g = Guid()
     g.Data1 = u.time_low  # noqa: N815 - Win32 SDK 字段名
     g.Data2 = u.time_mid  # noqa: N815 - Win32 SDK 字段名
@@ -178,6 +184,19 @@ def _permit_filter_guid_str(base_key: str, port: int) -> str:
     import uuid
     ns = uuid.UUID(_PERMIT_FILTER_NAMESPACE)
     return str(uuid.uuid5(ns, f"{base_key}:{port}"))
+
+
+def _dns_filter_guid_str(base_key: str, protocol: int) -> str:
+    """为 DNS Permit filter 派生确定性 Guid 字符串.
+
+    旧版 f"{dns_key}-UDP" / f"{dns_key}-TCP" 不是合法 UUID, UAC install 报
+    ValueError: badly formed hexadecimal UUID string. 与 _permit_filter_guid_str 同
+    理用 uuid5 派生。
+    """
+    import uuid
+    ns = uuid.UUID(_PERMIT_FILTER_NAMESPACE)
+    proto_name = "udp" if protocol == const.IPPROTO_UDP else "tcp"
+    return str(uuid.uuid5(ns, f"{base_key}:dns:{proto_name}"))
 
 
 # ---------------------------------------------------------------------------
@@ -735,13 +754,19 @@ def _add_filter(  # pylint: disable=huawei-too-many-arguments
                 except Exception:  # noqa: BLE001
                     cond_sd_ptrs.append("?")
             flt_bytes = bytes(flt)
+            cond_field_keys = []
+            for c in conditions:
+                try:
+                    cond_field_keys.append(_guid_to_str(c.fieldKey))
+                except Exception:  # noqa: BLE001
+                    cond_field_keys.append("?")
             logger.error(
                 "FwpmFilterAdd0 失败 display=%s hr=0x%08X sizeof_flt=%d "
-                "num_conds=%d cond_types=%s cond_sd_ptrs=%s weight_type=%d "
+                "num_conds=%d cond_types=%s cond_field_keys=%s cond_sd_ptrs=%s weight_type=%d "
                 "action=%d filterConditions_ptr=%s providerKey=%s reserved=%s "
                 "flt_hex_first32=%s",
                 display_name, hr, ctypes.sizeof(flt), len(conditions),
-                cond_types, cond_sd_ptrs, flt.weight.type, action_type,
+                cond_types, cond_field_keys, cond_sd_ptrs, flt.weight.type, action_type,
                 _ptr_val(flt.filterCondition),
                 _ptr_val(flt.providerKey),
                 _ptr_val(flt.reserved),
@@ -825,25 +850,24 @@ def install_wfp_filters(
                     )
 
             # --- DNS Permit filters (V4 + V6) ---
-            # 放行沙箱用户到任意 IP 的 DNS 出站 (UDP/TCP port 53),
-            # 对齐 Linux network.py iptables ALLOW DNS (port 53 UDP/TCP).
+            # 放行沙箱用户到任意 IP 的 DNS 出站 (port 53, TCP/UDP 均匹配).
+            # 不对 IP_PROTOCOL 单独建 filter: 实测 FwpmFilterAdd0 在 ALE_AUTH_CONNECT
+            # 上对 [ALE_USER_ID, IP_REMOTE_PORT, IP_PROTOCOL] 返回 FWP_E_CONDITION_NOT_FOUND
+            # (hr=0x80320002). port 53 已足够区分 DNS, 与 loopback Permit 同样省略 protocol.
             for layer, dns_key in (
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V4, const.JBX_FILTER_DNS_PERMIT_KEY_V4),
                 (const.FWPM_LAYER_ALE_AUTH_CONNECT_V6, const.JBX_FILTER_DNS_PERMIT_KEY_V6),
             ):
-                for protocol in (const.IPPROTO_UDP, const.IPPROTO_TCP):
-                    user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
-                    keeps.append(user_ka)
-                    port_cond = _build_port_eq_condition(const.DNS_PORT)
-                    proto_cond = _build_protocol_condition(protocol)
-                    proto_suffix = "UDP" if protocol == const.IPPROTO_UDP else "TCP"
-                    _add_filter(
-                        engine, f"{dns_key}-{proto_suffix}", layer, sublayer_key,
-                        [user_cond, port_cond, proto_cond],
-                        const.FWP_ACTION_PERMIT,
-                        const.FWP_WEIGHT_PERMIT,
-                        f"JiuwenBox-Permit-DNS-{proto_suffix}-{dns_key}",
-                    )
+                user_cond, user_ka = _build_ale_user_condition(sandbox_user_sid)
+                keeps.append(user_ka)
+                port_cond = _build_port_eq_condition(const.DNS_PORT)
+                _add_filter(
+                    engine, dns_key, layer, sublayer_key,
+                    [user_cond, port_cond],
+                    const.FWP_ACTION_PERMIT,
+                    const.FWP_WEIGHT_PERMIT,
+                    f"JiuwenBox-Permit-DNS-{dns_key}",
+                )
 
             fwpu.FwpmTransactionCommit0(engine)
         except Exception:
@@ -971,6 +995,17 @@ def _delete_all_filters_by_fixed_keys(fwpu, engine) -> None:
             const.DEFAULT_PROXY_PORT_RANGE_END + 1,
         ):
             _delete_filter_by_key(fwpu, engine, str(_uuid.uuid5(_ns, f"{_base}:{_port}")))
+    for _base in (
+        const.JBX_FILTER_DNS_PERMIT_KEY_V4,
+        const.JBX_FILTER_DNS_PERMIT_KEY_V6,
+    ):
+        _delete_filter_by_key(fwpu, engine, _base)
+        # 旧版按 UDP/TCP 各建一条 filter (含 IP_PROTOCOL 条件), 卸载时一并清理.
+        for _proto in (const.IPPROTO_UDP, const.IPPROTO_TCP):
+            _delete_filter_by_key(
+                fwpu, engine,
+                _dns_filter_guid_str(_base, _proto),
+            )
 
 
 def _delete_sublayer_idempotent(fwpu, engine, max_attempts: int = 3) -> None:

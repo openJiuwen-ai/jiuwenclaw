@@ -12052,3 +12052,92 @@ def _jws_install_browser_worker_no_download_patch() -> None:
 
 _jws_install_browser_worker_no_download_patch()
 # === [JiuWenSwarm patch end] ================================================
+
+
+# === [JiuWenSwarm patch] jiuwenbox: recreate on phase=error ================
+# Windows 沙箱创建失败时 box-server 仍 201 且 phase=error; openjiuwen 把该
+# sandbox_id 写入 _shared_sandbox_ids. 之后所有 exec/download 都是 409
+# "state is error", 且 _execute_with_sandbox_retry 只重试 404. 运行时包一层:
+#   1. 409 + "state is error" 视同 sandbox lost, 走 force_recreate
+#   2. create 后 GET 若 phase=error, 删掉并抛错, 避免把坏 id 写进缓存
+def _jws_install_jiuwenbox_error_sandbox_retry_patch() -> None:
+    try:
+        from openjiuwen.extensions.sys_operation.sandbox.providers import (
+            jiuwenbox as _jb,
+        )
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] jiuwenbox error-sandbox retry patch skipped",
+            exc_info=True,
+        )
+        return
+    if getattr(_jb, "_jws_error_sandbox_retry", False):
+        return
+
+    _orig_is_nf = _jb._is_sandbox_not_found_error  # pylint: disable=protected-access
+
+    def _is_dead_or_missing_sandbox(exc: BaseException) -> bool:
+        if _orig_is_nf(exc):
+            return True
+        import httpx as _httpx
+        if not isinstance(exc, _httpx.HTTPStatusError):
+            return False
+        resp = exc.response
+        if resp is None or resp.status_code != 409:
+            return False
+        blob = ""
+        try:
+            payload = resp.json()
+        except ValueError:
+            blob = (resp.text or "")
+        else:
+            if isinstance(payload, dict):
+                blob = " ".join(
+                    str(payload.get(k) or "")
+                    for k in ("error", "detail", "message")
+                )
+        return "state is error" in blob.lower()
+
+    _jb._is_sandbox_not_found_error = _is_dead_or_missing_sandbox  # pylint: disable=protected-access
+
+    _orig_create = _jb._JiuwenBoxClient.create_sandbox  # pylint: disable=protected-access
+
+    def _create_sandbox_reject_error(self, *args, **kwargs):
+        sandbox_id = _orig_create(self, *args, **kwargs)
+        try:
+            response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}")
+            if response.status_code != 200:
+                return sandbox_id
+            data = response.json()
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarm] sandbox phase check failed id=%s",
+                sandbox_id, exc_info=True,
+            )
+            return sandbox_id
+        phase = str((data or {}).get("phase") or "").lower() if isinstance(data, dict) else ""
+        if phase != "error":
+            return sandbox_id
+        err = (data or {}).get("error_message") or "sandbox phase is error"
+        logger.warning(
+            "[JiuWenSwarm] jiuwenbox create returned error sandbox %s: %s",
+            sandbox_id, err,
+        )
+        try:
+            self.delete_sandbox(sandbox_id)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarm] delete error sandbox %s failed",
+                sandbox_id, exc_info=True,
+            )
+        raise RuntimeError(
+            f"jiuwenbox sandbox {sandbox_id} failed to start: {err}"
+        )
+
+    _jb._JiuwenBoxClient.create_sandbox = _create_sandbox_reject_error  # pylint: disable=protected-access
+    _jb._jws_error_sandbox_retry = True  # pylint: disable=protected-access
+    logger.info("[JiuWenSwarm] installed jiuwenbox error-sandbox retry patch")
+
+
+_jws_install_jiuwenbox_error_sandbox_retry_patch()
+# === [JiuWenSwarm patch end] ================================================

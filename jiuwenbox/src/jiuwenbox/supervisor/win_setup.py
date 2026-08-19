@@ -52,9 +52,10 @@ def _require_windows() -> None:
 
 
 # ShellExecuteW 的 nShowWindow 取值: 0=SW_HIDE (不弹 CMD), 1=SW_SHOWNORMAL.
-# install/uninstall 提权子进程默认静默运行, 用户无感; 失败诊断靠 install_force.log.
+# install/uninstall 提权子进程: 子进程 CMD 仍隐藏, 但 UAC 确认框必须可见 (桌面产品).
 SW_HIDE = 0
 SW_SHOWNORMAL = 1
+SW_UAC_SHOW = SW_SHOWNORMAL
 
 
 def _resolve_install_log_dir() -> str:
@@ -80,6 +81,68 @@ def _resolve_install_log_dir() -> str:
 def _install_log_path() -> str:
     """install_force.log 的绝对路径, 落在用户数据目录而非包目录."""
     return os.path.join(_resolve_install_log_dir(), "install_force.log")
+
+
+_ACL_POLICY_PATHS_USER_CACHE = "acl_policy_paths.json"
+
+
+def _normalize_acl_path(path: str) -> str:
+    """统一 ACL 路径比较格式 (expandvars + normpath + normcase)."""
+    p = (path or "").strip()
+    if not p:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.expandvars(p)))
+
+
+def _user_acl_policy_cache_file() -> Path:
+    return Path(_resolve_install_log_dir()) / _ACL_POLICY_PATHS_USER_CACHE
+
+
+def _load_user_acl_policy_paths() -> set[str]:
+    """读用户目录下的 acl 路径缓存 (普通用户可写, 无需 HKLM)."""
+    cache = _user_acl_policy_cache_file()
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return set()
+    if not isinstance(data, list):
+        return set()
+    return {
+        _normalize_acl_path(p)
+        for p in data
+        if isinstance(p, str) and p.strip()
+    }
+
+
+def _save_user_acl_policy_paths(paths: set[str]) -> None:
+    if not paths:
+        return
+    cache = _user_acl_policy_cache_file()
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps(sorted(paths), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("写入 acl_policy_paths 用户缓存失败 (非致命): %s", exc)
+
+
+def _get_acl_policy_paths_recorded() -> set[str]:
+    """已处理的 deny/allow 路径 = HKLM 注册表 ∪ 用户目录缓存."""
+    recorded: set[str] = set()
+    raw = reg_get_str(const.REG_VALUE_ACL_POLICY_PATHS)
+    if raw:
+        try:
+            recorded |= {
+                _normalize_acl_path(p)
+                for p in json.loads(raw)
+                if isinstance(p, str)
+            }
+        except (ValueError, TypeError):
+            pass
+    recorded |= _load_user_acl_policy_paths()
+    return {p for p in recorded if p}
 
 
 def is_install_completed() -> bool:
@@ -537,6 +600,35 @@ def _lookup_current_user_sid() -> str | None:
         return None
 
 
+def _path_owned_by_current_user(path: str) -> bool:
+    """当前用户是否已是 ``path`` (或其最近存在的父目录) 的 owner.
+
+    owner 是当前用户时运行时就能改 DACL, 不必为每个沙箱 workspace 弹 UAC.
+    """
+    probe = path
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    if not probe or not os.path.exists(probe):
+        return False
+    probe = os.path.normpath(probe)
+    try:
+        import win32security  # type: ignore[import-not-found]
+        current = _lookup_current_user_sid()
+        if not current:
+            return False
+        sd = win32security.GetFileSecurity(
+            probe, win32security.OWNER_SECURITY_INFORMATION,
+        )
+        owner = sd.GetSecurityDescriptorOwner()
+        owner_sid = win32security.ConvertSidToStringSid(owner)
+        return os.path.normcase(owner_sid) == os.path.normcase(current)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _free_sid_str(sid_str: wintypes.LPWSTR) -> None:
     kernel32 = get_kernel32()
     try:
@@ -798,10 +890,10 @@ def _elevate_and_run_install(
     )
 
     # ShellExecuteW(parent, verb, file, parameters, directory, show).
-    # SW_HIDE: 提权子进程不弹 CMD, 全过程静默; 安装结果据 install_force.log
-    result = shell32.ShellExecuteW(None, "runas", py, params, None, SW_HIDE)
+    # SW_UAC_SHOW: 弹出可见 UAC 确认框 (SW_HIDE 时用户看不到, 120s 超时导致沙箱/AgentServer 反复重启).
+    result = shell32.ShellExecuteW(None, "runas", py, params, None, SW_UAC_SHOW)
     logger.info(
-        "ShellExecuteW(runas, SW_HIDE) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
+        "ShellExecuteW(runas, SW_UAC_SHOW) 返回 %s (>32=已发起 UAC, 不代表用户已点确认)",
         result,
     )
     if result <= 32:  # <= 32 表示失败.
@@ -903,10 +995,10 @@ def _preinstall_read_acl(
                 )
                 logger.debug("预装读 ACL: 已由主线程合并授权, 跳过 %s", expanded)
                 continue
-            # Allow Read ACE 给沙箱用户 SID (使其能读这些目录).
+            # Allow Read+Execute ACE 给沙箱用户 SID (python.exe / DLL 需要 Execute).
             win_acl.grant_ace(
                 expanded, sid,
-                rights=const.FILE_GENERIC_READ,
+                rights=const.ALLOW_READ_EXECUTE_RIGHTS,
                 mode="ALLOW",
                 recursive=True,
             )
@@ -1112,14 +1204,14 @@ def install(
             from jiuwenbox.supervisor import win_acl as _wa, win_constants as _wc
             _office_claw_root = str(Path.home() / ".office-claw")
             os.makedirs(_office_claw_root, exist_ok=True)
-            # 递归 grant Read (含 Execute): 合成 SID + 真实 sandbox 用户 SID 各一份.
+            # 递归 grant Read+Execute: 合成 SID + 真实 sandbox 用户 SID 各一份.
             _wa.grant_ace(
                 _office_claw_root, synth_sid,
-                rights=_wc.FILE_GENERIC_READ, mode="ALLOW", recursive=True,
+                rights=_wc.ALLOW_READ_EXECUTE_RIGHTS, mode="ALLOW", recursive=True,
             )
             _wa.grant_ace(
                 _office_claw_root, sid,
-                rights=_wc.FILE_GENERIC_READ, mode="ALLOW", recursive=True,
+                rights=_wc.ALLOW_READ_EXECUTE_RIGHTS, mode="ALLOW", recursive=True,
             )
             logger.info("预装数据根递归 Read ACL: %s (Write 由运行时子树单独授权)", _office_claw_root)
         except Exception as exc:  # noqa: BLE001
@@ -1161,7 +1253,7 @@ def install(
                             _p,
                             [
                                 (_current_user_sid, _wc.WRITE_DAC | _wc.READ_CONTROL, "ALLOW"),
-                                (sid, _wc.FILE_GENERIC_READ, "ALLOW"),
+                                (sid, _wc.ALLOW_READ_EXECUTE_RIGHTS, "ALLOW"),
                             ],
                             recursive=True,
                         )
@@ -1181,8 +1273,8 @@ def install(
                     logger.warning("grant 失败 (打包目录, 非致命): %s=%s", _p, exc)
 
         # 用户 policy 的 deny/allow 路径 (allow_read/deny_read/allow_write/deny_write)
+        _acl_paths: list[str] = []
         if _current_user_sid and policy_path:
-            _acl_paths: list[str] = []
             try:
                 _acl_paths = _load_policy_acl_paths(policy_path)
             except Exception as exc:  # noqa: BLE001
@@ -1232,6 +1324,12 @@ def install(
             const.REG_VALUE_PREINSTALLED_PATHS,
             json.dumps(sorted({os.path.expandvars(p) for p in paths_to_preinstall})),
         )
+        # 记录本次已预授 WRITE_DAC 的 deny/allow 路径集, 供 ensure_windows_setup
+        # 增量检测: 用户改 policy 新增 deny_read/deny_write 路径时自动弹 UAC 补授权.
+        if _current_user_sid and policy_path and _acl_paths:
+            _record_acl_policy_paths(
+                {_normalize_acl_path(p) for p in _acl_paths if p},
+            )
         logger.info("Windows 沙箱安装完成")
     except Exception:
         # review #4: 失败回滚只清本次已成功步骤新增的资源 (用户/组/WFP filter),
@@ -1288,6 +1386,90 @@ def collect_preinstall_paths(policy) -> list[str]:
     return paths
 
 
+def _record_acl_policy_paths(paths: set[str]) -> None:
+    """把已处理 (预授或当前用户可自授权) 的 deny/allow 路径记入缓存, 避免重复 UAC."""
+    if not paths:
+        return
+    normalized = {_normalize_acl_path(p) for p in paths if p}
+    normalized = {p for p in normalized if p}
+    if not normalized:
+        return
+    merged = _get_acl_policy_paths_recorded() | normalized
+    if merged == _get_acl_policy_paths_recorded():
+        return
+    # 用户目录缓存: 普通进程可写, 避免 HKLM 写入失败导致每次重启都弹 UAC.
+    _save_user_acl_policy_paths(merged)
+    try:
+        _reg_set_str(
+            const.REG_VALUE_ACL_POLICY_PATHS,
+            json.dumps(sorted(merged)),
+        )
+    except Exception as exc:  # noqa: BLE001 - 非管理员无 HKLM 写权限时回落用户缓存
+        logger.debug("HKLM acl_policy_paths 写入跳过 (无管理员权限): %s", exc)
+
+
+def ensure_acl_policy_paths_authorized(
+    acl_paths: list[str],
+    proxy_port_start: int = const.DEFAULT_PROXY_PORT_RANGE_START,
+    proxy_port_end: int = const.DEFAULT_PROXY_PORT_RANGE_END,
+    policy_path: str | None = None,
+) -> None:
+    """确保 deny/allow 路径已预授 WRITE_DAC, 未授权则弹 UAC 补授权.
+
+    _create_windows 创建沙箱时调: 对 per-sandbox policy 的 deny/allow 路径
+    做增量检测, 发现新路径 (owner 非当前用户, 需管理员预授 WRITE_DAC) 时
+    自动弹 UAC 补授权. 避免运行时 grant_ace WinError 5 → Deny Read 不生效.
+
+    Args:
+        acl_paths: 本次沙箱的所有 deny/allow 路径 (allow_read/deny_read/
+            allow_write/deny_write 合并去重后的展开路径).
+        proxy_port_start/end: 透传给 _elevate_and_run_install.
+        policy_path: windows-policy.yaml 路径, 透传给 install.
+    """
+    _require_windows()
+    if reg_get_str(const.REG_VALUE_INSTALLED) != "1":
+        return
+    acl_recorded = _get_acl_policy_paths_recorded()
+    new_acl_paths = {
+        _normalize_acl_path(p) for p in acl_paths if p
+    } - acl_recorded
+    new_acl_paths = {p for p in new_acl_paths if p}
+    if not new_acl_paths:
+        return
+    # 未展开的占位 / 当前用户已是 owner 的路径不弹 UAC:
+    # per-sandbox workspace 每次都是新路径, 否则每个沙箱都要等 120s UAC.
+    need_elevate: set[str] = set()
+    skipped: list[str] = []
+    for p in new_acl_paths:
+        if "{{" in p or (p.startswith("%") and "%" in p[1:] and not os.path.exists(p)):
+            skipped.append(p)
+            continue
+        if _path_owned_by_current_user(p):
+            skipped.append(p)
+            continue
+        need_elevate.add(p)
+    if skipped:
+        logger.info(
+            "新增 deny/allow 路径无需 UAC (占位或当前用户所有): %s",
+            skipped,
+        )
+        _record_acl_policy_paths(set(skipped))
+    if not need_elevate:
+        return
+    logger.info(
+        "检测到新增 deny/allow 路径未预授 WRITE_DAC: %s. "
+        "自动弹 UAC 补授权 (否则运行时 grant_ace 会 WinError 5).",
+        sorted(need_elevate),
+    )
+    _elevate_and_run_install(
+        force=True,
+        preinstall_paths=[],
+        proxy_port_start=proxy_port_start,
+        proxy_port_end=proxy_port_end,
+        policy_path=policy_path,
+    )
+
+
 def ensure_windows_setup(
     force: bool = False,
     preinstall_paths: list[str] | None = None,
@@ -1306,6 +1488,8 @@ def ensure_windows_setup(
             生效; 已安装则忽略.
         proxy_port_start/end: WFP Permit filter 放行的 loopback 端口范围
             (根 policy 的 ``windows.proxy.port_range_*``).
+        policy_path: windows-policy.yaml 路径; 已安装时用于增量检测
+            deny/allow 路径变更, 新增路径会自动弹 UAC 补授权 WRITE_DAC.
     """
     _require_windows()
     try:
@@ -1324,14 +1508,52 @@ def ensure_windows_setup(
                 except (ValueError, TypeError):
                     recorded = set()
             new_paths = self_check_paths - recorded
-            if new_paths:
+            # 增量检测: 用户 policy 的 deny/allow 路径变更 (allow_read/deny_read/allow_write/deny_write).
+            # install 阶段给这些路径预授 WRITE_DAC, 运行时 box-server 才能改 DACL 施加 Deny/Allow ACE.
+            # 若 runtime policy 新增了路径但未预授 WRITE_DAC → grant_ace WinError 5 → Deny Read 不生效.
+            new_acl_paths: set[str] = set()
+            if policy_path:
+                try:
+                    acl_recorded = _get_acl_policy_paths_recorded()
+                    new_acl_paths = {
+                        _normalize_acl_path(p)
+                        for p in _load_policy_acl_paths(policy_path)
+                    } - acl_recorded
+                    new_acl_paths = {p for p in new_acl_paths if p}
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("增量检测 deny/allow 路径变更失败 (非致命): %s", exc)
+            # 当前用户已是 owner 的路径 (如 D:/y, D:/n) 启动时记入缓存即可.
+            # 需管理员预授的路径推迟到创建沙箱时再弹 UAC (ensure_acl_policy_paths_authorized),
+            # 避免「保存配置 → 重启 box-server」每次都打断用户.
+            if new_acl_paths:
+                _skip_owned: set[str] = set()
+                _deferred_uac: set[str] = set()
+                for _p in new_acl_paths:
+                    if _path_owned_by_current_user(_p):
+                        _skip_owned.add(_p)
+                    else:
+                        _deferred_uac.add(_p)
+                if _skip_owned:
+                    logger.info(
+                        "deny/allow 路径无需 UAC (当前用户所有): %s",
+                        sorted(_skip_owned),
+                    )
+                    _record_acl_policy_paths(_skip_owned)
+                if _deferred_uac:
+                    logger.info(
+                        "需管理员预授的 deny/allow 路径 %s 推迟至创建沙箱时再弹 UAC "
+                        "(避免 box-server 重启时打断用户)",
+                        sorted(_deferred_uac),
+                    )
+                new_acl_paths = set()
+            if new_paths or new_acl_paths:
                 # relay-claw / officeace 是终端产品, 不能让用户手动跑
                 # --install --force. 这里自动走 UAC 提权子进程补预装新路径
-                # 的读 ACL (最多弹一次 UAC, 用户授权即可).
+                # 的读 ACL + 预授新 deny/allow 路径的 WRITE_DAC (最多弹一次 UAC, 用户授权即可).
                 logger.info(
-                    "Windows 沙箱已安装, 但检测到新增预装路径未预装读 ACL: %s. "
-                    "自动弹 UAC 提权补预装 (CreateProcessAsUserW 否则会 WinError 2/5).",
-                    sorted(new_paths),
+                    "Windows 沙箱已安装, 但检测到新增路径: 预装=%s, deny/allow=%s. "
+                    "自动弹 UAC 提权补预装+预授权 (否则运行时 grant_ace 会 WinError 5).",
+                    sorted(new_paths), sorted(new_acl_paths),
                 )
                 _elevate_and_run_install(
                     force=True,
