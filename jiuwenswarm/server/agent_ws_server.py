@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import inspect
 import json
 import logging
 import math
@@ -2354,10 +2355,12 @@ class AgentWebSocketServer:
         and the user's Plan toggle would do nothing until the agent instance is
         rebuilt.
 
-        A live session exists from the session's second turn on. On the first
-        turn there is none yet, so we fall back to a throwaway session — the
-        checkpointer is authoritative there, because ``start_interaction`` reads
-        it when it creates the session.
+        A live session already exists from the second turn on. On the first
+        turn we start that same session adapter first (the chat path will
+        reuse it) and write plan state there. Falling back to a throwaway
+        session is last-resort only: a concurrent first ``chat.send`` /
+        ``command.goal`` can bind a normal-mode snapshot after the
+        throwaway commit, and rails then hide ``enter_plan_mode``.
         """
         from openjiuwen.core.single_agent import create_agent_session
         from jiuwenswarm.agents.harness.common.session_ops_service import (
@@ -2369,6 +2372,27 @@ class AgentWebSocketServer:
             live_session = resolve_live_agent_session(live_deep_agent, session_id or "default")
             if live_session is not None:
                 return live_deep_agent, live_session, True
+
+        starter = getattr(agent, "ensure_live_session_instance", None)
+        if callable(starter):
+            try:
+                started = starter(session_id)
+                if inspect.isawaitable(started):
+                    started = await started
+            except Exception as exc:
+                logger.warning(
+                    "[_open_plan_state_session] failed to start live session "
+                    "for session=%s: %s; falling back to throwaway",
+                    session_id,
+                    exc,
+                )
+            else:
+                if started is not None:
+                    live_session = resolve_live_agent_session(
+                        started, session_id or "default"
+                    )
+                    if live_session is not None:
+                        return started, live_session, True
 
         deep_agent = await agent.ensure_instance()
         session = create_agent_session(session_id=session_id, card=deep_agent.card)
