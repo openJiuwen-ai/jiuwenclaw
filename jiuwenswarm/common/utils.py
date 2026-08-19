@@ -1549,6 +1549,30 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_expert_cache_dir() -> Path:
+    """Get the expert package download cache directory path.
+
+    Expert packages fetched from the package repo are extracted here
+    before being loaded via ``DeepAgent.load_agent_template``.
+
+    Returns:
+        Path to expert cache directory: ~/.jiuwenswarm/agent/workspace/experts_cache
+    """
+    return get_agent_workspace_dir() / "experts_cache"
+
+
+def get_agent_experts_dir() -> Path:
+    """Get the local expert packages directory path (dev override only).
+
+    Only consulted when env ``JIUWEN_EXPERT_LOCAL_DIRS`` is enabled;
+    the authoritative source of expert packages is the package repo.
+
+    Returns:
+        Path to local experts directory: ~/.jiuwenswarm/agent/workspace/experts
+    """
+    return get_agent_workspace_dir() / "experts"
+
+
 def get_interactions_dir() -> Path:
     """Get the interactions directory for pending interaction contexts.
 

@@ -407,16 +407,22 @@ def _fallback_wire_chunk_from_legacy(
     return e2a.to_dict()
 
 
-def encode_json_parse_error_wire(
-    *,
-    request_id: str,
-    channel_id: str,
-    message: str,
-    response_id: str = "",
+def encode_request_error_wire(
+        *,
+        request_id: str,
+        channel_id: str,
+        code: str,
+        message: str,
+        details_kind: str,
+        response_id: str = "",
 ) -> dict[str, Any]:
-    """入站 JSON 无法解析时发送的单帧 E2A 形错误（无 legacy blob）。"""
+    """入站请求在分发前失败时发送的单帧 E2A 形错误（无 legacy blob）。
+
+    用于「异常不能逃逸到 fire-and-forget task」的场景：帧必须落到客户端，
+    否则调用方只能等 RPC 超时。
+    """
     ts = utc_now_iso()
-    rid_out = response_id or (request_id or "invalid-json")
+    rid_out = response_id or (request_id or "invalid-request")
     e2a = E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
         response_id=rid_out,
@@ -428,12 +434,12 @@ def encode_json_parse_error_wire(
         timestamp=ts,
         provenance=E2AProvenance(
             source_protocol=E2A_SOURCE_PROTOCOL_E2A,
-            converter="jiuwenswarm.common.e2a.wire_codec:encode_json_parse_error_wire",
+            converter="jiuwenswarm.common.e2a.wire_codec:encode_request_error_wire",
             converted_at=ts,
-            details={"kind": "json_parse_error"},
+            details={"kind": details_kind},
         ),
         body={
-            "code": "E2A.INVALID_JSON",
+            "code": code,
             "message": message,
             "details": {},
         },
@@ -442,3 +448,21 @@ def encode_json_parse_error_wire(
         is_stream=False,
     )
     return e2a.to_dict()
+
+
+def encode_json_parse_error_wire(
+        *,
+        request_id: str,
+        channel_id: str,
+        message: str,
+        response_id: str = "",
+) -> dict[str, Any]:
+    """入站 JSON 无法解析时发送的单帧 E2A 形错误（无 legacy blob）。"""
+    return encode_request_error_wire(
+        request_id=request_id,
+        channel_id=channel_id,
+        code="E2A.INVALID_JSON",
+        message=message,
+        details_kind="json_parse_error",
+        response_id=response_id,
+    )
