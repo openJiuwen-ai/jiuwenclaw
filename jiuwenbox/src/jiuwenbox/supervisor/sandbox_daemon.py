@@ -369,7 +369,21 @@ FASTPATH_DEFAULT_WORKERS = 2
 FASTPATH_MARKER = "JIWENBOX_FORK_WORKER"
 # Worker control fd is socketpair'd by the daemon; the fd number is passed
 # as ``sys.argv[1]`` to the ``python3 -c`` worker.
-_FASTPATH_MAX_FRAME = 1 * 1024 * 1024
+# Phase 8A-3: the worker->daemon response frame carries the child's stdout +
+# stderr (JSON-encoded). This cap must not be a *tighter* bound than the
+# normal ``subprocess.Popen`` /exec path's output contract, or FastPath would
+# fail on outputs that Popen succeeds with -- breaking the "transparent
+# optimisation" goal. The enforced contract on the daemon->box-server hop is
+# ``DAEMON_MAX_RESPONSE_BYTES = 256 MiB`` (box-server ``recv_frame`` cap in
+# ``server/runtime/process.py``); beyond that *both* paths fail identically at
+# the box-server, so 256 MiB is the honest alignment point: FastPath succeeds
+# exactly where Popen does. (``MAX_STDOUT_BYTES = 64 MiB`` in ``daemon_ipc.py``
+# is documented but not enforced -- no truncation call -- so it is not the
+# contract.) The frame is a *bounded* read (size prefix checked before
+# allocation), never unbounded; worst case per in-flight FastPath request is
+# ~256 MiB of daemon buffer, the same order as ``Popen.communicate``'s own
+# accumulation, capped by the sandbox cgroup's memory limit.
+_FASTPATH_MAX_FRAME = 256 * 1024 * 1024
 
 # --- Phase 2: lifecycle / resilience / resource knobs --------------------
 # Every knob is env-overridable but hard-clamped so a bad override can never
@@ -1001,6 +1015,16 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
                 main_mod = types.ModuleType("__main__")
                 main_mod.__builtins__ = builtins
                 sys.modules["__main__"] = main_mod
+                # Phase 8A-3: ``python3 -c CODE`` sets ``sys.argv`` to
+                # ``['-c']``. The worker itself was launched as
+                # ``python -c <worker_source> <control_fd>``, so without this
+                # the forked child would inherit a ``sys.argv`` carrying the
+                # internal control fd. Set it here (in the forked child only;
+                # copy-on-write + os._exit discards it, so the parent worker is
+                # unaffected) to match CPython ``-c`` semantics. The matcher
+                # still rejects ``-c CODE arg1`` (8A-1 §2), so there is no
+                # argv tail to preserve.
+                sys.argv = ["-c"]
                 exec(coded, main_mod.__dict__)
             _flush_std()
             os._exit(0)

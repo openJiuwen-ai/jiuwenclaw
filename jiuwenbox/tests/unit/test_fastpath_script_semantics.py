@@ -18,9 +18,9 @@ the ones a real script can observe: ``__name__``, ``__file__``, ``sys.argv``,
 same-directory imports.
 
 These tests require ``os.fork`` and so run on POSIX only -- which is where
-the daemon runs. Run them with ``pytest -s``: the forked child writes to fd 1
-and fd 2 directly, which pytest's default fd-level capture intercepts, so
-``_run_child`` would read back empty pipes.
+the daemon runs. They drive the *real* worker subprocess (see
+``_fastpath_worker_session.WorkerSession``), so they are robust to pytest's
+default fd-level capture and need no ``-s``.
 """
 
 from __future__ import annotations
@@ -34,7 +34,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from jiuwenbox.supervisor.sandbox_daemon import FORKSERVER_WORKER_SOURCE
+# ``tests/unit`` is a package (``__init__.py`` present), so pytest does not put
+# the test directory on ``sys.path`` and a bare sibling import would fail. Add
+# this module's directory explicitly -- a local, per-module shim with no global
+# conftest side effects.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _fastpath_worker_session import WorkerSession  # noqa: E402
 
 
 pytestmark = pytest.mark.unit
@@ -43,12 +48,6 @@ _SKIP_NON_POSIX = pytest.mark.skipif(
     not hasattr(os, "fork"),
     reason="the FastPath child requires os.fork (POSIX)",
 )
-
-
-def _load_worker_ns() -> dict:
-    ns: dict = {}
-    exec(compile(FORKSERVER_WORKER_SOURCE, "<worker_src>", "exec"), ns)
-    return ns
 
 
 @dataclass(frozen=True)
@@ -69,9 +68,8 @@ class _ExecOpts:
 
 
 def _fastpath(script: str, opts: _ExecOpts | None = None):
-    """Run ``script`` through the FastPath child; return (rc, out, err)."""
+    """Run ``script`` through a real FastPath worker; return (rc, out, err)."""
     opts = opts or _ExecOpts()
-    ns = _load_worker_ns()
     plan = {
         "mode": "script",
         "path": os.path.abspath(script),
@@ -83,20 +81,10 @@ def _fastpath(script: str, opts: _ExecOpts | None = None):
     }
     if opts.env_extra:
         plan["env_extra"] = opts.env_extra
-    # Flush before the fork so the child does not re-emit pytest's captured
-    # output from an inherited buffer.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    r, w = os.pipe()
-    try:
-        rc, out, err = ns["_run_child"](
-            None, b"", plan["cwd"], {}, opts.timeout, r, plan)
-    finally:
-        for fd in (r, w):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+    with WorkerSession() as ws:
+        rc, out, err = ws.run(plan=plan, workdir=plan["cwd"],
+                              env_overrides=plan.get("env_extra"),
+                              timeout=opts.timeout)
     return rc, out.decode(), err.decode()
 
 
@@ -186,20 +174,13 @@ def test_relative_argv0_is_preserved_verbatim(tmp_path):
     """
     _write(tmp_path, "probe.py", _PROBE)
     cwd = str(tmp_path)
-    ns = _load_worker_ns()
     plan = {
         "mode": "script", "path": os.path.join(cwd, "probe.py"), "dir": cwd,
         "argv": ["probe.py", "x"], "cwd": cwd,
         "interp_name": "python3", "interp_path": sys.executable,
     }
-    sys.stdout.flush()
-    sys.stderr.flush()
-    r, _w = os.pipe()
-    try:
-        rc, out, err = ns["_run_child"](None, b"", cwd, {}, 30.0, r, plan)
-    finally:
-        os.close(r)
-        os.close(_w)
+    with WorkerSession() as ws:
+        rc, out, err = ws.run(plan=plan, workdir=cwd, timeout=30.0)
     assert rc == 0, err
     fp = json.loads(out.decode())
 
@@ -361,26 +342,20 @@ def test_script_mode_does_not_disturb_the_worker(tmp_path):
         sys.path.insert(0, "/injected")
         print(len(sys.argv), sys.path[0])
         """)
-    ns = _load_worker_ns()
     before_argv, before_path0 = list(sys.argv), sys.path[0]
-    for _ in range(3):
-        plan = {
-            "mode": "script", "path": os.path.abspath(script),
-            "dir": str(tmp_path), "argv": [script], "cwd": str(tmp_path),
-            "interp_name": "python3", "interp_path": sys.executable,
-        }
-        sys.stdout.flush()
-        sys.stderr.flush()
-        r, w = os.pipe()
-        try:
-            rc, out, err = ns["_run_child"](
-                None, b"", str(tmp_path), {}, 30.0, r, plan)
-        finally:
-            os.close(r)
-            os.close(w)
-        assert rc == 0, err
-        # Same result every time: no state leaked from the previous child.
-        assert out.decode() == "2 /injected\n"
+    # One persistent worker serves three consecutive requests: the child is a
+    # fork, so state mutated in one request must not leak into the next.
+    with WorkerSession() as ws:
+        for _ in range(3):
+            plan = {
+                "mode": "script", "path": os.path.abspath(script),
+                "dir": str(tmp_path), "argv": [script], "cwd": str(tmp_path),
+                "interp_name": "python3", "interp_path": sys.executable,
+            }
+            rc, out, err = ws.run(plan=plan, workdir=str(tmp_path), timeout=30.0)
+            assert rc == 0, err
+            # Same result every time: no state leaked from the previous child.
+            assert out.decode() == "2 /injected\n"
     # And nothing leaked back into this process either.
     assert sys.argv == before_argv
     assert sys.path[0] == before_path0
