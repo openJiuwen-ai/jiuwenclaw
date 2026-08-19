@@ -42,6 +42,7 @@ export interface WorkflowAgent {
   outcome?: string;
   outcome_parts?: WorkflowAgentPart[];
   error?: string;
+  error_parts?: WorkflowAgentPart[];
   started_at?: string;
   completed_at?: string;
   token_count?: number | null;
@@ -90,6 +91,7 @@ export interface WorkflowRun {
   result?: string;
   error?: string;
   logs?: string[];
+  logs_truncated?: boolean;
   token_count?: number | null;
   duration_ms?: number | null;
   estimated_token_count?: number | null;
@@ -421,6 +423,7 @@ const SPLITTABLE_AGENT_FIELDS = [
   "human_prompt",
   "human_reply",
   "activity",
+  "error",
 ] as const;
 
 /** Reassemble ``{field}_parts`` arrays back into the base string field. */

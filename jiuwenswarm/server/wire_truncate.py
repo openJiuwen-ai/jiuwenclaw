@@ -46,11 +46,6 @@ _TEAM_HISTORY_DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 _TEAM_HISTORY_MIN_MAX_BYTES = 2048
 _TEAM_HISTORY_MAX_MAX_BYTES = 6 * 1024 * 1024
 _TEAM_HISTORY_FRAME_OVERHEAD_BYTES = 1024
-_WORKFLOW_SNAPSHOT_MAX_BYTES = 6 * 1024 * 1024
-_WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES = 2048
-_WORKFLOW_SNAPSHOT_MAX_WORKFLOWS = 1000
-_WORKFLOW_LIST_SUMMARY_STRING_LIMIT = 256
-_WORKFLOW_COLLAPSED_AGENT_TEXT_LIMIT = 512
 _WORKFLOW_AGENT_FIELD_PART_BYTES = 32 * 1024
 _WORKFLOW_LIST_DEFAULT_LIMIT = 50
 _WORKFLOW_LIST_MAX_LIMIT = 200
@@ -58,7 +53,7 @@ _WORKFLOW_PHASE_DEFAULT_LIMIT = 20
 _WORKFLOW_PHASE_MAX_LIMIT = 100
 _WORKFLOW_AGENT_DEFAULT_LIMIT = 50
 _WORKFLOW_AGENT_MAX_LIMIT = 200
-_SPLITTABLE_AGENT_FIELDS = ("prompt", "outcome", "human_prompt", "human_reply", "activity")
+_SPLITTABLE_AGENT_FIELDS = ("prompt", "outcome", "human_prompt", "human_reply", "activity", "error")
 
 _TRUNCATE_SUFFIX = " [truncated]"
 
@@ -95,20 +90,6 @@ _HISTORY_COLLAPSE_KEEP_KEYS = {
     "is_goal_objective_message",
     "is_goal_completed_message",
     "evidence",
-}
-
-_WORKFLOW_SNAPSHOT_KEEP_KEYS = {
-    "id",
-    "name",
-    "status",
-    "agent_count",
-    "completed_agent_count",
-    "started_at",
-    "completed_at",
-    "duration_ms",
-    "token_count",
-    "estimated_token_count",
-    "budget",
 }
 
 _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
@@ -422,22 +403,23 @@ def _split_oversized_agent_fields(
 # ---------------------------------------------------------------------------
 
 def _workflow_list_summary_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Compact workflow row for ``action=list`` — no phases, detail_pending."""
+    """Compact workflow row for ``action=list`` — no phases, detail_pending.
+
+    Fields are carried in full — pagination bounds the frame, so there is no
+    per-string truncation.
+    """
     summary: dict[str, Any] = {}
     for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS:
         value = item.get(key)
         if value is None:
             continue
-        if key == "budget" and isinstance(value, dict):
-            summary[key] = value
-        else:
-            summary[key] = _compact_wire_metadata_value(value)
+        summary[key] = value
     for key in ("summary", "error", "result"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
-            summary[key] = _truncate_string_by_bytes(value, _WORKFLOW_LIST_SUMMARY_STRING_LIMIT)
+            summary[key] = value
         elif value is not None and key not in summary:
-            summary[key] = _truncate_string_by_bytes(str(value), _WORKFLOW_LIST_SUMMARY_STRING_LIMIT)
+            summary[key] = value
     summary["detail_pending"] = True
     return summary
 
@@ -459,25 +441,28 @@ def _workflow_phase_summary(phase: dict[str, Any]) -> dict[str, Any]:
 
 
 def _workflow_run_meta(workflow: dict[str, Any]) -> dict[str, Any]:
-    """Run-level meta for ``action=get_workflow`` — run fields, no phases/logs."""
+    """Run-level meta for ``action=get_workflow`` — run fields, no phases.
+
+    Fields are carried in full — ``get_workflow`` returns a single run, so
+    there is no per-string truncation.
+    """
     meta: dict[str, Any] = {}
     for key in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS:
         value = workflow.get(key)
         if value is None:
             continue
-        if key == "budget" and isinstance(value, dict):
-            meta[key] = value
-        else:
-            meta[key] = _compact_wire_metadata_value(value)
+        meta[key] = value
     for key in ("summary", "error", "result"):
         value = workflow.get(key)
         if isinstance(value, str) and value.strip():
-            meta[key] = _truncate_string_by_bytes(value, _WORKFLOW_LIST_SUMMARY_STRING_LIMIT)
+            meta[key] = value
         elif value is not None and key not in meta:
-            meta[key] = _truncate_string_by_bytes(str(value), _WORKFLOW_LIST_SUMMARY_STRING_LIMIT)
+            meta[key] = value
     logs = workflow.get("logs")
     if isinstance(logs, list) and logs:
-        meta["logs"] = [_truncate_string_by_bytes(str(log), 512) for log in logs[-10:]]
+        meta["logs"] = [str(log) for log in logs[-10:]]
+        if len(logs) > 10:
+            meta["logs_truncated"] = True
     return meta
 
 
@@ -647,11 +632,6 @@ __all__ = [
     "_TEAM_HISTORY_MIN_MAX_BYTES",
     "_TEAM_HISTORY_MAX_MAX_BYTES",
     "_TEAM_HISTORY_FRAME_OVERHEAD_BYTES",
-    "_WORKFLOW_SNAPSHOT_MAX_BYTES",
-    "_WORKFLOW_SNAPSHOT_FRAME_OVERHEAD_BYTES",
-    "_WORKFLOW_SNAPSHOT_MAX_WORKFLOWS",
-    "_WORKFLOW_LIST_SUMMARY_STRING_LIMIT",
-    "_WORKFLOW_COLLAPSED_AGENT_TEXT_LIMIT",
     "_WORKFLOW_AGENT_FIELD_PART_BYTES",
     "_WORKFLOW_LIST_DEFAULT_LIMIT",
     "_WORKFLOW_LIST_MAX_LIMIT",

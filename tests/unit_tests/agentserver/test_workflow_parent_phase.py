@@ -28,7 +28,7 @@ from jiuwenswarm.agents.harness.team.handlers.workflow_state import (
 from jiuwenswarm.server.wire_truncate import (
     _build_workflow_detail_paginated,
     _build_phase_detail_paginated,
-    _WORKFLOW_SNAPSHOT_KEEP_KEYS,
+    _WORKFLOW_LIST_SUMMARY_KEEP_KEYS,
 )
 
 _DEFAULT_RUN_ID = "wf_sdd0010_e2e"
@@ -475,9 +475,9 @@ class TestThreePathParity:
     def test_snapshot_keep_keys_includes_budget_and_token_count(self):
         """The KEEP_KEYS set used for wire truncation includes budget,
         token_count, and estimated_token_count."""
-        assert "budget" in _WORKFLOW_SNAPSHOT_KEEP_KEYS
-        assert "token_count" in _WORKFLOW_SNAPSHOT_KEEP_KEYS
-        assert "estimated_token_count" in _WORKFLOW_SNAPSHOT_KEEP_KEYS
+        assert "budget" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
+        assert "token_count" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
+        assert "estimated_token_count" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
 
 
 def test_parent_phase_agent_count_aggregates_children():

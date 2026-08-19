@@ -216,11 +216,9 @@ def test_inverse_raises_for_chunk_shape_on_unary_parser() -> None:
 
 def test_snapshot_keep_keys_include_budget() -> None:
     from jiuwenswarm.server.wire_truncate import (
-        _WORKFLOW_SNAPSHOT_KEEP_KEYS,
         _WORKFLOW_LIST_SUMMARY_KEEP_KEYS,
     )
 
-    assert "budget" in _WORKFLOW_SNAPSHOT_KEEP_KEYS
     assert "budget" in _WORKFLOW_LIST_SUMMARY_KEEP_KEYS
 
 
