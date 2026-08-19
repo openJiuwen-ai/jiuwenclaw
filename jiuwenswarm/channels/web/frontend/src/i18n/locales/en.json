@@ -57,6 +57,7 @@
     "statusShutdown": "Shutdown",
     "statusError": "Error",
     "collapse": "Collapse",
+    "toolTabs": "Tool panel tabs",
     "taskOverview": "Task Overview",
     "elapsedTime": "Elapsed time: {{value}}",
     "noTasks": "No tasks",
@@ -388,6 +389,7 @@
   },
   "toolPanel": {
     "status": "Status",
+    "context": "Context",
     "contextCompression": "Context window",
     "memoryUsage": "Memory usage",
     "poweredBy": "Powered by openJiuwen",
@@ -2194,7 +2196,6 @@
     "paused": "Paused",
     "waitingTasks": "Waiting Tasks",
     "messageQueue": "Message Queue",
-    "parallelProgress": "Parallel tasks running ({{completedCount}}/{{total}} complete)",
     "turnRunning": "Running",
     "turnElapsed": "Took",
     "workCompleted": "Completed {{duration}}",
@@ -2233,18 +2234,11 @@
       "todoGet": "Get todo",
       "skill": "View skill"
     },
-    "subtask": {
-      "starting": "Starting...",
-      "toolCall": "Calling {{tool}} (#{{count}})",
-      "toolFallback": "tool",
-      "toolResult": "Processing result...",
-      "taskLabel": "Task {{index}}: {{description}}",
-      "callCount": "{{count}} calls"
-    },
     "toolResult": {
       "success": "done",
       "failed": "failed",
       "timeout": "Execution timed out",
+      "pending": "Accepted, running...",
       "running": "Running...",
       "toolName": "Tool name",
       "arguments": "Arguments",
@@ -2264,7 +2258,13 @@
       },
       "sessionExecuted": "{{count}} session tasks completed",
       "sessionCompleted": "Session task completed",
+      "sessionPending": "Session task accepted, running",
+      "sessionCancelled": "Session task cancelled",
       "sessionFailed": "Session failed",
+      "sessionTask": "Session task: 【{{name}}】",
+      "sessionTaskUnknown": "Unknown task",
+      "sessionDescription": "Description",
+      "sessionResult": "Result",
       "latest": "↓ Latest"
     },
     "teamActivity": {
@@ -2588,6 +2588,47 @@
     "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
     "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
     "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+  },
+  "subagent": {
+    "title": "Subagents",
+    "compactTitle": "Subagents ({{count}})",
+    "activeListTitle": "Active now {{count}}",
+    "expand": "Expand Subagents",
+    "selectWithStatus": "Select {{name}}, status: {{status}}",
+    "running": "Running",
+    "idle": "Waiting",
+    "closed": "Closed",
+    "failed": "Error",
+    "cancelled": "Cancelled",
+    "tasksEmpty": "No tasks",
+    "activityTitle": "Activity",
+    "activityEmpty": "No activity yet",
+    "empty": "No subagents",
+    "activity": {
+      "thinking": "Thinking",
+      "toolCall": "Tool call",
+      "toolResult": "Tool result",
+      "expand": "Expand activity details",
+      "collapse": "Collapse activity details",
+      "ok": "OK",
+      "error": "Error",
+      "truncated": "Activity condensed",
+      "fields": {
+        "type": "Type",
+        "time": "Time",
+        "tool": "Tool",
+        "call": "Call",
+        "result": "Result",
+        "content": "Content",
+        "status": "Status",
+        "dropped": "Dropped"
+      },
+      "tools": {
+        "search": "Web search",
+        "terminal": "Terminal",
+        "todo": "Task list"
+      }
+    }
   },
   "mermaid": {
     "rendering": "Drawing…",

@@ -30,8 +30,11 @@ import {
   beginHistoryRestore,
   fetchHistoryPage,
   HISTORY_GET_METHOD,
+  recoverSubagentToolHistory,
   type HistoryRestoreHandle,
   type HistoryHarnessReplayItem,
+  type HistorySubagentReplayItem,
+  type HistoryToolReplayItem,
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
@@ -45,6 +48,7 @@ import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveM
 import { webRequest } from './services/webClient';
 import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
+import { useSingleAgentPanelState } from './features/singleAgentPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
 import {
   ensureSessionRuntimes,
@@ -56,6 +60,7 @@ import {
   usePlanStore,
   useWorkspaceStore,
   useCronStore,
+  useSubagentStore,
 } from './stores';
 import { useChatRoute } from './multi-session/routing/useChatRoute';
 import { ConversationSidebar, type NewConversationOptions } from './multi-session/sidebar/ConversationSidebar';
@@ -85,6 +90,11 @@ import {
   type PendingPreviousSession,
 } from './multi-session/state/newConversationPreviousSession';
 import { useTranslation } from 'react-i18next';
+import {
+  normalizeSubagentActivityEvent,
+  normalizeSubagentStatusEvent,
+  normalizeSubagentWaitResults,
+} from './features/subagent/subagentNormalizer';
 import {
   normalizeA2UIEnabled,
   setA2UIFeatureEnabled,
@@ -425,6 +435,8 @@ function AppContent() {
   const kvcPreparedInputSessionRef = useRef<string | null>(null);
   const historyLoadingSessionsRef = useRef(new Set<string>());
   const historyRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
+  const subagentHistoryRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
+  const subagentHistoryRestoreRevisionRef = useRef(new Map<string, string>());
   const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const historyPagePromisesRef = useRef(new Map<string, Promise<LoadedHistoryPage | null>>());
   const historyPageCancelRef = useRef(new Map<string, () => void>());
@@ -503,6 +515,14 @@ function AppContent() {
     setTeamAreaSelectedMemberId,
     setTeamAreaSelectedArtifactId,
   } = useTeamPanelState();
+  const {
+    singleAgentPanelExpanded,
+    singleAgentPanelActiveTab,
+    singleAgentPanelSelectedArtifactId,
+    setSingleAgentPanelExpanded,
+    setSingleAgentPanelActiveTab,
+    setSingleAgentPanelSelectedArtifactId,
+  } = useSingleAgentPanelState();
 
   useEffect(() => {
     if (route.kind === 'chat-session') {
@@ -521,12 +541,14 @@ function AppContent() {
       setSessionId('new');
       setActiveNav('chat');
       setTeamAreaExpanded(false);
+      setSingleAgentPanelExpanded(false);
     }
-  }, [navigate, route, setTeamAreaExpanded]);
+  }, [navigate, route, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   useEffect(() => {
     ensureSessionRuntimes(sessionId);
     useChatStore.getState().setActiveSessionId(sessionId);
+    useSubagentStore.getState().hydrateRuntime(sessionId);
   }, [sessionId]);
 
   useEffect(() => {
@@ -579,17 +601,23 @@ function AppContent() {
   }, [sessionId]);
 
   const handleToggleDetailPanel = useCallback((expanded: boolean) => {
-    if (expanded && mode !== 'team' && teamAreaActiveTab === 'team') {
-      setTeamAreaActiveTab('planning');
+    if (mode === 'team') {
+      setTeamAreaExpanded(expanded);
+      return;
     }
-    setTeamAreaExpanded(expanded);
-  }, [mode, setTeamAreaActiveTab, setTeamAreaExpanded, teamAreaActiveTab]);
+    setSingleAgentPanelExpanded(expanded);
+  }, [mode, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   const handleOpenCodeReview = useCallback((target: CodeReviewTarget) => {
     setCodeReviewTarget(target);
-    setTeamAreaActiveTab('review');
-    setTeamAreaExpanded(true);
-  }, [setTeamAreaActiveTab, setTeamAreaExpanded]);
+    if (mode === 'team') {
+      setTeamAreaActiveTab('review');
+      setTeamAreaExpanded(true);
+    } else {
+      setSingleAgentPanelActiveTab('review');
+      setSingleAgentPanelExpanded(true);
+    }
+  }, [mode, setSingleAgentPanelActiveTab, setSingleAgentPanelExpanded, setTeamAreaActiveTab, setTeamAreaExpanded]);
 
   const handleDividerPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || chatPanelResizeDragRef.current) return;
@@ -636,7 +664,6 @@ function AppContent() {
   }, [clearChatPanelResize]);
 
   const clearMessages = useChatStore((s) => s.clearMessages);
-  const clearSubtasks = useChatStore((s) => s.clearSubtasks);
   const addMessage = useChatStore((s) => s.addMessage);
   const addToolCall = useChatStore((s) => s.addToolCall);
   const addToolResult = useChatStore((s) => s.addToolResult);
@@ -692,6 +719,16 @@ function AppContent() {
       setLoadingHistory(targetSid, false);
       historyRestoreHandlesRef.current.get(targetSid)?.dispose();
       historyRestoreHandlesRef.current.delete(targetSid);
+      for (const [key, handle] of Array.from(subagentHistoryRestoreHandlesRef.current.entries())) {
+        if (!key.startsWith(`${targetSid}:`)) continue;
+        handle.dispose();
+        subagentHistoryRestoreHandlesRef.current.delete(key);
+      }
+      for (const key of subagentHistoryRestoreRevisionRef.current.keys()) {
+        if (key.startsWith(`${targetSid}:`)) {
+          subagentHistoryRestoreRevisionRef.current.delete(key);
+        }
+      }
       for (const [key, handle] of Array.from(historyPageHandlesRef.current.entries())) {
         if (!key.startsWith(`${targetSid}:`)) continue;
         handle.dispose();
@@ -709,6 +746,7 @@ function AppContent() {
 
     for (const targetSid of new Set([
       ...historyRestoreHandlesRef.current.keys(),
+      ...Array.from(subagentHistoryRestoreHandlesRef.current.keys(), (key) => key.split(':', 1)[0]),
       ...Array.from(historyPageHandlesRef.current.keys(), (key) => key.split(':', 1)[0]),
       ...historyLoadingSessionsRef.current,
     ])) {
@@ -718,6 +756,11 @@ function AppContent() {
 
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
   const todos = useTodoStore((s) => s.runtimes[sessionId]?.todos ?? []);
+  const subagentCount = useSubagentStore((s) => Object.keys(s.runtimes[sessionId]?.subagentsById ?? {}).length);
+  const subagentStatusSignature = useSubagentStore((s) => Object.values(s.runtimes[sessionId]?.subagentsById ?? {})
+    .sort((left, right) => left.subagent_id.localeCompare(right.subagent_id))
+    .map((subagent) => `${subagent.subagent_id}:${subagent.status}:${subagent.turn_outcome ?? ''}:${subagent.closed_reason ?? ''}:${subagent.revision}:${subagent.updated_at}`)
+    .join('|'));
   const clearTodos = useTodoStore((s) => s.clearTodos);
   const extensionReady = useHarnessStore((s) => s.runtimes[sessionId]?.extensionReady ?? null);
   const resetHarnessStore = useHarnessStore((s) => s.reset);
@@ -733,12 +776,16 @@ function AppContent() {
       case 'team':
         return isRestoringTeamHistory || teamTaskEvents.length > 0 || teamTasks.length > 0 || teamMembers.length > 0 || hasMessages || hasCodeEnvironment;
       default:
-        return todos.length > 0 || hasMessages || hasCodeEnvironment;
+        return todos.length > 0
+          || subagentCount > 0
+          || hasMessages
+          || hasCodeEnvironment;
     }
-  }, [mode, todos.length, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory, sessionId, sessionProject?.work_mode]);
+  }, [mode, todos.length, subagentCount, teamTaskEvents.length, teamTasks.length, teamMembers.length, extensionReady?.runtimePath, messages.length, isRestoringTeamHistory, sessionId, sessionProject?.work_mode]);
   // 单 agent 模式同样复用集群模式的展开布局（百分比宽度 + 可拖拽分割线），
   // 避免右侧面板与聊天面板平分空间导致宽度与集群模式不一致；auto_harness 走收起态分支。
-  const isTeamAreaExpanded = mode !== 'auto_harness' && teamAreaExpanded && toolPanelHasContent;
+  const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
+  const isTeamAreaExpanded = mode !== 'auto_harness' && panelExpanded && toolPanelHasContent;
 
   // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
@@ -789,6 +836,203 @@ function AppContent() {
     },
   });
 
+  const applySubagentHistoryReplay = useCallback((sid: string, items: HistorySubagentReplayItem[]) => {
+    const subagentStore = useSubagentStore.getState();
+    for (const item of items) {
+      if (item.kind === 'updated') {
+        const event = normalizeSubagentStatusEvent({ ...item.payload, session_id: sid });
+        if (!event || event.subagent.parent_session_id !== sid) continue;
+        subagentStore.applyHistoryEvent(sid, event);
+        continue;
+      }
+      if (item.kind === 'activity') {
+        const event = normalizeSubagentActivityEvent({
+          ...item.payload,
+          event_type: 'chat.subagent_activity',
+          session_id: sid,
+        });
+        if (!event) continue;
+        subagentStore.applyHistoryEvent(sid, event);
+        continue;
+      }
+      const subagentId = typeof item.payload.subagent_id === 'string' ? item.payload.subagent_id.trim() : '';
+      const content = typeof item.payload.content === 'string' ? item.payload.content : '';
+      if (subagentId && content.trim()) {
+        const parentSessionId = typeof item.payload.parent_session_id === 'string'
+          ? item.payload.parent_session_id
+          : undefined;
+        subagentStore.applyTranscript(sid, {
+          subagent_id: subagentId,
+          content,
+          ...(parentSessionId ? { parent_session_id: parentSessionId } : {}),
+        });
+      }
+    }
+  }, []);
+
+  const restoreSubagentHistory = useCallback((sid: string) => {
+    useSubagentStore.getState().hydrateRuntime(sid);
+    const runtime = useSubagentStore.getState().getRuntime(sid);
+    const subagentIds = Object.keys(runtime?.subagentsById ?? {});
+    for (const subagentId of subagentIds) {
+      const key = `${sid}:${subagentId}`;
+      const subagent = runtime?.subagentsById[subagentId];
+      if (!subagent) continue;
+      const expectedRevision = subagent.revision;
+      const expectedUpdatedAt = subagent.updated_at;
+      const revisionMarker = `${subagent.status}:${subagent.turn_outcome ?? ''}:${subagent.closed_reason ?? ''}:${subagent.revision}:${subagent.updated_at}`;
+      if (subagentHistoryRestoreRevisionRef.current.get(key) === revisionMarker) continue;
+      subagentHistoryRestoreRevisionRef.current.set(key, revisionMarker);
+      subagentHistoryRestoreHandlesRef.current.get(key)?.dispose();
+      const pageHandles = new Set<HistoryRestoreHandle>();
+      const pageSettlers = new Set<(page: LoadedHistoryPage | null) => void>();
+      let disposed = false;
+      const handle: HistoryRestoreHandle = {
+        generation: 0,
+        dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          for (const settlePending of pageSettlers) {
+            settlePending(null);
+          }
+          pageSettlers.clear();
+          for (const pageHandle of pageHandles) {
+            pageHandle.dispose();
+          }
+          pageHandles.clear();
+        },
+      };
+      subagentHistoryRestoreHandlesRef.current.set(key, handle);
+
+      const fetchSubagentHistoryPage = (
+        pageIdx: number,
+        fallbackTotalPages: number,
+      ): Promise<LoadedHistoryPage | null> => new Promise((resolve) => {
+        if (disposed) {
+          resolve(null);
+          return;
+        }
+
+        let settled = false;
+        let pageHandle: HistoryRestoreHandle | null = null;
+        const settle = (page: LoadedHistoryPage | null) => {
+          if (settled) return;
+          settled = true;
+          pageSettlers.delete(settle);
+          if (pageHandle) pageHandles.delete(pageHandle);
+          resolve(page);
+        };
+        pageSettlers.add(settle);
+
+        pageHandle = fetchHistoryPage({
+          sessionId: sid,
+          subagentId,
+          pageIdx,
+          onReady: (result: FetchHistoryPageResult) => settle({
+            pageIdx,
+            totalPages: result.totalPages ?? fallbackTotalPages,
+            result,
+          }),
+          onEmpty: (totalPages) => {
+            if (pageIdx > 1) {
+              settle(null);
+              return;
+            }
+            settle({
+              pageIdx,
+              totalPages: totalPages ?? fallbackTotalPages,
+              result: null,
+            });
+          },
+          onTimeout: () => settle(null),
+          onError: (message) => console.warn('[subagent.history]', message),
+        });
+        pageHandles.add(pageHandle);
+        void request(HISTORY_GET_METHOD, {
+          session_id: sid,
+          subagent_id: subagentId,
+          page_idx: pageIdx,
+        }).catch((error) => {
+          pageHandle?.dispose();
+          settle(null);
+          console.warn('[subagent.history] request failed', error);
+        });
+      });
+
+      const restorePages = async () => {
+        const cleanup = () => {
+          handle.dispose();
+          if (subagentHistoryRestoreHandlesRef.current.get(key) === handle) {
+            subagentHistoryRestoreHandlesRef.current.delete(key);
+          }
+        };
+        let hasSubagentHistory = false;
+        const applyPage = (page: LoadedHistoryPage) => {
+          const items = page.result?.subagentReplay ?? [];
+          if (items.length > 0) {
+            hasSubagentHistory = true;
+            applySubagentHistoryReplay(sid, items);
+          }
+        };
+
+        const firstPage = await fetchSubagentHistoryPage(1, 1);
+        if (disposed || !firstPage) {
+          cleanup();
+          return;
+        }
+        applyPage(firstPage);
+
+        const prefetchOutcome = await prefetchHistoryPages({
+          initialLoadedPages: 1,
+          initialTotalPages: firstPage.totalPages,
+          isCurrent: () => !disposed,
+          fetchPage: (pageIdx, totalPages) => fetchSubagentHistoryPage(pageIdx, totalPages),
+          applyPage,
+          waitForNextPaint: async () => {},
+        });
+        if (disposed || prefetchOutcome !== 'completed') {
+          cleanup();
+          return;
+        }
+        if (!hasSubagentHistory && firstPage.result === null) {
+          useSubagentStore.getState().dropCachedSubagent(
+            sid,
+            subagentId,
+            expectedRevision,
+            expectedUpdatedAt,
+          );
+        }
+        cleanup();
+      };
+
+      void restorePages().catch((error) => {
+        handle.dispose();
+        if (subagentHistoryRestoreHandlesRef.current.get(key) === handle) {
+          subagentHistoryRestoreHandlesRef.current.delete(key);
+        }
+        console.warn('[subagent.history] restore failed', error);
+      });
+    }
+  }, [applySubagentHistoryReplay, request]);
+
+  const applyRecoveredSubagentToolHistory = useCallback((sid: string, items: HistoryToolReplayItem[]) => {
+    const subagentStore = useSubagentStore.getState();
+    const recoveredItems = recoverSubagentToolHistory(items, sid);
+    for (const recovered of recoveredItems) {
+      const event = normalizeSubagentStatusEvent({ ...recovered.subagent, session_id: sid });
+      if (event && event.subagent.parent_session_id === sid) {
+        subagentStore.applyHistoryEvent(sid, event);
+      }
+      if (recovered.result) {
+        subagentStore.applyResult(sid, recovered.result);
+      }
+    }
+    if (recoveredItems.length > 0) {
+      setSingleAgentPanelActiveTab('subagents');
+    }
+    restoreSubagentHistory(sid);
+  }, [restoreSubagentHistory, setSingleAgentPanelActiveTab]);
+
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
     // 只 stamp 徽章：merge 完成卡只适合整页 replace（首次 history 恢复）。
     // 这里若再 merge，localStorage 里的完成卡不在本页 messages 里就会被再次注入，
@@ -818,6 +1062,7 @@ function AppContent() {
             toolName: n.toolName,
             result: n.result,
             success: n.success,
+            ...(n.pending ? { pending: true } : {}),
             toolCallId: n.toolCallId,
             summary: n.summary,
             skillTree: n.skillTree,
@@ -827,6 +1072,12 @@ function AppContent() {
           { updatedAt: item.at }
         );
       }
+    }
+    if (result.subagentReplay.length > 0) {
+      applySubagentHistoryReplay(sid, result.subagentReplay);
+    }
+    if (result.toolReplay.length > 0) {
+      applyRecoveredSubagentToolHistory(sid, result.toolReplay);
     }
     settleHistoricalToolExecutions(sid);
 
@@ -880,7 +1131,7 @@ function AppContent() {
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
-  }, [addToolCall, addToolResult, prependMessages, settleHistoricalToolExecutions]);
+  }, [addToolCall, addToolResult, applyRecoveredSubagentToolHistory, applySubagentHistoryReplay, prependMessages, settleHistoricalToolExecutions]);
 
   const fetchHistoryPageResult = useCallback(async (
     sid: string,
@@ -914,9 +1165,14 @@ function AppContent() {
           settle({ pageIdx, totalPages, result });
         },
         onEmpty: (emptyTotalPages) => {
+          if (pageIdx > 1) {
+            settle(null);
+            return;
+          }
           const totalPages = emptyTotalPages ?? fallbackTotalPages;
           settle({ pageIdx, totalPages, result: null });
         },
+        onTimeout: () => settle(null),
         onError: (message) => {
           console.warn('[history.page]', message);
         },
@@ -1012,6 +1268,7 @@ function AppContent() {
         session_id: targetSessionId,
       });
       upsertSessionMetadata(session, { setCurrent: sessionIdRef.current === targetSessionId });
+      useWorkspaceStore.getState().upsertSession(session);
       if (sessionIdRef.current === targetSessionId) {
         setMissingSessionId((current) => (current === targetSessionId ? null : current));
         // 同 handleRestoreSession：拿到后端 metadata 里的 model 后还原 selectedModelName，
@@ -1634,8 +1891,10 @@ function AppContent() {
         }
       },
       onToolReplay: (items) => {
-        clearSubtasks(sessionId);
         for (const item of items) {
+          for (const result of normalizeSubagentWaitResults(item.payload)) {
+            useSubagentStore.getState().applyResult(sessionId, result);
+          }
           if (item.kind === 'tool_call') {
             const n = normalizeToolCallPayload(item.payload);
             addToolCall(
@@ -1659,6 +1918,7 @@ function AppContent() {
                 toolName: n.toolName,
                 result: n.result,
                 success: n.success,
+                ...(n.pending ? { pending: true } : {}),
                 toolCallId: n.toolCallId,
                 summary: n.summary,
                 skillTree: n.skillTree,
@@ -1669,6 +1929,7 @@ function AppContent() {
             );
           }
         }
+        applyRecoveredSubagentToolHistory(sessionId, items);
         settleHistoricalToolExecutions(sessionId);
       },
       onHarnessReplay: (items: HistoryHarnessReplayItem[]) => {
@@ -1711,6 +1972,9 @@ function AppContent() {
             }
           }
         }
+      },
+      onSubagentReplay: (items) => {
+        applySubagentHistoryReplay(sessionId, items);
       },
       onReasoningReplay: (items) => {
         restoreReasoningSegments(sessionId, items);
@@ -1769,9 +2033,10 @@ function AppContent() {
     addMessage,
     addToolCall,
     addToolResult,
+    applyRecoveredSubagentToolHistory,
+    applySubagentHistoryReplay,
     settleHistoricalToolExecutions,
     clearMessages,
-    clearSubtasks,
     disposeInFlightHistoryHandles,
     setLoadingHistory,
     setHistoryPagerMeta,
@@ -1779,6 +2044,18 @@ function AppContent() {
     restoreReasoningSegments,
     startBackgroundHistoryPrefetch,
   ]);
+
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
+    restoreSubagentHistory(sessionId);
+  }, [historyBootstrapKey, isConnected, restoreSubagentHistory, sessionId]);
+
+  useEffect(() => {
+    if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID || !subagentStatusSignature) return;
+    const runtime = useSubagentStore.getState().getRuntime(sessionId);
+    if (!Object.values(runtime?.subagentsById ?? {}).some((subagent) => subagent.status !== 'running')) return;
+    restoreSubagentHistory(sessionId);
+  }, [isConnected, restoreSubagentHistory, sessionId, subagentStatusSignature]);
 
   // 会话切换/页面加载时主动拉一次当前 Goal 状态（协议文档 v2 §11 推荐流程）——不然刷新页面
   // 后 GoalBar 要等下一次 goal.updated 推送才会重新出现，目标 paused/静默期时甚至会一直缺失
@@ -1864,10 +2141,11 @@ function AppContent() {
     setSessionId(NEW_CONVERSATION_ID);
     setCurrentSession(null);
     setTeamAreaExpanded(false);
+    setSingleAgentPanelExpanded(false);
     navigate({ kind: 'chat-new' });
     setActiveNav('chat');
     requestComposerFocus();
-  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
+  }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setSingleAgentPanelExpanded, setTeamAreaExpanded]);
 
   // 监听从 SkillPanel 发来的"新建会话并插入技能"事件
   useEffect(() => {
@@ -2260,7 +2538,6 @@ function AppContent() {
         clearTeamRuntimeState(targetSessionId);
         clearMessages(targetSessionId);
         clearTodos(targetSessionId);
-        clearSubtasks(targetSessionId);
         resetHarnessStore(targetSessionId);
         historyRestoreFromPanelHintRef.current = true;
       }
@@ -2305,7 +2582,6 @@ function AppContent() {
     },
     [
       clearMessages,
-      clearSubtasks,
       clearTodos,
       disposeInFlightHistoryHandles,
       mode,
@@ -2365,6 +2641,7 @@ function AppContent() {
       sessionState.removeSession(deletedSessionId);
       sessionState.removeRuntime(deletedSessionId);
       useChatStore.getState().removeRuntime(deletedSessionId);
+      useSubagentStore.getState().removeRuntime(deletedSessionId);
       useTodoStore.getState().removeRuntime(deletedSessionId);
       useHarnessStore.getState().removeRuntime(deletedSessionId);
       useGoalStore.getState().removeRuntime(deletedSessionId);
@@ -2403,6 +2680,7 @@ function AppContent() {
       useSessionStore.getState().removeSession(deleteTarget.session_id);
       useSessionStore.getState().removeRuntime(deleteTarget.session_id);
       useChatStore.getState().removeRuntime(deleteTarget.session_id);
+      useSubagentStore.getState().removeRuntime(deleteTarget.session_id);
       useTodoStore.getState().removeRuntime(deleteTarget.session_id);
       useHarnessStore.getState().removeRuntime(deleteTarget.session_id);
       useGoalStore.getState().removeRuntime(deleteTarget.session_id);
@@ -2709,12 +2987,18 @@ function AppContent() {
                     teamAreaSelectedMemberId={teamAreaSelectedMemberId}
                     codeReviewTarget={codeReviewTarget}
                     teamAreaSelectedArtifactId={teamAreaSelectedArtifactId}
+                    singleAgentPanelExpanded={singleAgentPanelExpanded}
+                    singleAgentPanelActiveTab={singleAgentPanelActiveTab}
+                    singleAgentPanelSelectedArtifactId={singleAgentPanelSelectedArtifactId}
                     setTeamAreaExpanded={setTeamAreaExpanded}
                     setTeamAreaActiveTab={setTeamAreaActiveTab}
                     setTeamAreaActiveDetailTab={setTeamAreaActiveDetailTab}
                     setTeamAreaSelectedMemberId={setTeamAreaSelectedMemberId}
                     setCodeReviewTarget={setCodeReviewTarget}
                     setTeamAreaSelectedArtifactId={setTeamAreaSelectedArtifactId}
+                    setSingleAgentPanelExpanded={setSingleAgentPanelExpanded}
+                    setSingleAgentPanelActiveTab={setSingleAgentPanelActiveTab}
+                    setSingleAgentPanelSelectedArtifactId={setSingleAgentPanelSelectedArtifactId}
                   />
                 )}
               </div>

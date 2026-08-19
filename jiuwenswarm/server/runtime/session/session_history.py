@@ -135,6 +135,8 @@ def _has_persistable_assistant_payload(
         return True
     if payload.get("tool_call") or payload.get("tool_calls"):
         return True
+    if et == "chat.subagent_activity" and isinstance(payload.get("subagent_activity"), dict):
+        return True
     # Empty chat.final / chat.* status shells and other blank assistants: skip.
     if et.startswith("chat.") or et in {"", "chat.final"}:
         return False

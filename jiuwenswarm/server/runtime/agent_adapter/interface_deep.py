@@ -12166,6 +12166,44 @@ class JiuWenSwarmDeepAdapter:
         )
 
     @staticmethod
+    def _persist_subagent_activity(projection: dict[str, Any]) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        task_id = str(projection.get("task_id") or "").strip()
+        seq = projection.get("seq")
+        if seq is not None:
+            activity_key = str(seq)
+        else:
+            activity_key = str(
+                projection.get("activity_id")
+                or projection.get("activityId")
+                or projection.get("tool_call_id")
+                or projection.get("toolCallId")
+                or hashlib.sha256(
+                    json.dumps(projection, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()[:16]
+            )
+        request_id = f"{subagent_id}:activity:{task_id}:{activity_key}"
+        timestamp_ms = projection.get("at_ms")
+        timestamp = float(timestamp_ms) / 1000 if timestamp_ms is not None else time.time()
+        summary = projection.get("summary")
+        append_history_record(
+            session_id=parent_session_id,
+            subagent_id=subagent_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role="assistant",
+            content=str(summary or ""),
+            timestamp=timestamp,
+            event_type="chat.subagent_activity",
+            extra={"subagent_activity": dict(projection)},
+            mode="subagent",
+        )
+
+    @staticmethod
     def _persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
         parent_session_id = str(projection.get("parent_session_id") or "").strip()
         subagent_id = str(projection.get("subagent_id") or "").strip()

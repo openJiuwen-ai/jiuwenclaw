@@ -6,7 +6,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useSessionStore, useTodoStore } from '../../stores';
-import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, type ReactNode } from 'react';
 import { FileCheck2, FileText, Minimize2 } from 'lucide-react';
 import { webRequest } from '../../services/webClient';
 import { ArtifactsPanel, useSessionArtifactsCount } from '../ArtifactsPanel';
@@ -22,6 +22,11 @@ import { CodeEnvironmentPanel } from '../../features/code-mode/CodeEnvironmentPa
 import { CodeReviewPanel } from '../../features/code-mode/CodeReviewPanel';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
 import { useCodeGitDiffWatch } from '../../features/code-mode/useCodeGitDiffWatch';
+import { type SingleAgentToolTab } from '../../features/singleAgentPanelState';
+import { SubagentCompactPanel } from '../subagent/SubagentCompactPanel';
+import { SubagentExpandedPanel } from '../subagent/SubagentExpandedPanel';
+import { useSubagentStore } from '../../stores/subagentStore';
+import TeamMembersIcon from '../../assets/subagent/team-members.svg?react';
 import './ToolPanel.css';
 
 /** 规划/性能模式下把 TodoItem 降级映射为 TeamTask，复用 TaskPlanningPanel 紧凑态样式 */
@@ -52,12 +57,18 @@ interface ToolPanelProps {
   teamAreaSelectedMemberId?: string;
   codeReviewTarget?: CodeReviewTarget | null;
   teamAreaSelectedArtifactId?: string;
+  singleAgentPanelExpanded: boolean;
+  singleAgentPanelActiveTab: SingleAgentToolTab;
+  singleAgentPanelSelectedArtifactId?: string;
   setTeamAreaExpanded: (expanded: boolean) => void;
   setTeamAreaActiveTab: (tab: TabType) => void;
   setTeamAreaActiveDetailTab: (detailTab: TeamDetailTab) => void;
   setTeamAreaSelectedMemberId: (memberId: string) => void;
   setCodeReviewTarget?: (target: CodeReviewTarget | null) => void;
   setTeamAreaSelectedArtifactId: (artifactId: string) => void;
+  setSingleAgentPanelExpanded: (expanded: boolean) => void;
+  setSingleAgentPanelActiveTab: (tab: SingleAgentToolTab) => void;
+  setSingleAgentPanelSelectedArtifactId: (artifactId: string) => void;
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -90,6 +101,7 @@ function mergeById<T>(
 }
 
 function ExpandedSingleAgentArea({
+  sessionId,
   activeTab,
   tasks,
   members,
@@ -101,25 +113,30 @@ function ExpandedSingleAgentArea({
   selectedArtifactId,
   onArtifactSelect,
 }: {
-  activeTab: TabType;
+  sessionId: string;
+  activeTab: SingleAgentToolTab;
   tasks: TeamTask[];
   members: Parameters<typeof TaskPlanningPanel>[0]['members'];
   totalTasks: number;
   completedTasks: number;
-  onTabChange: (tab: TabType) => void;
+  onTabChange: (tab: SingleAgentToolTab) => void;
   onCollapse: () => void;
   reviewPanel?: ReactNode;
   selectedArtifactId?: string;
   onArtifactSelect: (artifactId: string) => void;
 }) {
   const { t } = useTranslation();
+  const tabPanelId = useId();
   const artifactsCount = useSessionArtifactsCount();
+  const subagentCount = useSubagentStore((state) => Object.keys(state.runtimes[sessionId]?.subagentsById ?? {}).length);
   const resolvedTab =
     activeTab === 'artifacts' && artifactsCount > 0
       ? 'artifacts'
-      : activeTab === 'review' && reviewPanel
-        ? 'review'
-        : 'planning';
+      : activeTab === 'subagents' && subagentCount > 0
+        ? 'subagents'
+        : activeTab === 'review' && reviewPanel
+          ? 'review'
+          : 'planning';
   const tabs = [
     {
       key: 'planning',
@@ -127,6 +144,13 @@ function ExpandedSingleAgentArea({
       count: `${completedTasks}/${totalTasks}`,
       icon: <img src={teamProcessIcon} width={16} height={16} aria-hidden="true" />,
     },
+    ...(subagentCount > 0
+      ? [{
+          key: 'subagents' as const,
+          label: t('subagent.title'),
+          icon: <TeamMembersIcon className="h-4 w-4" aria-hidden="true" />,
+        }]
+      : []),
     ...(artifactsCount > 0
       ? [{
           key: 'artifacts' as const,
@@ -140,19 +164,24 @@ function ExpandedSingleAgentArea({
 
   return (
     <div data-testid="tool-panel-expanded-body" className="flex h-full flex-col overflow-hidden bg-card">
-      <div data-testid="tool-panel-expanded-header" className="flex shrink-0 items-center justify-between px-6 py-4 bg-card border-b border-border">
-        <div data-testid="tool-panel-expanded-tabs" className="flex items-center gap-2">
+      <div data-testid="tool-panel-expanded-header" className="single-agent-tool-tabs">
+        <div data-testid="tool-panel-expanded-tabs" className="single-agent-tool-tabs__list" role="tablist" aria-label={t('team.toolTabs')}>
           {tabs.map((tab) => (
             <button
               key={tab.key}
               data-testid="tool-panel-tab"
               data-variant={tab.key}
-              className={`h-9 rounded-lg px-4 text-sm  flex items-center gap-2 ${
+              id={`${tabPanelId}-${tab.key}`}
+              type="button"
+              role="tab"
+              aria-selected={resolvedTab === tab.key}
+              aria-controls={`${tabPanelId}-panel`}
+              className={`single-agent-tool-tab ${
                 resolvedTab === tab.key
-                  ? 'bg-secondary font-medium text-text'
-                  : 'text-text-muted hover:bg-secondary/50 hover:text-text'
+                  ? 'single-agent-tool-tab--active'
+                  : ''
               }`}
-              onClick={() => onTabChange(tab.key as TabType)}
+              onClick={() => onTabChange(tab.key as SingleAgentToolTab)}
             >
               {tab.icon}
               {tab.label}{'count' in tab ? ` (${tab.count})` : ''}
@@ -161,17 +190,27 @@ function ExpandedSingleAgentArea({
         </div>
 
         <button
+          type="button"
           onClick={onCollapse}
           data-testid="tool-panel-collapse"
-          className="rounded p-2 text-text-muted  hover:bg-secondary hover:text-text"
+          className="single-agent-tool-tabs__collapse rounded p-2 text-text-muted hover:bg-secondary hover:text-text"
+          aria-label={t('team.collapse')}
           title={t('team.collapse')}
         >
           <Minimize2 size={12} />
         </button>
       </div>
 
-      <div data-testid="tool-panel-expanded-content" className="flex min-h-0 flex-1 overflow-hidden">
-        {resolvedTab === 'artifacts' ? (
+      <div
+        data-testid="tool-panel-expanded-content"
+        id={`${tabPanelId}-panel`}
+        className="flex min-h-0 flex-1 overflow-hidden"
+        role="tabpanel"
+        aria-labelledby={`${tabPanelId}-${resolvedTab}`}
+      >
+        {resolvedTab === 'subagents' ? (
+          <SubagentExpandedPanel sessionId={sessionId} />
+        ) : resolvedTab === 'artifacts' ? (
           <div data-testid="tool-panel-artifacts-pane" data-variant="artifacts" className="flex min-w-0 flex-1 overflow-hidden">
             <ArtifactsPanel selectedArtifactId={selectedArtifactId} onSelectArtifact={onArtifactSelect} />
           </div>
@@ -202,20 +241,26 @@ export function ToolPanel({
   teamAreaSelectedMemberId,
   codeReviewTarget = null,
   teamAreaSelectedArtifactId,
+  singleAgentPanelExpanded,
+  singleAgentPanelActiveTab,
+  singleAgentPanelSelectedArtifactId,
   setTeamAreaExpanded,
   setTeamAreaActiveTab,
   setTeamAreaActiveDetailTab,
   setTeamAreaSelectedMemberId,
   setCodeReviewTarget,
   setTeamAreaSelectedArtifactId,
+  setSingleAgentPanelExpanded,
+  setSingleAgentPanelActiveTab,
+  setSingleAgentPanelSelectedArtifactId,
 }: ToolPanelProps) {
   const { t } = useTranslation();
   const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
   const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
   const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
+  const resolvedSessionId = sessionId ?? activeSessionId ?? '';
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
   const teamHistoryMessages = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamHistoryMessages ?? []);
   const setTeamMembers = useSessionStore((s) => s.setTeamMembers);
@@ -415,26 +460,27 @@ export function ToolPanel({
     isProcessing && latestUserMessageIndex >= 0 && !hasVisibleReplyAfterLatestUser;
   const visibleContextCompressionBefore = shouldMaskContextUsage ? 0 : contextCompressionBefore;
   const visibleContextCompressionAfter = shouldMaskContextUsage ? 0 : contextCompressionAfter;
-  const beforeK = ((visibleContextCompressionBefore ?? 0) / 1000).toFixed(1);
-  const afterK = ((visibleContextCompressionAfter ?? 0) / 1000).toFixed(1);
-  let compressionRateDisplay;
-  if (
-    visibleContextCompressionBefore === 0 ||
-    visibleContextCompressionBefore === null ||
-    visibleContextCompressionAfter === 0 ||
-    visibleContextCompressionAfter === null
-  ) {
-    compressionRateDisplay = '--';
-  } else if (visibleContextCompressionAfter === visibleContextCompressionBefore) {
-    compressionRateDisplay = '100.0';
-  } else {
-    compressionRateDisplay = Number.isFinite(contextCompressionRate)
-      ? contextCompressionRate.toFixed(1)
-      : '0.0';
-  }
-  const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
+  const contextUsagePercent =
+    visibleContextCompressionBefore != null &&
+    visibleContextCompressionBefore > 0 &&
+    visibleContextCompressionAfter != null
+      ? Math.min(
+          100,
+          Math.max(0, Math.round((visibleContextCompressionAfter / visibleContextCompressionBefore) * 100)),
+        )
+      : null;
+  const contextUsageLabel = contextUsagePercent == null ? '--' : `${contextUsagePercent}%`;
+  const contextWindowDisplay =
+    visibleContextCompressionBefore == null ||
+    visibleContextCompressionBefore <= 0 ||
+    visibleContextCompressionAfter == null ||
+    visibleContextCompressionAfter <= 0
+      ? '--'
+      : `${(visibleContextCompressionAfter / 1000).toFixed(1)}K/${(visibleContextCompressionBefore / 1000).toFixed(1)}K`;
 
-  if (teamAreaExpanded && mode !== 'auto_harness') {
+  const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
+
+  if (panelExpanded && mode !== 'auto_harness') {
     if (mode !== 'team') {
       return (
         <div
@@ -443,16 +489,17 @@ export function ToolPanel({
         >
           <div className="h-full bg-panel flex flex-col overflow-hidden">
             <ExpandedSingleAgentArea
-              activeTab={teamAreaActiveTab}
+              sessionId={resolvedSessionId}
+              activeTab={singleAgentPanelActiveTab}
               tasks={todoTeamTasks}
               members={teamMembers}
               totalTasks={todos.length}
               completedTasks={todoCompletedTasks}
-              onTabChange={setTeamAreaActiveTab}
-              onCollapse={() => setTeamAreaExpanded(false)}
+              onTabChange={setSingleAgentPanelActiveTab}
+              onCollapse={() => setSingleAgentPanelExpanded(false)}
               reviewPanel={codeReviewPanel}
-              selectedArtifactId={teamAreaSelectedArtifactId}
-              onArtifactSelect={setTeamAreaSelectedArtifactId}
+              selectedArtifactId={singleAgentPanelSelectedArtifactId}
+              onArtifactSelect={setSingleAgentPanelSelectedArtifactId}
             />
           </div>
         </div>
@@ -493,13 +540,13 @@ export function ToolPanel({
   return (
     <div
       data-testid="tool-panel-collapsed"
-      className="bg-panel border-l border-border h-full overflow-hidden py-3 shrink-0"
+      className={`bg-panel border-l border-border h-full overflow-hidden shrink-0 ${mode === 'team' || mode === 'auto_harness' ? 'py-3' : 'py-0'}`}
       style={{ width: 'var(--tool-panel-width)' }}
     >
       <div className="h-full bg-panel flex flex-col overflow-hidden">
         {/* Auto-harness extension file tree */}
         {mode === 'auto_harness' ? (
-          <div data-testid="tool-panel-harness-tree-pane" className="flex-1 overflow-hidden mb-3">
+          <div data-testid="tool-panel-harness-tree-pane" className="flex flex-1 flex-col overflow-hidden mb-3">
             <div className="overflow-hidden h-full flex flex-col px-3">
               <HarnessExtensionTree />
             </div>
@@ -523,20 +570,29 @@ export function ToolPanel({
           </div>
         ) : (
           /* 任务概述（复用集群模式紧凑态样式，数据来自 TodoItem） */
-          <div data-testid="tool-panel-planning-pane" className="flex-1 overflow-hidden mb-3">
-            <TaskPlanningPanel
-              variant="compact"
-              tasks={todoTeamTasks}
-              members={teamMembers}
-              totalTasks={todos.length}
-              completedTasks={todoCompletedTasks}
-              hideBorder
+          <div data-testid="tool-panel-planning-pane" className="toolpanel-collapsed-sections">
+            <div className="toolpanel-collapsed-task-section">
+              <TaskPlanningPanel
+                variant="compact"
+                tasks={todoTeamTasks}
+                members={teamMembers}
+                totalTasks={todos.length}
+                completedTasks={todoCompletedTasks}
+                hideBorder
+                onExpand={() => {
+                  setSingleAgentPanelActiveTab('planning');
+                  setSingleAgentPanelExpanded(true);
+                }}
+                hideAssignee
+                title={t('chat.recentTasks')}
+              />
+            </div>
+            <SubagentCompactPanel
+              sessionId={resolvedSessionId}
               onExpand={() => {
-                setTeamAreaActiveTab('planning');
-                setTeamAreaExpanded(true);
+                setSingleAgentPanelActiveTab('subagents');
+                setSingleAgentPanelExpanded(true);
               }}
-              hideAssignee
-              title={t('chat.recentTasks')}
             />
           </div>
         )}
@@ -548,37 +604,44 @@ export function ToolPanel({
             diffWatch={codeGitDiffWatch}
             onReview={() => {
               setCodeReviewTarget?.({ source: 'working_tree' });
-              setTeamAreaActiveTab('review');
-              setTeamAreaExpanded(true);
+              if (mode === 'team') {
+                setTeamAreaActiveTab('review');
+                setTeamAreaExpanded(true);
+              } else {
+                setSingleAgentPanelActiveTab('review');
+                setSingleAgentPanelExpanded(true);
+              }
             }}
           />
         ) : null}
 
         {/* 状态显示 - 只在收起模式下显示 */}
-        {!teamAreaExpanded && (
-          <>
-            <hr className="border-0 border-t border-border m-0" />
-            <div data-testid="tool-panel-status-card" className="toolpanel-status-card px-3">
-            <h3 data-testid="tool-panel-status-title" className="toolpanel-status-card__title">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
-                <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
-                <rect x="11" y="1" width="3" height="14" rx="0.5" fill="currentColor" />
-              </svg>
-              {t('toolPanel.status')}
-            </h3>
-            <div className="space-y-2">
-              <div data-testid="tool-panel-status-context-compression" className="toolpanel-status-card__row">
-                <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
-                <span className="mono text-text">{compressionDisplay}</span>
-              </div>
-              <div data-testid="tool-panel-status-memory" className="toolpanel-status-card__row">
-                <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
-                <span className="mono text-text">{memoryDisplay}</span>
-              </div>
+        {!panelExpanded && (
+          <section data-testid="tool-panel-status-card" data-variant="context" className="toolpanel-context-card" aria-label={t('toolPanel.context')}>
+            <div className="toolpanel-context-card__heading">
+              <h3 data-testid="tool-panel-status-title">{t('toolPanel.context')}</h3>
+              <span className="mono">{contextUsageLabel}</span>
             </div>
-          </div>
-          </>
+            <div
+              className="toolpanel-context-card__meter"
+              role="progressbar"
+              aria-label={t('toolPanel.context')}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={contextUsagePercent ?? undefined}
+              aria-valuetext={contextUsageLabel}
+            >
+              <span style={{ width: `${contextUsagePercent ?? 0}%` }} />
+            </div>
+            <div data-testid="tool-panel-status-context-compression" className="toolpanel-context-card__row">
+              <span>{t('toolPanel.contextCompression')}</span>
+              <span className="mono">{contextWindowDisplay}</span>
+            </div>
+            <div data-testid="tool-panel-status-memory" className="toolpanel-context-card__row">
+              <span>{t('toolPanel.memoryUsage')}</span>
+              <span className="mono">{memoryDisplay}</span>
+            </div>
+          </section>
         )}
       </div>
     </div>

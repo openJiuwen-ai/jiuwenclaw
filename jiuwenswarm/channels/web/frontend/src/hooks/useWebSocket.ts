@@ -14,7 +14,6 @@ import {
   WebConnectionState,
   InterruptResultPayload,
   InterruptIntent,
-  SubtaskUpdatePayload,
   AskUserQuestionPayload,
   EvolutionStatusPayload,
   UserAnswer,
@@ -88,6 +87,12 @@ import {
   toUploadDocumentHints,
   withUploadDocumentBlock,
 } from '../utils/documentMessage';
+import { useSubagentStore } from '../stores/subagentStore';
+import {
+  normalizeSubagentActivityEvent,
+  normalizeSubagentWaitResults,
+  normalizeSubagentStatusEvent,
+} from '../features/subagent/subagentNormalizer';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -607,7 +612,7 @@ interface UseWebSocketReturn {
     sessionId: string,
     intent: InterruptIntent,
     options?: { newInput?: string }
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   pause: (sessionId: string) => Promise<void>;
   cancel: (sessionId: string) => Promise<void>;
   supplement: (sessionId: string, newInput: string) => Promise<void>;
@@ -1726,10 +1731,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           // 成功发出后才消费 explicit-entry 标记（与 sendMessage 一致），失败时保留以便重试。
           consumePlanEntryMark(sessionId, String(params.mode));
         }
+        return true;
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
+        return false;
       }
     },
     [
@@ -1758,7 +1765,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const cancel = useCallback(
     async (sessionId: string) => {
       try {
-        await interrupt(sessionId, 'cancel');
+        const succeeded = await interrupt(sessionId, 'cancel');
+        if (succeeded) {
+          useSubagentStore.getState().markRunningSubagentsCancelled(sessionId);
+        }
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -2176,6 +2186,74 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
     };
 
+    const applySessionResult = (payload: Record<string, unknown>) => {
+      const sessionId = resolveEventSessionId(payload);
+      if (!sessionId) return;
+      clearThinkingForVisibleOutput(sessionId);
+
+      const description = pickString(payload.description) || '';
+      const resultText =
+        pickString(payload.result, payload.error) ||
+        (payload.result != null ? stringifyCompact(payload.result) : '');
+      const taskId =
+        pickString(
+          payload.task_id,
+          payload.request_id,
+          payload.subagent_id,
+          payload.sub_session_id
+        ) || stableEventId('session-result', sessionId, description, payload.timestamp, resultText);
+      const status = (pickString(payload.status) || '').trim().toLowerCase();
+      const isPending = ['pending', 'accepted', 'queued', 'running'].includes(status);
+      const isCancelled = status === 'canceled' || status === 'cancelled';
+      const isCompleted = ['completed', 'success', 'succeeded'].includes(status);
+      const success = isPending
+        ? true
+        : status
+          ? isCompleted
+          : typeof payload.success === 'boolean'
+            ? payload.success
+            : true;
+      const summary = isPending
+        ? t('chatUi.toolGroup.sessionPending')
+        : isCancelled
+          ? t('chatUi.toolGroup.sessionCancelled')
+          : success
+            ? t('chatUi.toolGroup.sessionCompleted')
+            : t('chatUi.toolGroup.sessionFailed');
+      const toolCallId = stableEventId('session-task', sessionId, taskId);
+      const sessionToolCall: ToolCall = {
+        id: toolCallId,
+        name: 'session',
+        arguments: {
+          session_id: sessionId,
+          task_id: taskId,
+          ...(status ? { status } : {}),
+          ...(description ? { description } : {}),
+        },
+        description: description || t('chatUi.toolGroup.sessionCompleted'),
+        formatted_args: t('chatUi.toolGroup.sessionTask', { name: description || t('chatUi.toolGroup.sessionTaskUnknown') }),
+      };
+      const fullResult = [
+        description ? `${t('chatUi.toolGroup.sessionDescription')}: ${description}` : '',
+        resultText ? `${t('chatUi.toolGroup.sessionResult')}: ${resultText}` : '',
+      ].filter(Boolean).join('\n\n');
+
+      useChatStore.getState().addToolCall(sessionId, sessionToolCall, {
+        startedAt: normalizeEventTimestampIso(payload.timestamp),
+        requestId: taskId,
+      });
+      useChatStore.getState().addToolResult(sessionId, {
+        toolName: 'session',
+        result: fullResult,
+        success,
+        ...(isPending ? { pending: true } : {}),
+        toolCallId,
+        summary,
+      }, {
+        updatedAt: normalizeEventTimestampIso(payload.timestamp),
+      });
+    };
+
     const unsubs = [
       webClient.on('connection.ack', ({ payload }) => {
         handleConnectionAck(payload);
@@ -2368,6 +2446,34 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const cronJobIdForNav = typeof cronMeta.job_id === 'string' ? cronMeta.job_id.trim() : '';
           onCronResultArrivedRef.current?.(sessionId, cronJobIdForNav);
         }
+
+        // 子任务总结是独立气泡：它只记录子任务输出，不得收尾或污染父会话这一轮。
+        if (payload.source === 'session_task_summary') {
+          const summaryContent = normalizeFinalContent(payload);
+          const taskId = pickString(
+            payload.task_id,
+            payload.request_id,
+            payload.subagent_id,
+            payload.sub_session_id
+          );
+          if (summaryContent && taskId) {
+            const messageId = stableEventId('session-task-summary', sessionId, taskId);
+            const runtime = useChatStore.getState().getRuntime(sessionId);
+            const alreadyAdded = runtime?.messages.some((message) => message.id === messageId);
+            if (!alreadyAdded) {
+              const timestamp = normalizeEventTimestampIso(payload.timestamp);
+              useChatStore.getState().addMessage(sessionId, {
+                id: messageId,
+                role: 'assistant',
+                content: summaryContent,
+                timestamp,
+                completedAt: timestamp,
+                isStreaming: false,
+              });
+            }
+          }
+          return;
+        }
         flushPendingStreamDelta(sessionId);
 
         const memberAction = pickString(payload.member_action);
@@ -2457,11 +2563,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               // （见问题3：目标完成后队列消息没有紧接着发出去）。已经排空过则是空操作，不会重复发送。
               drainTaskQueueIfIdle(sessionId);
               useChatStore.getState().setThinking(sessionId, false);
-              useChatStore.getState().clearSubtasks(sessionId);
             }
           } else {
             useChatStore.getState().setThinking(sessionId, false);
-            useChatStore.getState().clearSubtasks(sessionId);
           }
         }
         if (content) {
@@ -2999,6 +3103,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
+        for (const result of normalizeSubagentWaitResults(payload)) {
+          useSubagentStore.getState().applyResult(sessionId, result);
+        }
         const activeSessionId = getPayloadSessionId(payload) || undefined;
         // Only trust the result text — "Member shutdown: member_name=X"
         // means success.  Error messages (e.g. "still holds active task")
@@ -3048,6 +3155,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             toolName: toolResult.toolName,
             result: toolResult.result,
             success: toolResult.success,
+            ...(toolResult.pending ? { pending: true } : {}),
             toolCallId: toolResult.toolCallId,
             summary: toolResult.summary,
             skillTree: toolResult.skillTree,
@@ -3200,7 +3308,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
         if (!isProcessingNow) {
           useChatStore.getState().setThinking(sessionId, false);
-          useChatStore.getState().clearSubtasks(sessionId);
           useChatStore.getState().stopStreaming(sessionId);
           useChatStore.getState().settleHistoricalToolExecutions(sessionId);
 
@@ -3512,9 +3619,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.subtask_update', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        useChatStore.getState().updateSubtask(sessionId, payload as unknown as SubtaskUpdatePayload);
+        const event = normalizeSubagentStatusEvent(payload);
+        if (!event) return;
+        useSubagentStore.getState().applyEvent(event.session_id, event);
+      }),
+      webClient.on('chat.subagent_activity', ({ payload }) => {
+        const event = normalizeSubagentActivityEvent(payload);
+        if (!event) return;
+        useSubagentStore.getState().applyEvent(event.session_id, event);
       }),
       webClient.on('chat.ask_user_question', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -3574,73 +3686,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
-        clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
-        // 创建工具调用对象
-        const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const sessionToolCall: ToolCall = {
-          id: toolCallId,
-          name: 'session',
-          arguments: {
-            session_id: sessionId,
-            description: description,
-          },
-          description: description || '会话完成',
-          formatted_args: `会话任务：【${description || '未知任务'}】`,
-        };
-        useChatStore.getState().addToolCall(sessionId, sessionToolCall);
-        // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
-        const sessionResult: ToolResult = {
-          toolName: 'session',
-          result: fullResult,
-          success: true,
-          toolCallId: toolCallId,
-          summary: '完成',
-        };
-        useChatStore.getState().addToolResult(sessionId, sessionResult);
+        applySessionResult(payload);
       }),
       webClient.on('chat.session_result', ({ payload }) => {
-        const sessionId = resolveEventSessionId(payload);
-        if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.session_result', payload)) {
           return;
         }
-        clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
-        // 创建工具调用对象
-        const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const sessionToolCall: ToolCall = {
-          id: toolCallId,
-          name: 'session',
-          arguments: {
-            session_id: sessionId,
-            description: description,
-          },
-          description: description || '会话完成',
-          formatted_args: `会话任务：【${description || '未知任务'}】`,
-        };
-        useChatStore.getState().addToolCall(sessionId, sessionToolCall);
-        // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
-        const sessionResult: ToolResult = {
-          toolName: 'session',
-          result: fullResult,
-          success: true,
-          toolCallId: toolCallId,
-          summary: '完成',
-        };
-        useChatStore.getState().addToolResult(sessionId, sessionResult);
+        applySessionResult(payload);
       }),
       webClient.on('proactive_recommendation', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);

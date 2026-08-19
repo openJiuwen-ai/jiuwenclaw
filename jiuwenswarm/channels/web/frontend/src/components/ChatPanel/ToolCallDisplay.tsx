@@ -82,11 +82,15 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
           <div className="flex items-center gap-2">
             <span className={clsx(
               'w-5 h-5 rounded flex items-center justify-center text-sm',
-              toolResult.success
-                ? 'bg-ok-subtle text-ok'
-                : 'bg-danger-subtle text-danger'
+              toolResult.pending
+                ? 'bg-card text-text-muted'
+                : toolResult.success
+                  ? 'bg-ok-subtle text-ok'
+                  : 'bg-danger-subtle text-danger'
             )} data-testid="chat-panel-tool-call-card-status-icon" data-variant={toolResult.success ? 'success' : 'failed'}>
-              {toolResult.success ? (
+              {toolResult.pending ? (
+                <span className="text-xs" aria-hidden="true">●</span>
+              ) : toolResult.success ? (
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                 </svg>
@@ -98,7 +102,9 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             </span>
             <span className={clsx(
               'font-mono text-sm',
-              toolResult.success ? 'text-text-muted' : 'text-danger'
+              toolResult.pending
+                ? 'text-text-muted'
+                : toolResult.success ? 'text-text-muted' : 'text-danger'
             )} data-testid="chat-panel-tool-call-card-summary">
               {displaySummary}
             </span>

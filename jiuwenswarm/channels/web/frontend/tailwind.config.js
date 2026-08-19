@@ -69,6 +69,9 @@ export default {
           DEFAULT: color('--color-action-secondary'),
           foreground: color('--color-action-secondary-text'),
         },
+        chat: {
+          accent: 'var(--color-chat-accent)',
+        },
         control: {
           emphasis: color('--color-control-emphasis'),
           'emphasis-foreground': color('--color-control-emphasis-text'),

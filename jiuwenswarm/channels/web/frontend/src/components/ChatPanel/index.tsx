@@ -23,7 +23,6 @@ import editIcon from '../../assets/edit.svg';
 import deleteIcon from '../../assets/delete.svg';
 import moveIcon from '../../assets/move.svg';
 import restartIcon from '../../assets/restart.svg';
-import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { InteractionSlot } from '../InteractionSlot';
 import { GoalBar } from '../GoalBar';
@@ -1344,7 +1343,6 @@ export function ChatPanel({
                       onShare={() => setHumanShareOpen(true)}
                     />
                   )}
-                  <SubtaskProgress />
                   {/* 内联审批卡片（演进审批 & 权限审批共用） */}
                   <InlineQuestionCard onSubmit={onUserAnswer} />
                   <ContextCompressionLines

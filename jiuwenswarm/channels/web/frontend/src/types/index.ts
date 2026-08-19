@@ -8,6 +8,7 @@ export * from './skillTree';
 export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
+export * from './subagent';
 export * from '../features/workspace/projectTypes';
 
 // 会话类型
