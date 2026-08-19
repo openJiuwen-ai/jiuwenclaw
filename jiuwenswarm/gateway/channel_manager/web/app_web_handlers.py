@@ -859,6 +859,8 @@ _CONFIG_YAML_KEYS = frozenset({
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
+    "a2ui_generation_enabled",
+    "a2ui_rendering_enabled",
     "proactive_recommendation_enabled",
     "proactive_recommendation_max_recommend_per_day",
     "proactive_recommendation_max_rounds_per_tick",

@@ -124,6 +124,21 @@ try {
     'the same A2UI action key should be allowed again after its request settles',
   );
 
+  const { setA2UIFeatureConfig } = await importTsModule('src/features/a2ui/featureConfig.ts');
+  setA2UIFeatureConfig({ generationEnabled: false, renderingEnabled: true });
+  await dispatchA2UIAction({
+    userAction: {
+      ...baseAction.userAction,
+      sourceComponentId: 'readonlyButton',
+    },
+  });
+  assert.deepEqual(
+    handled,
+    ['helloButton', 'otherButton', 'helloButton'],
+    'read-only historical A2UI must not dispatch actions when generation is disabled',
+  );
+  setA2UIFeatureConfig({ generationEnabled: true, renderingEnabled: true });
+
   cleanup();
 
   const {

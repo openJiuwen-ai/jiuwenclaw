@@ -38,19 +38,28 @@ Default configuration lives in `jiuwenswarm/resources/config.yaml`:
 
 ```yaml
 a2ui:
-  enabled: false
+  generation_enabled: false
+  rendering_enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
 ```
 
-A2UI can be controlled through:
+A2UI exposes two independent controls:
 
-- Web config panel: the `A2UI` top-level toggle.
-- User workspace config: `a2ui.enabled` in `config.yaml`.
-- Environment variable: `JIUWENSWARM_A2UI_ENABLED=false` or `true`.
+- `generation_enabled` controls runtime prompt injection, client-event handling,
+  response finalization, repair, and retry processing.
+- `rendering_enabled` controls whether the Web frontend parses and renders A2UI
+  content. When generation is disabled but rendering remains enabled, historical
+  A2UI content is rendered read-only.
 
-A2UI is disabled by default. It must be explicitly enabled before the Web channel injects the A2UI prompt and runs response finalization.
+The Web config panel exposes both controls. They can also be overridden with
+`JIUWENSWARM_A2UI_GENERATION_ENABLED` and `JIUWENSWARM_A2UI_RENDERING_ENABLED`.
+Both capabilities are disabled by default.
+
+For compatibility, legacy `a2ui.enabled` initializes both controls when their
+new YAML keys are absent. `JIUWENSWARM_A2UI_ENABLED` also controls either
+capability whose dedicated environment variable is absent.
 
 `non_web_fallback_enabled` is kept only for compatibility with older configs. A2UI is currently Web-only, so non-Web channels always bypass A2UI.
 

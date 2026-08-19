@@ -446,7 +446,11 @@ const HIDDEN_CONFIG_KEYS = new Set([
   "skill_retrieval_build_classification_batch_limit",
 ]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
-const A2UI_KEYS = new Set(["a2ui_enabled"]);
+const A2UI_KEYS = new Set([
+  "a2ui_enabled",
+  "a2ui_generation_enabled",
+  "a2ui_rendering_enabled",
+]);
 const SWARMFLOW_KEYS = new Set(["swarmflow_enabled"]);
 const RUNTIME_PLATFORM_KEY = "runtime_platform";
 const EXTERNAL_CLI_AGENTS_SUPPORTED_KEY = "external_cli_agents_supported";
@@ -495,6 +499,7 @@ const PROACTIVE_KEYS = new Set([
 ]);
 // ConfigPanel 暂不展示这些配置；保留后端下发值，并在比较/提交时跳过。
 const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
+  "a2ui_enabled",
   "proactive_recommendation_tick_interval_minutes",
   "kv_cache_release_enabled",
   "kv_cache_affinity_enabled",
@@ -709,7 +714,7 @@ function isBooleanKey(key: string): boolean {
     key === "kv_cache_affinity_enabled" ||
     key === "permissions_enabled" ||
     key === "memory_forbidden_enabled" ||
-    key === "a2ui_enabled" ||
+    A2UI_KEYS.has(key) ||
     key === "swarmflow_enabled" ||
     EXTERNAL_CLI_AGENT_BOOLEAN_KEYS.has(key) ||
     SYMPHONY_BOOLEAN_KEYS.has(key) ||
@@ -828,7 +833,8 @@ function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
     kv_cache_affinity_enabled: t('config.booleanLabels.kvCacheAffinity'),
     permissions_enabled: t('config.booleanLabels.enabled'),
     memory_forbidden_enabled: t('config.booleanLabels.enabled'),
-    a2ui_enabled: t('config.booleanLabels.enabled'),
+    a2ui_generation_enabled: t('config.booleanLabels.a2uiGeneration'),
+    a2ui_rendering_enabled: t('config.booleanLabels.a2uiRendering'),
     swarmflow_enabled: t('config.booleanLabels.enabled'),
     external_cli_agent_claude_enabled: t('config.booleanLabels.externalCliClaude'),
     external_cli_agent_claude_use_builtin: t('config.booleanLabels.externalCliUseBuiltin'),
@@ -963,6 +969,8 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
   free_search_ddg_enabled: "config.keyHelp.freeSearchDdg",
   free_search_bing_enabled: "config.keyHelp.freeSearchBing",
   skill_evolution: "config.keyHelp.skillEvolution",
+  a2ui_generation_enabled: "config.keyHelp.a2uiGeneration",
+  a2ui_rendering_enabled: "config.keyHelp.a2uiRendering",
   // 含义需补充（「启用」等不加）
   memory_forbidden_description: "config.keyHelp.memoryForbiddenDescription",
   symphony_dynamic_graph_enabled: "config.keyHelp.symphonyDynamicGraphEnabled",
@@ -995,6 +1003,8 @@ const KEY_LABEL_HINT_I18N: Record<string, string> = {
 
 /** 组内字段排序优先级，数字越小越靠前 */
 const KEY_SORT_PRIORITY: Record<string, number> = {
+  a2ui_generation_enabled: 0,
+  a2ui_rendering_enabled: 1,
   skill_evolution: 0,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,

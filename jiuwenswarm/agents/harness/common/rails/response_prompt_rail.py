@@ -173,7 +173,7 @@ class ResponsePromptRail(DeepAgentRail):
             from jiuwenswarm.server.runtime.a2ui.runtime.prompt import build_a2ui_prompt_section
 
             is_web_channel = is_a2ui_channel(channel)
-            enabled = get_current_a2ui_config().enabled if is_web_channel else False
+            enabled = get_current_a2ui_config().generation_enabled if is_web_channel else False
             injected = is_web_channel and enabled and not skip_a2ui
 
             if not injected:

@@ -12,17 +12,23 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jiuwenswarm.server.runtime.a2ui.config import get_a2ui_config, get_current_a2ui_config
+from jiuwenswarm.server.runtime.a2ui.config import (
+    get_a2ui_config,
+    get_current_a2ui_config,
+)
 from jiuwenswarm.server.runtime.a2ui.runtime.team_stream import TeamA2UIBlockBuffer
 
 logger = logging.getLogger(__name__)
 
 _WEB_CONFIG_KEY_MAP: dict[str, str] = {
-    "a2ui_enabled": "enabled",
+    "a2ui_generation_enabled": "generation_enabled",
+    "a2ui_rendering_enabled": "rendering_enabled",
 }
 
 _A2UI_CONFIG_DEFAULT_PAYLOAD: dict[str, str] = {
     "a2ui_enabled": "false",
+    "a2ui_generation_enabled": "false",
+    "a2ui_rendering_enabled": "false",
 }
 
 _A2UI_CHANNEL_ID = "web"
@@ -57,7 +63,9 @@ def _get_runtime_a2ui_config():
 
 def _build_a2ui_client_event_prompt(content: dict[str, Any], channel: str, language: str) -> str:
     """Delegate client-event prompt construction to the A2UI runtime package."""
-    from jiuwenswarm.server.runtime.a2ui.runtime.prompt import build_a2ui_client_event_prompt
+    from jiuwenswarm.server.runtime.a2ui.runtime.prompt import (
+        build_a2ui_client_event_prompt,
+    )
 
     return build_a2ui_client_event_prompt(content, channel=channel, language=language)
 
@@ -77,7 +85,7 @@ def build_user_prompt_if_a2ui_event(
         return None
 
     a2ui_config = _get_runtime_a2ui_config()
-    if not a2ui_config.enabled:
+    if not a2ui_config.generation_enabled:
         return None
 
     if not isinstance(content, dict) or content.get("type") != "a2ui.client_event":
@@ -105,14 +113,16 @@ async def finalize_assistant_response_if_a2ui(
         logger.debug("A2UI response finalization skipped: config lookup failed", exc_info=True)
         return content
 
-    from jiuwenswarm.server.runtime.a2ui.runtime.response_finalization import finalize_a2ui_assistant_content
+    from jiuwenswarm.server.runtime.a2ui.runtime.response_finalization import (
+        finalize_a2ui_assistant_content,
+    )
 
     return await finalize_a2ui_assistant_content(
         content,
         user_query=user_query,
         request_id=request_id,
         repair_call=repair_call if callable(repair_call) else None,
-        a2ui_enabled=a2ui_config.enabled,
+        a2ui_enabled=a2ui_config.generation_enabled,
         retry_without_a2ui_call=retry_without_a2ui_call if callable(retry_without_a2ui_call) else None,
     )
 
@@ -134,7 +144,9 @@ def get_a2ui_config_payload(raw_config: dict[str, object]) -> dict[str, str]:
     """Return user-facing Web config payload fields for the A2UI section."""
     config = get_a2ui_config(raw_config)
     return {
-        "a2ui_enabled": _bool_text(config.enabled),
+        "a2ui_enabled": _bool_text(config.generation_enabled),
+        "a2ui_generation_enabled": _bool_text(config.generation_enabled),
+        "a2ui_rendering_enabled": _bool_text(config.rendering_enabled),
     }
 
 
@@ -148,20 +160,27 @@ def validate_a2ui_config_update(
     value: object,
 ) -> tuple[bool, dict[str, object], str]:
     """Validate and map one Web A2UI config update to config.yaml keys."""
+    normalized_value = _to_bool(value)
+    if param_key == "a2ui_enabled":
+        return True, {
+            "generation_enabled": normalized_value,
+            "rendering_enabled": normalized_value,
+        }, ""
+
     config_key = _WEB_CONFIG_KEY_MAP.get(param_key)
     if config_key is None:
         return False, {}, f"Unknown A2UI config key: {param_key}"
 
-    return True, {config_key: _to_bool(value)}, ""
+    return True, {config_key: normalized_value}, ""
 
 
 __all__ = [
+    "TeamA2UIBlockBuffer",
     "apply_non_web_text_fallback_to_payload",
     "build_user_prompt_if_a2ui_event",
     "finalize_assistant_response_if_a2ui",
     "get_a2ui_config_payload",
     "get_default_a2ui_config_payload",
     "is_a2ui_channel",
-    "TeamA2UIBlockBuffer",
     "validate_a2ui_config_update",
 ]

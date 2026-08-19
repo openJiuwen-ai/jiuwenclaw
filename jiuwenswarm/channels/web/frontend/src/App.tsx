@@ -72,7 +72,7 @@ import { createConversationSession } from './multi-session/state/createConversat
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
-  setA2UIFeatureEnabled,
+  setA2UIFeatureConfig,
 } from './features/a2ui/featureConfig';
 import {
   buildA2UIClientEventContent,
@@ -114,6 +114,46 @@ const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
   "external_cli_agent_codex_use_builtin",
   "external_cli_agent_codex_cli_path",
 ]);
+
+type A2UIConfigChange = {
+  generationEnabled?: boolean;
+  renderingEnabled?: boolean;
+};
+
+function getA2UIConfigChange(updates?: Record<string, unknown>): A2UIConfigChange | null {
+  if (!updates) return null;
+
+  const change: A2UIConfigChange = {};
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_enabled')) {
+    const enabled = normalizeA2UIEnabled(updates.a2ui_enabled);
+    change.generationEnabled = enabled;
+    change.renderingEnabled = enabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_generation_enabled')) {
+    change.generationEnabled = normalizeA2UIEnabled(updates.a2ui_generation_enabled);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_rendering_enabled')) {
+    change.renderingEnabled = normalizeA2UIEnabled(updates.a2ui_rendering_enabled);
+  }
+  return Object.keys(change).length > 0 ? change : null;
+}
+
+function getA2UIChangeDescriptionKey(change: A2UIConfigChange | null): string {
+  const generationChanged = change?.generationEnabled !== undefined;
+  const renderingChanged = change?.renderingEnabled !== undefined;
+  if (generationChanged && renderingChanged) return 'app.a2uiBothChangedDesc';
+  if (renderingChanged) {
+    return change?.renderingEnabled
+      ? 'app.a2uiRenderingEnabledDesc'
+      : 'app.a2uiRenderingDisabledDesc';
+  }
+  if (generationChanged) {
+    return change?.generationEnabled
+      ? 'app.a2uiGenerationEnabledDesc'
+      : 'app.a2uiGenerationDisabledDesc';
+  }
+  return 'app.a2uiRefreshDesc';
+}
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -337,6 +377,7 @@ function AppContent() {
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
+  const [a2uiConfigChange, setA2uiConfigChange] = useState<A2UIConfigChange | null>(null);
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
@@ -982,7 +1023,15 @@ function AppContent() {
   const fetchConfig = useCallback(async () => {
     try {
       const config = await request<Record<string, unknown>>('config.get');
-      setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
+      const legacyEnabled = config.a2ui_enabled;
+      setA2UIFeatureConfig({
+        generationEnabled: normalizeA2UIEnabled(
+          config.a2ui_generation_enabled ?? legacyEnabled,
+        ),
+        renderingEnabled: normalizeA2UIEnabled(
+          config.a2ui_rendering_enabled ?? legacyEnabled,
+        ),
+      });
       setServerConfig(config);
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
@@ -1042,6 +1091,7 @@ function AppContent() {
     setRestartSeenDisconnect(false);
     setAppliedWithoutRestart(false);
     setA2uiRefreshPending(false);
+    setA2uiConfigChange(null);
   }, [clearRestartAutoCloseTimer]);
 
   const clearSaveToastTimer = useCallback(() => {
@@ -1176,6 +1226,7 @@ function AppContent() {
   );
 
   const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
+    const a2uiChange = getA2UIConfigChange(updates);
     const payload = await request<ConfigSaveResult>(
       'config.set',
       updates
@@ -1205,9 +1256,10 @@ function AppContent() {
     setRestartModalOpen(true);
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
-    if ('a2ui_enabled' in updates) {
+    if (a2uiChange) {
       setAppliedWithoutRestart(false);
       setA2uiRefreshPending(true);
+      setA2uiConfigChange(a2uiChange);
       setRestartSuccess(true);
       clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
@@ -1335,7 +1387,7 @@ function AppContent() {
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
   const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
-    const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
+    const a2uiChange = getA2UIConfigChange(payload.config);
     const result = await request<ConfigSaveResult>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
@@ -1375,7 +1427,7 @@ function AppContent() {
     if (hasExternalCliDependencyInstall) {
       return result;
     }
-    if (isA2UIChange) {
+    if (a2uiChange) {
       // Show modal then refresh page after 5 seconds
       setConfigError(null);
       setRestartModalOpen(true);
@@ -1383,6 +1435,7 @@ function AppContent() {
       setRestartSeenDisconnect(false);
       setAppliedWithoutRestart(false);
       setA2uiRefreshPending(true);
+      setA2uiConfigChange(a2uiChange);
       clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
         closeRestartModal();
@@ -2783,11 +2836,16 @@ function AppContent() {
                 {!restartSuccess
                   ? t('app.restartWaiting')
                   : a2uiRefreshPending
-                    ? t('app.a2uiRefreshDesc')
+                    ? t(getA2UIChangeDescriptionKey(a2uiConfigChange))
                     : appliedWithoutRestart
                       ? t('app.configAppliedDesc')
                       : t('app.restartSuccessDesc')}
               </p>
+              {restartSuccess && a2uiRefreshPending && a2uiConfigChange?.renderingEnabled === false && (
+                <p className="text-sm text-danger mb-5" data-testid="app-a2ui-rendering-disabled-warning">
+                  {t('app.a2uiRenderingDisabledWarning')}
+                </p>
+              )}
               {restartSuccess && (
                 <button
                   type="button"
