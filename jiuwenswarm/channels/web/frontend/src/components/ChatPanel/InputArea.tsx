@@ -41,6 +41,8 @@ import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
+import { ExtensionPickerPanel } from './ExtensionPickerPanel';
+import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -528,6 +530,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [attachMenuAnchor, setAttachMenuAnchor] = useState<DOMRect | null>(null);
+  // 默认下弹（这是本轮"扩展"需求里明确要的方向），但会话有消息、输入框沉到视口底部时，"+"按钮
+  // 本身已经贴近视口下边缘，下弹会把整个菜单渲染到可视区域外面、用户点了完全没反应——2026-08-18
+  // 用户报告的严重 bug。这里补上跟同文件里 modeMenu/model-selector 菜单一致的"空间不够就翻上去"
+  // 兜底逻辑，只在下方空间不够时才翻上，正常情况仍然默认下弹。
+  const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
+  const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
+  const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
@@ -536,6 +545,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const modeMenuPortalRef = useRef<HTMLDivElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const attachMenuPortalRef = useRef<HTMLDivElement>(null);
+  const extensionMenuItemRef = useRef<HTMLButtonElement>(null);
+  const extensionPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -1167,9 +1178,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
-        !attachMenuPortalRef.current?.contains(event.target as Node)
+        !attachMenuPortalRef.current?.contains(event.target as Node) &&
+        !extensionPanelRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
+        setExtensionPanelOpen(false);
       }
     };
 
@@ -2275,9 +2288,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               onClick={() => {
                 if (attachTriggerDisabled) return;
                 if (!attachMenuOpen && attachMenuRef.current) {
-                  setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
+                  const rect = attachMenuRef.current.getBoundingClientRect();
+                  setAttachMenuAnchor(rect);
+                  setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
                 }
                 setAttachMenuOpen((open) => !open);
+                setExtensionPanelOpen(false);
               }}
               disabled={attachTriggerDisabled}
               className={cx(
@@ -2297,12 +2313,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 className="chat-mode-select__menu"
                 role="menu"
                 data-testid="chat-panel-input-attach-menu"
-                style={{
-                  position: 'fixed',
-                  bottom: window.innerHeight - attachMenuAnchor.top + 10,
-                  left: attachMenuAnchor.left,
-                  zIndex: 9999,
-                }}
+                style={attachMenuDirection === 'up'
+                  ? { position: 'fixed', bottom: window.innerHeight - attachMenuAnchor.top + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                  : { position: 'fixed', top: attachMenuAnchor.bottom + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                }
               >
                 <button
                   type="button"
@@ -2402,8 +2416,46 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </button>
                   );
                 })()}
+                <button
+                  ref={extensionMenuItemRef}
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={extensionPanelOpen}
+                  onClick={() => {
+                    if (!extensionPanelOpen && extensionMenuItemRef.current) {
+                      setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                    }
+                    setExtensionPanelOpen((open) => !open);
+                  }}
+                >
+                  <span className="chat-mode-select__option-main">
+                    {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
+                        FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
+                        反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
+                        ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
+                        这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
+                        SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
+                        ExtensionIcon 的 className。 */}
+                    <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                      <ExtensionIcon />
+                    </span>
+                    <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                  </span>
+                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
+                  </svg>
+                </button>
               </div>,
               document.body
+            )}
+            {extensionPanelOpen && extensionAnchor && (
+              <ExtensionPickerPanel
+                anchorRect={extensionAnchor}
+                panelRef={extensionPanelRef}
+                onClose={() => setExtensionPanelOpen(false)}
+              />
             )}
           </div>
           <div

@@ -1464,6 +1464,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 添加用户消息（附带输入栏选中的技能）
       // 气泡只展示用户原文；路径提示仅随 chat.send 发给 Agent。
       const selectedSkills = useSessionStore.getState().getRuntime(sessionId)?.selectedSkills ?? [];
+      // 插件/MCP 是"+"菜单"扩展"面板里的会话级开关，和 selectedSkills 不同——不随发送清空，
+      // 持续带在本会话之后每一条消息里，直到用户在面板里手动关闭开关（见 sessionStore.ts
+      // SessionRuntime.enabledPlugins/enabledMcps 头部注释）。插件（plugin_names）后端还没有
+      // 权威字段定义，继续乐观发送（backend-requests.md 需求11遗留）；MCP 这半 2026-08-17 已经
+      // 有权威定义（MCP 接口文档 v2 §6.2，字段名是 `mcp`，见下方 chat.send 调用处）。两者都不
+      // 接入消息气泡展示——消息气泡怎么交织渲染插件/MCP 不在这轮范围内，只做输入栏可选可发送。
+      const enabledPlugins = useSessionStore.getState().getRuntime(sessionId)?.enabledPlugins ?? [];
+      const enabledMcps = useSessionStore.getState().getRuntime(sessionId)?.enabledMcps ?? [];
       useChatStore.getState().addMessage(sessionId, {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -1472,7 +1480,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         timestamp: new Date().toISOString(),
         ...(selectedSkills.length > 0 ? { skills: selectedSkills } : {}),
       });
-      // 发送后清空输入栏已选技能
+      // 发送后清空输入栏已选技能（一次性语义）；插件/MCP 是会话期间持续启用，不在这里清
       if (selectedSkills.length > 0) {
         useSessionStore.getState().clearSelectedSkills(sessionId);
       }
@@ -1559,6 +1567,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ...(selectedModel ? { model_name: selectedModel } : {}),
           ...workContext,
           skills: selectedSkills,
+          // plugin_names：对齐 专家与插件装备-前端接口_v2.md §1.3/§3.6——"不传"和"[]"是两种不同
+          // 语义（不传=不改该侧装备；[]=按 session LoadRecord 卸载全部），跟下面 `mcp` 字段"不传
+          // 和 [] 效果一致"正好相反，不能照抄同一种"选中为空就不传"的写法。这里永远显式传当前
+          // 会话已启用的插件全集（哪怕是空数组），确保用户在扩展面板里把插件开关关掉后，后端能
+          // 收到明确的 [] 去卸载，而不是被"不传"误判成"不改动、维持之前挂载的状态"。
+          // 2026-08-17 之前的写法（`enabledPlugins.length > 0 ? {...} : {}`）在"用户关闭全部已启用
+          // 插件后发送"这个场景下是真实 bug：见 cjh/feature/MCP/_migration/progress.md 当日记录。
+          plugin_names: enabledPlugins,
+          // mcp：MCP 接口文档 v2 §6.2 给出的权威字段名（不是 mcp_names——那是之前没有文档依据时
+          // 猜的占位名，后端从不解析）。语义：字段缺失和空数组效果一致，都会清除该会话已挂载的
+          // 全部 MCP，所以选中为空时不带这个字段是安全的，不用改成恒发 `mcp: []`。
+          ...(enabledMcps.length > 0 ? { mcp: enabledMcps } : {}),
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
           ...(sessionMetadata ? { metadata: sessionMetadata } : {}),

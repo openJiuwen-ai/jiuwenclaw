@@ -461,7 +461,8 @@ class WebClient {
         message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
-        this.isRetriableCode(message.code)
+        this.isRetriableCode(message.code),
+        message.payload
       )
     );
   }
@@ -550,12 +551,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 

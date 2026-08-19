@@ -18,6 +18,7 @@ import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
+import { ConnectorMarketPanel } from './components/ConnectorMarket';
 import {
   ShareImageDocument,
   exportShareImageNode,
@@ -137,7 +138,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = SidebarNavKey;
+type MainNavKey = SidebarNavKey | 'connectorMarket';
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -1848,6 +1849,10 @@ function AppContent() {
     if (options.initialInputValue) {
       useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
     }
+    // 扩展详情页"使用"按钮跳转——除了带上 demo 示例文案，还要顺带把这个扩展的会话内启用
+    // 开关打开，跟 initialInputValue 走的是同一条通道。
+    options.initialEnabledPlugins?.forEach((id) => useSessionStore.getState().addEnabledPlugin(NEW_CONVERSATION_ID, id));
+    options.initialEnabledMcps?.forEach((name) => useSessionStore.getState().addEnabledMcp(NEW_CONVERSATION_ID, name));
     if (options.preserveProject) {
       preserveSelectedProjectOnChatNewRef.current = true;
       newConversationProjectRef.current = selectedProject
@@ -2015,6 +2020,15 @@ function AppContent() {
           useSessionStore.getState().setSessionMetadata(newSid, pendingMetadata);
           useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, null);
         }
+        // 同样搬家：欢迎页（'new'）上如果已经通过"+"菜单"扩展"面板开了某些插件/MCP 的会话内
+        // 开关（或者是"使用"按钮带过来的 initialEnabledPlugins/initialEnabledMcps），真实
+        // session_id 创建后要跟着过去，否则下面 removeRuntime('new') 会把这些选择直接冲掉。
+        const pendingEnabledPlugins = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.enabledPlugins ?? [];
+        pendingEnabledPlugins.forEach((id) => useSessionStore.getState().addEnabledPlugin(newSid, id));
+        useSessionStore.getState().clearEnabledPlugins(NEW_CONVERSATION_ID);
+        const pendingEnabledMcps = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.enabledMcps ?? [];
+        pendingEnabledMcps.forEach((name) => useSessionStore.getState().addEnabledMcp(newSid, name));
+        useSessionStore.getState().clearEnabledMcps(NEW_CONVERSATION_ID);
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
@@ -2839,6 +2853,21 @@ function AppContent() {
         {activeNav === 'extensions' && (
           <div className="app-section">
             <ExtensionsHubPanel sessionId={sessionId} isConnected={isConnected} />
+          </div>
+        )}
+        {activeNav === 'connectorMarket' && (
+          <div className="app-section">
+            <ConnectorMarketPanel
+              onUseExample={(initialInputValue, mcpName) =>
+                requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
+              }
+              onUseExtension={({ kind, id }) =>
+                requestSessionNavigation(
+                  'new',
+                  kind === 'plugin' ? { initialEnabledPlugins: [id] } : { initialEnabledMcps: [id] },
+                )
+              }
+            />
           </div>
         )}
       </main>

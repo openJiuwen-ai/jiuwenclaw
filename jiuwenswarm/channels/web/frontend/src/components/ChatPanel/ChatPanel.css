@@ -1346,6 +1346,14 @@ overflow: hidden;
   height: 14px;
 }
 
+/* "+"菜单的"扩展"项单独放大图标（用户 2026-08-19 反馈手绘拼图图标比旁边 lucide 图标显得小）。
+   选择器叠两个 class（.chat-mode-select__icon.chat-mode-select__icon--lg）保证特异度稳定盖过
+   上面那条共享基础规则，不依赖源码顺序，也不影响其余三个菜单项。 */
+.chat-mode-select__icon.chat-mode-select__icon--lg svg {
+  width: 18px;
+  height: 18px;
+}
+
 .chat-mode-select__label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2237,7 +2245,8 @@ overflow: hidden;
 }
 
 .chat-skill-select__state {
-  flex: 1 1 0;
+  /* flex-basis 用 auto 的原因同 .chat-skill-select__list 上面那条注释——同一个坑。 */
+  flex: 1 1 auto;
   min-height: 0;
   display: flex;
   align-items: center;
@@ -2292,14 +2301,26 @@ overflow: hidden;
   color: var(--color-text-secondary);
 }
 
-/* 技能列表：占据剩余空间，超出滚动 */
+/* 技能列表：占据剩余空间，超出滚动。
+ * flex-basis 必须是 auto，不能是 0——0 只在父容器有确定 height 时才能正常撑满（原来唯一的
+ * 消费方 .chat-skill-select__menu 就是固定 height:358px，这条一直没暴露问题）。
+ * 2026-08-18：ExtensionPickerPanel 的 .chat-extension-picker 改用 max-height（不是固定
+ * height，要按内容多少自适应），父容器高度不确定时 flex-basis:0 的子元素在浏览器计算容器
+ * 自身高度那一步会被当成 0 参与计算，导致父容器高度只由其余固定高度的兄弟元素（tab/搜索框/
+ * 底部入口）撑出来，这个列表直接塌缩成 0——7 条真实数据全部被挤没，界面上只剩一条模糊分隔线。
+ * 换成 auto 后，父容器高度不确定时这里用内容的 max-content 高度参与计算（能正确撑到超过
+ * max-height 触发裁剪），父容器高度确定时（.chat-skill-select__menu 那条路径）行为不变。 */
 .chat-skill-select__list {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
   overflow-y: auto;
+  /* 显式声明，不能省略——只设 overflow-y 时 overflow-x 的计算值不是默认的 visible，浏览器会把
+     它强制变成 auto（CSS2.1 overflow 规则：两轴只要有一个不是 visible，另一个 visible 就会被
+     隐式改成 auto），一旦内容有任何轻微溢出就会莫名多出一条横向滚动条（2026-08-18 用户反馈）。 */
+  overflow-x: hidden;
   overscroll-behavior: contain;
 }
 
@@ -2415,6 +2436,143 @@ overflow: hidden;
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
+}
+
+/*
+ * "+"菜单"扩展"二级面板（ExtensionPickerPanel.tsx）。内部搜索框/列表/条目/底部管理入口复用
+ * 上面的 .chat-skill-select__* 结构类（布局/间距未在高保真对比中发现偏差），但面板容器本身是
+ * createPortal + position:fixed（贴着一级菜单动态选左侧/右侧，不是 .chat-skill-select__menu
+ * 那种相对父级定位的固定上弹），以及 tab/开关这两处颜色是高保真"1.0 添加插件"页实测取值，
+ * 数值和项目现成 token 对不上，不能照抄 .chat-skill-select__item--selected 那套
+ * --color-action-primary，见 ExtensionPickerPanel.tsx 组件头注释。
+ */
+.chat-extension-picker {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-height: 440px;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 14px;
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-shadow-lg);
+  box-sizing: border-box;
+}
+
+.chat-extension-picker__tabs {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 4px 8px;
+}
+
+.chat-extension-picker__tab {
+  padding: 0 0 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.chat-extension-picker__tab--active {
+  border-bottom-color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.chat-extension-picker__item {
+  height: auto;
+  min-height: 44px;
+  gap: 10px;
+  cursor: default;
+}
+
+/* 描述行去掉后条目只剩一行文字，继承旧版技能下拉的 12px 头像/9px 字号（那边是两行内容配 50px
+   行高撑出来的比例）在这里显得头像和文字都小、行内空白却很多（用户 2026-08-18 反馈）。这里只加
+   限定在 .chat-extension-picker__item 下的覆盖，不改共享基类，旧版技能下拉（InputArea.tsx 的
+   .chat-skill-select__menu）不受影响。 */
+.chat-extension-picker__item .chat-skill-select__avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.chat-extension-picker__item .chat-skill-select__item-name {
+  font-size: 13px;
+}
+
+.chat-extension-picker__spinner {
+  flex: 0 0 auto;
+  color: var(--color-text-secondary);
+  animation: chat-extension-picker-spin 0.8s linear infinite;
+}
+
+@keyframes chat-extension-picker-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 连接按钮样式改成直接复用 ConnectorMarket 卡片同款（connector-market-icon-btn + Tailwind
+   工具类，见 ExtensionPickerPanel.tsx），跟"扩展管理"广场卡片上的 + 号视觉对齐（用户 2026-08-18
+   反馈），不再单独维护一套。 */
+
+/* 条目描述 / 连接按钮的 hover 提示框（ExtensionPickerPanel.tsx 的 ItemTooltipPortal）。
+   跟 ConnectorMarket.css 里 .connector-market-desc-tooltip 视觉同款（同一套 popover/border/
+   shadow token），但这里不能复用那个 class 本身——那个是给 [data-tooltip]:hover::after 这种
+   "伪元素挂在被 hover 元素自己身上"的用法设计的，本组件的触发元素在 overflow-y:auto 的可滚动
+   列表内部，伪元素会被记入该滚动容器的 scrollHeight，一旦触发滚动条就会引发 hover 状态被
+   滚动条挤出触发区域 → 提示消失 → 滚动条消失 → 内容排版复位 → 又重新 hover 上的闪烁循环，
+   见 ExtensionPickerPanel.tsx ItemDescCell 头注释。这里改成 JS 控制的独立 DOM 节点，用
+   createPortal 挂到 document.body、position:fixed 定位，彻底脱离滚动容器。 */
+.chat-extension-picker__tooltip {
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--color-surface-popover);
+  border: 1px solid var(--color-border-default);
+  box-shadow: var(--effect-shadow-lg);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: normal;
+  pointer-events: none;
+}
+
+.chat-extension-picker__toggle {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-border-strong);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.chat-extension-picker__toggle--on {
+  background: var(--color-chat-accent);
+}
+
+.chat-extension-picker__toggle-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease;
+}
+
+.chat-extension-picker__toggle--on .chat-extension-picker__toggle-thumb {
+  transform: translateX(16px);
 }
 
 /* Keyboard hints */
