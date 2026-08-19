@@ -104,6 +104,8 @@ tiktoken>=0.12.0
 # ============================================================
 # 其他核心依赖
 # ============================================================
+# openjiuwen retrieval callbacks imports tqdm during AgentServer startup
+tqdm>=4.66.0
 numpy>=1.26.0
 beautifulsoup4>=4.12.0
 docx2txt>=0.8
