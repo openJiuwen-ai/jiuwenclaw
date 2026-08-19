@@ -5808,6 +5808,19 @@ export class AppScreen implements Component, Focusable {
         this.state.loadWorkflowDetail(workflowId).catch(() => undefined),
       ),
     );
+    // After get_workflow, phases carry summaries only — fetch agents per phase
+    // to surface waiting-for-human nodes (list snapshot had no phases/agents).
+    const phaseAgentLoads: Array<Promise<void>> = [];
+    for (const wf of this.state.getSnapshot().workflowRuns) {
+      if (!detailIds.has(wf.id)) continue;
+      for (const phase of wf.phases ?? []) {
+        if (Array.isArray(phase.agents) && phase.agents.length > 0) continue;
+        phaseAgentLoads.push(
+          this.state.loadPhaseAgents(wf.id, phase.id).catch(() => undefined),
+        );
+      }
+    }
+    await Promise.all(phaseAgentLoads);
     const promptLoads: Array<Promise<void>> = [];
     for (const wf of this.state.getSnapshot().workflowRuns) {
       for (const phase of wf.phases ?? []) {
@@ -6129,7 +6142,7 @@ export class AppScreen implements Component, Focusable {
       phaseEntries.findIndex((entry) => entry.phaseId === resolvedPhaseId),
     );
     const selectedPhase =
-      workflow.phases.find((phase) => phase.id === resolvedPhaseId) ?? workflow.phases[0];
+      workflow.phases?.find((phase) => phase.id === resolvedPhaseId) ?? workflow.phases?.[0];
     const activePhaseId = selectedPhase?.id ?? "";
     const phaseItems: SelectItem[] = phaseEntries.map((entry) => ({
       value: entry.phaseId,
@@ -6160,6 +6173,14 @@ export class AppScreen implements Component, Focusable {
         item.value,
         "agents",
       );
+      // Lazy-load agents for the selected phase (get_workflow returns
+      // summaries without agents — fetch on first drill-in).
+      const phase = workflow.phases?.find((p) => p.id === item.value);
+      if (phase && (!Array.isArray(phase.agents) || phase.agents.length === 0)) {
+        void this.state.loadPhaseAgents(workflowId, item.value).then(() =>
+          this.refreshSwarmWorkflowsView(),
+        );
+      }
       this.tui.requestRender();
     };
     phaseList.onCancel = () => {
@@ -6480,7 +6501,7 @@ export class AppScreen implements Component, Focusable {
       // Tab: enter reply mode for the waiting turn (if any)
       if (matchesKey(data, "tab")) {
         const workflow = this.state.getSnapshot().workflowRuns.find((w) => w.id === state.workflowId);
-        const phase = workflow?.phases.find((item) => item.id === state.phaseId);
+        const phase = workflow?.phases?.find((item) => item.id === state.phaseId);
         if (phase) {
           for (const agent of phase.agents ?? []) {
             if (
@@ -7107,9 +7128,9 @@ export class AppScreen implements Component, Focusable {
     const completed = workflow.completed_agent_count ?? 0;
     const statusBanner = workflowStatusBannerText(workflow.status);
     const selectedPhase =
-      workflow.phases.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases[0];
+      workflow.phases?.find((phase) => phase.id === state.selectedPhaseId) ?? workflow.phases?.[0];
     const selectedAgentId = state.agentList.getSelectedItem()?.value;
-    const selectedAgent = selectedPhase?.agents.find((agent) => agent.id === selectedAgentId);
+    const selectedAgent = selectedPhase?.agents?.find((agent) => agent.id === selectedAgentId);
     const replyHint =
       selectedAgent?.kind === "human" && selectedAgent.status === "waiting_for_human"
         ? " · Tab reply"
@@ -7156,14 +7177,7 @@ export class AppScreen implements Component, Focusable {
         : []),
       ...(state.loadingDetail
         ? [padToWidth(palette.text.dim("Loading workflow details…"), width)]
-        : workflow.truncated
-          ? [
-              padToWidth(
-                palette.status.warning("⚠ Large workflow — some fields were truncated"),
-                width,
-              ),
-            ]
-          : []),
+        : []),
       ...(workflow.status === "failed" && workflow.error
         ? wrapPlainText(workflow.error, width).map((line) =>
             padToWidth(palette.status.error(line), width),
@@ -7238,14 +7252,15 @@ export class AppScreen implements Component, Focusable {
     selectedPhaseId: string,
     width: number,
   ): string[] {
-    if (workflow.phases.length === 0) {
+    const phases = workflow.phases ?? [];
+    if (phases.length === 0) {
       return [padToWidth(palette.text.dim("No phases"), width)];
     }
 
     const lines: string[] = [];
     const childrenByParent = new Map<string, WorkflowPhase[]>();
     const orderedParents: WorkflowPhase[] = [];
-    for (const phase of workflow.phases) {
+    for (const phase of phases) {
       if (phase.phase_type === "child") {
         const parent = phase.parent_phase || "";
         if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
@@ -7310,7 +7325,7 @@ export class AppScreen implements Component, Focusable {
   ): string[] {
     const childrenByParent = new Map<string, WorkflowPhase[]>();
     const orderedParents: WorkflowPhase[] = [];
-    for (const phase of workflow.phases) {
+    for (const phase of workflow.phases ?? []) {
       if (phase.phase_type === "child") {
         const parent = phase.parent_phase || "";
         if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
@@ -7353,7 +7368,7 @@ export class AppScreen implements Component, Focusable {
 
   /** Phase-local 0-based turn label (see ``phaseLocalTurnNumber`` in workflows.ts). */
   private agentTurnNumber(
-    agent: WorkflowRun["phases"][number]["agents"][number],
+    agent: WorkflowAgent,
     indexInSession: number,
   ): number {
     return indexInSession;
@@ -7371,7 +7386,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   /** Total session turns visible in the current phase. */
-  private sessionTotalCount(members: WorkflowRun["phases"][number]["agents"]): number {
+  private sessionTotalCount(members: WorkflowAgent[]): number {
     return members.length;
   }
 
@@ -7464,7 +7479,7 @@ export class AppScreen implements Component, Focusable {
   }
 
   private aggregateSessionStatus(
-    members: WorkflowRun["phases"][number]["agents"],
+    members: WorkflowAgent[],
   ): WorkflowStatus {
     let aggregateStatus: WorkflowStatus = "completed";
     for (const member of members) {
@@ -7483,16 +7498,16 @@ export class AppScreen implements Component, Focusable {
   }
 
   /** Done turns for session parent progress (completed / failed / stopped). */
-  private sessionDoneCount(members: WorkflowRun["phases"][number]["agents"]): number {
+  private sessionDoneCount(members: WorkflowAgent[]): number {
     return members.filter(
-      (member) =>
+      (member: WorkflowAgent) =>
         member.status === "completed" ||
         member.status === "failed" ||
         member.status === "stopped",
     ).length;
   }
 
-  private formatSessionProgress(members: WorkflowRun["phases"][number]["agents"]): string {
+  private formatSessionProgress(members: WorkflowAgent[]): string {
     return `${this.sessionDoneCount(members)}/${this.sessionTotalCount(members)}`;
   }
 
@@ -7580,17 +7595,17 @@ export class AppScreen implements Component, Focusable {
   }
 
   private renderSwarmWorkflowAgentRows(
-    agents: WorkflowRun["phases"][number]["agents"],
+    agents: WorkflowAgent[] | undefined,
     width: number,
-    maxRows = agents.length,
+    maxRows = agents?.length ?? 0,
   ): string[] {
-    if (agents.length === 0) return [padToWidth(palette.text.dim("No agents"), width)];
+    if (!agents || agents.length === 0) return [padToWidth(palette.text.dim("No agents"), width)];
 
     const { sessions, oneShots } = groupWorkflowAgentsByName(agents);
 
     type DisplayGroup =
-      | { type: "session"; label: string; members: WorkflowRun["phases"][number]["agents"] }
-      | { type: "oneshot"; agent: WorkflowRun["phases"][number]["agents"][number] };
+      | { type: "session"; label: string; members: WorkflowAgent[] }
+      | { type: "oneshot"; agent: WorkflowAgent };
 
     const displayGroups: DisplayGroup[] = [
       ...sessions.map(({ label, members }) => ({ type: "session" as const, label, members })),
@@ -7608,11 +7623,12 @@ export class AppScreen implements Component, Focusable {
         const firstMember = members[0];
         const modelOrHuman = formatWorkflowAgentKindLabel(firstMember ?? {});
         const tokenValues = members
-          .map((member) => member.token_count)
-          .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+          .map((member: WorkflowAgent) => member.token_count)
+          .filter((value: number | null | undefined): value is number =>
+            typeof value === "number" && Number.isFinite(value));
         const tokenText =
           tokenValues.length > 0
-            ? formatTokenCount(tokenValues.reduce((total, value) => total + value, 0))
+            ? formatTokenCount(tokenValues.reduce((total: number, value: number) => total + value, 0))
             : null;
         const tokenSuffix = tokenText ? ` · ${tokenText} tok` : "";
 
@@ -7635,7 +7651,7 @@ export class AppScreen implements Component, Focusable {
         renderedRows++;
 
         const hasActiveTurn = members.some(
-          (member) =>
+          (member: WorkflowAgent) =>
             member.status === "waiting_for_human" ||
             member.status === "running" ||
             member.status === "pending",
@@ -7702,7 +7718,7 @@ export class AppScreen implements Component, Focusable {
           count++;
         } else {
           count++; // summary row
-          const hasWaiting = g.members.some(m => m.status === "waiting_for_human");
+          const hasWaiting = g.members.some((m: WorkflowAgent) => m.status === "waiting_for_human");
           if (hasWaiting) {
             count += g.members.length; // all turn sub-rows
           }
@@ -7730,7 +7746,7 @@ export class AppScreen implements Component, Focusable {
     const workflow = this.state.getSnapshot().workflowRuns.find((w) => w.id === state.workflowId);
     if (!workflow) return [padToWidth(palette.status.error("Workflow not found"), width)];
 
-    const phase = workflow.phases.find((item) => item.id === state.phaseId);
+    const phase = workflow.phases?.find((item) => item.id === state.phaseId);
 
     const sessionAgents = sessionMembersInPhase(
       phase?.agents ?? [],

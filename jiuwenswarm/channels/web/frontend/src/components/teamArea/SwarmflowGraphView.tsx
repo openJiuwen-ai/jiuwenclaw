@@ -40,6 +40,7 @@ import {
   findActiveIterationIndex,
 } from './workflowTypes';
 import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import type { AskUserQuestionPayload } from '../../types/websocket';
 import {
   AgentDetailModal,
@@ -557,6 +558,21 @@ export function SwarmflowGraphView({
   useEffect(() => {
     setEdges(rawEdges);
   }, [rawEdges, setEdges]);
+
+  // 历史恢复后 get_workflow 只给 phase 骨架（无 agents）——进入图视图时补齐缺失的 agents。
+  useEffect(() => {
+    for (const run of runs) {
+      for (const phase of run.phases ?? []) {
+        if (phase.agents === undefined && (phase.agent_count ?? 0) > 0) {
+          void useSessionStore
+            .getState()
+            .loadPhaseAgents(sessionId, run.id, phase.id)
+            .catch(() => undefined);
+        }
+      }
+    }
+  }, [runs, sessionId]);
+
   const [modalState, setModalState] = useState<AgentModalState | null>(null);
   const [modalAgentName, setModalAgentName] = useState('');
 

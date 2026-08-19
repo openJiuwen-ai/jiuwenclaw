@@ -32,14 +32,22 @@ export interface WorkflowBudget {
   exhausted: boolean;
 }
 
+export interface WorkflowAgentPart {
+  part_idx: number;
+  total_parts: number;
+  content: string;
+}
+
 export interface WorkflowAgent {
   id: string;
   name: string;
   status: WorkflowStatus;
   model?: string;
   prompt?: string;
+  prompt_parts?: WorkflowAgentPart[];
   activity?: WorkflowAgentActivity[];
   outcome?: string;
+  outcome_parts?: WorkflowAgentPart[];
   error?: string;
   started_at?: string;
   completed_at?: string;
@@ -49,7 +57,10 @@ export interface WorkflowAgent {
   node_type?: WorkflowNodeType;
   correlation_id?: string;
   human_prompt?: string;
+  human_prompt_parts?: WorkflowAgentPart[];
   human_reply?: string;
+  human_reply_parts?: WorkflowAgentPart[];
+  activity_parts?: WorkflowAgentPart[];
 }
 
 export interface WorkflowPhase {
@@ -59,10 +70,14 @@ export interface WorkflowPhase {
   status: WorkflowStatus;
   agent_count?: number;
   completed_agent_count?: number;
-  agents: WorkflowAgent[];
+  /** Absent on phase summaries from ``action=get_workflow``. */
+  agents?: WorkflowAgent[];
   phase_type?: 'child' | null;
   parent_phase?: string | null;
   iteration?: number | null;
+  detail_pending?: boolean;
+  agent_total?: number;
+  has_more?: boolean;
 }
 
 export interface WorkflowRun {
@@ -82,9 +97,40 @@ export interface WorkflowRun {
   duration_ms?: number | null;
   estimated_token_count?: number | null;
   budget?: WorkflowBudget | null;
-  phases: WorkflowPhase[];
+  /** Absent on list summaries from ``action=list``. */
+  phases?: WorkflowPhase[];
   detail_pending?: boolean;
-  truncated?: boolean;
+  phase_total?: number;
+  has_more?: boolean;
+}
+
+const SPLITTABLE_AGENT_FIELDS = [
+  'prompt',
+  'outcome',
+  'human_prompt',
+  'human_reply',
+  'activity',
+] as const;
+
+/** Reassemble ``{field}_parts`` arrays back into the base string field. */
+export function reassembleAgentFieldParts(agent: WorkflowAgent): WorkflowAgent {
+  let out = agent;
+  for (const field of SPLITTABLE_AGENT_FIELDS) {
+    const partsKey = `${field}_parts`;
+    const parts = (out as unknown as Record<string, unknown>)[partsKey];
+    if (!Array.isArray(parts) || parts.length === 0) continue;
+    const sorted = [...parts].sort(
+      (a, b) =>
+        (a as WorkflowAgentPart).part_idx - (b as WorkflowAgentPart).part_idx,
+    );
+    const joined = sorted
+      .map((p) => (p as WorkflowAgentPart).content ?? '')
+      .join('');
+    const next: WorkflowAgent = { ...out, [field]: joined } as WorkflowAgent;
+    delete (next as unknown as Record<string, unknown>)[partsKey];
+    out = next;
+  }
+  return out;
 }
 
 // ── 状态图标 ──────────────────────────────────────────────
@@ -228,11 +274,12 @@ function mergeWorkflowAgent(
   existing: WorkflowAgent | undefined,
   incoming: WorkflowAgent,
 ): WorkflowAgent {
+  const reassembled = reassembleAgentFieldParts(incoming);
   return {
     ...existing,
-    ...incoming,
-    activity: incoming.activity ?? existing?.activity,
-    human_prompt: preferHumanPrompt(existing?.human_prompt, incoming.human_prompt),
+    ...reassembled,
+    activity: reassembled.activity ?? existing?.activity,
+    human_prompt: preferHumanPrompt(existing?.human_prompt, reassembled.human_prompt),
   };
 }
 
@@ -240,6 +287,10 @@ function mergeWorkflowPhase(
   existing: WorkflowPhase | undefined,
   incoming: WorkflowPhase,
 ): WorkflowPhase {
+  const incomingHasAgents = Object.prototype.hasOwnProperty.call(incoming, 'agents');
+  if (!incomingHasAgents) {
+    return { ...existing, ...incoming, agents: existing?.agents };
+  }
   const existingAgents = existing?.agents ?? [];
   const mergedAgents = [...existingAgents];
 
@@ -291,6 +342,15 @@ export function mergeWorkflowRun(
   } else if (existing?.logs && !Object.prototype.hasOwnProperty.call(incoming, 'logs')) {
     merged.logs = existing.logs;
   }
+  if (Object.prototype.hasOwnProperty.call(incoming, 'detail_pending')) {
+    merged.detail_pending = incoming.detail_pending;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, 'has_more')) {
+    merged.has_more = incoming.has_more;
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, 'phase_total')) {
+    merged.phase_total = incoming.phase_total;
+  }
 
   return merged;
 }
@@ -305,20 +365,22 @@ export function normalizeWorkflowRun(workflow: WorkflowRun): WorkflowRun {
       ? workflow.phases.map((phase) => ({
           ...phase,
           agents: Array.isArray(phase.agents)
-            ? phase.agents.map((agent) => ({
-                ...agent,
-                activity: Array.isArray(agent.activity)
-                  ? agent.activity.filter(
-                      (activity): activity is WorkflowAgentActivity =>
-                        Boolean(
-                          activity && typeof activity === 'object' && !Array.isArray(activity),
-                        ),
-                    )
-                  : undefined,
-              }))
-            : [],
+            ? phase.agents.map((agent) =>
+                reassembleAgentFieldParts({
+                  ...agent,
+                  activity: Array.isArray(agent.activity)
+                    ? agent.activity.filter(
+                        (activity): activity is WorkflowAgentActivity =>
+                          Boolean(
+                            activity && typeof activity === 'object' && !Array.isArray(activity),
+                          ),
+                      )
+                    : undefined,
+                }),
+              )
+            : phase.agents,
         }))
-      : [],
+      : workflow.phases,
   };
 }
 
@@ -485,8 +547,8 @@ export function sortPhasesByExecution(phases: WorkflowPhase[]): WorkflowPhase[] 
   const withoutAgents = topLevel.filter((p) => !p.agents || p.agents.length === 0);
 
   withAgents.sort((a, b) => {
-    const aTime = a.agents[0]?.started_at ?? '';
-    const bTime = b.agents[0]?.started_at ?? '';
+    const aTime = a.agents?.[0]?.started_at ?? '';
+    const bTime = b.agents?.[0]?.started_at ?? '';
     return aTime.localeCompare(bTime);
   });
 
