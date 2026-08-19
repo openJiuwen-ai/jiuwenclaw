@@ -430,14 +430,21 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
         )
         return False
 
-    await _trigger_artifact_post_process_hook(
-        session_id=session_id,
-        tool_name=tool_name,
-        task_id=ctx.task_id,
-        subagent_id=ctx.subagent_id,
-        artifacts=new_artifacts,
-        log_prefix=ctx.log_prefix,
-    )
+    try:
+        await _trigger_artifact_post_process_hook(
+            session_id=session_id,
+            tool_name=tool_name,
+            task_id=ctx.task_id,
+            subagent_id=ctx.subagent_id,
+            artifacts=new_artifacts,
+            log_prefix=ctx.log_prefix,
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s artifact post-process hook failed: %s",
+            ctx.log_prefix,
+            exc,
+        )
     
     # Step 5: Build payload
     artifacts_payload = [
