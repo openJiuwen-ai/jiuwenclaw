@@ -25,12 +25,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 
 logger = logging.getLogger(__name__)
+
+# AgentWebSocketServer.start 注入: 开启沙箱 / 改 ACL 时真正拉起 box-server
+# (含 Windows extra_env). 不能在本模块 import agent_ws_server (循环依赖).
+_internal_bootstrap: Callable[[], Awaitable[None]] | None = None
+
+
+def set_internal_jiuwenbox_bootstrap(cb: Callable[[], Awaitable[None]] | None) -> None:
+    """由 AgentWebSocketServer.start 注册内部 jiuwenbox 拉起回调."""
+    global _internal_bootstrap
+    _internal_bootstrap = cb
 
 _SANDBOX_CFG_METHODS: frozenset[ReqMethod] = frozenset(
     {
@@ -161,7 +172,14 @@ async def _apply_sandbox_change(kind: str) -> None:
                     removed, released,
                 )
             else:
-                logger.info("[sandbox] enabled 变更为开启, 下轮 _create_sys_operation 读新值生效")
+                logger.info("[sandbox] enabled 变更为开启, 拉起 box-server")
+                if _internal_bootstrap is None:
+                    logger.warning(
+                        "[sandbox] 无 bootstrap 回调, 无法拉起 box-server; "
+                        "请重启 AgentServer 或确认 sandbox.enabled=true"
+                    )
+                else:
+                    await _internal_bootstrap()
             return
         if kind == "startup_mode":
             # 模式切换: internal→external 停掉自拉起的 box-server; external→internal 下次拉起.
@@ -181,14 +199,27 @@ async def _apply_sandbox_change(kind: str) -> None:
             # 文件 ACL + 网络 egress 都需重启 box-server 重载 root policy 副本.
             # 重启的 lifespan shutdown 调 shutdown_all_sandboxes 自动清活沙箱 (新配置只作
             # 用于新沙箱); jbx-sandbox 用户不重建 (ensure_windows_setup 幂等).
+            from jiuwenswarm.common.config import get_sandbox_runtime
             from jiuwenswarm.server.sandbox.jiuwenbox_runner import JiuwenBoxRunner
 
-            runner = JiuwenBoxRunner.instance()
-            if not runner.owns_process or runner.process is None:  # noqa: SLF001 - JiuwenBoxRunner 内部状态访问
+            if not bool(get_sandbox_runtime().get("enabled")):
                 logger.info(
-                    "[sandbox] %s 变更但 box-server 非 agent-server 拉起 (external), 跳过重启",
+                    "[sandbox] %s 变更但 sandbox.enabled=false, 跳过拉起/重启",
                     kind,
                 )
+                return
+            runner = JiuwenBoxRunner.instance()
+            if not runner.owns_process or runner.process is None:  # noqa: SLF001
+                # 以前这里直接跳过: claw 先写 windows-policy.runtime.yaml 再开开关,
+                # 或只改 ACL 时 box-server 从未拉起 → 配置在磁盘上但不生效.
+                logger.info(
+                    "[sandbox] %s 变更且 box-server 未由 agent-server 拉起, 改为拉起",
+                    kind,
+                )
+                if _internal_bootstrap is None:
+                    logger.warning("[sandbox] 无 bootstrap 回调, 无法拉起 box-server")
+                    return
+                await _internal_bootstrap()
                 return
             logger.info(
                 "[sandbox] %s 变更, 重启 box-server 重载运行时 policy 副本", kind,
@@ -321,4 +352,5 @@ def dispatch_sandbox_config_request(request: AgentRequest) -> AgentResponse:
 __all__ = [
     "dispatch_sandbox_config_request",
     "get_sandbox_config_req_methods",
+    "set_internal_jiuwenbox_bootstrap",
 ]
