@@ -1916,6 +1916,7 @@ class JiuWenSwarmDeepAdapter:
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         self._skill_turbo_prompt_rail: Any = None
+        self._skill_protocol_prompt_rail: Any = None
         self._request_summary_rail: Any | None = None
         # Track session IDs currently executing on this adapter instance.
         # Used by process_interrupt to avoid aborting sessions that are not
@@ -6793,6 +6794,17 @@ class JiuWenSwarmDeepAdapter:
             )
         )
 
+        # SkillProtocolPromptRail: 注入技能执行规范（skill_protocol 段），仅 agent 模式挂载。
+        if isinstance(mode, str) and mode.startswith("agent"):
+            rail_infos.append(
+                _RailBuildInfo(
+                    "_skill_protocol_prompt_rail",
+                    self._build_skill_protocol_prompt_rail,
+                )
+            )
+        else:
+            self._skill_protocol_prompt_rail = None
+
         rail_infos.append(
             _RailBuildInfo(
                 "_progressive_tool_rail",
@@ -9102,6 +9114,20 @@ class JiuWenSwarmDeepAdapter:
             logger.info("[JiuWenSwarmDeepAdapter] skill_turbo tool initialized")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] Failed to initialize skill_turbo tool: %s", exc)
+
+    @staticmethod
+    def _build_skill_protocol_prompt_rail() -> Any | None:
+        """构建 SkillProtocolPromptRail: 注入技能执行规范提示词。"""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.skill_protocol_prompt_rail import (
+                SkillProtocolPromptRail,
+            )
+            rail = SkillProtocolPromptRail()
+            logger.info("[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create failed: %s", exc)
+            return None
 
     @staticmethod
     def _build_skill_turbo_prompt_rail() -> Any | None:
