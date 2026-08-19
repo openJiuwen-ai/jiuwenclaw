@@ -42,6 +42,7 @@ import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
 import { ExtensionPickerPanel } from './ExtensionPickerPanel';
+import { Switch } from '../Switch';
 import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
@@ -2416,6 +2417,40 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </button>
                   );
                 })()}
+                {canUsePersistSessionMenu && (
+                  <button
+                    type="button"
+                    className={clsx(
+                      'chat-mode-select__option',
+                      persistSessionEnabled && 'chat-mode-select__option--active',
+                    )}
+                    role="menuitemcheckbox"
+                    aria-checked={persistSessionEnabled}
+                    disabled={persistSessionLocked}
+                    title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
+                    onClick={() => {
+                      if (persistSessionLocked || !activeSessionId) return;
+                      useSessionStore
+                        .getState()
+                        .setPersistSession(activeSessionId, !persistSessionEnabled);
+                      setAttachMenuOpen(false);
+                    }}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                        <InfinityIcon className="w-4 h-4" />
+                      </span>
+                      <span className="chat-mode-select__label">
+                        {t('persistSession.toolbarTag')}
+                      </span>
+                    </span>
+                    {persistSessionEnabled && (
+                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
+                      </svg>
+                    )}
+                  </button>
+                )}
                 <button
                   ref={extensionMenuItemRef}
                   type="button"
@@ -2447,6 +2482,109 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
                   </svg>
                 </button>
+                {(canUsePlanMenu || canUseGoalMenu) && <div className="chat-mode-select__divider" role="separator" />}
+                {canUsePlanMenu && (() => {
+                  // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
+                  // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
+                  // "关闭"方向只受 isProcessing 限制（跟输入框旁边现有的计划 chip 关闭按钮一致）。
+                  const planDisabledOn = hasUnfinishedGoal || isProcessing;
+                  const planDisabledOnTitle = hasUnfinishedGoal
+                    ? t('plan.toolbarUnavailableGoal')
+                    : isProcessing
+                      ? t('plan.toolbarUnavailableProcessing')
+                      : undefined;
+                  const planDisabled = planActive ? isProcessing : planDisabledOn;
+                  const planTitle = planActive
+                    ? (isProcessing ? t('plan.closeTagDisabled') : undefined)
+                    : planDisabledOnTitle;
+                  const togglePlan = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (planDisabledOn) return;
+                      // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
+                      // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                      // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
+                      // plan_entry_source，否则会被后端的防重入闸门拦下。
+                      usePlanStore.getState().setActive(activeSessionId, true, { explicitEntry: true });
+                    } else {
+                      if (isProcessing) return;
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    setAttachMenuOpen(false);
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', planDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-plan"
+                      title={planTitle}
+                      onClick={() => {
+                        if (planDisabled) return;
+                        togglePlan(!planActive);
+                      }}
+                    >
+                      <span className="chat-mode-select__option-main">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <ClipboardList className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
+                      </span>
+                      <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {canUseGoalMenu && (() => {
+                  // Goal 和 Plan 互斥：已有真正生效的计划时不能再选目标；"打开"方向沿用原逻辑，
+                  // "关闭"方向不受限制（跟输入框旁边现有的目标 chip 关闭按钮一致，随时可关）。
+                  const goalChecked = goalArmed || hasUnfinishedGoal;
+                  const goalDisabledOn = hasUnfinishedGoal || planCommitted;
+                  const goalDisabledOnTitle = hasUnfinishedGoal
+                    ? t('goal.toolbarUnavailable')
+                    : planCommitted
+                      ? t('goal.toolbarUnavailablePlan')
+                      : undefined;
+                  const goalDisabled = goalChecked ? false : goalDisabledOn;
+                  const goalTitle = goalChecked ? undefined : goalDisabledOnTitle;
+                  const toggleGoal = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (goalDisabledOn) return;
+                      // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
+                      // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
+                      if (planActive) {
+                        usePlanStore.getState().setActive(activeSessionId, false);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, true);
+                    } else {
+                      if (currentGoal) {
+                        onClearGoal?.(activeSessionId);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                    }
+                    setAttachMenuOpen(false);
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', goalDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-goal"
+                      title={goalTitle}
+                      onClick={() => {
+                        if (goalDisabled) return;
+                        toggleGoal(!goalChecked);
+                      }}
+                    >
+                      <span className="chat-mode-select__option-main">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Target className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('goal.toggleLabel')}</span>
+                      </span>
+                      <Switch checked={goalChecked} disabled={goalDisabled} onChange={toggleGoal} />
+                    </div>
+                  );
+                })()}
               </div>,
               document.body
             )}

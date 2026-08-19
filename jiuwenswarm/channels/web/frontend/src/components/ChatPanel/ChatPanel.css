@@ -1440,6 +1440,29 @@ overflow: hidden;
   color: var(--color-text-placeholder);
 }
 
+/* 计划模式/追求目标改成 div + 内嵌 Switch 后（原生 button 不能嵌套 button），原生
+   :disabled 伪类不再生效，用同名 modifier class 复刻一份禁用视觉。 */
+.chat-mode-select__option--disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.chat-mode-select__option--disabled:hover {
+  background: transparent;
+  color: var(--color-text-placeholder);
+}
+
+.chat-mode-select__option--disabled .chat-mode-select__icon {
+  color: var(--color-text-placeholder);
+}
+
+/* "+"菜单里计划模式/追求目标两行跟上面几项之间的小灰色分隔线 */
+.chat-mode-select__divider {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--color-border-default);
+}
+
 /* Trigger turns red when full_access is selected */
 .chat-mode-select__trigger--danger,
 .chat-mode-select__trigger--danger .chat-mode-select__icon {
@@ -2544,36 +2567,9 @@ overflow: hidden;
   pointer-events: none;
 }
 
-.chat-extension-picker__toggle {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-  width: 36px;
-  height: 20px;
-  padding: 2px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--color-border-strong);
-  cursor: pointer;
-  box-sizing: border-box;
-}
-
-.chat-extension-picker__toggle--on {
-  background: var(--color-chat-accent);
-}
-
-.chat-extension-picker__toggle-thumb {
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-  transition: transform 0.15s ease;
-}
-
-.chat-extension-picker__toggle--on .chat-extension-picker__toggle-thumb {
-  transform: translateX(16px);
-}
+/* 原 .chat-extension-picker__toggle*（MenuToggleSwitch 专属样式）已删除：2026-08-19 用户
+   明确要求开关统一复用已有的 components/Switch，不要再维护第二套开关视觉，插件/MCP 面板和
+   "+"菜单的计划模式/追求目标开关现在都是 components/Switch，以后要换样式只改那一个模块。 */
 
 /* Keyboard hints */
 .chat-input-hints {

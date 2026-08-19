@@ -15,6 +15,7 @@ import { ConnectTokenModal } from '../ConnectorMarket/ConnectTokenModal';
 import { CliAuthModal } from '../ConnectorMarket/CliAuthModal';
 import { requestManageView } from '../ConnectorMarket';
 import { usePendingConnectorFlow, PendingConnectorModals } from '../ConnectorMarket/usePendingConnectorFlow';
+import { Switch } from '../Switch';
 
 const PANEL_WIDTH = 320;
 const PANEL_MAX_HEIGHT = 440;
@@ -295,7 +296,7 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
                   {busy ? (
                     <Loader2 className="chat-extension-picker__spinner" size={16} />
                   ) : installed && linked ? (
-                    <ExtensionToggle checked={isEnabled} onChange={() => handleTogglePlugin(pkg.id)} />
+                    <Switch checked={isEnabled} onChange={() => handleTogglePlugin(pkg.id)} />
                   ) : installed ? (
                     // 已装但依赖 connector 未就绪（§1.6.4 已装重连）——不能直接给开关（打开也会被
                     // chat.send 硬拒绝，见 v2 §1.3），复用同一个连接icon，走重连而不是 install。
@@ -334,7 +335,7 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
                   {busy ? (
                     <Loader2 className="chat-extension-picker__spinner" size={16} />
                   ) : linked ? (
-                    <ExtensionToggle checked={isEnabled} onChange={() => handleToggleMcp(connector.name)} />
+                    <Switch checked={isEnabled} onChange={() => handleToggleMcp(connector.name)} />
                   ) : (
                     <ConnectButton label={t('chat.extensionConnect')} onClick={() => void handleConnectMcp(connector.name)} />
                   )}
@@ -377,26 +378,6 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
       <PendingConnectorModals flow={pluginReconnectFlow} />
     </>,
     document.body,
-  );
-}
-
-/** 会话内启用开关，颜色取高保真"1.0 添加插件"页实际取样值 #1476FF——正是项目已有的
- * --color-chat-accent，不是 tailwind `accent`（那个映射到 --color-action-primary #2563eb，
- * 跟高保真对不上，见 cjh/feature/MCP/_migration/progress.md 2026-08-17 记录）。 */
-function ExtensionToggle({ checked, onChange }: { checked: boolean; onChange: () => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={(e) => {
-        e.stopPropagation();
-        onChange();
-      }}
-      className={clsx('chat-extension-picker__toggle', checked && 'chat-extension-picker__toggle--on')}
-    >
-      <span className="chat-extension-picker__toggle-thumb" />
-    </button>
   );
 }
 

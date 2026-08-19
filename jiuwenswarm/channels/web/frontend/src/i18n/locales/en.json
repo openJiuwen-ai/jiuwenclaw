@@ -471,6 +471,7 @@
   },
   "plan": {
     "toolbarTag": "Plan",
+    "toggleLabel": "Plan Mode",
     "closeTag": "Exit plan mode",
     "closeTagDisabled": "You can exit plan mode once the reply finishes or you cancel it",
     "toolbarUnavailableGoal": "A goal is already in progress, so Plan isn't available",
@@ -490,6 +491,7 @@
     "formCancel": "Cancel",
     "editTitle": "Edit goal",
     "toolbarTag": "Goal",
+    "toggleLabel": "Pursue Goal",
     "toolbarUnavailable": "A goal is already in progress. Finish or clear it first.",
     "toolbarUnavailablePlan": "Plan mode is in progress, so Goal isn't available",
     "closeTag": "Cancel goal",
