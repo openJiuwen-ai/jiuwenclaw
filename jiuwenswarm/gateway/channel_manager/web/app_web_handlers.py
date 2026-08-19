@@ -45,6 +45,7 @@ from jiuwenswarm.common.config import (
     get_config,
     get_config_raw,
     get_default_models,
+    get_evolution_enabled,
     resolve_legacy_team_model_ref,
     replace_teams_in_config,
     update_default_models_in_config,
@@ -53,6 +54,7 @@ from jiuwenswarm.common.config import (
     replace_channel_subsection_with_cleanup,
     update_browser_in_config,
     update_preferred_language_in_config,
+    update_evolution_enabled_in_config,
     update_context_engine_enabled_in_config,
     update_default_model_provider_in_config,
     update_kv_cache_affinity_enabled_in_config,
@@ -821,6 +823,7 @@ CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
 _CONFIG_YAML_KEYS = frozenset({
+    "evolution_enabled",
     "context_engine_enabled",
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
@@ -1686,6 +1689,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
             # skill_create: tip 优先，fallback to config.yaml
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
+            payload["evolution_enabled"] = "true" if get_evolution_enabled(raw) else "false"
             skill_create_env = read_env_if_set("SKILL_CREATE")
             if skill_create_env is not None:
                 payload["skill_create"] = "true" if skill_create_env.lower() in ("true", "1", "yes") else "false"
@@ -1717,6 +1721,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("kv_cache_affinity_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
+            payload.setdefault("evolution_enabled", "true")
             payload.setdefault("skill_create", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
             payload.setdefault("memory_forbidden_description", "")
@@ -1901,7 +1906,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             val = params[param_key]
             parsed = _parse_config_bool(val)
             try:
-                if param_key == "context_engine_enabled":
+                if param_key == "evolution_enabled":
+                    update_evolution_enabled_in_config(parsed)
+                elif param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
                 elif param_key == "kv_cache_release_enabled":
                     update_kv_cache_release_enabled_in_config(parsed)
