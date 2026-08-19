@@ -5,7 +5,7 @@ preferred_language: zh
 # true：只向模型暴露 direct 工具和 tool_search，其他工具按需搜索；
 # false：不挂载 ProgressiveToolRail，未显式声明 exposure 的工具按 direct 暴露。
 # ToolCard 自己显式声明的 exposure 优先级更高。
-progressive_tool_enabled: true
+progressive_tool_enabled: false
 
 # Web 首次模型配置引导；用户确认完成后会自动关闭，可通过侧栏问号再次打开
 setup_guide:
