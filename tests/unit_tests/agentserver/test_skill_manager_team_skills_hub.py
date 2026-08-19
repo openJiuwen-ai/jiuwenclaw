@@ -110,6 +110,10 @@ async def test_handle_skills_team_skills_hub_search_maps_response(tmp_path):
                     "display_name": "Demo Skill",
                     "short_desc": "desc",
                     "latest_version": "1.2.3",
+                    "publisher_name": "example-publisher",
+                    "category_name": "Productivity",
+                    "install_count": 42,
+                    "plugin_type": "swarmskill",
                     "update_time": 123,
                 }
             ]
@@ -121,6 +125,9 @@ async def test_handle_skills_team_skills_hub_search_maps_response(tmp_path):
     assert payload["count"] == 1
     assert payload["skills"][0]["asset_id"] == "demo-skill"
     assert payload["skills"][0]["display_name"] == "Demo Skill"
+    assert payload["skills"][0]["author"] == "example-publisher"
+    assert payload["skills"][0]["is_team_skill"] is True
+    assert payload["skills"][0]["plugin_type"] == "swarmskill"
 
 
 @pytest.mark.asyncio

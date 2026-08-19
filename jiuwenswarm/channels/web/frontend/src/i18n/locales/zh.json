@@ -1636,12 +1636,15 @@
       "noResults": "未找到匹配的在线技能。",
       "installFailed": "安装技能失败。",
       "installed": "已安装技能 {{name}}",
+      "teamSkill": "团队技能",
+      "nonTeamSkill": "非团队技能",
+      "sourceTimeout": "该在线源搜索超时",
       "sourceStatus": {
         "success": "可用（{{count}}）",
         "error": "不可用",
         "skipped": "未配置"
       },
-      "sourceFilterHelp": "默认同时展示 SkillNet 与 ClawHub。点击源标签可筛选结果；至少保留一个源。",
+      "sourceFilterHelp": "默认同时展示 SwarmSkillHub 与 ClawHub。点击源标签可筛选结果；至少保留一个源。",
       "sourceFilterToggle": "点击筛选该源",
       "sourceFilterKeepOne": "至少保留一个源",
       "noFilteredResults": "当前筛选条件下没有结果，请重新选择源。"

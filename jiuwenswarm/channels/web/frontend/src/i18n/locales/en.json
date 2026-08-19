@@ -1639,12 +1639,15 @@
       "noResults": "No matching online skills found.",
       "installFailed": "Failed to install the skill.",
       "installed": "Installed skill {{name}}",
+      "teamSkill": "Team skill",
+      "nonTeamSkill": "Non-team skill",
+      "sourceTimeout": "The online source search timed out",
       "sourceStatus": {
         "success": "Available ({{count}})",
         "error": "Unavailable",
         "skipped": "Not configured"
       },
-      "sourceFilterHelp": "SkillNet and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
+      "sourceFilterHelp": "SwarmSkillHub and ClawHub are shown by default. Click a source chip to filter results; keep at least one source selected.",
       "sourceFilterToggle": "Click to filter this source",
       "sourceFilterKeepOne": "Keep at least one source selected",
       "noFilteredResults": "No results for the current source filter. Select another source."
