@@ -814,6 +814,19 @@ function RunNode({
         )}
       </div>
 
+      {run.error && (
+        <div className="flex items-start gap-1.5 px-3 py-1.5 text-xs text-red-400/90">
+          <CircleX className="w-3.5 h-3.5 shrink-0 mt-0.5 text-red-400/70" />
+          <span className="break-words min-w-0 whitespace-pre-wrap">{run.error}</span>
+        </div>
+      )}
+      {run.result && (
+        <div className="flex items-start gap-1.5 px-3 py-1.5 text-xs text-text-muted">
+          <CircleCheck className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-500/70" />
+          <span className="break-words min-w-0 whitespace-pre-wrap">{run.result}</span>
+        </div>
+      )}
+
       {expanded && (
         <div className="py-1 border-l border-border/30 ml-4">
           {/* 唯一 phase（非循环） */}
