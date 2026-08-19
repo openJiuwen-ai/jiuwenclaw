@@ -10067,7 +10067,16 @@ class JiuWenSwarmDeepAdapter:
             # has a parent for LLM/tool spans (see streaming path for details).
             sync_agent_observability()
             mark_single_agent_team(self._instance)
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            from jiuwenswarm.server.runtime.debug_trace.paths import (
+                resolve_debug_trace_mode,
+            )
+
+            _run_span = open_agent_run_span(
+                session_id=session_id,
+                mode=resolve_debug_trace_mode(
+                    mode, getattr(request, "_original_mode", None)
+                ),
+            )
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
             if attach_goal:
@@ -10681,7 +10690,9 @@ class JiuWenSwarmDeepAdapter:
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
             mark_single_agent_team(self._instance)
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            _run_span = open_agent_run_span(
+                session_id=session_id, mode=_debug_trace_mode
+            )
             _otel_trace_id = ""
             _otel_span_id = ""
             if _run_span is not None:
