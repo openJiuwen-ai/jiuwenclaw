@@ -5031,7 +5031,8 @@ export function ConfigPanel({
           return;
         }
         setExternalCliInstallStatuses({});
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        // enable_free_models 开关变更需要刷新模型列表（免费模型的添加/清除依赖 models.list 重新拉取）
+        if ((hasModelChanges || "enable_free_models" in configUpdates) && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
@@ -5077,6 +5078,8 @@ export function ConfigPanel({
           }
           setExternalCliInstallStatuses({});
         }
+        // enable_free_models 开关变更后刷新模型列表（旧后端路径）
+        if ("enable_free_models" in configUpdates && onModelsRefresh) await onModelsRefresh();
       }
   } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');

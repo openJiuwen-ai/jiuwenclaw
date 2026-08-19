@@ -717,6 +717,9 @@ function AppContent() {
     onConfigChanged: () => {
       handleConfigChanged();
     },
+    onModelsUpdated: () => {
+      handleModelsRefresh();
+    },
     onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
       // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
       // - 多个任务同时返回结果时，不会互相跳转覆盖

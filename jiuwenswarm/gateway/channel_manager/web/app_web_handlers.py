@@ -2846,6 +2846,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.warning("[config.set] on_config_saved failed: %s", exc)
             applied_without_restart = False
 
+        # enable_free_models 开关变更时重新拉取 Zen 免费模型缓存，
+        # 使"禁用→启用"能实时填充、启用→禁用"能清空缓存。
+        if "enable_free_models" in apply_result.yaml_updated:
+            try:
+                from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+                await warm_zen_free_models(reason="config-toggle")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[config.set] warm_zen_free_models failed: %s", exc)
+
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
         if apply_result.external_cli_dependency_installs is not None:
@@ -3235,6 +3244,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 force=bool(env_updates or yaml_updated),
             )
             applied_without_restart = await _apply_config_change_set(change_set)
+
+            # enable_free_models 开关变更时重新拉取 Zen 免费模型缓存。
+            if "enable_free_models" in yaml_updated:
+                try:
+                    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+                    await warm_zen_free_models(reason="config-toggle")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[config.save_all] warm_zen_free_models failed: %s", exc)
 
             payload = {
                 "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
