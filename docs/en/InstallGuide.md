@@ -17,6 +17,26 @@ For Windows and macOS users who want a ready-to-run app without setting up Pytho
 
 Releases: https://gitcode.com/openJiuwen/jiuwenswarm/releases
 
+##### System requirements
+
+Desktop installers are pre-built for a specific platform and architecture. Confirm your machine meets these before installing:
+
+| Platform | OS version | Architecture | Privilege | Minimum runtime resources (suggested) |
+|----------|------------|--------------|-----------|---------------------------------------|
+| Windows | Windows 10 / 11 (64-bit) | x64 only | **Administrator privileges required** to run the installer (`PrivilegesRequired=admin`) | 2 CPU cores, 4 GB RAM, 2 GB free disk |
+| macOS | macOS 11 (Big Sur) or newer | See "Architecture note" below | On first launch, right-click the app in Finder and choose "Open" to pass GateKeeper | 2 CPU cores, 4 GB RAM, 2 GB free disk |
+
+> 💡 **Resources**: The values above are an empirical lower bound for a single-machine local run (Web UI plus at least one model channel). If you also enable browser automation (Playwright), vector retrieval (ChromaDB/FAISS), or connect multiple IM channels, 8 GB+ RAM is recommended. Actual cost is dominated by the configured models and concurrency.
+
+##### Architecture note (macOS)
+
+The macOS desktop build is a **single-architecture artifact**, not a Universal binary:
+
+- A dmg built on an **Apple Silicon (M-series)** machine contains only `arm64` native binaries and Node runtime.
+- A dmg built on an **Intel** machine contains only `x64` native binaries and Node runtime.
+
+So pick the artifact that matches your Mac chip on the Release page (e.g. `JiuwenSwarm-<version>-arm64.dmg` or `JiuwenSwarm-<version>-x64.dmg`). **Downloading the wrong architecture will fail to start the bundled Node runtime**, so the Web front end cannot be built/loaded. If you are unsure of your chip, run `uname -m` in a terminal: `arm64` is Apple Silicon, `x86_64` is Intel.
+
 #### 1. macOS: download the dmg with curl (recommended)
 
 > ⚠️ **Important:** A `.dmg` downloaded through a browser gets a macOS quarantine flag (`com.apple.quarantine`). When opened it triggers a Gatekeeper check and may report "damaged and can't be opened" or "can't be verified developer". Downloading from the terminal with `curl` does not add the quarantine flag, so the dmg mounts and installs normally.
@@ -30,7 +50,8 @@ curl -L --fail -o JiuwenSwarm-<version>.dmg \
 #### 2. Install and first launch
 
 - **macOS**: double-click to mount the dmg, then drag `JiuwenSwarm.app` into `Applications`. If macOS blocks the first launch, right-click it in Finder and choose "Open".
-- **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts; it initializes the workspace automatically. For the portable onedir build, run `jiuwenswarm.exe init` once manually.
+- **Windows**: double-click the downloaded installer (`.exe`) and follow the prompts. The installer requests **administrator privileges** (a UAC elevation prompt); click "Yes" to continue. It initializes the workspace automatically. For the portable onedir build, run `jiuwenswarm.exe init` once manually.
+  > ⚠️ Only the **64-bit** edition of Windows 10 / 11 is supported; 32-bit systems and earlier Windows versions are not.
 
 On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verification](#3-post-start-verification) to finish model configuration.
 
@@ -44,9 +65,11 @@ On first launch the app creates `~/.jiuwenswarm/`. Then follow [Post-start verif
 
 The desktop installers already include the Python runtime and front-end static assets, so desktop users do not need to run these checks. This section applies only to pip and source installs; both support Windows 10/11, macOS 10.15+, and Linux.
 
+> 📦 **About the wheel package**: The wheel distributed on PyPI is not tied to a specific OS image, but its runtime dependencies still follow the OS-version constraint above and the Python constraint in the table below. Note the desktop dmg requires macOS 11+, while pip/wheel only requires macOS 10.15+. Suggested runtime resources match the desktop installer: 2 CPU cores, 4 GB RAM, 2 GB free disk (8 GB+ if you enable browser/vector retrieval/multiple channels).
+
 | Dependency | Version | Applies to | Notes |
 |------------|---------|------------|-------|
-| Python | ≥3.11, below 3.14 | pip and source installs | Python 3.11 recommended |
+| Python | ≥3.11, <3.14 | pip and source installs | Python 3.11 recommended |
 | Node.js | 18.x or newer | Source install only | Builds the Web front end; the pip package already includes the static assets |
 | Git | Latest | Source install only | Clones and updates the source tree |
 
@@ -468,7 +491,17 @@ jiuwenswarm-start
 
 ### Q: On start I see "Python version not supported"
 
-Use Python ≥3.11 and below 3.14. See [Environment check](#environment-check) for details.
+JiuwenSwarm requires Python **3.11, 3.12, or 3.13** (i.e. ≥3.11 and <3.14). 3.10 and earlier, as well as 3.14 and newer, are not supported. 3.11 and 3.12 have the best compatibility. See [Environment check](#environment-check) for details.
+
+> ℹ️ If a page renders something like `Python >=3.11 ❤️ 3.14` or `Python 3.11 3.14`, that is the `<=` angle brackets being parsed as an HTML tag or triggering an emoji substitution. The full intent is `≥3.11, <3.14`.
+
+### Q: Windows prompts "Do you want to allow this app to make changes to your device?"
+
+This is expected. The Windows installer (`.exe`) runs with administrator privileges (`PrivilegesRequired=admin`) so it can write to system directories and register the uninstaller. Click "Yes" to continue.
+
+### Q: The dmg I downloaded on macOS will not start, or says "damaged"
+
+See [macOS: download the dmg with curl (recommended)](#1-macos-download-the-dmg-with-curl-recommended) above. A dmg downloaded via a browser carries a quarantine flag; use `curl` from a terminal instead. Also confirm you downloaded the build matching your Mac chip — see [Architecture note (macOS)](#architecture-note-macos).
 
 ### Q: During a source install I see "Node.js not found" or `npm` is unavailable
 
@@ -496,4 +529,4 @@ pip uninstall jiuwenswarm
 
 ---
 
-*Last updated: 2026-08-13*
+*Last updated: 2026-08-18*

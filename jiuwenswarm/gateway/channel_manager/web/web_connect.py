@@ -707,7 +707,13 @@ class WebChannel(BaseWsChannel):
                 "session_id": msg.session_id,
                 "content": content,
             }
-            for _key in ("role", "member_name", "member_action", "source_channel", "user_id", "display_name"):
+            for _key in (
+                "role", "member_name", "member_action", "source_channel", "user_id", "display_name",
+                # 主动推荐标记需透传到所有 chunk 事件（chat.delta/chat.reasoning/…），
+                # 否则前端无法按 source 短路：proactive 的 chat.reasoning 会被当作
+                # 用户轮思考流追加进 reasoningSegments，污染上一条消息的思考状态。
+                "source", "proactive_type", "proactive_target",
+            ):
                 _val = msg.payload.get(_key)
                 if _val is not None:
                     payload[_key] = _val
@@ -716,16 +722,12 @@ class WebChannel(BaseWsChannel):
                 if isinstance(cron_extra, dict):
                     payload["cron"] = cron_extra
                 source = msg.payload.get("source")
-                if source:
-                    payload["source"] = source
-                ptype = msg.payload.get("proactive_type")
-                if ptype:
-                    payload["proactive_type"] = ptype
                 if source == "proactive_recommendation":
                     logger.info(
                         "[WebChannel] proactive push frame: source=%s proactive_type=%s "
                         "content_len=%d payload_keys=%s",
-                        source, ptype, len(str(payload.get("content", ""))), list(payload.keys()),
+                        source, msg.payload.get("proactive_type"),
+                        len(str(payload.get("content", ""))), list(payload.keys()),
                     )
             return payload
 
@@ -1090,8 +1092,19 @@ class WebChannel(BaseWsChannel):
                 )
 
         try:
+            inflight: set[Any] = set()
             async for raw in ws:
-                await self._handle_raw_message(ws, raw, query)
+                task = asyncio.create_task(self._handle_raw_message(ws, raw, query))
+                inflight.add(task)
+                task.add_done_callback(inflight.discard)
+            # connection closing: let in-flight handlers finish (bounded) to avoid
+            # truncating responses mid-flight; cancel if they exceed a grace period.
+            if inflight:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*inflight, return_exceptions=True), timeout=5.0)
+                except asyncio.TimeoutError:
+                    for t in inflight:
+                        t.cancel()
         except WebSocketConnectionClosed as e:  # pragma: no cover - 连接生命周期容错
             logger.info(
                 "WebChannel 连接关闭: %s",

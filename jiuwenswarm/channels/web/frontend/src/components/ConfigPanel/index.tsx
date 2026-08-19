@@ -1558,7 +1558,6 @@ const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
-  OPENAI_ACCOUNT_PROVIDER,
   "OpenRouter",
   "DashScope",
   "SiliconFlow",
@@ -4190,7 +4189,15 @@ export function ConfigPanel({
   const availableModels = useSessionStore((s) => s.availableModels);
   const setSelectedModelName = useSessionStore((s) => s.setSelectedModelName);
   const configSaveBlocked = isProcessing || globalTaskRunning;
-  const storeAvailableModels = availableModels;
+  // 免费模型（如 Opencode Zen）只在对话下拉框展示，不在“模型配置”页编辑--
+  // 它们是内存态、不入 config.yaml，在此过滤掉以免误编辑/误提交。
+  // 用 useMemo 缓存：只有 availableModels 真正变化才重算，避免每次渲染返回
+  // 新数组引用触发下方 [storeAvailableModels] effect 不断重置 draftModels，
+  // 那会抹掉用户正在进行的增删改编辑。
+  const storeAvailableModels = useMemo(
+    () => availableModels.filter((m) => m.is_free !== true),
+    [availableModels],
+  );
   const storeAvailableModelsRef = useRef(storeAvailableModels);
   storeAvailableModelsRef.current = storeAvailableModels;
   const [draftValues, setDraftValues] = useState<Record<string, string>>(() => {
@@ -4655,12 +4662,14 @@ export function ConfigPanel({
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
-    const externalCliAgentsSupported = parseBoolValue(normalizedConfig[EXTERNAL_CLI_AGENTS_SUPPORTED_KEY] ?? "true");
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
       if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
-      if (tag === "external_cli_agents" && !externalCliAgentsSupported) continue;
+      // 按产品要求暂不在配置页展示三方 Agent，保留后端下发值及运行能力。
+      if (tag === "external_cli_agents") continue;
+      // 按产品要求暂不在配置页展示记忆敏感信息过滤，保留后端下发值及运行能力。
+      if (tag === "memory") continue;
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
       // 飞书配置已迁移到 ChannelsPanel 管理，这里不再展示。
@@ -5398,6 +5407,31 @@ export function ConfigPanel({
                       {t('config.modelList.modelNameRequired')}
                     </div>
                   ) : null}
+                  <div
+                    id="config-group-enable_free_models"
+                    data-testid="config-panel-group-enable_free_models"
+                    className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+                  >
+                    <div className="px-4 py-3 bg-secondary/30 border-b border-border flex items-center justify-between gap-3" data-testid="config-panel-group-enable_free_models-header">
+                      <div className="min-w-0">
+                        <span className="block text-sm font-medium text-text-strong" data-testid="config-panel-group-enable_free_models-label">{t("config.keys.enableFreeModels")}</span>
+                        <span className="block text-xs text-text-muted mt-0.5" data-testid="config-panel-group-enable_free_models-hint">{t("config.keyHelp.enableFreeModels")}</span>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={parseBoolValue(draftValues["enable_free_models"] ?? "true")}
+                        onClick={() => handleFieldChange("enable_free_models", parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "false" : "true")}
+                        title={t("config.keys.enableFreeModels")}
+                        className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"}`}
+                        data-testid="config-panel-group-enable_free_models-switch"
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "translate-x-4" : "translate-x-0"}`}
+                        />
+                      </button>
+                    </div>
+                  </div>
                   <div
                     id="config-group-model_default"
                     data-testid="config-panel-group-model_default"

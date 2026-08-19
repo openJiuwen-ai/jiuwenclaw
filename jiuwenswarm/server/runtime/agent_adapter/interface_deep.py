@@ -194,7 +194,6 @@ from jiuwenswarm.agents.harness.common.rails.execution_guard import (
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
-from jiuwenswarm.common.config import get_model_names
 from jiuwenswarm.common.hooks_config import load_hooks_config
 from jiuwenswarm.common.log_preview import preview_text
 from jiuwenswarm.common.stage_timer import StageTimer
@@ -212,10 +211,17 @@ from jiuwenswarm.agents.harness.common.memory.config import (
     is_proactive_memory,
 )
 from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
-from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenswarm.common.model_config_validation import (
+    is_placeholder_api_base,
+    is_placeholder_model_entry,
+    model_client_config_view,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
+    TOOL_PERMISSION_CHANNEL_ID,
+)
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+from jiuwenswarm.server.runtime import extension_package_manager as equipment
 
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
@@ -312,6 +318,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
 )
 from jiuwenswarm.common.config import (
     get_config,
+    get_model_names,
     get_default_models,
     get_evolution_auto_save_enabled,
     get_progressive_tool_enabled,
@@ -319,6 +326,8 @@ from jiuwenswarm.common.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    get_mcp_server_config,
+    get_config_yaml_mcp_servers,
     resolve_env_vars,
 )
 from jiuwenswarm.common.mcp_config import (
@@ -326,7 +335,7 @@ from jiuwenswarm.common.mcp_config import (
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
 )
-from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
+from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.task_loop_config import (
     resolve_task_loop_completion_timeout,
 )
@@ -403,6 +412,24 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+
+
+def _diag_auth_headers(cfg: Any) -> str:
+    """Diagnostic snapshot of cfg.auth_headers (value prefix + length only).
+
+    Prints each header value's first 15 chars + total length, so logs reveal
+    whether a token was injected (e.g. ``Authorization[len=42]: Bearer ghp_abc``)
+    or left empty/placeholder (``Authorization[len=8]: Bearer ``). The full
+    token is never logged.
+    """
+    headers = getattr(cfg, "auth_headers", None)
+    if not isinstance(headers, dict) or not headers:
+        return f"{{no auth_headers; client_type={getattr(cfg,'client_type','?')}}}"
+    parts: list[str] = []
+    for k, v in headers.items():
+        vs = str(v)
+        parts.append(f"{k}[len={len(vs)}]: {vs[:15]}")
+    return "{" + ", ".join(parts) + "}"
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1214,6 +1241,7 @@ class JiuWenSwarmDeepAdapter:
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
+        self._last_resolved_model: Model | None = None
         self._config_base_cache: dict[str, Any] | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
@@ -1341,11 +1369,20 @@ class JiuWenSwarmDeepAdapter:
         self._last_models_config_fingerprint: str | None = None
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
+        # MCP names this session loaded via chat.send's ``mcp`` field
+        # (reconcile_session_mcp). init-registered config.yaml MCPs are NOT in
+        # this set — reconcile only adds/removes its own, never touching init's.
+        self._session_selected_mcp: set[str] = set()
         self._auto_harness_service: Optional[AutoHarnessService] = None
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        self._channel_id: str | None = None
+        # (name, load_record, manifest.version)
+        self._loaded_agent_template: tuple[str, Any, str] | None = None
+        # name → (load_record, manifest.version)
+        self._loaded_plugins: dict[str, tuple[Any, str]] = {}
 
     def _schedule_runtime_state_write(
         self,
@@ -1414,6 +1451,9 @@ class JiuWenSwarmDeepAdapter:
         """Create a child adapter that owns one DeepAgent for a single session."""
         adapter = type(self)()
         adapter.mark_as_session_scoped(session_id)
+        # Inherit the channel id so the child's MCP load strategy matches the
+        # parent's (TUI loads the global set, web loads nothing on init).
+        adapter._channel_id = getattr(self, "_channel_id", "")
         if self._skill_manager is not None:
             adapter.set_skill_manager(self._skill_manager)
         return adapter
@@ -1421,6 +1461,280 @@ class JiuWenSwarmDeepAdapter:
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
+
+    # chat.send equipment: apply package load/unload at the fresh-turn boundary.
+    _SKIP_EXTENSION_MODES: "frozenset[str]" = frozenset(
+        {"team", "team.plan", "code.team", "auto_harness"}
+    )
+
+    @staticmethod
+    def _equipment_error_response(request: AgentRequest, message: str) -> AgentResponse:
+        """Build a terminal chat.error AgentResponse for equipment failures."""
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=False,
+            payload={"event_type": "chat.error", "error": message},
+            metadata=request.metadata,
+        )
+
+    async def _ensure_chat_extensions(self, request: AgentRequest) -> AgentResponse | None:
+        """Apply agent_template / plugin equipment for the upcoming turn."""
+        params = request.params if isinstance(request.params, dict) else {}
+        mode = str(params.get("mode") or "").strip() or "agent"
+        if mode in self._SKIP_EXTENSION_MODES:
+            return None
+
+        has_at = "agent_template_name" in params
+        has_pl = "plugin_names" in params
+        if not has_at and not has_pl:
+            return None
+
+        marketplace_error = self._marketplace_equipment_gate(
+            params, has_at, has_pl
+        )
+        if marketplace_error is not None:
+            return self._equipment_error_response(request, marketplace_error)
+
+        connector_error = self._connector_equipment_gate(params, has_at, has_pl)
+        if connector_error is not None:
+            return self._equipment_error_response(request, connector_error)
+
+        would_change, reason = self._equipment_would_change(params, has_at, has_pl)
+        if would_change:
+            attach_goal = self._wants_attach_goal(params)
+            if attach_goal or self._is_session_live(request.session_id):
+                return self._equipment_error_response(
+                    request, f"equipment change rejected at non-fresh turn: {reason}"
+                )
+
+        try:
+            await self._unload_plugins_for_request(params, has_pl)
+            await self._unload_agent_template_for_request(params, has_at)
+            await self._load_agent_template_for_request(
+                params, has_at, request
+            )
+            await self._load_plugins_for_request(
+                params, has_pl, request
+            )
+        except (ValueError, RuntimeError) as exc:
+            return self._equipment_error_response(request, str(exc))
+        return None
+
+    @staticmethod
+    def _marketplace_equipment_gate(
+        params: dict,
+        has_at: bool,
+        has_pl: bool,
+    ) -> str | None:
+        """Hard-reject non-empty equipment that marketplace does not allow.
+
+        ``""`` / ``[]`` / missing fields skip this check (unload / no-op paths).
+        """
+        if has_at:
+            v = params.get("agent_template_name")
+            if isinstance(v, str) and v != "":
+                if not equipment.is_agent_template_installed(v):
+                    return f"agent_template not installed: {v}"
+        if has_pl:
+            v = params.get("plugin_names")
+            if isinstance(v, list):
+                for item in v:
+                    if not isinstance(item, str) or item == "":
+                        continue
+                    if not equipment.is_plugin_allowed(item):
+                        return f"plugin not installed: {item}"
+        return None
+
+    @staticmethod
+    def _connector_equipment_gate(
+        params: dict,
+        has_at: bool,
+        has_pl: bool,
+    ) -> str | None:
+        """Hard-reject when declared connectors are not connected (read-only).
+
+        Runs after marketplace gate. Does not initiate auth; points users to
+        the MCP management page to reconnect.
+        """
+        agent_id = None
+        plugin_ids: list[str] = []
+        if has_at:
+            v = params.get("agent_template_name")
+            if isinstance(v, str) and v != "":
+                agent_id = v
+        if has_pl:
+            v = params.get("plugin_names")
+            if isinstance(v, list):
+                plugin_ids = [item for item in v if isinstance(item, str) and item != ""]
+        pending = equipment.unready_connectors(
+            equipment.collect_connectors_for_packages(
+                agent_template_id=agent_id,
+                plugin_ids=plugin_ids,
+            )
+        )
+        if not pending:
+            return None
+        return (
+            f"connector not connected: {', '.join(pending)}; "
+            "reconnect from the MCP management page"
+        )
+
+    def _equipment_would_change(
+        self, params: dict, has_at: bool, has_pl: bool
+    ) -> tuple[bool, str]:
+        """Return whether passed equipment fields differ from the session handle."""
+        if has_at:
+            v = params["agent_template_name"]
+            if not isinstance(v, str):
+                return True, "agent_template_name illegal type"
+            current = self._loaded_agent_template[0] if self._loaded_agent_template else None
+            if v != current:
+                return True, f"agent_template_name {current!r}→{v!r}"
+        if has_pl:
+            v = params["plugin_names"]
+            if not isinstance(v, list):
+                return True, "plugin_names illegal type"
+            loaded = set(self._loaded_plugins)
+            desired = set(v)
+            if loaded != desired:
+                return True, "plugin set changed"
+        return False, ""
+
+    async def _unload_agent_template_for_request(self, params: dict, has_at: bool) -> None:
+        """Unload the current expert when switching, clearing, or version drifts."""
+        if not has_at:
+            return
+        v = params["agent_template_name"]
+        if not isinstance(v, str):
+            return
+        current = self._loaded_agent_template
+        if current is None:
+            return
+        if v != "" and v == current[0]:
+            desired_version = equipment.read_manifest_version(
+                equipment.resolve_agent_template_dir(v)
+            )
+            if desired_version == current[2]:
+                return
+        if self._instance is not None:
+            await self._instance.unload_extension(current[1])
+        self._loaded_agent_template = None
+
+    async def unload_equipment_if_loaded(self, kind: str, package_id: str) -> None:
+        """Unload ``package_id`` from this adapter and live sessions.
+
+        Not loaded is a no-op. Unload failure raises so uninstall does not
+        delete the package directory.
+        """
+        pid = str(package_id or "").strip()
+        if not pid:
+            return
+        try:
+            if kind == "agent_templates":
+                current = self._loaded_agent_template
+                if current is not None and current[0] == pid:
+                    if self._instance is not None:
+                        await self._instance.unload_extension(current[1])
+                    self._loaded_agent_template = None
+            elif kind == "plugin_packages":
+                entry = self._loaded_plugins.get(pid)
+                if entry is not None:
+                    if self._instance is not None:
+                        await self._instance.unload_extension(entry[0])
+                    self._loaded_plugins.pop(pid, None)
+        except Exception as exc:
+            raise RuntimeError(
+                f"unload equipment failed: kind={kind} id={pid}: {exc}"
+            ) from exc
+        # Session-scoped adapters only unload themselves; root fans out.
+        if getattr(self, "_is_session_scoped_adapter", False):
+            return
+        for adapter in list(getattr(self, "_session_adapters", {}).values()):
+            if adapter is not self:
+                await adapter.unload_equipment_if_loaded(kind, pid)
+
+    async def _load_agent_template_for_request(
+        self,
+        params: dict,
+        has_at: bool,
+        request: AgentRequest,
+    ) -> None:
+        """Load the expert when name or manifest.version differs from the handle."""
+        if not has_at:
+            return
+        v = params["agent_template_name"]
+        if not isinstance(v, str):
+            raise ValueError(f"agent_template_name must be str, got {type(v).__name__}")
+        if v == "":
+            return
+        pkg_dir = equipment.resolve_agent_template_dir(v)
+        desired_version = equipment.read_manifest_version(pkg_dir)
+        current = self._loaded_agent_template
+        if (
+            current is not None
+            and current[0] == v
+            and current[2] == desired_version
+        ):
+            return
+        if self._instance is None:
+            raise RuntimeError("DeepAgent instance not ready for equipment load")
+        record = await self._instance.load_agent_template(str(pkg_dir))
+        self._loaded_agent_template = (v, record, desired_version)
+
+    async def _unload_plugins_for_request(self, params: dict, has_pl: bool) -> None:
+        """Unload plugins removed from the set or whose manifest.version drifted."""
+        if not has_pl:
+            return
+        v = params["plugin_names"]
+        if not isinstance(v, list):
+            return
+        desired = set(v)
+        to_unload: list[str] = []
+        for name, (_record, loaded_version) in self._loaded_plugins.items():
+            if name not in desired:
+                to_unload.append(name)
+                continue
+            desired_version = equipment.read_manifest_version(
+                equipment.resolve_plugin_dir(name)
+            )
+            if loaded_version != desired_version:
+                to_unload.append(name)
+        for name in to_unload:
+            entry = self._loaded_plugins.pop(name, None)
+            if entry is not None and self._instance is not None:
+                await self._instance.unload_extension(entry[0])
+
+    async def _load_plugins_for_request(
+        self,
+        params: dict,
+        has_pl: bool,
+        request: AgentRequest,
+    ) -> None:
+        """Load desired plugins missing from the handle or with a new version."""
+        if not has_pl:
+            return
+        v = params["plugin_names"]
+        if not isinstance(v, list):
+            raise ValueError(f"plugin_names must be list, got {type(v).__name__}")
+        for item in v:
+            if not isinstance(item, str):
+                raise ValueError(f"plugin_names element must be str, got {type(item).__name__}")
+        to_load: list[tuple[str, str, Path]] = []
+        for name in v:
+            pkg_dir = equipment.resolve_plugin_dir(name)
+            desired_version = equipment.read_manifest_version(pkg_dir)
+            entry = self._loaded_plugins.get(name)
+            if entry is not None and entry[1] == desired_version:
+                continue
+            to_load.append((name, desired_version, pkg_dir))
+        if not to_load:
+            return
+        if self._instance is None:
+            raise RuntimeError("DeepAgent instance not ready for equipment load")
+        for name, desired_version, pkg_dir in to_load:
+            record = await self._instance.load_plugin(str(pkg_dir))
+            self._loaded_plugins[name] = (record, desired_version)
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
@@ -1668,6 +1982,26 @@ class JiuWenSwarmDeepAdapter:
             # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
             # (including the no-pending case, where it silently catches up).
             await self._reload_session_adapter_if_stale(sid, adapter)
+            # 服务重启 / adapter 被驱逐后重建时，context_engine 内存池为空，
+            # 而 chat.send 主路径不会回灌磁盘 history.jsonl——继续历史会话时
+            # 模型将拿到空上下文。这里在新建 adapter 后从磁盘恢复上下文
+            # （全新会话磁盘无历史，warmup 内部会静默跳过）。
+            try:
+                from jiuwenswarm.agents.harness.common.session_ops_service import (
+                    warmup_session_context,
+                )
+
+                await warmup_session_context(
+                    deep_agent=getattr(adapter, "_instance", None),
+                    session_id=sid,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] session context warmup failed: "
+                    "session_id=%s error=%s",
+                    sid,
+                    exc,
+                )
             self._touch_session_adapter(sid)
             # Cold-start cost of a session's first turn, split so a slow one can
             # be attributed to agent assembly vs. interaction startup.
@@ -2347,6 +2681,29 @@ class JiuWenSwarmDeepAdapter:
         return ""
 
     @staticmethod
+    def _resolve_managed_browser_type_from_config(
+        config_base: dict[str, Any] | None = None,
+    ) -> str:
+        """Resolve browser type: auto | chrome | msedge."""
+        if config_base is None:
+            config_base = get_config()
+        if not isinstance(config_base, dict):
+            return "auto"
+        config = resolve_env_vars(config_base)
+        browser_cfg = config.get("browser", {}) if isinstance(config, dict) else {}
+        if not isinstance(browser_cfg, dict):
+            return "auto"
+        raw = browser_cfg.get("browser_type", "auto")
+        if not isinstance(raw, str):
+            return "auto"
+        normalized = raw.strip().lower()
+        if normalized in {"chrome", "google-chrome", "google_chrome"}:
+            return "chrome"
+        if normalized in {"msedge", "edge", "microsoft-edge", "microsoft_edge"}:
+            return "msedge"
+        return "auto"
+
+    @staticmethod
     def _resolve_headless_from_config(
         config_base: dict[str, Any] | None = None,
     ) -> bool:
@@ -2363,6 +2720,88 @@ class JiuWenSwarmDeepAdapter:
             return bool(headless) if isinstance(headless, bool) else True
         except Exception:
             return True
+
+    @staticmethod
+    def _sync_mcp_credentials_environment() -> bool:
+        """Inject MCP tokens into ``os.environ``.
+
+        Skill-only MCPs (ctrip-wendao, netease-mail) run their bundled skill
+        script via BashTool, which inherits ``os.environ``. MCP stdio servers
+        get tokens via the McpServerConfig credential_resolver, but skill
+        scripts have no such hook — so their token env vars must be visible in
+        the agent process's own environment. This mirrors the browser
+        runtime's env-sync pattern (BashTool reads BROWSER_DRIVER the same way).
+
+        Idempotent: writes the current set of connected MCPs' tokens every
+        call. Called at agent init/reload and at connect/disconnect.
+
+        Returns True on a real sync (the caller stops on the first live agent
+        that can sync, since os.environ is process-global); False when the
+        credential store/state is unreadable (the caller falls through to try
+        another live agent — covers the cold-start race where the first agent
+        in ``self.agents`` has no adapter yet).
+        """
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_connected_mcps,
+            )
+            from jiuwenswarm.server.runtime.mcp.credential import (
+                CredentialStore,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] mcp credential sync skipped: %s", exc,
+            )
+            return False
+        store = CredentialStore()
+        for rec in list_connected_mcps():
+            n = str(rec.get("name", "")).strip()
+            if not n:
+                continue
+            try:
+                tokens = store.get_all(n)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "[JiuWenSwarmDeepAdapter] mcp '%s' tokens read failed: %s",
+                    n, exc,
+                )
+                continue
+            for key, value in tokens.items():
+                k = str(key)
+                if k:
+                    os.environ[k] = str(value) if value is not None else ""
+        return True
+
+    @staticmethod
+    def _mcp_env_keys(name: str) -> list[str]:
+        """Token env keys an MCP owns: CredentialStore keys + schema's
+        required field keys (covers the post-delete case where disconnect
+        wants to clear env vars whose stored value is already gone)."""
+        n = str(name or "").strip()
+        if not n:
+            return []
+        keys: set[str] = set()
+        try:
+            from jiuwenswarm.server.runtime.mcp.credential import (
+                CredentialStore,
+                required_tokens_from_schema,
+            )
+            store_keys = set(CredentialStore().get_all(n).keys())
+            keys.update(store_keys)
+            keys.update(required_tokens_from_schema(n))
+        except Exception:  # noqa: BLE001
+            pass
+        return sorted(keys)
+
+    def _clear_mcp_credentials_environment(self, name: str) -> None:
+        """Remove a disconnected MCP's token env vars from ``os.environ``.
+
+        Companion to :meth:`_sync_mcp_credentials_environment`. Called from
+        the disconnect path so a stale token doesn't linger in the agent
+        environment after the user disconnects the MCP.
+        """
+        for k in self._mcp_env_keys(name):
+            os.environ.pop(k, None)
 
     def _sync_browser_runtime_environment(
         self,
@@ -2391,10 +2830,35 @@ class JiuWenSwarmDeepAdapter:
         else:
             os.environ.pop("BROWSER_MANAGED_BINARY", None)
 
+        browser_type = self._resolve_managed_browser_type_from_config(config_base)
+        if browser_type and browser_type != "auto":
+            os.environ["BROWSER_MANAGED_TYPE"] = browser_type
+        else:
+            os.environ.pop("BROWSER_MANAGED_TYPE", None)
+
+        # Hint MCP/CDP which Chromium flavor to expect (auto → leave unset / chrome default).
+        path_l = chrome_path.replace("\\", "/").lower() if chrome_path else ""
+        path_looks_edge = bool(
+            path_l
+            and (
+                "msedge" in path_l
+                or "/microsoft/edge/" in path_l
+                or "microsoft edge" in path_l
+            )
+        )
+        if browser_type == "msedge" or path_looks_edge:
+            os.environ["PLAYWRIGHT_MCP_BROWSER"] = "msedge"
+        elif browser_type == "chrome" or chrome_path:
+            os.environ["PLAYWRIGHT_MCP_BROWSER"] = "chrome"
+        else:
+            # auto without explicit path: ManagedBrowserDriver chooses Chrome then Edge.
+            os.environ.pop("PLAYWRIGHT_MCP_BROWSER", None)
+
         logger.info(
-            "[%s] browser runtime config: headless=%s, chrome_path=%s",
+            "[%s] browser runtime config: headless=%s, browser_type=%s, chrome_path=%s",
             type(self).__name__,
             headless,
+            browser_type or "auto",
             chrome_path or "<auto>",
         )
 
@@ -2481,6 +2945,10 @@ class JiuWenSwarmDeepAdapter:
         # Swarm members and the main browser subagent read these variables when
         # their browser runtimes are built.
         self._sync_browser_runtime_environment(config_base)
+        # Skill-only MCPs' bundled scripts read tokens from os.environ (BashTool
+        # inherits it). Sync now so a freshly built agent process has the
+        # connected MCPs' tokens available before any skill runs.
+        self._sync_mcp_credentials_environment()
 
         browser_enabled = self._browser_runtime_enabled()
         if browser_enabled:
@@ -2539,16 +3007,96 @@ class JiuWenSwarmDeepAdapter:
 
     @staticmethod
     def _build_mcp_server_config(entry: dict[str, Any]) -> McpServerConfig | None:
-        # 传入 server_id_scope 生成稳定的 server_id，避免 reload 时重复注册导致进程泄漏
-        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm")
+        """Build McpServerConfig from a config entry, resolving ${VAR} placeholders.
+
+        state.json stores placeholders, never real tokens. Here we inject a
+        credential_resolver that checks the MCP's CredentialStore (keyed by
+        entry name = MCP name) + os.environ, so the spawned stdio process /
+        HTTP request gets real credentials while state.json stays secret-free.
+
+        server_id_scope="jiuwenswarm" produces a stable server_id so reload
+        doesn't re-register a duplicate MCP server (process leak).
+        """
+        name = str(entry.get("name", "")).strip()
+        resolver = None
+        if name:
+            try:
+                from jiuwenswarm.server.runtime.mcp.credential import CredentialStore
+                store = CredentialStore()
+                stored = store.get_all(name)
+                if stored:
+
+                    def resolver(key: str) -> str | None:
+                        if key in stored:
+                            return stored[key]
+                        return os.environ.get(key)
+            except Exception:  # noqa: BLE001
+                pass  # no store / not an MCP — leave placeholders as-is
+        return build_mcp_server_config(entry, server_id_scope="jiuwenswarm", credential_resolver=resolver)
 
     @staticmethod
     def _extract_enabled_mcp_server_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
         return extract_enabled_mcp_server_entries(config_base)
 
+    @staticmethod
+    def _yaml_enabled_mcp_entries(config_base: dict[str, Any]) -> list[dict[str, Any]]:
+        """Enabled config.yaml mcp.servers; fallback to config_base on read error."""
+        try:
+            servers = get_config_yaml_mcp_servers()
+        except Exception:  # noqa: BLE001
+            servers = []
+            if isinstance(config_base, dict):
+                mcp_cfg = config_base.get("mcp", {})
+                if isinstance(mcp_cfg, dict):
+                    servers = mcp_cfg.get("servers", []) or []
+        return [s for s in servers
+                if isinstance(s, dict) and bool(s.get("enabled", True))]
+
+    @staticmethod
+    def _state_enabled_mcp_entries() -> list[dict[str, Any]]:
+        """Enabled state.json MCPs (TUI-created / web-connected, enabled=True).
+
+        TUI channel (root adapter) loads config.yaml ``enabled`` ∪ these —
+        its global default set. Web ignores ``enabled`` (session-level via
+        chat.send's ``mcp`` field), so the root is the only caller. C/D
+        (skill-only / pure-cli) are dropped by ``record_to_mcp_entry``
+        (returns None — no MCP host); they surface via skills, and the root
+        never scans MCP skill dirs.
+        """
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_tui_enabled_mcps, record_to_mcp_entry,
+        )
+        out: list[dict[str, Any]] = []
+        try:
+            for rec in list_tui_enabled_mcps():
+                name = str(rec.get("name", "") or "").strip()
+                if not name:
+                    continue
+                entry = record_to_mcp_entry(name, rec)
+                if entry is None:
+                    continue  # C/D — no MCP host, surface via skills
+                out.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] read state.json enabled mcps failed: %s",
+                exc,
+            )
+        return out
+
     async def _register_mcp_server(self, cfg: McpServerConfig, *, tag: str) -> bool:
         if self._instance is None:
             return False
+        # stdio: command 必须可执行（npx/uvx/node 等），否则 SDK 启动子进程会
+        # 抛 OSError 但被 connect() 的 except 吞掉，前端只看到笼统失败。
+        # 提前 shutil.which 检查，缺失则直接报"命令不存在"，不发到 SDK。
+        if str(cfg.client_type).strip().lower() == "stdio":
+            import shutil
+            cmd = str((cfg.params or {}).get("command", "")).strip()
+            if cmd and not shutil.which(cmd):
+                raise RuntimeError(
+                    f"MCP '{cfg.server_name}' command '{cmd}' not found on PATH "
+                    f"(install it or add to PATH)"
+                )
         # Pre-flight reachability check for HTTP-based MCP servers. If the host
         # is down we skip registration here instead of entering the mcp
         # streamable-http context — otherwise openjiuwen leaks orphaned anyio
@@ -2583,22 +3131,55 @@ class JiuWenSwarmDeepAdapter:
                 self._registered_mcp_servers[server_id] = cfg
                 return True
             logger.warning(
-                "[JiuWenSwarmDeepAdapter] MCP server register failed: %s", cfg.server_name
+                "[JiuWenSwarmDeepAdapter] MCP server register failed: "
+                "%s (ok=False, result=%r, auth_headers_diag=%s)",
+                cfg.server_name, result, _diag_auth_headers(cfg),
             )
-            return False
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] MCP server register failed: %s", exc)
-            return False
+            # Surface the runner's error reason so the connect handler can report
+            # it to the frontend instead of a silent "connected". The runner
+            # returns an openjiuwen ``Error`` object whose value is exposed via
+            # the ``msg()`` / ``error()`` methods (and the ``_error`` attr), NOT
+            # via ``error_message`` / ``message`` / ``reason`` attributes.
+            runner_reason = ""
+            for getter in ("error", "msg"):
+                fn = getattr(result, getter, None)
+                if callable(fn):
+                    try:
+                        val = fn()
+                    except Exception:  # noqa: BLE001
+                        val = None
+                    if val:
+                        runner_reason = str(val)
+                        break
+            if not runner_reason:
+                val = getattr(result, "_error", None)
+                if val:
+                    runner_reason = str(val)
+            raise RuntimeError(
+                runner_reason
+                or f"MCP server '{cfg.server_name}' register rejected (no runner reason)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] MCP server '%s' register failed: %s",
+                cfg.server_name, exc,
+            )
+            raise
 
     async def _unregister_mcp_server(self, server_id: str) -> None:
         if self._instance is None:
             return
         cfg = self._registered_mcp_servers.get(server_id)
         server_name = getattr(cfg, "server_name", "") if cfg is not None else ""
-        try:
-            await Runner.resource_mgr.remove_mcp_server(server_id)
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] MCP server remove failed: %s", exc)
+        # openjiuwen's remove_mcp_server closes the MCP client (SSE/HTTP). For
+        # SSE clients the close runs a TaskGroup __aexit__ that can raise
+        # "Attempted to exit cancel scope in a different task" — this propagates
+        # into the caller's task and cancels it, tearing down the whole
+        # mcp.disconnect handler (no reply to the frontend, state.json left
+        # inconsistent). Isolate the removal in a fresh task so the cancel-scope
+        # error stays contained; the bookkeeping below runs regardless of the
+        # removal outcome.
+        await self._safe_remove_mcp_server(server_id)
         if server_name:
             try:
                 self._instance.ability_manager.remove(server_name)
@@ -2607,11 +3188,235 @@ class JiuWenSwarmDeepAdapter:
         self._registered_mcp_server_ids.discard(server_id)
         self._registered_mcp_servers.pop(server_id, None)
 
+    async def _safe_remove_mcp_server(self, server_id: str) -> None:
+        """Run remove_mcp_server in a fresh task so its TaskGroup's cancel-scope
+        errors stay contained (SSE clients raise 'exit cancel scope in a
+        different task' on close)."""
+        async def _do() -> None:
+            try:
+                await Runner.resource_mgr.remove_mcp_server(server_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[JiuWenSwarmDeepAdapter] remove_mcp_server inner: %s", exc)
+        try:
+            t = asyncio.create_task(_do())
+            await asyncio.wait_for(t, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[JiuWenSwarmDeepAdapter] MCP remove timed out/errored: %s", exc)
+
+    # --- Targeted single-MCP control (no full reload) ---
+    # The mcp connect/disconnect/enable/disable handlers call these instead
+    # of reload_agents_config so one MCP's change doesn't resync every MCP in
+    # mcp.servers (the heavy _sync_mcp_servers_for_runtime diff).
+
+    def _iter_mcp_target_adapters(self) -> list["JiuWenSwarmDeepAdapter"]:
+        """Adapters whose _registered_mcp_servers must be touched for a
+        targeted MCP add/remove.
+
+        A parent adapter owns both its own _registered_mcp_servers (the main
+        agent's MCPs) and a pool of session-scoped child adapters, each with
+        its OWN _registered_mcp_servers — the session child is where the
+        agent run actually calls MCP tools. So a targeted register/unregister
+        on the parent must propagate to every live session child; a session
+        child only owns itself and must not recurse.
+
+        getattr guards bare __new__-constructed adapters (tests) that skipped
+        __init__ and so lack _is_session_scoped_adapter / _session_adapters.
+        """
+        if getattr(self, "_is_session_scoped_adapter", False):
+            return [self]
+        targets: list[JiuWenSwarmDeepAdapter] = [self]
+        for _sid, child in list(getattr(self, "_session_adapters", {}).items()):
+            if child is self:
+                continue
+            targets.append(child)
+        return targets
+
+    async def register_mcp_by_name(self, name: str, *, tag: str = "agent.mcp") -> bool:
+        """Register one MCP by its name (from state.json/config.yaml merged list).
+
+        Propagates to every live session child so a freshly connected MCP is
+        visible to all sessions of this adapter, not just the parent's main run.
+
+        Idempotent: if already registered under this name (in a given adapter),
+        that adapter skips. Returns True if at least one adapter applied it.
+        Raises RuntimeError when no adapter applied it, carrying the first
+        adapter's error reason (e.g. the runner's "add mcp server failed"
+        message) so the connect handler can report failure to the frontend
+        instead of a silent "connected".
+
+        Skill-only / pure-CLI MCPs have no server entry (no mcp.json command,
+        no stdio bin) — get_mcp_server_config returns None. They expose tools
+        via bundled skills, not via an MCP server, so there is nothing to
+        register; return True so the connect handler's apply_mcp_change
+        succeeds instead of raising "register rejected".
+        """
+        entry = get_mcp_server_config(name)
+        if not entry:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] register_mcp_by_name: " \
+                "'%s' has no MCP entry (CLI/skill-only, no-op)",
+                name
+            )
+            return True
+        applied_any = False
+        first_error: str = ""
+        for adapter in self._iter_mcp_target_adapters():
+            if adapter._instance is None:
+                continue
+            already = any(
+                str(getattr(cfg, "server_name", "") or "").strip() == name
+                for _sid, cfg in adapter._registered_mcp_servers.items()
+            )
+            if already:
+                applied_any = True
+                continue
+            cfg = adapter._build_mcp_server_config(entry)
+            if cfg is None:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] register_mcp_by_name: '%s' invalid entry (adapter=%s)",
+                    name, "session" if adapter is not self else "parent",
+                )
+                continue
+            try:
+                if await adapter._register_mcp_server(cfg, tag=tag):
+                    applied_any = True
+                elif not first_error:
+                    first_error = (
+                        f"MCP server register failed for '{name}' "
+                        f"(adapter returned ok=False; see prior WARNING for the "
+                        f"runner error / cancel-scope error)"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # _register_mcp_server (via openjiuwen add_tool_server) surfaces
+                # plain Exceptions only — WorkflowError for connect/register
+                # failures, RuntimeError for ok=False. Collect the first failure
+                # so the caller can report it; raise if none succeeded.
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] register_mcp_by_name '%s' failed on %s: %s",
+                    name,
+                    "session" if adapter is not self else "parent",
+                    exc,
+                )
+                if not first_error:
+                    first_error = str(exc) or repr(exc)
+        if not applied_any:
+            raise RuntimeError(first_error or f"MCP '{name}' register failed")
+        return applied_any
+
+    async def unregister_mcp_by_name(self, name: str) -> bool:
+        """Unregister one MCP by name (no full reload).
+
+        Propagates to every live session child — otherwise the child's MCP
+        stays registered and the agent run can still call those tools after a
+        disconnect. Returns True if at least one adapter removed it.
+        """
+        removed_any = False
+        for adapter in self._iter_mcp_target_adapters():
+            if adapter._instance is None:
+                continue
+            for server_id, cfg in list(adapter._registered_mcp_servers.items()):
+                if str(getattr(cfg, "server_name", "") or "").strip() == name:
+                    try:
+                        await adapter._unregister_mcp_server(server_id)
+                        removed_any = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] unregister_mcp_by_name '%s' failed on %s: %s",
+                            name,
+                            "session" if adapter is not self else "parent",
+                            exc,
+                        )
+                    break
+        if not removed_any:
+            logger.debug("[JiuWenSwarmDeepAdapter] unregister_mcp_by_name: '%s' not registered", name)
+        return removed_any
+
+    async def reconcile_session_mcp(
+        self, session_id: str | None, needed: list[str] | None
+    ) -> None:
+        """Reconcile this session's MCP set to ``needed`` (idempotent diff).
+
+        ``needed`` is chat.send's ``mcp`` field (MCP server names). Diffs
+        against the session child's self-loaded set (``_session_selected_mcp``)
+        and adds/removes only the delta. ``None`` (field absent) and ``[]``
+        both clear that set; init-registered config.yaml MCPs are never in it,
+        so they survive. MCP-server forms (stdio/remote/hybrid) register/
+        unregister; cli/skill-only forms surface via ``_skill_scan_dirs``
+        (also filtered by ``_session_selected_mcp``), picked up by the
+        refresh_skill_rails on change.
+        """
+        needed_set = {str(n).strip() for n in (needed or []) if isinstance(n, str) and str(n).strip()}
+        child = await self._get_or_create_session_adapter(session_id)
+        if child._instance is None:
+            return
+        selected = child._session_selected_mcp
+        changed = False
+        # Add: in needed but not yet self-loaded.
+        for name in needed_set - selected:
+            try:
+                await child.register_mcp_by_name(name)
+                selected.add(name)
+                changed = True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reconcile add '%s' failed: %s",
+                    name, exc,
+                )
+        # Remove: self-loaded but not in needed. None (absent) and [] both
+        # land here as needed_set=∅ → unload all self-loaded. init's config.yaml
+        # MCPs are not in `selected`, so they survive.
+        for name in list(selected - needed_set):
+            if not name:
+                selected.discard(name)
+                continue
+            try:
+                await child.unregister_mcp_by_name(name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] reconcile remove '%s' failed: %s",
+                    name, exc,
+                )
+            selected.discard(name)
+            changed = True
+        # A cli/skill MCP's bundled skills surface via _skill_scan_dirs (filtered
+        # by _session_selected_mcp), not register_mcp_by_name (no server entry).
+        # Refresh so the rail picks up the new selection.
+        if changed:
+            try:
+                await child.refresh_skill_rails()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] refresh_skill_rails after "
+                    "reconcile failed: %s", exc,
+                )
+
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
     ) -> None:
-        enabled_entries = self._extract_enabled_mcp_server_entries(config_base)
+        """Register the TUI channel's global-default MCP set at init.
+
+        That set is the union of config.yaml ``mcp.servers`` (legacy stock,
+        TUI-managed) and state.json ``enabled=True`` records (TUI-created /
+        web-connected that the user enabled for the TUI). Only called on the
+        root adapter — a session-scoped child skips this (web is session-level:
+        its MCPs load via reconcile_session_mcp from chat.send's ``mcp``
+        field, config.yaml is tui-only). Per-MCP failure isolation: a bad
+        entry logs and continues without starving the rest.
+        """
+        # state.json first so a name present in BOTH files resolves to the
+        # state.json entry (user's latest via web connect / TUI add) —
+        # config.yaml is legacy stock, state.json is the active source.
+        yaml_entries = self._yaml_enabled_mcp_entries(config_base)
+        state_entries = self._state_enabled_mcp_entries()
+        enabled_entries = state_entries + yaml_entries
+        seen_names: set[str] = set()
         for entry in enabled_entries:
+            nm = str(entry.get("name", "") or "").strip()
+            if nm and nm in seen_names:
+                # state.json already registered this name; skip the config.yaml dup.
+                continue
+            if nm:
+                seen_names.add(nm)
             cfg = self._build_mcp_server_config(entry)
             if cfg is None:
                 logger.warning(
@@ -2619,14 +3424,88 @@ class JiuWenSwarmDeepAdapter:
                     entry.get("name", "<unknown>"),
                 )
                 continue
-            await self._register_mcp_server(cfg, tag=tag)
+            server_name = str(getattr(cfg, "server_name", "") or "").strip()
+            try:
+                ok = await self._register_mcp_server(cfg, tag=tag)
+                if not ok:
+                    # _register_mcp_server returns False on preflight
+                    # unreachability (HTTP host down) — a real failure, not a
+                    # skip. Normalize it into the except path so it degrades
+                    # state just like a raised register error.
+                    raise RuntimeError(
+                        f"MCP '{server_name}' preflight unreachable "
+                        f"(host down / DNS failed) — skipping registration"
+                    )
+                # Register succeeded — promote connecting → connected. A
+                # connecting MCP (left over from a connect interrupted by a
+                # restart) just proved it can register, so it is now truly
+                # connected. A connected MCP stays connected (idempotent flip).
+                # Without this, a restart-while-connecting MCP would stay
+                # connecting forever (frontend stuck on "connecting") even
+                # though its server is live.
+                if server_name:
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            get_mcp_record,
+                            set_mcp_state,
+                        )
+                        rec = get_mcp_record(server_name)
+                        if rec and rec.get("state") == "connecting":
+                            set_mcp_state(server_name, state="connected")
+                    except Exception as prom_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[JiuWenSwarmDeepAdapter] connecting→connected "
+                            "promote for '%s' failed: %s",
+                            server_name, prom_exc,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] MCP '%s' register failed on "
+                    "startup, marking disconnected (one-shot; won't retry on "
+                    "next restart): %s",
+                    server_name, exc,
+                )
+                if server_name:
+                    try:
+                        from jiuwenswarm.server.runtime.mcp.state_store import (
+                            set_mcp_state,
+                        )
+                        set_mcp_state(server_name, state="disconnected")
+                    except Exception as degr_exc:  # noqa: BLE001
+                        logger.debug(
+                            "[JiuWenSwarmDeepAdapter] state degrade for '%s' failed: %s",
+                            server_name, degr_exc,
+                        )
+                # continue to next MCP — one failure must not starve the rest
 
     async def _sync_mcp_servers_for_runtime(
         self, config_base: dict[str, Any], *, tag: str = "agent.reload"
     ) -> None:
         if self._instance is None:
             return
-        enabled_entries = self._extract_enabled_mcp_server_entries(config_base)
+        # Desired differs by channel (not adapter scope):
+        # - TUI channel (root + session children): loads its global-default set
+        #   (config.yaml ``enabled`` ∪ state.json ``enabled=True``) on every
+        #   reload, so an enable/disable/add/remove re-syncs the live set.
+        # - Web channel: loads NOTHING here — web is session-level, its MCPs
+        #   come solely from reconcile_session_mcp (chat.send's ``mcp``
+        #   field). A reload must not register the global set into a web
+        #   session or it would break the default-False contract.
+        is_web = getattr(self, "_channel_id", "") == "web"
+        if is_web:
+            yaml_entries = []
+            state_entries: list[dict[str, Any]] = []
+        else:
+            yaml_entries = self._yaml_enabled_mcp_entries(config_base)
+            state_entries = self._state_enabled_mcp_entries()
+        # Include session-selected MCPs (reconcile-loaded) so a reload doesn't
+        # drop the user's per-session selection.
+        selected_entries = []
+        for name in getattr(self, "_session_selected_mcp", set()):
+            entry = get_mcp_server_config(name)
+            if entry is not None:
+                selected_entries.append(entry)
+        enabled_entries = yaml_entries + state_entries + selected_entries
         desired_by_name: dict[str, McpServerConfig] = {}
         for entry in enabled_entries:
             cfg = self._build_mcp_server_config(entry)
@@ -3407,6 +4286,22 @@ class JiuWenSwarmDeepAdapter:
         if default_name is None:
             default_name = next(iter(self._model_cache))
 
+        # 首次启动兜底：config 默认条目仍为 .env 占位符时，改选 Zen 免费模型
+        # （如 DeepSeek V4 Flash）作为默认，避免把占位模型发往厂商。
+        # 仅内存态生效，不回写 config.yaml；Zen 不可达时保持原占位行为。
+        if is_placeholder_model_entry(
+            model_client_config_view(self._model_cache[default_name].model_client_config)
+        ):
+            from jiuwenswarm.server.runtime.opencode_zen import get_zen_default_free_model_entry
+            zen_default = get_zen_default_free_model_entry()
+            if zen_default is not None:
+                zmcc = zen_default["model_client_config"]
+                zname = zmcc["model_name"]
+                self._model_cache[zname] = build_model_from_entry(
+                    zmcc, zen_default.get("model_config_obj") or {}
+                )
+                default_name = zname
+
         self._default_model_name = default_name
         self._model = self._model_cache[default_name]
         self._model_client_config = self._model.model_client_config
@@ -3436,7 +4331,9 @@ class JiuWenSwarmDeepAdapter:
         """Resolve the exact model object that will be used."""
         requested = (requested_model_name or "").strip()
         if not requested:
-            return self._model
+            # ask_user_interrupt 等中断恢复请求不带 model_name，
+            # 回退到 session 上次应用的模型，而非 config.yaml 默认占位模型。
+            return getattr(self, "_last_resolved_model", None) or self._model
         # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
@@ -3449,6 +4346,26 @@ class JiuWenSwarmDeepAdapter:
             resolved = self._model_cache.get(keys[0])
             if resolved is not None:
                 return resolved
+        # Opencode Zen 免费模型（纯内存态，不入 config.yaml）：从进程内存缓存
+        # 取完整 model_client_config / model_config_obj 构建并缓存，供本次及后续请求复用。
+        # 不写回 config，开关关闭（get_zen_free_model_entries 返回空）则自然查不到。
+        try:
+            from jiuwenswarm.server.runtime.opencode_zen import (
+                get_zen_free_model_entries,
+            )
+            for zent in get_zen_free_model_entries():
+                zmcc = zent.get("model_client_config") or {}
+                if (zmcc.get("model_name") or "") == requested:
+                    built = build_model_from_entry(
+                        zmcc, zent.get("model_config_obj") or {}
+                    )
+                    self._model_cache[requested] = built
+                    return built
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] resolve zen free model %s failed",
+                requested, exc_info=True,
+            )
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
@@ -3647,6 +4564,9 @@ class JiuWenSwarmDeepAdapter:
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
         self._model_request_config = model.model_config
+        # 记录最近一次解析并应用的模型，供 ask_user_interrupt 等不带 model_name
+        # 的中断恢复请求回退使用，避免回退到 config.yaml 默认占位模型。
+        self._last_resolved_model = model
 
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
@@ -4161,14 +5081,37 @@ class JiuWenSwarmDeepAdapter:
 
         return config_paths
 
+    async def _unload_active_packages(
+        self, config_paths: list[str] | None = None
+    ) -> None:
+        """Unload every active harness package. Idempotent —
+        ``unload_harness_config`` no-ops when the ledger has no record, so
+        safe to run before every re-bind cycle.
+        """
+        if self._instance is None:
+            return
+        if config_paths is None:
+            config_paths = self._get_active_package_config_paths()
+        if not config_paths:
+            return
+        for config_path in config_paths:
+            try:
+                await self._instance.unload_harness_config(config_path)
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] Failed to unload active package %s: %s: %r",
+                    config_path,
+                    exc.__class__.__name__,
+                    exc,
+                )
+
     async def _load_active_packages(self) -> list[str]:
-        """Load all active packages via load_harness_config.
+        """Restore active harness packages from harness-packages.json.
 
-        Called after agent instance is created to restore previously activated
-        packages (skills, rails, tools) from harness-packages.json.
-
-        Returns:
-            List of loaded resource names.
+        Idempotent: unloads first so re-binding onto an agent that already
+        carries those tool names does not trip openjiuwen's "already bound"
+        raise (which rolls back the whole batch). Called at create_instance
+        and after configure() reconciles harness tools out of config.tools.
         """
         if self._instance is None:
             return []
@@ -4176,6 +5119,9 @@ class JiuWenSwarmDeepAdapter:
         config_paths = self._get_active_package_config_paths()
         if not config_paths:
             return []
+
+        # Unload first (same path list) so re-bind does not trip "already bound".
+        await self._unload_active_packages(config_paths)
 
         loaded: list[str] = []
         for config_path in config_paths:
@@ -4189,9 +5135,10 @@ class JiuWenSwarmDeepAdapter:
                         resources,
                     )
             except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] Failed to load active package %s: %s",
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] Failed to load active package %s: %s: %r",
                     config_path,
+                    exc.__class__.__name__,
                     exc,
                 )
 
@@ -4216,10 +5163,11 @@ class JiuWenSwarmDeepAdapter:
                 return await self._instance.unload_harness_config(config_path)
             return await self._instance.load_harness_config(config_path)
         except Exception as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] apply_package_change(%s) failed on %s: %s",
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] apply_package_change(%s) failed on %s: %s: %r",
                 operation,
                 config_path,
+                exc.__class__.__name__,
                 exc,
             )
             return None
@@ -4256,12 +5204,18 @@ class JiuWenSwarmDeepAdapter:
     def _build_skill_rail(
         self, config: dict[str, Any], include_tools: bool = False
     ) -> SkillUseRail | None:
-        """Build SkillUseRail."""
+        """Build SkillUseRail.
+
+        skills_dir seeds with the agent's main skills dir PLUS the connected
+        MCPs' skill dirs (derived from state.json), so a freshly started agent
+        sees connected MCP skills immediately.
+        """
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
+            skills_dirs = self._skill_scan_dirs()
             skill_rail = SkillUseRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
                 disabled_skills=self._skill_manager.list_execution_disabled_skills(),
@@ -4271,6 +5225,37 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillUseRail create failed: %s", exc)
             skill_rail = None
         return skill_rail
+
+    def _skill_scan_dirs(self) -> list[str]:
+        """Skill scan roots: agent skills dir + this session's selected MCP
+        skill dirs.
+
+        Centralized so _build_skill_rail (init) and refresh_skill_rails
+        (reload) compute the same roots. Only a session-scoped child scans MCP
+        skill dirs, filtered to its ``_session_selected_mcp`` set (populated by
+        reconcile_session_mcp from chat.send's ``mcp`` field) — so a cli/
+        skill MCP's bundled skills are invisible to the agent until the user
+        selects it this session. The root adapter never scans MCP skill dirs:
+        cli/skill MCPs are session-level only, and the TUI channel does not
+        support them, so the root's view of them must be empty (previously it
+        scanned ALL connected MCP dirs, leaking cli/skill skills into rewind/
+        cron/admin root runs).
+        """
+        roots = [str(get_agent_skills_dir())]
+        if not getattr(self, "_is_session_scoped_adapter", False):
+            return roots
+        try:
+            selected = getattr(self, "_session_selected_mcp", None)
+            for entry in self._skill_manager._mcp_skills_dirs():
+                if selected is not None:
+                    if str(entry.get("name", "")).strip() not in selected:
+                        continue
+                d = str(entry.get("dir", "") or "").strip()
+                if d and d not in roots:
+                    roots.append(d)
+        except Exception:  # noqa: BLE001
+            pass
+        return roots
 
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
@@ -4284,7 +5269,7 @@ class JiuWenSwarmDeepAdapter:
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=self._skill_scan_dirs(),
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
@@ -4777,23 +5762,112 @@ class JiuWenSwarmDeepAdapter:
     async def refresh_skill_rails(self) -> None:
         """轻量刷新 skill 相关 rail，避免全量重建 agent 实例.
 
-        uninstall 后调用：SkillUseRail.reload_skills() 重新扫描 skills_dir，
-        增量移除已删除 skill 的缓存；同步更新 disabled_skills。
+        reload_skills() 重新扫描 skills_dir，增量移除已删除 skill 的缓存；
+        同步更新 disabled_skills。MCP bundled skills 位于
+        <workspace>/mcp/skills/<name>/（agent 主 skills_dir 之外），reload
+        前把已连接 MCP 的 skill 目录并入 scan roots，让新连接 MCP 的 skills
+        对 agent 可见。
         """
-        new_disabled = set(self._skill_manager.list_execution_disabled_skills())
+        # disabled skills: use list_disabled_skills (NOT list_execution_disabled_skills)
+        # — the latter filters to "registered" (installed_plugins/local_skills) and
+        # excludes MCP bundled skills, so a disabled MCP's skills would stay
+        # visible. list_disabled_skills returns ALL skill_configs entries with
+        # enabled=False, including MCP skills. Fall back to
+        # list_execution_disabled_skills for older SkillManager variants / test
+        # mocks that only implement the latter.
+        sm = self._skill_manager
+        # reload_state first: MCP disable/enable writes skill_configs via a
+        # different SkillManager instance, so this adapter's _skill_manager._state
+        # is stale. Reload from disk so list_disabled_skills sees the just-toggled
+        # MCP skills.
+        _reload = getattr(sm, "reload_state", None)
+        if _reload is not None:
+            try:
+                _reload()
+            except Exception:  # noqa: BLE001
+                pass
+        _list_disabled = getattr(sm, "list_disabled_skills", None)
+        if _list_disabled is None:
+            _list_disabled = getattr(sm, "list_execution_disabled_skills", lambda: [])
+        new_disabled = set(_list_disabled())
+        # Rebuild the rail's scan roots from scratch (agent skills dir +
+        # currently-connected MCP skill dirs). Previously this preserved the
+        # rail's existing roots and only appended new MCP dirs, so a
+        # disconnected MCP's skill dir stayed in the scan list and its skills
+        # remained visible to the agent. Rebuilding via _skill_scan_dirs makes
+        # the roots reflect the live connection state — disconnected MCPs drop
+        # out — and stays in sync with _build_skill_rail's init-time roots.
+        skills_dirs = self._skill_scan_dirs()
         if self._skill_rail is not None:
+            # Update the rail's scan roots before reload so it picks up newly
+            # connected (and drops disconnected) MCP skill dirs.
+            try:
+                self._skill_rail.skills_dir = skills_dirs
+            except (AttributeError, TypeError):
+                pass
             if self._skill_rail.disabled_skills != new_disabled:
                 self._skill_rail.disabled_skills = new_disabled
             try:
                 await self._skill_rail.reload_skills()
             except Exception as exc:
                 logger.warning("[JiuWenSwarmDeepAdapter] skill rail reload failed: %s", exc)
+            # Clear the session's persisted skill baseline (skill_use state).
+            # SkillUseRail snapshots self.skills into the session at first use
+            # (_ensure_session_baseline) and get_skills_for_session merges that
+            # baseline back — so a skill disabled mid-session stays reachable
+            # via skill_tool (it reads from the baseline). Dropping the
+            # baseline forces the next skill_tool / prompt build to re-snapshot
+            # from the now-filtered self.skills, so disabled skills disappear.
+            self._clear_skill_session_baseline()
         if self._skill_evolution_rail is not None:
+            try:
+                self._skill_evolution_rail.skills_dir = skills_dirs
+            except (AttributeError, TypeError):
+                pass
             if getattr(self._skill_evolution_rail, "disabled_skills", None) != new_disabled:
                 try:
                     self._skill_evolution_rail.disabled_skills = new_disabled
                 except (AttributeError, TypeError):
                     pass
+        # Propagate to live session child adapters — each has its own
+        # SkillUseRail that caches the skill set. An MCP's bundled skills were
+        # installed via skill_installer (writes skill_state.json + copies dirs),
+        # but session child rails won't see them until reloaded.
+        # getattr guards bare __new__-constructed adapters (tests) that skipped
+        # __init__ and so lack _is_session_scoped_adapter / _session_adapters.
+        if not getattr(self, "_is_session_scoped_adapter", False) and getattr(self, "_session_adapters", {}):
+            for _sid, child in list(self._session_adapters.items()):
+                if child is self:
+                    continue
+                try:
+                    await child.refresh_skill_rails()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "[JiuWenSwarmDeepAdapter] session skill rail reload %s failed: %s",
+                        _sid, exc,
+                    )
+
+    def _clear_skill_session_baseline(self) -> None:
+        """Drop this adapter's session skill baseline so disabled skills vanish.
+
+        SkillUseRail snapshots ``self.skills`` into the session on first use
+        (``_ensure_session_baseline``) and ``get_skills_for_session`` merges
+        that baseline back into the result ``skill_tool`` reads. A skill
+        disabled mid-session therefore stays reachable via ``skill_tool``
+        because the stale baseline still lists it. Clearing the baseline
+        forces the next ``get_skills_for_session`` to re-snapshot from the
+        already-filtered ``self.skills`` (disabled excluded), so the
+        disabled skill disappears from ``skill_tool`` output too.
+        """
+        try:
+            instance = getattr(self, "_instance", None)
+            loop_session = getattr(instance, "_loop_session", None)
+            if loop_session is None:
+                return
+            # _SESSION_STATE_KEY = "skill_use" (openjiuwen SkillUseRail)
+            loop_session.update_state({"skill_use": None})
+        except Exception:  # noqa: BLE001
+            pass
 
     def _build_symphony_orchestration_rail(
         self,
@@ -5554,6 +6628,15 @@ class JiuWenSwarmDeepAdapter:
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
+        # Channel id drives the MCP load strategy (see _register_mcp_servers_
+        # from_config / _sync_mcp_servers_for_runtime): the TUI channel loads
+        # the global-default set (config.yaml ∪ state.json enabled) on init;
+        # the web channel loads nothing on init (session-level via chat.send's
+        # ``mcp`` field). Session children inherit this from the root.
+        self._channel_id = str(
+            (config or {}).get("channel_id") if isinstance(config, dict) else ""
+            or ""
+        ).strip() or getattr(self, "_channel_id", "")
 
         await self.set_checkpoint()
         await asyncio.sleep(0)
@@ -5654,7 +6737,15 @@ class JiuWenSwarmDeepAdapter:
         self._ensure_cron_tools_registered(self._parent_session_id)
         self._registered_mcp_server_ids.clear()
         self._registered_mcp_servers.clear()
-        await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
+        # MCP load strategy by channel: the TUI channel loads its global-
+        # default set (config.yaml ∪ state.json ``enabled=True``) on init —
+        # both root and TUI session children register it. The web channel
+        # loads NOTHING on init: web is session-level, its MCPs come solely
+        # from chat.send's ``mcp`` field via reconcile_session_mcp (None and
+        # [] both mean "no MCP this turn"). Skipping init keeps web's
+        # default-False contract.
+        if getattr(self, "_channel_id", "") != "web":
+            await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
         logger.info(
             "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )
@@ -5874,6 +6965,11 @@ class JiuWenSwarmDeepAdapter:
         self._sync_active_evolution_review_agent_after_reload()
 
         await self._sync_mcp_servers_for_runtime(config_base, tag="agent.reload")
+
+        # configure() drops harness-injected tools (they live in
+        # deep_config.tools, not the config.yaml-driven tool_cards) as stale;
+        # re-bind so MCP/model/config saves don't strip harness tools.
+        await self._load_active_packages()
 
         await self._fan_out_reload_to_session_adapters(config_base, env_overrides, target_sid)
 
@@ -8892,6 +9988,10 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
 
+        equipment_error = await self._ensure_chat_extensions(request)
+        if equipment_error is not None:
+            return equipment_error
+
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
             session_id=request.session_id,
@@ -9457,6 +10557,24 @@ class JiuWenSwarmDeepAdapter:
                     goal_payload=goal_obj if isinstance(goal_obj, dict) else None,
                 )
             return payload
+
+        equipment_error = await self._ensure_chat_extensions(request)
+        if equipment_error is not None:
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "chat.error",
+                    "error": (
+                        equipment_error.payload.get("error", "equipment error")
+                        if isinstance(equipment_error.payload, dict)
+                        else "equipment error"
+                    ),
+                },
+                is_complete=True,
+                metadata=request.metadata if isinstance(request.metadata, dict) else {},
+            )
+            return
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -11081,15 +12199,14 @@ class JiuWenSwarmDeepAdapter:
             current_mode: 触发 recap 时的 canonical runtime mode。
         """
         if not self._is_session_scoped_adapter:
-            session_adapter = self._get_cached_session_adapter(session_id)
-            if session_adapter is not None:
-                try:
-                    return await session_adapter.generate_recap(
-                        session_id=session_id,
-                        current_mode=current_mode,
-                    )
-                finally:
-                    await self._evict_idle_session_adapters()
+            session_adapter = await self._get_or_create_session_adapter(session_id)
+            try:
+                return await session_adapter.generate_recap(
+                    session_id=session_id,
+                    current_mode=current_mode,
+                )
+            finally:
+                await self._evict_idle_session_adapters()
 
         from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
             RECENT_MESSAGE_WINDOW,

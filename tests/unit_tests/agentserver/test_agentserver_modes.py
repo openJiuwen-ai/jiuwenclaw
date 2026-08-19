@@ -2115,7 +2115,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     assert {
         "create_instance_mode": "code",
         "sub_mode": "team",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 
@@ -2169,7 +2169,7 @@ def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     assert {
         "create_instance_mode": "team",
         "sub_mode": "plan",
-        "config": {},
+        "config": {"channel_id": "tui"},
     } in calls
 
 

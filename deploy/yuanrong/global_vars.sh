@@ -42,6 +42,7 @@ declare -A DEPLOY_VARS=(
     ["FRONTEND_PORT"]=""
     ["FUNCTION_ID"]=""
     ["MASTER_NODE_IP"]=""
+    ["INGRESS_VIP"]=""
     ["REGISTRY_PORT"]=""
     ["SSH_PORT"]=""
     # TUI GatewayServer bind host; empty → default to 0.0.0.0 at deploy check time
@@ -55,6 +56,8 @@ declare -A DEPLOY_VARS=(
     ["WEB_STATIC_HOST"]=""
     ["WEB_STATIC_PORT"]=""
     ["SANDBOX_IDLE_TIMEOUT_SECONDS"]=""
+    # Channel timeout cleanup; empty -> default to gateway.agentos.disconnect_cleanup_timeout_seconds
+    ["DISCONNECT_CLEANUP_TIMEOUT_SECONDS"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
     # AgentOS IAM; empty URL → http://MASTER_NODE_IP:8090 at deploy check time

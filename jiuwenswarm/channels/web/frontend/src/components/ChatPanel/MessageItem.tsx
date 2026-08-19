@@ -382,9 +382,23 @@ export const MessageItem = memo(function MessageItem({
     });
   }, [stopGeneratedAudio, stop]);
 
-  // 主动推荐消息 - 使用特殊卡片样式
+  // 主动推荐消息 - 使用特殊卡片样式。外层沿用正常 agent 回复的布局（avatar 占位
+  // + gap + chat-bubble-wrapper），使卡片左右边缘与回复正文气泡对齐，避免卡片
+  // 左缘超出回复列。
   if (message.isProactiveRecommendation) {
-    return <ProactiveRecommendationCard message={message} />;
+    const withAssistantAvatar = enableAssistantAvatar;
+    return (
+      <div className={clsx('flex animate-rise justify-start', withAssistantAvatar && 'assistant-row')} data-testid="chat-panel-proactive-row">
+        {withAssistantAvatar && (
+          <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-proactive-avatar">
+            {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}
+          </div>
+        )}
+        <div className="chat-bubble-wrapper max-w-[82%] min-w-0 flex-1" data-testid="chat-panel-proactive-bubble-wrapper">
+          <ProactiveRecommendationCard message={message} />
+        </div>
+      </div>
+    );
   }
 
   // 工具调用/结果消息
