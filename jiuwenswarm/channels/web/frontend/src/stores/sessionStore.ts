@@ -106,18 +106,17 @@ export function resolveEffectiveModel(
 /**
  * Resolve the model shown by the chat selector.
  *
- * Team mode is locked to the main-chat default model, so a stale model kept by
- * the previous single-agent runtime must not win the selector lookup.
+ * 单 Agent 与集群（team）模式共用同一套解析：都展示会话自选的模型，
+ * 失配时回退默认模型（见 resolveEffectiveModel）。
  */
 export function resolveChatModelSelection(
   chatAvailableModels: ModelEntry[],
   selectedModelName: string | null,
   defaultModelName: string | null,
-  lockedToDefault: boolean,
 ): ModelEntry | null {
   return resolveEffectiveModel(
     chatAvailableModels,
-    lockedToDefault ? null : selectedModelName,
+    selectedModelName,
     defaultModelName,
   );
 }
@@ -482,10 +481,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const state = get();
     const runtime = state.runtimes[sessionId];
     if (!runtime) return null;
-    if (runtime.mode === 'team') return state.defaultModelName;
     // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
     // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
+    // 单 Agent 与集群（team）模式统一走同一套解析——集群模式下用户同样可以自选模型，
+    // 后端 team_helpers 会把它透传给未显式配置 per-agent model 的团队成员。
     //
     // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
     // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
@@ -569,13 +569,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
-      const selectedModelName = normalizedMode === 'team'
-        ? state.defaultModelName
-        : runtime.selectedModelName;
       return {
         runtimes: {
           ...state.runtimes,
-          [sessionId]: { ...runtime, mode: normalizedMode, selectedModelName },
+          [sessionId]: { ...runtime, mode: normalizedMode },
         },
       };
     });
@@ -1246,18 +1243,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
       const chatModels = defaultModels.length > 0 ? defaultModels : models;
       // 优先使用后端返回的 activeModel（默认模型），其次取第一个；状态统一保存真实
-      // model_name，alias 只用于界面展示，避免集群模式把 alias 直接发给后端。
+      // model_name，alias 只用于界面展示。各会话 runtime 的 selectedModelName 不在这里
+      // 重置——单 Agent 和集群会话都是用户自选状态，模型列表刷新（models.updated）不应
+      // 冲掉；陈旧失配的名字由 getEffectiveModelName 走 resolveEffectiveModel 兜底解析。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const selected = (matchedModel ?? chatModels[0])?.model_name ?? null;
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      const runtimes = Object.fromEntries(
-        Object.entries(state.runtimes).map(([sessionId, runtime]) => [
-          sessionId,
-          runtime.mode === 'team' ? { ...runtime, selectedModelName: selected } : runtime,
-        ]),
-      );
+      // 默认模型变化时，同步未发送的新建会话（'new'，见 newConversationLifecycle 的
+      // NEW_CONVERSATION_ID；此处用字面量避免循环依赖）的模型选择：仅当其当前选择
+      // 恰为旧默认模型（说明来自默认而非用户手动选择）时才替换为新默认，用户手动
+      // 选择的模型不受影响。已创建的真实会话 runtime 依然不在此处重置。
+      const runtimes = { ...state.runtimes };
+      const pendingNewRuntime = runtimes['new'];
+      if (
+        pendingNewRuntime
+        && selected
+        && state.defaultModelName
+        && pendingNewRuntime.selectedModelName === state.defaultModelName
+      ) {
+        runtimes['new'] = { ...pendingNewRuntime, selectedModelName: selected };
+      }
       return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected, runtimes };
     });
   },

@@ -2197,9 +2197,10 @@ function AppContent() {
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
-        // 单 Agent 会话打开时若后端 metadata 带 model，写进 runtime.selectedModelName；
-        // 集群模式始终使用主对话默认模型，不恢复任务历史里可能携带的其它模型。
-        if (targetSession.model && !isTeamMode(resolvedMode)) {
+        // 会话打开时若后端 metadata 带 model（首条 chat.send 显式携带 model_name 时
+        // 由后端落盘），写进 runtime.selectedModelName——单 Agent 与集群（team）会话
+        // 同样恢复，保证刷新页面后模型选择不回退到默认模型。
+        if (targetSession.model) {
           useSessionStore.getState().setSelectedModelName(targetSessionId, targetSession.model);
         }
       } else {
