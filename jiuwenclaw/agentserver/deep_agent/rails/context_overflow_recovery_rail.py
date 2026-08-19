@@ -3,22 +3,70 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
-from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
-    CONTEXT_OVERFLOW_KEYWORDS,
+from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+    FullCompactProcessor,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.common.logging import logger
 
-_CONTEXT_OVERFLOW_RECOVERY_KEYWORDS = CONTEXT_OVERFLOW_KEYWORDS
+
+# 413 恢复时 threshold_override 占模型窗口的比例
+# 0.85 表示压缩后上下文最多占模型窗口的 85%，预留 15% 给 LLM 输出
+RECOVERY_THRESHOLD_RATIO = 0.85
+
+
+def _parse_token_limits(exc: Exception) -> tuple[int | None, int | None]:
+    """从 413 错误解析 limit_tokens 和 actual_tokens。
+
+    Returns: (actual_tokens, limit_tokens)
+    """
+    msg = str(exc)
+
+    # Anthropic: "prompt is too long: N tokens > M maximum"
+    m = re.search(r'(\d+)\s*tokens?\s*>\s*(\d+)', msg, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    # 华为: "prompt length N must less than maximum input length M"
+    m = re.search(r'prompt length\s+(\d+).*?maximum input length\s+(\d+)', msg, re.IGNORECASE)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    # OpenAI: "maximum context length is N"
+    m = re.search(r'maximum context length is\s+(\d+)', msg, re.IGNORECASE)
+    if m:
+        return None, int(m.group(1))
+
+    return None, None
+
+
+def _get_config_context_limit(ctx: AgentCallbackContext) -> int:
+    """从 config 读 context_window_limit_tokens 作为 fallback。
+
+    Returns 0 if not found (triggers circuit_break_with_model_hint).
+    """
+    agent = getattr(ctx, "agent", None)
+    if agent is None:
+        return 0
+    deep_config = getattr(agent, "deep_config", None)
+    if deep_config is None:
+        return 0
+    # context_window_limit_tokens 在 deep_config 或 yaml 中
+    limit = getattr(deep_config, "context_window_limit_tokens", None)
+    if isinstance(limit, int) and limit > 0:
+        return limit
+    return 0
 
 
 class ContextOverflowRecoveryRail(DeepAgentRail):
-    """API 413 / context overflow reactive recovery chain.
-    When an LLM call fails with a context-overflow error (413, 400 with
-    "context_length_exceeded", etc.), this rail executes a cascade:
+    """Context overflow recovery chain (reactive + proactive bridge).
+
+    **Reactive** — when an LLM call fails with a context-overflow error (413, 400 with
+    "context_length_exceeded", etc.):
     1. **Detect** — keyword matching on the exception message.
     2. **SessionMemory** — force an incremental notes update (bypass trigger_tokens).
     3. **FullCompact** — set ``force_compact`` flag so the next ``get_context_window``
@@ -27,6 +75,13 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
     5. **Circuit-break** — after ``max_recovery_attempts`` consecutive failures,
        stop retrying and let the exception propagate with a clear user-facing message.
 
+    **Proactive bridge** — when ``FullCompactProcessor`` whole-window fallback still
+    exceeds the hard window, it defers to this recovery chain (setting the
+    ``deferred_overflow_recovery`` / ``force_compact`` flags) instead of failing.
+    ``before_model_call`` consumes those flags and runs the same session-memory +
+    force-compact preparation so the upcoming ``get_context_window`` can shrink further
+    before the LLM is invoked (or before a reactive retry after API overflow).
+
     Priority: 100 (higher value = runs first; higher than StreamEventRail's 80
     and ContextEngineeringRail's 85), so ``on_model_exception`` fires **before**
     those rails.
@@ -34,36 +89,45 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self, max_recovery_attempts: int = 3) -> None:
+    def __init__(self, max_recovery_attempts: int = 2) -> None:
         super().__init__()
         self._max_recovery_attempts = max_recovery_attempts
         self._consecutive_overflow_count: int = 0
         self._context_engineering_rail: Optional[Any] = None
-        self._agent: Optional[Any] = None
+        self._logged_missing_full_compact_bridge_api = False
 
-    def init(self, agent: Any) -> None:
-        self._agent = agent
+    # ------------------------------------------------------------------
+    # before_model_call: bridge proactive compression deferral
+    # ------------------------------------------------------------------
 
-    def _ensure_context_engineering_rail(self) -> Optional[Any]:
-        """Lazily find ContextEngineeringRail from agent.rails.
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Run recovery prep when proactive whole-window compact deferred overflow."""
+        if ctx.context is None:
+            return
 
-        CE Rail is mounted on-demand by ``_update_rails_for_mode`` which
-        runs *after* ``init()``, so we cannot find it during init.
-        Instead, resolve it on first use and cache the result.
-        """
-        if self._context_engineering_rail is not None:
-            return self._context_engineering_rail
-        if self._agent is None:
-            return None
-        rails = getattr(self._agent, "rails", None) or []
-        for rail in rails:
-            cls_name = type(rail).__name__
-            if "ContextEngineeringRail" == cls_name:
-                self._context_engineering_rail = rail
-                logger.info("[ContextOverflowRecovery] Found ContextEngineeringRail: %s", cls_name)
-                return rail
-        logger.debug("[ContextOverflowRecovery] No ContextEngineeringRail found in agent rails")
-        return None
+        processor = self._find_full_compact_processor(ctx.context)
+        if processor is None:
+            return
+
+        consume = getattr(processor, "consume_deferred_overflow_recovery", None)
+        pending_getter = getattr(processor, "is_force_compact_pending", None)
+        if not callable(consume) or not callable(pending_getter):
+            self._warn_missing_bridge_api_once(processor, consume, pending_getter)
+            return
+
+        deferred = bool(consume())
+        force_pending = bool(pending_getter())
+
+        if not deferred and not force_pending:
+            return
+
+        logger.info(
+            "[ContextOverflowRecovery] Proactive overflow recovery before model call "
+            "(deferred=%s force_compact_pending=%s)",
+            deferred,
+            force_pending,
+        )
+        await self._run_overflow_recovery_prep(ctx)
 
     # ------------------------------------------------------------------
     # on_model_exception: core recovery logic
@@ -75,37 +139,26 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
             return
 
         self._consecutive_overflow_count += 1
-        logger.warning(
-            "[ContextOverflowRecovery] Context overflow detected "
-            "(attempt %d/%d): %s",
-            self._consecutive_overflow_count,
-            self._max_recovery_attempts,
-            str(exc)[:300],
-        )
+        actual_tokens, limit_tokens = _parse_token_limits(exc)
+        logger.warning(f"[ContextOverflowRecovery] Context overflow detected "
+                       f"(attempt {self._consecutive_overflow_count}/{self._max_recovery_attempts}) "
+                       f"actual_tokens={actual_tokens} limit_tokens={limit_tokens}")
 
         if self._consecutive_overflow_count > self._max_recovery_attempts:
             await self._circuit_break(ctx)
             return
 
-        await self._force_session_memory_update(ctx)
-
-        compact_success = self._set_force_compact_flag(ctx)
+        threshold_override = self._resolve_threshold_override(ctx, limit_tokens)
+        logger.warning(f"[ContextOverflowRecovery] Calculate threshold_override = {threshold_override}")
+        compact_success = self._set_force_compact_flag(ctx, threshold_override=threshold_override)
 
         if compact_success:
             ctx.request_retry(delay_seconds=0)
-            logger.info(
-                "[ContextOverflowRecovery] Recovery actions taken, requesting retry "
-                "(attempt %d/%d)",
-                self._consecutive_overflow_count,
-                self._max_recovery_attempts,
-            )
+            logger.info("[ContextOverflowRecovery] Recovery actions taken, requesting retry")
         else:
-            logger.warning(
-                "[ContextOverflowRecovery] Could not set force_compact flag; "
-                "retrying anyway (attempt %d/%d)",
-                self._consecutive_overflow_count,
-                self._max_recovery_attempts,
-            )
+            logger.warning(f"[ContextOverflowRecovery] Could not set force_compact flag or compact context failed; "
+                           f"retrying anyway (attempt {self._consecutive_overflow_count}/{self._max_recovery_attempts}"
+                           f"threshold_override={threshold_override})")
             ctx.request_retry(delay_seconds=0)
 
     # ------------------------------------------------------------------
@@ -122,89 +175,146 @@ class ContextOverflowRecoveryRail(DeepAgentRail):
             self._consecutive_overflow_count = 0
 
     # ------------------------------------------------------------------
-    # Detection
+    # Detection: structured → status code → keyword fallback
     # ------------------------------------------------------------------
 
     @staticmethod
     def _is_context_overflow_error(exc: Exception) -> bool:
-        error_message = str(exc).lower()
-        return any(keyword in error_message for keyword in _CONTEXT_OVERFLOW_RECOVERY_KEYWORDS)
-
-    # ------------------------------------------------------------------
-    # Step 1: Force SessionMemory update
-    # ------------------------------------------------------------------
-
-    async def _force_session_memory_update(self, ctx: AgentCallbackContext) -> None:
-        ce_rail = self._ensure_context_engineering_rail()
-        if ce_rail is None:
-            logger.debug("[ContextOverflowRecovery] No CE rail, skipping session memory force update")
-            return
-
-        session_memory_mgr = ce_rail.get_session_memory_mgr()
-        session_memory_enabled = ce_rail.session_memory_enabled()
-        if not session_memory_enabled or session_memory_mgr is None:
-            logger.debug("[ContextOverflowRecovery] SessionMemory not enabled, skipping force update")
-            return
-
-        workspace = ce_rail.get_workspace()
-        if workspace is None:
-            logger.debug("[ContextOverflowRecovery] No workspace on CE rail, skipping force update")
-            return
-
-        try:
-            await session_memory_mgr.force_schedule_update(ctx, workspace=workspace)
-            logger.info("[ContextOverflowRecovery] Forced session memory update scheduled")
-        except Exception as e:
-            logger.warning("[ContextOverflowRecovery] Failed to force session memory update: %s", e)
-
-    # ------------------------------------------------------------------
-    # Step 2: Set force_compact flag on FullCompactProcessor
-    # ------------------------------------------------------------------
-
-    def _set_force_compact_flag(self, ctx: AgentCallbackContext) -> bool:
-        """Set force_compact flag on FullCompactProcessor via context._processors.
-
-        Note: ``SessionModelContext`` stores processors in ``self._processors``
-        directly (not through an intermediate ``_context_engine`` object).
-        We iterate the list to find the FullCompactProcessor instance.
+        """判断异常是否为上下文溢出错误。
+        1. status_code=413 — 明确的溢出语义，直接判定
+        2. status_code=400 + 溢出关键词 — 400 状态码 对应多种错误类型（参数错误、权限错误等），必须结合关键词,
+        才能区分出上下文溢出，避免误判
+        3. 无 status_code + 溢出关键词兜底 — 非 SDK 标准异常的纯文本匹配
         """
-        context = ctx.context
-        if context is None:
-            return False
+        status_code = getattr(exc, "status_code", None)
+        exc_str = str(exc)
+        error_message_lower = exc_str.lower()
 
-        processors = getattr(context, "_processors", None)
-        if processors is None:
-            logger.debug("[ContextOverflowRecovery] No _processors on context")
-            return False
+        overflow_keys = (
+            "prompt is too long",       # Anthropic 精确前缀
+            "input too long",           # Anthropic 新格式
+            "context_length_exceeded",  # OpenAI 标准 error code
+            "maximum context length",   # OpenAI: "maximum context length is N"
+            "maximum input length",     # 华为: "maximum input length M"
+            "must less than the maximum input",
+            "context length exceeded"
+        )
+        error_key = "Error code: 400"
+        error_code = "ModelArts.81001"
+        has_overflow_keyword = any(keyword in error_message_lower for keyword in overflow_keys)
 
-        for processor in processors:
-            cls_name = type(processor).__name__
-            if "FullCompactProcessor" == cls_name and hasattr(processor, "set_force_compact"):
-                processor.set_force_compact(True)
-                logger.info(
-                    "[ContextOverflowRecovery] Set force_compact=True on %s",
-                    cls_name,
-                )
-                return True
+        if status_code == 413 or (status_code == 400 and has_overflow_keyword):
+            return True
 
-        logger.warning("[ContextOverflowRecovery] No FullCompactProcessor found in context _processors")
+        # 无 status_code 但有溢出关键词
+        if status_code is None and has_overflow_keyword:
+            return True
+
+        if (error_key in error_message_lower) and (error_code in error_message_lower) and has_overflow_keyword:
+            return True
+
         return False
 
+    async def _run_overflow_recovery_prep(self, ctx: AgentCallbackContext) -> bool:
+        return self._set_force_compact_flag(ctx)
+
+    @staticmethod
+    def _find_full_compact_processor(context: Any) -> Any | None:
+        if context is None:
+            logger.warning("[ContextOverflowRecovery] No context available when finding FullCompactProcessor")
+            return None
+
+        processors = getattr(context, "_processors", None)
+        if not processors:
+            logger.warning("[ContextOverflowRecovery] Context has no _processors when finding FullCompactProcessor")
+            return None
+        for processor in processors:
+            if isinstance(processor, FullCompactProcessor):
+                return processor
+        logger.warning(
+            "[ContextOverflowRecovery] No FullCompactProcessor found in context processors: %s",
+            [type(processor).__name__ for processor in processors],
+        )
+        return None
+
+    def _warn_missing_bridge_api_once(self, processor: Any, consume: Any, pending_getter: Any) -> None:
+        if self._logged_missing_full_compact_bridge_api:
+            return
+        missing = []
+        if not callable(consume):
+            missing.append("consume_deferred_overflow_recovery")
+        if not callable(pending_getter):
+            missing.append("is_force_compact_pending")
+        logger.warning(
+            "[ContextOverflowRecovery] FullCompactProcessor is missing proactive overflow bridge API %s; "
+            "agent-core version may be incompatible and deferred recovery bridge is disabled",
+            missing,
+        )
+        self._logged_missing_full_compact_bridge_api = True
+
     # ------------------------------------------------------------------
-    # Circuit breaker
+    # threshold_override resolution
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _resolve_threshold_override(cls, ctx: AgentCallbackContext, parsed_limit: int | None) -> int | None:
+        """Compute threshold_override for FullCompact adaptive chain.
+
+        threshold_override = model_limit * RECOVERY_THRESHOLD_RATIO
+        自适应模型窗口大小，按照比例设置压缩阈值。
+        """
+        if parsed_limit is not None:
+            return int(parsed_limit * RECOVERY_THRESHOLD_RATIO)
+
+        config_limit = _get_config_context_limit(ctx)
+        if config_limit > 0:
+            return int(config_limit * RECOVERY_THRESHOLD_RATIO)
+
+        # No parsed limit, no config — FullCompactProcessor will use default trigger_total_tokens
+        logger.info("[ContextOverflowRecovery] No limit parsed, no config limit; "
+                    "FullCompactProcessor will use default trigger_total_tokens")
+        return None
+
+    # ------------------------------------------------------------------
+    # Set force_compact flag on FullCompactProcessor
+    # ------------------------------------------------------------------
+
+    def _set_force_compact_flag(self, ctx: AgentCallbackContext, *, threshold_override: int | None = None) -> bool:
+        """Set force_compact flag on the FullCompactProcessor attached to context."""
+        processor = self._find_full_compact_processor(ctx.context)
+        if processor is None:
+            return False
+
+        set_force_compact = getattr(processor, "set_force_compact", None)
+        if not callable(set_force_compact):
+            logger.warning(
+                "[ContextOverflowRecovery] FullCompactProcessor has no set_force_compact method"
+            )
+            return False
+
+        set_force_compact(True)
+        logger.info(
+            "[ContextOverflowRecovery] Set force_compact=True on %s",
+            type(processor).__name__,
+        )
+        if threshold_override is not None and hasattr(processor, "set_overflow_threshold_override"):
+            processor.set_overflow_threshold_override(threshold_override)
+            logger.info(f"[ContextOverflowRecovery] Set force_compact=True and "
+                        f"threshold_override={threshold_override} on {type(processor).__name__}")
+        return True
+
+    # ------------------------------------------------------------------
+    # Circuit breaker: overflow recovery exhausted
     # ------------------------------------------------------------------
 
     async def _circuit_break(self, ctx: AgentCallbackContext) -> None:
-        logger.error(
-            "[ContextOverflowRecovery] Circuit breaker triggered after %d "
-            "consecutive context overflow errors. Will not retry.",
-            self._consecutive_overflow_count,
-        )
+        logger.error(f"[ContextOverflowRecovery] Circuit breaker triggered after {self._consecutive_overflow_count} "
+                     f"consecutive context overflow errors. Will not retry.")
 
         session = ctx.session
         if session is not None and hasattr(session, "write_stream"):
             try:
-                from openjiuwen.core.common.schema import OutputSchema
+                from openjiuwen.core.session.stream import OutputSchema
                 await session.write_stream(
                     OutputSchema(
                         type="error",

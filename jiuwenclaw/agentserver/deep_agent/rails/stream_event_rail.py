@@ -20,6 +20,7 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolMessage,
+    UserMessage,
 )
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
@@ -46,6 +47,10 @@ from jiuwenclaw.agentserver.tools.subagent_executor import (
     set_current_fork_agent_executor,
     reset_current_fork_agent_executor,
 )
+from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import (
+    set_current_skill_turbo_adapter,
+    reset_current_skill_turbo_adapter,
+)
 
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.tools.subagent_executor.executor import ForkAgentExecutor
@@ -57,6 +62,7 @@ _TODO_TOOL_NAMES = frozenset([
 _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
 _EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenclaw_early_checkpoint_done"
 _FORK_EXECUTOR_TOKEN_EXTRA_KEY = "_jiuwenclaw_fork_executor_token"
+_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY = "_jiuwenclaw_skill_turbo_adapter_token"
 _EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"
 
 
@@ -65,6 +71,13 @@ def _reset_fork_executor_token(ctx: AgentCallbackContext) -> None:
     token = ctx.extra.pop(_FORK_EXECUTOR_TOKEN_EXTRA_KEY, None)
     if token is not None:
         reset_current_fork_agent_executor(token)
+
+
+def _reset_skill_turbo_adapter_token(ctx: AgentCallbackContext) -> None:
+    """Restore SkillTurbo adapter ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        reset_current_skill_turbo_adapter(token)
 
 
 def _early_checkpoint_disabled_by_env() -> bool:
@@ -143,6 +156,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
         super().__init__()
         self._deep_agent: Optional[Any] = None
         self._fork_agent_executor: Optional["ForkAgentExecutor"] = None
+        self._skill_turbo_adapter: Optional[Any] = None
+        self._checkpointer: Optional[Any] = None
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._abort_requested = False
@@ -155,6 +170,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
     ) -> None:
         """Bind the adapter-local ForkAgentExecutor for main-agent tool calls."""
         self._fork_agent_executor = executor
+
+    def set_skill_turbo_adapter(self, adapter: Optional[Any]) -> None:
+        """Bind the adapter instance for skill_turbo tool."""
+        self._skill_turbo_adapter = adapter
+
+    def set_checkpointer(self, checkpointer: Optional[Any]) -> None:
+        """Bind tenant-scoped checkpointer for early checkpoint saves."""
+        self._checkpointer = checkpointer
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -261,7 +284,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
         try:
             await context_engine.save_contexts(actual_session)
             inner = getattr(actual_session, "_inner", actual_session)
-            await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+            cp = self._checkpointer if self._checkpointer is not None else CheckpointerFactory.get_checkpointer()
+            await cp.post_agent_execute(inner)
             ctx.extra[_EARLY_CHECKPOINT_EXTRA_KEY] = True
             sid = ""
             gs = getattr(actual_session, "get_session_id", None)
@@ -302,6 +326,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 self._fork_agent_executor
             )
 
+        if self._skill_turbo_adapter is not None:
+            ctx.extra[_SKILL_TURBO_ADAPTER_TOKEN_EXTRA_KEY] = set_current_skill_turbo_adapter(
+                self._skill_turbo_adapter
+            )
+
         # Set parent session for subagent tools
         # Use parent session if session is a proxy (SubagentSessionProxy)
         # This ensures tools get the actual parent session, not the proxy wrapper
@@ -337,6 +366,35 @@ class JiuClawStreamEventRail(DeepAgentRail):
         set_current_agent_context(None)
         set_subagent_parent_session(None)
         _reset_fork_executor_token(ctx)
+        _reset_skill_turbo_adapter_token(ctx)
+
+        # SkillTurbo HITL：skill_turbo_tools 在 ContextVar 存了 ToolInterruptException，
+        # 此处改写 ctx.inputs.tool_result 为 TIE，使 harness 原生 HITL 机制检测并暂停。
+        # 用 harness 的 tool_call 构造新 TIE（原始的是 SkillTurboToolCall，Pydantic 验证不通过）。
+        from jiuwenclaw.agentserver.skill_turbo.skill_turbo_tools import (
+            get_skill_turbo_hitl_tic,
+            set_skill_turbo_hitl_tic,
+        )
+        _skill_turbo_tic = get_skill_turbo_hitl_tic()
+        if _skill_turbo_tic is not None:
+            set_skill_turbo_hitl_tic(None)
+            if isinstance(ctx.inputs, ToolCallInputs):
+                from openjiuwen.core.single_agent.interrupt.exception import (
+                    ToolInterruptException,
+                )
+                new_tic = ToolInterruptException(
+                    request=_skill_turbo_tic.request,
+                    tool_call=ctx.inputs.tool_call,
+                )
+                ctx.inputs.tool_result = new_tic
+                ctx.inputs.tool_msg = None
+            logger.info(
+                "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
+                "original_tcid=%s harness_tcid=%s",
+                _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
+                ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
+            )
+            return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -388,6 +446,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         set_current_agent_context(None)
         set_subagent_parent_session(None)
         _reset_fork_executor_token(ctx)
+        _reset_skill_turbo_adapter_token(ctx)
 
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
@@ -702,12 +761,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     async def _fix_incomplete_tool_context(self, context: Any, *, session_id: str = "") -> None:
         """Fix incomplete context: ensure assistant messages with tool_calls have matching tool messages."""
+        original_messages: list = []
         try:
             messages = context.get_messages()
             len_messages = len(messages)
             if len_messages == 0:
                 return
 
+            original_messages = list(messages)
             messages = context.pop_messages(size=len_messages)
             tool_message_cache: dict = {}
             tool_id_cache: list = []
@@ -819,5 +880,34 @@ class JiuClawStreamEventRail(DeepAgentRail):
                             tool_call_id,
                             tc_info.get("invalid_reason"),
                         ))
+
+            rebuilt = context.get_messages()
+            if rebuilt and not any(
+                isinstance(m, (UserMessage, ToolMessage))
+                or getattr(m, "role", None) in ("user", "tool")
+                for m in rebuilt
+            ):
+                logger.error(
+                    "[StreamEventRail] context repair rejected: missing user/tool role "
+                    "session_id=%s before=%s after=%s; restoring original messages",
+                    session_id,
+                    len(original_messages),
+                    len(rebuilt),
+                )
+                remaining = context.get_messages()
+                if remaining:
+                    context.pop_messages(size=len(remaining))
+                await context.add_messages(original_messages)
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)
+            try:
+                remaining = context.get_messages()
+                if remaining:
+                    context.pop_messages(size=len(remaining))
+                if original_messages:
+                    await context.add_messages(original_messages)
+            except Exception:
+                logger.warning(
+                    "Failed to restore original messages after context repair error",
+                    exc_info=True,
+                )

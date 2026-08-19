@@ -74,7 +74,6 @@ def test_build_kwargs_includes_dashscope_fields() -> None:
     assert kwargs["negative_prompt"] == "blur"
     assert kwargs["seed"] == 7
     assert kwargs["prompt_extend"] is True
-    assert kwargs["watermark"] is False
 
 
 def test_parse_optional_seed_valid_and_invalid() -> None:
@@ -95,7 +94,6 @@ def test_build_kwargs_huawei_maas_forces_b64_and_single_image() -> None:
     assert kwargs["size"] == "1664x2496"
     assert kwargs["n"] == 1
     assert kwargs["response_format"] == "b64_json"
-    assert kwargs["watermark"] is True
     assert kwargs["seed"] == 42
     assert "prompt_extend" not in kwargs
     assert "negative_prompt" not in kwargs

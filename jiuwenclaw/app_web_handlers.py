@@ -56,7 +56,15 @@ from jiuwenclaw.utils import (
     get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.version import __version__
-from jiuwenclaw.local_env_config import decrypt, encrypt
+from jiuwenclaw.local_env_config import (
+    SPAWN_ENV_KEYS,
+    decrypt,
+    encrypt,
+    mirror_bare_business_env_to_default_ns,
+    read_env,
+    set_os_environ,
+    update_process_baseline,
+)
 
 apply_openai_model_client_patch()
 
@@ -69,6 +77,8 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = get_env_file()
 load_dotenv(dotenv_path=_ENV_FILE)
+# Idempotent with app_gateway / app_agentserver; ensures get_default_models sees ns tip.
+mirror_bare_business_env_to_default_ns()
 
 
 def _resolve_env_var_str(value: str) -> str:
@@ -108,6 +118,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
+    "command.diff",
     "browser.start",
     # "tts.synthesize",
     "skills.marketplace.list",
@@ -131,6 +142,9 @@ _FORWARD_REQ_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "skills.evolution.archives",
+    "skills.evolution.rollback",
+    "skills.evolution.rebuild",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -150,6 +164,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "initialize",
     "session.create",
     "acp.tool_response",
+    "command.diff",
     "browser.start",
     "skills.marketplace.list",
     "skills.list",
@@ -172,6 +187,9 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skills.evolution.status",
     "skills.evolution.get",
     "skills.evolution.save",
+    "skills.evolution.archives",
+    "skills.evolution.rollback",
+    "skills.evolution.rebuild",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -226,10 +244,10 @@ _CONFIG_SET_ENV_MAP = {
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
-    "evolution_auto_scan": "EVOLUTION_AUTO_SCAN",
     "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
     "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
     "free_search_proxy_url": "FREE_SEARCH_PROXY_URL",
+    "tool_calling_guard_enabled": "TOOL_CALLING_GUARD_ENABLED",
     "deepsearch_llm_model_name": "LLM_MODEL_NAME",
     "deepsearch_llm_model_type": "LLM_MODEL_TYPE",
     "deepsearch_llm_base_url": "LLM_BASE_URL",
@@ -291,6 +309,7 @@ class WebHandlersBindParams:
     on_config_saved: Any = None
     heartbeat_service: Any = None
     cron_controller: Any = None
+    cron_registry: Any = None
     updater_service: WindowsUpdaterService | None = None
 
 
@@ -310,6 +329,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     on_config_saved = bind.on_config_saved
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
+    cron_registry = bind.cron_registry or bind.cron_controller
     updater_service = bind.updater_service
 
     from jiuwenclaw.schema.message import Message, EventType
@@ -328,7 +348,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             def replace_env(match):
                 var_name = match.group(1)
                 default = match.group(2) if match.group(2) is not None else ""
-                return os.getenv(var_name, default)
+
+                if var_name in SPAWN_ENV_KEYS:
+                    return os.getenv(var_name, default)
+                tip_val = read_env(var_name, "")
+                return tip_val if tip_val else default
 
             return re.sub(pattern, replace_env, value)
         elif isinstance(value, dict):
@@ -370,9 +394,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.on_connect(_on_connect)
 
     async def _config_get(ws, req_id, params, session_id):
-        # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的环境变量当前值
+        # 返回 _CONFIG_SET_ENV_MAP 里所有键对应的 tip 当前值
         payload = {
-            param_key: (os.getenv(env_key) or "")
+            param_key: (read_env(env_key) or "")
             for param_key, env_key in _CONFIG_SET_ENV_MAP.items()
         }
         payload["app_version"] = __version__
@@ -480,8 +504,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             if val is None:
-                # 改为全量更新, 将env配置全部同步到agentserver
-                env_updates[env_key] = os.getenv(env_key)
+                # 改为全量更新, 将 tip 配置全部同步到 agentserver
+                env_updates[env_key] = read_env(env_key)
             else:
                 env_updates[env_key] = str(val).strip()
 
@@ -550,7 +574,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return
 
         for env_key, value in env_updates.items():
-            os.environ[env_key] = encrypt(env_key, value)
+            # Tip stores plaintext; encrypt only when persisting to .env file.
+            set_os_environ(env_key, value)
+        if env_updates:
+            update_process_baseline(env_updates)
         applied_without_restart = True
 
         if env_updates:
@@ -574,6 +601,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                         set(env_updates.keys()) | set(yaml_updated),
                         env_updates=dict(env_updates),
                         config_payload=config_payload,
+                        config_set_req_id=req_id,
                     )
                     if inspect.isawaitable(callback_result):
                         await callback_result
@@ -815,6 +843,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     set(),
                     env_updates={},
                     config_payload=config_payload,
+                    config_set_req_id=req_id,
                 )
                 if inspect.isawaitable(callback_result):
                     await callback_result
@@ -864,6 +893,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     set(),
                     env_updates={},
                     config_payload=config_payload,
+                    config_set_req_id=req_id,
                 )
                 if inspect.isawaitable(callback_result):
                     await callback_result
@@ -1868,11 +1898,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     # ----- cron jobs -----
 
-    def _get_cron():
-        return _resolve(cron_controller)
+    def _get_cron_registry():
+        return _resolve(cron_registry)
+
+    def _cron_tenant_scope(params: Any) -> tuple[str, str]:
+        from jiuwenclaw.utils import resolve_cron_tenant_scope
+
+        p = params if isinstance(params, dict) else {}
+        return resolve_cron_tenant_scope(params=p, log_prefix="[WebCron]")
+
+    async def _cron_context(params: Any):
+        reg = _get_cron_registry()
+        if reg is None:
+            return None, None, None, None
+        sid, aid = _cron_tenant_scope(params)
+        if hasattr(reg, "get_controller"):
+            cc = await reg.get_controller(sid, aid)
+            return reg, cc, sid, aid
+        return reg, reg, sid, aid
 
     async def _cron_job_list(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1880,7 +1926,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
 
     async def _cron_job_get(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1898,7 +1944,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         await channel.send_response(ws, req_id, ok=True, payload={"job": job})
 
     async def _cron_job_create(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1906,13 +1952,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         try:
-            job = await cc.create_job(params)
+            if hasattr(reg, "web_create_job"):
+                job = await reg.web_create_job(params, sid, aid)
+            else:
+                job = await cc.create_job(params)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except Exception as e:  # noqa: BLE001
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_update(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1928,7 +1977,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
             return
         try:
-            job = await cc.update_job(job_id, patch)
+            if hasattr(reg, "web_update_job"):
+                job = await reg.web_update_job(job_id, patch, sid, aid)
+            else:
+                job = await cc.update_job(job_id, patch)
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
@@ -1936,7 +1988,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_delete(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1947,14 +1999,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not job_id:
             await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
             return
-        deleted = await cc.delete_job(job_id)
+        if hasattr(reg, "web_delete_job"):
+            deleted = await reg.web_delete_job(job_id, sid, aid)
+        else:
+            deleted = await cc.delete_job(job_id)
         if not deleted:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
             return
         await channel.send_response(ws, req_id, ok=True, payload={"deleted": True})
 
     async def _cron_job_toggle(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1970,13 +2025,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
             return
         try:
-            job = await cc.toggle_job(job_id, bool(enabled))
+            if hasattr(reg, "web_toggle_job"):
+                job = await reg.web_toggle_job(job_id, bool(enabled), sid, aid)
+            else:
+                job = await cc.toggle_job(job_id, bool(enabled))
             await channel.send_response(ws, req_id, ok=True, payload={"job": job})
         except KeyError:
             await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
 
     async def _cron_job_preview(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return
@@ -1997,7 +2055,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
 
     async def _cron_job_run_now(ws, req_id, params, session_id):
-        cc = _get_cron()
+        reg, cc, sid, aid = await _cron_context(params)
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
             return

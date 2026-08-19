@@ -26,6 +26,8 @@ from openjiuwen.core.single_agent.rail.base import (
 
 from jiuwenclaw.agentserver.deep_agent.rails.skill_credential_injection_rail import (
     SkillCredentialInjectionRail,
+    coalesce_config_skill_envs,
+    coalesce_skill_envs,
 )
 from jiuwenclaw.agentserver.tools.command_tools import _build_subprocess_env
 
@@ -291,6 +293,44 @@ class TestHotReload(unittest.TestCase):
         rail = SkillCredentialInjectionRail(skill_envs={"skill": {"K": "V"}})
         rail.update_skill_envs({})
         assert rail._get_skill_envs("skill") == {}
+
+
+class TestCoalesceSkillEnvs(unittest.TestCase):
+    """YAML ``skill_envs: {}`` must not wipe catalog-injected credentials."""
+
+    def test_empty_incoming_keeps_current(self):
+        current = {"hwocr": {"HWOCR_AK": "ak"}}
+        assert coalesce_skill_envs({}, current) == current
+        assert coalesce_skill_envs(None, current) == current
+
+    def test_catalog_clear_with_skill_key_wins(self):
+        current = {"hwocr": {"HWOCR_AK": "ak"}}
+        incoming = {"hwocr": {"HWOCR_AK": ""}}
+        assert coalesce_skill_envs(incoming, current) == incoming
+
+    def test_config_placeholder_keeps_previous_react_block(self):
+        previous = {
+            "react": {
+                "skill_envs": {"hwocr": {"HWOCR_AK": "ak"}},
+                "agent_name": "main",
+            }
+        }
+        yaml_reload = {"react": {"skill_envs": {}, "agent_name": "main"}}
+        merged = coalesce_config_skill_envs(yaml_reload, previous)
+        assert merged["react"]["skill_envs"]["hwocr"]["HWOCR_AK"] == "ak"
+
+    def test_config_without_react_picks_up_previous_skill_envs(self):
+        previous = {"react": {"skill_envs": {"hwocr": {"HWOCR_AK": "ak"}}}}
+        create_override = {"agent_name": "agent_x"}
+        merged = coalesce_config_skill_envs(create_override, previous)
+        assert merged["react"]["skill_envs"]["hwocr"]["HWOCR_AK"] == "ak"
+        assert merged["agent_name"] == "agent_x"
+
+    def test_config_catalog_clear_replaces(self):
+        previous = {"react": {"skill_envs": {"hwocr": {"HWOCR_AK": "ak"}}}}
+        catalog = {"react": {"skill_envs": {"hwocr": {"HWOCR_AK": ""}}}}
+        merged = coalesce_config_skill_envs(catalog, previous)
+        assert merged["react"]["skill_envs"]["hwocr"]["HWOCR_AK"] == ""
 
 
 # ============================================================

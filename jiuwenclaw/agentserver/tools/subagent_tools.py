@@ -18,6 +18,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor import (
 )
 from jiuwenclaw.agentserver.tools.subagent_models import (
     ForkAgentTaskSpec,
+    SpawnSubagentParams,
     SubagentTaskSpec,
 )
 from jiuwenclaw.utils import logger
@@ -59,10 +60,10 @@ def _wrap_subagent_result(result_dict: dict[str, Any]) -> dict[str, Any]:
         "分叉会继承父代理的历史记录，可能污染子代理的推理。\n\n"
         "可选模型选择：传递 `model_tier`（配置文件中的 lite/pro）或 `model_name`"
         "（精确模型名称）。两者都省略则使用父代理的默认模型。如果请求的 tier 未配置，"
-        "则改用父代理的默认模型。\n\n"
+        "则改用父代理的默认模型。你可以用自然语言描述模型偏好，例如'使用 lite 模型'或'使用 pro 模型'。\n\n"
+        "深度思考控制：传递 `thinking`（`default`|`off`|`on`）。重要：除非subagent的任务上下文中明确指定开启或关闭思考，否则一律填充 `default`。\n\n"
         "**重要提示**：收到 fork_agent 结果后，你**必须**将结果总结给用户并**停止**。"
-        "不要再次对同一任务调用 fork_agent 或 spawn_subagent。子代理已完成其工作——你的职责是呈现结果，"
-        "而不是重新委派或继续处理。"
+        "不要对同一子任务重复委派。子代理已完成其工作——你的职责是呈现结果，而不是重新委派。"
     ),
 )
 async def fork_agent(
@@ -70,6 +71,7 @@ async def fork_agent(
     prompt: str = "",
     model_name: str = "",
     model_tier: str = "",
+    thinking: str = "",
 ) -> dict[str, Any]:
     """
     Create fork subAgent inheriting parent Agent's message history (shared context).
@@ -86,6 +88,7 @@ async def fork_agent(
         prompt: Execution prompt (optional, detailed instructions)
         model_name: Optional exact model name for this subagent
         model_tier: Optional model tier (lite or pro) configured in models.defaults
+        thinking: Optional semantic thinking mode: default | off | on
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
@@ -104,6 +107,7 @@ async def fork_agent(
         prompt=prompt,
         model_name=model_name,
         model_tier=model_tier,
+        thinking=thinking,
     )
 
     result = await executor.execute_fork(
@@ -116,24 +120,22 @@ async def fork_agent(
 @tool(
     name="spawn_subagent",
     description=(
-        "生成一个子代理，使用隔离的上下文执行任务。**默认选择**适用于大多数任务。"
-        "子代理拥有完整的代理能力：多轮推理、工具调用、技能加载。仅在需要共享上下文时使用 fork_agent"
-        "（用于具有一致文档理解的并行任务）。\n\n"
+        "生成子代理，使用隔离的上下文执行任务。**默认选择**适用于大多数任务。"
+        "子代理拥有大部分代理能力：多轮推理、工具调用、技能加载。\n\n"
+        "**并发调用**：隔离上下文天然适合并发——你可以同时发起多个 spawn_subagent 调用处理**不同的**子任务"
+        "（例如并行调研多个主题、同时对比多个方案）。每个子代理独立执行，无上下文冲突。"
+        "仅在需要共享上下文时使用 fork_agent（用于具有一致文档理解的并行任务）。\n\n"
+        "**角色指定**：通过 `role_id` 指定子代理角色（默认 MainAgent）。"
         "可选模型选择：传递 `model_tier`（配置文件中的 lite/pro）或 `model_name`"
         "（精确模型名称）。两者都省略则使用父代理的默认模型。如果请求的 tier 未配置，"
-        "则改用父代理的默认模型。技能可以用自然语言描述这一点，例如“使用 lite 模型”或“使用 pro 模型启动子代理”。\n\n"
-        "**重要提示**：收到 spawn_subagent 结果后，你**必须**将结果总结给用户并**停止**。"
-        "不要再次对同一任务调用 fork_agent 或 spawn_subagent。子代理已完成其工作——你的职责是呈现结果，"
-        "而不是重新委派或继续处理。"
+        "则改用父代理的默认模型。你可以用自然语言描述模型偏好，例如'使用 lite 模型'或'使用 pro 模型'。\n\n"
+        "深度思考控制：传递 `thinking`（`default`|`off`|`on`）。重要：除非subagent的任务上下文中明确指定开启或关闭思考，否则一律填充 `default`。\n\n"
+        "**重要提示**：不要对**同一个**子任务重复调用 spawn_subagent 或 fork_agent。"
+        "子代理已完成其工作——你的职责是呈现结果，而不是重新委派。"
     ),
+    input_params=SpawnSubagentParams,
 )
-async def spawn_subagent(
-    objective: str,
-    role_id: str = "MainAgent",
-    prompt: str = "",
-    model_name: str = "",
-    model_tier: str = "",
-) -> dict[str, Any]:
+async def spawn_subagent(**kwargs: Any) -> dict[str, Any]:
     """
     Spawn a subagent to execute a task, blocking until result is returned.
 
@@ -146,16 +148,13 @@ async def spawn_subagent(
     **Nested scenario**: spawn_subagent can call fork_agent inside. The fork_agent will inherit
     spawn's context (not main agent's), enabling consistent context within spawn's task scope.
 
-    Args:
-        objective: Task objective description
-        role_id: Role ID to use (default: MainAgent)
-        prompt: Execution prompt (optional)
-        model_name: Optional exact model name for this subagent
-        model_tier: Optional model tier (lite or pro) configured in models.defaults
+    Args are validated via :class:`SpawnSubagentParams` (flat tool schema unchanged).
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
     """
+    params = SpawnSubagentParams.model_validate(kwargs)
+
     executor = get_current_fork_agent_executor()
     if executor is None:
         return _wrap_subagent_result({"success": False, "error": "Subagent tools not initialized"})
@@ -163,11 +162,12 @@ async def spawn_subagent(
     parent_session: Session | None = get_subagent_parent_session()
 
     task = SubagentTaskSpec(
-        role_id=role_id,
-        objective=objective,
-        prompt=prompt,
-        model_name=model_name,
-        model_tier=model_tier,
+        role_id=params.role_id,
+        objective=params.objective,
+        prompt=params.prompt,
+        model_name=params.model_name,
+        model_tier=params.model_tier,
+        thinking=params.thinking,
     )
 
     result = await executor.execute_spawn(

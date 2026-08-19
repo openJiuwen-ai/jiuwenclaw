@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import ipaddress
 import json
 import os
 import re
@@ -12,6 +15,7 @@ import sys
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
@@ -26,10 +30,8 @@ from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
 from jiuwenclaw.agentserver.tools.mcp_toolkits import _normalize_stdio_command_kind, create_mcp_tool
 
 _OFFICE_CLAW_SERVER_NAME_PREFIX = "office-claw"
-_REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID = "office-claw-request"
 
-# 请求级 stdio 参数：每个异步上下文独立，避免并发请求间配置串台
-_OFFICE_CLAW_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_OFFICE_CLAW_STDIO_PARAMS", default={})
+_REQUEST_STDIO_PARAMS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar("_REQUEST_STDIO_PARAMS", default=None)
 
 
 # ── 安全拦截规则 ──
@@ -56,9 +58,108 @@ def _check_mcp_security(tool_name: str, cfg: dict) -> None:
         )
 
 
-def _get_office_claw_stdio_params() -> dict[str, Any]:
-    """回调函数：供 EphemeralStdioMcpTool 在 invoke 时获取当前请求级的 stdio 参数。"""
-    return _OFFICE_CLAW_STDIO_PARAMS.get()
+_REQUEST_REMOTE_BLOCKED_HOSTS = frozenset({
+    "localhost",
+    "metadata.google.internal",
+    "metadata",
+    "metadata.azure.com",
+})
+
+_REQUEST_REMOTE_METADATA_HOSTS = frozenset({
+    "metadata.google.internal",
+    "metadata",
+    "metadata.azure.com",
+})
+
+
+def _loopback_mcp_allowed() -> bool:
+    return (os.getenv("JIUWENCLAW_ALLOW_LOOPBACK_MCP") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _is_blocked_host(host: str) -> bool:
+    """判断 host 是否指向内网/环回/元数据地址（SSRF 防护）。"""
+    if not host:
+        return False
+    host = host.lower().strip()
+    allow_loopback = _loopback_mcp_allowed()
+    if allow_loopback and host == "localhost":
+        return False
+    if host in _REQUEST_REMOTE_METADATA_HOSTS:
+        return True
+    if not allow_loopback and host in _REQUEST_REMOTE_BLOCKED_HOSTS:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if allow_loopback and ip.is_loopback:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _validate_request_scoped_remote_mcp(tool_name: str, cfg: dict) -> None:
+    """请求级 sse/streamable-http MCP 安全校验。
+
+    安全边界（评审结论）：
+    - url 不做域名白名单（业务需要连接任意合法外网 MCP 端点），但拦截内网/环回/
+      元数据地址，缓解 SSRF
+    - auth_headers / auth_query_params 的字符串值做同样的内网/元数据地址黑名单，
+      防止被用作重定向入口
+    - 不拦截字段本身（sse/http 功能必需 url 与 auth）
+    - JIUWENCLAW_ALLOW_LOOPBACK_MCP=1 时放行 loopback/localhost（仅开发测试用，
+      metadata 地址仍拦截，private/link_local 仍拦截）
+    """
+    if not isinstance(cfg, dict):
+        return
+    if _loopback_mcp_allowed():
+        logger.warning(
+            "[ToolManager][WARN] JIUWENCLAW_ALLOW_LOOPBACK_MCP 已启用，"
+            "loopback/localhost 地址放行（仅开发测试用，生产环境勿设此变量）"
+        )
+    url = cfg.get("url")
+    if isinstance(url, str) and url:
+        try:
+            host = urlparse(url).hostname or ""
+        except Exception:
+            host = ""
+        if _is_blocked_host(host):
+            raise ValueError(
+                f"安全拦截阻断：请求级 sse/http MCP ({tool_name!r}) 的 url 指向"
+                f"内网/元数据地址 ({host})，疑似 SSRF 攻击。"
+            )
+    for field in ("auth_headers", "auth_query_params"):
+        val = cfg.get(field)
+        if not isinstance(val, dict):
+            continue
+        for k, v in val.items():
+            if not isinstance(v, str):
+                continue
+            # 值可能是完整 URL（含 host）或裸 host/IP
+            try:
+                host = (urlparse(v).hostname or "") if "://" in v else v.strip()
+            except Exception:
+                host = v.strip()
+            if _is_blocked_host(host):
+                raise ValueError(
+                    f"安全拦截阻断：请求级 sse/http MCP ({tool_name!r}) 的 "
+                    f"{field}[{k!r}] 值指向内网/元数据地址，疑似凭证外泄/SSRF。"
+                )
+
+
+def _make_stdio_params_getter(server_name: str) -> Callable[[], dict[str, Any]]:
+    def _get() -> dict[str, Any]:
+        params_map = _REQUEST_STDIO_PARAMS.get()
+        if params_map is None:
+            return {}
+        return params_map.get(server_name, {})
+    return _get
 
 
 def _trusted_cat_cafe_stdio_roots() -> list[Path]:
@@ -127,7 +228,11 @@ def _path_is_under_trusted_root(path: Path, roots: list[Path]) -> bool:
 
 
 def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
-    """限制请求级 stdio：禁止内联代码执行面，脚本路径须在受信根目录下。"""
+    """限制请求级 stdio：禁止内联代码执行面，脚本路径须在受信根目录下。
+
+    npx/uvx 为包运行器，参数为包名及其参数，不适用本地脚本路径受信根校验
+    （代码来源为包仓库而非本地文件，信任决策在于包名而非路径）。
+    """
     cmd = str(params.get("command") or "").strip()
     args = params.get("args") or []
     if not isinstance(args, list):
@@ -140,6 +245,9 @@ def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
         raise ValueError("请求级 cat_cafe_mcp 禁止使用 python -c / --command")
     if kind == "node" and any(x in ("-e", "--eval") for x in lowered):
         raise ValueError("请求级 cat_cafe_mcp 禁止使用 node -e / --eval")
+
+    if kind in ("npx", "uvx"):
+        return
 
     cwd_path: Path | None = None
     cwd_raw = params.get("cwd")
@@ -207,18 +315,48 @@ def _mcp_add_result_error_text(result: Any) -> str:
 
 
 async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> None:
-    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。"""
-    result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。
+
+    注意：不在此处捕获 ``asyncio.CancelledError``。MCP 不可达导致的 cancel 由
+    ``ResourceMgr.add_mcp_server`` 隔离并转为 Error 结果；外层真取消必须继续向上传播。
+    """
+    try:
+        result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    except Exception as e:
+        error_msg = (
+            f"add_mcp_server 失败: "
+            f"name={mcp_cfg.server_name} url={mcp_cfg.server_path}: {e}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+
     if _mcp_add_result_is_ok(result):
         agent.ability_manager.add(mcp_cfg)
+        logger.debug(
+            "[ToolManager] add_mcp_server 成功: name=%s url=%s",
+            mcp_cfg.server_name,
+            mcp_cfg.server_path,
+        )
         return
+
     err = _mcp_add_result_error_text(result)
     if "already exist" in err.lower():
         agent.ability_manager.add(mcp_cfg)
-        logger.info("[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: %s", err)
+        logger.info(
+            "[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: name=%s, 错误信息: %s",
+            mcp_cfg.server_name,
+            err,
+        )
         return
-    raise RuntimeError(f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败")
 
+    error_msg = f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败"
+    logger.error(
+        "[ToolManager] %s: name=%s url=%s",
+        error_msg,
+        mcp_cfg.server_name,
+        mcp_cfg.server_path,
+    )
+    raise RuntimeError(error_msg)
 
 # ---------------------------------------------------------------------------
 # 落盘 JSON 模板：列表顺序即写入顺序；每项为 (disk_key, default, kind)。
@@ -340,8 +478,8 @@ class ToolManager:
         """
         self._get_agent = get_agent
         self._get_tools_dir = get_tools_dir
-        # (tool_id, tool_name)，请求级 Office Claw stdio 走 ephemeral 注册时用于下次替换前卸载
-        self._office_claw_ephemeral_tools: list[tuple[str, str]] = []
+        self._request_registrations: dict[str, list[dict[str, Any]]] = {}
+        self._request_registrations_lock = asyncio.Lock()
 
     def _resolve_tools_dir(self) -> Path:
         if self._get_tools_dir is not None:
@@ -500,97 +638,206 @@ class ToolManager:
             "errors": errors,
         }
 
-    async def register_request_scoped_office_claw_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
-        """按请求注册 Office Claw MCP；stdio 工具以单次 invoke 模式执行。"""
-        if not isinstance(cfg, dict):
-            raise ValueError("office_claw_mcp 必须是对象")
+    async def register_request_scoped_mcp(self, payload: dict[str, Any], *, request_id: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("request_mcp_servers 必须是对象")
+
+        servers = payload.get("mcpServers")
+        if not isinstance(servers, dict) or not servers:
+            raise ValueError("缺少有效的 mcpServers 对象")
 
         agent = self._get_agent() if self._get_agent else None
         if agent is None:
             raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
 
-        mcp_servers = getattr(agent.ability_manager, "_mcp_servers", {})
-        names_to_remove = [
-            name for name in mcp_servers
-            if isinstance(name, str) and name.startswith(_OFFICE_CLAW_SERVER_NAME_PREFIX)
-        ]
-        for server_name in names_to_remove:
-            get_server_ids = getattr(Runner.resource_mgr, "get_mcp_server_ids", None)
-            server_ids = list(get_server_ids(server_name) or []) if callable(get_server_ids) else []
-            for server_id in server_ids:
+        registered: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
+
+        for tool_name, cfg in servers.items():
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError(f"非法的工具名: {tool_name!r}")
+            if not isinstance(cfg, dict):
+                raise ValueError(f"mcpServers[{tool_name!r}] 必须是对象")
+
+            record = {"name": tool_name, **cfg}
+            single_json = json.dumps(record, ensure_ascii=False)
+            mcp_cfg = create_mcp_tool(single_json)
+            server_name = mcp_cfg.server_name
+            request_scoped_server_id = f"{server_name}::{request_id}"
+
+            if getattr(mcp_cfg, "client_type", "") == "stdio":
                 try:
-                    await Runner.resource_mgr.remove_tool_server(server_id, ignore_not_exist=True)
-                except Exception as exc:
-                    logger.warning("[ToolManager] 移除旧的 Office Claw MCP 失败 name=%s id=%s: %s",
-                        server_name, server_id, exc)
-            agent.ability_manager.remove(server_name)
+                    _validate_cat_cafe_request_scoped_stdio(mcp_cfg.params or {})
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
 
-        record = {
-            "name": _OFFICE_CLAW_SERVER_NAME_PREFIX,
-            "server_id": _REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID,
-            **cfg,
-        }
-        single_json = json.dumps(record, ensure_ascii=False)
-        mcp_cfg = create_mcp_tool(single_json)
+                stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
+                params_map = dict(_REQUEST_STDIO_PARAMS.get() or {})
+                params_map[server_name] = stdio_sp
+                _REQUEST_STDIO_PARAMS.set(params_map)
 
-        # stdio：不经过 add_mcp_server，每工具每次 invoke 单独起停子进程，避免会话间状态串台
-        if getattr(mcp_cfg, "client_type", "") == "stdio":
-            try:
-                _validate_cat_cafe_request_scoped_stdio(mcp_cfg.params or {})
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
-            stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
-            _OFFICE_CLAW_STDIO_PARAMS.set(stdio_sp)
-
-            if not self._office_claw_ephemeral_tools:
                 try:
                     tool_defs = await list_stdio_mcp_tool_defs(mcp_cfg.params or {})
                 except Exception as exc:
-                    raise RuntimeError(f"列举 Office Claw stdio MCP 工具失败: {exc}") from exc
+                    raise RuntimeError(f"列举 stdio MCP 工具失败: {exc}") from exc
+
+                tool_ids: list[str] = []
+                tool_names: list[str] = []
+                getter = _make_stdio_params_getter(server_name)
                 for td in tool_defs:
                     tname = td["name"]
-                    tool_id = f"{mcp_cfg.server_id}.{mcp_cfg.server_name}.{tname}"
+                    # 不同连接器下可能存在同名工具（如多个 Supabase MCP 共享 execute_sql）；
+                    # 在 LLM 可见名上叠加 server 前缀做命名空间隔离，避免 ability_manager._tools
+                    # 后注册覆盖前注册。资源侧的 full id 不变，仍由 server_id 唯一定位。
+                    qualified_name = f"{server_name}__{tname}"
+                    tool_id = f"{request_scoped_server_id}.{server_name}.{tname}"
                     card = ToolCard(
                         id=tool_id,
-                        name=tname,
+                        name=qualified_name,
                         description=td.get("description") or "",
                         input_params=td.get("input_params") or {},
                     )
-                    ephemeral = EphemeralStdioMcpTool(card, _get_office_claw_stdio_params)
-                    add_res = Runner.resource_mgr.add_tool(ephemeral, tag=mcp_cfg.server_name)
+                    ephemeral = EphemeralStdioMcpTool(card, getter, raw_tool_name=tname)
+                    add_res = Runner.resource_mgr.add_tool(ephemeral, tag=server_name)
                     if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
                         err = _mcp_add_result_error_text(add_res)
                         if "already exist" not in err.lower():
-                            raise RuntimeError(f"注册 ephemeral Office Claw 工具失败 {tname}: {err}")
-                        logger.info(
-                            "[ToolManager] ephemeral Office Claw 工具已存在，复用现有资源 tool=%s id=%s err=%s",
-                            tname,
-                            tool_id,
-                            err,
-                        )
+                            raise RuntimeError(f"注册 ephemeral 工具失败 {tname}: {err}")
                     agent.ability_manager.add(card)
-                    self._office_claw_ephemeral_tools.append((tool_id, tname))
+                    tool_ids.append(tool_id)
+                    tool_names.append(qualified_name)
+
+                reg = {
+                    "kind": "stdio",
+                    "server_name": server_name,
+                    "server_id": request_scoped_server_id,
+                    "tool_ids": tool_ids,
+                    "tool_names": tool_names,
+                }
+                async with self._request_registrations_lock:
+                    self._request_registrations.setdefault(request_id, []).append(reg)
+                registered.append({"name": server_name, "server_id": request_scoped_server_id, "kind": "stdio"})
                 logger.info(
-                    "[ToolManager] 已注册请求级 Office Claw MCP（stdio 每调用隔离）name=%s id=%s tools=%s",
-                    mcp_cfg.server_name,
-                    mcp_cfg.server_id,
-                    [t[1] for t in self._office_claw_ephemeral_tools],
+                    "[ToolManager] 已注册请求级 MCP（stdio）request_id=%s name=%s tools=%s",
+                    request_id, server_name, tool_names,
                 )
             else:
+                try:
+                    _validate_request_scoped_remote_mcp(tool_name, cfg)
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                mcp_cfg = copy.copy(mcp_cfg)
+                mcp_cfg.server_id = request_scoped_server_id
                 logger.info(
-                    "[ToolManager] 已有 ephemeral Office Claw 工具，仅更新 stdio 参数 tools=%s",
-                    [t[1] for t in self._office_claw_ephemeral_tools],
+                    "[ToolManager][AUDIT] 请求级 MCP 注册 request_id=%s kind=%s name=%s "
+                    "url=%s has_auth=%s",
+                    request_id, mcp_cfg.client_type, server_name,
+                    cfg.get("url", ""),
+                    bool(cfg.get("auth_headers") or cfg.get("auth_query_params")),
                 )
-            return {
-                "registered": True,
-                "name": mcp_cfg.server_name,
-                "server_id": mcp_cfg.server_id,
-            }
+                # 远程 MCP 连接失败（含 core 已转为 Error 的 cancel）时跳过该 server，
+                # 不中断同请求内其它 MCP；真 CancelledError 不在 Exception 内，会继续上抛。
+                try:
+                    await _add_mcp_server_and_ability(agent, mcp_cfg, tag=server_name)
+                except Exception as e:
+                    logger.error(
+                        "[ToolManager] MCP 服务器注册失败，跳过: name=%s error=%s",
+                        server_name,
+                        e,
+                    )
+                    failed.append({"name": server_name, "error": str(e)})
+                    continue
+                reg = {
+                    "kind": "shared",
+                    "server_name": server_name,
+                    "server_id": request_scoped_server_id,
+                }
+                async with self._request_registrations_lock:
+                    self._request_registrations.setdefault(request_id, []).append(reg)
+                registered.append({
+                    "name": server_name,
+                    "server_id": request_scoped_server_id,
+                    "kind": mcp_cfg.client_type,
+                })
+                logger.info(
+                    "[ToolManager] 已注册请求级 MCP（%s）request_id=%s name=%s",
+                    mcp_cfg.client_type, request_id, server_name,
+                )
 
-        await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
-        logger.info("[ToolManager] 已注册请求级 Office Claw MCP name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
         return {
             "registered": True,
-            "name": mcp_cfg.server_name,
-            "server_id": mcp_cfg.server_id,
+            "request_id": request_id,
+            "tools": registered,
+            "failed": failed,
         }
+
+    async def unregister_request_scoped_mcp(self, request_id: str) -> None:
+        async with self._request_registrations_lock:
+            registrations = self._request_registrations.pop(request_id, None)
+        if not registrations:
+            return
+
+        agent = self._get_agent() if self._get_agent else None
+        has_stdio = False
+
+        for reg in registrations:
+            try:
+                if reg.get("kind") == "stdio":
+                    has_stdio = True
+                    for tool_id in reg.get("tool_ids", []):
+                        try:
+                            Runner.resource_mgr.remove_tool(tool_id)
+                        except Exception as exc:
+                            logger.warning("[ToolManager] remove_tool 失败 tool_id=%s: %s", tool_id, exc)
+                    if agent is not None:
+                        # tool_names 已经是带 server 前缀的 qualified name，
+                        # 与 add() 时写入 ability_manager._tools 的 key 一致。
+                        for tool_name in reg.get("tool_names", []):
+                            try:
+                                agent.ability_manager.remove(tool_name)
+                            except Exception as exc:
+                                logger.warning(
+                                    "[ToolManager] ability_manager.remove 失败 name=%s: %s",
+                                    tool_name, exc,
+                                )
+                elif reg.get("kind") == "shared":
+                    server_id = reg.get("server_id")
+                    if server_id:
+                        try:
+                            await Runner.resource_mgr.remove_mcp_server(
+                                server_id=server_id,
+                                tag=reg.get("server_name"),
+                                ignore_exception=True,
+                            )
+                        except Exception as exc:
+                            logger.warning("[ToolManager] remove_mcp_server 失败 server_id=%s: %s", server_id, exc)
+                    if agent is not None:
+                        server_name = reg.get("server_name")
+                        if server_name:
+                            try:
+                                agent.ability_manager.remove(server_name)
+                            except Exception as exc:
+                                logger.warning("[ToolManager] ability_manager.remove 失败 name=%s: %s", server_name, exc)
+                logger.info(
+                    "[ToolManager] 已清理请求级 MCP request_id=%s kind=%s name=%s",
+                    request_id, reg.get("kind"), reg.get("server_name"),
+                )
+            except Exception as exc:
+                logger.warning("[ToolManager] 清理请求级 MCP 失败 request_id=%s: %s", request_id, exc)
+
+        if has_stdio:
+            _REQUEST_STDIO_PARAMS.set(None)
+
+    async def unregister_all_request_scoped_mcp(self) -> None:
+        request_ids = list(self._request_registrations.keys())
+        for request_id in request_ids:
+            try:
+                await self.unregister_request_scoped_mcp(request_id)
+            except Exception as exc:
+                logger.warning("[ToolManager] 兜底清理失败 request_id=%s: %s", request_id, exc)
+
+    async def register_request_scoped_office_claw_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        from uuid import uuid4
+        request_id = f"legacy_office_claw_{uuid4().hex[:12]}"
+        payload = {"mcpServers": {_OFFICE_CLAW_SERVER_NAME_PREFIX: cfg}}
+        return await self.register_request_scoped_mcp(payload, request_id=request_id)

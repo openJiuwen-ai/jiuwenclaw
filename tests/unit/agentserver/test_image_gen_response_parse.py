@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from jiuwenclaw.agentserver.tools.image_gen_post_watermark import PostWatermarkConfig
 from jiuwenclaw.agentserver.tools.image_gen_tools import (
     _iter_response_image_items,
     _save_generated_images,
@@ -40,8 +39,8 @@ def test_iter_response_image_items_dashscope_nested() -> None:
 
 def test_save_generated_images_from_url_strings(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.tools.image_gen_tools.get_agent_workspace_dir",
-        lambda: tmp_path,
+        "jiuwenclaw.agentserver.tools.image_gen_tools.resolve_tenant_agent_workspace_dir",
+        lambda *args, **kwargs: tmp_path,
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.tools.image_gen_tools.get_effective_request_workspace_dir",
@@ -52,11 +51,7 @@ def test_save_generated_images_from_url_strings(tmp_path, monkeypatch) -> None:
         lambda url, dest, timeout=120: dest.write_bytes(b"png-bytes"),
     )
     response = SimpleNamespace(images=["https://example.com/x.png"], images_base64=[])
-    paths = _save_generated_images(
-        response,
-        prompt="test prompt",
-        watermark_config=PostWatermarkConfig(enabled=False),
-    )
+    paths = _save_generated_images(response, prompt="test prompt")
     assert len(paths) == 1
     assert paths[0].exists()
     assert paths[0].read_bytes() == b"png-bytes"
@@ -75,11 +70,7 @@ def test_save_generated_images_uses_effective_project_dir(tmp_path, monkeypatch)
         lambda url, dest, timeout=120: dest.write_bytes(b"png-bytes"),
     )
     response = SimpleNamespace(images=["https://example.com/x.png"], images_base64=[])
-    paths = _save_generated_images(
-        response,
-        prompt="hero cat",
-        watermark_config=PostWatermarkConfig(enabled=False),
-    )
+    paths = _save_generated_images(response, prompt="hero cat")
     assert len(paths) == 1
     assert paths[0].parent == expected_dir.resolve()
     assert paths[0].exists()

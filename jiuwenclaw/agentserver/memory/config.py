@@ -9,47 +9,47 @@ same as ``jiuwenclaw.config.get_config``. Embedding API settings are in the ``em
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
 
-from jiuwenclaw.config import get_config
+from jiuwenclaw.config import clear_config_cache as clear_global_config_cache, get_config
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.utils import logger
 
-DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
-_config_cache: Optional[Dict[str, Any]] = None
+def default_workspace_dir() -> str:
+    """Lazy default workspace dir (respects tenant ContextVar when bound)."""
+    return str(get_agent_workspace_dir())
 
 
 def clear_config_cache() -> None:
-    """清除配置缓存，使下次 _load_config() 重新读取合并后的配置（含环境变量解析）。"""
-    global _config_cache
-    _config_cache = None
+    """清除全局 ``get_config()`` 解析缓存（memory 不再维护独立快照）。"""
+    clear_global_config_cache()
 
 
 def _ensure_dotenv_loaded() -> None:
-    """确保 .env 文件中的变量已加载到 os.environ，避免 load_dotenv 尚未执行导致配置为空。"""
+    """Ensure .env is loaded into tip; pop Track B bare keys (H1)."""
     try:
         from dotenv import load_dotenv
+        from jiuwenclaw.local_env_config import ingest_bare_business_into_tip
         from jiuwenclaw.utils import get_env_file
         load_dotenv(dotenv_path=get_env_file(), override=False)
+        ingest_bare_business_into_tip()
     except Exception as e:
         logger.debug("Failed to load .env file: %s", e)
 
 
 def _load_config() -> Dict[str, Any]:
-    """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。"""
-    global _config_cache
+    """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。
 
-    if _config_cache is not None:
-        return _config_cache
-
+    不再维护独立的已解析快照：直接委托 ``get_config()``（已按 sid/aid 分片缓存），
+    避免 memory 模块二次缓存串 agent。
+    """
     _ensure_dotenv_loaded()
 
     try:
         cfg = get_config()
-        _config_cache = cfg if isinstance(cfg, dict) else {}
+        return cfg if isinstance(cfg, dict) else {}
     except Exception as e:
         logger.warning("Failed to load merged config for memory module: %s", e)
-        _config_cache = {}
-    return _config_cache
+        return {}
 
 
 def get_embed_config() -> Dict[str, str]:
@@ -116,7 +116,7 @@ class MemorySettings:
 
 
 def create_memory_settings(
-    workspace_dir: str = DEFAULT_WORKSPACE_DIR,
+    workspace_dir: str | None = None,
     **overrides
 ) -> MemorySettings:
     """Create MemorySettings instance.
@@ -128,6 +128,7 @@ def create_memory_settings(
     Returns:
         MemorySettings instance
     """
+    resolved_workspace = workspace_dir if workspace_dir else default_workspace_dir()
     config = _load_config()
     embed_config = get_embed_config()
     memory_config = config.get("memory", {})

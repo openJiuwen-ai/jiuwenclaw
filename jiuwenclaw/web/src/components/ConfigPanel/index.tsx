@@ -48,7 +48,6 @@ const THIRD_PARTY_API_KEYS = new Set([
 ]);
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
-const EVOLUTION_KEYS = new Set(["evolution_auto_scan"]);
 const DEEPSEARCH_KEYS = new Set([
   "deepsearch_llm_model_name",
   "deepsearch_llm_model_type",
@@ -72,7 +71,6 @@ function classifyKey(key: string): string {
   if (EMBED_KEYS.has(key)) return "embed";
   if (THIRD_PARTY_API_KEYS.has(key)) return "third_party_api";
   if (EMAIL_KEYS.has(key)) return "email";
-  if (EVOLUTION_KEYS.has(key)) return "evolution";
   if (DEEPSEARCH_KEYS.has(key)) return "deepsearch";
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
@@ -194,7 +192,6 @@ function getNestedModelStyle(tag: string): string {
 
 function isBooleanKey(key: string): boolean {
   return (
-    EVOLUTION_KEYS.has(key) ||
     FREE_SEARCH_BOOLEAN_KEYS.has(key) ||
     key === "context_engine_enabled" ||
     key === "kv_cache_affinity_enabled" ||
@@ -209,7 +206,6 @@ function parseBoolValue(value: string): boolean {
 
 function getBooleanKeyLabel(key: string, t: (key: string) => string): string {
   const labels: Record<string, string> = {
-    evolution_auto_scan: t('config.booleanLabels.evolutionAutoScan'),
     free_search_ddg_enabled: t('config.booleanLabels.freeSearchDdg'),
     free_search_bing_enabled: t('config.booleanLabels.freeSearchBing'),
     context_engine_enabled: t('config.booleanLabels.enabled'),

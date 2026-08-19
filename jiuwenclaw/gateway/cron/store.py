@@ -64,12 +64,16 @@ class CronJobStore:
         chat_type: str | None = None,
         mode: str | None = None,
         delete_after_run: bool | None = None,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> CronJob:
         now = time.time()
         sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
         ct = str(chat_type).strip() if isinstance(chat_type, str) and chat_type.strip() else None
         m = str(mode).strip().lower() if isinstance(mode, str) and mode.strip() else "agent"
         dar = bool(delete_after_run) if delete_after_run is not None else False
+        tenant_sid = str(service_id or "default").strip() or "default"
+        tenant_aid = str(agent_id or "default").strip() or "default"
         job = CronJob(
             id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
@@ -85,6 +89,8 @@ class CronJobStore:
             chat_type=ct,
             mode=m,
             delete_after_run=dar,
+            service_id=tenant_sid,
+            agent_id=tenant_aid,
         )
         # validate via round-trip
         CronJob.from_dict(job.to_dict())
@@ -143,6 +149,16 @@ class CronJobStore:
             updated = replace(updated, mode=new_mode)
         if "delete_after_run" in patch:
             updated = replace(updated, delete_after_run=bool(patch.get("delete_after_run")))
+        if "service_id" in patch:
+            updated = replace(
+                updated,
+                service_id=str(patch.get("service_id") or "default").strip() or "default",
+            )
+        if "agent_id" in patch:
+            updated = replace(
+                updated,
+                agent_id=str(patch.get("agent_id") or "default").strip() or "default",
+            )
 
         updated.updated_at = time.time()
         CronJob.from_dict(updated.to_dict())
@@ -194,6 +210,12 @@ class CronJobStore:
             data["version"] = int(data.get("version") or 1)
             data["jobs"] = out
             self._write_json_unlocked(data)
+
+    async def upsert_from_dict(self, data: dict[str, Any]) -> CronJob:
+        """Insert or replace a job from a serialized dict (mirror sync)."""
+        job = CronJob.from_dict(dict(data))
+        await self._upsert_job(job)
+        return job
 
     async def _read_json(self) -> dict[str, Any]:
         async with self._lock:

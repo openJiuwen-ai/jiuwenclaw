@@ -14,17 +14,18 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-import trafilatura
 from openjiuwen.core.foundation.tool import ToolCard, tool
 
+from jiuwenclaw.http_proxy_config import requests_get
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.local_env_config import get_local_config
 
 logger = logging.getLogger(__name__)
 
 
 def should_use_jina_fetch() -> bool:
     """Return True when Jina Reader fetch is enabled via env (opt-in)."""
-    return os.getenv("JIUWENCLAW_ENABLE_JINA_FETCH") == "1"
+    return get_local_config("JIUWENCLAW_ENABLE_JINA_FETCH") == "1"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -228,18 +229,9 @@ def _format_fetch_failure(
 
 
 def _http_get(url: str, **kwargs) -> requests.Response:
-    """Try normal requests first; retry without env proxies on ProxyError."""
+    """Fetch via overlay-aware proxy settings."""
     kwargs.setdefault("verify", get_requests_verify())
-    try:
-        return requests.get(url, **kwargs)
-    except requests.exceptions.ProxyError as exc:
-        logger.warning(
-            "HTTP request hit ProxyError, retrying without env proxies: %s",
-            _format_fetch_failure("http", url, exc=exc),
-        )
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.get(url, **kwargs)
+    return requests_get(url, **kwargs)
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -282,6 +274,7 @@ def _extract_content_with_trafilatura(
     Returns:
         tuple of (content, title)
     """
+    import trafilatura  # 局部导入：trafilatura 重型依赖链会显著拖慢启动
     content_type_lower = (content_type or "").lower()
 
     if "application/json" in content_type_lower:

@@ -4,235 +4,40 @@
 
 from pathlib import Path
 
+import pytest
+
 from jiuwenclaw.agentserver.team.config_loader import (
+    TeamTemplateNotFoundError,
+    _resolve_enable_permissions,
     load_team_spec_dict,
     resolve_team_sqlite_db_path,
 )
 
 
-def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_path):
-    """Predefined members should resolve to member_name-keyed DeepAgentSpec entries."""
-    fake_agent_teams_home = tmp_path / ".agent_teams"
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-test",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {"temperature": 0.2},
-            }
-        },
-        "team": {
-            "team_name": "demo_team",
-            "leader": {
-                "member_name": "team_leader",
-                "display_name": "TeamLeader",
-                "persona": "Lead the team",
-            },
-            "workspace": {
-                "enabled": True,
-                "artifact_dirs": ["artifacts/reports"],
-            },
-            "agents": {
-                "leader": {
-                },
-                "teammate": {
-                },
-                "analyst": {
-                    "name": "Analyst",
-                    "skills": ["skill-a", "skill-b"],
-                },
-            },
-            "predefined_members": [
-                {
-                    "member_name": "analyst",
-                    "display_name": "Data Analyst",
-                    "persona": "Analyze data",
-                    "prompt_hint": "Focus on trends",
-                    "toolkits": ["sql", "python"],
-                }
-            ],
-            "storage": {
-                "type": "sqlite",
-                "params": {
-                    "connection_string": "team.db",
-                },
-            },
-            "planning": {
-                "enabled": True,
-                "max_parallel_tasks": 3,
-            },
-        },
-    }
-
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
-        lambda: fake_agent_teams_home,
-    )
-
-    spec = load_team_spec_dict("session-1")
-
-    assert spec["team_name"] == "demo_team_session-1"
-    assert spec["leader"]["member_name"] == "team_leader"
-    assert spec["leader"]["display_name"] == "TeamLeader"
-    assert spec["leader"]["persona"] == "Lead the team"
-    assert spec["predefined_members"][0]["member_name"] == "analyst"
-    assert spec["predefined_members"][0]["display_name"] == "Data Analyst"
-    assert spec["predefined_members"][0]["prompt_hint"] == "Focus on trends"
-    assert spec["predefined_members"][0]["toolkits"] == ["sql", "python"]
-    assert spec["workspace"]["enabled"] is True
-    assert spec["workspace"]["artifact_dirs"] == ["artifacts/reports"]
-    assert spec["planning"] == {
-        "enabled": True,
-        "max_parallel_tasks": 3,
-    }
-    assert spec["agents"]["analyst"]["skills"] == ["skill-a", "skill-b"]
-    assert spec["agents"]["analyst"]["model"]["model_request_config"]["model"] == "gpt-test"
-    assert spec["agents"]["analyst"]["workspace"] == {"stable_base": True}
-    assert spec["storage"]["params"]["connection_string"] == str(
-        fake_agent_teams_home / "team.db"
-    )
-
-
-def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monkeypatch, tmp_path):
-    """Role keys should remain usable after member_name aliases are injected."""
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-role",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        "team": {
-            "agents": {
-                "leader": {},
-                "teammate": {
-                    "skills": ["shared-skill"],
-                },
-                "default_teammate": {
-                    "skills": ["member-skill"],
-                },
-            }
-        },
-    }
-
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-
-    spec = load_team_spec_dict("session-2")
-
-    assert "leader" in spec["agents"]
-    assert "teammate" in spec["agents"]
-    assert "default_teammate" in spec["agents"]
-    assert spec["agents"]["default_teammate"]["skills"] == ["member-skill"]
-    assert spec["agents"]["teammate"]["skills"] == ["shared-skill"]
-
-
-def test_load_team_spec_dict_preserves_explicit_empty_skills(monkeypatch, tmp_path):
-    """Explicit empty skill lists should not be treated as missing config."""
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-empty",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        "team": {
-            "agents": {
-                "leader": {},
-                "reviewer": {
-                    "skills": [],
-                },
-            }
-        },
-    }
-
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-
-    spec = load_team_spec_dict("session-3")
-
-    assert "reviewer" in spec["agents"]
-    assert spec["agents"]["reviewer"]["skills"] == []
-
-
-def test_load_team_spec_dict_no_auto_fill_skills_when_missing(monkeypatch, tmp_path):
-    """Missing skills config should not auto-fill with global skills (new behavior)."""
-    global_skills_dir = tmp_path / "skills"
-    (global_skills_dir / "skill-a").mkdir(parents=True)
-    (global_skills_dir / "skill-a" / "SKILL.md").write_text("# skill-a", encoding="utf-8")
-    (global_skills_dir / "skill-b").mkdir(parents=True)
-    (global_skills_dir / "skill-b" / "SKILL.md").write_text("# skill-b", encoding="utf-8")
-    (global_skills_dir / "_internal").mkdir(parents=True)
-
-    config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-all",
-                    "client_provider": "openai",
-                },
-                "model_config_obj": {},
-            }
-        },
-        "team": {
-            "agents": {
-                "leader": {},
-                "writer": {},
-            }
-        },
-    }
-
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_skills_dir",
-        lambda: global_skills_dir,
-    )
-
-    spec = load_team_spec_dict("session-4")
-
-    # skills should not be auto-filled when not configured
-    assert "skills" not in spec["agents"]["leader"]
-    assert "skills" not in spec["agents"]["writer"]
+def test_resolve_enable_permissions_follows_global_only() -> None:
+    """Team rails follow permissions.enabled; team-local flag is ignored."""
+    assert _resolve_enable_permissions(
+        {"permissions": {"enabled": True}},
+        {"enable_permissions": False},
+    ) is True
+    assert _resolve_enable_permissions(
+        {"permissions": {"enabled": False}},
+        {"enable_permissions": True},
+    ) is False
+    assert _resolve_enable_permissions({}, {"enable_permissions": True}) is False
 
 
 def test_resolve_team_sqlite_db_path_defaults_to_agent_teams_home(monkeypatch, tmp_path):
     """Missing connection_string should fall back to openjiuwen agent-teams team.db."""
     config = {
-        "team": {
-            "storage": {
-                "type": "sqlite",
-                "params": {},
+        "modes": {
+            "team": {
+                "jiuwen_team": {
+                    "storage": {
+                        "type": "sqlite",
+                        "params": {},
+                    }
+                }
             }
         }
     }
@@ -251,43 +56,529 @@ def test_resolve_team_sqlite_db_path_defaults_to_agent_teams_home(monkeypatch, t
     assert db_path == Path(tmp_path / ".agent_teams" / "team.db")
 
 
-def test_load_team_spec_dict_preserves_arbitrary_team_top_level_fields(monkeypatch, tmp_path):
-    """Unknown team-level fields should be preserved in the final spec dict."""
+def test_load_team_spec_dict_selects_bound_template_not_first_entry():
+    """chat.send team_name must select that modes.team key, not the first preset."""
     config = {
-        "models": {
-            "default": {
-                "model_client_config": {
-                    "model_name": "gpt-custom",
-                    "client_provider": "openai",
+        "modes": {
+            "team": {
+                "oc_team_preset-product-research": {
+                    "team_name": "oc_team_preset-product-research",
+                    "lifecycle": "persistent",
+                    "leader": {"agent_id": "product", "name": "product", "display_name": "产品"},
                 },
-                "model_config_obj": {},
+                "oc_team_team-user": {
+                    "team_name": "oc_team_team-user",
+                    "lifecycle": "persistent",
+                    "leader": {"agent_id": "office", "name": "office", "display_name": "助手"},
+                },
             }
         },
-        "team": {
-            "agents": {
-                "leader": {},
-            },
-            "runtime_flags": {
-                "enable_observer": True,
-                "retry_limit": 5,
-            },
-            "custom_labels": ["a", "b"],
+        "models": {"defaults": []},
+    }
+
+    assert load_team_spec_dict(config)["team_name"] == "oc_team_preset-product-research"
+    assert (
+        load_team_spec_dict(config, template_id="oc_team_team-user")["team_name"]
+        == "oc_team_team-user"
+    )
+    with pytest.raises(TeamTemplateNotFoundError):
+        load_team_spec_dict(config, template_id="oc_team_missing")
+
+
+def test_load_team_spec_dict_maps_persona_and_prompt_hint_to_desc_prompt():
+    """Relay syncs persona/prompt_hint; TeamMemberSpec only keeps desc/prompt."""
+    config = {
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "天才项目管理专家",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "assistant",
+                            "name": "助理",
+                            "persona": "逻辑清晰的综合助理",
+                            "prompt_hint": "先认领再写",
+                        },
+                        {
+                            "member_name": "user-research",
+                            "name": "用研",
+                            "persona": "用户研究专家",
+                        },
+                    ],
+                }
+            }
         },
+        "models": {"defaults": []},
     }
 
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
-        lambda: config,
-    )
-    monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
-        lambda: tmp_path / ".agent_teams",
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["leader"]["desc"] == "天才项目管理专家"
+    members = {m["member_name"]: m for m in spec["predefined_members"]}
+    assert members["assistant"]["desc"] == "逻辑清晰的综合助理"
+    assert "先认领再写" in members["assistant"]["prompt"]
+    assert "persona" not in members["assistant"]
+    assert "prompt_hint" not in members["assistant"]
+    assert members["user-research"]["desc"] == "用户研究专家"
+
+
+def test_load_team_spec_dict_hydrates_credentials_by_member_tip(monkeypatch):
+    """Each team role hydrates from catalog agent_id tip (plan-equivalent)."""
+    from jiuwenclaw.local_env_config import (
+        bind_agent_env_ns,
+        replace_active_env,
+        reset_agent_env_ns,
     )
 
-    spec = load_team_spec_dict("session-custom")
+    replace_active_env(
+        {
+            "API_BASE": "https://bound.example/v1",
+            "API_KEY": "sk-bound",
+            "MODEL_NAME": "glm-bound",
+            "MODEL_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="agentteam",
+    )
+    replace_active_env(
+        {
+            "API_BASE": "https://leader.example/v1",
+            "API_KEY": "sk-leader",
+            "MODEL_NAME": "glm-leader",
+            "MODEL_PROVIDER": "OpenAI",
+            "ENABLED_SKILLS": "research-brief,web_free_search",
+        },
+        service_id="default",
+        agent_id="expert-chief-researcher",
+    )
+    replace_active_env(
+        {
+            "API_BASE": "https://mate.example/v1",
+            "API_KEY": "sk-mate",
+            "MODEL_NAME": "glm-mate",
+            "MODEL_PROVIDER": "OpenAI",
+            "ENABLED_SKILLS": "market-scan",
+        },
+        service_id="default",
+        agent_id="expert-market-intelligence-researcher",
+    )
 
-    assert spec["runtime_flags"] == {
-        "enable_observer": True,
-        "retry_limit": 5,
+    config = {
+        "modes": {
+            "team": {
+                "demo": {
+                    "team_name": "demo",
+                    "leader": {
+                        "member_name": "chief-researcher",
+                        "display_name": "首席研究官",
+                        "agent_id": "expert-chief-researcher",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "market-intelligence-researcher",
+                            "display_name": "市场与情报研究员",
+                            "role_type": "teammate",
+                            "agent_id": "expert-market-intelligence-researcher",
+                        }
+                    ],
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "client_provider": "OpenAI",
+                                    "api_base": "${API_BASE}",
+                                    "api_key": "${API_KEY}",
+                                },
+                                "model_request_config": {"model": "glm-leader"},
+                            }
+                        },
+                        "market-intelligence-researcher": {
+                            "model": {
+                                "model_client_config": {
+                                    "client_provider": "OpenAI",
+                                    "api_base": "${API_BASE}",
+                                    "api_key": "${API_KEY}",
+                                },
+                                "model_request_config": {"model": "glm-mate"},
+                            }
+                        },
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
     }
-    assert spec["custom_labels"] == ["a", "b"]
+
+    token = bind_agent_env_ns("default", "agentteam")
+    try:
+        spec = load_team_spec_dict(config_base=config)
+    finally:
+        reset_agent_env_ns(token)
+
+    leader_mcc = spec["agents"]["leader"]["model"]["model_client_config"]
+    mate_mcc = spec["agents"]["market-intelligence-researcher"]["model"]["model_client_config"]
+    assert leader_mcc["api_base"] == "https://leader.example/v1"
+    assert leader_mcc["api_key"] == "sk-leader"
+    assert mate_mcc["api_base"] == "https://mate.example/v1"
+    assert mate_mcc["api_key"] == "sk-mate"
+    assert leader_mcc["api_key"] != "sk-bound"
+    assert mate_mcc["api_key"] != "sk-bound"
+    assert spec["agents"]["leader"]["skills"] == ["research-brief", "web_free_search"]
+    assert spec["agents"]["market-intelligence-researcher"]["skills"] == ["market-scan"]
+
+
+def test_transform_front_team_agent_spec_persists_tip_skills():
+    """Sync writes skills on agents.*.skills; tip fills only when front omits."""
+    from jiuwenclaw.config import _transform_front_team_agent_spec
+    from jiuwenclaw.local_env_config import replace_active_env
+
+    replace_active_env(
+        {"ENABLED_SKILLS": "alpha,beta"},
+        service_id="default",
+        agent_id="expert-demo",
+    )
+    # Front skills win (same field as HEAD).
+    with_front = _transform_front_team_agent_spec(
+        "expert-demo",
+        {"max_iterations": 50, "skills": ["front-only"]},
+    )
+    assert with_front["max_iterations"] == 50
+    assert with_front["skills"] == ["front-only"]
+    assert "model" not in with_front
+
+    # Tip fills the same skills field when front omits it.
+    from_tip = _transform_front_team_agent_spec(
+        "expert-demo",
+        {"max_iterations": 50},
+    )
+    assert from_tip["skills"] == ["alpha", "beta"]
+    assert "model" not in from_tip
+
+
+def test_load_team_spec_dict_does_not_rematch_other_agent_tip(monkeypatch):
+    """Member tip without credentials must not borrow another agent's tip."""
+    from jiuwenclaw.local_env_config import (
+        bind_agent_env_ns,
+        replace_active_env,
+        reset_agent_env_ns,
+    )
+
+    replace_active_env(
+        {
+            "API_BASE": "https://other.example/v1",
+            "API_KEY": "sk-other",
+            "MODEL_NAME": "glm-5.2",
+            "MODEL_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="assistant",
+    )
+    replace_active_env(
+        {"MODEL_NAME": "glm-5.2", "MODEL_PROVIDER": "OpenAI"},
+        service_id="default",
+        agent_id="expert-chief-researcher",
+    )
+
+    config = {
+        "modes": {
+            "team": {
+                "demo": {
+                    "team_name": "demo",
+                    "leader": {
+                        "member_name": "chief-researcher",
+                        "display_name": "Lead",
+                        "agent_id": "expert-chief-researcher",
+                    },
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "client_provider": "OpenAI",
+                                    "api_base": "${API_BASE}",
+                                    "api_key": "${API_KEY}",
+                                },
+                                "model_request_config": {"model": "glm-5.2"},
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    token = bind_agent_env_ns("default", "assistant")
+    try:
+        spec = load_team_spec_dict(config_base=config)
+    finally:
+        reset_agent_env_ns(token)
+
+    mcc = spec["agents"]["leader"]["model"]["model_client_config"]
+    assert not str(mcc.get("api_base") or "").strip()
+    assert not str(mcc.get("api_key") or "").strip()
+
+
+def test_load_team_spec_dict_without_agent_id_uses_bound_tip(monkeypatch):
+    """Missing roster agent_id hydrates from bound tip only (no inventing ids)."""
+    from jiuwenclaw.local_env_config import (
+        bind_agent_env_ns,
+        replace_active_env,
+        reset_agent_env_ns,
+    )
+
+    replace_active_env(
+        {
+            "API_BASE": "https://bound.example/v1",
+            "API_KEY": "sk-bound",
+            "MODEL_NAME": "glm-5.2",
+            "MODEL_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="agentteam",
+    )
+    replace_active_env(
+        {
+            "API_BASE": "https://expert.example/v1",
+            "API_KEY": "sk-expert",
+            "MODEL_NAME": "glm-5.2",
+            "MODEL_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="expert-chief-researcher",
+    )
+
+    config = {
+        "modes": {
+            "team": {
+                "demo": {
+                    "team_name": "demo",
+                    "leader": {
+                        "member_name": "chief-researcher",
+                        # no agent_id → cannot address expert tip
+                    },
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "client_provider": "OpenAI",
+                                    "api_base": "${API_BASE}",
+                                    "api_key": "${API_KEY}",
+                                },
+                                "model_request_config": {"model": "glm-5.2"},
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    token = bind_agent_env_ns("default", "agentteam")
+    try:
+        spec = load_team_spec_dict(config_base=config)
+    finally:
+        reset_agent_env_ns(token)
+
+    mcc = spec["agents"]["leader"]["model"]["model_client_config"]
+    assert mcc["api_base"] == "https://bound.example/v1"
+    assert mcc["api_key"] == "sk-bound"
+
+
+def test_load_team_spec_dict_hydrates_from_bound_tip_when_no_member(monkeypatch):
+    """Without roster agent_id, credentials come from bound tip."""
+    from jiuwenclaw.local_env_config import (
+        bind_agent_env_ns,
+        replace_active_env,
+        reset_agent_env_ns,
+    )
+
+    replace_active_env(
+        {
+            "API_BASE": "https://bound.example/v1",
+            "API_KEY": "sk-bound",
+            "MODEL_NAME": "glm-5.2",
+            "MODEL_PROVIDER": "OpenAI",
+        },
+        service_id="default",
+        agent_id="office",
+    )
+
+    config = {
+        "modes": {
+            "team": {
+                "demo": {
+                    "team_name": "demo",
+                    "agents": {
+                        "leader": {
+                            "model": {
+                                "model_client_config": {
+                                    "api_base": "",
+                                    "api_key": "",
+                                    "client_provider": "OpenAI",
+                                },
+                                "model_request_config": {"model": "glm-5.2"},
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    token = bind_agent_env_ns("default", "office")
+    try:
+        spec = load_team_spec_dict(config_base=config)
+    finally:
+        reset_agent_env_ns(token)
+
+    mcc = spec["agents"]["leader"]["model"]["model_client_config"]
+    assert mcc["api_base"] == "https://bound.example/v1"
+    assert mcc["api_key"] == "sk-bound"
+
+
+def test_load_team_spec_dict_adds_teammate_when_leader_and_extra_keys():
+    """Missing teammate must be filled even if agents has non-role keys."""
+    config = {
+        "modes": {
+            "team": {
+                "demo": {
+                    "team_name": "demo",
+                    "lifecycle": "persistent",
+                    "agents": {
+                        "leader": {},
+                        "chief-researcher": {},
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+    spec = load_team_spec_dict(config_base=config)
+    assert "teammate" in spec["agents"]
+    assert "leader" in spec["agents"]
+
+def test_display_name_rule_appended_to_leader_and_member_prompts():
+    """Display-name rule is appended to leader and member private prompts."""
+    from jiuwenclaw.agentserver.team.config_loader import (
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_CN,
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_EN,
+    )
+
+    config = {
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "天才项目管理专家",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "assistant",
+                            "name": "助理",
+                            "persona": "逻辑清晰的综合助理",
+                            "prompt_hint": "先认领再写",
+                        },
+                        {
+                            "member_name": "blank-prompt",
+                            "name": "空白",
+                            "display_name": "空白成员",
+                        },
+                    ],
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "cn"
+    # leader: persona + naming rule (default preferred_language -> CN)
+    leader_prompt = spec["leader"]["prompt"]
+    assert "天才项目管理专家" in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN not in leader_prompt
+    assert "## 成员称呼规范" in leader_prompt
+    members = {m["member_name"]: m for m in spec["predefined_members"]}
+    # member: keep persona/prompt_hint and append naming rule
+    assert "先认领再写" in members["assistant"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in members["assistant"]["prompt"]
+    # members without persona still get the naming rule
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN in members["blank-prompt"]["prompt"]
+
+
+def test_display_name_rule_uses_english_when_preferred_language_en():
+    """preferred_language=en selects the English naming-rule prompt."""
+    from jiuwenclaw.agentserver.team.config_loader import (
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_CN,
+        _TEAM_MEMBER_DISPLAY_NAME_RULE_EN,
+    )
+
+    config = {
+        "preferred_language": "en",
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "Project lead",
+                    },
+                    "predefined_members": [
+                        {
+                            "member_name": "assistant",
+                            "name": "Assistant",
+                            "persona": "Helper",
+                        },
+                    ],
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "en"
+    leader_prompt = spec["leader"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN in leader_prompt
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN not in leader_prompt
+    assert "## Member naming convention" in leader_prompt
+    members = {m["member_name"]: m for m in spec["predefined_members"]}
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_EN in members["assistant"]["prompt"]
+    assert _TEAM_MEMBER_DISPLAY_NAME_RULE_CN not in members["assistant"]["prompt"]
+
+
+def test_preferred_language_zh_normalizes_to_cn_on_spec():
+    """Config ``zh`` must become TeamSpec ``cn`` (agent-core supported set)."""
+    config = {
+        "preferred_language": "zh",
+        "modes": {
+            "team": {
+                "oc_team_debate": {
+                    "team_name": "oc_team_debate",
+                    "lifecycle": "persistent",
+                    "leader": {
+                        "member_name": "team_leader",
+                        "name": "Leader",
+                        "persona": "专家",
+                    },
+                }
+            }
+        },
+        "models": {"defaults": []},
+    }
+    spec = load_team_spec_dict(config, template_id="oc_team_debate")
+    assert spec["language"] == "cn"
+

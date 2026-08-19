@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +14,9 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 
 from jiuwenclaw.schema.message import Message, ReqMethod
 from jiuwenclaw.gateway.slash_command import CONTROL_MESSAGE_TEXTS
+from jiuwenclaw.local_env_config import read_env
 from jiuwenclaw.utils import get_root_dir, logger
+
 SYSTEM_PROMPT_TEMPLATE = """
 你是{principal_name}的数字分身，活跃在即时通讯群聊中。当群里有其他用户发送与{principal_name}相关的消息时，你的任务是改写这条消息，使其更清晰、更完整，以便后续帮助{principal_name}生成恰当的回复。
 
@@ -86,7 +87,7 @@ class IMPlatformAdapter(Protocol):
         ...
 
     def load_recent_messages(
-        self, thread_id: str, limit: int = 500
+        self, thread_id: str, limit: int = 500, *, service_id: str | None = None, agent_id: str | None = None
     ) -> list[IMHistoryMessage]:
         ...
 
@@ -161,7 +162,7 @@ class IMConversationProcessor:
         name = (
             (model_name_override or "").strip()
             or react.get("model_name", "")
-            or os.getenv("MODEL_NAME", "").strip()
+            or read_env("MODEL_NAME", "").strip()
             or "gpt-4o"
         )
         return name, mcc
@@ -229,6 +230,8 @@ class IMConversationProcessor:
             timestamp_ms=self._resolve_timestamp_ms(msg.timestamp, metadata),
             principal_name=principal_name,
             adapter=adapter,
+            service_id=(msg.params or {}).get("service_id") if isinstance(msg.params, dict) else None,
+            agent_id=(msg.params or {}).get("agent_id") if isinstance(msg.params, dict) else None,
         )
         rewritten_content = await self._rewrite_query(prompt, principal_name, adapter)
         if not rewritten_content:
@@ -328,10 +331,17 @@ class IMConversationProcessor:
         timestamp_ms: int,
         principal_name: str,
         adapter: IMPlatformAdapter,
+        service_id: str | None = None,
+        agent_id: str | None = None,
     ) -> str:
         prompt_parts: list[str] = []
         prompt_parts.append("=== 群聊历史消息 ===")
-        history = adapter.load_recent_messages(thread_id, limit=500)
+        history = adapter.load_recent_messages(
+            thread_id,
+            limit=500,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
         if history:
             prompt_parts.append(f"最近 {len(history)} 条消息：\n")
             for msg in history:
@@ -378,11 +388,11 @@ class IMConversationProcessor:
                 top_p=0.7,
             )
             mcc = self._model_client_raw
-            api_key = (mcc.get("api_key") or os.getenv("API_KEY") or "").strip()
-            api_base = (mcc.get("api_base") or os.getenv("API_BASE") or "").strip()
+            api_key = (mcc.get("api_key") or read_env("API_KEY") or "").strip()
+            api_base = (mcc.get("api_base") or read_env("API_BASE") or "").strip()
             if api_base.endswith("/chat/completions"):
                 api_base = api_base.rsplit("/chat/completions", 1)[0]
-            client_provider = mcc.get("client_provider") or os.getenv("MODEL_PROVIDER", "OpenAI")
+            client_provider = mcc.get("client_provider") or read_env("MODEL_PROVIDER", "OpenAI")
             model_client_cfg = ModelClientConfig(
                 client_id="im_conversation_processor_client",
                 client_provider=client_provider,

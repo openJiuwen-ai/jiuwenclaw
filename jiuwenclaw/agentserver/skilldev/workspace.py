@@ -20,8 +20,8 @@
     └── output/
         └── {skill_name}.skill  ← 最终打包产物
 
-base_dir 由调用方传入，约定为 get_workspace_dir() / "skilldev"，
-与整个 jiuwenclaw 的目录体系保持一致，不另起顶级目录。
+base_dir 由调用方传入，约定为租户 ``jiuwenclaw_workspace`` 下的 ``skilldev`` 子目录
+（``JiuWenClaw._workspace_dir / "skilldev"``），与整个 jiuwenclaw 的目录体系保持一致。
 
 扩展点：替换为支持远程对象存储的实现（接口不变），
         sync_to_remote 届时将文件同步到 S3/OBS。
@@ -41,8 +41,8 @@ class WorkspaceProvider:
     def __init__(self, base_dir: Path) -> None:
         """
         Args:
-            base_dir: SkillDev 工作区根目录，约定为 get_workspace_dir() / "skilldev"
-                      即 ~/.jiuwenclaw/service_default/agent_default/agent/jiuwenclaw_workspace/skilldev/
+            base_dir: SkillDev 工作区根目录，约定为 ``{tenant_workspace}/skilldev``
+                      例如 ``~/.jiuwenclaw/service_{sid}/agent_{aid}/agent/jiuwenclaw_workspace/skilldev/``
         """
         self._base_dir = base_dir
 

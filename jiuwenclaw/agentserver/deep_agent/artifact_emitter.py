@@ -8,7 +8,9 @@ between main agent (TaskExecutionRail) and subagent (SubagentContextRail).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,8 @@ ARTIFACT_DETECTION_ALLOWED_TOOLS = frozenset({
 })
 
 _SESSION_EMITTED_ARTIFACTS: dict[str, set[str]] = {}
+
+_BODY_SCAN_TIMEOUT_S = 2.0
 
 
 def _normalize_path_key(path: str) -> str:
@@ -248,6 +252,26 @@ async def _trigger_artifact_post_process_hook(
         )
         return
 
+    # Sync back: if hook renamed files via ctx.artifact_paths, update artifacts
+    new_paths = {
+        old: new
+        for old, new in zip(artifact_paths, hook_ctx.artifact_paths)
+        if old != new and new
+    }
+    if new_paths:
+        for item in artifacts:
+            old_path = str(item.get("path") or "").strip()
+            if old_path in new_paths:
+                new_path = new_paths[old_path]
+                item["path"] = new_path
+                item["name"] = Path(new_path).name
+                logger.info(
+                    "%s artifact path updated by hook: %s -> %s",
+                    log_prefix,
+                    Path(old_path).name,
+                    Path(new_path).name,
+                )
+
     _refresh_artifact_sizes(artifacts, log_prefix=log_prefix)
     logger.info(
         "%s artifact post-process hook done session_id=%s tool=%s count=%d",
@@ -256,6 +280,48 @@ async def _trigger_artifact_post_process_hook(
         tool_name,
         len(artifacts),
     )
+
+
+async def _extract_artifacts_async(
+    ctx: ArtifactEmitContext,
+    *,
+    scan_body_text: bool = True,
+    skip_mtime_check: bool = False,
+) -> list[dict[str, Any]]:
+    """Run artifact path extraction off the event loop with a wall-clock timeout."""
+    from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import (
+        _extract_artifact_paths_from_tool_result,
+    )
+
+    cancel_event = threading.Event()
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _extract_artifact_paths_from_tool_result,
+                ctx.tool_result,
+                ctx.workspace_base,
+                ctx.tool_start_time,
+                scan_body_text=scan_body_text,
+                skip_mtime_check=skip_mtime_check,
+                cancel_event=cancel_event,
+            ),
+            timeout=_BODY_SCAN_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        cancel_event.set()
+        logger.warning(
+            "%s Body scan timed out (%.1fs), skipping artifact extraction",
+            ctx.log_prefix,
+            _BODY_SCAN_TIMEOUT_S,
+        )
+        return []
+    except Exception as exc:
+        logger.exception(
+            "%s Body scan failed: %s",
+            ctx.log_prefix,
+            exc,
+        )
+        return []
 
 
 async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
@@ -281,7 +347,6 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     # Import here to avoid circular dependency at module load time
     from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import (
         _build_artifacts_from_explicit_paths,
-        _extract_artifact_paths_from_tool_result,
         _is_recently_sent,
         _mark_as_sent,
     )
@@ -315,21 +380,13 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
             )
         else:
             extract_source = "send_file:regex_fallback"
-            artifacts = _extract_artifact_paths_from_tool_result(
-                ctx.tool_result,
-                ctx.workspace_base,
-                tool_start_time=ctx.tool_start_time,
+            artifacts = await _extract_artifacts_async(
+                ctx,
                 scan_body_text=True,
                 skip_mtime_check=True,
             )
     else:
-        artifacts = _extract_artifact_paths_from_tool_result(
-            ctx.tool_result,
-            ctx.workspace_base,
-            tool_start_time=ctx.tool_start_time,
-            scan_body_text=True,
-            skip_mtime_check=False,
-        )
+        artifacts = await _extract_artifacts_async(ctx)
 
     logger.info(
         "%s 产物检测 session_id=%s tool=%s source=%s candidate_paths=%s count=%d artifacts=%s",

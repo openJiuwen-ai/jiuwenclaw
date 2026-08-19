@@ -8,8 +8,13 @@ import os
 import re
 import time
 from typing import Any
+from contextvars import ContextVar
 
 from jiuwenclaw.utils import logger
+
+_FEISHU_FILE_TENANT: ContextVar[tuple[str, str] | None] = ContextVar(
+    "feishu_file_tenant", default=None
+)
 
 # 类型别名，用于类型提示
 FeishuConfig = Any  # 避免循环导入
@@ -95,7 +100,7 @@ class FeishuFileService:
         self,
         api_client: Any,
         config: FeishuConfig,
-        workspace_dir: str,
+        workspace_dir: str | None = None,
     ):
         """
         初始化文件服务。
@@ -103,11 +108,14 @@ class FeishuFileService:
         Args:
             api_client: 飞书 API 客户端（lark.Client 实例）
             config: 飞书通道配置（FeishuConfig）
-            workspace_dir: 工作空间目录
+            workspace_dir: 可选覆盖根目录（如 config.temp_file_dir）；
+                为 None 时按消息 sid/aid 懒解析租户 workspace。
         """
         self._api_client = api_client
         self._config = config
-        self._workspace_dir = workspace_dir
+        self._workspace_dir_override = (
+            str(workspace_dir).strip() if workspace_dir else None
+        ) or None
         self._download_semaphore = asyncio.Semaphore(3)  # 限制并发下载数
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -118,9 +126,41 @@ class FeishuFileService:
         """确保目录存在。"""
         os.makedirs(path, exist_ok=True)
 
+    @staticmethod
+    def tenant_scope(
+        service_id: str | None = None,
+        agent_id: str | None = None,
+    ):
+        """Context manager: bind tenant for download path resolution in this task."""
+        from contextlib import contextmanager
+        from jiuwenclaw.channel.tenant_paths import normalize_channel_tenant_ids
+
+        @contextmanager
+        def _cm():
+            token = _FEISHU_FILE_TENANT.set(
+                normalize_channel_tenant_ids(service_id, agent_id)
+            )
+            try:
+                yield
+            finally:
+                _FEISHU_FILE_TENANT.reset(token)
+
+        return _cm()
+
+    def _resolve_workspace_dir(self) -> str:
+        if self._workspace_dir_override:
+            return self._workspace_dir_override
+        from jiuwenclaw.channel.tenant_paths import resolve_channel_agent_workspace
+
+        bound = _FEISHU_FILE_TENANT.get()
+        if bound is not None:
+            return str(resolve_channel_agent_workspace(bound[0], bound[1]))
+        return str(resolve_channel_agent_workspace("default", "default"))
+
     def _get_download_dir(self, file_type: str) -> str:
         """获取下载目录路径，并确保目录存在。"""
-        base_dir = os.path.join(self._workspace_dir, "feishu_files", "downloads", file_type)
+        workspace = self._resolve_workspace_dir()
+        base_dir = os.path.join(workspace, "feishu_files", "downloads", file_type)
         self._ensure_dir(base_dir)
         return base_dir
 

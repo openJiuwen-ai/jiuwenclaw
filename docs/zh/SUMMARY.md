@@ -15,6 +15,7 @@
   - [记忆系统](记忆.md)
   - [上下文压缩卸载](上下文压缩卸载.md)
   - [工具渐进可见](工具渐进可见.md)
+  - [Tool Calling Guard](tool-calling-guard.md)
   - [技能系统](技能.md)
   - [Skill 自演进](Skill自演进.md)
   - [智能体与工作区](智能体.md)

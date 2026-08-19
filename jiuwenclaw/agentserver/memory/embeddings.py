@@ -7,6 +7,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
+from jiuwenclaw.local_env_config import read_env
+
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +45,24 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         
         embed_config = get_embed_config()
         
-        self.api_key = api_key or os.getenv("EMBED_KEY") or os.getenv("EMBED_API_KEY") or embed_config.get("api_key", "")
-        self.model = model or os.getenv("EMBED_MODEL") or os.getenv("EMBEDDING_MODEL") or embed_config.get("model", "")
-        self.base_url = base_url or os.getenv("EMBED_BASE") or os.getenv("EMBED_BASE_URL") or embed_config.get("base_url", "")
+        self.api_key = (
+            api_key
+            or read_env("EMBED_KEY")
+            or read_env("EMBED_API_KEY")
+            or embed_config.get("api_key", "")
+        )
+        self.model = (
+            model
+            or read_env("EMBED_MODEL")
+            or read_env("EMBEDDING_MODEL")
+            or embed_config.get("model", "")
+        )
+        self.base_url = (
+            base_url
+            or read_env("EMBED_BASE")
+            or read_env("EMBED_BASE_URL")
+            or embed_config.get("base_url", "")
+        )
         
         if self.base_url and self.base_url.endswith("/embeddings"):
             self.base_url = self.base_url.rsplit("/embeddings", 1)[0]
@@ -68,7 +85,10 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
     async def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple documents."""
         if not self.api_key:
-            raise ValueError("Embedding API key not configured. Set embed.api_key in config.yaml or EMBED_API_KEY environment variable.")
+            raise ValueError(
+                "Embedding API key not configured. "
+                "Set embed.api_key in config.yaml or EMBED_API_KEY environment variable."
+            )
         
         client = self._get_client()
         
@@ -143,13 +163,13 @@ async def create_embedding_provider(
         return MockEmbeddingProvider()
     
     embed_config = get_embed_config()
-    embed_key = os.getenv("EMBED_KEY") or os.getenv("EMBED_API_KEY") or embed_config.get("api_key", "")
+    embed_key = read_env("EMBED_KEY") or read_env("EMBED_API_KEY") or embed_config.get("api_key", "")
     
     if embed_key:
         return OpenAICompatibleEmbeddingProvider(
             api_key=embed_key,
-            model=model or os.getenv("EMBED_MODEL") or os.getenv("EMBEDDING_MODEL") or embed_config.get("model"),
-            base_url=os.getenv("EMBED_BASE") or os.getenv("EMBED_BASE_URL") or embed_config.get("base_url")
+            model=model or read_env("EMBED_MODEL") or read_env("EMBEDDING_MODEL") or embed_config.get("model"),
+            base_url=read_env("EMBED_BASE") or read_env("EMBED_BASE_URL") or embed_config.get("base_url")
         )
     
     if fallback == "mock":

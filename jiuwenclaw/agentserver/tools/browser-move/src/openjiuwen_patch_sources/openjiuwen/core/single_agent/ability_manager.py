@@ -208,10 +208,20 @@ class AbilityManager:
                     mcp_tool_name = getattr(mcp_tool, 'name', None)
                     if not mcp_tool_name:
                         continue
+                    # 与 stdio 路径保持一致：LLM 可见名叠加 server 前缀避免同名覆盖。
+                    # mcp_tool_id（资源侧）继续保留全限定形式，由 resource_mgr 唯一定位。
+                    qualified_name = f"{mcp_server_name}__{mcp_tool_name}"
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool_name}'
-                    self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=getattr(mcp_tool, 'description', '') or '')
-                    tool_infos.append(mcp_tool)
+                    self._tools[qualified_name] = ToolCard(
+                        id=mcp_tool_id,
+                        name=qualified_name,
+                        description=getattr(mcp_tool, 'description', '') or '',
+                    )
+                    # ToolInfo 传给 LLM，用 model_copy 改名避免污染上游共享对象
+                    if qualified_name != mcp_tool_name:
+                        tool_infos.append(mcp_tool.model_copy(update={'name': qualified_name}))
+                    else:
+                        tool_infos.append(mcp_tool)
 
         # Deduplicate by tool name so the LLM API receives unique names (required by providers)
         seen_names: set = set()

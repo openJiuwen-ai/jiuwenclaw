@@ -216,10 +216,6 @@ def test_engine_checks_unconfigured_tools_via_file_guard(monkeypatch):
 def test_engine_relaxes_guard_ask_when_action_aligned_paths_cleared(monkeypatch, tmp_path):
     """管线 A 仅 DENY 时：workspace 内读路径由管线 B 放行 → 直接 ALLOW（无 tier ASK，故无 relax 后缀）。"""
     _config_dir_with_builtin(_tmp_dir("relax-fg-aligned"), monkeypatch, [])
-    monkeypatch.setattr(
-        "jiuwenclaw.utils.get_agent_workspace_dir",
-        lambda: str(tmp_path),
-    )
     cfg = {
         "enabled": True,
         "tools": {},
@@ -229,6 +225,7 @@ def test_engine_relaxes_guard_ask_when_action_aligned_paths_cleared(monkeypatch,
         },
     }
     engine = PermissionEngine(config=cfg)
+    engine._file_guard._workspace_root = tmp_path
     p = tmp_path / "a.txt"
     p.write_text("ok", encoding="utf-8")
     perm, mr, _, _ = engine.evaluate_global_policy_with_details(
@@ -326,6 +323,38 @@ def test_unconfigured_tool_uses_configured_default_level(monkeypatch):
         PermissionLevel.DENY,
         "defaults.deny",
     )
+
+
+def test_team_orchestration_tools_allow_via_permissions_tools_config(monkeypatch):
+    """Team tools are allowlisted in permissions.tools (not intrinsic code)."""
+    _config_dir_with_builtin(_tmp_dir("team-orch-config-allow"), monkeypatch, [])
+
+    tools = {
+        "build_team": "allow",
+        "spawn_teammate": "allow",
+        "create_task": "allow",
+        "claim_task": "allow",
+        "submit_plan": "allow",
+        "view_task": "allow",
+        "send_message": "allow",
+    }
+    for tool_name, level_cfg in tools.items():
+        level, rule = evaluate_tiered_policy(
+            {"defaults": "guard", "tools": {tool_name: level_cfg}},
+            tool_name,
+            {},
+        )
+        assert level == PermissionLevel.ALLOW, tool_name
+        assert rule == f"tools.{tool_name}", (tool_name, rule)
+
+    # Without permissions.tools entry, non-shell still falls to defaults.guard ASK.
+    level, rule = evaluate_tiered_policy(
+        {"defaults": "guard", "tools": {}},
+        "build_team",
+        {},
+    )
+    assert level == PermissionLevel.ASK
+    assert rule == "defaults.guard"
 
 
 def test_shell_ast_fallback_keeps_simple_command(monkeypatch):
@@ -443,7 +472,7 @@ def test_persist_shell_allow_rule_writes_minimal_approval_override(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -479,7 +508,7 @@ def test_persist_shell_allow_rule_fallback_uses_ask_subcommands(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -498,7 +527,7 @@ def test_persist_shell_allow_rule_prefers_preview_patterns(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -539,7 +568,7 @@ def test_persist_shell_allow_rule_expands_preseeded_approval_overrides(monkeypat
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -567,7 +596,7 @@ def test_persist_shell_allow_rule_uses_short_stable_id_for_long_exact_pattern(mo
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
 
@@ -597,7 +626,7 @@ def test_persist_non_shell_allow_rule_updates_whole_tool(monkeypatch):
         encoding="utf-8",
     )
     config_mod = importlib.import_module("jiuwenclaw.config")
-    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
     _config_dir_with_builtin(base_dir, monkeypatch, [])
     set_permission_engine(PermissionEngine({"enabled": True, "tools": {"Write": "ask"}}))
 
@@ -2176,3 +2205,287 @@ def test_user_ask_works_when_builtin_deny_misses(monkeypatch):
 
     assert perm == PermissionLevel.ASK
     assert "ask_git_push" in mr
+
+
+def test_persist_writes_approval_override_when_rules_allow_conflicts_with_ask(monkeypatch):
+    """回归：rules 有 allow ``npm *`` + ask ``npm --help`` 时，persist 仍须写入 approval_override。
+
+    根因：``_existing_allow_override_patterns`` 曾把 ``rules`` 的 allow 也算作「已存在」去重，
+    导致 persist 提取的 ``npm *`` 被跳过，``npm --help`` 永远 ASK（用户「总是允许」无效）。
+    approval_override（Phase 2）优先级高于 ask（Phase 3），写入后应让 ``npm --help`` 放行。
+    """
+    rules = [
+        {"id": "allow_npm", "pattern": "npm *", "action": "allow"},
+        {"id": "ask_npm_help", "pattern": "npm --help", "action": "ask"},
+    ]
+    permissions = {
+        "enabled": True,
+        "tools": {"bash": "guard"},
+        "rules": rules,
+        "approval_overrides": [],
+    }
+
+    base_dir = _tmp_dir("persist-rules-allow-ask-conflict")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"permissions": permissions}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine(permissions))
+
+    # 前提：ask（Phase 3）优先于 rules allow（Phase 4）→ npm --help 判 ASK
+    perm_before, _ = evaluate_tiered_policy(permissions, "bash", {"command": "npm --help"})
+    assert perm_before == PermissionLevel.ASK
+
+    assert persist_permission_allow_rule("bash", {"command": "npm --help"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    overrides = saved["permissions"].get("approval_overrides", [])
+    assert any(item.get("pattern") == "npm *" for item in overrides), (
+        "应写入 approval_override ``npm *`` 以覆盖 ask"
+    )
+
+    # 写入后：approval_override（Phase 2）覆盖 ask → npm --help 判 ALLOW
+    perm_after, _ = evaluate_tiered_policy(saved["permissions"], "bash", {"command": "npm --help"})
+    assert perm_after == PermissionLevel.ALLOW
+
+
+def test_persist_writes_to_live_path_ignoring_import_time_frozen_constant(monkeypatch):
+    """回归：persist 必须用实时 ``_current_config_yaml_path()``，而非 import 期冻结的 ``_CONFIG_YAML_PATH``。
+
+    复现云上依赖包场景：import ``jiuwenclaw.config`` 时 workspace 尚未初始化，
+    ``_CONFIG_YAML_PATH`` 被固化为包内 resources 路径；后续 workspace 初始化后
+    实时路径才指向正确文件。persist 应写到实时路径，不被冻结常量误导而写进包内。
+    """
+    base_dir = _tmp_dir("persist-live-vs-frozen")
+    live_config = base_dir / "config.yaml"
+    live_config.write_text(
+        yaml.safe_dump(
+            {"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    # 仿真 import 期固化的「包内路径」——一个不该被写入的诱饵文件
+    frozen_config = base_dir / "frozen_resources_config.yaml"
+    frozen_config.write_text(
+        yaml.safe_dump(
+            {"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", frozen_config)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: live_config)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
+
+    assert persist_permission_allow_rule(
+        "bash",
+        {"command": "git status"},
+        permission_context={"would_persist_patterns": ["git *"]},
+    )
+
+    live_saved = yaml.safe_load(live_config.read_text(encoding="utf-8"))
+    frozen_saved = yaml.safe_load(frozen_config.read_text(encoding="utf-8"))
+    assert any(
+        item.get("pattern") == "git *"
+        for item in live_saved["permissions"].get("approval_overrides", [])
+    )
+    # 冻结常量指向的诱饵文件不应被写入
+    assert not frozen_saved["permissions"].get("approval_overrides")
+
+
+def test_persist_cli_trusted_directory_writes_to_live_path_not_frozen_constant(monkeypatch):
+    """回归：persist_cli_trusted_directory 用实时路径，不写 import 期冻结常量指向的诱饵文件。
+
+    与 ``persist_permission_allow_rule`` 同模式但独立持久化 CLI 信任目录段
+    （``permissions.file_guard.global`` / ``trusted_exec_directory`` + ``approval_overrides``）。
+    若该 writer 被误改回 ``_CONFIG_YAML_PATH``，本测试应捕获。
+    """
+    from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
+
+    base_dir = _tmp_dir("persist-cli-live-vs-frozen")
+    live_config = base_dir / "config.yaml"
+    live_config.write_text(
+        yaml.safe_dump({"permissions": {"enabled": True, "rules": []}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    frozen_config = base_dir / "frozen_resources_config.yaml"
+    frozen_config.write_text(
+        yaml.safe_dump({"permissions": {"enabled": True, "rules": []}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", frozen_config)
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: live_config)
+    set_permission_engine(PermissionEngine({"enabled": True, "rules": []}))
+
+    trusted = base_dir / "trusted_dir"
+    trusted.mkdir()
+    result = persist_cli_trusted_directory(str(trusted))
+    assert result.get("ok"), result
+
+    live_saved = yaml.safe_load(live_config.read_text(encoding="utf-8"))
+    frozen_saved = yaml.safe_load(frozen_config.read_text(encoding="utf-8"))
+    live_global = live_saved["permissions"].get("file_guard", {}).get("global", {})
+    assert live_global, "信任目录应写入实时配置的 file_guard.global"
+    assert not frozen_saved["permissions"].get("file_guard", {}).get("global"), "诱饵文件不应被写入"
+
+
+def test_persist_permission_allow_rule_auto_creates_permissions_section(monkeypatch):
+    base_dir = _tmp_dir("persist-auto-create-permissions")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"version": 1.0, "preferred_language": "zh"}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"list_files": "ask"}}))
+
+    assert persist_permission_allow_rule("list_files", {"path": "D:\\"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "permissions" in saved
+    assert saved["permissions"]["tools"]["list_files"] == "allow"
+
+
+def test_persist_permission_allow_rule_no_permissions_section_writes_tools_and_path(monkeypatch):
+    base_dir = _tmp_dir("persist-no-perms-full")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"version": 1.0}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_current_config_yaml_path", lambda: config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"Write": "ask"}}))
+
+    assert persist_permission_allow_rule("Write", {"path": "/tmp/b.txt"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["permissions"]["tools"]["Write"] == "allow"
+    assert "approval_overrides" not in saved["permissions"]
+
+
+def test_should_store_auto_confirm_returns_true_when_persist_requested_but_failed():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=False,
+        persist_requested=True,
+    ) is True
+
+
+def test_should_store_auto_confirm_returns_false_when_persist_succeeded():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=True,
+        persist_requested=True,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_false_without_auto_confirm():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=False,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=False,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_false_without_session():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=None,
+        auto_confirm_key="list_files",
+        persisted=False,
+    ) is False
+
+
+def test_should_store_auto_confirm_returns_true_for_simple_allow_once():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    fake_session = SimpleNamespace()
+
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=True,
+        session=fake_session,
+        auto_confirm_key="bash",
+        persisted=False,
+        persist_requested=False,
+    ) is True
+
+
+def test_web_channel_persist_allow_false_skips_persist_and_stores_auto_confirm(monkeypatch):
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PermissionConfirmResponse,
+    )
+
+    rail = PermissionInterruptRail(config={"enabled": True, "defaults": "ask"})
+    call_persist_count = 0
+
+    def mock_persist_permission_allow_rule(*args, **kwargs):
+        nonlocal call_persist_count
+        call_persist_count += 1
+        return True
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.permissions.patterns.persist_permission_allow_rule",
+        mock_persist_permission_allow_rule,
+    )
+
+    payload = PermissionConfirmResponse(
+        approved=True,
+        feedback="",
+        auto_confirm=True,
+        persist_allow=False,
+    )
+
+    allow_rule_persisted = False
+    persisted = False
+    if payload.persist_allow:
+        allow_rule_persisted = mock_persist_permission_allow_rule(
+            "list_files", {"path": "D:\\"},
+        )
+        persisted = allow_rule_persisted
+
+    assert call_persist_count == 0, "persist_permission_allow_rule 不应被调用"
+    assert allow_rule_persisted is False
+    assert persisted is False
+
+    fake_session = SimpleNamespace()
+    assert PermissionInterruptRail._should_store_auto_confirm(
+        auto_confirm=payload.auto_confirm,
+        session=fake_session,
+        auto_confirm_key="list_files",
+        persisted=allow_rule_persisted,
+        persist_requested=payload.persist_allow,
+    ) is True

@@ -29,8 +29,16 @@ _BUILTIN_PROVIDERS = {"openjiuwen", "mem0", "openviking"}
 def build_external_memory_rail(
     config: Optional[Dict[str, Any]] = None,
     workspace_dir: str = ".",
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
 ) -> Optional[Any]:
-    """Build an ExternalMemoryRail from config, or None if disabled/failed."""
+    """Build an ExternalMemoryRail from config, or None if disabled/failed.
+
+    ``workspace_dir`` is retained for call-site compatibility; openjiuwen store
+    paths use tip/config (P0) or tenant default under the agent workspace.
+    """
+    del workspace_dir  # openjiuwen paths resolve via tip/config/tenant helpers
     try:
         from openjiuwen.harness.rails.external_memory_rail import ExternalMemoryRail
     except Exception as exc:
@@ -45,7 +53,12 @@ def build_external_memory_rail(
     provider = None
     try:
         if provider_name == "openjiuwen":
-            provider = _build_openjiuwen_provider(ext_cfg, config)
+            provider = _build_openjiuwen_provider(
+                ext_cfg,
+                config,
+                service_id=service_id,
+                agent_id=agent_id,
+            )
         elif provider_name == "mem0":
             provider = _build_mem0_provider(ext_cfg)
         elif provider_name == "openviking":
@@ -69,8 +82,10 @@ def build_external_memory_rail(
             scope_id=ext_cfg.get("scope_id", "__default__"),
         )
         logger.info(
-            "[ExternalMemoryBuilder] ExternalMemoryRail built (provider=%s)",
+            "[ExternalMemoryBuilder] ExternalMemoryRail built (provider=%s sid=%s aid=%s)",
             provider_name,
+            service_id,
+            agent_id,
         )
         return rail
     except Exception as exc:
@@ -78,11 +93,22 @@ def build_external_memory_rail(
         return None
 
 
-def _build_openjiuwen_provider(ext_cfg: Dict[str, Any], full_config: Optional[Dict[str, Any]] = None):
+def _build_openjiuwen_provider(
+    ext_cfg: Dict[str, Any],
+    full_config: Optional[Dict[str, Any]] = None,
+    *,
+    service_id: str | None = None,
+    agent_id: str | None = None,
+):
     from openjiuwen.core.memory.external.openjiuwen_memory_provider import (
         OpenJiuwenMemoryProvider,
     )
-    provider_config, scope_config = build_openjiuwen_provider_config(ext_cfg, full_config)
+    provider_config, scope_config = build_openjiuwen_provider_config(
+        ext_cfg,
+        full_config,
+        service_id=service_id,
+        agent_id=agent_id,
+    )
     return OpenJiuwenMemoryProvider(config=provider_config, scope_config=scope_config)
 
 

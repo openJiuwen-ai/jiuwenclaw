@@ -14,7 +14,9 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
     normalize_headings,
     postprocess_html,
     preprocess_markdown_text_for_docx,
+    protect_math_spans,
     read_text_with_fallback,
+    restore_math_spans,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.word_utils import (
     html_to_doc,
@@ -69,11 +71,13 @@ def convert_md_to_docx(
         content = read_text_with_fallback(md_file)
         content = preprocess_markdown_text_for_docx(content)
         content = normalize_headings(content)
+        content, math_spans = protect_math_spans(content)
         html_body = markdown.markdown(
             content,
             extensions=["extra", "toc", "md_in_html"],
             output_format="html5",
         )
+        html_body = restore_math_spans(html_body, math_spans)
         html_text = DOCX_HTML_TEMPLATE.format(content=postprocess_html(html_body))
         temp_html.write_text(html_text, encoding="utf-8", newline="\n")
 

@@ -5,6 +5,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -21,7 +22,7 @@ from jiuwenclaw.agentserver.gateway_push import (
     GatewayPushTransport,
     WebSocketGatewayPushTransport,
 )
-from jiuwenclaw.utils import get_user_workspace_dir
+from jiuwenclaw.utils import resolve_tenant_agent_root_dir
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,13 @@ class CronToolRoute:
     channel_id: str = CronTargetChannel.WEB.value
     session_id: str | None = None
     chat_type: str | None = None  # "group" 表示群聊, "p2p" 或 None 表示私聊
+    service_id: str = "default"
+    agent_id: str = "default"
+
+
+def resolve_cron_jobs_path(service_id: str, agent_id: str) -> Path:
+    """Per-tenant cron_jobs.json under ``service_{sid}/agent_{aid}/agent/home/``."""
+    return resolve_tenant_agent_root_dir(service_id, agent_id) / "home" / "cron_jobs.json"
 
 
 class CronTools:
@@ -46,80 +54,140 @@ class CronTools:
 
     路由用 ContextVar 按 Task 隔离（与 interface 中 ``push_cron_route`` / ``reset_cron_route`` 配对）；
     同进程一套 LocalFunction，并发安全依赖当前 asyncio 任务的上下文而非单例可变字段。
-    
-    包含内置调度器，即使 Gateway 未启动也能执行定时任务。
+
+    含内置调度器：relay-claw / 仅 AgentServer 时由本进程调度；若 Gateway 在线也会 push 同步。
     """
 
     def __init__(
         self,
         gateway_push: GatewayPushTransport | None = None,
         *,
+        service_id: str = "default",
+        agent_id: str = "default",
         agent_client: Any | None = None,
         message_handler: Any | None = None,
     ) -> None:
+        self._service_id = str(service_id or "default").strip() or "default"
+        self._agent_id = str(agent_id or "default").strip() or "default"
         self._gateway_push: GatewayPushTransport = gateway_push or WebSocketGatewayPushTransport()
         self._local_store = CronJobStore(
-            path=get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
+            path=resolve_cron_jobs_path(self._service_id, self._agent_id)
         )
         # 内置调度器，用于在 Agent-side 执行定时任务
         self._scheduler: CronSchedulerService | None = None
         self._agent_client = agent_client
         self._message_handler = message_handler
         self._scheduler_started = False
+        # Set by stop_scheduler (tenant eviction); this instance must never start again.
+        self._retired = False
 
     async def ensure_scheduler(self) -> CronSchedulerService | None:
-        """Ensure the scheduler is started."""
+        """Ensure the Agent-side scheduler is started (needed for relay / AgentServer-only)."""
+        if self._retired:
+            return None
+
         if self._scheduler is not None and self._scheduler.is_running():
             return self._scheduler
-        
+
         if self._scheduler_started:
-            # Already tried to start but failed or stopped
             return self._scheduler
-        
-        # Try to create and start scheduler
+
+        from jiuwenclaw.agentserver.cron_local_runtime import (
+            AgentCronRegistry,
+            resolve_agent_side_cron_deps,
+        )
+
+        # Fast path after AgentCronRegistry.remove (or never registered standalone).
+        if not AgentCronRegistry.is_current(self._service_id, self._agent_id, self):
+            return None
+
         try:
-            # Lazy import to avoid circular dependency
-            from jiuwenclaw.gateway.agent_client import AgentServerClient
-            
-            agent_client = self._agent_client
-            message_handler = self._message_handler
-            
-            # If not provided, try to get from singletons
-            if agent_client is None:
-                try:
-                    agent_client = AgentServerClient.get_instance()
-                except RuntimeError:
-                    agent_client = None
-            
-            if message_handler is None:
-                try:
-                    from jiuwenclaw.gateway.message_handler import MessageHandler
-                    message_handler = MessageHandler.get_instance()
-                except RuntimeError:
-                    message_handler = None
-            
-            if agent_client is None:
-                logger.warning("[CronTools] Cannot start scheduler: AgentServerClient not available")
-                self._scheduler_started = True  # Mark as tried
-                return None
-            
+            agent_client, message_handler = resolve_agent_side_cron_deps(
+                agent_client=self._agent_client,
+                message_handler=self._message_handler,
+            )
             self._scheduler = CronSchedulerService(
                 store=self._local_store,
                 agent_client=agent_client,
                 message_handler=message_handler,
+                service_id=self._service_id,
+                agent_id=self._agent_id,
             )
             await self._scheduler.start()
-            logger.info("[CronTools] Scheduler started successfully")
+
+            # Race: remove/stop may have run during await start().
+            if self._retired or not AgentCronRegistry.is_current(
+                self._service_id, self._agent_id, self
+            ):
+                await self._discard_scheduler_after_stale_start()
+                return None
+
+            logger.info(
+                "[CronTools] Scheduler started service_id=%s agent_id=%s path=%s",
+                self._service_id,
+                self._agent_id,
+                self._local_store.path,
+            )
             self._scheduler_started = True
+            # Do not AgentCronRegistry.register here: get_or_create owns the map;
+            # re-register after remove would resurrect an evicted tenant.
             return self._scheduler
-            
         except Exception as exc:
-            logger.warning("[CronTools] Failed to start scheduler: %s", exc)
-            self._scheduler_started = True  # Mark as tried
+            logger.warning(
+                "[CronTools] Failed to start scheduler service_id=%s agent_id=%s "
+                "path=%s (will retry on next ensure_scheduler): %s",
+                self._service_id,
+                self._agent_id,
+                self._local_store.path,
+                exc,
+                exc_info=True,
+            )
+            await self._discard_scheduler_after_stale_start()
             return None
 
+    async def _discard_scheduler_after_stale_start(self) -> None:
+        """Stop and clear a scheduler that must not remain (eviction or failed start)."""
+        scheduler = self._scheduler
+        self._scheduler = None
+        self._scheduler_started = False
+        if scheduler is None:
+            return
+        try:
+            await scheduler.stop()
+        except Exception as exc:
+            logger.warning(
+                "[CronTools] Failed to discard stale scheduler "
+                "service_id=%s agent_id=%s: %s",
+                self._service_id,
+                self._agent_id,
+                exc,
+            )
+
+    async def stop_scheduler(self) -> None:
+        """Stop the Agent-side scheduler if running (tenant eviction / shutdown)."""
+        self._retired = True
+        scheduler = self._scheduler
+        self._scheduler = None
+        self._scheduler_started = False
+        if scheduler is None:
+            return
+        try:
+            await scheduler.stop()
+            logger.info(
+                "[CronTools] Scheduler stopped service_id=%s agent_id=%s",
+                self._service_id,
+                self._agent_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[CronTools] Failed to stop scheduler service_id=%s agent_id=%s: %s",
+                self._service_id,
+                self._agent_id,
+                exc,
+            )
+
     async def _reload_scheduler(self) -> None:
-        """Reload scheduler if it's running."""
+        """Reload scheduler if it's running (or start it on first mutation)."""
         scheduler = await self.ensure_scheduler()
         if scheduler is not None:
             try:
@@ -154,6 +222,9 @@ class CronTools:
             "body": {
                 "action": action,
                 "status": "ok",
+                # Tenant scope follows CronTools instance (per-tenant backend), not route defaults.
+                "service_id": self._service_id,
+                "agent_id": self._agent_id,
                 "data": dict(params or {}),
                 "message": "",
             },
@@ -273,6 +344,10 @@ class CronTools:
             enabled=bool(normalized.get("enabled", True)),
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
             delete_after_run=normalized.get("delete_after_run"),
+            # Instance tenant wins: CronToolRoute defaults to "default", so
+            # ``route.service_id or self._service_id`` would never fall back.
+            service_id=self._service_id,
+            agent_id=self._agent_id,
             **session_kw,
         )
         try:

@@ -59,8 +59,8 @@ def update_extensions_in_config(
         extension_configs: 扩展配置字符串。
         extension_security_configs: 敏感配置明文，落盘前会加密。
     """
-    from jiuwenclaw.config import _CONFIG_YAML_PATH, _dump_yaml_round_trip, _load_yaml_round_trip
-    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    from jiuwenclaw.config import _current_config_yaml_path, _dump_yaml_round_trip, _load_yaml_round_trip
+    data = _load_yaml_round_trip(_current_config_yaml_path())
     if "extensions" not in data or not isinstance(data["extensions"], dict):
         data["extensions"] = {}
     ext = data["extensions"]
@@ -74,5 +74,5 @@ def update_extensions_in_config(
             raise RuntimeError("没有找到加解密算法，无法加密敏感配置")
         ext["extension_security_configs"] = crypto.encrypt(extension_security_configs)
 
-    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
 

@@ -27,11 +27,11 @@ from jiuwenclaw.e2a.constants import (
     FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH,
 )
 from jiuwenclaw.utils import (
-    get_service_root_dir,
     TransferProgress,
     safe_filename,
     guess_mime_type,
     FileTransferStartParams,
+    resolve_file_transfer_received_dir,
 )
 
 
@@ -49,12 +49,15 @@ class FileTransferHandler:
         self._config = config or get_file_transfer_config()
         self._downloads: dict[str, TransferProgress] = {}
         self._lock = asyncio.Lock()
-        # 接收文件存储目录（service 级别，多 agent 共享）
-        self._received_dir = get_service_root_dir() / self._config.received_files_dir
-        self._received_dir.mkdir(parents=True, exist_ok=True)
-        # 后台清理任务
+        # 接收目录按次传输的 service_id 懒解析（见 _resolve_received_dir）
         self._cleanup_task: asyncio.Task | None = None
         self._running = False
+
+    def _resolve_received_dir(self, service_id: str | None = None) -> Path:
+        return resolve_file_transfer_received_dir(
+            self._config.received_files_dir,
+            service_id,
+        )
 
     async def start_cleanup_task(self) -> None:
         """启动后台清理任务."""
@@ -281,6 +284,7 @@ class FileTransferHandler:
                 mime_type=params.mime_type,
                 session_id=params.session_id,
                 channel_id=params.channel_id,
+                service_id=params.service_id or "",
             )
 
             logger.info(
@@ -441,14 +445,15 @@ class FileTransferHandler:
                     "actual": actual_sha256,
                 }
 
-            # 生成存储路径
+            # 生成存储路径（按 service_id 隔离；同 service 下多 agent 共享）
             safe_name = safe_filename(progress.filename)
+            received_dir = self._resolve_received_dir(progress.service_id)
             if progress.session_id:
-                session_dir = self._received_dir / progress.session_id
+                session_dir = received_dir / progress.session_id
                 session_dir.mkdir(parents=True, exist_ok=True)
                 file_path = session_dir / safe_name
             else:
-                file_path = self._received_dir / f"{transfer_id}_{safe_name}"
+                file_path = received_dir / f"{transfer_id}_{safe_name}"
 
             # 写入文件
             try:

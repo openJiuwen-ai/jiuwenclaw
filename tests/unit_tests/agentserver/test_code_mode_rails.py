@@ -1,0 +1,609 @@
+"""Focused tests for migrated Code-mode plan rails."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from openjiuwen.harness.prompts import SystemPromptBuilder
+
+from jiuwenclaw.agentserver.deep_agent.rails.code.code_agent_mode_rail import (
+    CodeAgentModeRail,
+)
+from jiuwenclaw.agentserver.deep_agent.rails.code.code_confirm_interrupt_rail import (
+    CodeConfirmInterruptRail,
+    build_confirm_interrupt_message,
+)
+from jiuwenclaw.agentserver.deep_agent.rails.code.code_plan_approval_interrupt_rail import (
+    PlanApprovalInterruptRail,
+    build_plan_approval_options_from_message,
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "expected_fragments"),
+    [
+        (
+            "cn",
+            (
+                'switch_mode(mode="plan")',
+                "enter_plan_mode()",
+                "exit_plan_mode()",
+                'switch_mode(mode="auto")',
+                "如果退出被拒绝",
+            ),
+        ),
+        (
+            "en",
+            (
+                'switch_mode(mode="plan")',
+                "enter_plan_mode()",
+                "exit_plan_mode()",
+                'switch_mode(mode="auto")',
+                "If exit is rejected",
+            ),
+        ),
+    ],
+)
+async def test_code_mode_prompt_requires_explicit_switches_around_plan(
+    language: str,
+    expected_fragments: tuple[str, ...],
+) -> None:
+    rail = CodeAgentModeRail()
+    builder = SystemPromptBuilder(language=language)
+    agent = SimpleNamespace(system_prompt_builder=builder)
+    rail.system_prompt_builder = builder
+    rail._agent = MagicMock()
+    ctx = SimpleNamespace(
+        agent=agent,
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(tools=[]),
+        extra={},
+    )
+
+    with (
+        patch.object(rail, "_apply_requested_mode"),
+        patch.object(
+            CodeAgentModeRail.__bases__[0], "before_model_call", AsyncMock()
+        ),
+    ):
+        await rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    positions = [prompt.index(fragment) for fragment in expected_fragments[:4]]
+    assert positions == sorted(positions)
+    assert expected_fragments[4] in prompt
+
+
+def test_code_mode_prompt_is_removed_when_rail_is_unregistered() -> None:
+    rail = CodeAgentModeRail()
+    builder = MagicMock()
+    agent = SimpleNamespace(system_prompt_builder=builder)
+    rail.system_prompt_builder = builder
+
+    with patch.object(CodeAgentModeRail.__bases__[0], "uninit") as parent_uninit:
+        rail.uninit(agent)
+
+    builder.remove_section.assert_called_once_with("code_mode_workflow")
+    parent_uninit.assert_called_once_with(agent)
+
+
+@pytest.mark.asyncio
+async def test_code_submode_syncs_session_plan_state_once_per_request() -> None:
+    rail = CodeAgentModeRail()
+    state = SimpleNamespace(plan_mode=SimpleNamespace(mode="auto"))
+    session = SimpleNamespace(get_session_id=lambda: "code-session")
+    agent = MagicMock()
+    agent.load_state.return_value = state
+
+    def switch_mode(_session, mode: str) -> None:
+        state.plan_mode.mode = mode
+
+    agent.switch_mode.side_effect = switch_mode
+    rail._agent = agent
+    parent = AsyncMock()
+    ctx = SimpleNamespace(
+        session=session,
+        inputs=SimpleNamespace(tools=[]),
+        extra={},
+    )
+
+    rail.set_requested_mode("code.plan", session_id="code-session")
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_model_call", parent):
+        await rail.before_model_call(ctx)
+        await rail.before_model_call(ctx)
+
+    assert state.plan_mode.mode == "plan"
+    agent.switch_mode.assert_called_once_with(session, "plan")
+
+    rail.set_requested_mode("code.normal", session_id="code-session")
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_model_call", parent):
+        await rail.before_model_call(ctx)
+
+    assert state.plan_mode.mode == "auto"
+    assert agent.switch_mode.call_args.args == (session, "auto")
+
+
+@pytest.mark.asyncio
+async def test_dynamic_plan_switch_survives_interrupt_resume_session() -> None:
+    rail = CodeAgentModeRail()
+    original_session = SimpleNamespace(
+        get_session_id=lambda: "code-session",
+        state=SimpleNamespace(plan_mode=SimpleNamespace(mode="auto")),
+    )
+    resumed_session = SimpleNamespace(
+        get_session_id=lambda: "code-session",
+        state=SimpleNamespace(plan_mode=SimpleNamespace(mode="auto")),
+    )
+    agent = MagicMock()
+    agent.load_state.side_effect = lambda session: session.state
+
+    def switch_mode(session, mode: str) -> None:
+        session.state.plan_mode.mode = mode
+
+    agent.switch_mode.side_effect = switch_mode
+    rail._agent = agent
+    rail.set_requested_mode("code.normal", session_id="code-session")
+    model_ctx = SimpleNamespace(
+        session=original_session,
+        inputs=SimpleNamespace(tools=[]),
+        extra={},
+    )
+    with patch.object(
+        CodeAgentModeRail.__bases__[0], "before_model_call", AsyncMock()
+    ):
+        await rail.before_model_call(model_ctx)
+
+    original_session.state.plan_mode.mode = "plan"
+    switch_ctx = SimpleNamespace(
+        session=original_session,
+        inputs=SimpleNamespace(
+            tool_name="switch_mode",
+            tool_result="switched to plan",
+        ),
+        extra={},
+    )
+    with patch.object(
+        CodeAgentModeRail.__bases__[0], "after_tool_call", AsyncMock()
+    ):
+        await rail.after_tool_call(switch_ctx)
+
+    resumed_ctx = SimpleNamespace(
+        session=resumed_session,
+        inputs=SimpleNamespace(
+            tool_name="exit_plan_mode",
+            tool_call=SimpleNamespace(id="call-exit", arguments="{}"),
+            tool_args={},
+        ),
+        extra={},
+    )
+    with patch.object(
+        CodeAgentModeRail.__bases__[0], "before_tool_call", AsyncMock()
+    ):
+        await rail.before_tool_call(resumed_ctx)
+
+    assert resumed_session.state.plan_mode.mode == "plan"
+    assert "_skip_tool" not in resumed_ctx.extra
+    assert agent.switch_mode.call_args.args == (resumed_session, "plan")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_mode", ["normal", "auto"])
+async def test_code_mode_blocks_switch_mode_exit_in_plan(target_mode: str) -> None:
+    rail = CodeAgentModeRail(allowed_tools=["switch_mode"])
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan", plan_slug="test-plan")
+    )
+    rail._agent = agent
+    parent = AsyncMock()
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        ctx = SimpleNamespace(
+            session=SimpleNamespace(),
+            inputs=SimpleNamespace(
+                tool_name="switch_mode",
+                tool_call=SimpleNamespace(
+                    id="call_1",
+                    arguments=f'{{"mode": "{target_mode}"}}',
+                ),
+                tool_args={"mode": target_mode},
+            ),
+            extra={},
+        )
+        await rail.before_tool_call(ctx)
+
+    parent.assert_not_awaited()
+    assert ctx.extra["_skip_tool"] is True
+
+
+@pytest.mark.asyncio
+async def test_code_mode_blocks_bash_writes_but_allows_reads() -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail._agent = agent
+    parent = AsyncMock()
+
+    blocked_ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="bash",
+            tool_call=SimpleNamespace(
+                id="call-write", arguments='{"command":"mkdir x"}'
+            ),
+            tool_args={"command": "mkdir x"},
+        ),
+        extra={},
+    )
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        await rail.before_tool_call(blocked_ctx)
+    assert blocked_ctx.extra["_skip_tool"] is True
+
+    read_ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="bash",
+            tool_call=SimpleNamespace(id="call-read", arguments='{"command":"ls"}'),
+            tool_args={"command": "ls"},
+        ),
+        extra={},
+    )
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        await rail.before_tool_call(read_ctx)
+    assert "_skip_tool" not in read_ctx.extra
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i 's/old/new/' file.py",
+        "python -c \"open('file.py', 'w').write('x')\"",
+        "perl -e 'print 1'",
+        "ruby -e 'puts 1'",
+        "find . -name '*.tmp' -delete",
+        "install source destination",
+        "truncate -s 0 file.py",
+    ],
+)
+async def test_code_mode_blocks_common_bash_write_commands(command: str) -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail._agent = agent
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="bash",
+            tool_call=SimpleNamespace(
+                id="call-write",
+                arguments=json.dumps({"command": command}),
+            ),
+            tool_args={"command": command},
+        ),
+        extra={},
+    )
+    parent = AsyncMock()
+    with patch.object(CodeAgentModeRail.__bases__[0], "before_tool_call", parent):
+        await rail.before_tool_call(ctx)
+
+    assert ctx.extra["_skip_tool"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["write_file", "edit_file"])
+async def test_plan_mode_rejects_writes_outside_plan_file(
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    agent.get_plan_file_path.return_value = tmp_path / "plan.md"
+    rail._agent = agent
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name=tool_name,
+            tool_call=SimpleNamespace(
+                id="call-file",
+                arguments='{"path":"src/main.py","content":"x"}',
+            ),
+            tool_args={"path": "src/main.py", "content": "x"},
+        ),
+        extra={},
+    )
+
+    await rail.before_tool_call(ctx)
+
+    assert ctx.extra["_skip_tool"] is True
+
+
+@pytest.mark.asyncio
+async def test_code_confirm_rejects_switch_mode_exit_in_plan() -> None:
+    rail = CodeConfirmInterruptRail(tool_names=["switch_mode"])
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan", plan_slug="test-plan")
+    )
+    agent.system_prompt_builder = SimpleNamespace(language="cn")
+    tool_call = SimpleNamespace(
+        name="switch_mode",
+        arguments='{"mode": "normal"}',
+    )
+
+    decision = await rail.resolve_interrupt(
+        SimpleNamespace(agent=agent, session=SimpleNamespace()),
+        tool_call,
+        user_input={"approved": True},
+    )
+
+    assert "switch_mode" in str(decision.tool_result)
+
+
+def test_code_confirm_message_contains_mode_and_argument_preview() -> None:
+    message = build_confirm_interrupt_message(
+        "write_file",
+        {"path": "src/main.py", "content": "finish plan"},
+    )
+
+    assert "write_file" in message
+    assert "src/main.py" in message
+    assert "finish plan" in message
+
+
+def test_plan_approval_options_are_structured() -> None:
+    options = build_plan_approval_options_from_message(
+        "**计划审批**\n\nAgent 已完成计划制定，等待你审批：\n\nplan"
+    )
+
+    assert [option["value"] for option in options] == ["approve", "reject"]
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_shows_plan_and_reject_stays_in_plan() -> None:
+    with TemporaryDirectory() as temp_dir:
+        plan_path = Path(temp_dir) / "plan.md"
+        plan_path.write_text("write the implementation", encoding="utf-8")
+        rail = PlanApprovalInterruptRail()
+        agent = MagicMock()
+        agent.system_prompt_builder = SimpleNamespace(language="en")
+        agent.load_state.return_value = SimpleNamespace(
+            plan_mode=SimpleNamespace(mode="plan")
+        )
+        agent.get_plan_file_path.return_value = plan_path
+        rail.init(agent)
+        ctx = SimpleNamespace(
+            agent=agent,
+            session=SimpleNamespace(),
+            extra={},
+        )
+        tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+        interrupt = await rail.resolve_interrupt(ctx, tool_call, None)
+        assert "write the implementation" in interrupt.request.message
+
+        decision = await rail.resolve_interrupt(
+            ctx,
+            tool_call,
+            {"approved": False, "feedback": "revise it"},
+        )
+        assert ctx.extra["_plan_rejected"] is True
+        assert "revise it" in str(decision.tool_result)
+
+        approved = await rail.resolve_interrupt(
+            SimpleNamespace(
+                agent=agent,
+                session=SimpleNamespace(),
+                extra={},
+            ),
+            tool_call,
+            {"approved": True},
+        )
+        assert approved.__class__.__name__ == "ApproveResult"
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_resume_does_not_revalidate_recovered_mode() -> None:
+    rail = PlanApprovalInterruptRail()
+    state = SimpleNamespace(plan_mode=SimpleNamespace(mode="plan"))
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = state
+    agent.get_plan_file_path.return_value = None
+    rail.init(agent)
+    ctx = SimpleNamespace(agent=agent, session=SimpleNamespace(), extra={})
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    interrupt = await rail.resolve_interrupt(ctx, tool_call, None)
+    assert interrupt.__class__.__name__ == "InterruptResult"
+
+    # chat.resume may recover a new/transient session state before the mode
+    # rail hydrates it.  The pending approval was already validated above.
+    state.plan_mode.mode = "auto"
+    approved = await rail.resolve_interrupt(
+        ctx,
+        tool_call,
+        {"approved": True},
+    )
+
+    assert approved.__class__.__name__ == "ApproveResult"
+    assert ctx.extra["_plan_approved"] is True
+
+
+def test_plan_preview_reads_only_bounded_content() -> None:
+    with TemporaryDirectory() as temp_dir:
+        plan_path = Path(temp_dir) / "plan.md"
+        plan_path.write_text("x" * 10_000, encoding="utf-8")
+        rail = PlanApprovalInterruptRail()
+        agent = MagicMock()
+        agent.get_plan_file_path.return_value = plan_path
+        rail.init(agent)
+
+        content = rail._read_plan_content(SimpleNamespace(session=SimpleNamespace()))
+
+        assert len(content) <= 3_001
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_rejects_exit_outside_plan_mode() -> None:
+    rail = PlanApprovalInterruptRail()
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="normal")
+    )
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    rail.init(agent)
+    ctx = SimpleNamespace(agent=agent, session=SimpleNamespace(), extra={})
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    decision = await rail.resolve_interrupt(ctx, tool_call, None)
+
+    assert "plan mode" in str(decision.tool_result)
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_reads_mode_from_initialized_deep_agent() -> None:
+    rail = PlanApprovalInterruptRail()
+    deep_agent = MagicMock()
+    deep_agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    deep_agent.system_prompt_builder = SimpleNamespace(language="en")
+    deep_agent.get_plan_file_path.return_value = None
+    callback_agent = MagicMock()
+    callback_agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="auto")
+    )
+    rail.init(deep_agent)
+    ctx = SimpleNamespace(
+        agent=callback_agent,
+        session=SimpleNamespace(),
+        extra={},
+    )
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    decision = await rail.resolve_interrupt(ctx, tool_call, None)
+
+    assert decision.__class__.__name__ == "InterruptResult"
+    deep_agent.load_state.assert_called_once_with(ctx.session)
+    callback_agent.load_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_invalid_payload_keeps_interrupt_pending() -> None:
+    rail = PlanApprovalInterruptRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail.init(agent)
+    ctx = SimpleNamespace(agent=agent, session=SimpleNamespace(), extra={})
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    decision = await rail.resolve_interrupt(ctx, tool_call, {"invalid": True})
+
+    assert decision.__class__.__name__ == "InterruptResult"
+    assert ctx.extra["_plan_rejected"] is True
+    assert ctx.extra["_plan_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_exception_marks_rejection(monkeypatch) -> None:
+    rail = PlanApprovalInterruptRail()
+    ctx = SimpleNamespace(extra={})
+
+    async def raise_timeout(*_args, **_kwargs):
+        raise TimeoutError("approval timed out")
+
+    monkeypatch.setattr(
+        PlanApprovalInterruptRail.__bases__[0],
+        "resolve_interrupt",
+        raise_timeout,
+    )
+
+    with pytest.raises(TimeoutError):
+        await rail.resolve_interrupt(ctx, None, {"approved": True})
+
+    assert ctx.extra["_plan_rejected"] is True
+    assert ctx.extra["_plan_approved"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_pending_or_rejected_never_restores_normal() -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail._agent = agent
+    ctx = SimpleNamespace(
+        agent=agent,
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="exit_plan_mode",
+            tool_result="rejected",
+        ),
+        extra={"_plan_rejected": True, "_plan_approved": False},
+    )
+
+    await rail.after_tool_call(ctx)
+
+    agent.restore_mode_after_plan_exit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_explicit_approve_allows_mode_restore() -> None:
+    rail = CodeAgentModeRail()
+    agent = MagicMock()
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    rail._agent = agent
+    ctx = SimpleNamespace(
+        agent=agent,
+        session=SimpleNamespace(),
+        inputs=SimpleNamespace(
+            tool_name="exit_plan_mode",
+            tool_result="empty plan",
+        ),
+        extra={"_plan_approved": True},
+    )
+
+    await rail.after_tool_call(ctx)
+
+    agent.restore_mode_after_plan_exit.assert_called_once_with(ctx.session)
+
+
+@pytest.mark.asyncio
+async def test_empty_plan_still_requires_explicit_approval() -> None:
+    rail = PlanApprovalInterruptRail()
+    agent = MagicMock()
+    agent.system_prompt_builder = SimpleNamespace(language="en")
+    agent.load_state.return_value = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="plan")
+    )
+    agent.get_plan_file_path.return_value = Path("missing-plan.md")
+    rail.init(agent)
+    ctx = SimpleNamespace(agent=agent, session=SimpleNamespace(), extra={})
+    tool_call = SimpleNamespace(name="exit_plan_mode", arguments="{}")
+
+    decision = await rail.resolve_interrupt(ctx, tool_call, None)
+
+    assert decision.__class__.__name__ == "InterruptResult"
+    assert "empty" in decision.request.message.lower()

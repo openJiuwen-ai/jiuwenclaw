@@ -7,8 +7,9 @@ import sys
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
+from jiuwenclaw.config import get_sandbox_runtime
 from jiuwenclaw.runtime.pip_env import get_runtime_python, get_runtime_venv_dir
-from jiuwenclaw.utils import logger, get_agent_root_dir
+from jiuwenclaw.utils import logger, resolve_tenant_agent_root_dir
 
 
 def _should_show_cron_tools() -> bool:
@@ -28,6 +29,51 @@ class PromptPriority(IntEnum):
     RESPONSE = 60
     WORKSPACE = 70
     TODO = 85
+    # final_visible_reply 放在 system 最末，强调约束工具/todo 结束后必须再发一轮完整纯文本 final；
+    # UI 主要展示「最后一轮无 tool_calls」的正文。
+    FINAL_VISIBLE_REPLY = 120
+
+
+def _final_visible_reply_prompt(language: str) -> PromptSection:
+    if language == "cn":
+        content = """## 最终可见回复（强制）
+
+**哪一条算「最终可见」**：用户界面主要展示的是你**最后一轮** assistant 回复——即不再附带任何 `tool_calls`、以纯文本结束的那一轮。中间轮次（含工具调用的轮次）在 UI 中可能被折叠、分到另一条气泡，**但不影响你在这些轮次正常输出思考与进展**。
+
+**轮次纪律（硬约束）**：
+- 所有工具执行完毕后，**必须**再发一轮纯文本最终回复，写入完整、可独立理解的结果。
+- 最终纯文本轮**不得**仅用「任务已完成」「以上已整理完毕」等收尾句代替正文；若前面某轮已写过说明，最终轮仍须**完整复述或等价概括**全部实质性结论，使用户只读这一条也能看懂。
+
+**内容要求**（写在最后一轮纯文本中）：
+- 复述或概括用户需要的每一项实质性结果：重要命令输出、检查过的文件路径、变更的文件、发现、结论、错误、未解决风险，以及相关的后续步骤。
+- 若用户要求你运行命令、检查数据、审查代码、比较方案、诊断故障或解释某事，须在最终回复中传达重要细节或概括关键行，使用户无需依赖折叠的工具输出也能理解结果。
+- 若用户提出多部分问题，确保每一部分都有回答，或明确标注为未解决。
+- 若创建或修改了文件，写出具体文件路径及变更内容。
+- 若任务产出了可查看的交付物，仍须在回复中简要说明交付物包含什么或得出什么结论。
+- 勿让回复超过 50–70 行而淹没用户；提供最高信号密度的上下文，而非穷举一切细节。
+"""
+    else:
+        content = """## Final visible reply (mandatory)
+
+**What counts as "final visible"**: The UI mainly shows your **last** assistant turn—the one that ends as plain text with **no** `tool_calls`. Earlier turns (including any that invoke tools) may be collapsed or split into a separate bubble, **but you should still write thinking and progress normally in those turns**.
+
+**Turn discipline (hard rules)**:
+- After all tools finish, you **must** send one more plain-text final turn with the full, self-contained result.
+- The final plain-text turn **must not** be only a closing line such as "All tasks completed" or "Summarized above." If you already wrote the answer in an earlier turn, the final turn must still **fully restate or equivalently summarize** every substantive conclusion so the user understands by reading that turn alone.
+
+**Content requirements** (in the last plain-text turn):
+- Restate or summarize every substantive result the user needs: important command output, inspected file paths, changed files, findings, conclusions, errors, unresolved risks, and next steps when they matter.
+- If the user asked you to run a command, inspect data, review code, compare options, diagnose a failure, or explain something, relay the important details or summarize the key lines in the final reply so the user understands the result without relying on collapsed tool output.
+- If the user asked a multi-part question, make sure each part is answered or explicitly marked as unresolved.
+- If files were created or modified, name the concrete files and what changed.
+- If a task produced a viewable deliverable and present_files was used, still include a concise textual summary of what the deliverable contains or concludes.
+- Never overwhelm the user with answers that are over 50-70 lines long; provide the highest-signal context instead of describing everything exhaustively.
+"""
+    return PromptSection(
+        name="final_visible_reply",
+        content={language: content},
+        priority=PromptPriority.FINAL_VISIBLE_REPLY,
+    )
 
 
 def _response_prompt(language: str) -> PromptSection:
@@ -147,6 +193,36 @@ def _pip_isolation_prompt_section(language: str) -> PromptSection:
 def _runtime_environment_prompt(language: str) -> str:
     """OS / shell command hints shared by main agent identity and subagent / fork / spawn base prompts."""
     os_type = sys.platform
+    # 沙箱权限提示词仅在 sandbox.enabled=True 时注入; 关闭沙箱时命令可自由访问全盘.
+    sandbox_enabled = bool(get_sandbox_runtime().get("enabled"))
+    sandbox_perm_cn = ""
+    sandbox_perm_en = ""
+    if sandbox_enabled:
+        sandbox_perm_cn = (
+            "\n\n## 命令执行环境与权限\n\n"
+            "- 你的命令在一个**受限沙箱**中执行，只能读写你自己的工作区目录，工作区之外的路径"
+            "（例如 `C:\\\\` 系统盘、其他用户目录、桌面）很可能**没有访问权限**。\n"
+            "- 一旦命令返回**权限拒绝**类错误（如 `拒绝访问` / `PermissionError` / `WinError 5` / "
+            "`Access is denied`），**立即停止**对该路径的进一步尝试。"
+            "**不要**换一种命令（改 `dir`/`powershell`/`wsl`/换路径写法）反复重试同一目标——"
+            "权限是按路径授予的，换命令语法不会改变结果，只会浪费轮次。\n"
+            "- 正确做法：将该路径视为不可达，向用户说明权限受限并给出替代方案"
+            "（例如请用户把文件放进工作区，或在工作区内完成等效任务）。\n"
+        )
+        sandbox_perm_en = (
+            "\n\n## Command Execution Environment and Permissions\n\n"
+            "- Your commands run inside a **restricted sandbox**. You can read/write your own "
+            "workspace directory, but paths outside it (e.g. `C:\\\\` system drive, other user "
+            "directories, the Desktop) very likely have **no access**.\n"
+            "- As soon as a command returns a **permission-denied** error "
+            "(`PermissionError` / `WinError 5` / `Access is denied`), **stop immediately**. "
+            "Do NOT retry the same target with a different command (switching "
+            "`dir`/`powershell`/`wsl`/path syntax) — permissions are granted per-path, so "
+            "changing command syntax will not change the result; it only wastes turns.\n"
+            "- Correct action: treat that path as unreachable, tell the user about the "
+            "restriction, and offer an alternative (e.g. ask the user to place the file in "
+            "the workspace, or complete the equivalent task within the workspace).\n"
+        )
     if language == "cn":
         return f"""## 运行环境
 
@@ -165,7 +241,7 @@ def _runtime_environment_prompt(language: str) -> str:
 | 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。
+**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。{sandbox_perm_cn}
 """
     return f"""## Runtime Environment
 
@@ -184,7 +260,7 @@ Common command differences:
 | Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | Find file | `dir /s pattern` or PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.
+**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.{sandbox_perm_en}
 """
 
 
@@ -261,7 +337,7 @@ def _subagent_principle_prompt(language: str) -> str:
 
 def _subagent_workspace_prompt(language: str, workspace_dir: Path | None = None) -> str:
     """Workspace prompt for subagent."""
-    ws = workspace_dir or Path(get_agent_root_dir())
+    ws = workspace_dir or resolve_tenant_agent_root_dir()
     if language == "cn" or language == "zh":
         return f"""## 工作区
 

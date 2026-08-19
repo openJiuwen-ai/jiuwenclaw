@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
 
@@ -31,10 +32,15 @@ from jiuwenclaw.agentserver.tools.subagent_models import (
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_subagent_base_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawContextEngineeringRail
+from jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail import (
+    RecentToolResultsRail,
+)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
-    get_agent_root_dir,
     logger,
+    resolve_tenant_agent_root_dir,
+    resolve_tenant_agent_workspace_dir,
+    resolve_tenant_env_ns_from_agent,
 )
 from jiuwenclaw.config import get_config
 
@@ -51,7 +57,10 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     ForkMessageInjectionRail,
     SubagentContextRail,
 )
+from jiuwenclaw.agentserver.thinking import adapt_thinking
+from jiuwenclaw.agentserver.thinking.rail import ThinkingInjectRail
 from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+from jiuwenclaw.perf.request_summary_rail import RequestSummaryRail
 from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent import (
     SubagentSkillUseRail,
 )
@@ -128,6 +137,10 @@ class ForkAgentExecutor:
         self._resolve_model = resolve_model
         self._default_role_prompts = default_role_prompts or {}
         self._active_fork_agents: dict[str, Any] = {}
+
+    def set_model(self, model: Model) -> None:
+        """Update default model for subagent execution (e.g. after config hot-reload)."""
+        self._model = model
 
     _FORWARDED_MODEL_EVENTS = {
         "chat.delta",
@@ -393,37 +406,72 @@ class ForkAgentExecutor:
             return self._model, None
         return self._resolve_model(model_name=model_name, model_tier=model_tier)
 
-    def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
-        """Resolve workspace for fork/spawn to match the main agent for the current request.
+    @staticmethod
+    def _build_thinking_inject_rail(
+        thinking: str,
+        model: Model | None,
+        *,
+        role_id: str = "",
+        agent_id: str = "",
+    ) -> ThinkingInjectRail:
+        """Freeze thinking kwargs once for the subagent lifetime."""
+        from jiuwenclaw.agentserver.thinking.types import kwargs_digest
 
-        Order: per-request (same as RuntimePromptRail) > parent DeepAgent workspace > agent root.
-        
-        Validates path existence before returning to prevent runtime errors.
+        profile = adapt_thinking(thinking, model)
+        logger.info(
+            "[Thinking] subagent_thinking_profile role_id=%s agent_id=%s "
+            "thinking=%s model=%r injected=%s degraded=%s reason=%s "
+            "vendor_style=%s digest=%s",
+            role_id or "",
+            agent_id or "",
+            profile.thinking,
+            profile.model_name,
+            profile.injected,
+            profile.degraded,
+            profile.reason,
+            profile.vendor_style,
+            kwargs_digest(profile.llm_call_kwargs),
+        )
+        return ThinkingInjectRail(
+            profile,
+            role_id=role_id or "",
+            agent_id=agent_id or "",
+        )
+
+    def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
+        """Resolve context root for fork/spawn subagent.
+
+        Context storage (session_memory, offload) goes to agent root,
+        not to the per-request effective_project_dir. This keeps the
+        relay-claw workspace directory free of jiuwenclaw internal files.
+
+        File operations still use cwd (effective_project_dir) inherited from parent.
+        """
+        tenant_ids = resolve_tenant_env_ns_from_agent(self._parent_agent)
+        if tenant_ids is not None:
+            root = str(resolve_tenant_agent_root_dir(*tenant_ids))
+            return (root, f"tenant({tenant_ids[0]},{tenant_ids[1]})")
+        root = str(resolve_tenant_agent_root_dir())
+        root_path = Path(root)
+        if root_path.exists() and root_path.is_dir():
+            return (root, "resolve_tenant_agent_root_dir()")
+        logger.warning(
+            "[Subagent] Agent root path does not exist or not a directory: '%s'",
+            root
+        )
+        return (root, "resolve_tenant_agent_root_dir()")
+
+    @staticmethod
+    def _resolve_subagent_working_dir() -> str:
+        """Resolve the working directory for prompt injection and file operations.
+
+        Subagent performs file operations via cwd (effective_project_dir),
+        while context storage goes to agent root via _resolve_subagent_workspace_dir.
         """
         req_ws = get_effective_request_workspace_dir()
         if isinstance(req_ws, str) and req_ws.strip():
-            ws_path = Path(req_ws.strip())
-            if ws_path.exists() and ws_path.is_dir():
-                return (req_ws.strip(), "effective_request_workspace_dir")
-            logger.warning(
-                "[Subagent] Request workspace path does not exist or not a directory: '%s'",
-                req_ws.strip()
-            )
-
-        parent_config = getattr(self._parent_agent, "deep_config", None)
-        if parent_config and hasattr(parent_config, "workspace"):
-            parent_ws = getattr(parent_config.workspace, "root_path", None)
-            if parent_ws:
-                root = str(parent_ws).strip()
-                ws_path = Path(root)
-                if ws_path.exists() and ws_path.is_dir():
-                    return (root, "parent_config.workspace.root_path")
-                logger.warning(
-                    "[Subagent] Parent workspace path does not exist or not a directory: '%s'",
-                    root
-                )
-
-        return (get_agent_root_dir(), "get_agent_root_dir()")
+            return req_ws.strip()
+        return str(resolve_tenant_agent_workspace_dir())
 
     def _resolve_subagent_max_iterations(self) -> int:
         """Use parent DeepAgent's max_iterations; then react.max_iterations; then default.
@@ -476,6 +524,7 @@ class ForkAgentExecutor:
                 language=language,
                 profile="subagent",
                 agent_id=task_id,
+                agent_card_id=task_id,
                 subagent_kind=kind,
             )
         except Exception as exc:
@@ -715,6 +764,20 @@ Approach each task methodically and deliver high-quality results.
             )
         finally:
             reset_current_fork_agent_executor(executor_token)
+            # 清理 create_deep_agent 自动注册的子代理 sysop，防止 resource_mgr 残留
+            # 受限 sysop（restrict_to_sandbox=True）污染后续 skill_turbo 的 sysop 解析。
+            sysop_id = f"fork_{task.role_id}_{task.task_id}"
+            try:
+                remove_result = Runner.resource_mgr.remove_sys_operation(sysop_id)
+                if hasattr(remove_result, "is_err") and remove_result.is_err():
+                    logger.warning(
+                        "[ForkAgent] remove sys_operation failed: %s",
+                        remove_result.msg(),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[ForkAgent] remove sys_operation raised: %s", exc,
+                )
 
     async def execute_spawn(
         self,
@@ -866,6 +929,21 @@ Approach each task methodically and deliver high-quality results.
             )
         finally:
             reset_current_fork_agent_executor(executor_token)
+            # 清理 create_deep_agent 自动注册的子代理 sysop，防止 resource_mgr 残留
+            # 受限 sysop（restrict_to_sandbox=True）污染后续 skill_turbo 的 sysop 解析。
+            # sysop id 格式见 factory.py: "{card.name}_{card.id}"。
+            sysop_id = f"spawn_{task.role_id}_{task.task_id}"
+            try:
+                remove_result = Runner.resource_mgr.remove_sys_operation(sysop_id)
+                if hasattr(remove_result, "is_err") and remove_result.is_err():
+                    logger.warning(
+                        "[SpawnAgent] remove sys_operation failed: %s",
+                        remove_result.msg(),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[SpawnAgent] remove sys_operation raised: %s", exc,
+                )
 
     async def _create_spawn_agent(
         self,
@@ -885,10 +963,12 @@ Approach each task methodically and deliver high-quality results.
             DeepAgent instance for spawn subagent
         """
         ws, ws_source = self._resolve_subagent_workspace_dir()
+        working_dir = self._resolve_subagent_working_dir()
         logger.debug(
-            "[SpawnAgent] workspace_dir=%s source=%s",
+            "[SpawnAgent] context_root=%s source=%s working_dir=%s",
             ws,
             ws_source,
+            working_dir,
         )
 
         config_base = get_config()
@@ -896,7 +976,7 @@ Approach each task methodically and deliver high-quality results.
 
         base_prompt = build_subagent_base_prompt(
             language=language,
-            workspace_dir=ws,
+            workspace_dir=working_dir,
             include_time=True,
         )
         # F-REDUCE: Do not append role prompt or use ContextEngineeringRail.
@@ -938,20 +1018,29 @@ Approach each task methodically and deliver high-quality results.
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
+            FileSystemRail(),
             SubagentContextRail(
                 subagent_id=task.task_id,
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
-            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
-            # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
-            # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
+            RecentToolResultsRail(parent_session=parent_session),
+            self._build_thinking_inject_rail(
+                task.thinking,
+                model or self._model,
+                role_id=getattr(task, "role_id", "") or "",
+                agent_id=getattr(task, "task_id", "") or "",
+            ),
+            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发;
+            # include_tools=False：read_file/code/bash 已由 FileSystemRail 注册;
+            # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
+            # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
             SubagentSkillUseRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=SkillUseRail.SKILL_MODE_ALL,
                 include_tools=False,
-                include_skill_body_tools=False,
+                include_skill_body_tools=True,
             ),
         ]
         if ce_rail is not None:
@@ -960,7 +1049,9 @@ Approach each task methodically and deliver high-quality results.
             rails.append(progressive_tool_rail)
 
         telemetry_rail = TelemetryRail()
+        request_summary_rail = RequestSummaryRail(record_only=True)
         rails.insert(0, telemetry_rail)
+        rails.insert(1, request_summary_rail)
 
         spawn_agent = create_deep_agent(
             model=model or self._model,
@@ -973,6 +1064,8 @@ Approach each task methodically and deliver high-quality results.
             enable_task_loop=False,
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             auto_create_workspace=False,
+            restrict_to_work_dir=True,
+            allowed_paths=[ws, *[str(p) for p in get_agent_registered_skill_dirs()]],
         )
 
         self._inherit_tools_for_spawn(spawn_agent)
@@ -1052,14 +1145,15 @@ Approach each task methodically and deliver high-quality results.
             DeepAgent instance configured with message injection rail
         """
         ws, ws_source = self._resolve_subagent_workspace_dir()
-        logger.info("[ForkAgent] Final workspace_dir=%s, source=%s", ws, ws_source)
+        working_dir = self._resolve_subagent_working_dir()
+        logger.info("[ForkAgent] context_root=%s source=%s working_dir=%s", ws, ws_source, working_dir)
 
         config_base = get_config()
         language = config_base.get("preferred_language", "zh")
 
         base_prompt = build_subagent_base_prompt(
             language=language,
-            workspace_dir=ws,
+            workspace_dir=working_dir,
             include_time=True,
         )
 
@@ -1121,18 +1215,26 @@ Execute the given task using inherited context and available tools.
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
+            FileSystemRail(),
             SubagentContextRail(
                 subagent_id=task.task_id,
                 parent_session=parent_session,
                 workspace=workspace_obj,  # Pass workspace for artifact path detection
             ),
-            # 与 spawn 路径同样的 active-skill body lift/pin 接入；
-            # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
+            self._build_thinking_inject_rail(
+                task.thinking,
+                model or self._model,
+                role_id=getattr(task, "role_id", "") or "",
+                agent_id=getattr(task, "task_id", "") or "",
+            ),
+            # 与 spawn 路径同样：include_tools=False（FileSystemRail 已注册 fs 工具）；
+            # include_skill_body_tools=True：子代理自行注册 skill_tool/skill_complete，
+            # 不依赖父 agent 的 SkillUseRail 是否已初始化。
             SubagentSkillUseRail(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=SkillUseRail.SKILL_MODE_ALL,
                 include_tools=False,
-                include_skill_body_tools=False,
+                include_skill_body_tools=True,
             ),
         ]
         if ce_rail is not None:
@@ -1141,7 +1243,9 @@ Execute the given task using inherited context and available tools.
             rails.append(progressive_tool_rail)
 
         telemetry_rail = TelemetryRail()
+        request_summary_rail = RequestSummaryRail(record_only=True)
         rails.insert(0, telemetry_rail)
+        rails.insert(1, request_summary_rail)
 
         fork_agent = create_deep_agent(
             model=model or self._model,
@@ -1154,6 +1258,8 @@ Execute the given task using inherited context and available tools.
             enable_task_loop=False,
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             auto_create_workspace=False,
+            restrict_to_work_dir=True,
+            allowed_paths=[ws, *[str(p) for p in get_agent_registered_skill_dirs()]],
         )
 
         self._inherit_tools_for_fork(fork_agent)

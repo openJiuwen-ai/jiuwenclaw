@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -108,11 +109,109 @@ def merged_file_guard_config(permissions: dict[str, Any]) -> dict[str, Any]:
     ted = fg.get("trusted_exec_directory")
     if not isinstance(ted, list):
         fg["trusted_exec_directory"] = []
+    _inject_system_default_trust(fg)
     return fg
+
+
+def _inject_system_default_trust(fg: dict[str, Any]) -> None:
+    """将系统基础设施路径注入 file_guard 默认信任配置。
+
+    ``isolation_venv/Scripts``（或 ``isolation_venv/bin``）是系统自己管理的
+    隔离虚拟环境，不是用户数据，不应被当作"外部路径"弹窗。
+    如果用户已显式配置了信任路径，本注入视为兜底，不覆盖用户配置。
+    """
+    try:
+        from jiuwenclaw.runtime import get_runtime_venv_dir
+
+        venv_dir = get_runtime_venv_dir()
+        scripts_dir = _posix_str(venv_dir / ("Scripts" if os.name == "nt" else "bin"))
+        if not scripts_dir:
+            return
+
+        ted = fg.get("trusted_exec_directory")
+        if not isinstance(ted, list):
+            ted = []
+            fg["trusted_exec_directory"] = ted
+
+        # 仅当该路径尚未被显式配置时注入。用精确 posix 路径比较（与
+        # _trusted_matches 一致），避免 substring matching 把超集路径
+        # （如 Scripts-backup）误判为已配置而跳过注入。
+        already_trusted = False
+        for raw in ted:
+            if not isinstance(raw, str):
+                continue
+            try:
+                prefix = _posix_str(Path(_expand_path_str(raw.strip())))
+            except (OSError, RuntimeError):
+                continue
+            if scripts_dir == prefix or scripts_dir.startswith(prefix + "/"):
+                already_trusted = True
+                break
+        if not already_trusted:
+            ted.append(scripts_dir)
+            logger.info(
+                "[file_guard] system_default_trust added path=%s",
+                scripts_dir,
+            )
+    except Exception:
+        logger.debug("[file_guard] system_default_trust skip", exc_info=True)
+
+
+# Only for ``file_guard.global`` keys (e.g. ``${JIUWENCLAW_SHARED_SKILLS_DIRS}``).
+# Tip/overlay is via read_env; do not use this for tool-arg / trusted_exec paths.
+_ENV_PLACEHOLDER_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+)
 
 
 def _expand_path_str(s: str) -> str:
     return os.path.expandvars(os.path.expanduser(s.strip()))
+
+
+def _union_env_path_lists(*raw_values: str) -> str:
+    """Merge pathsep-separated path lists; preserve order, drop empty/dupes."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for raw in raw_values:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        for part in text.split(os.pathsep):
+            part = part.strip()
+            if not part or part in seen:
+                continue
+            seen.add(part)
+            parts.append(part)
+    return os.pathsep.join(parts)
+
+
+def _expand_global_whitelist_key(key: str) -> str:
+    """Expand a ``file_guard.global`` map key (placeholders + pathsep lists).
+
+    Scoped to whitelist keys only so tool-arg resolution and trusted_exec keep
+    using plain ``os.path.expandvars`` / ``os.environ``.
+
+    Placeholder values are the **union** of tip/overlay (``read_env``) and
+    ``os.environ`` path lists — neither source alone wins.
+    """
+    text = key.strip()
+
+    def _repl(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2) or match.group(3) or ""
+        if not name:
+            return match.group(0)
+        try:
+            from jiuwenclaw.local_env_config import read_env
+
+            tip_value = read_env(name, "")
+        except Exception:
+            tip_value = ""
+        os_value = os.environ.get(name, "") or ""
+        merged = _union_env_path_lists(tip_value, os_value)
+        return merged if merged else match.group(0)
+
+    text = _ENV_PLACEHOLDER_RE.sub(_repl, text)
+    return os.path.expandvars(os.path.expanduser(text))
 
 
 def _resolve_path_str(raw: str, workspace: Path) -> Path | None:
@@ -144,11 +243,18 @@ def _longest_prefix_match(abs_posix: str, global_map: dict[str, Any]) -> dict[st
             continue
         if not isinstance(entry, dict):
             continue
-        prefix = _posix_str(Path(_expand_path_str(key)))
-        if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
-            ln = len(prefix)
-            if best is None or ln > best[0]:
-                best = (ln, entry)
+        # Support env keys that expand to pathsep-joined lists
+        # (e.g. ``${JIUWENCLAW_SHARED_SKILLS_DIRS}`` → ``dirA;dirB`` on Windows).
+        expanded = _expand_global_whitelist_key(key)
+        for part in expanded.split(os.pathsep):
+            part = part.strip()
+            if not part:
+                continue
+            prefix = _posix_str(Path(part))
+            if abs_posix == prefix or abs_posix.startswith(prefix + "/"):
+                ln = len(prefix)
+                if best is None or ln > best[0]:
+                    best = (ln, entry)
     return best[1] if best else None
 
 
@@ -215,10 +321,18 @@ class FileGuardChecker:
         except ImportError:
             pass
         try:
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            p = Path(get_agent_workspace_dir()).resolve()
+            from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
+            p = resolve_tenant_agent_workspace_dir().resolve()
             logger.debug(
-                "[file_guard] workspace_root source=agent_default (get_agent_workspace_dir) path=%s",
+                "[file_guard] workspace_root source=tenant_workspace "
+                "(resolve_tenant_agent_workspace_dir) path=%s",
+                p,
+            )
+            return p
+        except TypeError:
+            p = Path.cwd().resolve()
+            logger.debug(
+                "[file_guard] workspace_root source=cwd_fallback (no tenant bind) path=%s",
                 p,
             )
             return p
@@ -415,18 +529,18 @@ def classify_tool_file_action_kind(tool_name: str) -> Literal["read", "write", "
 def _yaml_update_permissions(mutate_fn) -> None:
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
     from jiuwenclaw.config import (
-        _CONFIG_YAML_PATH,
+        _current_config_yaml_path,
         _load_yaml_round_trip,
         _dump_yaml_round_trip,
     )
 
-    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    data = _load_yaml_round_trip(_current_config_yaml_path())
     permissions = data.get("permissions")
     if not isinstance(permissions, dict):
         permissions = {}
         data["permissions"] = permissions
     mutate_fn(permissions)
-    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
     get_permission_engine().update_config(data.get("permissions", {}))
 
 

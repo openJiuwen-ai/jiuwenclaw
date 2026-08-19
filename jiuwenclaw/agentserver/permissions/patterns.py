@@ -260,6 +260,13 @@ def persist_permission_allow_rule(
     For mcp_exec_command with a command arg, adds a wildcard pattern.
     For other tools, sets the tool to 'allow'.
     """
+    if not str(tool_name or "").strip():
+        logger.warning(
+            "[PermissionEngine] permission.persist.skip tool=%r reason=empty_tool_name",
+            tool_name,
+        )
+        return False
+
     if isinstance(tool_args, str):
         try:
             tool_args = json.loads(tool_args)
@@ -282,20 +289,21 @@ def persist_permission_allow_rule(
         )
         from jiuwenclaw.agentserver.permissions.models import PermissionLevel
         from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
+            _current_config_yaml_path,
             _load_yaml_round_trip,
             _dump_yaml_round_trip,
         )
 
-        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", _CONFIG_YAML_PATH)
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", _current_config_yaml_path())
+        data = _load_yaml_round_trip(_current_config_yaml_path())
         permissions = data.get("permissions")
         if permissions is None:
-            logger.warning(
-                "[PermissionEngine] permission.persist.abort tool=%s reason=no_permissions_section",
+            permissions = {}
+            data["permissions"] = permissions
+            logger.info(
+                "[PermissionEngine] permission.persist.auto_create_permissions tool=%s",
                 tool_name,
             )
-            return False
         current_permission, current_matched_rule = evaluate_tiered_policy(
             permissions, tool_name, tool_args,
         )
@@ -358,10 +366,10 @@ def persist_permission_allow_rule(
                 persisted,
             )
 
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
         logger.info("[PermissionEngine] permission.persist.write tool=%s target=config_yaml persisted=true", tool_name)
 
-        verify_data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        verify_data = _load_yaml_round_trip(_current_config_yaml_path())
         engine = get_permission_engine()
         engine.update_config(verify_data.get("permissions", {}))
         logger.info("[PermissionEngine] permission.persist.reload tool=%s reloaded=true", tool_name)
@@ -472,6 +480,13 @@ def _set_approval_overrides_after_rules(permissions: dict, overrides: list[Any])
 
 
 def _persist_tiered_tool_allow(permissions: dict, tool_name: str) -> bool:
+    if not str(tool_name or "").strip():
+        logger.warning(
+            "[PermissionEngine] permission.persist.skip tool=%r reason=empty_tool_name "
+            "target=tools",
+            tool_name,
+        )
+        return False
     tools = permissions.get("tools")
     if not isinstance(tools, dict):
         tools = {}
@@ -530,8 +545,12 @@ def _build_approval_override_id(pattern: str) -> str:
 
 
 def _existing_allow_override_patterns(permissions: dict) -> set[str]:
+    # 只收集 approval_overrides 段：rules 的 allow（Phase 4）优先级低于 ask（Phase 3），
+    # 无法覆盖 ask 命中；approval_overrides（Phase 2）高于 ask，才是「总是允许」覆盖 ask 的手段。
+    # 若把 rules allow 也算作「已存在」去重，当 rules 有 allow ``npm *`` + ask ``npm --help``
+    # 时，persist 提取的 ``npm *`` 会被跳过 → ``npm --help`` 永远 ASK、用户「总是允许」无效。
     patterns: set[str] = set()
-    for section_name in ("rules", "approval_overrides"):
+    for section_name in ("approval_overrides",):
         raw = permissions.get(section_name)
         if not isinstance(raw, list):
             continue
@@ -591,12 +610,12 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
             apply_cli_trusted_to_permissions_dict,
         )
         from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
+            _current_config_yaml_path,
             _load_yaml_round_trip,
             _dump_yaml_round_trip,
         )
 
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        data = _load_yaml_round_trip(_current_config_yaml_path())
         permissions = data.get("permissions")
         if permissions is None:
             permissions = {}
@@ -639,7 +658,7 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
                 sorted(SHELL_PERMISSION_TOOLS),
             )
 
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+        _dump_yaml_round_trip(_current_config_yaml_path(), data)
         engine = get_permission_engine()
         engine.update_config(data.get("permissions", {}))
         return {

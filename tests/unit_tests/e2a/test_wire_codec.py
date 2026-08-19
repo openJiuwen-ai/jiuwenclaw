@@ -86,6 +86,99 @@ def test_roundtrip_chunk_chat_delta() -> None:
     assert back.payload.get("source_chunk_type") == "llm_reasoning"
 
 
+def test_roundtrip_chunk_chat_delta_preserves_team_attribution() -> None:
+    """Teammate streaming must keep member_name/role across E2A chat.delta wire."""
+    orig = AgentResponseChunk(
+        request_id="s2b",
+        channel_id="c",
+        payload={
+            "event_type": "chat.delta",
+            "content": "tok",
+            "source_chunk_type": "content_chunk",
+            "role": "teammate",
+            "member_name": "planning",
+            "rid": "round-1",
+        },
+        is_complete=False,
+    )
+    wire = encode_agent_chunk_for_wire(orig, response_id="s2b", sequence=1)
+    e2a_body = wire.get("body") or {}
+    assert e2a_body.get("member_name") == "planning"
+    assert e2a_body.get("role") == "teammate"
+    assert e2a_body.get("rid") == "round-1"
+    back = parse_agent_server_wire_chunk(wire)
+    assert back.payload.get("member_name") == "planning"
+    assert back.payload.get("role") == "teammate"
+    assert back.payload.get("rid") == "round-1"
+    assert back.payload.get("content") == "tok"
+
+
+def test_roundtrip_chunk_custom_tool_preserves_member_name() -> None:
+    orig = AgentResponseChunk(
+        request_id="s3b",
+        channel_id="c",
+        payload={
+            "event_type": "chat.tool_call",
+            "tool_call": {"name": "read_file", "tool_call_id": "t1"},
+            "role": "teammate",
+            "member_name": "agentteams",
+            "rid": "round-2",
+        },
+        is_complete=False,
+    )
+    wire = encode_agent_chunk_for_wire(orig, response_id="s3b", sequence=0)
+    e2a_body = wire.get("body") or {}
+    assert e2a_body.get("member_name") == "agentteams"
+    assert e2a_body.get("role") == "teammate"
+    back = parse_agent_server_wire_chunk(wire)
+    assert back.payload.get("event_type") == "chat.tool_call"
+    assert back.payload.get("member_name") == "agentteams"
+    assert back.payload.get("role") == "teammate"
+
+
+def test_roundtrip_chunk_chat_reasoning_preserves_member_name() -> None:
+    orig = AgentResponseChunk(
+        request_id="s3c",
+        channel_id="c",
+        payload={
+            "event_type": "chat.reasoning",
+            "content": "thinking...",
+            "role": "teammate",
+            "member_name": "planning",
+            "rid": "round-3",
+        },
+        is_complete=False,
+    )
+    wire = encode_agent_chunk_for_wire(orig, response_id="s3c", sequence=0)
+    e2a_body = wire.get("body") or {}
+    assert e2a_body.get("member_name") == "planning"
+    back = parse_agent_server_wire_chunk(wire)
+    assert back.payload.get("event_type") == "chat.reasoning"
+    assert back.payload.get("member_name") == "planning"
+    assert back.payload.get("content") == "thinking..."
+
+
+def test_roundtrip_leader_chat_delta_preserves_member_name() -> None:
+    orig = AgentResponseChunk(
+        request_id="s3d",
+        channel_id="c",
+        payload={
+            "event_type": "chat.delta",
+            "content": "lead",
+            "source_chunk_type": "content_chunk",
+            "role": "leader",
+            "member_name": "product",
+            "rid": "round-4",
+        },
+        is_complete=False,
+    )
+    wire = encode_agent_chunk_for_wire(orig, response_id="s3d", sequence=1)
+    assert (wire.get("body") or {}).get("member_name") == "product"
+    back = parse_agent_server_wire_chunk(wire)
+    assert back.payload.get("role") == "leader"
+    assert back.payload.get("member_name") == "product"
+
+
 def test_roundtrip_chunk_custom_event() -> None:
     orig = AgentResponseChunk(
         request_id="s3",

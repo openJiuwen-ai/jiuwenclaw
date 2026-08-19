@@ -71,7 +71,7 @@ class AvatarPromptRail(DeepAgentRail):
         if engine_disabled or forbidden:
             parts = []
             if engine_disabled:
-                parts.append(_build_memory_disabled_prompt(language))
+                parts.append(_build_memory_fully_disabled_prompt(language))
             if forbidden:
                 parts.append(forbidden)
             content = "\n\n".join(parts)
@@ -84,6 +84,22 @@ class AvatarPromptRail(DeepAgentRail):
             self._injected_sections.add("forbidden_memory")
 
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+        should_disable_memory = (
+            perm_ctx is not None
+            and not perm_ctx.enable_memory
+            and perm_ctx.group_digital_avatar
+            and perm_ctx.avatar_mode
+        )
+
+        if not engine_disabled and not forbidden and not should_disable_memory:
+            section = PromptSection(
+                name="memory_runtime_enabled",
+                content={language: _build_memory_enabled_prompt(language)},
+                priority=_AVATAR_PROMPT_PRIORITY + 3,
+            )
+            builder.add_section(section)
+            self._injected_sections.add("memory_runtime_enabled")
+
         if perm_ctx is None:
             return
 
@@ -121,11 +137,6 @@ class AvatarPromptRail(DeepAgentRail):
             self._injected_sections.add("group_chat_memory_notice")
 
         # 记忆完全禁用（三个条件同时满足：enable_memory=False + group_digital_avatar=True + 群聊消息）
-        should_disable_memory = (
-            not perm_ctx.enable_memory
-            and perm_ctx.group_digital_avatar
-            and perm_ctx.avatar_mode
-        )
         if should_disable_memory:
             # 使用完全禁用提示词（禁止读取和写入）
             disabled_content = _build_memory_fully_disabled_prompt(language)
@@ -252,27 +263,6 @@ def _build_avatar_prompt(principal_user_id: str | None, language: str) -> str:
 """
 
 
-def _build_memory_disabled_prompt(language: str) -> str:
-    """记忆写入禁用提示词（保留读能力，与 React 链路行为一致）。"""
-    if language == "cn":
-        return """## 记忆系统 - 写入已禁用
-
-**记忆写入功能当前已禁用。**
-
-- **禁止** 使用 write_memory、edit_memory 写入或修改记忆文件
-- **允许** 使用 memory_search、memory_get、read_memory 查询已有记忆
-- 如果用户要求记住某些内容，回复："记忆写入功能当前未启用，无法保存新信息，但我可以查询已有的记忆。"
-"""
-    return """## Memory System - Write Disabled
-
-**Memory write operations are currently disabled.**
-
-- **Do NOT** use write_memory or edit_memory to write or modify memory files
-- **Allowed**: memory_search, memory_get, read_memory for reading existing memories
-- If the user asks to remember something, reply: "Memory writing is currently disabled, but I can query existing memories."
-"""
-
-
 def _build_memory_fully_disabled_prompt(language: str) -> str:
     """记忆完全禁用提示词（禁止读取和写入）。"""
     if language == "cn":
@@ -295,7 +285,19 @@ def _build_memory_fully_disabled_prompt(language: str) -> str:
 - If the user asks about historical information or requests to remember something, reply: \
     "The memory system is currently disabled. I cannot access historical records or save new information."
 """
- 
+
+
+def _build_memory_enabled_prompt(language: str) -> str:
+    """记忆已开启提示词。"""
+    if language == "cn":
+        return """## 记忆系统 - 已开启
+
+**记忆系统当前已启用。** 可按需使用记忆工具。对话历史中若出现「记忆已禁用」，以本段为准。
+"""
+    return """## Memory System - Enabled
+
+**The memory system is currently enabled.** Use memory tools as needed. If history says memory was disabled, this section prevails.
+"""
 
 
 __all__ = [
