@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
+from jiuwenclaw.agentserver.tools.web_search.content_cache import parse_update_time
 from jiuwenclaw.config import get_config
 from jiuwenclaw.local_env_config import read_env
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
 _PETAL_MAX_SUMMARY_LEN = 4000
+_PETAL_MAX_CONTENT_LEN = 50000
 _TAVILY_DEFAULT_API_URL = "https://api.tavily.com"
 _TAVILY_MAX_CONTENT_LEN = 4000
 
@@ -39,14 +41,20 @@ def _load_llm_default_headers() -> dict[str, str]:
     return header_map
 
 
-def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, str]:
+def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, Any]:
     raw_url = item.get("url") or item.get("link") or item.get("source_url") or ""
     title = (item.get("title") or item.get("name") or "").strip()
     summary = (item.get("summary") or "").strip()
+    content = (item.get("content") or "").strip()
+    update_time_raw = (
+        item.get("update_time") or item.get("publish_time") or item.get("date")
+    )
     return {
         "title": title[:_PETAL_MAX_TITLE_LEN],
         "url": str(raw_url).strip()[:_PETAL_MAX_URL_LEN],
         "summary": summary[:_PETAL_MAX_SUMMARY_LEN],
+        "content": content[:_PETAL_MAX_CONTENT_LEN],
+        "update_time": parse_update_time(update_time_raw),
     }
 
 
@@ -73,7 +81,7 @@ def petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dic
     search_url = _resolve_petal_search_url()
     header_map = _load_llm_default_headers()
     headers = {**header_map, "Content-Type": "application/json"}
-    payload = {"query": query, "content": False}
+    payload = {"query": query, "content": True}
 
     response = http_request(
         "POST",
@@ -86,7 +94,7 @@ def petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dic
     data = response.json()
     web_pages = data.get("web_pages", [])
 
-    records: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
     if isinstance(web_pages, list):
         for raw in web_pages[:max_results]:
             if not isinstance(raw, dict):
@@ -95,7 +103,12 @@ def petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dic
 
     answer = _petal_format_answer_from_records(records)
     urls = [r["url"] for r in records if r.get("url")][:max_results]
-    return {"provider": "petal", "answer": answer, "urls": urls}
+    return {
+        "provider": "petal",
+        "answer": answer,
+        "urls": urls,
+        "records": records,
+    }
 
 
 def enable_petal_search() -> bool:

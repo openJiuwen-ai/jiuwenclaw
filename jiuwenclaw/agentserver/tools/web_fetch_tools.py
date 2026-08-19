@@ -642,7 +642,9 @@ async def _fetch_webpage_async(
         id="mcp_fetch_webpage",
         name="mcp_fetch_webpage",
         description=(
-            "抓取网页文本内容，支持并发回退。"
+            "抓取网页文本内容。"
+            "默认优先从内存缓存读取（use_cache=true），"
+            "若缓存内容不够新或需要最新数据，请用 use_cache=false 重新从原站抓取。"
             "返回状态码、标题和纯文本正文。"
         ),
         properties={"truncate_length": 60000},
@@ -663,13 +665,24 @@ async def _fetch_webpage_async(
                     "description": "HTTP request timeout in seconds (3-10, default 5)",
                     "default": 5,
                 },
+                "use_cache": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, read from cache first (default). "
+                        "If false, bypass cache and fetch from origin."
+                    ),
+                    "default": True,
+                },
             },
             "required": ["url"],
         },
     ),
 )
 async def mcp_fetch_webpage(
-    url: str, max_chars: int = 12000, timeout_seconds: int = 5
+    url: str,
+    max_chars: int = 12000,
+    timeout_seconds: int = 5,
+    use_cache: bool = True,
 ) -> str:
     url = _normalize_url(url)
     if not url:
@@ -678,6 +691,18 @@ async def mcp_fetch_webpage(
     max_chars = max(500, min(max_chars, 50000))
     timeout_seconds = max(3, min(timeout_seconds, 10))
     overall_timeout = 5
+
+    if use_cache:
+        cached = await _try_cache_fetch(url)
+        if cached is not None:
+            _log_cache_stats()
+            return _format_fetch_result(cached, max_chars, from_cache=True)
+    else:
+        from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+            get_default_cache,
+        )
+
+        get_default_cache().bypassed += 1
 
     try:
         data = await _fetch_webpage_async(url, timeout_seconds, overall_timeout)
@@ -693,14 +718,86 @@ async def mcp_fetch_webpage(
         reason = _clip_user_text(str(exc).strip() or "unknown error")
         return _clip_user_text(f"[ERROR]: fetch failed ({reason})")
 
+    _log_cache_stats()
+
+    return _format_fetch_result(data, max_chars, from_cache=False)
+
+
+async def _try_cache_fetch(url: str) -> dict[str, Any] | None:
+    """模式 1：从内存缓存读取，附带元数据供模型决策。"""
+    from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+        get_default_cache,
+    )
+
+    cache = get_default_cache()
+    entry = await cache.get(url)
+    if entry is None:
+        logger.debug("[mcp_fetch_webpage] cache miss url=%s", url)
+        return None
+
+    import time as _time
+
+    cache_age_days = round((_time.time() - entry.cached_at) / 86400, 1)
+    page_update_days = None
+    if entry.update_time is not None:
+        page_update_days = round((_time.time() - float(entry.update_time)) / 86400, 1)
+
+    logger.info(
+        "[mcp_fetch_webpage] cache hit url=%s source=%s cache_age_days=%s page_update_days=%s",
+        url,
+        entry.source,
+        cache_age_days,
+        page_update_days,
+    )
+    return {
+        "url": entry.url,
+        "status_code": 200,
+        "title": entry.title,
+        "content": entry.content,
+        "provider": f"cache:{entry.source}",
+        "cache_age_days": cache_age_days,
+        "page_update_days": page_update_days,
+    }
+
+
+def _log_cache_stats() -> None:
+    """输出缓存命中率汇总日志。"""
+    from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+        get_default_cache,
+    )
+
+    stats = get_default_cache().stats()
+    logger.info(
+        "[FetchCache] hits=%d misses=%d bypassed=%d "
+        "hit_rate=%.1f%% entries=%d",
+        stats["hits"],
+        stats["misses"],
+        stats["bypassed"],
+        stats["hit_rate_pct"],
+        stats["entries"],
+    )
+
+
+def _format_fetch_result(
+    data: dict[str, Any], max_chars: int, *, from_cache: bool
+) -> str:
     lines = [
-        f"URL: {data.get('url', url)}",
+        f"URL: {data.get('url', '')}",
         f"Status: {data.get('status_code', '')}",
     ]
     if data.get("title"):
         lines.append(f"Title: {data['title']}")
     if data.get("provider"):
         lines.append(f"Provider: {data['provider']}")
+    lines.append(f"FromCache: {'true' if from_cache else 'false'}")
+    if from_cache:
+        lines.append(f"CacheAgeDays: {data.get('cache_age_days', '?')}")
+        page_update = data.get("page_update_days")
+        if page_update is not None:
+            lines.append(f"PageUpdateDays: {page_update}")
+        lines.append(
+            "Hint: 若缓存内容不够新或需要最新数据，请用 use_cache=false 重新抓取。"
+        )
     lines.append("Content:")
     lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
     return "\n".join(lines)
