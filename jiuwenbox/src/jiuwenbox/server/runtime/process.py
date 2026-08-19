@@ -142,14 +142,16 @@ _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
-# Python ForkServer fast path (feature-flagged, default OFF; release candidate).
-# When ``JIUWENBOX_PYTHON_FASTPATH=1`` is set in the server process
-# environment, exec requests whose command is the simple ``python3 -c CODE``
-# shape are marked ``python_fastpath: true`` in the daemon IPC payload. The
-# in-sandbox daemon routes those to a persistent ForkServer (see
-# ``sandbox_daemon.py``) instead of spawning a fresh interpreter per call.
-# The flag is inherited into the sandbox daemon via the bwrap process env, so
-# both sides agree. This does not change the HTTP API or the default path.
+# Python ForkServer fast path (transparent optimisation, default ON since
+# Phase 8A-4). Exec requests whose command is the simple ``python3 -c CODE``
+# shape are marked ``python_fastpath: true`` in the daemon IPC payload (when
+# the fast path is enabled, which it is unless ``JIUWENBOX_PYTHON_FASTPATH=0``
+# opts out). The in-sandbox daemon routes those to a persistent ForkServer
+# (see ``sandbox_daemon.py``) instead of spawning a fresh interpreter per
+# call. The flag is inherited into the sandbox daemon via the bwrap process
+# env, so both sides agree (``_python_fastpath_enabled`` here mirrors
+# ``sandbox_daemon._fastpath_enabled``). This does not change the HTTP API or
+# the default ``/exec`` path.
 FASTPATH_ENV = "JIUWENBOX_PYTHON_FASTPATH"
 
 # Global fast-path admission cap: at most this many sandboxes in a single
@@ -174,7 +176,32 @@ def _fastpath_max_sandboxes() -> int:
 
 
 def _python_fastpath_enabled() -> bool:
-    return os.environ.get(FASTPATH_ENV) == "1"
+    """Whether the server marks exec requests as FastPath candidates.
+
+    Phase 8A-4: the fast path is a **transparent optimisation** and is ON by
+    default. Mirrors ``sandbox_daemon._fastpath_enabled`` so both sides agree
+    (the flag is inherited into the sandbox daemon via the bwrap env, so the
+    two must read it identically):
+
+    * unset  -> ON  (default-on; the user does nothing and still gets it)
+    * ``"1"`` -> ON  (explicit enable, equivalent to the new default)
+    * ``"0"`` -> OFF (explicit opt-out)
+    * any other value -> OFF, fail-safe, with a warning.
+
+    Default-on only marks simple ``python3 -c CODE`` candidates; everything
+    else is served by the unchanged ``subprocess.Popen`` path, so the contract
+    for non-candidates is unaffected.
+    """
+    raw = os.environ.get(FASTPATH_ENV)
+    if raw is None or raw == "1":
+        return True
+    if raw == "0":
+        return False
+    logger.warning(
+        "unrecognised %s=%r; expected '0' or '1'; defaulting fast path OFF",
+        FASTPATH_ENV, raw,
+    )
+    return False
 
 
 def _python_fastpath_candidate(command: list[str]) -> bool:

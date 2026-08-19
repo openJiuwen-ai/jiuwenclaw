@@ -239,9 +239,10 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 
         stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
 
-        # Python ForkServer fast path (default OFF). Only activated when BOTH
-        # the server marked the request (``python_fastpath``) and the daemon
-        # environment enables the feature (``JIUWENBOX_PYTHON_FASTPATH=1``).
+        # Python ForkServer fast path (default ON since Phase 8A-4 -- a
+        # transparent optimisation, no env var required). Activated when BOTH
+        # the server marked the request (``python_fastpath``) and the fast path
+        # is enabled (it is, unless ``JIUWENBOX_PYTHON_FASTPATH=0`` opts out).
         # Falls back to the normal ``subprocess.Popen`` path below otherwise.
         if header.get("python_fastpath") and _fastpath_enabled():
             if _try_fastpath_exec(conn, command, header, stdin_bytes):
@@ -350,18 +351,17 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 # ---------------------------------------------------------------------------
 # Python ForkServer fast path (feature-flagged, default OFF; release candidate).
 #
-# When ``JIUWENBOX_PYTHON_FASTPATH=1`` is set in the server environment (and
-# therefore inherited into the sandbox daemon), ``python3 -c <code>`` exec
-# requests that the server marked with ``python_fastpath: true`` are routed
-# to a small persistent in-sandbox ForkServer instead of spawning a fresh
-# interpreter per call. The worker source is passed to the worker via
-# ``python3 -c <source>`` so nothing needs to be read from disk after
-# Landlock applies (mirroring how the launcher loads the daemon itself).
-# The forked children inherit the exact same bwrap namespace / userns /
-# cgroup / seccomp / Landlock / mount envelope as the daemon. This is a
-# feature-flagged internal path -- it is not a formal external API and does
-# not change the default ``/exec`` path. When the fast path is unavailable it
-# falls back to the normal ``subprocess.Popen`` path.
+# When the fast path is enabled (default ON since Phase 8A-4; opt out with
+# ``JIUWENBOX_PYTHON_FASTPATH=0``), ``python3 -c <code>`` exec requests that the
+# server marked with ``python_fastpath: true`` are routed to a small persistent
+# in-sandbox ForkServer instead of spawning a fresh interpreter per call. The
+# worker source is passed to the worker via ``python3 -c <source>`` so nothing
+# needs to be read from disk after Landlock applies (mirroring how the launcher
+# loads the daemon itself). The forked children inherit the exact same bwrap
+# namespace / userns / cgroup / seccomp / Landlock / mount envelope as the
+# daemon. This is a feature-flagged internal path -- it is not a formal
+# external API and does not change the default ``/exec`` path. When the fast
+# path is unavailable it falls back to the normal ``subprocess.Popen`` path.
 FASTPATH_ENV = "JIUWENBOX_PYTHON_FASTPATH"
 FASTPATH_WORKERS_ENV = "JIUWENBOX_PYTHON_FASTPATH_WORKERS"
 FASTPATH_IDLE_TIMEOUT_ENV = "JIUWENBOX_PYTHON_FASTPATH_IDLE_TIMEOUT"
@@ -403,7 +403,39 @@ FASTPATH_STATS_THROTTLE = 1.0       # min seconds between snapshot writes
 
 
 def _fastpath_enabled() -> bool:
-    return os.environ.get(FASTPATH_ENV) == "1"
+    """Whether the Python ForkServer fast path is active.
+
+    Phase 8A-4: the fast path is a **transparent optimisation** and is ON by
+    default -- no environment variable is required to benefit from it.
+
+    Semantics of ``JIUWENBOX_PYTHON_FASTPATH``:
+
+    * unset  -> ON  (default-on; the user does nothing and still gets it)
+    * ``"1"`` -> ON  (explicit enable, equivalent to the new default)
+    * ``"0"`` -> OFF (explicit opt-out)
+    * any other value -> OFF, fail-safe, with a warning so a typo does not
+      silently leave the fast path on when the operator intended to disable
+      it. Fail-safe here means "off" because that is the known-good path the
+      operator can reason about; a silently-on typo would be the worse
+      failure mode.
+
+    The fast path only ever routes requests the server already marked as
+    ``python_fastpath``; everything else falls through to ``subprocess.Popen``
+    unchanged, so default-ON cannot change the contract for non-candidates.
+    """
+    raw = os.environ.get(FASTPATH_ENV)
+    if raw is None:
+        return True
+    if raw == "1":
+        return True
+    if raw == "0":
+        return False
+    # Unrecognised value: fail safe (off) and surface it.
+    logger.warning(
+        "unrecognised %s=%r; expected '0' or '1'; defaulting fast path OFF",
+        FASTPATH_ENV, raw,
+    )
+    return False
 
 
 def _fastpath_worker_count() -> int:
