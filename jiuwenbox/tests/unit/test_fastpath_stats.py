@@ -35,6 +35,7 @@ import pytest
 
 from jiuwenbox.supervisor import sandbox_daemon as sd
 from jiuwenbox.supervisor.sandbox_daemon import (
+    FastPathExecUncertain,
     FastPathUnavailable,
     FastPathStats,
     _FastPathRequest,
@@ -217,6 +218,146 @@ def test_route_submit_raises_counts_fallback(isolated_stats, monkeypatch, drain_
     assert snap["hits"] == 0
     assert snap["fallbacks"] == 1
     assert snap["fallback_reasons"] == {reason: 1}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 8A-2: post-dispatch no-replay boundary
+# --------------------------------------------------------------------------- #
+def _fake_live_worker():
+    """A live, idle worker triple stub: (proc, sock, wlock) all fake.
+
+    ``poll`` returns ``None`` (alive); the lock is unheld so the round-robin
+    acquires it immediately and ``chosen`` is set. ``sock``/``proc`` accept the
+    methods ``submit`` calls in its round-trip (settimeout/close, kill). No
+    fork, so this runs on every platform including under pytest capture.
+    """
+    lock = threading.Lock()
+    proc = types.SimpleNamespace(poll=lambda: None, kill=lambda: None)
+    sock = types.SimpleNamespace(
+        settimeout=lambda _t: None, close=lambda: None)
+    return (proc, sock, lock)
+
+
+def test_post_dispatch_failure_raises_exec_uncertain(monkeypatch):
+    """A failure AFTER ``_send_frame`` raises ``FastPathExecUncertain`` (no replay).
+
+    Stubs the pool with one fake live worker, then makes ``_send_frame`` raise.
+    Because dispatch begins at ``_send_frame``, this is a post-dispatch
+    failure: ``submit`` must raise ``FastPathExecUncertain`` (NOT
+    ``FastPathUnavailable``), so the caller cannot fall back to Popen. The
+    worker is still dropped and the breaker bumped (a real worker failure).
+    """
+    pool = sd._FORK_POOL
+    monkeypatch.setattr(pool, "_workers", [_fake_live_worker()])
+    monkeypatch.setattr(pool, "_ensure", lambda: True)
+    monkeypatch.setattr(pool, "_next", 0)
+    monkeypatch.setattr(pool, "_breaker_state", "closed")
+    monkeypatch.setattr(pool, "_breaker_failures", 0)
+    drops = {"n": 0}
+    monkeypatch.setattr(pool, "_drop", lambda _p: drops.__setitem__("n", drops["n"] + 1))
+    bumps = {"n": 0}
+    monkeypatch.setattr(pool, "_bump_failure_locked",
+                        lambda: bumps.__setitem__("n", bumps["n"] + 1))
+
+    def _boom(_sock, _payload):
+        raise OSError("send failed mid-frame")
+    monkeypatch.setattr(sd, "_send_frame", _boom)
+
+    with pytest.raises(FastPathExecUncertain) as ei:
+        pool.submit(_FastPathRequest(code="pass", stdin_bytes=b"", workdir=None,
+                                     env_overrides=None, timeout=1.0, plan=None))
+    assert ei.value.reason == "post_dispatch_failure"
+    # It must NOT be a FastPathUnavailable (the safe-fallback type).
+    assert not isinstance(ei.value, FastPathUnavailable)
+    # Real worker failure: worker dropped and breaker bumped.
+    assert drops["n"] == 1
+    assert bumps["n"] == 1
+
+
+def test_pre_dispatch_failure_still_safe_unavailable(monkeypatch):
+    """A failure BEFORE ``_send_frame`` stays ``FastPathUnavailable`` (safe fallback).
+
+    ``sock.settimeout`` raising simulates a pre-dispatch failure (the header
+    frame was never sent, so the worker cannot have executed). ``submit`` must
+    raise ``FastPathUnavailable`` so the daemon can safely Popen. This guards
+    the boundary: only post-``_send_frame`` failures are no-replay.
+    """
+    pool = sd._FORK_POOL
+    proc, sock, lock = _fake_live_worker()
+    monkeypatch.setattr(pool, "_workers", [(proc, sock, lock)])
+    monkeypatch.setattr(pool, "_ensure", lambda: True)
+    monkeypatch.setattr(pool, "_next", 0)
+    monkeypatch.setattr(pool, "_breaker_state", "closed")
+    monkeypatch.setattr(pool, "_breaker_failures", 0)
+    monkeypatch.setattr(pool, "_drop", lambda _p: None)
+    monkeypatch.setattr(pool, "_bump_failure_locked", lambda: None)
+    # settimeout raises before _send_frame -> pre-dispatch.
+    sock.settimeout = lambda _t: (_ for _ in ()).throw(OSError("settimeout failed"))
+
+    with pytest.raises(FastPathUnavailable) as ei:
+        pool.submit(_FastPathRequest(code="pass", stdin_bytes=b"", workdir=None,
+                                     env_overrides=None, timeout=1.0, plan=None))
+    assert ei.value.reason == "worker_unavailable"
+    # Must NOT be the no-replay type.
+    assert not isinstance(ei.value, FastPathExecUncertain)
+
+
+def test_exec_uncertain_no_popen_sends_error_response(monkeypatch, drain_conn):
+    """``_try_fastpath_exec`` on ``FastPathExecUncertain`` sends an error, no Popen.
+
+    The post-dispatch path must NOT return ``False`` (that would make the
+    daemon Popen / replay). It sends an ``fastpath_exec_uncertain`` response
+    and returns ``True`` (a response was sent). The request is bucketed as
+    ``exec_uncertain`` and the counting invariant stays closed.
+    """
+    stats = FastPathStats()
+    monkeypatch.setattr(sd._FORK_POOL, "stats", stats)
+    monkeypatch.setattr(sd, "_fastpath_plan",
+                        lambda cmd, hdr: {"mode": "code", "code": "x"})
+
+    def _raise(*a, **k):
+        raise FastPathExecUncertain("post_dispatch_failure")
+    monkeypatch.setattr(sd._FORK_POOL, "submit", _raise)
+
+    srv, cli = drain_conn
+    rc = sd._try_fastpath_exec(srv, ["python3", "-c", "x"], {}, b"")
+    resp = _drain(cli)
+
+    assert rc is True            # response sent; daemon must NOT Popen
+    assert resp["error"] == "fastpath_exec_uncertain"
+    assert resp["exit_code"] == 1
+    snap = stats.snapshot()
+    assert snap["requests"] == 1
+    assert snap["hits"] == 0
+    assert snap["fallbacks"] == 1
+    assert snap["fallback_reasons"] == {"exec_uncertain": 1}
+    assert snap["requests"] == snap["hits"] + snap["fallbacks"]
+
+
+def test_exec_uncertain_not_caught_as_unavailable(monkeypatch, drain_conn):
+    """``except FastPathUnavailable`` must not swallow ``FastPathExecUncertain``.
+
+    The two types are siblings (both subclass ``RuntimeError`` directly);
+    a handler for one cannot catch the other. If they were parent/child a
+    no-replay condition could be silently converted back into a Popen fallback.
+    """
+    assert not issubclass(FastPathExecUncertain, FastPathUnavailable)
+    assert not issubclass(FastPathUnavailable, FastPathExecUncertain)
+
+    # And the routing proves it end-to-end: submit raising exec_uncertain lands
+    # in the exec_uncertain bucket, not worker_unavailable.
+    stats = FastPathStats()
+    monkeypatch.setattr(sd._FORK_POOL, "stats", stats)
+    monkeypatch.setattr(sd, "_fastpath_plan",
+                        lambda cmd, hdr: {"mode": "code", "code": "x"})
+    monkeypatch.setattr(
+        sd._FORK_POOL, "submit",
+        lambda *a, **k: (_ for _ in ()).throw(FastPathExecUncertain("post_dispatch_failure")))
+
+    srv, _cli = drain_conn
+    rc = sd._try_fastpath_exec(srv, ["python3", "-c", "x"], {}, b"")
+    assert rc is True
+    assert stats.snapshot()["fallback_reasons"] == {"exec_uncertain": 1}
 
 
 def test_mixed_traffic_invariant_closed(isolated_stats, monkeypatch, drain_conn):

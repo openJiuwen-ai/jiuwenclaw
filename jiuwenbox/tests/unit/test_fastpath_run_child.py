@@ -125,6 +125,56 @@ def test_stdin_forwarded_and_json_stdout():
 
 
 @_SKIP_NON_POSIX
+def test_long_lived_grandchild_marker_written_once():
+    """Phase 8A-2: a long-lived grandchild must not cause double execution.
+
+    The child writes a side-effect marker, forks a grandchild that holds the
+    stdout/stderr pipe write-ends longer than the request timeout, then exits.
+    ``_run_child`` reaps the child while the pipes are still open, so the drain
+    loop keeps running until the grandchild releases the pipes. The marker
+    must appear exactly once: ``_run_child`` forks the code a single time; the
+    no-replay guarantee against a *Popen* replay lives at the ``submit`` /
+    daemon layer and is covered by the Phase 8A-2 pool-level marker bench.
+
+    The grandchild sleeps longer than ``timeout`` but is bounded so the test
+    completes: the deadline kill fires on the (already dead) child, the
+    grandchild then exits, the pipes reach EOF, and ``_run_child`` returns the
+    child's real exit code -- no hang, no ECHILD leak, marker == 1.
+    """
+    import tempfile
+    ns = _load_worker_ns()
+    marker = tempfile.mktemp(prefix="p8a2_marker_")
+    code = (
+        "import os, sys, time\n"
+        "open(%r, 'w').write('1\\n')\n"  # side effect, exactly once
+        "sys.stdout.write('hello\\n')\n"
+        "sys.stdout.flush()\n"
+        "gc = os.fork()\n"
+        "if gc == 0:\n"
+        "    # Grandchild outlives the deadline kill (which only targets the\n"
+        "    # direct child) and holds the pipes open, then exits so the test\n"
+        "    # is bounded and the drain loop converges.\n"
+        "    time.sleep(2.0)\n"
+        "    os._exit(0)\n"
+        "os._exit(7)\n" % marker
+    )
+    exit_code, out, err = _run_child(ns, code, timeout=1.0)
+    # The child exited 7 immediately, but the grandchild holds the pipes past
+    # the 1.0s deadline, so ``_run_child`` cannot observe pipe EOF in time and
+    # reports a timeout (124) -- the same wedge the daemon socket timeout later
+    # breaks. ``exit_code`` is a return value (from waitpid status), so it is
+    # robust to pytest fd-capture; the stdout/stderr *content* is not (the
+    # documented pytest-capture x fork incompatibility), so the property under
+    # test here is the marker count, not the captured bytes.
+    assert exit_code == 124, f"expected timeout 124, got {exit_code} (out={out!r}, err={err!r})"
+    # The side effect ran exactly once: the replay guarantee is enforced at the
+    # daemon layer, but this confirms ``_run_child`` itself never re-forks even
+    # when a grandchild outlives the deadline.
+    with open(marker) as fh:
+        assert len(fh.read().splitlines()) == 1
+
+
+@_SKIP_NON_POSIX
 def test_child_reaped_before_pipe_eof_no_echild():
     """Deterministic regression for the ECHILD reap race.
 

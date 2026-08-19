@@ -1177,7 +1177,11 @@ class FastPathStats:
     * ``fallbacks`` -- judged requests that did not hit, broken down by
       ``fallback_reasons``: ``not_eligible`` / ``nonempty_stdin`` /
       ``breaker_open`` / ``capacity_busy`` / ``worker_unavailable`` /
-      ``spawn_failed`` / ``worker_error``.
+      ``spawn_failed`` / ``worker_error`` / ``exec_uncertain``.
+      ``exec_uncertain`` (Phase 8A-2) is a *post-dispatch* failure: the
+      request was sent to a worker and the code may have run, so the daemon
+      reports an explicit failure instead of replaying via ``subprocess.Popen``.
+      All other reasons are *pre-dispatch* (safe Popen fallback).
 
     Invariant: ``requests == hits + fallbacks`` (every judged request lands in
     exactly one bucket). ``record_request`` is taken at the *entry* of
@@ -1294,10 +1298,40 @@ class FastPathUnavailable(RuntimeError):
     Carries a ``reason`` recorded for observability. Subclasses
     ``RuntimeError`` so existing callers catching ``RuntimeError`` keep
     working unchanged.
+
+    Only raised for *pre-dispatch* failures -- the request never reached a
+    worker -- so the caller may safely fall back to ``subprocess.Popen``
+    without risk of replaying the command. Post-dispatch failures (the
+    request may have run) raise ``FastPathExecUncertain`` instead, a sibling
+    (NOT a subclass) so a broad ``except FastPathUnavailable`` cannot swallow
+    a no-replay condition into a fallback.
     """
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"fork fastpath unavailable: {reason}")
+        self.reason = reason
+
+
+class FastPathExecUncertain(RuntimeError):
+    """Raised by ``ForkServerPool.submit`` for a *post-dispatch* failure.
+
+    Dispatch begins the moment ``_send_frame`` starts sending the request
+    header to a worker. Any failure from that point on -- a half-sent frame,
+    a worker that dies mid-round-trip, a ``_recv_frame`` error (including
+    the >1 MiB ``frame too large`` path), a socket timeout, a
+    ``json.loads`` error -- means the code may already have run in the
+    forked child. Replaying via ``subprocess.Popen`` would risk duplicate
+    side effects, so the caller MUST NOT fall back; it reports an explicit
+    execution-uncertain failure instead.
+
+    A sibling of ``FastPathUnavailable`` (both subclass ``RuntimeError``
+    directly, neither is a subclass of the other) so an ``except
+    FastPathUnavailable`` handler cannot accidentally catch this and turn a
+    no-replay condition back into a Popen fallback.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"fork fastpath execution uncertain: {reason}")
         self.reason = reason
 
 
@@ -1617,8 +1651,21 @@ class ForkServerPool:
             break
 
         proc, sock, wlock = chosen
+        # Phase 8A-2: once we begin sending the request header to the worker
+        # the code may run in the forked child, so any subsequent failure must
+        # NOT fall back to ``subprocess.Popen`` (that would replay side effects).
+        # ``dispatched`` marks the no-replay boundary. It is set the instant we
+        # commit to sending -- just before ``_send_frame`` -- so even a partial
+        # send that raises mid-frame is treated as "may have reached the worker"
+        # (we cannot prove the worker never read/executed). Only failures before
+        # that point (``settimeout``) stay ``FastPathUnavailable`` for a safe
+        # Popen fallback. Anything from ``_send_frame`` onward raises
+        # ``FastPathExecUncertain`` (sibling, not subclass, of
+        # ``FastPathUnavailable``).
+        dispatched = False
         try:
             sock.settimeout((timeout or 305.0) + 5.0)
+            dispatched = True  # dispatch begins here: about to send the header
             _send_frame(sock, json.dumps(header).encode("utf-8"))
             if stdin_bytes:
                 sock.sendall(struct.pack(">I", len(stdin_bytes)))
@@ -1641,9 +1688,16 @@ class ForkServerPool:
                 self._drop(proc)
                 # A worker that dies mid-request is replaced on the next
                 # request; count it as a restart so observability matches the
-                # resurrected-worker-prune path below.
+                # resurrected-worker-prune path below. A real worker failure
+                # still bumps the breaker (capacity_busy does not).
                 self.stats.record_worker_restart(1)
                 self._bump_failure_locked()
+            if dispatched:
+                # Post-dispatch: the code may have run. Report an explicit
+                # execution-uncertain failure; the caller must NOT Popen.
+                raise FastPathExecUncertain("post_dispatch_failure") from exc
+            # Pre-dispatch: the worker never received a complete header, so a
+            # Popen fallback cannot double-execute.
             raise FastPathUnavailable("worker_unavailable") from exc
         else:
             with self._lock:
@@ -1734,8 +1788,28 @@ def _try_fastpath_exec(
             )
         )
     except FastPathUnavailable as exc:
+        # Pre-dispatch: the request never reached a worker, so falling back to
+        # ``subprocess.Popen`` cannot double-execute the command.
         _FORK_POOL.stats.record_fallback(exc.reason)
         return False
+    except FastPathExecUncertain:
+        # Phase 8A-2: the request was dispatched -- the code may already have
+        # run in the forked child. Replaying via ``subprocess.Popen`` would
+        # risk duplicate side effects, so report an explicit execution-uncertain
+        # failure and tell the caller a response was sent (it must NOT Popen).
+        # ``FastPathExecUncertain`` is a sibling of ``FastPathUnavailable`` (not
+        # a subclass), so this handler is reached independently of the one above.
+        _FORK_POOL.stats.record_fallback("exec_uncertain")
+        _send_response(
+            conn,
+            _exec_response(
+                exit_code=1,
+                stderr="fastpath execution status uncertain; command not re-run",
+                started=False,
+                error="fastpath_exec_uncertain",
+            ),
+        )
+        return True
     if "error" in response:
         # The worker responded but hit an internal error (``_run_child``
         # defensive except) -- fastpath attempted and failed to run the code,
