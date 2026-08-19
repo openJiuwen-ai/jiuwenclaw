@@ -115,7 +115,11 @@ def _normalize_ask_user_interrupt_value(value_obj: Any, tool_args: dict[str, Any
     }
 
 
-def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) -> dict[str, Any] | None:
+def _ask_user_question_payload_from_interrupt(
+    tool_call: Any,
+    interrupt: Any,
+    tool_name: str,
+) -> dict[str, Any] | None:
     request_id = str(
         getattr(getattr(interrupt, "request", None), "tool_call_id", None)
         or getattr(tool_call, "id", "")
@@ -127,10 +131,10 @@ def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) ->
     args = _parse_tool_call_arguments(tool_call)
     value_obj = getattr(interrupt, "request", None)
     if value_obj is None:
-        if not args:
+        if str(tool_name or "").strip() != "ask_user" or not args:
             return None
         value_obj = {"tool_name": "ask_user", "tool_args": args, "questions": args.get("questions", [])}
-    elif args:
+    elif args and str(tool_name or "").strip() == "ask_user":
         value_obj = _normalize_ask_user_interrupt_value(value_obj, args)
 
     return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
@@ -871,12 +875,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         result: Any,
         exception: Any = None,
     ) -> None:
-        if str(tool_name or "").strip() != "ask_user":
-            return
         interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
         if interrupt is None:
             return
-        payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt)
+        payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt, tool_name)
         if not payload:
             logger.debug("[StreamEventRail] ask_user interrupt payload unavailable")
             return

@@ -228,3 +228,39 @@ async def test_ask_user_interrupt_emits_question_event_from_exception_cause():
     assert output.type == "chat.ask_user_question"
     assert output.payload["request_id"] == "tool-ask-2"
     assert output.payload["questions"][0]["question"] == "是否继续"
+
+
+@pytest.mark.asyncio
+async def test_permission_interrupt_for_read_file_emits_approval_question():
+    class ToolInterruptException(Exception):
+        def __init__(self):
+            super().__init__()
+            self.request = SimpleNamespace(
+                tool_call_id="tool-read-1",
+                tool_name="read_file",
+                tool_args={"file_path": r"C:\Users\Administrator\Desktop\分析.md"},
+                message="**工具 `read_file` 需要授权才能执行**\n\n请确认是否允许该操作。",
+            )
+
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-read-1",
+        name="read_file",
+        arguments={"file_path": r"C:\Users\Administrator\Desktop\分析.md"},
+    )
+    exception = SimpleNamespace(cause=ToolInterruptException())
+
+    await _TestRail().emit_ask_user_question_if_interrupted(
+        session,
+        tool_call,
+        "read_file",
+        None,
+        exception,
+    )
+
+    assert len(session.outputs) == 1
+    output = session.outputs[0]
+    assert output.type == "chat.ask_user_question"
+    assert output.payload["request_id"] == "tool-read-1"
+    assert output.payload["source"] == "permission_interrupt"
+    assert output.payload["questions"][0]["header"] == "权限审批: read_file"
