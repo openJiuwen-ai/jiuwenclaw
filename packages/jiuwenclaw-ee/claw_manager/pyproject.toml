@@ -23,6 +23,7 @@ dependencies = [
     "websockets>=12.0,<16",
     "asyncpg>=0.29",
     "cryptography>=42.0",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

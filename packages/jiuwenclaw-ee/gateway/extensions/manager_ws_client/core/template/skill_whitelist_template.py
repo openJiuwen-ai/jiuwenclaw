@@ -12,7 +12,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import get_jiuwenclaw_id, parse_iso_datetime, utc_now
 from ...models.template_models import SKILL_WHITELIST_TEMPLATE_TABLE_DEF
-from ...schemas.template_schemas import SkillWhitelistTemplateUpdateRequest
+from ...schemas.template_schemas import SkillWhitelistTemplateUpdateRequest, _validate_http_url
 
 _TABLE = SKILL_WHITELIST_TEMPLATE_TABLE_DEF.table_name
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def _normalize_skill_source(value: str) -> str:
         raise ValueError("skill_source is required")
     if len(normalized) > 2048:
         raise ValueError("skill_source must be at most 2048 characters")
-    return normalized
+    return _validate_http_url(normalized)
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, str]:

@@ -69,15 +69,15 @@ async def list_template_mappings(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@mapping_router.get("/{mapping_id}", response_model=ResponseModel)
+@mapping_router.get("/{row_id}", response_model=ResponseModel)
 async def get_template_mapping(
     jiuwenclaw_id: str,
-    mapping_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        row = await svc.get(jiuwenclaw_id, mapping_id)
+        row = await svc.get(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -85,16 +85,16 @@ async def get_template_mapping(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@mapping_router.patch("/{mapping_id}", response_model=ResponseModel)
+@mapping_router.patch("/{row_id}", response_model=ResponseModel)
 async def update_template_mapping(
     jiuwenclaw_id: str,
-    mapping_id: int,
+    row_id: int,
     body: ConfigDefaultTemplateMappingUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        row = await svc.update(jiuwenclaw_id, mapping_id, body)
+        row = await svc.update(jiuwenclaw_id, row_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -102,20 +102,22 @@ async def update_template_mapping(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@mapping_router.delete("/{mapping_id}", response_model=ResponseModel)
+@mapping_router.delete("/{row_id}", response_model=ResponseModel)
 async def delete_template_mapping(
     jiuwenclaw_id: str,
-    mapping_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        ok = await svc.delete(jiuwenclaw_id, mapping_id)
+        ok = await svc.delete(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="template mapping not found")
-    return ResponseModel(code=200, message="success", data={"deleted": True, "id": mapping_id})
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "id": row_id}
+    )
 
 # --- Global 兜底 ---
 
@@ -156,15 +158,15 @@ async def list_global_policies(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@global_router.get("/{policy_id}", response_model=ResponseModel)
+@global_router.get("/{row_id}", response_model=ResponseModel)
 async def get_global_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        row = await svc.get(jiuwenclaw_id, policy_id)
+        row = await svc.get(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -172,16 +174,16 @@ async def get_global_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@global_router.patch("/{policy_id}", response_model=ResponseModel)
+@global_router.patch("/{row_id}", response_model=ResponseModel)
 async def update_global_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     body: ConfigEffectiveGlobalPolicyUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        row = await svc.update(jiuwenclaw_id, policy_id, body)
+        row = await svc.update(jiuwenclaw_id, row_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -189,20 +191,22 @@ async def update_global_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@global_router.delete("/{policy_id}", response_model=ResponseModel)
+@global_router.delete("/{row_id}", response_model=ResponseModel)
 async def delete_global_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        ok = await svc.delete(jiuwenclaw_id, policy_id)
+        ok = await svc.delete(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="global policy not found")
-    return ResponseModel(code=200, message="success", data={"deleted": True, "id": policy_id})
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "id": row_id}
+    )
 
 # --- Service 层级 ---
 
@@ -243,15 +247,15 @@ async def list_service_policies(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@service_router.get("/{policy_id}", response_model=ResponseModel)
+@service_router.get("/{row_id}", response_model=ResponseModel)
 async def get_service_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        row = await svc.get(jiuwenclaw_id, policy_id)
+        row = await svc.get(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -259,16 +263,16 @@ async def get_service_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@service_router.patch("/{policy_id}", response_model=ResponseModel)
+@service_router.patch("/{row_id}", response_model=ResponseModel)
 async def update_service_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     body: ConfigEffectiveServicePolicyUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        row = await svc.update(jiuwenclaw_id, policy_id, body)
+        row = await svc.update(jiuwenclaw_id, row_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -276,20 +280,22 @@ async def update_service_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@service_router.delete("/{policy_id}", response_model=ResponseModel)
+@service_router.delete("/{row_id}", response_model=ResponseModel)
 async def delete_service_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        ok = await svc.delete(jiuwenclaw_id, policy_id)
+        ok = await svc.delete(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="service policy not found")
-    return ResponseModel(code=200, message="success", data={"deleted": True, "id": policy_id})
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "id": row_id}
+    )
 
 
 # --- Agent 层级 ---
@@ -331,15 +337,15 @@ async def list_agent_policies(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@agent_router.get("/{policy_id}", response_model=ResponseModel)
+@agent_router.get("/{row_id}", response_model=ResponseModel)
 async def get_agent_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        row = await svc.get(jiuwenclaw_id, policy_id)
+        row = await svc.get(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -347,16 +353,16 @@ async def get_agent_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@agent_router.patch("/{policy_id}", response_model=ResponseModel)
+@agent_router.patch("/{row_id}", response_model=ResponseModel)
 async def update_agent_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     body: ConfigEffectiveAgentPolicyUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        row = await svc.update(jiuwenclaw_id, policy_id, body)
+        row = await svc.update(jiuwenclaw_id, row_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -364,20 +370,22 @@ async def update_agent_policy(
     return ResponseModel(code=200, message="success", data=row.model_dump())
 
 
-@agent_router.delete("/{policy_id}", response_model=ResponseModel)
+@agent_router.delete("/{row_id}", response_model=ResponseModel)
 async def delete_agent_policy(
     jiuwenclaw_id: str,
-    policy_id: int,
+    row_id: int,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        ok = await svc.delete(jiuwenclaw_id, policy_id)
+        ok = await svc.delete(jiuwenclaw_id, row_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="agent policy not found")
-    return ResponseModel(code=200, message="success", data={"deleted": True, "id": policy_id})
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "id": row_id}
+    )
 
 
 config_effective_policy_router = APIRouter()

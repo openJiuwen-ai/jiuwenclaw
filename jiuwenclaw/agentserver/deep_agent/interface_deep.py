@@ -932,6 +932,44 @@ class JiuWenClawDeepAdapter:
 
         return _default_trust_resolver(skill_dir)
 
+    async def _refresh_skill_identity(self, skill_name: str) -> None:
+        """按安装账本校准当前企业 Skill 的预置身份，不改变 Skill 加载集合。"""
+        if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            return
+        name = str(skill_name or "").strip()
+        if not name or Path(name).name != name:
+            return
+
+        from jiuwenclaw.agentserver.installed_skill import (
+            SOURCE_PREBUILT,
+            get_installed_skill,
+        )
+
+        try:
+            installed = await get_installed_skill(
+                service_id=self._service_id,
+                agent_id=self._agent_id,
+                skill_name=name,
+            )
+        except Exception:  # noqa: BLE001 — 查询失败保留实例已有快照，加载行为不变
+            logger.warning(
+                "[JiuWenClawDeepAdapter] refresh skill identity failed "
+                "service_id=%s agent_id=%s skill=%s",
+                self._service_id,
+                self._agent_id,
+                name,
+                exc_info=True,
+            )
+            return
+
+        if (
+            installed is not None
+            and str(installed.get("source_type") or "").strip() == SOURCE_PREBUILT
+        ):
+            self._prebuilt_skills.add(name)
+        else:
+            self._prebuilt_skills.discard(name)
+
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
         if not isinstance(config, dict):
@@ -2149,6 +2187,7 @@ class JiuWenClawDeepAdapter:
                     skill_dirs_provider=lambda: self._resolve_skill_dirs(),
                 ),
                 trust_resolver=self._resolve_skill_trust,
+                skill_identity_refresher=self._refresh_skill_identity,
             )
             logger.info("[JiuWenClawDeepAdapter] SkillAuthorizationRail create success")
             return rail
