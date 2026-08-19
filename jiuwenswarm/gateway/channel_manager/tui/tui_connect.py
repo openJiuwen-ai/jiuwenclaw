@@ -291,6 +291,18 @@ CLI_FORWARD_REQ_METHODS = frozenset(
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_templates.list",
+        "agent_templates.show",
+        "agent_templates.file.list",
+        "agent_templates.file.read",
+        "agent_templates.create",
+        "agent_templates.install",
+        "agent_templates.uninstall",
+        "plugin_packages.list",
+        "plugin_packages.show",
+        "plugin_packages.create",
+        "plugin_packages.install",
+        "plugin_packages.uninstall",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.tools.delete",
@@ -390,6 +402,18 @@ CLI_FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset(
         "plugins.enable",
         "plugins.disable",
         "plugins.reload",
+        "agent_templates.list",
+        "agent_templates.show",
+        "agent_templates.file.list",
+        "agent_templates.file.read",
+        "agent_templates.create",
+        "agent_templates.install",
+        "agent_templates.uninstall",
+        "plugin_packages.list",
+        "plugin_packages.show",
+        "plugin_packages.create",
+        "plugin_packages.install",
+        "plugin_packages.uninstall",
         "permissions.tools.get",
         "permissions.tools.update",
         "permissions.tools.delete",
@@ -1583,6 +1607,134 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             payload=payload if response.ok else None,
             error=None if response.ok else str(payload.get("error") or "session.create failed"),
             code=None if response.ok else str(payload.get("code") or "SESSION_CREATE_FAILED"),
+        )
+
+    async def _session_rebind_project(ws, req_id, params, session_id, user_id=None):
+        """TUI 专用：``/workspace set`` 切换工作目录时同步重绑当前 session 的 project。
+
+        会话运行态与 metadata 写入权由 AgentServer 持有，因此优先经 E2A 转发到
+        AgentServer 的 ``session.rebind_project`` handler（分离部署 / user_id 隔离
+        目录时，Gateway 本地写不会落到正确会话目录）。AgentServer 不可用时回退到
+        本地解析 + ``rebind_session_project``，保证单机部署仍可用。
+        """
+        from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenswarm.common.schema.message import ReqMethod
+
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST"
+            )
+            return
+        target = str(params.get("session_id") or session_id or "").strip()
+        if not target:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session_id is required", code="BAD_REQUEST"
+            )
+            return
+        candidate_dir = str(params.get("project_dir") or "").strip()
+        if not candidate_dir:
+            await channel.send_response(
+                ws, req_id, ok=False, error="project_dir is required", code="BAD_REQUEST"
+            )
+            return
+
+        forward_params = {
+            "session_id": target,
+            "project_dir": candidate_dir,
+            **{k: v for k, v in params.items() if k not in ("session_id", "project_dir")},
+        }
+        real_client = _resolve_agent_client(agent_client)
+        if real_client is not None:
+            try:
+                env = e2a_from_agent_fields(
+                    request_id=req_id,
+                    channel_id="tui",
+                    session_id=target,
+                    req_method=ReqMethod.SESSION_REBIND_PROJECT,
+                    params=forward_params,
+                    is_stream=False,
+                    timestamp=time.time(),
+                    user_id=user_id or getattr(ws, "_gateway_user_id", None),
+                )
+                resp = await _send_tui_agent_request(
+                    real_client, env, label="session.rebind_project",
+                )
+                pl = resp.payload if isinstance(resp.payload, dict) else {}
+                if resp.ok:
+                    await channel.send_response(ws, req_id, ok=True, payload=pl)
+                    return
+                err = pl.get("error", "session.rebind_project failed")
+                code = pl.get("code") or None
+                if isinstance(code, str) and not code.strip():
+                    code = None
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(err), code=code,
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "[tui] session.rebind_project forward to agent failed, "
+                    "fallback local: %s",
+                    e,
+                )
+
+        # 本地回退：AgentServer 不可用（单机部署 / 进程未起）时仍能完成重绑。
+        from jiuwenswarm.server.runtime.session.project_store import (
+            find_or_create_code_project_for_tui_params,
+        )
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            rebind_session_project,
+        )
+
+        if not get_session_metadata(target):
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+            )
+            return
+        try:
+            project = find_or_create_code_project_for_tui_params(
+                {"project_dir": candidate_dir}
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[tui] session.rebind_project: resolve project failed: %s", exc
+            )
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code="PROJECT_RESOLVE_FAILED"
+            )
+            return
+        if project is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="project_dir must be a non-empty absolute path",
+                code="BAD_REQUEST",
+            )
+            return
+        updated = rebind_session_project(
+            session_id=target,
+            project_id=project.project_id,
+            project_dir=project.project_dir,
+            work_mode=project.work_mode,
+        )
+        if not updated:
+            await channel.send_response(
+                ws, req_id, ok=False, error="session not found", code="NOT_FOUND"
+            )
+            return
+        await channel.send_response(
+            ws,
+            req_id,
+            ok=True,
+            payload={
+                "session_id": target,
+                "project_id": project.project_id,
+                "project_dir": project.project_dir,
+                "project_name": project.name,
+                "work_mode": project.work_mode,
+            },
         )
 
     async def _session_delete(ws, req_id, params, session_id, user_id=None):
@@ -3170,6 +3322,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     channel.register_local_handler(path, "3rdagent.switch", _3rdagent_switch)
     channel.register_local_handler(path, "session.list", _session_list)
     channel.register_local_handler(path, "session.create", _session_create)
+    channel.register_local_handler(path, "session.rebind_project", _session_rebind_project)
     channel.register_local_handler(path, "session.delete", _session_delete)
     channel.register_local_handler(path, "session.rename", _session_rename)
     channel.register_local_handler(path, "session.color_set", _session_color_set)
@@ -3351,7 +3504,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             logger.warning("[cron.job.get] %s", exc)
             await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
 
-    async def _cron_job_create(ws, req_id, params, session_id):
+    async def _cron_job_create(ws, req_id, params, session_id, user_id=None):
         cc = _get_cron()
         if cc is None:
             await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
@@ -3362,6 +3515,10 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
         try:
             if session_id:
                 params["session_id"] = session_id
+            # 与 Web _cron_job_create 对齐：写入创建者，执行时透传 AgentOS X-Session-Context。
+            uid = str(user_id or getattr(ws, "_gateway_user_id", None) or "").strip()
+            if uid:
+                params["user_id"] = uid
             # project_dir 默认值：TUI 前端已自动注入；仅当「未传」时从当前会话 metadata 兜底
             # 注意：显式传空串 "" 等价于归默认项目，不可覆盖——用 key presence 区分
             if "project_dir" not in params and session_id:
@@ -3542,13 +3699,17 @@ def build_cli_route_binding(bind: CliRouteBindParams) -> GatewayRouteBinding:
 
     async def _tui_disconnect(
         _ws: Any,
-        stale_session_keys: list[tuple[str, str]],
-        stale_request_keys: list[tuple[str, str]] | None = None,
+        stale_session_keys: list[tuple[str, ...]],
+        stale_request_keys: list[tuple[str, ...]] | None = None,
     ) -> None:
         await _cancel_harmonyos_dev_init_tasks(_ws)
+        mh = bind.message_handler
+        cleanup = getattr(mh, "unregister_ws_subscriptions", None)
+        ws_id = str(getattr(_ws, "_jiuwen_ws_id", "") or "").strip()
+        if callable(cleanup) and ws_id:
+            await cleanup(bind.channel_id, ws_id)
         if bool(getattr(_ws, "_jiuwenswarm_tui_user_exit", False)):
             return
-        mh = bind.message_handler
         if mh is None:
             return
         # NOTE: do not early-return on empty stale_session_keys; in-flight streams

@@ -6,20 +6,23 @@ import json
 import logging
 import re
 import threading
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.session.session_history import (
+    SESSION_REQUEST_COMPLETED_EVENT,
+    enqueue_history_request_completion,
     get_read_history_path,
     load_history_records,
 )
 from jiuwenswarm.symphony.config import load_symphony_config
 from jiuwenswarm.symphony.evolution.models import normalize_edges, skill_id
-from jiuwenswarm.symphony.evolution.service import record_plan_outcome
-from jiuwenswarm.symphony.graph_storage import resolve_graph_artifact_dir
+from jiuwenswarm.symphony.evolution.service import (
+    prepare_evolution_store,
+    record_plan_outcome,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,13 +31,23 @@ SESSION_FEEDBACK_STATE_FILE = "session_feedback_state.json"
 SESSION_FEEDBACK_SOURCE = "session_history"
 SESSION_INFERENCE_VERSION = "session_history_v1"
 _MAX_TRACKED_SESSIONS = 500
+_MAX_TRACKED_SKILLS = 200
 _MAX_SKIPPED_TURNS = 3
-_HISTORY_READY_RETRIES = 20
-_HISTORY_READY_INTERVAL_SECONDS = 0.05
 _SYMPHONY_TOOL_NAMES = {
     "symphony_compose_graph",
     "symphony_read_graph",
     "symphony_refresh_graph",
+}
+_SKILL_FILE_TOOL_NAMES = {"read_file", "Read"}
+_NON_BUSINESS_TOOL_NAMES = {
+    "skill_tool",
+    *_SKILL_FILE_TOOL_NAMES,
+    *_SYMPHONY_TOOL_NAMES,
+}
+_TERMINAL_RESPONSE_EVENTS = {
+    "chat.final",
+    "chat.error",
+    "chat.ask_user_question",
 }
 _CONTINUATION_RE = re.compile(
     r"(?:"
@@ -50,6 +63,12 @@ _CONTINUATION_RE = re.compile(
 _SKILL_FRONTMATTER_NAME_RE = re.compile(
     r"---[ \t]*(?:\r?\n|\\n)[ \t]*name[ \t]*:[ \t]*[\"']?"
     r"([A-Za-z0-9_.-]+)",
+    re.IGNORECASE,
+)
+_NON_EXECUTION_FINAL_RE = re.compile(
+    r"^\s*(?:(?:已|本次|当前)\s*)?"
+    r"(?:取消(?:执行|计划|任务)?|未执行|无法执行|需要.{0,16}(?:补充|提供)|"
+    r"(?:cancelled|canceled|not executed|unable to execute|need(?:s|ed)? more input)\b)",
     re.IGNORECASE,
 )
 
@@ -69,6 +88,8 @@ def session_feedback_state_path(graph_dir: str | Path) -> Path:
 def schedule_session_evolution_consume(
     session_id: str,
     request_id: str,
+    *,
+    terminal_status: str = "success",
 ) -> bool:
     """Schedule non-blocking feedback consumption after history is durable."""
 
@@ -80,7 +101,7 @@ def schedule_session_evolution_consume(
         config = load_symphony_config()
         if not config.enabled or not config.evolution.enabled:
             return False
-        graph_dir = resolve_graph_artifact_dir(config.paths.graph_dir)
+        graph_dir = prepare_evolution_store(config.paths.graph_dir)
     except Exception as exc:  # noqa: BLE001
         LOGGER.debug("Symphony session feedback is unavailable: %s", exc)
         return False
@@ -91,12 +112,26 @@ def schedule_session_evolution_consume(
             return False
         _SCHEDULED.add(schedule_key)
 
-    future = _EXECUTOR.submit(
-        _consume_after_history_ready,
-        clean_session_id,
-        clean_request_id,
-        graph_dir,
-    )
+    try:
+        completion_receipt = enqueue_history_request_completion(
+            clean_session_id,
+            clean_request_id,
+            terminal_status=terminal_status,
+        )
+        if completion_receipt is None:
+            raise RuntimeError("request completion was not enqueued")
+        future = _EXECUTOR.submit(
+            _consume_after_history_ready,
+            clean_session_id,
+            clean_request_id,
+            graph_dir,
+            completion_receipt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        with _SCHEDULE_LOCK:
+            _SCHEDULED.discard(schedule_key)
+        LOGGER.warning("Failed to schedule Symphony session feedback: %s", exc)
+        return False
     future.add_done_callback(lambda current: _on_consume_done(schedule_key, current))
     return True
 
@@ -105,34 +140,16 @@ def _consume_after_history_ready(
     session_id: str,
     request_id: str,
     graph_dir: Path,
+    completion_receipt: Future[None],
 ) -> dict[str, Any]:
+    completion_receipt.result()
     history_path = get_read_history_path(session_id)
-    history_limit = _wait_for_request_history(session_id, request_id, history_path)
     return consume_session_history(
         session_id,
         completed_request_id=request_id,
         graph_dir=graph_dir,
-        history_limit_bytes=history_limit,
+        history_limit_bytes=_file_size(history_path),
     )
-
-
-def _wait_for_request_history(
-    session_id: str,
-    request_id: str,
-    history_path: Path,
-) -> int | None:
-    """Wait off the request thread until this request's terminal record is durable."""
-
-    for _attempt in range(_HISTORY_READY_RETRIES):
-        records = load_history_records(session_id)
-        if any(
-            str(record.get("request_id") or "") == request_id
-            and record.get("event_type") == "chat.final"
-            for record in reversed(records)
-        ):
-            return _file_size(history_path)
-        time.sleep(_HISTORY_READY_INTERVAL_SECONDS)
-    return _file_size(history_path)
 
 
 def consume_session_history(
@@ -156,8 +173,8 @@ def consume_session_history(
                 "recorded": False,
                 "source": SESSION_FEEDBACK_SOURCE,
             }
-        graph_dir = resolve_graph_artifact_dir(config.paths.graph_dir)
-    resolved_graph_dir = Path(graph_dir).resolve()
+        graph_dir = config.paths.graph_dir
+    resolved_graph_dir = prepare_evolution_store(graph_dir)
     history_path = get_read_history_path(clean_session_id)
 
     with _STATE_LOCK:
@@ -165,6 +182,11 @@ def consume_session_history(
         sessions = state.setdefault("sessions", {})
         session_state = dict(sessions.get(clean_session_id) or {})
         try:
+            _bootstrap_activated_skill_state(
+                clean_session_id,
+                history_path,
+                session_state,
+            )
             records, cursor = _read_new_records(
                 history_path,
                 session_state,
@@ -178,6 +200,9 @@ def consume_session_history(
                 graph_dir=resolved_graph_dir,
             )
             session_state.update(cursor)
+            for key in ("deferred_records", "deferred_completed_request_ids"):
+                if not session_state.get(key):
+                    session_state.pop(key, None)
             session_state["updated_at"] = _utc_now()
             sessions[clean_session_id] = session_state
             _update_state_stats(state, records, results)
@@ -258,8 +283,15 @@ def _consume_records(
         if isinstance(session_state.get("pending_plan"), dict)
         else {}
     )
+    activated_skill_ids = _dedupe_skill_ids(
+        session_state.get("activated_skill_ids") or []
+    )
     results: list[dict[str, Any]] = []
     for request_id, request_records in _group_by_request(records):
+        activated_skill_ids = _merge_skill_ids(
+            activated_skill_ids,
+            _activated_skill_ids(request_records),
+        )
         markers = _plan_markers(request_records, graph_dir=graph_dir)
 
         if markers:
@@ -273,6 +305,7 @@ def _consume_records(
                 request_id=request_id,
                 graph_dir=graph_dir,
                 same_turn=False,
+                activated_skill_ids=activated_skill_ids,
             )
             if result is not None:
                 results.append(result)
@@ -294,6 +327,7 @@ def _consume_records(
                 request_id=request_id,
                 graph_dir=graph_dir,
                 same_turn=True,
+                activated_skill_ids=activated_skill_ids,
             )
             if result is not None:
                 results.append(result)
@@ -303,6 +337,10 @@ def _consume_records(
         session_state["pending_plan"] = pending
     else:
         session_state.pop("pending_plan", None)
+    if activated_skill_ids:
+        session_state["activated_skill_ids"] = activated_skill_ids
+    else:
+        session_state.pop("activated_skill_ids", None)
     return results
 
 
@@ -314,10 +352,8 @@ def _consume_execution_turn(
     request_id: str,
     graph_dir: Path,
     same_turn: bool,
+    activated_skill_ids: list[str],
 ) -> dict[str, Any] | None:
-    correlation = _execution_correlation(pending, records, same_turn=same_turn)
-    if not correlation:
-        return None
     classification = _classify_outcome(records)
     if classification is None:
         return None
@@ -328,14 +364,33 @@ def _consume_execution_turn(
         include_attempted=outcome != "success",
     )
     observed_tools = _observed_tool_names(records)
-    planned_skill_ids = list(pending.get("selected_skill_ids") or [])
+    planned_skill_ids = _dedupe_skill_ids(pending.get("selected_skill_ids") or [])
+    activated_planned_skills = _match_planned_skills(
+        planned_skill_ids,
+        activated_skill_ids,
+    )
+    correlation = _execution_correlation(
+        pending,
+        records,
+        same_turn=same_turn,
+        outcome=outcome,
+        observed_skill_ids=observed_skills,
+        activated_skill_ids=activated_planned_skills,
+    )
+    if not correlation:
+        return None
+    attributed_skills = (
+        planned_skill_ids
+        if correlation.startswith("session_activation_with_")
+        else observed_skills
+    )
     if outcome == "success" and not _all_planned_skills_observed(
         planned_skill_ids,
-        observed_skills,
+        attributed_skills,
     ):
         return None
     planned_edges = normalize_edges(pending.get("selected_edges") or [])
-    selected_edges = _observed_edges(planned_edges, observed_skills)
+    selected_edges = _observed_edges(planned_edges, attributed_skills)
     failed_edges = selected_edges[-1:] if outcome == "failure" else []
     evidence_id = f"session:{session_id}:{pending['plan_id']}:{request_id}"
     event = record_plan_outcome(
@@ -343,7 +398,7 @@ def _consume_execution_turn(
         plan_id=str(pending["plan_id"]),
         query=str(pending.get("query") or ""),
         outcome=outcome,
-        selected_skill_ids=observed_skills,
+        selected_skill_ids=attributed_skills,
         selected_edges=selected_edges,
         failed_edges=failed_edges,
         failure_attribution="terminal_edge" if outcome == "failure" else "",
@@ -359,6 +414,12 @@ def _consume_execution_turn(
             "planned_skill_ids": planned_skill_ids,
             "planned_edges": planned_edges,
             "observed_skill_ids": observed_skills,
+            "activated_skill_ids": activated_planned_skills,
+            "skill_evidence": (
+                "session_activation"
+                if correlation.startswith("session_activation_with_")
+                else "current_request"
+            ),
             "observed_tool_names": observed_tools,
             "same_turn": same_turn,
         },
@@ -427,20 +488,50 @@ def _execution_correlation(
     records: list[dict[str, Any]],
     *,
     same_turn: bool,
+    outcome: str,
+    observed_skill_ids: list[str],
+    activated_skill_ids: list[str],
 ) -> str:
     if not records:
         return ""
-    if _observed_skill_ids(records, pending.get("selected_skill_ids") or []):
+    planned_skill_ids = list(pending.get("selected_skill_ids") or [])
+    if _all_planned_skills_observed(planned_skill_ids, observed_skill_ids):
         return "planned_skill_observed"
     observed_tools = _observed_tool_names(records)
     has_execution_tool = any(
-        name and name not in _SYMPHONY_TOOL_NAMES
+        name and name not in _SYMPHONY_TOOL_NAMES and name != "skill_tool"
         for name in observed_tools
     )
+    activation_covers_plan = _all_planned_skills_observed(
+        planned_skill_ids,
+        activated_skill_ids,
+    )
+    has_successful_execution_tool = bool(_successful_execution_tool_names(records))
     if same_turn:
+        if outcome == "success" and activation_covers_plan:
+            if has_successful_execution_tool:
+                return "session_activation_with_tool_execution"
+            current_request_activations = _match_planned_skills(
+                planned_skill_ids,
+                _activated_skill_ids(records),
+            )
+            if (
+                len(planned_skill_ids) == 1
+                and _all_planned_skills_observed(
+                    planned_skill_ids,
+                    current_request_activations,
+                )
+                and _has_substantive_final(records)
+            ):
+                return "session_activation_with_final_response"
         return "same_turn_tool_execution" if has_execution_tool else ""
     if not _CONTINUATION_RE.search(_user_text(records)):
         return ""
+    if outcome == "success" and activation_covers_plan:
+        if has_successful_execution_tool:
+            return "session_activation_with_tool_execution"
+        if len(planned_skill_ids) == 1 and _has_substantive_final(records):
+            return "session_activation_with_final_response"
     if has_execution_tool:
         return "explicit_continuation_with_tool_execution"
     if any(record.get("event_type") == "chat.error" for record in records):
@@ -456,6 +547,8 @@ def _execution_correlation(
 def _classify_outcome(
     records: list[dict[str, Any]],
 ) -> tuple[str, str, str] | None:
+    if _request_cancelled(records):
+        return None
     for record in records:
         if record.get("event_type") == "chat.error":
             error = str(record.get("error") or record.get("content") or "execution failed")
@@ -475,8 +568,19 @@ def _classify_outcome(
         if record.get("event_type") == "chat.final" and str(record.get("content") or "").strip()
     )
     if final_text:
+        if _NON_EXECUTION_FINAL_RE.search(final_text):
+            return None
         return "success", "", final_text[-1000:]
     return None
+
+
+def _request_cancelled(records: list[dict[str, Any]]) -> bool:
+    return any(
+        record.get("event_type") == SESSION_REQUEST_COMPLETED_EVENT
+        and str(record.get("status") or "").strip().lower()
+        in {"cancelled", "canceled", "aborted", "interrupted"}
+        for record in records
+    )
 
 
 def _tool_result_failed(record: dict[str, Any]) -> bool:
@@ -571,6 +675,114 @@ def _observed_skill_ids(
     return observed
 
 
+def _activated_skill_ids(records: list[dict[str, Any]]) -> list[str]:
+    """Return Skills made available by a successful, paired tool result."""
+
+    activated: list[str] = []
+    pending_calls: list[tuple[str, str, str]] = []
+    for record in records:
+        if record.get("event_type") == "chat.tool_call":
+            tool_call = record.get("tool_call")
+            if not isinstance(tool_call, dict):
+                continue
+            tool_name = str(tool_call.get("name") or "").strip()
+            arguments = _tool_arguments(tool_call.get("arguments"))
+            candidate = ""
+            if tool_name == "skill_tool":
+                candidate = str(arguments.get("skill_name") or "").strip()
+            elif tool_name in _SKILL_FILE_TOOL_NAMES:
+                candidate = _managed_skill_name_from_path(
+                    arguments.get("path")
+                    or arguments.get("file_path")
+                    or arguments.get("filepath")
+                )
+            if candidate:
+                call_id = str(
+                    tool_call.get("tool_call_id") or tool_call.get("id") or ""
+                ).strip()
+                pending_calls.append((call_id, tool_name, candidate))
+            continue
+        if record.get("event_type") != "chat.tool_result":
+            continue
+        tool_name = str(record.get("tool_name") or "").strip()
+        if tool_name != "skill_tool" and tool_name not in _SKILL_FILE_TOOL_NAMES:
+            continue
+        invoked_name = _take_pending_activation_call(
+            pending_calls,
+            str(record.get("tool_call_id") or "").strip(),
+            tool_name,
+        )
+        if not invoked_name or _tool_result_failed(record):
+            continue
+        canonical_name = _skill_name_from_result(record)
+        if tool_name in _SKILL_FILE_TOOL_NAMES and (
+            not canonical_name
+            or not _skill_names_equivalent(invoked_name, canonical_name)
+        ):
+            continue
+        candidate = skill_id(canonical_name or invoked_name).strip()
+        if candidate and candidate.lower() not in {item.lower() for item in activated}:
+            activated.append(candidate)
+    return activated
+
+
+def _take_pending_activation_call(
+    pending_calls: list[tuple[str, str, str]],
+    call_id: str,
+    tool_name: str,
+) -> str:
+    if call_id:
+        for index, (pending_id, pending_tool, candidate) in enumerate(pending_calls):
+            if pending_id == call_id and pending_tool == tool_name:
+                pending_calls.pop(index)
+                return candidate
+        return ""
+    matches = [
+        (index, candidate)
+        for index, (_pending_id, pending_tool, candidate) in enumerate(pending_calls)
+        if pending_tool == tool_name
+    ]
+    if len(matches) == 1:
+        index, candidate = matches[0]
+        pending_calls.pop(index)
+        return candidate
+    return ""
+
+
+def _managed_skill_name_from_path(value: Any) -> str:
+    raw_path = str(value or "").strip()
+    if not raw_path:
+        return ""
+    try:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            return ""
+        candidate = candidate.resolve()
+        skills_root = load_symphony_config().paths.skills_root.resolve()
+        relative = candidate.relative_to(skills_root)
+    except (OSError, RuntimeError, ValueError):
+        return ""
+    if candidate.name != "SKILL.md" or len(relative.parts) < 2:
+        return ""
+    return candidate.parent.name
+
+
+def _skill_names_equivalent(path_name: str, canonical_name: str) -> bool:
+    path_id = skill_id(path_name).strip().lower()
+    canonical_id = skill_id(canonical_name).strip().lower()
+    return bool(
+        path_id
+        and canonical_id
+        and (
+            path_id == canonical_id
+            or re.fullmatch(
+                rf"{re.escape(canonical_id)}-v?\d+(?:\.\d+)*",
+                path_id,
+            )
+        )
+    )
+
+
 def _take_pending_skill_call(
     pending_calls: list[tuple[str, str]],
     call_id: str,
@@ -604,7 +816,15 @@ def _find_skill_content(value: Any) -> str:
         direct = value.get("skill_content")
         if isinstance(direct, str):
             return direct
-        for key in ("data", "raw_output", "rawOutput", "result"):
+        for key in (
+            "data",
+            "raw_output",
+            "rawOutput",
+            "result",
+            "content",
+            "text",
+            "output",
+        ):
             nested = _find_skill_content(value.get(key))
             if nested:
                 return nested
@@ -645,6 +865,65 @@ def _observed_tool_names(records: list[dict[str, Any]]) -> list[str]:
             name = str(record.get("tool_name") or "").strip()
         if name and name not in output:
             output.append(name)
+    return output
+
+
+def _successful_execution_tool_names(records: list[dict[str, Any]]) -> list[str]:
+    output: list[str] = []
+    for record in records:
+        if record.get("event_type") != "chat.tool_result":
+            continue
+        name = str(record.get("tool_name") or "").strip()
+        if not name or name in _NON_BUSINESS_TOOL_NAMES:
+            continue
+        if _tool_result_failed(record):
+            continue
+        if name not in output:
+            output.append(name)
+    return output
+
+
+def _has_substantive_final(records: list[dict[str, Any]]) -> bool:
+    return any(
+        record.get("event_type") == "chat.final"
+        and bool(str(record.get("content") or "").strip())
+        and not _NON_EXECUTION_FINAL_RE.search(str(record.get("content") or ""))
+        for record in records
+    )
+
+
+def _dedupe_skill_ids(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        current = skill_id(value).strip()
+        key = current.lower()
+        if current and key not in seen:
+            output.append(current)
+            seen.add(key)
+    return output
+
+
+def _merge_skill_ids(existing: list[str], additions: list[str]) -> list[str]:
+    return _dedupe_skill_ids([*existing, *additions])[-_MAX_TRACKED_SKILLS:]
+
+
+def _match_planned_skills(
+    planned_skill_ids: list[str],
+    activated_skill_ids: list[str],
+) -> list[str]:
+    selected = {
+        skill_id(item).strip().lower(): skill_id(item).strip()
+        for item in planned_skill_ids
+        if skill_id(item).strip()
+    }
+    output: list[str] = []
+    for candidate in activated_skill_ids:
+        matched = _match_selected_skill(candidate, selected)
+        if matched and matched not in output:
+            output.append(matched)
     return output
 
 
@@ -718,31 +997,67 @@ def _read_new_records(
     history_limit_bytes: int | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if history_path.suffix.lower() == ".jsonl":
-        return _read_new_jsonl_records(
+        records, cursor = _read_new_jsonl_records(
             history_path,
             session_state,
             history_limit_bytes=history_limit_bytes,
         )
+    else:
+        all_records = load_history_records(history_path.parent.name)
+        processed_count = max(
+            0,
+            int(session_state.get("processed_record_count") or 0),
+        )
+        if processed_count > len(all_records):
+            processed_count = 0
+        records = all_records[processed_count:]
+        cursor = {
+            "history_path": str(history_path),
+            "processed_record_count": len(all_records),
+            "history_offset": 0,
+            "history_identity": "legacy_json",
+        }
 
-    records = load_history_records(history_path.parent.name)
-    processed_count = max(0, int(session_state.get("processed_record_count") or 0))
-    if processed_count > len(records):
-        processed_count = 0
-    limit = len(records)
-    if completed_request_id:
-        matching = [
-            index
-            for index, record in enumerate(records)
-            if str(record.get("request_id") or "") == completed_request_id
-        ]
-        if matching:
-            limit = matching[-1] + 1
-    return records[processed_count:limit], {
-        "history_path": str(history_path),
-        "processed_record_count": limit,
-        "history_offset": 0,
-        "history_identity": "legacy_json",
-    }
+    selected, deferred, completed_ids = _select_completed_request_records(
+        records,
+        session_state=session_state,
+        completed_request_id=completed_request_id,
+    )
+    cursor["deferred_records"] = deferred
+    cursor["deferred_completed_request_ids"] = completed_ids
+    return selected, cursor
+
+
+def _bootstrap_activated_skill_state(
+    session_id: str,
+    history_path: Path,
+    session_state: dict[str, Any],
+) -> None:
+    """Recover activations hidden behind a cursor written by older releases."""
+
+    if session_state.get("activated_skill_state_initialized"):
+        return
+    processed_count = max(
+        0,
+        int(session_state.get("processed_record_count") or 0),
+    )
+    if processed_count:
+        previous_identity = str(session_state.get("history_identity") or "")
+        if history_path.suffix.lower() == ".jsonl" and previous_identity:
+            try:
+                stat = history_path.stat()
+            except OSError:
+                processed_count = 0
+            else:
+                if previous_identity != f"{stat.st_dev}:{stat.st_ino}":
+                    processed_count = 0
+        if processed_count:
+            prior_records = load_history_records(session_id)[:processed_count]
+            session_state["activated_skill_ids"] = _merge_skill_ids(
+                _dedupe_skill_ids(session_state.get("activated_skill_ids") or []),
+                _activated_skill_ids(prior_records),
+            )[-_MAX_TRACKED_SKILLS:]
+    session_state["activated_skill_state_initialized"] = True
 
 
 def _read_new_jsonl_records(
@@ -789,6 +1104,104 @@ def _read_new_jsonl_records(
         "history_offset": limit,
         "history_identity": identity,
     }
+
+
+def _select_completed_request_records(
+    new_records: list[dict[str, Any]],
+    *,
+    session_state: dict[str, Any],
+    completed_request_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    existing = session_state.get("deferred_records")
+    combined = [
+        *(
+            [dict(item) for item in existing if isinstance(item, dict)]
+            if isinstance(existing, list)
+            else []
+        ),
+        *new_records,
+    ]
+    if not completed_request_id:
+        return combined, [], []
+
+    known_completed = {
+        str(item).strip()
+        for item in session_state.get("deferred_completed_request_ids") or []
+        if str(item).strip()
+    }
+    known_completed.add(str(completed_request_id).strip())
+    groups: dict[str, dict[str, Any]] = {}
+    for index, record in enumerate(combined):
+        request_id = str(record.get("request_id") or f"__record_{index}")
+        group = groups.setdefault(
+            request_id,
+            {"first": index, "last": index, "order": index, "records": []},
+        )
+        group["last"] = index
+        group["records"].append(record)
+        if (
+            record.get("event_type") == "chat.tool_result"
+            and str(record.get("tool_name") or "") == "symphony_compose_graph"
+        ):
+            group["order"] = index
+        if record.get("event_type") == SESSION_REQUEST_COMPLETED_EVENT:
+            known_completed.add(request_id)
+
+    target = groups.get(str(completed_request_id).strip())
+    if target is not None:
+        target_first = int(target["first"])
+        for request_id, group in groups.items():
+            if int(group["last"]) >= target_first:
+                continue
+            if _history_group_has_terminal_response(group["records"]):
+                known_completed.add(request_id)
+
+    ordered = sorted(groups.items(), key=lambda item: int(item[1]["order"]))
+    first_incomplete = _first_incomplete_request_order(ordered, known_completed)
+    selected: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    processed_ids: set[str] = set()
+    for request_id, group in ordered:
+        requires_completion = _history_group_requires_completion(group["records"])
+        if request_id in known_completed and (
+            first_incomplete is None or int(group["order"]) < first_incomplete
+        ):
+            selected.extend(group["records"])
+            processed_ids.add(request_id)
+        elif requires_completion:
+            deferred.extend(group["records"])
+    return selected, deferred, sorted((known_completed & groups.keys()) - processed_ids)
+
+
+def _history_group_has_terminal_response(records: list[dict[str, Any]]) -> bool:
+    for record in records:
+        if record.get("event_type") in _TERMINAL_RESPONSE_EVENTS:
+            return True
+    return False
+
+
+def _first_incomplete_request_order(
+    ordered: list[tuple[str, dict[str, Any]]],
+    known_completed: set[str],
+) -> int | None:
+    for request_id, group in ordered:
+        if request_id in known_completed:
+            continue
+        if _history_group_requires_completion(group["records"]):
+            return int(group["order"])
+    return None
+
+
+def _history_group_requires_completion(records: list[dict[str, Any]]) -> bool:
+    return any(
+        record.get("role") in {"user", "human"}
+        and not record.get("is_goal_objective_message")
+        for record in records
+    ) or any(
+        record.get("event_type") == "chat.tool_result"
+        and str(record.get("tool_name") or "") == "symphony_compose_graph"
+        for record in records
+    )
 
 
 def _read_state(graph_dir: Path) -> dict[str, Any]:

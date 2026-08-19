@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """统一消息模型."""
 
@@ -45,6 +45,7 @@ class ReqMethod(Enum):
     SESSION_DELETE = "session.delete"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
+    SESSION_REBIND_PROJECT = "session.rebind_project"
     SESSION_REWIND = "session.rewind"
     SESSION_REWIND_AND_RESTORE = "session.rewind_and_restore"
     SESSION_REWIND_CONTEXT = "session.rewind_context"
@@ -87,11 +88,27 @@ class ReqMethod(Enum):
     AGENT_SWITCH = "3rdagent.switch"
     AGENT_LIST = "3rdagent.list"
 
+    # mcp management.
+    MCP_LIST = "mcp.list"
+    MCP_SHOW = "mcp.show"
+    MCP_CONNECT = "mcp.connect"
+    MCP_WAIT_AUTH = "mcp.wait_auth"
+    MCP_DISCONNECT = "mcp.disconnect"
+    MCP_REGISTER_CUSTOM = "mcp.register_custom"
+    MCP_DELETE_CUSTOM = "mcp.delete_custom"
+    MCP_SAVE_CREDENTIALS = "mcp.save_credentials"
+
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
     SKILLS_TOGGLE = "skills.toggle"
+    # Per-workspace Skill visibility (team mode): the Skill entities themselves
+    # live in exactly one global library, so who may see which Skill is metadata
+    # stored next to a member / team workspace rather than a directory layout.
+    SKILLS_VISIBILITY_GET = "skills.visibility.get"
+    SKILLS_VISIBILITY_SET = "skills.visibility.set"
+    SKILLS_VISIBILITY_UPDATE = "skills.visibility.update"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"
@@ -143,6 +160,20 @@ class ReqMethod(Enum):
     EXTENSIONS_IMPORT = "extensions.import"
     EXTENSIONS_DELETE = "extensions.delete"
     EXTENSIONS_TOGGLE = "extensions.toggle"
+
+    # agent_template / plugin package catalog + lifecycle RPCs.
+    AGENT_TEMPLATES_LIST = "agent_templates.list"
+    AGENT_TEMPLATES_SHOW = "agent_templates.show"
+    AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
+    AGENT_TEMPLATES_FILE_READ = "agent_templates.file.read"
+    AGENT_TEMPLATES_CREATE = "agent_templates.create"
+    AGENT_TEMPLATES_INSTALL = "agent_templates.install"
+    AGENT_TEMPLATES_UNINSTALL = "agent_templates.uninstall"
+    PLUGIN_PACKAGES_LIST = "plugin_packages.list"
+    PLUGIN_PACKAGES_SHOW = "plugin_packages.show"
+    PLUGIN_PACKAGES_CREATE = "plugin_packages.create"
+    PLUGIN_PACKAGES_INSTALL = "plugin_packages.install"
+    PLUGIN_PACKAGES_UNINSTALL = "plugin_packages.uninstall"
 
     HOOKS_LIST = "hooks.list"
 

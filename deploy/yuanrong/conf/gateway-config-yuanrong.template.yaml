@@ -475,9 +475,14 @@ gateway:
     sandbox_idle_timeout_seconds: 600
     # 空闲扫描周期（秒）
     sandbox_idle_check_interval_seconds: 30
+    # 连接断开清理：用户连接数归零后，等待该时长再删除 jiuwenswarm agent
+    # （给重连与 in-flight 的 chat/SSH 留出时间）。与 idle 回收共用 READY +
+    # task_count==0 + 空闲超阈值的安全检查，不会误杀活动中的 agent。
+    # 也可通过环境变量 DISCONNECT_CLEANUP_TIMEOUT_SECONDS 覆盖（优先于本配置）。
+    disconnect_cleanup_timeout_seconds: 60
     registry:
-      # Agent OS 注册中心：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
-      endpoint: http://<<MASTER_NODE_IP>>:<<REGISTRY_PORT>>
+      # Agent OS 注册中心：endpoint 绑定 ingress_virtual_ip(VIP)（与本机注册中心绑定一致）
+      endpoint: http://<<INGRESS_VIP>>:<<REGISTRY_PORT>>
       request_timeout_s: 10
       # 本机 nodeIP，供 POST /api/nodes/{node}/heartbeat
       node: <<MASTER_NODE_IP>>
@@ -488,10 +493,13 @@ gateway:
       port: 2222
       user_template: "yr:instance:{instance}"
       connect_timeout_s: 30
-    auth_service_url: ${AGENTOS_AUTH_SERVICE_URL:-http://iam-agentos:8080}
-    timeout: ${AGENTOS_AUTH_TIMEOUT:-10}
-    # Web/TUI token 鉴权总开关；默认关闭。true 时创建 AgentOSAuthenticator 校验连接。
-    auth_enabled: false
+    # agentos_router.load_router_config 不会解析 ${VAR}，部署时用 <<>> 替换进 yaml。
+    # 部署脚本空值默认 http://<<MASTER_NODE_IP>>:8090；可用 AGENTOS_AUTH_SERVICE_URL 覆盖。
+    auth_service_url: <<AGENTOS_AUTH_SERVICE_URL>>
+    timeout: <<AGENTOS_AUTH_TIMEOUT>>
+    # TUI token 鉴权；本 template 默认开启。true 时创建 AgentOSAuthenticator 校验 TUI 连接。
+    # Web 不挂鉴权 hook（浏览器 WS 无法带 Authorization）。
+    auth_enabled: true
 
 heartbeat:
   # 心跳间隔（秒），默认 3600
@@ -658,11 +666,20 @@ channels:
     # 客户端: ssh -p <listen_port> user@<gateway-host>
     # 南向连接参数见 gateway.agentos.ssh；agent_type 跟随用户当前值（3rdagent.switch）。
     enabled: true
-    # 监听 IP：host 来自 --hosts / CLUSTER_HOSTS 的 master IP
-    listen_host: <<MASTER_NODE_IP>>
+    # 监听 IP：绑定 ingress_virtual_ip(VIP)，使 SSH 通道可通过统一入口访问
+    listen_host: <<INGRESS_VIP>>
     listen_port: <<SSH_PORT>>
     host_key_path: ~/.jiuwenswarm/config/ssh_host_key
     relay_timeout_sec: 3600
+    auth:
+      # 公钥认证开关。true 时校验客户端公钥并签发临时密钥；false 为宽松认证。
+      enabled: true
+      # TUI 场景: 临时密钥有效期（秒）
+      ephemeral_key_ttl_sec: 300
+      # 临时密钥类型
+      ephemeral_key_type: "ssh-ed25519"
+      # 过期清理间隔（秒）
+      cleanup_interval_sec: 60
 
 # ========== 细粒度权限管控（tiered_policy）==========
 #
@@ -850,10 +867,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern_windows: "JiuwenSwarm-setup-{version}.exe"
-  asset_name_pattern_macos: "JiuwenSwarm-{version}.dmg"
+  # Windows / macOS installers are selected by their unique .exe / .dmg suffix.
   asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
   pypi_mirror: "https://mirrors.aliyun.com/pypi"
 

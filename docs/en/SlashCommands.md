@@ -38,6 +38,8 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
 | `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
+| `/swarmflow` | SwarmFlow toggle, status, and token budget (`on` / `off` / `--budget`, see [TUI SwarmFlow Guide](TUISwarmFlowGuide.md)) |
+| `/swarmflows` | Full-screen SwarmFlow run tree viewer (alias `/swarmworkflows`, same guide) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -68,6 +70,19 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 ---
 
 ## Key Command Details
+
+### `/swarmflow` and `/swarmflows` (TUI local)
+
+SwarmFlow-specific commands. Full walkthrough: **[TUI SwarmFlow Guide](TUISwarmFlowGuide.md)**.
+
+| Command | Description |
+|---------|-------------|
+| `/swarmflow` | Query status, e.g. `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | Set `enable_swarmflow=true`; switches to team if needed; optional `--budget <tokens\|none>` |
+| `/swarmflow off` | Set `enable_swarmflow=false`; does not leave team automatically |
+| `/swarmflows` | Open the full-screen run tree (workflow → phase → node); alias `/swarmworkflows` |
+
+Config changes are **not hot-applied** in the current session (`Use /new to apply.`). Use **`h`** on the main view for pending human replies (not this command).
 
 ### `/workspace` (TUI Trusted Directory Management)
 
@@ -214,7 +229,7 @@ Manages model configs defined under `models.defaults` in `config.yaml`. Supports
 
 Per-turn diffs are computed from `.agent_history/file_ops_jiuwenswarm*.json` logs, not from git. The service reads and merges file operation logs from multiple locations:
 
-1. Agent workspace (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`)
+1. Agent workspace (`~/.jiuwenswarm/agent/workspace/.agent_history/`)
 2. User workspace `.agent_history/`
 3. Project directory `.agent_history/` (session-specific and global files)
 
@@ -476,9 +491,9 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#push-to-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
+| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
 | `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
@@ -526,7 +541,7 @@ Manage skills lifecycle: listing, installing, uninstalling, marketplace source m
 - **Marketplace source**: A remote Git repository that hosts available skills. Each source has a name, URL, and enabled/disabled state.
 - **Spec**: The install identifier format supporting: `<skill>@builtin` (builtin), `<slug>@clawhub` (ClawHub), `<skill>@<marketplace>` (Git marketplace); bare names without `@` are auto-detected as builtin if applicable.
 - **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
-- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`).
+- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/workspace/skills/`).
 - **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[clawhub]` = ClawHub, `[skillnet]` = SkillNet, `[project]` or marketplace name = other.
 
 #### Grouped List Display
@@ -551,7 +566,7 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
 - **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
-- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs.
+- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill`, `~/skill`, or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs. Local paths must be **absolute** or use `~/...`; `~` means the JiuwenClaw service process user's home directory on the server. Other relative paths, sources under system/sensitive directories (e.g. `/etc`, `~/.ssh`), symbolic links, and `SKILL.md` files without valid `name`/`description` frontmatter are rejected.
 - **`@skillnet` search-install**: When using `/skills install <name>@skillnet`, the frontend first calls `skills.skillnet.search`. **Only auto-installs if an exact match by skill_name is found**; with no exact match, it only displays search results (with URLs and names) without auto-installing the first result — the user must choose one and install via `/skills skillnet install <url>` or `/skills install <exact_name>@skillnet`. This is because SkillNet search is semantic: searching "code" may return "taskflow", "coding-agent" etc. whose names don't contain "code".
 - **ClawHub token required**: A ClawHub CLI token must be configured before installing from ClawHub (via `/skills marketplace clawhub token <value>`). Without a token, `@clawhub` installs will fail with a message explaining how to set the token. Obtain your token at [clawhub.ai](https://clawhub.ai).
 - **ClawHub slug vs. display name**: ClawHub skills are identified by their unique **slug** (e.g., `code-review-security`), not their display name (e.g., "Code Review Assistant"). When a direct slug install fails, the system automatically searches ClawHub and displays matching results (with real slugs and summaries) to help you find the correct skill.
@@ -707,7 +722,7 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
 - **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`.
 - **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
-- **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
+- **excluded_commands**: `fnmatch` per simple-command leaf (full leaf text or command name). All matches → whole command on host; none → whole command in sandbox; mixed leaves → local bash orchestrates and wraps remote leaves with `jiuwenbox sandbox exec` (CLI required).
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
 - **enable / disable**: Triggers an agent rebuild. The response lists `rebuilt_modes` (typically `agent.*` / `code.*`) and the jiuwenbox endpoint.
 
@@ -1007,7 +1022,8 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | Launch the built-in setup subagent to create, review, modify, or remove the status line |
+| `/statusline get` | Always view the current status line configuration without launching the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
 | `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
@@ -1019,9 +1035,9 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 - **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
-- **Agent-generated mode**: Any non-empty argument that is not a known subcommand (`set`, `padding`, `clear`, `help`, `json`, or `get`) is sent to the Agent with the `script-creator` skill. For example: `/statusline show mode, model, and remaining context`. Running `/statusline` with no arguments still only shows the current configuration.
-- **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
-- **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+- **Agent-generated mode**: `/statusline`, with or without a natural-language description, delegates to the built-in `statusline-setup` subagent. When unconfigured, it guides creation and applies the configuration. When configured, it inspects the current setup and can explain, modify, or remove it. Use `/statusline get` to display the raw configuration without launching the subagent.
+- **JSON input**: Each execution receives current session info as JSON through stdin, which the configured command can parse with `jq`, PowerShell `ConvertFrom-Json`, or another available tool.
+- **Shell selection**: On Windows, the runner uses Git Bash when it is installed and otherwise falls back to PowerShell. On macOS/Linux, it uses `sh`. The setup subagent creates a platform-appropriate persistent script and does not require `jq` on Windows.
 
 #### JSON Input Fields
 
@@ -1102,7 +1118,8 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — Launch the built-in setup subagent to create, review, modify, or remove the status line
+- `/statusline get` — View current configuration without launching the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
@@ -1121,7 +1138,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
 - **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
-- **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
+- **Windows adaptation**: The runner pipes JSON through stdin, uses Git Bash when installed, and falls back to PowerShell. Prefer a persistent PowerShell script when Git Bash or `jq` is unavailable.
 
 #### Config File Structure
 

@@ -6,9 +6,10 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Coroutine
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
@@ -43,22 +44,37 @@ from jiuwenswarm.extensions.agentos.agentos_router.registry_client import (
     RegistryClient,
     instance_service_id,
 )
-from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import YuanrongSshRelay
+from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
+    DEFAULT_CLIENT_KEYS_DIR,
+    YuanrongSshRelay,
+    resolve_client_keys_dir,
+)
 from jiuwenswarm.extensions.yuanrong_frontend_client import (
+    AgentFileDownloadChunk,
     AgentRuntimeSpec,
+    YuanrongAgentFileError,
     YuanrongFrontendAgentClient,
 )
+from jiuwenswarm.extensions.agentos.auth.ssh_key_issuer import SshKeyIssuer
 from jiuwenswarm.gateway import ChannelManager
 from jiuwenswarm.gateway.channel_manager.base import ChannelType
+from jiuwenswarm.gateway.document_attachments import is_forbidden_document
 from jiuwenswarm.gateway.routing.agent_client import (
     AgentServerClient,
     WebSocketAgentServerClient,
 )
+from jiuwenswarm.gateway.upload_storage import safe_upload_filename
 
 
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Gateway-side file transfer limits (design: stricter than YuanRong 512MB).
+_AGENT_FILE_PATH_ROOT = "/home/agentos"
+_MAX_AGENT_FILE_UPLOAD_BYTES = 50 * 1024 * 1024
+
+_TEAM_MODES = frozenset({"team", "code.team", "team.plan"})
 
 # create_sandbox 返回后 agentserver 仍在进程内启动；YuanRong WS 代理此时会回
 # HTTP 502。在 deadline 内重试，避免首条 chat 立刻空失败（TUI "Worked for 0s"）。
@@ -72,6 +88,13 @@ _WS_CONNECT_RETRYABLE_TEXT_TOKENS = (
     "connection refused",
     "temporarily unavailable",
 )
+
+
+def _is_team_mode(params: Any) -> bool:
+    """Return True if params["mode"] is a team variant."""
+    if not isinstance(params, dict):
+        return False
+    return str(params.get("mode") or "").strip().lower() in _TEAM_MODES
 
 
 def _is_ws_connect_retryable(exc: BaseException) -> bool:
@@ -90,6 +113,135 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
 
 class UnsupportedAgentType(ValueError):
     pass
+
+
+class EphemeralKeyIssueError(RuntimeError):
+    """A configured issuer could not mint an ephemeral SSH key."""
+
+
+class AgentOSFileTransferError(RuntimeError):
+    """Raised when AgentOS container file transfer cannot be completed."""
+
+    def __init__(self, message: str, *, code: str = "INTERNAL_ERROR") -> None:
+        super().__init__(message)
+        self.code = str(code)
+
+
+# Upload: relative path (+ optional dir prefix) → ``/home/agentos/<relative>``.
+# Download / list: absolute path under ``/home/agentos``.
+
+
+def _normalize_upload_dir_prefix(dir_prefix: str) -> str:
+    """Return a clean relative directory prefix, or empty string for default root."""
+    text = str(dir_prefix or "").strip().replace("\\", "/")
+    if not text or text == ".":
+        return ""
+    if text.startswith("/"):
+        raise AgentOSFileTransferError(
+            "upload dir must be relative (AgentOS prefixes /home/agentos)",
+            code="BAD_REQUEST",
+        )
+    text = text.strip("/")
+    if not text or text == ".":
+        return ""
+    posix = PurePosixPath(text)
+    if ".." in posix.parts or posix.is_absolute():
+        raise AgentOSFileTransferError("path must not contain '..'", code="BAD_REQUEST")
+    return posix.as_posix()
+
+
+def normalize_agent_file_upload_path(
+    path: str,
+    *,
+    dir_prefix: str = "",
+    user_id: str = "",
+) -> str:
+    """Normalize upload path: relative (+ optional ``dir_prefix``) → ``/home/agentos/...``.
+
+    - ``dir_prefix`` empty: land under ``/home/agentos`` (e.g. ``a.pdf`` → ``/home/agentos/a.pdf``)
+    - ``dir_prefix`` set: prefix directory (e.g. ``docs`` + ``a.pdf`` → ``/home/agentos/docs/a.pdf``)
+    """
+    del user_id  # reserved for future per-user upload roots
+    text = str(path or "").strip().replace("\\", "/")
+    if not text or text in {".", "/"}:
+        raise AgentOSFileTransferError("path is required", code="BAD_REQUEST")
+    if text.startswith("/"):
+        raise AgentOSFileTransferError(
+            "upload path must be relative (AgentOS prefixes /home/agentos)",
+            code="BAD_REQUEST",
+        )
+    posix = PurePosixPath(text)
+    if ".." in posix.parts or posix.is_absolute():
+        raise AgentOSFileTransferError("path must not contain '..'", code="BAD_REQUEST")
+
+    raw_name = posix.name
+    if not raw_name or raw_name in {".", ".."}:
+        raise AgentOSFileTransferError("path is required", code="BAD_REQUEST")
+    safe_name = safe_upload_filename(raw_name, fallback="upload.bin")
+    if is_forbidden_document(filename=safe_name):
+        raise AgentOSFileTransferError("forbidden extension", code="BAD_REQUEST")
+
+    path_parent = posix.parent.as_posix().strip(".")
+    prefix = _normalize_upload_dir_prefix(dir_prefix)
+    parts: list[str] = []
+    if prefix:
+        parts.append(prefix)
+    if path_parent and path_parent != ".":
+        parts.append(path_parent)
+    parts.append(safe_name)
+    return f"{_AGENT_FILE_PATH_ROOT}/{'/'.join(parts)}"
+
+
+def normalize_agent_file_download_path(path: str) -> str:
+    """Normalize download/list path: absolute and under ``/home/agentos``."""
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        raise AgentOSFileTransferError("path is required", code="BAD_REQUEST")
+    if not text.startswith("/"):
+        raise AgentOSFileTransferError("download path must be absolute", code="BAD_REQUEST")
+    posix = PurePosixPath(text)
+    if ".." in posix.parts:
+        raise AgentOSFileTransferError("path must not contain '..'", code="BAD_REQUEST")
+    root = _AGENT_FILE_PATH_ROOT
+    if text != root and not text.startswith(f"{root}/"):
+        raise AgentOSFileTransferError(
+            f"path must be under {root}",
+            code="BAD_REQUEST",
+        )
+    return text
+
+
+def enforce_agent_file_upload_size(content: bytes) -> None:
+    """Reject uploads larger than the Gateway-side 50MB limit."""
+    size = len(content)
+    if size > _MAX_AGENT_FILE_UPLOAD_BYTES:
+        raise AgentOSFileTransferError(
+            f"file size exceeds {_MAX_AGENT_FILE_UPLOAD_BYTES} bytes limit",
+            code="file_too_large",
+        )
+
+
+def build_auth_headers_from_mapping(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Build Authorization header for YuanRong file APIs from WS/auth headers."""
+    if not headers:
+        return {}
+    lowered = {str(k).lower(): str(v) for k, v in headers.items() if v is not None}
+    auth = lowered.get("authorization", "").strip()
+    if auth:
+        return {"Authorization": auth}
+    token = lowered.get("x-token", "").strip()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
+def build_auth_headers_from_token(token: str | None) -> dict[str, str]:
+    text = str(token or "").strip()
+    if not text:
+        return {}
+    if text.lower().startswith("bearer "):
+        return {"Authorization": text}
+    return {"Authorization": f"Bearer {text}"}
 
 
 def build_inline_runtime_spec(image_info: ImageInfo) -> AgentRuntimeSpec:
@@ -125,22 +277,32 @@ def resolve_agent_workspace(user_id: str, *, workspace_root: str | None = None) 
     Default: ``/home/agentos/users/<user_id>``. Optional ``workspace_root``
     overrides the parent directory (``{workspace_root}/<user_id>``).
 
-    Best-effort ``mkdir``: permission errors are ignored so callers (and unit
-    tests) can still pass the path to YuanRong create; the host/deploy side
-    remains responsible for a writable mount source.
+    The gateway does **not** create the directory. It only validates that the
+    directory already exists and is a directory. The directory's owner/group
+    and permission setup is validated by other management-plane components,
+    so no permission check is performed here. Any validation failure raises
+    :class:`ValueError`, which the caller turns into a failed request.
     """
     safe_user = _WORKSPACE_NAME_RE.sub("_", str(user_id or "").strip()) or "default"
     root = Path(workspace_root or DEFAULT_AGENT_WORKSPACE_ROOT).expanduser()
     workspace = (root / safe_user).resolve()
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "[AgentOSRouter] workspace mkdir skipped: path=%s error=%s",
-            workspace,
-            exc,
-        )
+    _validate_agent_workspace(workspace)
     return str(workspace)
+
+
+def _validate_agent_workspace(workspace: Path) -> None:
+    """Raise :class:`ValueError` unless *workspace* exists and is a directory.
+
+    Owner/group and permission validation is delegated to other management-plane
+    components, so only existence and type are checked here.
+    """
+    if not workspace.exists():
+        raise ValueError(
+            f"agent workspace does not exist: {workspace} "
+            "(create it before creating a sandbox)"
+        )
+    if not stat.S_ISDIR(workspace.stat().st_mode):
+        raise ValueError(f"agent workspace is not a directory: {workspace}")
 
 
 class AgentOSRouterClient(AgentServerClient):
@@ -153,9 +315,12 @@ class AgentOSRouterClient(AgentServerClient):
         agent_manager: AgentManager,
         ssh_relay: YuanrongSshRelay | None = None,
         ssh_channel_endpoint: SshChannelEndpoint | None = None,
-        workspace_root: str = DEFAULT_AGENT_WORKSPACE_ROOT,
+        key_issuer: SshKeyIssuer | None = None,
+        ephemeral_key_ttl_sec: float = 300.0,
+        workspace_root: str | None = None,
         sandbox_idle_timeout_seconds: float = 600.0,
         sandbox_idle_check_interval_seconds: float = 30.0,
+        disconnect_cleanup_timeout_seconds: float = 60.0,
         auth_client: AgentOSAuthenticator | None = None,
         ws_client_factory: Callable[[], WebSocketAgentServerClient] | None = None,
     ) -> None:
@@ -164,6 +329,8 @@ class AgentOSRouterClient(AgentServerClient):
         self._agent_manager = agent_manager
         self._ssh_relay = ssh_relay
         self._ssh_channel_endpoint = ssh_channel_endpoint
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
         self._workspace_root = (
             str(workspace_root or "").strip() or DEFAULT_AGENT_WORKSPACE_ROOT
         )
@@ -171,6 +338,10 @@ class AgentOSRouterClient(AgentServerClient):
         self._sandbox_idle_timeout_seconds = float(sandbox_idle_timeout_seconds)
         self._sandbox_idle_check_interval_seconds = max(
             1.0, float(sandbox_idle_check_interval_seconds)
+        )
+        # <= 0 disables the channel-disconnect cleanup path entirely.
+        self._disconnect_cleanup_timeout_seconds = float(
+            disconnect_cleanup_timeout_seconds
         )
         self._idle_reaper_task: asyncio.Task[None] | None = None
         self._server_ready = False
@@ -192,14 +363,13 @@ class AgentOSRouterClient(AgentServerClient):
 
 
     def set_channel_manager(self, channel_manager: ChannelManager) -> None:
-        """订阅 web channel和 tui channel 的连接事件和断开。"""
-        web_channel = channel_manager.get_channel(ChannelType.WEB)
+        """Subscribe TUI connect hooks (token auth) and channel disconnect events.
+
+        Web is intentionally not hooked: browser WS cannot send Authorization
+        headers, and the stock Web UI does not pass ``?token=``.
+        """
         tui_channel = channel_manager.get_channel(ChannelType.CLI)
 
-        if web_channel:
-            on_connect = getattr(web_channel, "on_connect", None)
-            if callable(on_connect):
-                on_connect(self.on_connect)
         if tui_channel:
             on_connect = getattr(tui_channel, "on_connect", None)
             if callable(on_connect):
@@ -234,6 +404,16 @@ class AgentOSRouterClient(AgentServerClient):
                     await ret
         return result
 
+    def set_key_issuer(
+        self,
+        key_issuer: SshKeyIssuer | None,
+        *,
+        ephemeral_key_ttl_sec: float = 300.0,
+    ) -> None:
+        """Inject or clear the northbound SSH ephemeral key issuer."""
+        self._key_issuer = key_issuer
+        self._ephemeral_key_ttl_sec = float(ephemeral_key_ttl_sec)
+
     async def _on_channel_event(self, event: Any) -> None:
         """处理 Channel 连接事件，维护用户连接计数并触发延迟清理。"""
         user_id = str(getattr(event, "user_id", "") or "").strip()
@@ -248,8 +428,9 @@ class AgentOSRouterClient(AgentServerClient):
                 task.cancel()
         elif event_type == "disconnected":
             count = self._agent_manager.decrement_user_connections(user_id)
-            if count <= 0:
-                # 连接数为 0：1 分钟后触发 jiuwenswarm agent 清理
+            # 配置的超时清理时长为0或者负数时，不触发清理机制
+            if count <= 0 and self._disconnect_cleanup_timeout_seconds > 0:
+                # 连接数为 0：超时后尝试删除 jiuwenswarm agent
                 task = asyncio.create_task(
                     self._delayed_cleanup(user_id),
                     name=f"agentos-delayed-cleanup-{user_id[:24]}",
@@ -259,9 +440,16 @@ class AgentOSRouterClient(AgentServerClient):
                 task.add_done_callback(self._background_tasks.discard)
 
     async def _delayed_cleanup(self, user_id: str) -> None:
-        """连接断开 1 分钟后，若用户仍无连接，删除其 jiuwenswarm agent。"""
+        """连接断开后，若用户仍无连接且 agent 真的空闲，删除其 jiuwenswarm agent。
+
+        和 :meth:`_reap_idle_once` 走同一条 pop_if_idle 路径（status=READY、
+        task_count==0、last_active_at 距今超过本超时），避免在 in-flight 的
+        chat/SSH 还未释放时强制 kill。超时时长由
+        ``disconnect_cleanup_timeout_seconds`` 配置，<= 0 表示关闭该路径。
+        """
+        timeout = self._disconnect_cleanup_timeout_seconds
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(timeout)
         except asyncio.CancelledError:
             return
         # 二次检查：用户可能已重连
@@ -284,15 +472,24 @@ class AgentOSRouterClient(AgentServerClient):
                 if session_id:
                     key_values = {"session_id": session_id}
             try:
-                await self.delete_agent(user_id, runtime.info.agent_type, key_values=key_values)
-                logger.info(
-                    "[AgentOSRouter] delayed cleanup deleted agent: user=%s agent_type=%s",
+                # 走 pop_if_idle：task_count>0 / 非 READY / 未达空闲阈值时
+                # 直接返回 False，确保不会误杀活动中的 agent。
+                deleted = await self.delete_agent(
                     user_id,
                     runtime.info.agent_type,
+                    key_values=key_values,
+                    idle_timeout_seconds=timeout,
                 )
             except Exception:
                 logger.exception(
                     "[AgentOSRouter] delayed cleanup delete failed: user=%s agent_type=%s",
+                    user_id,
+                    runtime.info.agent_type,
+                )
+                continue
+            if deleted:
+                logger.info(
+                    "[AgentOSRouter] delayed cleanup deleted agent: user=%s agent_type=%s",
                     user_id,
                     runtime.info.agent_type,
                 )
@@ -301,6 +498,203 @@ class AgentOSRouterClient(AgentServerClient):
         """Return the user's current agent_type (default ``jiuwenswarm``)."""
         uid = str(user_id or "").strip()
         return self._current_agent_types.get(uid) or BUILTIN_AGENT_TYPE
+
+    async def resolve_instance_id_for_files(
+        self,
+        *,
+        user_id: str,
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+    ) -> str:
+        """Resolve YuanRong instance id for container file upload/download."""
+        resolved, _key = await self._resolve_file_runtime(
+            user_id=user_id,
+            agent_type=agent_type,
+            session_id=session_id,
+            instance_id=instance_id,
+            acquire=False,
+        )
+        return resolved
+
+    async def _resolve_file_runtime(
+        self,
+        *,
+        user_id: str,
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+        acquire: bool = False,
+    ) -> tuple[str, Any]:
+        """Return ``(instance_id, runtime_key)``; ``runtime_key`` is set when acquired."""
+        explicit = str(instance_id or "").strip()
+        if explicit:
+            return explicit, None
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            raise AgentOSFileTransferError("user_id is required", code="BAD_REQUEST")
+
+        try:
+            normalized_type = AgentRuntime.normalize_agent_type(
+                agent_type or self.get_current_agent_type(uid)
+            )
+        except ValueError as exc:
+            raise AgentOSFileTransferError(str(exc), code="BAD_REQUEST") from exc
+
+        key_values: dict[str, Any] | None = None
+        if session_id and "session_id" in self._agent_manager.key_fields:
+            key_values = {"session_id": session_id}
+
+        acquired_key = None
+        # Builtin jiuwenswarm: same as chat.send — create sandbox then use instance files API.
+        if self._uses_direct_yuanrong(normalized_type):
+            try:
+                runtime = await self._agent_manager.get_or_create_agent(
+                    uid,
+                    normalized_type,
+                    key_values=key_values,
+                    creator=self._create_agent,
+                    metadata={"session_id": session_id} if session_id else None,
+                    acquire=acquire,
+                )
+            except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentDeleted) as exc:
+                raise AgentOSFileTransferError(str(exc), code="INTERNAL_ERROR") from exc
+            acquired_key = runtime.key if acquire else None
+        else:
+            # Third-party agents: resolve existing runtime only (no create here).
+            # Still acquire when requested so idle reaper cannot reclaim mid-transfer.
+            runtime = await self._agent_manager.get_agent(
+                uid,
+                normalized_type,
+                key_values=key_values,
+                acquire=acquire,
+            )
+            if runtime is None or not runtime.is_ready():
+                raise AgentOSFileTransferError(
+                    "instance not found or not running",
+                    code="instance_not_found",
+                )
+            acquired_key = runtime.key if acquire else None
+
+        resolved = str(runtime.info.sandbox_id or "").strip()
+        if not resolved:
+            if acquired_key is not None:
+                await self._agent_manager.release(acquired_key)
+            raise AgentOSFileTransferError(
+                "agent has no yuanrong instance_id",
+                code="instance_not_found",
+            )
+        return resolved, acquired_key
+
+    async def upload_container_file(
+        self,
+        *,
+        user_id: str,
+        path: str,
+        content: bytes,
+        dir_prefix: str = "",
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Upload bytes into the user's agent container workspace."""
+        enforce_agent_file_upload_size(content)
+        normalized_path = normalize_agent_file_upload_path(
+            path, dir_prefix=dir_prefix, user_id=user_id
+        )
+        resolved_instance_id, runtime_key = await self._resolve_file_runtime(
+            user_id=user_id,
+            agent_type=agent_type,
+            session_id=session_id,
+            instance_id=instance_id,
+            acquire=True,
+        )
+        try:
+            return await self._yuanrong.upload_agent_file(
+                resolved_instance_id,
+                normalized_path,
+                content,
+                auth_headers=build_auth_headers_from_mapping(auth_headers),
+            )
+        except YuanrongAgentFileError as exc:
+            raise AgentOSFileTransferError(str(exc), code=exc.error_code) from exc
+        finally:
+            if runtime_key is not None:
+                await self._agent_manager.release(runtime_key)
+
+    async def download_container_file(
+        self,
+        *,
+        user_id: str,
+        path: str,
+        offset: int = 0,
+        limit: int = 65536,
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> AgentFileDownloadChunk:
+        """Download one chunk from the user's agent container."""
+        normalized_path = normalize_agent_file_download_path(path)
+        resolved_instance_id, runtime_key = await self._resolve_file_runtime(
+            user_id=user_id,
+            agent_type=agent_type,
+            session_id=session_id,
+            instance_id=instance_id,
+            acquire=True,
+        )
+        try:
+            return await self._yuanrong.download_agent_file(
+                resolved_instance_id,
+                normalized_path,
+                offset=max(int(offset), 0),
+                limit=max(int(limit), 1),
+                auth_headers=build_auth_headers_from_mapping(auth_headers),
+            )
+        except YuanrongAgentFileError as exc:
+            raise AgentOSFileTransferError(str(exc), code=exc.error_code) from exc
+        finally:
+            if runtime_key is not None:
+                await self._agent_manager.release(runtime_key)
+
+    async def list_container_files(
+        self,
+        *,
+        user_id: str,
+        dir_path: str,
+        recursive: bool = False,
+        max_depth: int = 0,
+        agent_type: str | None = None,
+        session_id: str = "",
+        instance_id: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List files in a directory inside the user's agent container."""
+        if int(max_depth) < 0:
+            raise AgentOSFileTransferError("max_depth must be >= 0", code="BAD_REQUEST")
+        normalized_dir = normalize_agent_file_download_path(dir_path)
+        resolved_instance_id, runtime_key = await self._resolve_file_runtime(
+            user_id=user_id,
+            agent_type=agent_type,
+            session_id=session_id,
+            instance_id=instance_id,
+            acquire=True,
+        )
+        try:
+            return await self._yuanrong.list_agent_files(
+                resolved_instance_id,
+                normalized_dir,
+                recursive=bool(recursive),
+                max_depth=int(max_depth),
+                auth_headers=build_auth_headers_from_mapping(auth_headers),
+            )
+        except YuanrongAgentFileError as exc:
+            raise AgentOSFileTransferError(str(exc), code=exc.error_code) from exc
+        finally:
+            if runtime_key is not None:
+                await self._agent_manager.release(runtime_key)
 
     @staticmethod
     def _uses_direct_yuanrong(agent_type: str) -> bool:
@@ -527,6 +921,7 @@ class AgentOSRouterClient(AgentServerClient):
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
             return await self._handle_ssh_relay(envelope)
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -545,6 +940,7 @@ class AgentOSRouterClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
+        await self._inject_external_cli_agents(envelope)
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
@@ -562,6 +958,72 @@ class AgentOSRouterClient(AgentServerClient):
                 yield chunk
         finally:
             await self._agent_manager.release(runtime.key)
+
+    # ---------- external_cli_agents injection for team chat send ----------
+
+    async def _inject_external_cli_agents(self, envelope: E2AEnvelope) -> None:
+        """Inject ``external_cli_agents`` into params for team chat send.
+
+        When the request is a team-mode chat send, fetches registered
+        3rd-party agents from the registry and constructs
+        ``external_cli_agents`` with SSH transport info for each, so the
+        builtin agent (inside the container) can SSH into each 3rd-party
+        agent through the gateway's northbound SSH channel.
+        """
+        if not _is_team_mode(envelope.params):
+            return
+        user_id = str(envelope.user_id or "").strip()
+        if not user_id:
+            return
+        ssh_fields = self._ssh_endpoint_fields()
+        if ssh_fields is None:
+            logger.warning(
+                "[AgentOSRouter] skip external_cli_agents: ssh endpoint unavailable"
+            )
+            return
+        try:
+            images = await self._registry.list_user_images(user_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AgentOSRouter] list_user_images failed: %s", exc)
+            return
+        key_file = self._resolve_ssh_key_file(user_id)
+        agents: list[dict[str, Any]] = []
+        for image in images:
+            agent_type = str(
+                (image.metadata or {}).get("agent_type") or image.image_name or ""
+            ).strip()
+            if not agent_type or not is_third_party_agent_type(agent_type):
+                continue
+            agents.append(
+                {
+                    "cli_agent": agent_type,
+                    "ssh_transport": {
+                        "host": ssh_fields["ssh_ip"],
+                        "port": ssh_fields["ssh_port"],
+                        "username": user_id,
+                        "agent": False,
+                        "key_file": key_file,
+                        "disable_host_key_check": False,
+                        "use_exec": False
+                    },
+                }
+            )
+        if agents:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            params["external_cli_agents"] = agents
+            logger.info(
+                "[AgentOSRouter] injected external_cli_agents: user=%s count=%d",
+                user_id,
+                len(agents),
+            )
+
+    def _resolve_ssh_key_file(self, user_id: str) -> str:
+        """Resolve the SSH key file path for external_cli_agents."""
+        keys_dir_template = DEFAULT_CLIENT_KEYS_DIR
+        if self._ssh_relay is not None:
+            keys_dir_template = self._ssh_relay.client_keys_dir
+        keys_dir = resolve_client_keys_dir(keys_dir_template, user_id)
+        return str(keys_dir / "id_ed25519")
 
     async def thirdagent_list(
         self,
@@ -658,19 +1120,31 @@ class AgentOSRouterClient(AgentServerClient):
         ssh_fields = self._ssh_endpoint_fields()
         if ssh_fields is None:
             return self._missing_ssh_endpoint_error()
+        # Fail fast before create: without the key the client cannot pass
+        # SSH public-key auth, so a "successful" switch would be unusable.
+        try:
+            key_fields = self._ephemeral_ssh_key_fields(
+                user_id=uid,
+                session_id=session_id,
+            )
+        except EphemeralKeyIssueError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "code": "SSH_KEY_ISSUE_FAILED",
+            }
         # Builtin swarm: no registry / create_sandbox; mark current type only.
         if self._uses_direct_yuanrong(normalized):
             self._current_agent_types[uid] = normalized
-            return {
-                "ok": True,
-                "payload": {
-                    "agent_id": "",
-                    "agent_type": normalized,
-                    "sandbox_id": "",
-                    "status": AgentStatus.READY.value,
-                    **ssh_fields,
-                },
+            payload = {
+                "agent_id": "",
+                "agent_type": normalized,
+                "sandbox_id": "",
+                "status": AgentStatus.READY.value,
+                **ssh_fields,
+                **key_fields,
             }
+            return {"ok": True, "payload": payload}
         try:
             runtime = await self._agent_manager.get_or_create_agent(
                 uid,
@@ -687,21 +1161,90 @@ class AgentOSRouterClient(AgentServerClient):
             }
         info = runtime.info
         status = info.status.value if hasattr(info.status, "value") else str(info.status)
+        instance_id = str(info.sandbox_id or "").strip()
+        ssh_relay = self._ssh_relay
+        if ssh_relay is not None:
+            if not instance_id:
+                return {
+                    "ok": False,
+                    "error": f"agent has no yuanrong instance_id: user={uid}",
+                    "code": "INTERNAL_ERROR",
+                }
+            try:
+                # create 返回不代表 sshd 已听端口；等南向 SSH 通了再让客户端连。
+                await ssh_relay.wait_until_ready(instance_id, user_id=uid)
+            except Exception as exc:
+                logger.warning(
+                    "[AgentOSRouter] 3rdagent.switch sshd not ready: "
+                    "user=%s instance=%s error=%s",
+                    uid,
+                    instance_id,
+                    exc,
+                )
+                return {
+                    "ok": False,
+                    "error": f"sandbox sshd not ready: {exc}",
+                    "code": "SSH_NOT_READY",
+                }
         # 记录用户当前 agent_type，后续 SSH 接入默认跟随
         self._current_agent_types[uid] = normalized
-        return {
-            "ok": True,
-            "payload": {
-                "agent_id": info.agent_id,
-                "agent_type": info.agent_type,
-                "sandbox_id": info.sandbox_id,
-                "status": status,
-                **ssh_fields,
-            },
+        payload = {
+            "agent_id": info.agent_id,
+            "agent_type": info.agent_type,
+            "sandbox_id": info.sandbox_id,
+            "status": status,
+            **ssh_fields,
+            **key_fields,
         }
+        return {"ok": True, "payload": payload}
+
+    def _ephemeral_ssh_key_fields(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Mint ``ssh_private_key`` when an issuer is configured.
+
+        Returns an empty mapping when no issuer is injected (auth disabled).
+        Raises :class:`EphemeralKeyIssueError` when issuance is expected but
+        does not yield a usable key.
+        """
+        issuer = self._key_issuer
+        if issuer is None:
+            return {}
+        try:
+            private_key = issuer.issue_ephemeral_key(
+                user_id=user_id,
+                username=user_id,
+                session_id=str(session_id or ""),
+                ttl_sec=self._ephemeral_key_ttl_sec,
+            )
+        except Exception as exc:
+            logger.error(
+                "[AgentOSRouter] failed to issue ephemeral SSH key: user=%s error=%s",
+                user_id,
+                exc,
+            )
+            raise EphemeralKeyIssueError(
+                f"failed to issue ephemeral SSH key: {exc}"
+            ) from exc
+        if not private_key:
+            logger.error(
+                "[AgentOSRouter] ephemeral SSH key issuer returned an empty key: user=%s",
+                user_id,
+            )
+            raise EphemeralKeyIssueError("ephemeral SSH key issuer returned an empty key")
+        return {"ssh_private_key": private_key}
 
     async def shutdown(self) -> None:
-        await self.disconnect()
+        try:
+            await self.disconnect()
+        finally:
+            auth_client = self._auth_client
+            close = getattr(auth_client, "aclose", None)
+            if callable(close):
+                await close()
 
     # ---------- SSH relay (northbound SshChannel -> YuanRong instance) ----------
 

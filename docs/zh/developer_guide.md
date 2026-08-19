@@ -350,3 +350,9 @@ bash scripts/build-macos.sh
 4. 使用 `hdiutil` 创建 DMG 安装镜像
 
 产物：`dist/JiuwenSwarm-<version>.dmg`
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

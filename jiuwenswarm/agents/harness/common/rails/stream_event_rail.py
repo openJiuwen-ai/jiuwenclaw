@@ -28,7 +28,6 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
@@ -47,6 +46,7 @@ from jiuwenswarm.common.tool_display import (
     inject_call_goal_schema,
 )
 from jiuwenswarm.common.utils import logger
+from jiuwenswarm.common.todo_snapshot import format_todos_for_frontend
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 
@@ -936,32 +936,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
     ) -> List[dict[str, Any]]:
         """Format todo items for frontend compatibility.
 
-        Maps internal TodoStatus values to frontend-compatible status strings.
-        Cancelled items are omitted because the frontend todo panel tracks
-        actionable or completed tasks only.
-
-        Args:
-            todos_data: List of TodoItem objects from TodoListTool.
-
-        Returns:
-            List of formatted todo dictionaries.
+        Delegates to the shared snapshot helper so history restore and live
+        tool-call emits stay on one field mapping.
         """
-        status_mapping = {
-            TodoStatus.PENDING: "pending",
-            TodoStatus.IN_PROGRESS: "in_progress",
-            TodoStatus.COMPLETED: "completed",
-        }
-
-        return [
-            {
-                "id": item.id,
-                "content": item.content,
-                "activeForm": item.activeForm,
-                "status": status_mapping.get(item.status, item.status.value),
-            }
-            for item in todos_data
-            if item.status != TodoStatus.CANCELLED
-        ]
+        return format_todos_for_frontend(todos_data)
 
     @staticmethod
     async def _emit_context_usage(

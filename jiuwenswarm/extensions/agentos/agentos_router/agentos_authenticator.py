@@ -52,8 +52,8 @@ class AgentOSAuthenticator(CredentialAuthenticator):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
         }
-        if extra_headers:
-            headers.update(extra_headers)
+        # 不要把 WS 握手头（Host/Upgrade/authorization 等）原样并入 IAM 请求，
+        # 否则可能产生重复 Authorization 或错误 Host，导致 verify 失败。
         try:
             resp = await self._auth_client.post(
                 f"{self._auth_service_url}/api/v1/auth/verify",

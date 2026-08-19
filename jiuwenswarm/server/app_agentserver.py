@@ -29,6 +29,7 @@ parse_dotenv_early("jiuwenswarm-agentserver")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_default_builtin_skills,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir,
@@ -43,9 +44,20 @@ _config_file = _workspace_dir / "config" / "config.yaml"
 _new_workspace = _workspace_dir / "agent" / "workspace"
 _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration),
+# or if the preset MCP package dir isn't seated yet (an install predating the
+# mcp_builtins zip-seed feature would otherwise skip an already-initialized
+# workspace, leaving mcp_builtins absent and mcp.list empty).
+_mcp_builtins_dir = _new_workspace / "mcp" / "mcp_builtins"
+config_missing = not _config_file.exists()
+workspace_migration_needed = _old_workspace.exists() and not _new_workspace.exists()
+mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
+
+if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
@@ -124,9 +136,33 @@ from jiuwenswarm.agents.harness.common.tools.bash_tool_safety import (
 install_shell_tool_safety_hooks()
 
 # 兼容 SSE-only 网关：让非流式 invoke()（subagent / 心跳等）能解析 text/event-stream 响应
+# 仅当 channels.xiaoyi.mode == xiaoyi_claw 时才打补丁（该网关以 SSE-only 方式返回非流式响应）。
 from jiuwenswarm.llm_sse_patch import apply_openai_sse_invoke_patch
 
-apply_openai_sse_invoke_patch()
+
+def _should_apply_sse_invoke_patch() -> bool:
+    """检测 channels.xiaoyi.mode 是否为 xiaoyi_claw。"""
+    try:
+        from jiuwenswarm.common.config import get_config
+
+        mode = (
+            get_config()
+            .get("channels", {})
+            .get("xiaoyi", {})
+            .get("mode")
+        )
+    except Exception as exc:  # noqa: BLE001 - 启动早期读配置失败时保守兜底
+        logger.warning(
+            "[app_agentserver] 读取 channels.xiaoyi.mode 失败，默认应用 SSE 兼容补丁: %s",
+            exc,
+        )
+        return True
+
+    return str(mode or "").strip() == "xiaoyi_claw"
+
+
+if _should_apply_sse_invoke_patch():
+    apply_openai_sse_invoke_patch()
 
 # /debug 模式下捕获 builtin TaskTool 分发的 subagent 流（reasoning/tool_call/usage），
 # 内联写入主 dump。非 debug 或 include_subagent_flow 关闭时走原始 invoke，零回归。
@@ -179,6 +215,12 @@ async def _run(host: str, port: int) -> None:
     from jiuwenswarm.server.runtime.image_modality_warmup import warm_image_modality_cache
 
     await warm_image_modality_cache(get_config(), reason="startup")
+
+    # ---------- Opencode Zen 免费模型注入 ----------
+    # 开箱即用：从 Zen 拉取限时免费模型，追加到 models.defaults。失败兜底、不阻断启动。
+    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+
+    await warm_zen_free_models(reason="startup")
 
     server = AgentWebSocketServer.get_instance(
         host=host,

@@ -11,7 +11,7 @@
 | 依赖项 | 版本要求 | 说明 |
 |--------|----------|------|
 | 操作系统 | Windows 10/11, macOS 10.15+, Linux | 支持主流操作系统 |
-| Python | ≥3.11, <3.14 | 推荐使用 Python 3.11 |
+| Python | `≥3.11, <3.14` | 推荐使用 Python 3.11 |
 | Node.js | 18.x 或更高版本 | 用于前端界面 |
 | Git | 最新版本 | 用于源码安装 |
 
@@ -58,6 +58,16 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
+### Linux 远程访问 Web 前端（可选）
+
+`jiuwenswarm-start` 默认将 Web 前端绑定到 `localhost`，可在 Linux 本机浏览器中访问终端显示的 Web UI 地址。如需从其他电脑访问 Linux 服务器上的 Web 前端，请使用以下命令启动：
+
+```bash
+FRONTEND_HOST=0.0.0.0 jiuwenswarm-start
+```
+
+然后在其他电脑的浏览器中访问 `http://<Linux服务器IP>:<Web UI端口>`。Web UI 默认端口为 `5173`；如果启动时自动切换了端口，请使用终端实际显示的 Web UI 端口。请同时确保 Linux 防火墙或云安全组允许该端口访问，并仅向可信网络或来源 IP 开放。
+
 ### 端口冲突自动处理
 
 JiuWenSwarm 默认使用一组固定端口（`18092 / 19000 / 19001 / 5173`）。若启动时检测到某端口已被占用（例如上一次未完全停止、或被其他应用占用），系统会**自动向上扫描相邻索引寻找可用的端口组**并使用，而不会直接退出：
@@ -99,18 +109,6 @@ jiuwenswarm chat "你好，介绍一下你自己"
 ```
 
 详情见 [命令行指令 / 终端 CLI](命令行指令.md#终端-clijiuwenswarm-chat)。
-
-### 远程访问（可选）
-
-如需远程访问，执行以下命令：
-
-```bash
-# 启动 Web 服务
-jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
-
-# 启动后端服务
-jiuwenswarm-app
-```
 
 **配置目录自动创建**：
 首次启动服务后，系统会自动创建配置目录：
@@ -340,9 +338,13 @@ cd jiuwenswarm
 
 **清空记忆操作步骤：**
 
-记忆文件存储路径：
+默认内置记忆目录：
 - **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm\agent\workspace\memory\`
 - **Linux/Mac**：`~/.jiuwenswarm/agent/workspace/memory/`
+
+其中，长期记忆文件 `MEMORY.md` 的完整默认路径为：
+- **Windows**：`C:\Users\<你的用户名>\.jiuwenswarm\agent\workspace\memory\MEMORY.md`
+- **Linux/Mac**：`~/.jiuwenswarm/agent/workspace/memory/MEMORY.md`
 
 **方式一：通过 Agent 删除**
 直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
@@ -351,3 +353,9 @@ cd jiuwenswarm
 停止 JiuwenSwarm 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
 
 > ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

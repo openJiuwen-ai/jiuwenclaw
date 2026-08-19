@@ -80,7 +80,6 @@ export function buildModeAutocompleteItems(): AutocompleteItem[] {
   return [
     { value: "agent", label: "agent" },
     { value: "agent.plan", label: "    plan" },
-    { value: "agent.fast", label: "    fast" },
     { value: "code", label: "code" },
     { value: "code.plan", label: "    plan" },
     { value: "code.normal", label: "    normal" },
@@ -95,7 +94,6 @@ export function createModeCommand(): SlashCommand {
     "agent",
     "code",
     "agent.plan",
-    "agent.fast",
     "code.plan",
     "code.normal",
     "team.work",

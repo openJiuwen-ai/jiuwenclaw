@@ -212,6 +212,84 @@ async def test_plan_reports_service_failure():
 
 
 @pytest.mark.asyncio
+async def test_compose_timeout_is_compact_non_retryable_terminal_payload(monkeypatch):
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    timeouts: list[float] = []
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: timeouts.append(default_s) or 0.01),
+    )
+
+    result = await SymphonyToolkit(SimpleNamespace(plan=handler)).plan("compose")
+
+    assert timeouts == [3300.0]
+    assert result == {
+        "success": False,
+        "reason": "graph_build_timeout",
+        "timed_out": True,
+        "retryable": False,
+        "operation": "plan",
+        "timeout_s": 0.01,
+        "detail": "symphony.plan: timeout after 0.01s",
+        "continue_after_display": False,
+    }
+    assert result.get("followup_action") != "external_skill_discovery"
+
+
+@pytest.mark.asyncio
+async def test_refresh_timeout_is_non_retryable_terminal_payload(monkeypatch):
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    timeouts: list[float] = []
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: timeouts.append(default_s) or 0.01),
+    )
+
+    result = await SymphonyToolkit(SimpleNamespace(refresh_graph=handler)).refresh_graph()
+
+    assert timeouts == [1800.0]
+    assert result == {
+        "success": False,
+        "reason": "graph_build_timeout",
+        "timed_out": True,
+        "retryable": False,
+        "operation": "refresh_graph",
+        "timeout_s": 0.01,
+        "detail": "symphony.refresh_graph: timeout after 0.01s",
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_graph_timeout_remains_an_ordinary_failure(monkeypatch):
+    async def handler(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        SymphonyToolkit,
+        "_resolve_timeout_s",
+        staticmethod(lambda default_s=1800.0: 0.01),
+    )
+
+    result = await SymphonyToolkit(SimpleNamespace(graph_status=handler)).graph_status()
+
+    assert result == {
+        "success": False,
+        "detail": "symphony.graph_status: timeout after 0.01s",
+    }
+    assert "reason" not in result
+    assert "timed_out" not in result
+
+
+@pytest.mark.asyncio
 async def test_status_and_refresh_remain_explicit_tools():
     async def graph_status():
         return {"success": True, "exists": True}
@@ -306,6 +384,19 @@ def test_get_tools_exposes_only_graph_named_contracts():
     assert "language" not in properties
     assert "most relevant" in properties["candidate_skill_ids"]["description"]
     assert "fast is the default" in properties["mode"]["description"]
+    assert "any trigger condition" in compose_tool.card.description
+    assert "skill_branch_explore requires a follow-up call" in compose_tool.card.description
+    assert "never pass every explored Skill" in compose_tool.card.description
+    assert "none of the three trigger conditions is true" in compose_tool.card.description
+    assert all("Symphony" not in tool.card.description for tool in tools)
+    assert all(
+        "Symphony" not in property_schema.get("description", "")
+        for property_schema in properties.values()
+    )
+    assert "graph_build_timeout" in compose_tool.card.description
+    assert "manual_graph_build" in compose_tool.card.description
+    assert "graph_build_timeout" in tools[1].card.description
+    assert "manual_graph_build" in tools[1].card.description
 
 
 def test_disabled_config_hides_tools():

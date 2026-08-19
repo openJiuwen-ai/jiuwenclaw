@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import AgentManager
+from jiuwenswarm.extensions.agentos.agentos_router.agent_manager import (
+    AgentManager,
+    AgentRuntime,
+)
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
@@ -417,16 +422,37 @@ async def test_swarm_request_repeated_reuses_single_runtime() -> None:
     assert agents[0].info.agent_type == "jiuwenswarm"
 
 
-def test_resolve_agent_workspace_defaults_under_agentos_users() -> None:
-    assert resolve_agent_workspace("alice") == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice"
-    assert resolve_agent_workspace("alice/../bob") == (
-        f"{DEFAULT_AGENT_WORKSPACE_ROOT}/alice_.._bob"
-    )
-    assert resolve_agent_workspace("u1", workspace_root="/data/ws") == "/data/ws/u1"
+def test_resolve_agent_workspace_requires_existing_writable_dir(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    alice = workspace_root / "alice"
+    alice.mkdir(parents=True)
+    alice.chmod(0o777)
+    assert resolve_agent_workspace("alice", workspace_root=str(workspace_root)) == str(alice)
+    # 路径穿越被安全化：sanitized 目录也必须已存在才能通过校验。
+    sanitized = workspace_root / "alice_.._bob"
+    sanitized.mkdir(parents=True)
+    assert resolve_agent_workspace(
+        "alice/../bob", workspace_root=str(workspace_root)
+    ) == str(sanitized)
+
+
+def test_resolve_agent_workspace_rejects_missing_dir(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    with pytest.raises(ValueError, match="does not exist"):
+        resolve_agent_workspace("nobody", workspace_root=str(workspace_root))
+
+
+def test_resolve_agent_workspace_rejects_non_directory(tmp_path) -> None:
+    workspace_root = tmp_path / "ws"
+    file_path = workspace_root / "file"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_text("x")
+    with pytest.raises(ValueError, match="not a directory"):
+        resolve_agent_workspace("file", workspace_root=str(workspace_root))
 
 
 @pytest.mark.asyncio
-async def test_third_party_type_creates_via_yuanrong() -> None:
+async def test_third_party_type_creates_via_yuanrong(agentos_workspace_root: str) -> None:
     yuanrong = FakeYuanRongClient()
     agent_manager = AgentManager()
     client = _router_client(yuanrong, FakeRegistryClient(), agent_manager)
@@ -435,7 +461,9 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
 
     assert response.ok
     assert yuanrong.create_calls == 1
-    assert yuanrong.create_payloads[0]["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert yuanrong.create_payloads[0]["workspace"] == str(
+        Path(agentos_workspace_root) / "u1"
+    )
     assert yuanrong.send_calls == 1
     # 第三方 agent 端口取自 runtime_spec rootfs.ports（tcp:22）。
     assert yuanrong.ws_connect_uris == [
@@ -446,7 +474,9 @@ async def test_third_party_type_creates_via_yuanrong() -> None:
     assert agents[0].info.agent_type == "opencode"
     assert agents[0].info.status is AgentStatus.READY
     assert agents[0].info.sandbox_id == "sbx-1"
-    assert agents[0].info.metadata["workspace"] == f"{DEFAULT_AGENT_WORKSPACE_ROOT}/u1"
+    assert agents[0].info.metadata["workspace"] == str(
+        Path(agentos_workspace_root) / "u1"
+    )
 
 
 @pytest.mark.asyncio
@@ -596,6 +626,110 @@ async def test_switch_to_jiuwenswarm_is_direct_without_create() -> None:
     assert response["payload"]["ssh_port"] == 2222
     assert client.get_current_agent_type("u1") == "jiuwenswarm"
     assert await agent_manager.list_user_agents("u1") == []
+    assert "ssh_private_key" not in response["payload"]
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_includes_ephemeral_ssh_private_key_when_issuer_set() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _Issuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            assert user_id == "u1"
+            assert username == "u1"
+            assert session_id == "sess-1"
+            assert ttl_sec == 120.0
+            return "-----BEGIN OPENSSH PRIVATE KEY-----\nTEST\n-----END OPENSSH PRIVATE KEY-----\n"
+
+    client.set_key_issuer(_Issuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert response["payload"]["ssh_private_key"].startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_key_issuance_raises() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+
+    class _BrokenIssuer:
+        def issue_ephemeral_key(self, *, user_id, username, session_id, ttl_sec):
+            raise RuntimeError("asyncssh missing")
+
+    client.set_key_issuer(_BrokenIssuer(), ephemeral_key_ttl_sec=120.0)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+    assert "asyncssh missing" in response["error"]
+    # Fail fast: no sandbox is created for an unusable switch.
+    assert yuanrong.create_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_fails_when_issuer_returns_empty_key() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(issue_ephemeral_key=lambda **kwargs: ""),
+        ephemeral_key_ttl_sec=120.0,
+    )
+
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="jiuwenswarm",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is False
+    assert response["code"] == "SSH_KEY_ISSUE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_agent_switch_omits_ssh_private_key_when_issuer_cleared() -> None:
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = AgentOSRouterClient(
+        yuanrong, FakeRegistryClient(), agent_manager, ssh_channel_endpoint=_ssh_channel()
+    )
+    client.set_key_issuer(
+        SimpleNamespace(
+            issue_ephemeral_key=lambda **kwargs: "KEY",
+        ),
+        ephemeral_key_ttl_sec=60.0,
+    )
+    client.set_key_issuer(None)
+    response = await client.thirdagent_switch(
+        user_id="u1",
+        agent_type="opencode",
+        session_id="sess-1",
+    )
+    await client.shutdown()
+
+    assert response["ok"] is True
+    assert "ssh_private_key" not in response["payload"]
 
 
 @pytest.mark.asyncio
@@ -846,7 +980,217 @@ async def test_agentos_third_agent_list_and_switch() -> None:
     assert switched["payload"]["ssh_ip"] == "0.0.0.0"
     assert switched["payload"]["ssh_port"] == 2223
     assert yuanrong.create_calls == 1
-    assert yuanrong.send_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# disconnect_cleanup_timeout_seconds: configurable + idle-aware delete path
+# ---------------------------------------------------------------------------
+
+
+async def _ready_creator(agent_info: AgentInfo) -> AgentInfo:
+    """Minimal creator that marks the runtime READY with a stub sandbox id."""
+    agent_info.sandbox_id = "fake-sbx"
+    agent_info.status = AgentStatus.READY
+    return agent_info
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_uses_configured_timeout() -> None:
+    """The wait must follow ``disconnect_cleanup_timeout_seconds``,
+    not the old hardcoded 60s."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.05,
+    )
+    await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+
+    start = asyncio.get_running_loop().time()
+    await client._delayed_cleanup("u1")
+    elapsed = asyncio.get_running_loop().time() - start
+
+    # If the wait was still 60s this test would take 60s; assert the new knob
+    # actually drove the sleep.
+    assert elapsed < 5.0, f"delayed cleanup took {elapsed:.2f}s, expected ~0.05s"
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_skips_held_agents() -> None:
+    """Like the idle reaper, a held agent (task_count > 0) must not be killed
+    by the disconnect cleanup even after the timeout elapses."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    held = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator, acquire=True
+    )
+    assert held.is_ready()
+    assert held.task_count == 1
+
+    await asyncio.sleep(0.05)
+    await client._delayed_cleanup("u1")
+
+    # pop_if_idle must have refused the held agent → nothing deleted.
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is not None
+    assert yuanrong.delete_calls == []
+
+    await agent_manager.release(held.key)
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_deletes_unheld_idle_builtin() -> None:
+    """When the task is ended (task_count == 0) and idle past the timeout,
+    the disconnect cleanup must delete the agent (mirroring the idle reaper)."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        registry,
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    runtime = await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+    assert runtime.task_count == 0
+
+    await asyncio.sleep(0.05)
+    await client._delayed_cleanup("u1")
+
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is None
+    assert yuanrong.delete_calls == ["fake-sbx"]
+    assert registry.unregistered == [
+        {
+            "agent_id": runtime.info.agent_id,
+            "user_id": "u1",
+            "agent_type": "jiuwenswarm",
+        }
+    ]
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_skips_creating_or_non_builtin_agents() -> None:
+    """Cleanup is gated by the same READY+task_count==0+idle triple as the
+    idle reaper, so non-READY runtimes are not force-deleted."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        disconnect_cleanup_timeout_seconds=0.01,
+    )
+    # Seed a CREATING runtime directly: get_or_create_agent() without a
+    # creator resolves to READY, so we must insert the runtime ourselves.
+    key = AgentRuntime.build_key(
+        agent_manager.key_fields, user_id="u1", agent_type="jiuwenswarm"
+    )
+    agent_manager._runtimes[key] = AgentRuntime.for_key(
+        key, user_id="u1", agent_type="jiuwenswarm"
+    )
+    await asyncio.sleep(0.05)
+
+    await client._delayed_cleanup("u1")
+
+    # Still tracked, not deleted.
+    assert await agent_manager.get_agent("u1", "jiuwenswarm") is not None
+    assert yuanrong.delete_calls == []
+    await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delayed_cleanup_cancelled_on_reconnect() -> None:
+    """Reconnect during the wait window must cancel the pending cleanup task."""
+    yuanrong = FakeYuanRongClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        FakeRegistryClient(),
+        agent_manager,
+        # Long enough that the cleanup task is still asleep when we reconnect.
+        disconnect_cleanup_timeout_seconds=10.0,
+    )
+    await agent_manager.get_or_create_agent(
+        "u1", "jiuwenswarm", creator=_ready_creator
+    )
+
+    # Disconnect while connection count was 0 → schedules the pending task.
+    await client._on_channel_event(
+        SimpleNamespace(user_id="u1", event_type="disconnected")
+    )
+    pending = client._pending_cleanups.get("u1")
+    assert pending is not None and not pending.done()
+
+    # Reconnect before the timeout elapses → task must be cancelled.
+    await client._on_channel_event(
+        SimpleNamespace(user_id="u1", event_type="connected")
+    )
+    # Python 3.11+: even though _delayed_cleanup swallows CancelledError inside
+    # its sleep() and returns cleanly, the task itself is still in the
+    # "cancelled" state, so awaiting must re-raise CancelledError.
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert "u1" not in client._pending_cleanups
+    assert yuanrong.delete_calls == []
+    await client.shutdown()
+
+
+def test_load_router_config_disconnect_cleanup_knobs(monkeypatch) -> None:
+    base_agent_client = {
+        "type": "agentos_router",
+        "frontend_endpoint": "http://yuanrong.test",
+        "function_version_urn": "urn:test",
+    }
+    monkeypatch.delenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", raising=False)
+
+    # Default keeps the historical 60s.
+    defaults = load_router_config({"gateway": {"agent_client": base_agent_client}})
+    assert defaults.disconnect_cleanup_timeout_seconds == 60.0
+
+    # Explicit yaml value is honored.
+    loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"disconnect_cleanup_timeout_seconds": 120},
+            }
+        }
+    )
+    assert loaded.disconnect_cleanup_timeout_seconds == 120.0
+
+    # Env overrides yaml (incl. yaml=0).
+    monkeypatch.setenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", "30")
+    env_loaded = load_router_config(
+        {
+            "gateway": {
+                "agent_client": base_agent_client,
+                "agentos": {"disconnect_cleanup_timeout_seconds": 0},
+            }
+        }
+    )
+    assert env_loaded.disconnect_cleanup_timeout_seconds == 30.0
+
+    # Env explicit 0 disables.
+    monkeypatch.setenv("DISCONNECT_CLEANUP_TIMEOUT_SECONDS", "0")
+    assert (
+        load_router_config(
+            {"gateway": {"agent_client": base_agent_client}}
+        ).disconnect_cleanup_timeout_seconds
+        == 0.0
+    )
 
 
 def test_agentos_selected_by_agent_client_type() -> None:
@@ -964,14 +1308,17 @@ def test_load_router_config_sandbox_idle_knobs(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_uses_configured_workspace_root() -> None:
+async def test_create_uses_configured_workspace_root(tmp_path) -> None:
     yuanrong = FakeYuanRongClient()
+    ws_user = tmp_path / "ws" / "u1"
+    ws_user.mkdir(parents=True)
+    ws_user.chmod(0o777)
     client = _router_client(
         yuanrong,
         FakeRegistryClient(),
         AgentManager(),
         ssh_channel_endpoint=_ssh_channel(),
-        workspace_root="/mnt/workspaces",
+        workspace_root=str(tmp_path / "ws"),
     )
     try:
         response = await client.thirdagent_switch(
@@ -980,7 +1327,7 @@ async def test_create_uses_configured_workspace_root() -> None:
             session_id="sess-1",
         )
         assert response["ok"] is True
-        assert yuanrong.create_payloads[0]["workspace"] == "/mnt/workspaces/u1"
+        assert yuanrong.create_payloads[0]["workspace"] == str(ws_user)
     finally:
         await client.shutdown()
 

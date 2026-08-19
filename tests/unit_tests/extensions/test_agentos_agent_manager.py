@@ -257,6 +257,27 @@ async def test_acquire_and_release_track_task_count() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_agent_acquire_holds_ready_runtime() -> None:
+    agent_manager = AgentManager()
+    created = await agent_manager.get_or_create_agent("u1", "claude")
+    assert created.task_count == 0
+
+    held = await agent_manager.get_agent("u1", "claude", acquire=True)
+    assert held is not None
+    assert held.task_count == 1
+    assert await agent_manager.pop_if_idle(held.key, 0.0) is None
+
+    plain = await agent_manager.get_agent("u1", "claude")
+    assert plain is not None
+    assert plain.task_count == 1
+
+    await agent_manager.release(held.key)
+    released = await agent_manager.get_agent("u1", "claude")
+    assert released is not None
+    assert released.task_count == 0
+
+
+@pytest.mark.asyncio
 async def test_pop_if_idle_respects_holds_and_staleness() -> None:
     agent_manager = AgentManager()
 

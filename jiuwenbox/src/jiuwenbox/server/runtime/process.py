@@ -33,7 +33,7 @@ from typing import Any
 import yaml
 
 from jiuwenbox.logging_config import configure_logging
-from jiuwenbox.models.policy import NetworkMode, SecurityPolicy
+from jiuwenbox.models.policy import NetworkMode, NetworkPolicy, SecurityPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
     BackgroundJobStatus,
@@ -974,6 +974,17 @@ class ProcessRuntime(RuntimeAdapter):
         if policy.network.mode != NetworkMode.ISOLATED:
             return None
 
+        old_uplink = self._uplink_handles.pop(sandbox_id, None)
+        if old_uplink is not None:
+            try:
+                network_module.teardown_network_uplink(old_uplink)
+            except Exception:
+                logger.warning(
+                    "Failed to teardown previous uplink for sandbox %s before rebuild",
+                    sandbox_id,
+                    exc_info=True,
+                )
+
         namespace = self._get_netns_name(sandbox_id)
         if network_module.namespace_exists(namespace):
             network_module.delete_named_namespace(namespace)
@@ -1802,6 +1813,18 @@ class ProcessRuntime(RuntimeAdapter):
                 job,
             )
 
+    async def get_sandbox_ip_address(self, sandbox_id: str) -> str | None:
+        """Return the sandbox IPv4 confirmed by the current network setup."""
+        mode = self._network_modes.get(sandbox_id)
+        if mode == NetworkMode.ISOLATED:
+            handle = self._uplink_handles.get(sandbox_id)
+            if handle is None:
+                return None
+            return handle.sandbox_ip or None
+        if mode == NetworkMode.HOST:
+            return await asyncio.to_thread(network_module.resolve_host_egress_ipv4)
+        return None
+
     async def create(
         self,
         sandbox_id: str,
@@ -2208,6 +2231,47 @@ class ProcessRuntime(RuntimeAdapter):
         if proc is None:
             return False
         return proc.poll() is None
+
+    async def update_network_policy(
+        self,
+        sandbox_id: str,
+        network_policy: NetworkPolicy,
+    ) -> None:
+        """Hot-replace egress/ingress iptables rules for a running sandbox.
+
+        Requires an existing named network namespace (``network.mode: isolated``).
+        Updates the in-memory runtime policy cache so subsequent restarts that
+        reload from disk stay consistent with the manager's written YAML.
+        """
+        if network_policy.mode != NetworkMode.ISOLATED:
+            raise RuntimeError(
+                f"Cannot hot-update network rules for sandbox '{sandbox_id}': "
+                f"network.mode is '{network_policy.mode.value}' (requires isolated)"
+            )
+
+        namespace = self._netns_names.get(
+            sandbox_id,
+            network_module.netns_name_for_sandbox(sandbox_id),
+        )
+        if not network_module.namespace_exists(namespace):
+            raise RuntimeError(
+                f"Cannot hot-update network rules for sandbox '{sandbox_id}': "
+                f"network namespace '{namespace}' does not exist"
+            )
+
+        cached = self._runtime_policies.get(sandbox_id)
+        if cached is not None:
+            self._runtime_policies[sandbox_id] = cached.model_copy(
+                update={"network": network_policy},
+            )
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            network_module.replace_network_isolation,
+            network_policy,
+            namespace,
+        )
 
     def get_exit_diagnostics(self, sandbox_id: str) -> str:
         """Return diagnostics for a sandbox whose lifecycle process is not running.

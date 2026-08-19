@@ -19,6 +19,8 @@ from jiuwenswarm.extensions.agentos.agentos_router.ssh_relay import (
 DEFAULT_AGENT_WORKSPACE_ROOT = "/home/agentos/users"
 # Env override for gateway.agentos.sandbox_idle_timeout_seconds (vibeskill-aligned).
 SANDBOX_IDLE_TIMEOUT_ENV = "SANDBOX_IDLE_TIMEOUT_SECONDS"
+# Env override for gateway.agentos.disconnect_cleanup_timeout_seconds.
+DISCONNECT_CLEANUP_TIMEOUT_ENV = "DISCONNECT_CLEANUP_TIMEOUT_SECONDS"
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,12 @@ class RouterConfig:
     # has no held tasks (chat/SSH) for this long. <= 0 disables reclamation.
     sandbox_idle_timeout_seconds: float = 600.0
     sandbox_idle_check_interval_seconds: float = 30.0
+    # Channel-disconnect cleanup: when a user has zero live channels, wait this
+    # long before deleting their jiuwenswarm agent (gives a chance to reconnect
+    # and gives in-flight chat/SSH time to finish). Reuses the same
+    # pop_if_idle safety check as the idle reaper (READY + task_count==0 +
+    # last_active_at beyond this window). <= 0 disables disconnect cleanup.
+    disconnect_cleanup_timeout_seconds: float = 60.0
     ssh: YuanrongSshSettings = YuanrongSshSettings()
     ssh_channel: SshChannelEndpoint | None = None
     auth_service_url: str = ""
@@ -143,6 +151,13 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         else _read_float(agentos, "sandbox_idle_timeout_seconds", 600.0)
     )
 
+    disconnect_cleanup_env = _read_float_env(DISCONNECT_CLEANUP_TIMEOUT_ENV)
+    disconnect_cleanup_timeout_seconds = (
+        disconnect_cleanup_env
+        if disconnect_cleanup_env is not None
+        else _read_float(agentos, "disconnect_cleanup_timeout_seconds", 60.0)
+    )
+
     return RouterConfig(
         frontend_endpoint=frontend_endpoint,
         function_version_urn=function_version_urn,
@@ -169,6 +184,7 @@ def load_router_config(config: dict[str, Any]) -> RouterConfig:
         sandbox_idle_check_interval_seconds=_read_float(
             agentos, "sandbox_idle_check_interval_seconds", 30.0
         ),
+        disconnect_cleanup_timeout_seconds=disconnect_cleanup_timeout_seconds,
         ssh=load_yuanrong_ssh_settings(agentos.get("ssh")),
         ssh_channel=load_ssh_channel_endpoint(config),
         auth_service_url=auth_service_url,

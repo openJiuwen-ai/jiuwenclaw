@@ -221,20 +221,33 @@ Prompting is similar to normal chat, but for smoother runs:
 
 ### 2.4 Team Skills
 
-In Agent Team mode you can still use and develop **Skills**. Each agent can configure and use skills; the team can also share skill resources.
+In Agent Team mode you can still use and develop **Skills**. Each agent can configure and use skills.
 
-**Team Skills concepts:**
+**Skills exist exactly once on disk:**
 
-- **Personal skills** — configured and used by each agent, stored under `workspaces/<agent_name>_workspace/skills/`  
-- **Team-shared skills** — team-level skills under `team-workspace/skills/`, available to all members  
+An installed skill lives only in the global skill library `~/.jiuwenswarm/agent/workspace/skills/`. Neither the team workspace nor a member workspace has a `skills/` directory, a symlink view, or a copy.
+
+**Who may see which skill is metadata, not a directory:**
+
+- **Member visibility** — one `skills-visibility.json` at each agent workspace root, holding that member's `allow` / `deny` lists  
+- **Team visibility** — one `skills-visibility.json` at the `team-workspace/` root, applied to every member  
+- **Composition** — visible = member allow ∪ team allow; denied = member deny ∪ team deny ∪ library-wide disabled. `deny` always wins over `allow`; an empty `allow` means "no filtering", i.e. inherit the whole library  
+
+Changing visibility only rewrites those two JSON documents — no file-system work — and takes effect on the next turn.
+
+**Three behaviours you will notice:**
+
+1. **Everything is visible by default.** With no lists configured, `allow` is empty and the member inherits the whole library; skills you install later show up for members automatically, with nothing to distribute.
+2. **The `skills` list in your config is a starting value, not the current one.** The `skills` list under each role in `agents` is written as the initial `allow` only when that member's visibility declaration is first created. Once the declaration exists, editing the config will not overwrite it — adjust visibility afterwards through the `skills.visibility.get` / `skills.visibility.set` / `skills.visibility.update` interfaces instead, so you never hit the "I changed the config and nothing happened" surprise.
+3. **A team-level `deny` cannot be undone by a member.** A skill denied in the team declaration stays unavailable even if the member lists it in its own `allow`. Team `deny` is the hard constraint used to lock something down team-wide.
 
 **How skills help the team:**
 
 1. **Stronger expertise** — skills extend what each agent can do in its domain  
-2. **Shared tooling** — one shared skill set avoids duplicate setup  
+2. **One source of tooling** — the whole team reads the same library, so installing once serves everyone and no copy can drift  
 3. **Higher efficiency** — skills help agents finish assigned work faster  
 
-> For detailed usage and development of Team Skills, see the [SwarmSkills guide](SwarmSkills.md).
+> For detailed usage and development of Team Skills, see [Swarm Skills](SwarmSkills.md).
 
 ### 2.5 Team Memory
 
@@ -403,8 +416,10 @@ Agent Team provides a shared workspace where members collaborate on the same int
 
 Agent Team storage has two layers: **team shared workspace** and **per-member workspaces**.
 
-- **Team shared workspace (`team-workspace`)** — shared by all members; holds team artifacts and shared skills. Each Agent Team session gets its own folder containing `team-workspace`.  
-- **Per-member workspaces (`workspaces`)** — private space per agent for config, memory, skills, and todos.  
+- **Team shared workspace (`team-workspace`)** — shared by all members; holds team artifacts. Each Agent Team session gets its own folder containing `team-workspace`.  
+- **Per-member workspaces (`workspaces`)** — private space per agent for config, memory, and todos.  
+
+> Skills themselves are not in this tree: they live only in the global library `~/.jiuwenswarm/agent/workspace/skills/`. The `skills-visibility.json` documents below only declare *which* of the library's skills are visible.
 
 Full path layout:
 
@@ -416,13 +431,13 @@ Full path layout:
     │   │   ├── code/                  ← code artifacts
     │   │   ├── docs/                  ← document artifacts
     │   │   └── reports/               ← report artifacts
-    │   └── skills/                    ← team-shared skills
+    │   └── skills-visibility.json     ← team skill visibility (not the skills)
     └── workspaces/                    ← per-member workspaces
         └── <agent_name>_workspace/    ← each agent’s private space
             ├── AGENT.md               ← agent configuration
             ├── memory/                ← personal long-term memory (general scenario)
             ├── coding_memory/         ← personal coding memory (coding scenario)
-            ├── skills/                ← skill library
+            ├── skills-visibility.json ← member skill visibility (not the skills)
             ├── todo/                  ← todos
             └── ...                    ← other agent-specific files
 ```

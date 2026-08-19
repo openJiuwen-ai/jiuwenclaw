@@ -51,7 +51,7 @@
 | --- | --- |
 | 多智能体协作 | 复杂任务不再是一个 Agent 的战场：Leader 自动拆解任务、组建团队，多个 Agent 专业分工、动态协商 |
 | 分布式 Agent Swarm | 突破单机算力瓶颈：Leader/Teammate 跨进程、跨机器部署，多机协同处理大规模任务 |
-| Swarmflow | 用自然语言驱动工作流编排：Leader 自动拆解为多阶段工作流，各阶段 Agent 自动衔接 |
+| Swarmflow | 用 Python 工作流脚本做确定性多阶段编排：Leader 驱动各阶段 Agent 衔接；支持 **HITL**（`human` / `human_session`）、**Team token 预算**与 TUI **`/swarmflows`** 运行树监控 |
 | Skill 自演进 | 能力越用越强而非越跑越僵：执行出错或用户不满时自动检测信号、优化 Skill 定义 |
 | Skill Hub 流通 | 能力资产一次沉淀、处处复用：Skill 在开发者之间搜索、安装、组合与二次创作 |
 | Auto Harness | 评测驱动、端到端自动优化 Harness：不是训练模型权重，而是让 Harness 在实战中自动学习、自动优化 |
@@ -178,13 +178,6 @@ JiuwenSwarm 支持三种执行模式，按需切换：
 ## 文档导航
 
 如需了解查看JiuwenSwarm 的常用使用说明与功能文档，请见：[文档导航](docs/README.md)
-
-## Roadmap
-
-| 功能 | 状态  | 预计时间 | 价值 |
-| --- |-----| --- | --- |
-| Swarmflow 有状态算子 | 规划中 | 2026-07 | 工作流节点支持人工介入，作为有状态算子参与流程，根据中间结果审批、修正或接管后续步骤 |
-| Team 模式同 Session 飞书联机 | 规划中 | 2026-07 | 飞书用户作为 Human Agent 加入同会话，与 AI Agent 团队共同协作，人机混合编队让决策更精准 |
 
 ## 常见问题
 

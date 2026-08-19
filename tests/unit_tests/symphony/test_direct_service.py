@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.symphony import (
     FINGERPRINT_ARTIFACT_FILENAME,
     CapabilityDescriptor,
@@ -97,13 +99,17 @@ class _CountingGraphModel(_FakeGraphModel):
 
 
 class _FakeFingerprintService:
-    def __init__(self, scan_result, artifact_root, fingerprints):
+    def __init__(self, scan_result, artifact_root, fingerprints, progress_events=()):
         self.scan_result = scan_result
         self.artifact_root = Path(artifact_root)
         self.fingerprints = fingerprints
+        self.progress_events = tuple(progress_events)
 
-    async def build(self, *, force=False):
+    async def build(self, *, force=False, progress_callback=None):
         del force
+        if progress_callback is not None:
+            for event in self.progress_events:
+                progress_callback(event)
         content_hashes = self.scan_result.content_hashes
         fingerprints = tuple(
             item.model_copy(
@@ -131,9 +137,16 @@ class _FakeFingerprintService:
 class _FakeGraphBuildRuntimeFactory:
     """Keep graph integration tests on the public core fingerprint boundary."""
 
-    def __init__(self, fingerprint_batches, *, scan_real_root=False):
+    def __init__(
+        self,
+        fingerprint_batches,
+        *,
+        scan_real_root=False,
+        fingerprint_progress=(),
+    ):
         self.fingerprint_batches = [tuple(batch) for batch in fingerprint_batches]
         self.scan_real_root = scan_real_root
+        self.fingerprint_progress = tuple(fingerprint_progress)
         self.build_index = 0
         self.last_scan_result = None
 
@@ -159,7 +172,12 @@ class _FakeGraphBuildRuntimeFactory:
         del llm_config, runtime_config
         batch = self._current_batch()
         self.build_index += 1
-        return _FakeFingerprintService(scan_result, artifact_root, batch)
+        return _FakeFingerprintService(
+            scan_result,
+            artifact_root,
+            batch,
+            self.fingerprint_progress,
+        )
 
     def _current_batch(self):
         return self.fingerprint_batches[
@@ -528,7 +546,15 @@ async def test_swarm_build_publishes_public_graph_artifact(
         inputs=(CapabilityIO(name="document", type="markdown"),),
         content_hash="archiver-hash",
     )
-    runtime_factory = _FakeGraphBuildRuntimeFactory([(fingerprint, reviewer, archiver)])
+    runtime_factory = _FakeGraphBuildRuntimeFactory(
+        [(fingerprint, reviewer, archiver)],
+        fingerprint_progress=(
+            {"event": "fingerprint.extract.progress", "current": 0, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 1, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 2, "total": 3},
+            {"event": "fingerprint.extract.progress", "current": 3, "total": 3},
+        ),
+    )
     (tmp_path / "skills").mkdir()
     graph_dir = tmp_path / "graph"
     config = symphony_config_from_dict(
@@ -598,6 +624,31 @@ async def test_swarm_build_publishes_public_graph_artifact(
     assert "build_started" not in stages
     assert "build_published" not in stages
     assert stages.count("graph.resolve.done") == 1
+    fingerprint_progress = [
+        details
+        for stage, details in build_events
+        if stage == "fingerprint.extract.start" and "current" in details
+    ]
+    assert [(item["current"], item["total"]) for item in fingerprint_progress] == [
+        (0, 3),
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert _build_progress(
+        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress[:3]]
+    )["percent"] < 48
+    assert _build_progress(
+        [{"stage": "fingerprint.extract.start", **item} for item in fingerprint_progress]
+    ) == {
+        "stage": "fingerprint.extract.start",
+        "label": "提取技能指纹",
+        "percent": 48,
+        "status": "running",
+        "current": 3,
+        "total": 3,
+        "ts": None,
+    }
     progress_entries = []
     percents = []
     for stage, details in build_events:
@@ -1488,6 +1539,11 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     tmp_path,
 ):
     config = _config(tmp_path)
+    _BuildProcessLogger(config.paths.graph_dir / "build_log.jsonl").record(
+        "update.done",
+        success=True,
+        version="old",
+    )
     build_entered = asyncio.Event()
     release_build = asyncio.Event()
 
@@ -1518,6 +1574,7 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert started["background"] is True
     assert started["build_status"] == "running"
     assert started["build_progress"]["status"] == "running"
+    assert [entry["stage"] for entry in started["build_log"]] == ["update.start"]
     assert first_task is not None
     assert build_entered.is_set() is False
 
@@ -1527,6 +1584,7 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
     assert reused["success"] is True
     assert reused["background"] is True
     assert reused["build_status"] == "running"
+    assert [entry["stage"] for entry in reused["build_log"]] == ["update.start"]
     assert service._active_build_task is first_task
 
     release_build.set()
@@ -1534,6 +1592,175 @@ async def test_start_refresh_graph_runs_in_background_and_reuses_active_task(
 
     assert result["success"] is True
     assert service._active_build_task is None
+
+
+@pytest.mark.asyncio
+async def test_start_refresh_graph_status_is_running_before_background_task_enters(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    _BuildProcessLogger(config.paths.graph_dir / "build_log.jsonl").record(
+        "update.done",
+        success=True,
+        version="old",
+    )
+    build_entered = asyncio.Event()
+    release_build = asyncio.Event()
+
+    async def fake_build_graph(*args, **kwargs):
+        del args, kwargs
+        build_entered.set()
+        await release_build.wait()
+        return SimpleNamespace(to_dict=lambda: {"success": True, "version": "new"})
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        fake_build_graph,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"success": True}),
+    )
+    service = SwarmSymphonyService()
+
+    started = await service.start_refresh_graph(force=True)
+    status = await service.graph_status()
+
+    assert started["build_progress"] == status["build_progress"]
+    assert status["build_progress"]["status"] == "running"
+    assert status["build_progress"]["stage"] == "update.start"
+    assert status["build_progress"]["percent"] == 3
+    assert [entry["stage"] for entry in status["build_log"]] == ["update.start"]
+
+    await build_entered.wait()
+    release_build.set()
+    result = await asyncio.wait_for(service._active_build_task, timeout=0.5)
+
+    assert result["success"] is True
+
+
+def test_build_progress_keeps_running_batch_at_relation_stage_start():
+    entries = [
+        {"stage": "graph.resolve.start"},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_start",
+            "current": 0,
+            "total": 1,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 1,
+        },
+    ]
+
+    assert _build_progress(entries)["percent"] == 72
+
+
+def test_build_progress_uses_completed_batches_and_never_regresses():
+    entries = [
+        {"stage": "graph.resolve.start"},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_start",
+            "current": 0,
+            "total": 4,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 2,
+            "total": 4,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+        },
+    ]
+
+    assert _build_progress(entries)["percent"] == 78
+
+    entries.append(
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+        }
+    )
+    assert _build_progress(entries)["percent"] == 78
+
+    entries.append(
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+        }
+    )
+    assert _build_progress(entries)["percent"] == 84
+
+
+def test_build_progress_uses_global_candidate_counts_across_matcher_windows():
+    entries = [
+        {"stage": "graph.resolve.start", "candidate_count": 143},
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "matching_done",
+            "current": 4,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_start",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 16,
+            "total_candidate_count": 143,
+        },
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 4,
+            "completed_candidate_count": 20,
+            "total_candidate_count": 143,
+        },
+    ]
+
+    progress = _build_progress(entries)
+
+    assert progress["percent"] == 74
+    assert progress["current"] == 20
+    assert progress["total"] == 143
+
+
+def test_build_progress_invalid_relation_totals_stay_at_stage_start():
+    entries = [
+        {
+            "stage": "graph.resolve.progress",
+            "matcher_event": "batch_done",
+            "current": 1,
+            "total": 0,
+        }
+    ]
+
+    assert _build_progress(entries)["percent"] == 72
 
 
 @pytest.mark.asyncio
@@ -1674,6 +1901,43 @@ async def test_graph_status_repairs_interrupted_build_log(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_service_graph_status_does_not_bind_freshness_to_current_default_model(
+    monkeypatch,
+    tmp_path,
+):
+    config = _config(tmp_path)
+    captured = {}
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+
+    def fake_graph_status(*args, **kwargs):
+        del args
+        captured.update(kwargs)
+        return SimpleNamespace(
+            to_dict=lambda: {"success": True, "exists": True, "stale": False}
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.graph_status",
+        fake_graph_status,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("default model must not affect graph status")
+        ),
+    )
+
+    result = await SwarmSymphonyService().graph_status()
+
+    assert result["stale"] is False
+    assert captured.get("llm_config") is None
+
+
+@pytest.mark.asyncio
 async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_path):
     config = _config(tmp_path)
 
@@ -1699,6 +1963,105 @@ async def test_refresh_build_failure_returns_business_payload(monkeypatch, tmp_p
     assert result["success"] is False
     assert "LLM unavailable" in result["detail"]
     assert result["build_progress"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_downstream_failure_result(monkeypatch, tmp_path):
+    config = _config(tmp_path)
+
+    async def return_failed_build(*args, **kwargs):
+        del args, kwargs
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "success": False,
+                "graph_dir": str(config.paths.graph_dir),
+                "detail": "fingerprint model failed",
+            }
+        )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.service_build_graph",
+        return_failed_build,
+    )
+
+    result = await SwarmSymphonyService().refresh_graph()
+
+    assert result["success"] is False
+    assert result["detail"] == "fingerprint model failed"
+    assert result["build_progress"]["status"] == "error"
+    assert result["build_log"][-1]["stage"] == "update.failed"
+
+
+@pytest.mark.asyncio
+async def test_refresh_propagates_framework_model_failure_from_core(monkeypatch, tmp_path):
+    config = symphony_config_from_dict(
+        {
+            "paths": {
+                "skills_root": str(tmp_path / "skills"),
+                "graph_dir": str(tmp_path / "graph"),
+            }
+        }
+    )
+    skill_md = config.paths.skills_root / "writer" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("---\nname: writer\n---\nWrite markdown.\n", encoding="utf-8")
+
+    class FrameworkFailingModel:
+        async def invoke(self, messages, **kwargs):
+            del messages, kwargs
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg="model unavailable",
+            )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.LLMConfig.from_default_model",
+        lambda: LLMConfig(model="failing-model"),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.build.model_from_config",
+        lambda _config: FrameworkFailingModel(),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.adapter.model_from_config",
+        lambda _config: FrameworkFailingModel(),
+    )
+
+    result = await SwarmSymphonyService().refresh_graph()
+
+    assert result["success"] is False
+    assert "model unavailable" in result["detail"]
+    assert result["build_progress"]["status"] == "error"
+    assert result["build_log"][-1]["stage"] == "update.failed"
+    assert not (config.paths.graph_dir / "current.json").exists()
+
+
+def test_build_progress_treats_false_done_payload_as_error() -> None:
+    progress = _build_progress(
+        [
+            {
+                "stage": "update.done",
+                "success": False,
+                "label": "构建完成",
+                "current": 1,
+                "total": 1,
+            }
+        ]
+    )
+
+    assert progress["status"] == "error"
 
 
 def _named_progress_tasks():
