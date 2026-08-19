@@ -76,6 +76,7 @@ class ReqMethod(Enum):
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
     TTS_SYNTHESIZE = "tts.synthesize"
+    VIDEO_RESEARCH = "video.research"
 
     AGENTS_LIST = "agents.list"
     AGENTS_GET = "agents.get"

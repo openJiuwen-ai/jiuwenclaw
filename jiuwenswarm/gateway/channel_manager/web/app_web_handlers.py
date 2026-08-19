@@ -1532,7 +1532,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         register_video_live_handler,
     )
 
-    register_video_live_handler(channel)
+    register_video_live_handler(channel, agent_client=agent_client)
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service

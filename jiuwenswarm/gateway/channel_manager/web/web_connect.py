@@ -50,9 +50,14 @@ _HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
 _LOCAL_ONLY_METHODS = frozenset(
     {
         "video.realtime.config",
+        "video.joyai.frame",
+        "video.realtime.telemetry",
         "video.transcribe",
         "video.agent",
+        "video.search.status",
         "tts.synthesize",
+        "tts.stream.start",
+        "tts.stream.cancel",
     }
 )
 

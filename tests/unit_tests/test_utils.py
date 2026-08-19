@@ -13,6 +13,16 @@ import pytest
 from jiuwenswarm.common import utils
 
 
+def test_reset_free_search_runtime_flags_preserves_configured_values(monkeypatch) -> None:
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+    monkeypatch.delenv("FREE_SEARCH_BING_ENABLED", raising=False)
+
+    utils.reset_free_search_runtime_flags()
+
+    assert os.environ["FREE_SEARCH_DDG_ENABLED"] == "true"
+    assert os.environ["FREE_SEARCH_BING_ENABLED"] == "false"
+
+
 class TestPathResolution:
     """Test path resolution functions."""
 

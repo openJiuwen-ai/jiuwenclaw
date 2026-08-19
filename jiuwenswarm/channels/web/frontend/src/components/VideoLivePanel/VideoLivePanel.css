@@ -430,6 +430,14 @@
   background: var(--fill-tertiary);
 }
 
+.video-live__realtime-status {
+  padding: 8px 12px;
+  color: var(--color-action-primary);
+  background: var(--color-action-primary-subtle);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
 .video-live__answer-empty {
   display: flex;
   align-items: center;
@@ -528,6 +536,14 @@
   background: var(--color-feedback-danger);
   box-shadow: var(--effect-voice-pulse-start);
   animation: video-live-recording-pulse 1.2s ease-in-out infinite;
+}
+
+.video-live__spinner {
+  animation: video-live-spinner 0.8s linear infinite;
+}
+
+@keyframes video-live-spinner {
+  to { transform: rotate(360deg); }
 }
 
 .video-live__capture-canvas {
