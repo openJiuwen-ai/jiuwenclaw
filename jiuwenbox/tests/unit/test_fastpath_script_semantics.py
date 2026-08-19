@@ -30,6 +30,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from dataclasses import dataclass
 
 import pytest
 
@@ -50,21 +51,38 @@ def _load_worker_ns() -> dict:
     return ns
 
 
-def _fastpath(script: str, args=(), cwd=None, env_extra=None,
-              interp_name="python3", timeout=30.0):
+@dataclass(frozen=True)
+class _ExecOpts:
+    """Per-call options shared by the differential-test helpers.
+
+    G.FNM.03 keeps ``_fastpath``/``_real`` at or below five arguments: the
+    optional correlated inputs travel as a single value object. ``interp_name``
+    is read by ``_fastpath`` only, ``interp`` by ``_real`` only.
+    """
+
+    args: tuple = ()
+    cwd: str | None = None
+    env_extra: dict | None = None
+    timeout: float = 30.0
+    interp_name: str = "python3"
+    interp: str | None = None
+
+
+def _fastpath(script: str, opts: _ExecOpts | None = None):
     """Run ``script`` through the FastPath child; return (rc, out, err)."""
+    opts = opts or _ExecOpts()
     ns = _load_worker_ns()
     plan = {
         "mode": "script",
         "path": os.path.abspath(script),
         "dir": os.path.dirname(os.path.abspath(script)),
-        "argv": [script] + list(args),
-        "cwd": cwd or os.path.dirname(os.path.abspath(script)),
-        "interp_name": interp_name,
+        "argv": [script] + list(opts.args),
+        "cwd": opts.cwd or os.path.dirname(os.path.abspath(script)),
+        "interp_name": opts.interp_name,
         "interp_path": sys.executable,
     }
-    if env_extra:
-        plan["env_extra"] = env_extra
+    if opts.env_extra:
+        plan["env_extra"] = opts.env_extra
     # Flush before the fork so the child does not re-emit pytest's captured
     # output from an inherited buffer.
     sys.stdout.flush()
@@ -72,7 +90,7 @@ def _fastpath(script: str, args=(), cwd=None, env_extra=None,
     r, w = os.pipe()
     try:
         rc, out, err = ns["_run_child"](
-            None, b"", plan["cwd"], {}, timeout, r, plan)
+            None, b"", plan["cwd"], {}, opts.timeout, r, plan)
     finally:
         for fd in (r, w):
             try:
@@ -82,8 +100,7 @@ def _fastpath(script: str, args=(), cwd=None, env_extra=None,
     return rc, out.decode(), err.decode()
 
 
-def _real(script: str, args=(), cwd=None, env_extra=None, timeout=30.0,
-          interp=None):
+def _real(script: str, opts: _ExecOpts | None = None):
     """Run the same script under a real interpreter; return (rc, out, err).
 
     ``interp`` defaults to ``sys.executable``. Pass a bare name ("python3")
@@ -91,20 +108,22 @@ def _real(script: str, args=(), cwd=None, env_extra=None, timeout=30.0,
     CPython echoes argv[0] verbatim in its "can't open file" message, so the
     spelling matters for that one comparison.
     """
+    opts = opts or _ExecOpts()
     env = dict(os.environ)
-    if env_extra:
-        env.update(env_extra)
+    if opts.env_extra:
+        env.update(opts.env_extra)
     proc = subprocess.run(
-        [interp or sys.executable, script] + list(args),
-        cwd=cwd or os.path.dirname(os.path.abspath(script)),
-        env=env, capture_output=True, timeout=timeout,
+        [opts.interp or sys.executable, script] + list(opts.args),
+        cwd=opts.cwd or os.path.dirname(os.path.abspath(script)),
+        env=env, capture_output=True, timeout=opts.timeout,
     )
     return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
 
 
 def _both(script, **kw):
     """Run both ways and return (fastpath_result, real_result)."""
-    return _fastpath(script, **kw), _real(script, **kw)
+    opts = _ExecOpts(**kw)
+    return _fastpath(script, opts), _real(script, opts)
 
 
 def _write(tmp_path, name, body):
@@ -184,7 +203,7 @@ def test_relative_argv0_is_preserved_verbatim(tmp_path):
     assert rc == 0, err
     fp = json.loads(out.decode())
 
-    rl_rc, rl_out, rl_err = _real("probe.py", args=["x"], cwd=cwd)
+    rl_rc, rl_out, rl_err = _real("probe.py", _ExecOpts(args=["x"], cwd=cwd))
     assert rl_rc == 0, rl_err
     rl = json.loads(rl_out)
 
@@ -294,8 +313,8 @@ def test_env_extra_is_visible_to_the_script(tmp_path):
               os.environ.get("MY_MARKER"))
         """)
     extra = {"PWD": str(tmp_path), "SHLVL": "0", "MY_MARKER": "marker-1"}
-    assert _fastpath(script, env_extra=extra) == _real(script, env_extra=extra)
-    rc, out, _ = _fastpath(script, env_extra=extra)
+    assert _fastpath(script, _ExecOpts(env_extra=extra)) == _real(script, _ExecOpts(env_extra=extra))
+    rc, out, _ = _fastpath(script, _ExecOpts(env_extra=extra))
     assert rc == 0
     assert out == f"{tmp_path} 0 marker-1\n"
 
@@ -309,9 +328,9 @@ def test_missing_script_reports_like_cpython(tmp_path):
     the one the fast path has to match.
     """
     missing = str(tmp_path / "nope.py")
-    fp_rc, _fp_out, fp_err = _fastpath(missing, cwd=str(tmp_path))
-    rl_rc, _rl_out, rl_err = _real(missing, cwd=str(tmp_path),
-                                   interp="python3")
+    fp_rc, _fp_out, fp_err = _fastpath(missing, _ExecOpts(cwd=str(tmp_path)))
+    rl_rc, _rl_out, rl_err = _real(missing, _ExecOpts(cwd=str(tmp_path),
+                                   interp="python3"))
     assert fp_rc == rl_rc == 2
     assert fp_err == rl_err, f"fastpath:\n{fp_err}\nreal:\n{rl_err}"
 
@@ -320,8 +339,8 @@ def test_missing_script_reports_like_cpython(tmp_path):
 def test_missing_script_uses_the_interpreter_name_as_invoked(tmp_path):
     """``python`` and ``python3`` prefix the message differently."""
     missing = str(tmp_path / "nope.py")
-    _rc, _out, err = _fastpath(missing, cwd=str(tmp_path),
-                               interp_name="python")
+    _rc, _out, err = _fastpath(missing, _ExecOpts(cwd=str(tmp_path),
+                               interp_name="python"))
     assert err.startswith("python: can't open file")
 
 
@@ -329,7 +348,7 @@ def test_missing_script_uses_the_interpreter_name_as_invoked(tmp_path):
 def test_timeout_still_returns_124(tmp_path):
     """Script mode reuses the existing timeout path."""
     script = _write(tmp_path, "sleep.py", "import time; time.sleep(30)\n")
-    rc, _out, _err = _fastpath(script, timeout=1.0)
+    rc, _out, _err = _fastpath(script, _ExecOpts(timeout=1.0))
     assert rc == 124
 
 

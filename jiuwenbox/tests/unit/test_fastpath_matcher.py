@@ -18,9 +18,16 @@ Interpreter resolution and the login-shell probe touch the host, so the
 shape-level tests stub them; the guards themselves are tested separately.
 """
 
+# 豁免 G.CLS.11 protected-access：本文件为 FastPath recogniser 的白盒单测，
+# 需直接访问 sd._fastpath_plan / sd._fastpath_split_shell / sd._fastpath_interp_path /
+# sd._fastpath_login_env_safe / sd._fastpath_shadow_conflict / sd._FASTPATH_PROBE_CACHE
+# 等受保护成员；重命名为 public 会破坏封装语义，故仅在本测试侧豁免。
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import os
+import posixpath
 
 import pytest
 
@@ -40,7 +47,7 @@ def stub_host(monkeypatch):
     covered by its own test below.
     """
     monkeypatch.setattr(sd, "_fastpath_interp_path",
-                        lambda name: "/usr/bin/" + name)
+                        lambda name: posixpath.join("/usr/bin", name))
     monkeypatch.setattr(sd, "_fastpath_login_env_safe", lambda: True)
     monkeypatch.setattr(sd, "_fastpath_shadow_conflict", lambda d: False)
 
@@ -169,7 +176,7 @@ def test_direct_script_forms_hit(stub_host, workdir):
 
 
 def test_absolute_script_path_hits(stub_host, workdir):
-    script = workdir + "/app.py"
+    script = posixpath.join(workdir, "app.py")
     plan = _plan(["python3", script], workdir="/")
     assert _same(plan["path"], script)
     assert _same(plan["dir"], workdir)
@@ -294,7 +301,7 @@ def test_plan_rejects_unrecognised_commands(stub_host, workdir, command):
 
 def test_wrapper_with_nonexistent_cd_target_falls_back(stub_host, workdir):
     """A ``cd`` that would fail must not be silently skipped."""
-    missing = workdir + "/does-not-exist"
+    missing = posixpath.join(workdir, "does-not-exist")
     assert _plan(["bash", "-lc", f'cd "{missing}" && python app.py']) is None
 
 
@@ -321,7 +328,7 @@ def test_interpreter_identity_mismatch_falls_back(monkeypatch, workdir):
 
 def test_login_shell_env_side_effects_disable_the_wrapper(monkeypatch, workdir):
     monkeypatch.setattr(sd, "_fastpath_interp_path",
-                        lambda name: "/usr/bin/" + name)
+                        lambda name: posixpath.join("/usr/bin", name))
     monkeypatch.setattr(sd, "_fastpath_shadow_conflict", lambda d: False)
     monkeypatch.setattr(sd, "_fastpath_login_env_safe", lambda: False)
     # ``-lc`` is a login shell: blocked.
@@ -333,7 +340,7 @@ def test_login_shell_env_side_effects_disable_the_wrapper(monkeypatch, workdir):
 def test_shadowing_script_dir_falls_back(monkeypatch, tmp_path):
     """A local ``json.py`` imports differently under a warm worker."""
     monkeypatch.setattr(sd, "_fastpath_interp_path",
-                        lambda name: "/usr/bin/" + name)
+                        lambda name: posixpath.join("/usr/bin", name))
     monkeypatch.setattr(sd, "_fastpath_login_env_safe", lambda: True)
     (tmp_path / "app.py").write_text("import json\n")
     (tmp_path / "json.py").write_text("VALUE = 'shadow'\n")

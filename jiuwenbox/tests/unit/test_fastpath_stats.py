@@ -18,6 +18,11 @@ The ``_try_fastpath_exec`` routing tests stub ``_fastpath_plan`` and
 every platform.
 """
 
+# 豁免 G.CLS.11 protected-access：本文件为 FastPath stats 计数的白盒单测，
+# 需直接访问 sd._FORK_POOL / stats._last_write / stats._dirty 等受保护成员；
+# 重命名为 public 会破坏封装语义，故仅在本测试侧豁免（不改产品符号可见性）。
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import json

@@ -68,6 +68,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -458,6 +459,10 @@ _FASTPATH_RESIDENT_MODULES = frozenset(sys.modules) | frozenset(
 
 _FASTPATH_PROBE_LOCK = threading.Lock()
 _FASTPATH_PROBE_CACHE: dict[str, Any] = {}
+# Resolved once at import so the login-env probe uses an absolute path to the
+# interpreter's bash rather than a bare ``"bash"`` lookup (G.EDV.05). Falls back
+# to the conventional ``/bin/bash`` when ``shutil.which`` finds nothing.
+_BASH_BIN = shutil.which("bash") or "/bin/bash"
 
 
 def _fastpath_script_enabled() -> bool:
@@ -601,7 +606,7 @@ def _fastpath_login_env_safe() -> bool:
     safe = False
     try:
         probe = subprocess.run(
-            ["bash", "-lc",
+            [_BASH_BIN, "-lc",
              "exec python3 -c 'import json,os,sys;"
              "sys.stdout.write(json.dumps(dict(os.environ)))'"],
             stdin=subprocess.DEVNULL,
@@ -1279,6 +1284,23 @@ class FastPathUnavailable(RuntimeError):
         self.reason = reason
 
 
+@dataclass(frozen=True)
+class _FastPathRequest:
+    """One fast-path code payload or script plan, bundled for the worker.
+
+    G.FNM.03 keeps ``ForkServerPool.submit`` at or below five arguments: the
+    per-call inputs travel as a single value object, mirroring the
+    ``_DaemonExecCall`` pattern in ``server/runtime/process.py``.
+    """
+
+    code: str | None
+    stdin_bytes: bytes | None
+    workdir: str | None
+    env_overrides: dict[str, str] | None
+    timeout: float | None
+    plan: dict[str, Any] | None = None
+
+
 class ForkServerPool:
     """Daemon-side pool of persistent in-sandbox ForkServer workers.
 
@@ -1419,7 +1441,8 @@ class ForkServerPool:
             return False
 
     # -- worker management -------------------------------------------------
-    def _spawn(self) -> tuple[subprocess.Popen, socket.socket]:
+    @staticmethod
+    def _spawn() -> tuple[subprocess.Popen, socket.socket]:
         parent, child = socket.socketpair()
         worker_env = dict(os.environ)
         worker_env.pop(LISTENER_FD_ENV, None)
@@ -1484,19 +1507,11 @@ class ForkServerPool:
         return bool(self._workers)
 
     def _drop(self, proc: subprocess.Popen) -> None:
-        self._workers = [
-            (p, s, l) for (p, s, l) in self._workers if p is not proc
-        ]
+        # G.NAM.02: filter by the worker's process identity without unpacking
+        # the tuple members into single-char names.
+        self._workers = [entry for entry in self._workers if entry[0] is not proc]
 
-    def submit(
-        self,
-        code: str | None,
-        stdin_bytes: bytes | None,
-        workdir: str | None,
-        env_overrides: dict[str, str] | None,
-        timeout: float | None,
-        plan: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    def submit(self, request: _FastPathRequest) -> dict[str, Any]:
         """Send one code payload or script plan to a worker and return its JSON response.
 
         Raises ``FastPathUnavailable`` (a ``RuntimeError``) when the fast
@@ -1512,6 +1527,13 @@ class ForkServerPool:
         # ``error`` (that case is a ``worker_error`` fallback, not a hit).
         if not self._allow_attempt():
             raise FastPathUnavailable("breaker_open")
+
+        code = request.code
+        stdin_bytes = request.stdin_bytes
+        workdir = request.workdir
+        env_overrides = request.env_overrides
+        timeout = request.timeout
+        plan = request.plan
 
         header: dict[str, Any] = {
             "code": code,
@@ -1668,12 +1690,14 @@ def _try_fastpath_exec(
 
     try:
         response = _FORK_POOL.submit(
-            source,
-            stdin_bytes,
-            header.get("workdir"),
-            header.get("env"),
-            header.get("timeout"),
-            script_plan,
+            _FastPathRequest(
+                code=source,
+                stdin_bytes=stdin_bytes,
+                workdir=header.get("workdir"),
+                env_overrides=header.get("env"),
+                timeout=header.get("timeout"),
+                plan=script_plan,
+            )
         )
     except FastPathUnavailable as exc:
         _FORK_POOL.stats.record_fallback(exc.reason)
