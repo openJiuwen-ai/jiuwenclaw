@@ -318,7 +318,7 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
     real_agent_root = None
     user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
     if user_dir:
-        real_agent_root = Path(user_dir) / "agent" / "workspace"
+        real_agent_root = Path(user_dir) / ".jiuwenswarm" / "agent" / "workspace"
     if agent_root is None:
         raise ValueError("yuanrong sandbox requires a resolvable agent_root directory")
 
