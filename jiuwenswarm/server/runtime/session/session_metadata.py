@@ -674,6 +674,7 @@ def update_session_metadata(
     mode: str | None = None,
     team_name: str | None = None,
     team_template_id: str | None = None,
+    agent_group_name: str | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -747,6 +748,7 @@ def update_session_metadata(
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
             "team_template_id": team_template_id or "",
+            "agent_group_name": agent_group_name or "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -780,6 +782,8 @@ def update_session_metadata(
             metadata["team_name"] = team_name
         if team_template_id is not None:
             metadata["team_template_id"] = team_template_id
+        if agent_group_name is not None:
+            metadata["agent_group_name"] = agent_group_name
         if accent_color is not None:
             metadata["accent_color"] = accent_color
         # model：覆盖式——每次请求更新为本次模型
@@ -1062,6 +1066,7 @@ def get_session_metadata(
         )
         metadata.setdefault("team_name", "")
         metadata.setdefault("team_template_id", "")
+        metadata.setdefault("agent_group_name", "")
     return metadata
 
 

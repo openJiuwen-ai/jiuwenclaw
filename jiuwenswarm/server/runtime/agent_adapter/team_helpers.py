@@ -128,6 +128,40 @@ def _safe_team_path_segment(value: str, fallback: str = "_") -> str:
     return normalized[:96] or fallback
 
 
+def _resolve_agent_group_selection(
+    *,
+    session_id: str,
+    params: dict[str, Any] | None,
+    is_first_request: bool,
+) -> tuple[str | None, bool]:
+    """Resolve the immutable AgentGroup selection for one Team session.
+
+    Returns ``(name, needs_persist)``.  A missing request field inherits the
+    session binding.  Empty/non-string values and attempts to switch an active
+    Team are rejected before any package is loaded.
+    """
+    metadata = get_session_metadata(session_id, cache_bust=True)
+    stored = str(metadata.get("agent_group_name") or "").strip()
+    has_request_value = isinstance(params, dict) and "agent_group_name" in params
+    if not has_request_value:
+        return (stored or None), False
+
+    raw_name = params.get("agent_group_name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ValueError("agent_group_name must be a non-empty string")
+    requested = raw_name.strip()
+    if stored and requested != stored:
+        raise ValueError(
+            f"agent_group_name cannot be changed for this Team session: "
+            f"{stored!r} -> {requested!r}"
+        )
+    if not stored and not is_first_request:
+        raise ValueError(
+            "agent_group_name can only be selected when the Team is first built"
+        )
+    return requested, not stored
+
+
 def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, "").strip().lower() == "true"
@@ -1791,6 +1825,13 @@ async def process_team_message_stream(
         # explicitly configured, so cluster mode honors the page model when no
         # per-agent model is set in config.yaml.
         params_obj = getattr(request, "params", None)
+        agent_group_name, persist_agent_group = _resolve_agent_group_selection(
+            session_id=session_id,
+            params=params_obj if isinstance(params_obj, dict) else None,
+            is_first_request=is_first_request,
+        )
+        if agent_group_name:
+            request_metadata["agent_group_name"] = agent_group_name
         requested_model_name = (
             str(params_obj.get("model_name") or "").strip()
             if isinstance(params_obj, dict)
@@ -1807,7 +1848,16 @@ async def process_team_message_stream(
             channel_id=channel_id,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,
+            agent_group_name=agent_group_name,
         )
+        if persist_agent_group and agent_group_name:
+            update_session_metadata(
+                session_id=session_id,
+                agent_group_name=agent_group_name,
+                touch_last_message_at=False,
+                cache_bust=True,
+                sync_write=True,
+            )
         _persist_team_file_monitor_roots(session_id, team_spec)
     except Exception as exc:
         logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)

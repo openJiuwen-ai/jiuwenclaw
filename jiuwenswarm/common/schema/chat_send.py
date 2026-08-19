@@ -20,6 +20,7 @@ class ChatSendParams(TypedDict, total=False):
     - attachments: 附件列表（@file 等）
     - files: 文件更新字典（传统字段，逐步迁出到 attachments）
     - agent_template_name: 当前会话期望专家名；缺失保持，非空 load/切换，"" 卸载当前专家。
+    - agent_group_name: 首次 Team 构建时选择的专家团包；会话建立后不可切换。
     - plugin_names: 当前会话期望插件名全集；缺失保持，list[str] 差量同步，[] 卸载全部插件。
     """
 
@@ -128,6 +129,9 @@ class ChatSendParams(TypedDict, total=False):
 
     agent_template_name: NotRequired[str]
     """Desired expert package name for this turn ("" clears)."""
+
+    agent_group_name: NotRequired[str]
+    """AgentGroup package selected for the Team session (non-empty, immutable)."""
 
     plugin_names: NotRequired[list[str]]
     """Desired plugin package names for this turn ([] clears all)."""

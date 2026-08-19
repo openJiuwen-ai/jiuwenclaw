@@ -209,6 +209,26 @@ class TestUpdateSessionMetadata:
         assert data["message_count"] == 1
 
     @staticmethod
+    def test_update_agent_group_binding(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+        )
+
+        init_session_metadata(session_id="sess_agent_group", channel_id="web")
+        update_session_metadata(
+            session_id="sess_agent_group",
+            agent_group_name="sample-expert-group",
+            touch_last_message_at=False,
+            sync_write=True,
+        )
+
+        data = _read_json(
+            sessions_dir / "sess_agent_group" / "metadata.json"
+        )
+        assert data["agent_group_name"] == "sample-expert-group"
+
+    @staticmethod
     def test_fallback_create_when_no_metadata(sessions_dir):
         """外部渠道隐式创建 session 时,metadata 不存在,应自动创建"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
