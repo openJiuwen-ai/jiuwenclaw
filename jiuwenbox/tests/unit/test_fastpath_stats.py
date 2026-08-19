@@ -27,12 +27,18 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
+import types
 
 import pytest
 
 from jiuwenbox.supervisor import sandbox_daemon as sd
-from jiuwenbox.supervisor.sandbox_daemon import FastPathUnavailable, FastPathStats
+from jiuwenbox.supervisor.sandbox_daemon import (
+    FastPathUnavailable,
+    FastPathStats,
+    _FastPathRequest,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -243,6 +249,92 @@ def test_mixed_traffic_invariant_closed(isolated_stats, monkeypatch, drain_conn)
     assert snap["fallbacks"] == 7
     assert snap["fallback_reasons"] == {"not_eligible": 5, "worker_error": 2}
     assert snap["requests"] == snap["hits"] + snap["fallbacks"]
+
+
+def test_nonempty_stdin_falls_back_without_submit(isolated_stats, monkeypatch,
+                                                   drain_conn):
+    """Phase 8A-1: a non-empty stdin never reaches the worker (deadlock guard).
+
+    The request is counted and bucketed as ``nonempty_stdin``; ``submit`` must
+    not run, so the daemon takes the normal Popen path before any child.
+    """
+    monkeypatch.setattr(sd, "_fastpath_plan",
+                        lambda cmd, hdr: {"mode": "code", "code": "pass"})
+    called = {"submit": False}
+    monkeypatch.setattr(sd._FORK_POOL, "submit",
+                        lambda *a, **k: called.__setitem__("submit", True))
+
+    srv, _cli = drain_conn
+    rc = sd._try_fastpath_exec(srv, ["python3", "-c", "pass"], {}, b"some stdin")
+
+    assert rc is False
+    assert called["submit"] is False
+    snap = isolated_stats.snapshot()
+    assert snap["requests"] == 1
+    assert snap["hits"] == 0
+    assert snap["fallbacks"] == 1
+    assert snap["fallback_reasons"] == {"nonempty_stdin": 1}
+    assert snap["requests"] == snap["hits"] + snap["fallbacks"]
+
+
+def test_capacity_busy_falls_back(monkeypatch, drain_conn):
+    """Phase 8A-1: all workers busy -> ``capacity_busy`` fallback, no breaker bump.
+
+    ``submit`` raising ``capacity_busy`` is recorded as a fallback reason; the
+    daemon takes the Popen path. Capacity is a signal, not a failure, so the
+    breaker stays closed (the routing path never bumps it on this reason).
+    """
+    stats = FastPathStats()
+    monkeypatch.setattr(sd._FORK_POOL, "stats", stats)
+    monkeypatch.setattr(sd, "_fastpath_plan",
+                        lambda cmd, hdr: {"mode": "code", "code": "x"})
+    monkeypatch.setattr(
+        sd._FORK_POOL, "submit",
+        lambda *a, **k: (_ for _ in ()).throw(FastPathUnavailable("capacity_busy")))
+
+    srv, _cli = drain_conn
+    rc = sd._try_fastpath_exec(srv, ["python3", "-c", "x"], {}, b"")
+
+    assert rc is False
+    snap = stats.snapshot()
+    assert snap["requests"] == 1
+    assert snap["fallbacks"] == 1
+    assert snap["fallback_reasons"] == {"capacity_busy": 1}
+
+
+def test_capacity_busy_submit_raises_without_bumping_breaker(monkeypatch):
+    """The real ``submit`` round-robin: all-live-busy workers raise immediately.
+
+    Stubs the pool with two fake live workers whose locks are already held
+    (busy). ``submit`` must raise ``capacity_busy`` without spawning or sending
+    a frame, and must NOT call ``_bump_failure_locked`` (breaker unaffected).
+    No real worker / fork is needed, so this runs on every platform.
+    """
+    pool = sd._FORK_POOL
+    locks = [threading.Lock(), threading.Lock()]
+    for lk in locks:
+        lk.acquire()  # simulate both workers busy
+    fake_workers = [
+        (types.SimpleNamespace(poll=lambda: None), object(), locks[0]),
+        (types.SimpleNamespace(poll=lambda: None), object(), locks[1]),
+    ]
+    monkeypatch.setattr(pool, "_workers", fake_workers)
+    monkeypatch.setattr(pool, "_ensure", lambda: True)
+    monkeypatch.setattr(pool, "_next", 0)
+    monkeypatch.setattr(pool, "_breaker_state", "closed")
+    monkeypatch.setattr(pool, "_breaker_failures", 0)
+    bumps = {"n": 0}
+    monkeypatch.setattr(pool, "_bump_failure_locked",
+                        lambda: bumps.__setitem__("n", bumps["n"] + 1))
+
+    with pytest.raises(FastPathUnavailable) as ei:
+        pool.submit(_FastPathRequest(code="pass", stdin_bytes=b"", workdir=None,
+                                     env_overrides=None, timeout=1.0, plan=None))
+    assert ei.value.reason == "capacity_busy"
+    assert bumps["n"] == 0  # breaker NOT advanced on capacity busy
+    # Worker locks still held by the test (submit never acquired/released them).
+    for lk in locks:
+        assert lk.locked()
 
 
 # --------------------------------------------------------------------------- #

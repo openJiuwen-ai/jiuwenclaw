@@ -89,6 +89,30 @@ def test_nonzero_exit_preserves_code_and_stderr():
 
 
 @_SKIP_NON_POSIX
+def test_dash_c_main_module_matches_real_interpreter():
+    """Phase 8A-1: ``import __main__`` under ``-c`` sees the code's own globals.
+
+    Previously the FastPath ``-c`` path exec'd into a bare dict, so
+    ``import __main__`` returned the worker's own module (exposing ``_run_child``
+    etc.) and code-defined names were invisible. Now it installs a fresh
+    ``__main__`` module whose namespace is the code's globals, matching CPython.
+    The forked child mutates ``sys.modules`` copy-on-write and ``os._exit``s,
+    so the parent worker is unaffected.
+    """
+    import subprocess
+    code = ("import __main__ as m\n"
+            "X = 1\n"
+            "print(m.__name__, hasattr(m, 'X'), m.X, hasattr(m, '_run_child'))\n")
+    ns = _load_worker_ns()
+    fp_rc, fp_out, fp_err = _run_child(ns, code)
+    assert fp_rc == 0, fp_err
+    rl = subprocess.run([sys.executable, "-c", code], capture_output=True)
+    assert fp_out == rl.stdout, f"fastpath={fp_out!r}\nreal={rl.stdout!r}"
+    # Fixed behaviour: the worker's own symbols must NOT leak into __main__.
+    assert b"__main__ True 1 False" in fp_out
+
+
+@_SKIP_NON_POSIX
 def test_stdin_forwarded_and_json_stdout():
     ns = _load_worker_ns()
     code = ("import json,sys; d=json.loads(sys.stdin.read()); "

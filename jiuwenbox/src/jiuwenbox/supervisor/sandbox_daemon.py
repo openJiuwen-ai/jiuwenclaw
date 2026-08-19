@@ -746,6 +746,12 @@ def _fastpath_plan(
         if len(command) >= 2 and command[1] == "-c":
             if len(command) < 3:
                 return None  # bare ``-c`` with no code -> let it error
+            # Phase 8A-1: only the exact ``python[3] -c CODE`` shape (3 tokens)
+            # is convertible. Any trailing arg would land in a fresh
+            # interpreter's ``sys.argv`` but is currently dropped by the
+            # worker's ``-c`` path, so refuse rather than run wrongly.
+            if len(command) > 3:
+                return None
             if interp == "python" and _fastpath_interp_path("python") is None:
                 return None  # ``python`` is not the worker interpreter
             return {"mode": "code", "code": command[2]}
@@ -984,8 +990,18 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
             if plan:
                 _exec_script_in_child(plan)
             else:
-                coded = compile(code, "<fastpath>", "exec")
-                exec(coded, {"__name__": "__main__"})
+                # Phase 8A-1: install a fresh ``__main__`` module the way
+                # ``python3 -c`` does, so ``import __main__`` returns the module
+                # whose namespace is the code's own globals -- previously it
+                # returned the worker's own ``__main__``. This runs in the forked
+                # child only (copy-on-write), and ``os._exit`` discards the
+                # mutation, so the parent worker is unaffected. The filename is
+                # ``<string>`` to match CPython's ``-c`` traceback filename.
+                coded = compile(code, "<string>", "exec")
+                main_mod = types.ModuleType("__main__")
+                main_mod.__builtins__ = builtins
+                sys.modules["__main__"] = main_mod
+                exec(coded, main_mod.__dict__)
             _flush_std()
             os._exit(0)
         except SystemExit as esc:
@@ -1159,8 +1175,9 @@ class FastPathStats:
     * ``hits``      -- judged requests the fast path executed to a *normal*
       ``exit_code`` response (``"error" not in response``).
     * ``fallbacks`` -- judged requests that did not hit, broken down by
-      ``fallback_reasons``: ``not_eligible`` / ``breaker_open`` /
-      ``worker_unavailable`` / ``spawn_failed`` / ``worker_error``.
+      ``fallback_reasons``: ``not_eligible`` / ``nonempty_stdin`` /
+      ``breaker_open`` / ``capacity_busy`` / ``worker_unavailable`` /
+      ``spawn_failed`` / ``worker_error``.
 
     Invariant: ``requests == hits + fallbacks`` (every judged request lands in
     exactly one bucket). ``record_request`` is taken at the *entry* of
@@ -1550,11 +1567,14 @@ class ForkServerPool:
         if env_overrides:
             header["env"] = env_overrides
 
-        # Pick a free worker (round-robin, non-blocking acquire); when all
-        # are busy, block on the next round-robin worker's lock - but never
-        # while holding the pool lock, so independent workers stay
-        # concurrent. Bounded spins + the breaker stop rebuild storms when
-        # workers keep dying.
+        # Pick a free worker (round-robin, non-blocking acquire). When every
+        # live worker is busy, raise ``capacity_busy`` immediately so the daemon
+        # falls back to ``subprocess.Popen`` BEFORE any child runs -- no
+        # blocking wait, no duplicate execution. ``capacity_busy`` is a
+        # capacity signal, not a worker failure, so it must NOT bump the
+        # breaker (only real failures -- dead/un-spawnable workers -- bump it).
+        # Bounded spins still stop rebuild storms when workers keep dying
+        # mid-round.
         spins = 0
         while True:
             spins += 1
@@ -1562,6 +1582,7 @@ class ForkServerPool:
                 with self._lock:
                     self._bump_failure_locked()
                 raise FastPathUnavailable("worker_unavailable")
+            round_exhausted = False
             with self._lock:
                 if not self._ensure():
                     self._bump_failure_locked()
@@ -1572,18 +1593,22 @@ class ForkServerPool:
                     self._next += 1
                     if proc.poll() is not None:
                         self._prune()
-                        break
+                        break  # a worker died; retry the round (chosen stays None)
                     if wlock.acquire(blocking=False):
                         chosen = (proc, sock, wlock)
                         break
+                else:
+                    # The round completed without breaking: every live worker
+                    # was checked and none was free.
+                    round_exhausted = True
                 if chosen is None and not self._workers:
                     continue  # everything got pruned; re-ensure (respawn)
-                if chosen is None:
-                    proc, sock, wlock = self._workers[self._next % len(self._workers)]
-                    self._next += 1
             if chosen is None:
-                wlock.acquire()
-                chosen = (proc, sock, wlock)
+                if round_exhausted:
+                    # All live workers busy -> immediate fallback, no breaker bump.
+                    raise FastPathUnavailable("capacity_busy")
+                # A worker died mid-round; retry (prune already ran in the lock).
+                continue
             if chosen[0].poll() is not None:
                 with self._lock:
                     self._prune()
@@ -1674,6 +1699,15 @@ def _try_fastpath_exec(
     or one ``fallbacks`` reason -- so ``requests == hits + fallbacks``.
     """
     _FORK_POOL.stats.record_request()
+    # Phase 8A-1: the worker writes stdin to the child synchronously before
+    # draining stdout, which deadlocks when the child writes >64KB before
+    # reading stdin. The worker I/O state machine is not being rewritten this
+    # round, so any request with a non-empty stdin takes the normal Popen path.
+    # The real EDPA wrapper carries no stdin, so this does not affect current
+    # gains.
+    if stdin_bytes:
+        _FORK_POOL.stats.record_fallback("nonempty_stdin")
+        return False
     try:
         plan = _fastpath_plan(command, header)
     except Exception:  # a recogniser bug must never break exec handling

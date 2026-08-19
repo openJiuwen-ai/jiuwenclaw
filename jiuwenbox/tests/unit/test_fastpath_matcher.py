@@ -257,6 +257,22 @@ def test_python_dash_c_requires_identity_match(stub_host, monkeypatch):
                                                     "code": "print(1)"}
 
 
+def test_dash_c_with_trailing_args_falls_back(stub_host):
+    """Phase 8A-1: only the exact ``python[3] -c CODE`` shape hits.
+
+    A trailing arg lands in a fresh interpreter's ``sys.argv`` but is dropped by
+    the worker's ``-c`` path, so the request must fall back to Popen (which
+    preserves ``sys.argv``) rather than be converted wrongly.
+    """
+    assert _plan(["python3", "-c", "print(1)", "arg1"]) is None
+    assert _plan(["python", "-c", "print(1)", "a", "b"]) is None
+    # The exact 3-token shape still hits.
+    assert _plan(["python3", "-c", "print(1)"]) == {"mode": "code",
+                                                    "code": "print(1)"}
+    assert _plan(["python", "-c", "print(1)"]) == {"mode": "code",
+                                                   "code": "print(1)"}
+
+
 # --------------------------------------------------------------------------
 # _fastpath_plan: shapes that MUST NOT hit.
 # --------------------------------------------------------------------------
