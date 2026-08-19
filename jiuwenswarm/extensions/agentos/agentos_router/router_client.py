@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import stat
+import time
 import urllib.parse
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,11 @@ from jiuwenswarm.extensions.agentos.auth.credential_authenticator import AuthCon
 from jiuwenswarm.extensions.agentos.agentos_router.config import (
     DEFAULT_AGENT_WORKSPACE_ROOT,
     SshChannelEndpoint,
+)
+from jiuwenswarm.extensions.agentos.agentos_router.logutil import (
+    agentos_extra,
+    format_agentos,
+    log_agentos,
 )
 from jiuwenswarm.extensions.agentos.agentos_router.models import (
     AgentInfo,
@@ -91,6 +97,11 @@ _WS_CONNECT_RETRYABLE_TEXT_TOKENS = (
     "connection refused",
     "temporarily unavailable",
 )
+
+
+def _should_log_ws_retry(attempt: int) -> bool:
+    """Log retry WARNING sparsely: first attempt + every 10th attempt."""
+    return attempt == 1 or attempt % 10 == 0
 
 
 def _is_team_mode(params: Any) -> bool:
@@ -413,12 +424,73 @@ class AgentOSRouterClient(AgentServerClient):
 
         channel_manager.subscribe_channel_events(self._on_channel_event)
 
+    @staticmethod
+    def _ws_channel_name(ws: Any) -> str:
+        path = str(getattr(ws, "path", "") or "")
+        if "/tui" in path:
+            return "tui"
+        if "/ws" in path:
+            return "web"
+        return str(getattr(ws, "channel_id", "") or "")
+
+    @staticmethod
+    def _runtime_log_fields(runtime: AgentRuntime) -> dict[str, Any]:
+        info = runtime.info
+        sandbox_id = str(info.sandbox_id or "")
+        return {
+            "user_id": info.user_id,
+            "session_id": str(info.metadata.get("session_id") or ""),
+            "sandbox_id": sandbox_id,
+            "agent_type": info.agent_type,
+            "instance": sandbox_id,
+        }
+
+    @staticmethod
+    def _envelope_log_fields(envelope: E2AEnvelope) -> dict[str, Any]:
+        return {
+            "user_id": str(envelope.user_id or ""),
+            "session_id": str(envelope.session_id or ""),
+            "request_id": str(envelope.request_id or ""),
+            "channel": str(envelope.channel or ""),
+            "method": str(envelope.method or ""),
+        }
+
+    def _log_route(
+        self,
+        event: str,
+        envelope: E2AEnvelope,
+        runtime: AgentRuntime | None = None,
+        *,
+        level: int = logging.INFO,
+        error: str = "",
+    ) -> None:
+        fields = self._envelope_log_fields(envelope)
+        if runtime is not None:
+            fields.update(self._runtime_log_fields(runtime))
+            fields["user_id"] = fields["user_id"] or str(runtime.info.user_id or "")
+            fields["session_id"] = fields["session_id"] or str(
+                runtime.info.metadata.get("session_id") or ""
+            )
+        if error:
+            fields["error"] = error
+        log_agentos(logger, level, event, **fields)
+
     async def on_connect(self, ws: Any) -> AuthResult | None:
+        channel = self._ws_channel_name(ws)
+        remote = get_remote_addr(ws)
         if self._auth_client is None:
             # auth 未启用时回落使用握手头里的 X-User-Id，
             # 否则 user_id 为空会跳过连接计数/延迟清理，导致 agent 泄漏不回收。
             headers = {k.lower(): v for k, v in extract_headers(ws).items()}
             fallback_user_id = str(headers.get("x-user-id", "") or "").strip()
+            fields: dict[str, Any] = {
+                "user_id": fallback_user_id,
+                "channel": channel,
+                "remote": remote,
+            }
+            if not fallback_user_id:
+                fields["uid_empty"] = "yes"
+            log_agentos(logger, logging.DEBUG, "auth.skip", **fields)
             return AuthResult(
                 success=True,
                 user_id=fallback_user_id,
@@ -429,10 +501,31 @@ class AgentOSRouterClient(AgentServerClient):
             channel_type="",
             credentials={"token": token} if token else {},
             headers=headers,
-            remote_addr=get_remote_addr(ws),
+            remote_addr=remote,
         )
         result = await self._auth_client.authenticate(context)
-        if not result.success:
+        if result.success:
+            log_agentos(
+                logger,
+                logging.INFO,
+                "auth.ok",
+                user_id=result.user_id,
+                channel=channel,
+                remote=remote,
+            )
+        else:
+            error_code = ""
+            if isinstance(result.extensions, dict):
+                error_code = str(result.extensions.get("error_code") or "")
+            log_agentos(
+                logger,
+                logging.WARNING,
+                "auth.deny",
+                user_id=result.user_id,
+                channel=channel,
+                remote=remote,
+                error=error_code or result.error or "unauthorized",
+            )
             close = getattr(ws, "close", None)
             if callable(close):
                 ret = close(code=1008, reason="unauthorized")
@@ -851,6 +944,9 @@ class AgentOSRouterClient(AgentServerClient):
         *,
         instance_id: str,
         agent_port: int,
+        user_id: str = "",
+        session_id: str = "",
+        agent_type: str = "",
     ) -> WebSocketAgentServerClient:
         """建立到 instance 的 WS；对冷启动 502 等做 deadline 内重试."""
         uri = self._agent_ws_url(instance_id, agent_port)
@@ -862,45 +958,81 @@ class AgentOSRouterClient(AgentServerClient):
             client = self._ws_client_factory()
             if self._push_handler is not None:
                 client.set_server_push_handler(self._push_handler)
-            logger.info(
-                "[AgentOSRouter] connecting agent instance via ws: "
-                "instance=%s attempt=%s uri=%s",
-                instance_id,
-                attempt,
-                uri,
+            log_agentos(
+                logger,
+                logging.DEBUG,
+                "agent.ws.connecting",
+                user_id=user_id,
+                session_id=session_id,
+                sandbox_id=instance_id,
+                agent_type=agent_type,
+                instance=instance_id,
+                attempt=attempt,
             )
             try:
                 await client.connect(uri)
-                if attempt > 1:
-                    logger.info(
-                        "[AgentOSRouter] agent ws ready after retry: "
-                        "instance=%s attempts=%s",
-                        instance_id,
-                        attempt,
-                    )
+                log_agentos(
+                    logger,
+                    logging.INFO,
+                    "agent.ws.ready",
+                    user_id=user_id,
+                    session_id=session_id,
+                    sandbox_id=instance_id,
+                    agent_type=agent_type,
+                    instance=instance_id,
+                    attempt=attempt,
+                )
                 return client
             except Exception as exc:
                 try:
                     await client.disconnect()
                 except Exception:
                     logger.warning(
-                        "[AgentOSRouter] cleanup after failed ws connect: "
-                        "instance=%s attempt=%s",
+                        "[AgentOS] agent.ws.cleanup.fail user_id=%s sandbox_id=%s attempt=%s",
+                        user_id,
                         instance_id,
                         attempt,
+                        extra=agentos_extra(
+                            session_id=session_id,
+                            sandbox_id=instance_id,
+                        ),
                         exc_info=True,
                     )
                 remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0 or not _is_ws_connect_retryable(exc):
+                give_up = remaining <= 0 or not _is_ws_connect_retryable(exc)
+                if give_up:
+                    # Last failure summary: emit one WARNING then give up.
+                    log_agentos(
+                        logger,
+                        logging.WARNING,
+                        "agent.ws.retry",
+                        user_id=user_id,
+                        session_id=session_id,
+                        sandbox_id=instance_id,
+                        agent_type=agent_type,
+                        instance=instance_id,
+                        attempt=attempt,
+                        error=type(exc).__name__,
+                        final="yes",
+                    )
                     raise
+
                 sleep_for = min(_WS_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
-                logger.warning(
-                    "[AgentOSRouter] agent ws not ready, retrying: "
-                    "instance=%s attempt=%s sleep=%.1fs error=%s",
-                    instance_id,
-                    attempt,
-                    sleep_for,
-                    exc,
+                retry_level = (
+                    logging.WARNING if _should_log_ws_retry(attempt) else logging.DEBUG
+                )
+                log_agentos(
+                    logger,
+                    retry_level,
+                    "agent.ws.retry",
+                    user_id=user_id,
+                    session_id=session_id,
+                    sandbox_id=instance_id,
+                    agent_type=agent_type,
+                    instance=instance_id,
+                    attempt=attempt,
+                    error=type(exc).__name__,
+                    sleep=f"{sleep_for:.1f}s",
                 )
                 await asyncio.sleep(sleep_for)
 
@@ -945,6 +1077,9 @@ class AgentOSRouterClient(AgentServerClient):
             client = await self._connect_ws_until_ready(
                 instance_id=instance_id,
                 agent_port=agent_port,
+                user_id=str(info.user_id or ""),
+                session_id=str(info.metadata.get("session_id") or ""),
+                agent_type=str(info.agent_type or ""),
             )
         except Exception as exc:
             async with self._ws_clients_lock:
@@ -975,8 +1110,9 @@ class AgentOSRouterClient(AgentServerClient):
             await client.disconnect()
         except Exception:
             logger.warning(
-                "[AgentOSRouter] close agent ws failed: instance=%s",
+                "[AgentOS] agent.ws.close.fail sandbox_id=%s",
                 instance_id,
+                extra={"sandbox_id": str(instance_id)},
                 exc_info=True,
             )
 
@@ -995,50 +1131,6 @@ class AgentOSRouterClient(AgentServerClient):
             except Exception:
                 logger.warning("[AgentOSRouter] close agent ws failed", exc_info=True)
 
-    @staticmethod
-    def _runtime_log_fields(runtime: AgentRuntime) -> dict[str, Any]:
-        info = runtime.info
-        sandbox_id = str(info.sandbox_id or "")
-        return {
-            "user_id": info.user_id,
-            "session_id": str(info.metadata.get("session_id") or ""),
-            "sandbox_id": sandbox_id,
-            "agent_type": info.agent_type,
-            "instance": sandbox_id,
-        }
-
-    @staticmethod
-    def _envelope_log_fields(envelope: E2AEnvelope) -> dict[str, Any]:
-        return {
-            "user_id": str(envelope.user_id or ""),
-            "session_id": str(envelope.session_id or ""),
-            "request_id": str(envelope.request_id or ""),
-            "channel": str(envelope.channel or ""),
-            "method": str(envelope.method or ""),
-        }
-
-    def _log_route(
-        self,
-        event: str,
-        envelope: E2AEnvelope,
-        runtime: AgentRuntime | None = None,
-        *,
-        level: int = logging.INFO,
-        error: str = "",
-    ) -> None:
-        """Emit a route-level log line with plain logger (no log_agentos)."""
-        fields = self._envelope_log_fields(envelope)
-        if runtime is not None:
-            fields.update(self._runtime_log_fields(runtime))
-            fields["user_id"] = fields["user_id"] or str(runtime.info.user_id or "")
-            fields["session_id"] = fields["session_id"] or str(
-                runtime.info.metadata.get("session_id") or ""
-            )
-        if error:
-            fields["error"] = error
-        details = " ".join(f"{key}={value}" for key, value in fields.items() if value)
-        logger.log(level, "[AgentOSRouter] route event=%s %s", event, details)
-
     async def send_request(
         self,
         envelope: E2AEnvelope,
@@ -1053,6 +1145,7 @@ class AgentOSRouterClient(AgentServerClient):
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
+            self._log_route("route.error", envelope, level=logging.WARNING, error=str(exc))
             return self._routing_error_response(envelope, str(exc))
         try:
             runtime.attach_to_envelope(envelope)
@@ -1066,6 +1159,13 @@ class AgentOSRouterClient(AgentServerClient):
             try:
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
+                self._log_route(
+                    "route.error",
+                    envelope,
+                    runtime,
+                    level=logging.WARNING,
+                    error=str(exc),
+                )
                 return self._routing_error_response(envelope, str(exc))
             except Exception as exc:
                 if not _is_agent_network_error(exc):
@@ -1102,6 +1202,7 @@ class AgentOSRouterClient(AgentServerClient):
         try:
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed) as exc:
+            self._log_route("route.error", envelope, level=logging.WARNING, error=str(exc))
             yield self._routing_error_chunk(envelope, str(exc))
             return
         try:
@@ -1117,6 +1218,13 @@ class AgentOSRouterClient(AgentServerClient):
             try:
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
+                self._log_route(
+                    "route.error",
+                    envelope,
+                    runtime,
+                    level=logging.WARNING,
+                    error=str(exc),
+                )
                 yield self._routing_error_chunk(envelope, str(exc))
                 return
             except Exception as exc:
@@ -1365,12 +1473,15 @@ class AgentOSRouterClient(AgentServerClient):
                 # create 返回不代表 sshd 已听端口；等南向 SSH 通了再让客户端连。
                 await ssh_relay.wait_until_ready(instance_id, user_id=uid)
             except Exception as exc:
-                logger.warning(
-                    "[AgentOSRouter] 3rdagent.switch sshd not ready: "
-                    "user=%s instance=%s error=%s",
-                    uid,
-                    instance_id,
-                    exc,
+                log_agentos(
+                    logger,
+                    logging.WARNING,
+                    "ssh.south.not_ready",
+                    user_id=uid,
+                    session_id=session_id,
+                    sandbox_id=instance_id,
+                    instance=instance_id,
+                    error=type(exc).__name__,
                 )
                 return {
                     "ok": False,
@@ -1500,14 +1611,33 @@ class AgentOSRouterClient(AgentServerClient):
                 return
             runtime = await self._resolve_agent(envelope, acquire=True)
         except (ValueError, AgentCreatingTimeout, AgentCreateFailed, AgentDeleted) as exc:
+            log_agentos(
+                logger,
+                logging.WARNING,
+                "ssh.relay.fail",
+                user_id=str(envelope.user_id or ""),
+                session_id=str(relay_session.session_id or ""),
+                request_id=str(envelope.request_id or ""),
+                channel="ssh",
+                error=str(exc),
+            )
             ssh_relay.fail_session(
                 relay_session, f"agent resolve failed: {exc}"
             )
             return
         except Exception as exc:  # noqa: BLE001 - creation errors must release the client
             logger.exception(
-                "[AgentOSRouter] ssh relay agent creation failed: session=%s",
-                relay_session.session_id,
+                format_agentos(
+                    "ssh.relay.fail",
+                    user_id=str(envelope.user_id or ""),
+                    session_id=str(relay_session.session_id or ""),
+                    request_id=str(envelope.request_id or ""),
+                    agent_type=str(envelope.params.get("agent_type") or "")
+                    if isinstance(envelope.params, dict)
+                    else "",
+                    error=type(exc).__name__,
+                    channel="ssh",
+                ),
             )
             ssh_relay.fail_session(
                 relay_session, f"agent creation failed: {exc}"
@@ -1526,11 +1656,17 @@ class AgentOSRouterClient(AgentServerClient):
                 return
 
             runtime.attach_to_envelope(envelope)
-            logger.info(
-                "[AgentOSRouter] ssh relay start: session=%s user=%s instance=%s",
-                relay_session.session_id,
-                runtime.info.user_id,
-                instance_id,
+            log_agentos(
+                logger,
+                logging.INFO,
+                "ssh.relay.start",
+                user_id=runtime.info.user_id,
+                session_id=str(relay_session.session_id or ""),
+                request_id=str(envelope.request_id or ""),
+                sandbox_id=instance_id,
+                agent_type=runtime.info.agent_type,
+                instance=instance_id,
+                channel="ssh",
             )
             await ssh_relay.run(
                 relay_session,
@@ -1563,8 +1699,7 @@ class AgentOSRouterClient(AgentServerClient):
         params["agent_type"] = current
         envelope.params = params
         logger.info(
-            "[AgentOSRouter] ssh relay follows user current agent_type: "
-            "user=%s agent_type=%s",
+            "[AgentOS] ssh.relay.agent_type user_id=%s agent_type=%s",
             user_id,
             current,
         )
@@ -1655,7 +1790,7 @@ class AgentOSRouterClient(AgentServerClient):
                 )
             except Exception:  # noqa: BLE001 - keep reaping other agents
                 logger.exception(
-                    "[AgentOSRouter] delete idle agent failed: user=%s agent_type=%s",
+                    "[AgentOS] sandbox.reclaim.fail user_id=%s agent_type=%s",
                     user_id,
                     agent_type,
                 )
@@ -1710,6 +1845,7 @@ class AgentOSRouterClient(AgentServerClient):
                     key: value for key, value in rootfs.items() if key != "ports"
                 }
 
+        started = time.monotonic()
         sandbox = await self._yuanrong.create_sandbox(
             namespace=self._yuanrong.agent_namespace,
             name=f"{agent_info.user_id}+{agent_info.agent_type}",
@@ -1717,8 +1853,10 @@ class AgentOSRouterClient(AgentServerClient):
             runtime_spec=runtime_spec,
             env_vars=env_vars,
         )
+        latency_ms = max(0, int((time.monotonic() - started) * 1000))
         instance_id = sandbox.sandbox_id
         agent_info.sandbox_id = instance_id
+        session_id = str(agent_info.metadata.get("session_id") or "")
         agent_info.metadata.update(
             {
                 "instance_id": instance_id,
@@ -1729,6 +1867,17 @@ class AgentOSRouterClient(AgentServerClient):
             }
         )
         agent_info.status = AgentStatus.READY
+        log_agentos(
+            logger,
+            logging.INFO,
+            "sandbox.create.ok",
+            user_id=agent_info.user_id,
+            session_id=session_id,
+            sandbox_id=instance_id,
+            agent_type=agent_info.agent_type,
+            instance=instance_id,
+            latency_ms=latency_ms,
+        )
 
         task = asyncio.create_task(
             self._register_agent(agent_info.copy()),
@@ -1804,13 +1953,16 @@ class AgentOSRouterClient(AgentServerClient):
         if runtime is None:
             return False
         agent_info = runtime.info
-        logger.info(
-            "[AgentOSRouter] reclaiming idle agent: user=%s agent_type=%s "
-            "sandbox_id=%s idle_timeout=%.0fs",
-            agent_info.user_id,
-            agent_info.agent_type,
-            agent_info.sandbox_id,
-            idle_timeout_seconds,
+        log_agentos(
+            logger,
+            logging.INFO,
+            "sandbox.reclaim",
+            user_id=agent_info.user_id,
+            session_id=str(agent_info.metadata.get("session_id") or ""),
+            sandbox_id=str(agent_info.sandbox_id or ""),
+            agent_type=agent_info.agent_type,
+            instance=str(agent_info.sandbox_id or ""),
+            idle_timeout=f"{idle_timeout_seconds:.0f}s",
         )
         await self._release_agent_resources(agent_info, best_effort=True)
         return True
@@ -1871,8 +2023,18 @@ class AgentOSRouterClient(AgentServerClient):
                 await self._yuanrong.delete_sandbox(agent_info.sandbox_id)
             except Exception:
                 logger.exception(
-                    "[AgentOSRouter] delete sandbox failed: sandbox_id=%s",
-                    agent_info.sandbox_id,
+                    format_agentos(
+                        "sandbox.delete.fail",
+                        user_id=agent_info.user_id,
+                        session_id=str(agent_info.metadata.get("session_id") or ""),
+                        sandbox_id=str(agent_info.sandbox_id or ""),
+                        agent_type=agent_info.agent_type,
+                        instance=str(agent_info.sandbox_id or ""),
+                    ),
+                    extra=agentos_extra(
+                        session_id=str(agent_info.metadata.get("session_id") or ""),
+                        sandbox_id=str(agent_info.sandbox_id or ""),
+                    ),
                 )
                 if not best_effort:
                     raise
@@ -1942,17 +2104,34 @@ class AgentOSRouterClient(AgentServerClient):
                     node=node_ip or None,
                     address=sandbox_ip or None,
                 )
-                logger.info(
-                    "[AgentOSRouter] registry instance updated: "
-                    "service_id=%s node=%s address=%s",
-                    service_id,
-                    node_ip,
-                    sandbox_ip,
+                log_agentos(
+                    logger,
+                    logging.INFO,
+                    "registry.instance.ok",
+                    user_id=agent_info.user_id,
+                    session_id=str(agent_info.metadata.get("session_id") or ""),
+                    sandbox_id=str(agent_info.sandbox_id or ""),
+                    agent_type=agent_info.agent_type,
+                    instance=str(agent_info.sandbox_id or ""),
+                    service_id=service_id,
+                    node=node_ip,
+                    address=sandbox_ip,
                 )
         except Exception:
             logger.exception(
-                "[AgentOSRouter] registry instance update failed: agent_id=%s",
-                agent_info.agent_id,
+                format_agentos(
+                    "registry.instance.fail",
+                    user_id=agent_info.user_id,
+                    session_id=str(agent_info.metadata.get("session_id") or ""),
+                    sandbox_id=str(agent_info.sandbox_id or ""),
+                    agent_type=agent_info.agent_type,
+                    instance=str(agent_info.sandbox_id or ""),
+                    error="update_failed",
+                ),
+                extra=agentos_extra(
+                    session_id=str(agent_info.metadata.get("session_id") or ""),
+                    sandbox_id=str(agent_info.sandbox_id or ""),
+                ),
             )
 
     @staticmethod
