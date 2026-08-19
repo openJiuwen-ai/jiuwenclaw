@@ -526,7 +526,7 @@ function AgentNode({
           style={{ paddingLeft: `${depth * 20 + 28}px` }}
         >
           <span className="shrink-0 text-text-muted/40">└</span>
-          <span className="truncate">{agent.outcome}</span>
+          <span className="min-w-0 flex-1 truncate">{agent.outcome}</span>
         </div>
       )}
       {agent.error && !showDetail && (
@@ -535,7 +535,7 @@ function AgentNode({
           style={{ paddingLeft: `${depth * 20 + 28}px` }}
         >
           <span className="shrink-0 text-red-400/40">└</span>
-          <span className="truncate">{agent.error}</span>
+          <span className="min-w-0 flex-1 truncate">{agent.error}</span>
         </div>
       )}
 
