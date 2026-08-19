@@ -392,7 +392,7 @@ export const MessageItem = memo(function MessageItem({
   if (message.isProactiveRecommendation) {
     const withAssistantAvatar = enableAssistantAvatar;
     return (
-      <div className={clsx('flex animate-rise justify-start', withAssistantAvatar && 'assistant-row')}>
+      <div className={clsx('flex animate-rise justify-start', withAssistantAvatar && 'assistant-row')} data-testid="chat-panel-proactive-row">
         {withAssistantAvatar && (
           <div className="assistant-row__avatar" aria-hidden={!showAvatar} data-testid="chat-panel-proactive-avatar">
             {showAvatar ? <TeamMemberAvatar member="team_leader" /> : null}

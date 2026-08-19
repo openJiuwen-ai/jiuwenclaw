@@ -104,7 +104,8 @@ export default function ModeSelector({ value, onChange, disabled = false }: Mode
               )}
               role="menuitemradio"
               aria-checked={value === m.value}
-              data-testid={`cron-mode-option-${m.value}`}
+              data-testid="cron-mode-option"
+              data-variant={m.value}
             >
               <span className="chat-mode-select__option-main">
                 <span className="chat-mode-select__icon" aria-hidden="true">

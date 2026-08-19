@@ -39,6 +39,7 @@ class FakeAgentManager:
         self.claim_session_calls = []
         self.activated_sessions = []
         self.released_sessions = []
+        self.cleaned_session_runtimes = []
 
     async def initialize(self, channel_id="", extra_config=None):
         self.initialize_calls.append(
@@ -68,6 +69,12 @@ class FakeAgentManager:
 
     def get_agent_nowait(self, channel_id=""):
         return None
+
+    async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+        self.cleaned_session_runtimes.append(
+            {"channel_id": channel_id, "session_id": session_id}
+        )
+        return False
 
 
 class FakeTeamManager:
@@ -133,6 +140,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
 
     async def handle_session_switch_for_test(self, ws, request, send_lock):
         await self._handle_session_switch(ws, request, send_lock)
+
+    async def handle_session_kvc_prepare_for_test(self, ws, request, send_lock):
+        await self._handle_session_kvc_prepare(ws, request, send_lock)
 
     async def handle_team_delete_for_test(self, ws, request, send_lock):
         await self._handle_team_delete(ws, request, send_lock)
@@ -801,12 +811,74 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
             "ok": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_create_locks_persist_session(monkeypatch, tmp_path):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="persist_session_001")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, sessions_root)
+    request = AgentRequest(
+        request_id="create-persist-session",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "persist-token", "persist_session": True},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls[0]["persist_session"] is True
+    assert fake_ws.sent[0]["payload"]["persist_session"] is True
+    metadata = json.loads(
+        (sessions_root / "persist_session_001" / "metadata.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata["persist_session"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_value", [1, "true", None, {}])
+async def test_handle_session_create_requires_boolean_persist_session(
+    monkeypatch, tmp_path, invalid_value
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-create")
+    server.set_agent_manager_for_test(fake_manager)
+    fake_ws = FakeWebSocket()
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    patch_session_roots(monkeypatch, tmp_path / "sessions")
+    request = AgentRequest(
+        request_id="create-invalid-persist",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"create_token": "invalid-token", "persist_session": invalid_value},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_manager.claim_session_calls == []
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["error"] == "persist_session must be a boolean"
 
 
 @pytest.mark.asyncio
@@ -959,6 +1031,42 @@ async def test_handle_tui_explicit_session_create_is_idempotent_and_bypasses_pre
         assert response["ok"] is True
         assert response["payload"]["session_id"] == "tui_external_idempotent"
         assert response["payload"]["prewarm_status"] == "bypassed"
+
+
+@pytest.mark.asyncio
+async def test_handle_tui_existing_session_rejects_persist_session_change(
+    monkeypatch, tmp_path
+):
+    server = AgentWebSocketServerHarness()
+    fake_manager = FakeAgentManager(session_id="must-not-be-used")
+    server.set_agent_manager_for_test(fake_manager)
+    sessions_root = tmp_path / "sessions"
+    patch_session_roots(monkeypatch, sessions_root)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    from jiuwenswarm.server.runtime.session.session_metadata import init_session_metadata
+
+    init_session_metadata(
+        session_id="tui_persist_locked",
+        channel_id="tui",
+        persist_session=True,
+    )
+    fake_ws = FakeWebSocket()
+    request = AgentRequest(
+        request_id="register-persist-mismatch",
+        channel_id="tui",
+        req_method=ReqMethod.SESSION_CREATE,
+        params={"session_id": "tui_persist_locked", "persist_session": False},
+    )
+
+    await server.handle_session_create_for_test(fake_ws, request, asyncio.Lock())
+
+    assert fake_ws.sent[0]["ok"] is False
+    assert fake_ws.sent[0]["payload"]["code"] == "CONFLICT"
+    assert fake_manager.claim_session_calls == []
 
 
 @pytest.mark.asyncio
@@ -1219,6 +1327,7 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
                 "projectId": "proj_code",
                 "projectDir": code_project.project_dir,
                 "workMode": "code",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1286,6 +1395,7 @@ async def test_handle_session_create_acks_before_async_kvc(monkeypatch, tmp_path
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": True,
                 "prewarm_status": "ready",
             },
@@ -1355,6 +1465,7 @@ async def test_handle_session_create_prepares_team_before_ack(monkeypatch, tmp_p
                 "projectId": "default",
                 "projectDir": "",
                 "workMode": "work",
+                "persist_session": False,
                 "prewarm_hit": False,
                 "prewarm_status": "bypassed",
             },
@@ -1908,8 +2019,8 @@ async def test_handle_session_switch_delegates_product_lifecycle(
 
 
 @pytest.mark.asyncio
-async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
-    """A slow optional affinity signal must not hold the UI switch response."""
+async def test_handle_session_switch_records_foreground_before_ack(monkeypatch):
+    """The cheap foreground fact is committed before an immediate chat.send."""
     server = AgentWebSocketServerHarness()
     fake_ws = FakeWebSocket()
     kvc_started = asyncio.Event()
@@ -1945,13 +2056,18 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         },
     )
 
-    await server.handle_session_switch_for_test(
-        fake_ws,
-        request,
-        asyncio.Lock(),
+    switch_task = asyncio.create_task(
+        server.handle_session_switch_for_test(
+            fake_ws,
+            request,
+            asyncio.Lock(),
+        )
     )
     await asyncio.wait_for(kvc_started.wait(), timeout=1.0)
+    assert fake_ws.sent == []
 
+    kvc_release.set()
+    await switch_task
     assert fake_ws.sent == [
         {
             "response_id": "req-session-switch-async-kvc",
@@ -1964,8 +2080,58 @@ async def test_handle_session_switch_acks_before_async_kvc(monkeypatch):
         }
     ]
 
-    kvc_release.set()
-    await asyncio.sleep(0)
+
+@pytest.mark.asyncio
+async def test_handle_session_kvc_prepare_is_best_effort(monkeypatch):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    calls = []
+
+    def _prepare(**kwargs):
+        calls.append(kwargs)
+        return "scheduled"
+
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks."
+        "record_session_prepare",
+        _prepare,
+    )
+
+    request = AgentRequest(
+        request_id="req-kvc-prepare",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_KVC_PREPARE,
+        params={
+            "session_id": "sess_002",
+            "intent_id": "intent-1",
+            "mode": "code.normal",
+        },
+    )
+
+    await server.handle_session_kvc_prepare_for_test(
+        fake_ws,
+        request,
+        asyncio.Lock(),
+    )
+
+    assert calls[0]["session_id"] == "sess_002"
+    assert calls[0]["intent_id"] == "intent-1"
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-kvc-prepare",
+            "payload": {
+                "session_id": "sess_002",
+                "scheduled": True,
+                "outcome": "scheduled",
+            },
+            "ok": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2714,6 +2880,150 @@ async def test_handle_session_delete_initializes_persistent_checkpointer(monkeyp
             "response_id": "req-session-delete",
             "payload": {"session_id": "sess-agent-1"},
             "ok": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cleanup(
+    monkeypatch,
+    tmp_path,
+):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    session_dir = sessions_root / "sess-agent-drain"
+    session_dir.mkdir(parents=True)
+    events = []
+
+    class RuntimeManager:
+        async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+            events.append(("runtime", channel_id, session_id))
+            return True
+
+    async def fake_evict_plan_session(*, session_id, agent_manager, channel_id):
+        events.append(("evict", channel_id, session_id))
+
+    async def fake_release(session_id: str):
+        events.append(("release", None, session_id))
+
+    async def fake_ensure_persistent_checkpointer():
+        return None
+
+    server.set_agent_manager_for_test(RuntimeManager())
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda _session_id: {"mode": "code.normal", "channel_id": "bench-channel"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.ensure_persistent_checkpointer",
+        fake_ensure_persistent_checkpointer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
+        fake_evict_plan_session,
+    )
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
+
+    request = AgentRequest(
+        request_id="req-session-delete-drain",
+        channel_id="request-channel",
+        req_method=ReqMethod.SESSION_DELETE,
+        params={"session_id": "sess-agent-drain"},
+    )
+
+    await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+
+    assert events == [
+        ("runtime", "bench-channel", "sess-agent-drain"),
+        ("evict", "bench-channel", "sess-agent-drain"),
+        ("release", None, "sess-agent-drain"),
+    ]
+    assert not session_dir.exists()
+    assert fake_ws.sent[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_handle_session_delete_keeps_state_when_runtime_drain_fails(
+    monkeypatch,
+    tmp_path,
+):
+    server = AgentWebSocketServerHarness()
+    fake_ws = FakeWebSocket()
+    sessions_root = tmp_path / "sessions"
+    session_dir = sessions_root / "sess-agent-busy"
+    session_dir.mkdir(parents=True)
+    evict_calls = []
+    release_calls = []
+
+    class BusyRuntimeManager:
+        async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
+            raise RuntimeError("session runtime is still active")
+
+    async def fake_evict_plan_session(**kwargs):
+        evict_calls.append(kwargs)
+
+    async def fake_release(session_id: str):
+        release_calls.append(session_id)
+
+    async def fake_ensure_persistent_checkpointer():
+        return None
+
+    server.set_agent_manager_for_test(BusyRuntimeManager())
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        fake_encode_agent_response_for_wire,
+    )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "get_agent_sessions_dir",
+        lambda: sessions_root,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda _session_id: {"mode": "code.normal"},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_adapter.interface_deep.ensure_persistent_checkpointer",
+        fake_ensure_persistent_checkpointer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.kv_cache.kv_cache_product_hooks.evict_plan_session",
+        fake_evict_plan_session,
+    )
+    monkeypatch.setattr("openjiuwen.core.runner.Runner.release", fake_release)
+
+    request = AgentRequest(
+        request_id="req-session-delete-busy",
+        channel_id="web",
+        req_method=ReqMethod.SESSION_DELETE,
+        params={"session_id": "sess-agent-busy"},
+    )
+
+    await server.handle_session_delete_for_test(fake_ws, request, asyncio.Lock())
+
+    assert evict_calls == []
+    assert release_calls == []
+    assert session_dir.exists()
+    assert fake_ws.sent == [
+        {
+            "response_id": "req-session-delete-busy",
+            "payload": {
+                "error": "session runtime cleanup failed",
+                "code": "DELETE_FAILED",
+            },
+            "ok": False,
         }
     ]
 

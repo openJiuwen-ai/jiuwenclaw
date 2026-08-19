@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from jiuwenswarm.common import config as config_module
 from jiuwenswarm.common.kv_cache_affinity_config import (
+    build_kv_cache_affinity_config,
+    model_provider,
     normalize_affinity_request,
     validate_affinity_invariant,
 )
@@ -72,3 +76,27 @@ def test_explicit_other_provider_disables_affinity() -> None:
     normalize_affinity_request(params)
 
     assert params["kv_cache_affinity_enabled"] == "false"
+
+
+def test_runtime_policy_preserves_ascend_affinity() -> None:
+    model = SimpleNamespace(
+        model_client_config=SimpleNamespace(client_provider="AscendAffinity")
+    )
+
+    result = build_kv_cache_affinity_config(
+        _config("AscendAffinity")["react"],
+        provider=model_provider(model),
+    )
+
+    assert result.enable_kv_cache_affinity is True
+    assert result.enable_kv_cache_release is False
+
+
+def test_runtime_policy_fails_closed_for_other_provider() -> None:
+    result = build_kv_cache_affinity_config(
+        _config("OpenAI", release=True)["react"],
+        provider="OpenAI",
+    )
+
+    assert result.enable_kv_cache_affinity is False
+    assert result.enable_kv_cache_release is True

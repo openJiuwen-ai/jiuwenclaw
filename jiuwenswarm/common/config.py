@@ -242,6 +242,21 @@ def get_config():
     return config_base
 
 
+def get_configured_read_image_multimodal(
+    config: dict[str, Any] | None = None,
+) -> bool | None:
+    """Return the explicit native-image policy, or ``None`` for auto mode."""
+
+    resolved = config if isinstance(config, dict) else get_config()
+    react = resolved.get("react")
+    value = (
+        react.get("enable_read_image_multimodal")
+        if isinstance(react, dict)
+        else None
+    )
+    return value if isinstance(value, bool) else None
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)
@@ -713,41 +728,12 @@ def update_skill_retrieval_in_config(updates: dict[str, Any]) -> None:
 
 
 def update_permissions_enabled_in_config(value: bool) -> None:
-    """兼容旧开关：False→mode=full_access；True→若当前为 full_access 则切回 auto。
-
-    权限轨始终 ``enabled: true``（完全访问不再用关闭权限系统表示）。
-    """
-    from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
-        get_permissions_mode,
-        update_permissions_mode,
-    )
-
-    if not value:
-        update_permissions_mode("full_access")
-        return
-    current = get_permissions_mode()
-    if current == "full_access":
-        update_permissions_mode("auto")
-    else:
-        # 保持现有 mode，仅确保 enabled
-        update_permissions_mode(current)
-
-
-def update_permissions_mode_in_config(mode: str) -> str:
-    """更新产品权限模式 ``full_access|auto|strict``。"""
-    from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
-        update_permissions_mode,
-    )
-
-    return update_permissions_mode(mode)
-
-
-def get_permissions_mode_from_config() -> str:
-    from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
-        get_permissions_mode,
-    )
-
-    return get_permissions_mode()
+    """更新 permissions.enabled（工具安全护栏开关）并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "permissions" not in data:
+        data["permissions"] = {}
+    data["permissions"]["enabled"] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
 def update_auto_recap_enabled_in_config(value: bool) -> None:

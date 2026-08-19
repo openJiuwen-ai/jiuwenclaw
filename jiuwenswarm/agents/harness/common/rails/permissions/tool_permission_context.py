@@ -16,11 +16,6 @@ TOOL_PERMISSION_CHANNEL_ID: contextvars.ContextVar[str] = contextvars.ContextVar
     default="",
 )
 
-# 当前会话 id（供 session_permissions.yaml 落盘）；由接口层在 run_agent 前 set。
-TOOL_PERMISSION_SESSION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "jiuwenswarm_tool_permission_session_id",
-    default="",
-)
 
 # skills.rebuild 静默 follow-up：无 UI 审批，权限轨需自动放行。
 SKILLS_REBUILD_SILENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -29,8 +24,4 @@ SKILLS_REBUILD_SILENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
-__all__ = [
-    "SKILLS_REBUILD_SILENT",
-    "TOOL_PERMISSION_CHANNEL_ID",
-    "TOOL_PERMISSION_SESSION_ID",
-]
+__all__ = ["SKILLS_REBUILD_SILENT", "TOOL_PERMISSION_CHANNEL_ID"]

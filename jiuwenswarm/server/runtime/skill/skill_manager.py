@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import sys
 import shutil
 import ssl
 import tarfile
@@ -118,6 +119,10 @@ _TEAM_SKILLS_HUB_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = (
 )
 _IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
 _IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
+# 本地导入源的基础黑名单追加入口（逗号分隔绝对路径，只收紧不放宽）。
+_IMPORT_LOCAL_FORBIDDEN_DIRS_ENV = "IMPORT_LOCAL_FORBIDDEN_DIRS"
+# 本地导入结构校验：SKILL.md 开头（仅允许前置空行）必须是 --- frontmatter。
+_SKILL_FRONTMATTER_RE = re.compile(r"^(?:\s*\n)*---\s*\n(.*?)\n---\s*\n?(.*)", re.DOTALL)
 _ONLINE_SEARCH_RRF_K = 60
 _ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
 
@@ -2533,9 +2538,19 @@ class SkillManager:
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
+        try:
+            self._assert_import_local_source_safe(path_raw)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_root = Path(path_raw).expanduser().resolve()
         if not skill_root.exists() or not skill_root.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {skill_root}"}
+        try:
+            self._validate_local_skill_source(skill_root)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_md = self._try_find_skill_file(skill_root)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
@@ -2598,9 +2613,19 @@ class SkillManager:
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
+        try:
+            self._assert_import_local_source_safe(path_raw)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_root = Path(path_raw).expanduser().resolve()
         if not skill_root.exists() or not skill_root.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {skill_root}"}
+        try:
+            self._validate_local_skill_source(skill_root)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_md = self._try_find_skill_file(skill_root)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
@@ -3236,7 +3261,9 @@ class SkillManager:
                 logger.error("remote archive import failed: %s", exc)
                 return {"success": False, "detail": str(exc)[:500]}
 
-        return self._import_local_from_path(Path(path_str), force=force, origin=path_str)
+        return self._import_local_from_path(
+            Path(path_str).expanduser(), force=force, origin=path_str
+        )
 
     async def _import_local_from_download_token(
         self,
@@ -3346,8 +3373,17 @@ class SkillManager:
         self._assert_skill_package_safe(skill_dir)
         return skill_dir
 
-    def _assert_skill_package_safe(self, skill_dir: Path) -> dict[str, Any]:
-        """校验包结构：拒根级 .archive，要求有效 name/description."""
+    def _assert_skill_package_safe(
+        self,
+        skill_dir: Path,
+        *,
+        source_trusted: bool = False,
+    ) -> dict[str, Any]:
+        """校验包结构：拒根级 .archive，要求有效 name；本地导入还要求 description.
+
+        ``source_trusted=True`` 用于远端归档等已过 host/解压校验的来源：
+        与主仓 develop 一致，仅要求非空 name，允许缺 description。
+        """
         if (skill_dir / ARCHIVE_DIRNAME).exists():
             raise SkillRpcError(
                 ERROR_SKILL_RESERVED_PATH,
@@ -3365,7 +3401,12 @@ class SkillManager:
             raise SkillRpcError(ERROR_SKILL_INVALID_METADATA, "无法解析 SKILL.md")
         name = str(meta.get("name") or "").strip()
         description = str(meta.get("description") or "").strip()
-        if not name or not description:
+        if not name:
+            raise SkillRpcError(
+                ERROR_SKILL_INVALID_METADATA,
+                "SKILL.md YAML 须包含非空 name",
+            )
+        if not source_trusted and not description:
             raise SkillRpcError(
                 ERROR_SKILL_INVALID_METADATA,
                 "SKILL.md YAML 须包含非空 name 与 description",
@@ -3378,9 +3419,10 @@ class SkillManager:
         *,
         force: bool,
         origin: str,
+        source_trusted: bool = False,
     ) -> dict[str, Any]:
         """把已校验的 Skill 目录安装到 workspace，并返回约定的 skill 字段."""
-        meta = self._assert_skill_package_safe(src)
+        meta = self._assert_skill_package_safe(src, source_trusted=source_trusted)
         raw_skill_name = str(meta.get("name") or "").strip()
         try:
             skill_name = _safe_path_name(raw_skill_name, "skill")
@@ -3533,16 +3575,37 @@ class SkillManager:
                 self.copy_workspace_business_to_version(dest, content_root)
                 touch_version_metadata(dest, default_version)
 
-    def _import_local_from_path(self, src: Path, *, force: bool, origin: str) -> dict[str, Any]:
+    def _import_local_from_path(
+        self,
+        src: Path,
+        *,
+        force: bool,
+        origin: str,
+        source_trusted: bool = False,
+    ) -> dict[str, Any]:
         logger.info(
-            "[SkillManager] import_local_from_path start: src=%s origin=%s force=%s",
+            "[SkillManager] import_local_from_path start: src=%s origin=%s force=%s trusted=%s",
             src,
             origin,
             force,
+            source_trusted,
         )
+        if not source_trusted:
+            try:
+                self._assert_import_local_source_safe(str(src))
+            except ValueError as exc:
+                logger.warning(
+                    "[SkillManager] import_local_from_path rejected source: src=%s origin=%s error=%s",
+                    src,
+                    origin,
+                    exc,
+                )
+                return {"success": False, "detail": str(exc)}
+
         if not src.exists():
             return {"success": False, "detail": f"路径不存在: {origin}"}
 
+        # HEAD: 支持 .skill / .zip 包文件导入
         if src.is_file() and self._is_skill_package_file(src):
             with tempfile.TemporaryDirectory(prefix="jiuwenswarm_import_pkg_") as tmpdir:
                 try:
@@ -3553,22 +3616,39 @@ class SkillManager:
                     skill_dir, force=force, origin=origin
                 )
 
+        if source_trusted:
+            # 远端归档导入：源已过 host 白名单 + 防 slip 解压（含拒符号链接），
+            # 直接复用本流程，name 沿用下方原宽松解析。
+            skill_name = None
+        else:
+            try:
+                skill_name = self._validate_local_skill_source(src)
+            except ValueError as exc:
+                logger.warning(
+                    "[SkillManager] import_local_from_path rejected skill: src=%s origin=%s error=%s",
+                    src,
+                    origin,
+                    exc,
+                )
+                return {"success": False, "detail": str(exc)}
+
         if src.is_file():
             meta = self._parse_skill_md(src)
             if meta is None:
                 return {"success": False, "detail": "无法解析 skill 文件"}
             raw_skill_name = meta.get("name", src.stem)
             description = str(meta.get("description") or "").strip()
-            if not str(raw_skill_name or "").strip() or not description:
+            if source_trusted:
+                try:
+                    skill_name = _safe_path_name(raw_skill_name, "skill")
+                except ValueError as exc:
+                    _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
+                    return {"success": False, "detail": str(exc)}
+            elif not str(raw_skill_name or "").strip() or not description:
                 raise SkillRpcError(
                     ERROR_SKILL_INVALID_METADATA,
                     "SKILL.md YAML 须包含非空 name 与 description",
                 )
-            try:
-                skill_name = _safe_path_name(raw_skill_name, "skill")
-            except ValueError as exc:
-                _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
-                return {"success": False, "detail": str(exc)}
             dest = _safe_child_path(self._skills_dir, skill_name, "skill")
             if dest.exists():
                 if self._is_builtin_skill(skill_name, self._get_installed_plugins(), dest):
@@ -3618,7 +3698,13 @@ class SkillManager:
                 shutil.copy2(src, dest / src.name)
             except OSError as exc:
                 return _handle_copy_error(exc, dest, "local import file", src)
-            self._add_local_skill({"name": skill_name, "origin": origin, "source": "local"})
+            self._add_local_skill(
+                {
+                    "name": skill_name,
+                    "origin": origin,
+                    "source": "local",
+                }
+            )
             self._refresh_agent_data_indexes()
             return {
                 "success": True,
@@ -3636,8 +3722,15 @@ class SkillManager:
             md = self._try_find_skill_file(src)
             if md is None:
                 return {"success": False, "detail": f"目录中未找到 SKILL.md: {origin}"}
+            # 统一走安装路径（保留 .archive / skill_type 等）；
+            # source_trusted 时放宽 description，兼容远端归档。
             try:
-                return self._install_imported_skill_dir(src, force=force, origin=origin)
+                return self._install_imported_skill_dir(
+                    src,
+                    force=force,
+                    origin=origin,
+                    source_trusted=source_trusted,
+                )
             except SkillRpcError as exc:
                 # 兼容旧调用方：部分路径场景仍返回 success=false
                 if exc.code in {
@@ -3717,8 +3810,11 @@ class SkillManager:
             if skill_dir is None:
                 return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
             logger.info("[SkillManager] remote import extracted: url=%s skill_dir=%s", download_url, skill_dir)
-            return self._install_imported_skill_dir(
-                skill_dir, force=force, origin=download_url
+            return self._import_local_from_path(
+                skill_dir,
+                force=force,
+                origin=download_url,
+                source_trusted=True,
             )
 
 
@@ -5023,6 +5119,197 @@ class SkillManager:
             if SkillManager._team_skills_hub_host_matches_rule(host, rule):
                 return
         raise RuntimeError(f"远程导入 URL host 不在白名单: {host}")
+
+    @staticmethod
+    def _get_import_local_forbidden_roots() -> list[Path]:
+        """本地导入源的基础黑名单（高危根目录）。
+
+        黑名单只作兜底，主防线是 :meth:`_validate_local_skill_source` 的结构校验，
+        符号链接拒绝（:meth:`_assert_import_local_source_safe`）是黑名单的主要补强。
+        按运行平台计算：Unix-like 系统根、Windows 系统根、家目录敏感子目录。
+        运维可通过 ``IMPORT_LOCAL_FORBIDDEN_DIRS`` env 追加（只收紧不放宽）。
+        """
+        roots: list[Path] = []
+        if os.name == "nt":
+            # Windows：不黑名单整盘根或 Users 根，避免锁死用户目录下的本地导入；
+            # 单独禁止系统目录与 Users 下的 Default / Public 公共配置。
+            system_drive = Path(os.environ.get("SystemDrive", "C:") + os.sep)
+            for name in ("Windows", "Program Files", "Program Files (x86)", "ProgramData"):
+                roots.append(system_drive / name)
+            users_root = system_drive / "Users"
+            roots.extend((users_root / "Default", users_root / "Public"))
+        else:
+            for p in (
+                "/etc",
+                "/proc",
+                "/sys",
+                "/dev",
+                "/boot",
+                "/root",
+                "/usr",
+                "/bin",
+                "/sbin",
+                "/lib",
+                "/var",
+                "/run",
+                "/srv",
+            ):
+                roots.append(Path(p))
+            if sys.platform == "darwin":
+                roots.extend(Path(p) for p in ("/System", "/Library"))
+        home = Path.home()
+        for name in (
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".config",
+            ".git",
+            ".gradle",
+            ".m2",
+            ".cache",
+            ".local",
+            ".pki",
+            ".kube",
+            ".docker",
+        ):
+            roots.append(home / name)
+        raw = (os.getenv(_IMPORT_LOCAL_FORBIDDEN_DIRS_ENV) or "").strip()
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                extra = Path(token).expanduser()
+                if extra.is_absolute():
+                    roots.append(extra)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning(
+                    "[SkillManager] %s 忽略无效项 %r: %s",
+                    _IMPORT_LOCAL_FORBIDDEN_DIRS_ENV,
+                    token,
+                    exc,
+                )
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for root in roots:
+            key = os.path.normcase(str(root))
+            if key not in seen:
+                seen.add(key)
+                unique.append(root)
+        return unique
+
+    @staticmethod
+    def _path_is_link_or_junction(path: Path) -> bool:
+        """判断路径是否为符号链接；Windows 上再补 junction/reparse point 判断。
+
+        ``Path.is_junction`` 自 Python 3.12 才存在，3.11 兼容下回退为仅符号链接判断。
+        """
+        if path.is_symlink():
+            return True
+        if os.name == "nt":
+            is_junction = getattr(path, "is_junction", None)
+            if is_junction is not None:
+                return bool(is_junction())
+        return False
+
+    @staticmethod
+    def _path_is_within_root(path: Path, root: Path) -> bool:
+        """按文件系统对象身份判断 path 是否位于已存在的 root 下。"""
+        try:
+            resolved_root = root.resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
+            return False
+        for candidate in (path, *path.parents):
+            try:
+                if candidate.samefile(resolved_root):
+                    return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def _assert_import_local_source_safe(self, raw_path: str) -> None:
+        """拒绝符号链接、URL 协议与落在基础黑名单根下的本地导入源。
+
+        必须在任何 ``exists()`` / 读取之前调用，否则读取本身即构成任意文件读取。
+        ``~/...`` 按 JiuwenClaw 服务进程用户的 home 展开后再校验。
+        绝对路径判定按服务端平台进行：Unix-like 拒绝非绝对与 Windows 风格路径；
+        Windows 拒绝非绝对、drive-relative（``C:foo``）与无盘符 root-relative
+        （``\\Windows\\...``），接受 ``C:\\...``、``D:\\...`` 与 UNC。
+        """
+        raw = str(raw_path or "").strip()
+        if not raw:
+            raise ValueError("缺少参数: path")
+        if "://" in raw.lower():
+            raise ValueError("仅支持本地文件路径，不支持 URL 协议")
+        if "\0" in raw:
+            raise ValueError("path 包含非法字符")
+        expanded = Path(raw).expanduser()
+        if os.name == "nt":
+            if not expanded.is_absolute():
+                raise ValueError("path 仅支持绝对路径")
+            if not PureWindowsPath(raw).drive:
+                raise ValueError("path 必须包含盘符或 UNC 根")
+        else:
+            if not expanded.is_absolute():
+                raise ValueError("path 仅支持绝对路径")
+            if PureWindowsPath(raw).is_absolute() or re.match(r"^[A-Za-z]:", raw):
+                raise ValueError("path 不支持 Windows 风格路径")
+        if self._path_is_link_or_junction(expanded):
+            raise ValueError(f"path 不支持符号链接: {raw}")
+        try:
+            resolved = expanded.resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError(f"path 无效: {exc}") from exc
+        for root in self._get_import_local_forbidden_roots():
+            if self._path_is_within_root(resolved, root):
+                raise ValueError(f"path 位于禁止导入的目录: {raw}")
+        if resolved.is_dir():
+            for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+                for name in dirnames + filenames:
+                    if self._path_is_link_or_junction(Path(dirpath) / name):
+                        raise ValueError(f"path 目录内不允许包含符号链接: {raw}")
+
+    @staticmethod
+    def _validate_local_skill_source(src: Path) -> str:
+        """对本地导入源做结构校验，返回校验通过的技能名。
+
+        主防线：目录必须含精确 ``SKILL.md``（单文件则文件本身必须是合法
+        ``SKILL.md``），且文件开头（仅允许前置空行）必须是含 ``name`` 与
+        ``description`` 的 YAML frontmatter；``name`` 再通过
+        :func:`_validate_skill_name` 校验。失败抛 ``ValueError``。
+        """
+        if src.is_dir():
+            skill_file = src / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(f"目录中未找到 SKILL.md: {src}")
+        elif src.is_file():
+            skill_file = src
+        else:
+            raise ValueError(f"不支持的路径类型: {src}")
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"无法读取 SKILL.md: {skill_file}") from exc
+        match = _SKILL_FRONTMATTER_RE.match(text)
+        if not match:
+            raise ValueError(f"SKILL.md 开头必须是 --- frontmatter（仅允许前置空行）: {skill_file}")
+        try:
+            loaded = yaml.safe_load(match.group(1))
+        except (yaml.YAMLError, RecursionError) as exc:
+            raise ValueError(f"SKILL.md frontmatter YAML 无效: {skill_file}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"SKILL.md frontmatter 必须是 YAML 对象: {skill_file}")
+        raw_name = loaded.get("name")
+        if not raw_name:
+            raise ValueError(f"SKILL.md frontmatter 缺少 name: {skill_file}")
+        description = loaded.get("description")
+        if not description or not str(description).strip():
+            raise ValueError(f"SKILL.md frontmatter 缺少 description: {skill_file}")
+        try:
+            skill_name = _validate_skill_name(str(raw_name))
+        except ValueError as exc:
+            raise ValueError(f"invalid skill name: {exc}") from exc
+        return skill_name
 
     @staticmethod
     def _team_skills_hub_host_matches_rule(host: str, rule: str) -> bool:

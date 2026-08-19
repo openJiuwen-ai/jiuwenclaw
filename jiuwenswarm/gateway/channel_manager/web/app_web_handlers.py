@@ -67,8 +67,6 @@ from jiuwenswarm.common.config import (
     update_skill_retrieval_in_config,
     update_symphony_in_config,
     update_permissions_enabled_in_config,
-    update_permissions_mode_in_config,
-    get_permissions_mode_from_config,
     update_setup_guide_enabled_in_config,
     update_enable_free_models_in_config,
     update_memory_forbidden_enabled_in_config,
@@ -623,6 +621,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "initialize",
     "session.create",
     "session.switch",
+    "session.kvc.prepare",
     "acp.tool_response",
     "team.delete",
     "command.goal",
@@ -682,6 +681,18 @@ _FORWARD_REQ_METHODS = frozenset({
     "plugins.enable",
     "plugins.disable",
     "plugins.reload",
+    "agent_templates.list",
+    "agent_templates.show",
+    "agent_templates.file.list",
+    "agent_templates.file.read",
+    "agent_templates.create",
+    "agent_templates.install",
+    "agent_templates.uninstall",
+    "plugin_packages.list",
+    "plugin_packages.show",
+    "plugin_packages.create",
+    "plugin_packages.install",
+    "plugin_packages.uninstall",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -723,6 +734,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "initialize",
     "session.create",
     "session.switch",
+    "session.kvc.prepare",
     "acp.tool_response",
     "team.templates.list",
     "team.bindings.list",
@@ -784,6 +796,18 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "plugins.enable",
     "plugins.disable",
     "plugins.reload",
+    "agent_templates.list",
+    "agent_templates.show",
+    "agent_templates.file.list",
+    "agent_templates.file.read",
+    "agent_templates.create",
+    "agent_templates.install",
+    "agent_templates.uninstall",
+    "plugin_packages.list",
+    "plugin_packages.show",
+    "plugin_packages.create",
+    "plugin_packages.install",
+    "plugin_packages.uninstall",
     "extensions.list",
     "extensions.import",
     "extensions.delete",
@@ -867,7 +891,6 @@ _CONFIG_YAML_KEYS = frozenset({
     "kv_cache_release_enabled",
     "kv_cache_affinity_enabled",
     "permissions_enabled",
-    "permissions_mode",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
     "a2ui_enabled",
@@ -2348,18 +2371,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 "true" if kv_cfg.get("enable_kv_cache_affinity", False) else "false"
             )
             perm_cfg = raw.get("permissions") or {}
-            try:
-                perm_mode = get_permissions_mode_from_config()
-            except Exception:
-                if perm_cfg.get("enabled") is False:
-                    perm_mode = "full_access"
-                elif str(perm_cfg.get("permission_mode") or "").lower() == "strict":
-                    perm_mode = "strict"
-                else:
-                    perm_mode = "auto"
-            payload["permissions_mode"] = perm_mode
-            # 兼容旧前端：full_access 映射为 permissions_enabled=false
-            payload["permissions_enabled"] = "false" if perm_mode == "full_access" else "true"
+            payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
             # Skill evolution is controlled solely by the canonical nested YAML key.
             evolution_cfg = (raw.get("react") or {}).get("evolution") or {}
             payload["skill_evolution"] = "true" if evolution_cfg.get("skill_evolution", False) else "false"
@@ -2391,8 +2403,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_release_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
-            payload.setdefault("permissions_enabled", "true")
-            payload.setdefault("permissions_mode", "auto")
+            payload.setdefault("permissions_enabled", "false")
             payload.setdefault("setup_guide_enabled", "true")
             payload.setdefault("skill_evolution", "false")
             payload.setdefault("memory_forbidden_enabled", "false")
@@ -2629,8 +2640,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     update_kv_cache_affinity_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
-                elif param_key == "permissions_mode":
-                    update_permissions_mode_in_config(str(val or "").strip())
                 elif param_key == "setup_guide_enabled":
                     update_setup_guide_enabled_in_config(parsed)
                 elif param_key == "enable_free_models":
@@ -2868,6 +2877,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         except Exception as exc:
             logger.warning("[config.set] on_config_saved failed: %s", exc)
             applied_without_restart = False
+
+        # enable_free_models 开关变更时重新拉取 Zen 免费模型缓存，
+        # 使"禁用→启用"能实时填充、启用→禁用"能清空缓存。
+        if "enable_free_models" in apply_result.yaml_updated:
+            try:
+                from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+                await warm_zen_free_models(reason="config-toggle")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[config.set] warm_zen_free_models failed: %s", exc)
 
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated
         payload = {"updated": updated_param_keys, "applied_without_restart": applied_without_restart}
@@ -3258,6 +3276,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 force=bool(env_updates or yaml_updated),
             )
             applied_without_restart = await _apply_config_change_set(change_set)
+
+            # enable_free_models 开关变更时重新拉取 Zen 免费模型缓存。
+            if "enable_free_models" in yaml_updated:
+                try:
+                    from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+                    await warm_zen_free_models(reason="config-toggle")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[config.save_all] warm_zen_free_models failed: %s", exc)
 
             payload = {
                 "updated": [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in env_updates] + yaml_updated,
@@ -3777,7 +3803,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session is not a directory", code="BAD_REQUEST",
             )
             return
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             evict_session_kv_cache,
         )
 
@@ -3938,6 +3964,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "pin_order": int(meta.get("pin_order", 0)),
             "project_dir": str(meta.get("project_dir", "")),
             "project_id": str(meta.get("project_id", "")),
+            "persist_session": meta.get("persist_session") is True,
             "cron_id": str(meta.get("cron_id", "")),
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),

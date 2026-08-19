@@ -7,7 +7,7 @@ import pytest
 
 from openjiuwen.core.foundation.kv_cache import KVC_SESSION_EVICT_TIMEOUT_SECONDS
 
-from jiuwenswarm.server.runtime.session import kv_cache_affinity_lifecycle as lifecycle
+from jiuwenswarm.server.runtime.session.kv_cache import kv_cache_lifecycle as lifecycle
 
 
 class FakeAffinityModel:
@@ -221,4 +221,107 @@ async def test_offload_dispatch_returns_before_provider_completion(monkeypatch):
 
     release.set()
     await asyncio.sleep(0)
+    await lifecycle.cancel_pending_kv_cache_lifecycle_tasks()
+
+
+@pytest.mark.asyncio
+async def test_same_root_session_offload_and_prefetch_are_ordered(monkeypatch):
+    offload_started = asyncio.Event()
+    offload_release = asyncio.Event()
+    prefetch_done = asyncio.Event()
+    calls: list[str] = []
+    model = FakeAffinityModel()
+
+    async def slow_offload(**_kwargs):
+        calls.append("offload-start")
+        offload_started.set()
+        await offload_release.wait()
+        calls.append("offload-end")
+        return True
+
+    async def prefetch(**_kwargs):
+        calls.append("prefetch")
+        prefetch_done.set()
+        return True
+
+    model.offload_kvc = slow_offload
+    model.prefetch_kvc = prefetch
+    monkeypatch.setattr(lifecycle, "get_config", lambda: _config(True))
+    monkeypatch.setattr(lifecycle, "resolve_kv_cache_affinity_model", lambda **_: model)
+
+    lifecycle.dispatch_offload_session_kv_cache(session_id="sess_a")
+    await asyncio.wait_for(offload_started.wait(), timeout=0.5)
+    lifecycle.dispatch_prefetch_session_kv_cache(session_id="sess_a")
+    await asyncio.sleep(0)
+    assert calls == ["offload-start"]
+
+    offload_release.set()
+    await asyncio.wait_for(prefetch_done.wait(), timeout=0.5)
+    assert calls == ["offload-start", "offload-end", "prefetch"]
+    await lifecycle.cancel_pending_kv_cache_lifecycle_tasks()
+
+
+@pytest.mark.asyncio
+async def test_signal_dispatched_during_root_evict_waits_for_evict(monkeypatch):
+    evict_started = asyncio.Event()
+    evict_release = asyncio.Event()
+    prefetch_done = asyncio.Event()
+    calls: list[str] = []
+    model = FakeAffinityModel()
+
+    async def slow_evict(**_kwargs):
+        calls.append("evict-start")
+        evict_started.set()
+        await evict_release.wait()
+        calls.append("evict-end")
+        return True
+
+    async def prefetch(**_kwargs):
+        calls.append("prefetch")
+        prefetch_done.set()
+        return True
+
+    model.evict_kvc = slow_evict
+    model.prefetch_kvc = prefetch
+    monkeypatch.setattr(lifecycle, "get_config", lambda: _config(True))
+    monkeypatch.setattr(lifecycle, "resolve_kv_cache_affinity_model", lambda **_: model)
+
+    evict_task = asyncio.create_task(
+        lifecycle.evict_session_kv_cache(session_id="sess_a")
+    )
+    await asyncio.wait_for(evict_started.wait(), timeout=0.5)
+    result = lifecycle.dispatch_prefetch_session_kv_cache(session_id="sess_a")
+    assert result.scheduled
+    await asyncio.sleep(0)
+    assert calls == ["evict-start"]
+
+    evict_release.set()
+    assert (await evict_task).ok
+    await asyncio.wait_for(prefetch_done.wait(), timeout=0.5)
+    assert calls == ["evict-start", "evict-end", "prefetch"]
+    await lifecycle.cancel_pending_kv_cache_lifecycle_tasks()
+
+
+@pytest.mark.asyncio
+async def test_different_root_sessions_do_not_share_management_lane(monkeypatch):
+    release_a = asyncio.Event()
+    started_b = asyncio.Event()
+    model = FakeAffinityModel()
+
+    async def offload(**kwargs):
+        if kwargs["session_id"] == "sess_a":
+            await release_a.wait()
+        else:
+            started_b.set()
+        return True
+
+    model.offload_kvc = offload
+    monkeypatch.setattr(lifecycle, "get_config", lambda: _config(True))
+    monkeypatch.setattr(lifecycle, "resolve_kv_cache_affinity_model", lambda **_: model)
+
+    lifecycle.dispatch_offload_session_kv_cache(session_id="sess_a")
+    lifecycle.dispatch_offload_session_kv_cache(session_id="sess_b")
+    await asyncio.wait_for(started_b.wait(), timeout=0.5)
+
+    release_a.set()
     await lifecycle.cancel_pending_kv_cache_lifecycle_tasks()

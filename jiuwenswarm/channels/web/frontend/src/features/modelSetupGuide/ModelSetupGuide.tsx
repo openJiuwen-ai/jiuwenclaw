@@ -193,26 +193,27 @@ export function ModelSetupGuide({
   // Welcome step: centered card with config choices, no spotlight
   if (isWelcomeStep) {
     return createPortal(
-      <div className="model-setup-guide model-setup-guide--welcome" aria-live="polite">
-        <div className="model-setup-guide__mask" style={{ inset: 0 }} />
-        <section className="model-setup-guide__welcome-card" aria-labelledby="model-setup-guide-title-0">
-          <div className="model-setup-guide__welcome-header">
-            <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" />
-            <div className="model-setup-guide__copy">
-              <h2 id="model-setup-guide-title-0" className="model-setup-guide__title">
+      <div className="model-setup-guide model-setup-guide--welcome" aria-live="polite" data-testid="model-setup-guide-welcome">
+        <div className="model-setup-guide__mask" style={{ inset: 0 }} data-testid="model-setup-guide-welcome-mask" />
+        <section className="model-setup-guide__welcome-card" aria-labelledby="model-setup-guide-title-0" data-testid="model-setup-guide-welcome-card">
+          <div className="model-setup-guide__welcome-header" data-testid="model-setup-guide-welcome-header">
+            <TeamMemberAvatar member="team_leader" className="model-setup-guide__avatar" alt="" data-testid="model-setup-guide-welcome-avatar" />
+            <div className="model-setup-guide__copy" data-testid="model-setup-guide-welcome-copy">
+              <h2 id="model-setup-guide-title-0" className="model-setup-guide__title" data-testid="model-setup-guide-welcome-title">
                 {t('modelSetupGuide.steps.0.title')}
               </h2>
-              <p className="model-setup-guide__description">
+              <p className="model-setup-guide__description" data-testid="model-setup-guide-welcome-description">
                 {t('modelSetupGuide.steps.0.description')}
               </p>
             </div>
           </div>
-          <div className="model-setup-guide__choices">
-            <div className="model-setup-guide__quick-setup-card">
+          <div className="model-setup-guide__choices" data-testid="model-setup-guide-welcome-choices">
+            <div className="model-setup-guide__quick-setup-card" data-testid="model-setup-guide-welcome-quick-setup-card">
               <button
                 type="button"
                 className="model-setup-guide__choice model-setup-guide__choice--primary"
                 onClick={onQuickSetup}
+                data-testid="model-setup-guide-welcome-quick-setup-button"
               >
                 <span className="model-setup-guide__choice-title">
                   {t('modelSetupGuide.quickSetup.title')}
@@ -221,14 +222,16 @@ export function ModelSetupGuide({
                   {t('modelSetupGuide.quickSetup.description')}
                 </span>
               </button>
-              <div className="model-setup-guide__quick-setup-footer">
-                <p className="model-setup-guide__agreement">
+              <div className="model-setup-guide__quick-setup-footer" data-testid="model-setup-guide-welcome-quick-setup-footer">
+                <p className="model-setup-guide__agreement" data-testid="model-setup-guide-welcome-agreement">
                   {t('modelSetupGuide.quickSetup.agreementPrefix')}
                   <a
                     href="https://www.huaweicloud.com/declaration/modelartsstudio.html"
                     target="_blank"
                     rel="noreferrer"
                     className="model-setup-guide__agreement-link"
+                    data-testid="model-setup-guide-welcome-agreement-link"
+                    data-variant="maas"
                   >
                     {t('modelSetupGuide.quickSetup.agreementMaas')}
                   </a>
@@ -238,12 +241,14 @@ export function ModelSetupGuide({
                     target="_blank"
                     rel="noreferrer"
                     className="model-setup-guide__agreement-link"
+                    data-testid="model-setup-guide-welcome-agreement-link"
+                    data-variant="cloud"
                   >
                     {t('modelSetupGuide.quickSetup.agreementCloud')}
                   </a>
                   {t('modelSetupGuide.quickSetup.agreementSuffix')}
                 </p>
-                <p className="model-setup-guide__billing-note">
+                <p className="model-setup-guide__billing-note" data-testid="model-setup-guide-welcome-billing-note">
                   {t('modelSetupGuide.quickSetup.billingNote')}
                 </p>
               </div>
@@ -252,6 +257,7 @@ export function ModelSetupGuide({
               type="button"
               className="model-setup-guide__choice"
               onClick={onManualSetup}
+              data-testid="model-setup-guide-welcome-manual-setup-button"
             >
               <span className="model-setup-guide__choice-title">
                 {t('modelSetupGuide.manualSetup.title')}
@@ -267,6 +273,8 @@ export function ModelSetupGuide({
             onClick={onSkip}
             aria-label={t('modelSetupGuide.skip')}
             title={t('modelSetupGuide.skip')}
+            data-testid="model-setup-guide-skip"
+            data-variant="welcome"
           >
             {t('modelSetupGuide.skip')}
           </button>
@@ -333,6 +341,7 @@ export function ModelSetupGuide({
           aria-label={t('modelSetupGuide.skip')}
           title={t('modelSetupGuide.skip')}
           data-testid="model-setup-guide-skip"
+          data-variant="spotlight"
         >
           {t('modelSetupGuide.skip')}
         </button>

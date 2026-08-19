@@ -81,6 +81,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     finalize_assistant_response_if_a2ui,
 )
 from jiuwenswarm.server.runtime.a2ui.runtime.finalizer import should_finalize_a2ui_content
+from jiuwenswarm.server.runtime import extension_package_manager as package_manager
 from jiuwenswarm.agents.harness.common.auto_memory import (
     _execute_auto_memory_extraction,
 )
@@ -92,6 +93,33 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
 
 class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
+
+
+def compute_chat_send_mcp_needed(params: dict[str, Any] | None) -> list[str]:
+    """``params.mcp`` ∪ connectors from ``agent_template_name`` / ``plugin_names``.
+
+    Always returns a list (never ``None``). ``reconcile_session_mcp`` still
+    filters/strips names. Absent/``[]`` ``mcp`` no longer drops connectors
+    declared by this turn's equipment params.
+    """
+    p = params if isinstance(params, dict) else {}
+    mcp = p.get("mcp")
+    connectors = package_manager.collect_connectors_for_packages(
+        agent_template_id=p.get("agent_template_name"),
+        plugin_ids=p.get("plugin_names") if isinstance(p.get("plugin_names"), list) else None,
+        skip_missing=True,
+    )
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in (mcp if isinstance(mcp, list) else []) + connectors:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
 
 
 def _schedule_symphony_session_feedback(
@@ -622,6 +650,22 @@ _PLUGIN_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.PLUGINS_ENABLE: "handle_plugins_enable",
     ReqMethod.PLUGINS_DISABLE: "handle_plugins_disable",
     ReqMethod.PLUGINS_RELOAD: "handle_plugins_reload",
+}
+
+# Catalog + lifecycle: method → package_manager callable.
+_PACKAGE_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.AGENT_TEMPLATES_LIST: "list_agent_templates",
+    ReqMethod.AGENT_TEMPLATES_SHOW: "show_agent_template",
+    ReqMethod.AGENT_TEMPLATES_FILE_LIST: "list_agent_template_files",
+    ReqMethod.AGENT_TEMPLATES_FILE_READ: "read_agent_template_file",
+    ReqMethod.AGENT_TEMPLATES_CREATE: "create_agent_template",
+    ReqMethod.AGENT_TEMPLATES_INSTALL: "install_agent_template",
+    ReqMethod.AGENT_TEMPLATES_UNINSTALL: "uninstall_agent_template",
+    ReqMethod.PLUGIN_PACKAGES_LIST: "list_plugin_packages",
+    ReqMethod.PLUGIN_PACKAGES_SHOW: "show_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_CREATE: "create_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_INSTALL: "install_plugin_package",
+    ReqMethod.PLUGIN_PACKAGES_UNINSTALL: "uninstall_plugin_package",
 }
 
 _SKILL_COMMAND_REGEX = re.compile(
@@ -1683,6 +1727,98 @@ class JiuWenSwarm:
             metadata=request.metadata,
         )
 
+    async def _handle_package_catalog_request(self, request: AgentRequest) -> AgentResponse | None:
+        """Route catalog / lifecycle ReqMethods to package_manager and wrap AgentResponse."""
+        method = request.req_method
+        if method not in _PACKAGE_ROUTES:
+            return None
+        params = request.params if isinstance(request.params, dict) else {}
+        # Frontend contract uses `id`; accept legacy `name` as alias.
+        name = params.get("id") if params.get("id") not in (None, "") else params.get("name")
+        try:
+            if method == ReqMethod.AGENT_TEMPLATES_LIST:
+                payload: dict[str, Any] = {
+                    "templates": package_manager.list_agent_templates(params)
+                }
+            elif method == ReqMethod.AGENT_TEMPLATES_SHOW:
+                card = package_manager.show_agent_template(str(name or ""))
+                if card is None:
+                    raise ValueError(f"agent_template not found: {name!r}")
+                payload = {"template": card}
+            elif method == ReqMethod.AGENT_TEMPLATES_FILE_LIST:
+                payload = {
+                    "tree": package_manager.list_agent_template_files(str(name or ""))
+                }
+            elif method == ReqMethod.AGENT_TEMPLATES_FILE_READ:
+                payload = package_manager.read_agent_template_file(
+                    str(name or ""), str(params.get("path", ""))
+                )
+            elif method == ReqMethod.PLUGIN_PACKAGES_LIST:
+                payload = {"packages": package_manager.list_plugin_packages(params)}
+            elif method == ReqMethod.PLUGIN_PACKAGES_SHOW:
+                card = package_manager.show_plugin_package(str(name or ""))
+                if card is None:
+                    raise ValueError(f"plugin not found: {name!r}")
+                payload = {"package": card}
+            elif method == ReqMethod.AGENT_TEMPLATES_INSTALL:
+                ok, payload = package_manager.install_equipment_gated(
+                    "agent_templates", params
+                )
+                if not ok:
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload=payload,
+                        metadata=request.metadata,
+                    )
+            elif method == ReqMethod.PLUGIN_PACKAGES_INSTALL:
+                ok, payload = package_manager.install_equipment_gated(
+                    "plugin_packages", params
+                )
+                if not ok:
+                    return AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload=payload,
+                        metadata=request.metadata,
+                    )
+            elif method == ReqMethod.AGENT_TEMPLATES_UNINSTALL:
+                unload_live = getattr(self, "_unload_live_equipment", None)
+                if unload_live is not None:
+                    await unload_live("agent_templates", str(name or ""))
+                payload = package_manager.uninstall_equipment_with_notice(
+                    "agent_templates", params
+                )
+            elif method == ReqMethod.PLUGIN_PACKAGES_UNINSTALL:
+                unload_live = getattr(self, "_unload_live_equipment", None)
+                if unload_live is not None:
+                    await unload_live("plugin_packages", str(name or ""))
+                payload = package_manager.uninstall_equipment_with_notice(
+                    "plugin_packages", params
+                )
+            else:
+                # lifecycle: create → ok + {}
+                getattr(package_manager, _PACKAGE_ROUTES[method])(params)
+                payload = {}
+        except Exception as exc:
+            logger.warning("[extension_package_manager] request %s failed: %s", method, exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -1993,6 +2129,10 @@ class JiuWenSwarm:
         if plugins_response is not None:
             return plugins_response
 
+        package_catalog_response = await self._handle_package_catalog_request(request)
+        if package_catalog_response is not None:
+            return package_catalog_response
+
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
 
         heartbeat_response = await adapter.handle_heartbeat(request)
@@ -2051,12 +2191,13 @@ class JiuWenSwarm:
             _schedule_feedback_once("error")
             raise
 
-        # Session-level MCP enable: reconcile this session's MCP set to the
-        # request's ``mcp`` list before the agent runs. ``None`` (field absent)
-        # and an empty list both clear the selection; a non-empty list does an
-        # idempotent diff add/remove.
+        # Session-level MCP enable: reconcile to explicit mcp ∪ equipment
+        # connectors before the agent runs. Always pass a list (never None):
+        # empty clears selection when neither side contributes names.
+        params = request.params if isinstance(request.params, dict) else {}
         await self.reconcile_session_mcp(
-            request.session_id, request.params.get("mcp") if isinstance(request.params, dict) else None
+            request.session_id,
+            compute_chat_send_mcp_needed(params),
         )
 
         # cloud memory: before chat hook
@@ -2241,6 +2382,7 @@ class JiuWenSwarm:
         for stateless_handler in (
             self._handle_skills_request,
             self._handle_plugins_request,
+            self._handle_package_catalog_request,
         ):
             stateless_response = await stateless_handler(request)
             if stateless_response is not None:
@@ -2343,12 +2485,13 @@ class JiuWenSwarm:
             _schedule_feedback_once("error")
             raise
 
-        # Session-level MCP enable: reconcile this session's MCP set to the
-        # request's ``mcp`` list before the agent runs. ``None`` (field absent)
-        # and an empty list both clear the selection; a non-empty list does an
-        # idempotent diff add/remove.
+        # Session-level MCP enable: reconcile to explicit mcp ∪ equipment
+        # connectors before the agent runs. Always pass a list (never None):
+        # empty clears selection when neither side contributes names.
+        params = request.params if isinstance(request.params, dict) else {}
         await self.reconcile_session_mcp(
-            request.session_id, request.params.get("mcp") if isinstance(request.params, dict) else None
+            request.session_id,
+            compute_chat_send_mcp_needed(params),
         )
 
         # Team 模式：把整个 turn 交给 team_helpers。它先用 turn.text（用户原
@@ -3327,6 +3470,20 @@ class JiuWenSwarm:
             return None
         return getter(session_id)
 
+    async def ensure_live_session_instance(self, session_id: str | None):
+        """Start the session-scoped adapter if needed and return its DeepAgent.
+
+        Used by plan-mode sync so the first turn writes ``plan_mode`` onto the
+        same Session the upcoming ``chat.send`` will invoke, not a throwaway.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        starter = getattr(adapter, "ensure_live_session_instance", None)
+        if starter is None:
+            return self.get_live_session_instance(session_id)
+        return await starter(session_id)
+
     # --- Phase-2: targeted single-MCP control (forwarded to the deep adapter) ---
     async def apply_mcp_change(self, name: str, action: str, *, enabled: bool = True) -> bool:
         """Apply a single-MCP change without a full config reload.
@@ -3354,11 +3511,11 @@ class JiuWenSwarm:
     ) -> None:
         """Reconcile this session's MCP set to ``needed`` (idempotent diff).
 
-        Session-level enable driven by chat.send's ``mcp`` field. ``None``
-        (field absent) and an empty list both clear the session's selection
-        (default False); a non-empty list does an idempotent add/remove of the
-        delta. See ``JiuWenSwarmDeepAdapter.reconcile_session_mcp`` for the
-        diff logic.
+        Session-level enable driven by chat.send: callers should pass the union
+        of ``params.mcp`` and connectors from ``agent_template_name`` /
+        ``plugin_names`` (see ``compute_chat_send_mcp_needed``). ``None`` /
+        ``[]`` both clear the session's selection. See
+        ``JiuWenSwarmDeepAdapter.reconcile_session_mcp`` for the diff logic.
         """
         adapter = self._adapter
         if adapter is None:
@@ -3432,6 +3589,18 @@ class JiuWenSwarm:
         if method is None:
             return
         await method(operation, config_path)
+
+    async def _unload_live_equipment(self, kind: str, package_id: str) -> None:
+        """Unload a catalog package from live session adapters before delete.
+
+        Missing adapter is a no-op (nothing loaded). Unload errors propagate
+        so uninstall does not delete the package.
+        """
+        adapter = getattr(self, "_adapter", None)
+        unload = getattr(adapter, "unload_equipment_if_loaded", None)
+        if unload is None:
+            return
+        await unload(kind, package_id)
 
     async def compress_context(
             self,

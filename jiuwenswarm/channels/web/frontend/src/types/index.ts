@@ -16,6 +16,8 @@ export interface Session {
   title: string;
   project_id: string;
   project_dir: string;
+  /** Session 创建时锁定；true 表示启用 Persist Session，创建后不可修改。 */
+  persist_session?: boolean;
   work_mode?: import('../features/workspace/projectTypes').WorkMode;
   pinned?: boolean;
   pin_order?: number;
@@ -43,7 +45,7 @@ export interface Session {
 
 export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
-export type Permission = 'full_access' | 'auto' | 'strict';
+export type Permission = 'default' | 'full_access';
 
 export interface ModelEntry {
   model_name: string;

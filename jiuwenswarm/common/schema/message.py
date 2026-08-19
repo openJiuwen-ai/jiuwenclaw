@@ -43,6 +43,7 @@ class ReqMethod(Enum):
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"
     SESSION_DELETE = "session.delete"
+    SESSION_KVC_PREPARE = "session.kvc.prepare"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
     SESSION_REBIND_PROJECT = "session.rebind_project"
@@ -165,6 +166,20 @@ class ReqMethod(Enum):
     EXTENSIONS_DELETE = "extensions.delete"
     EXTENSIONS_TOGGLE = "extensions.toggle"
 
+    # agent_template / plugin package catalog + lifecycle RPCs.
+    AGENT_TEMPLATES_LIST = "agent_templates.list"
+    AGENT_TEMPLATES_SHOW = "agent_templates.show"
+    AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
+    AGENT_TEMPLATES_FILE_READ = "agent_templates.file.read"
+    AGENT_TEMPLATES_CREATE = "agent_templates.create"
+    AGENT_TEMPLATES_INSTALL = "agent_templates.install"
+    AGENT_TEMPLATES_UNINSTALL = "agent_templates.uninstall"
+    PLUGIN_PACKAGES_LIST = "plugin_packages.list"
+    PLUGIN_PACKAGES_SHOW = "plugin_packages.show"
+    PLUGIN_PACKAGES_CREATE = "plugin_packages.create"
+    PLUGIN_PACKAGES_INSTALL = "plugin_packages.install"
+    PLUGIN_PACKAGES_UNINSTALL = "plugin_packages.uninstall"
+
     HOOKS_LIST = "hooks.list"
 
     HEARTBEAT_GET_CONF = "heartbeat.get_conf"
@@ -181,8 +196,6 @@ class ReqMethod(Enum):
     PERMISSIONS_RULES_DELETE = "permissions.rules.delete"
     PERMISSIONS_APPROVAL_OVERRIDES_GET = "permissions.approval_overrides.get"
     PERMISSIONS_APPROVAL_OVERRIDES_DELETE = "permissions.approval_overrides.delete"
-    PERMISSIONS_MODE_GET = "permissions.mode.get"
-    PERMISSIONS_MODE_SET = "permissions.mode.set"
 
     CHANNEL_FEISHU_GET_CONF = "channel.feishu.get_conf"
     CHANNEL_FEISHU_SET_CONF = "channel.feishu.set_conf"

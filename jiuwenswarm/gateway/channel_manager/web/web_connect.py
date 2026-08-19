@@ -757,6 +757,13 @@ class WebChannel(BaseWsChannel):
             getattr(msg, "id", ""), getattr(msg, "event_type", None), _et,
             _has_fanout, routing_target is not None, len(self.clients),
         )
+        # 维护 session busy 状态(供 /ws/git 写操作查询)。
+        # 必须在所有路由分支之前执行:集群模式下 chat.processing_status 事件携带
+        # fan_out_targets(godview 兜底),经 SessionDispatcher 走 V2 精确路由后
+        # 提前 return,不会再经过下方旧路径的 busy 更新。若只在旧路径维护,
+        # 任务结束后 _session_busy 会残留 True,撤销/重做(discard/redo)会被
+        # is_session_busy 误判为忙碌,永远报 SESSION_BUSY(前端却显示已完成)。
+        self._track_session_busy(msg)
         # ── 心跳 relay：临时 session_id（heartbeat_{ts}_{suffix}）不匹配任何前端连接，
         # 按常规 session_id 路由会被当作"无连接"丢弃。心跳状态是全局的（非会话级），
         # 前端 setHeartbeatStatus 也是全局 store，因此直接广播给所有 web 客户端。
@@ -976,24 +983,48 @@ class WebChannel(BaseWsChannel):
         }
         await self._broadcast_to(frame_data, all_clients)
 
-        # 维护 session busy 状态(供 /ws/git 写操作查询)
-        if event_name == "chat.processing_status" and isinstance(payload, dict):
-            sid = payload.get("session_id") or msg.session_id
-            if sid:
-                self._session_busy[sid] = bool(payload.get("is_processing", False))
-
         # interrupt_result 根据 intent 决定 is_processing 状态
+        # (busy 映射已在 send() 入口 _track_session_busy 统一维护,此处仅补发
+        #  合成的 processing_status 事件让前端同步状态)
         if event_name == "chat.interrupt_result":
             intent = payload.get("intent", "cancel") if isinstance(payload, dict) else "cancel"
             is_processing = intent in ("pause", "supplement", "resume")
-            # 同步更新 busy 映射
-            if msg.session_id:
-                self._session_busy[msg.session_id] = is_processing
             await self._broadcast_to({
                 "type": "event",
                 "event": "chat.processing_status",
                 "payload": {"session_id": msg.session_id, "is_processing": is_processing},
             }, all_clients)
+
+    def _track_session_busy(self, msg: Message) -> None:
+        """在所有路由分支之前维护 session busy 映射(供 /ws/git 写操作查询)。
+
+        与路由路径解耦:集群模式下 chat.processing_status 事件携带
+        fan_out_targets,经 SessionDispatcher 以 routing_target 调用 send(),
+        走 V2 精确路由提前 return。若只在旧路径维护 busy,该类事件的
+        is_processing=false 永远不会写入映射,任务结束后 busy 残留 True。
+
+        事件语义:
+          - chat.processing_status: 直接取 payload.is_processing,
+            session_id 缺失时回退 msg.session_id
+          - chat.interrupt_result: pause/supplement/resume 视为仍在处理,
+            其余 intent(cancel)视为已结束
+        """
+        if msg.type != "event":
+            return
+        payload = msg.payload if isinstance(msg.payload, dict) else None
+        event_type = getattr(msg, "event_type", None)
+        if event_type is not None:
+            event_name = event_type.value
+        else:
+            event_name = str(payload.get("event_type") or "") if payload is not None else ""
+        if event_name == "chat.processing_status" and payload is not None:
+            sid = payload.get("session_id") or msg.session_id
+            if sid:
+                self._session_busy[sid] = bool(payload.get("is_processing", False))
+        elif event_name == "chat.interrupt_result":
+            intent = payload.get("intent", "cancel") if payload is not None else "cancel"
+            if msg.session_id:
+                self._session_busy[msg.session_id] = intent in ("pause", "supplement", "resume")
 
     def is_session_busy(self, session_id: str) -> bool:
         """查询 session 是否正在执行(agent 处理中)。

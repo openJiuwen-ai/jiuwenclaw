@@ -10,7 +10,7 @@ import { ArrowRight, CheckCircle2, ClipboardList, Copy, Info, LoaderCircle, Shar
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { useChatStore, useHarnessStore, useSessionStore, useTodoStore } from '../../stores';
-import { AgentMode, MediaItem, Message, UserAnswer, type Permission, type ProjectInfo } from '../../types';
+import { AgentMode, MediaItem, Message, UserAnswer, type ProjectInfo } from '../../types';
 import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
@@ -64,6 +64,7 @@ export interface ChatHistoryPagerProps {
 
 interface ChatPanelProps {
   onSendMessage: (content: string, mediaItems?: MediaItem[]) => void;
+  onInputIntent?: (sessionId: string) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<{
     content?: string;
     query?: string;
@@ -100,10 +101,7 @@ interface ChatPanelProps {
   onToggleTeamArea?: (expanded: boolean) => void;
   /** 打开右侧面板并切换到代码审核 Tab */
   onOpenCodeReview?: (target: CodeReviewTarget) => void;
-  /** 产品权限三态：auto / full_access / strict */
-  permissionsMode: Permission;
-  /** @deprecated 兼容旧布尔开关；优先用 permissionsMode */
-  permissionsEnabled?: boolean;
+  permissionsEnabled: boolean;
   onSavePermission: (updates: Record<string, string>) => Promise<void>;
   /** Goal（持续目标）控制，见 GoalBar 组件 */
   onSetGoal?: (sessionId: string, objective: string) => void;
@@ -735,6 +733,7 @@ function scrollToBottom(el: HTMLDivElement): void {
 
 export function ChatPanel({
   onSendMessage,
+  onInputIntent,
   onPersistMedia,
   onPersistDocuments,
   onInterrupt,
@@ -755,7 +754,6 @@ export function ChatPanel({
   onNavigateToSkills,
   onToggleTeamArea,
   onOpenCodeReview,
-  permissionsMode,
   permissionsEnabled,
   onSavePermission,
   onSetGoal,
@@ -1374,6 +1372,7 @@ export function ChatPanel({
                 <InputArea
                   ref={inputAreaRef}
                   onSubmit={handleSendMessage}
+                  onInputIntent={onInputIntent}
                   onPersistMedia={onPersistMedia}
                   onPersistDocuments={onPersistDocuments}
                   onInterrupt={onInterrupt}
@@ -1382,7 +1381,6 @@ export function ChatPanel({
                   isProcessing={isProcessing}
                   autoFocusKey={autoFocusKey}
                   onNavigateToSkills={onNavigateToSkills}
-                  permissionsMode={permissionsMode}
                   permissionsEnabled={permissionsEnabled}
                   onSavePermission={onSavePermission}
                   onSetGoal={onSetGoal}
@@ -1417,6 +1415,7 @@ export function ChatPanel({
           <InputArea
             ref={inputAreaRef}
             onSubmit={handleSendMessage}
+            onInputIntent={onInputIntent}
             onPersistMedia={onPersistMedia}
             onPersistDocuments={onPersistDocuments}
             onInterrupt={onInterrupt}
@@ -1425,7 +1424,6 @@ export function ChatPanel({
             isProcessing={isProcessing}
             autoFocusKey={autoFocusKey}
             onNavigateToSkills={onNavigateToSkills}
-            permissionsMode={permissionsMode}
             permissionsEnabled={permissionsEnabled}
             onSavePermission={onSavePermission}
             onSetGoal={onSetGoal}

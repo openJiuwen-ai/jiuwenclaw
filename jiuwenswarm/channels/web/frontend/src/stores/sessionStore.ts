@@ -21,6 +21,7 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
+import { stripPlanSuffix } from '../features/planMode/wireMode';
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
@@ -51,12 +52,15 @@ const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
-  const normalized = mode.trim().toLowerCase();
+  // 后端 session.mode 可能带 `.plan` 后缀（`agent.plan` / `team.plan.normal` /
+  // `team.plan.code`），先剥掉再归一化。否则 `team.plan.*` 会落进下面的兜底分支
+  // 被误判成单 agent，把团队会话的 runtime mode 覆盖成 agent（setCurrentSession 等
+  // 路径会把归一化结果写回 runtime）。
+  const normalized = stripPlanSuffix(mode.trim().toLowerCase());
   if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
     return 'team';
   }
   if (normalized === 'auto_harness') return 'auto_harness';
-  // plan / fast 已合并为单一 agent（历史 agent.plan / agent.fast 归一）。
   return 'agent';
 }
 
@@ -293,6 +297,8 @@ export interface SessionRuntime {
   mode: AgentMode;
   selectedModelName: string | null;
   projectDirectory: string | null;
+  /** 新会话草稿值；真实 Session 创建后由后端 metadata 的权威值覆盖。 */
+  persistSession: boolean;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
@@ -319,6 +325,7 @@ function createEmptyRuntime(): SessionRuntime {
       try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
     })(),
     projectDirectory: null,
+    persistSession: false,
     contextCompressionRate: 0,
     contextCompressionBefore: null,
     contextCompressionAfter: null,
@@ -376,6 +383,7 @@ interface SessionState {
   // B 类 actions（加 sessionId）
   setMode: (sessionId: string, mode: AgentMode) => void;
   setProjectDirectory: (sessionId: string, directory: string | null) => void;
+  setPersistSession: (sessionId: string, enabled: boolean) => void;
   setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
   addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
   setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
@@ -492,6 +500,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
+        persistSession: normalizedSession.persist_session === true,
         teamHistoryMessages: baseRuntime.teamHistoryMessages,
       };
       return {
@@ -560,6 +569,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, projectDirectory: directory },
+        },
+      };
+    });
+  },
+
+  setPersistSession: (sessionId, enabled) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, persistSession: Boolean(enabled) },
         },
       };
     });

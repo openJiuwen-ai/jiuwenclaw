@@ -480,6 +480,52 @@ def test_desktop_check_prefers_workswarm_installer_for_multiple_candidates(
     assert status["download_url"] == "https://example.test/workswarm"
 
 
+@pytest.mark.parametrize(
+    ("platform", "legacy_name", "preferred_name"),
+    [
+        (
+            "win32",
+            "WorkSwarm-setup-0.2.5.beta1.exe",
+            "workswarm-0.2.5.beta1-windows.exe",
+        ),
+        (
+            "darwin",
+            "WorkSwarm-0.2.5.beta1.dmg",
+            "workswarm-0.2.5.beta1-macos.dmg",
+        ),
+    ],
+)
+def test_desktop_check_prefers_platform_filename_over_legacy_workswarm_asset(
+    monkeypatch,
+    platform,
+    legacy_name,
+    preferred_name,
+):
+    from jiuwenswarm.common.version_source import ReleaseAsset, ReleaseInfo
+
+    monkeypatch.setattr(sys, "platform", platform)
+    release = ReleaseInfo(
+        version="0.2.5.beta1",
+        assets=[
+            ReleaseAsset(
+                name=legacy_name,
+                download_url="https://example.test/legacy",
+            ),
+            ReleaseAsset(
+                name=preferred_name,
+                download_url="https://example.test/preferred",
+            ),
+        ],
+    )
+
+    service = updater.UpdaterService()
+    service._resolve_desktop_asset({}, release)
+
+    status = service.get_status()
+    assert status["matched_asset"] == preferred_name
+    assert status["download_url"] == "https://example.test/preferred"
+
+
 def test_desktop_check_rejects_ambiguous_same_platform_installers_without_workswarm(
     monkeypatch,
 ):

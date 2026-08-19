@@ -1261,7 +1261,7 @@ def prepare_workspace(
 
     # Copy DeepAgent workspace template (includes agent-data.json, memory, skills)
     # Ignore _ZH.md and _EN.md files - they are handled separately
-    # Ignore mcp_builtins*.zip
+    # Ignore mcp_builtins*.zip, plugins
     if template_agent_workspace.exists():
         with TrackCopyDiff(
             dest=deepagent_workspace,
@@ -1271,7 +1271,7 @@ def prepare_workspace(
             _copy_dir(
                 template_agent_workspace,
                 deepagent_workspace,
-                ignore_patterns=("*_ZH.md", "*_EN.md", "skills", "mcp_builtins*.zip"),
+                ignore_patterns=("*_ZH.md", "*_EN.md", "skills", "mcp_builtins*.zip", "plugins"),
             )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
@@ -1321,6 +1321,13 @@ def prepare_workspace(
     # sessions is runtime-only (template may not include it)
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
+
+    # Equipment tree: plugins/{agent_templates,plugin_packages}/{built_in,local}.
+    # Template copy ignores plugins/; package reconcile belongs to runtime equipment module.
+    for kind in ("agent_templates", "plugin_packages"):
+        kind_root = deepagent_workspace / "plugins" / kind
+        (kind_root / "built_in").mkdir(parents=True, exist_ok=True)
+        (kind_root / "local").mkdir(parents=True, exist_ok=True)
 
     from jiuwenswarm.common.config import migrate_config_from_template, set_preferred_language_in_config_file
 
