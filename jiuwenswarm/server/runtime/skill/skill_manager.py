@@ -2825,6 +2825,9 @@ class SkillManager:
             meta["source"] = source
             if not str(meta.get("display_name") or "").strip():
                 meta["display_name"] = meta.get("name", "")
+            # 目录名作为稳定标识 slug 透出：前端市场条目以 slug 安装/匹配，
+            # frontmatter name 可能与目录名不一致，仅回传 name 会让已安装匹配失灵。
+            meta["slug"] = child.name
             meta["installed"] = True
             meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
             # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
@@ -2872,6 +2875,7 @@ class SkillManager:
 
             # 设置内置技能的标记
             meta["name"] = self._resolve_skill_name(child, md, meta)
+            meta["slug"] = child.name
             meta["source"] = "builtin"
             meta["is_builtin"] = True
             meta["is_builtin_source"] = True
