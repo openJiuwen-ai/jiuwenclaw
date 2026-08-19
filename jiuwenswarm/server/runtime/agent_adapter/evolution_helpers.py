@@ -630,6 +630,21 @@ def is_evolution_outcome_event(evt: Any) -> bool:
     return evolution_event_kind(evt) == "outcome"
 
 
+def is_evolution_progress_event(evt: Any) -> bool:
+    """True for rail `_emit_progress` host events (not model reasoning)."""
+    return evolution_event_kind(evt) == "progress"
+
+
+def _skip_evolution_stream_forward(evt: Any) -> bool:
+    """Host progress/approval/outcome must not be re-emitted as chat.reasoning."""
+    return (
+        is_evolution_approval_event(evt)
+        or is_evolution_outcome_event(evt)
+        or is_evolution_progress_event(evt)
+        or team_evolution_terminal_progress(evt) is not None
+    )
+
+
 def evolution_outcome_from_event(evt: Any) -> dict[str, str]:
     payload = event_payload_dict(evt)
     if not isinstance(payload, dict):
@@ -910,11 +925,7 @@ async def broadcast_evolution_progress(
     broadcast_event: Callable[[str | None, str, dict[str, Any]], None],
 ) -> None:
     for evt in events:
-        if (
-            is_evolution_approval_event(evt)
-            or is_evolution_outcome_event(evt)
-            or team_evolution_terminal_progress(evt) is not None
-        ):
+        if _skip_evolution_stream_forward(evt):
             continue
         parsed = parse_stream_chunk(evt)
         if parsed is not None:
@@ -930,11 +941,7 @@ async def push_evolution_progress(
     build_push_message: Callable[..., dict[str, Any]],
 ) -> None:
     for evt in events:
-        if (
-            is_evolution_approval_event(evt)
-            or is_evolution_outcome_event(evt)
-            or team_evolution_terminal_progress(evt) is not None
-        ):
+        if _skip_evolution_stream_forward(evt):
             continue
         try:
             parsed = parse_stream_chunk(evt)
