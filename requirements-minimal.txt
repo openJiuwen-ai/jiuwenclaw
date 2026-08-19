@@ -46,6 +46,13 @@ pydantic>=2.11.0
 pydantic-core>=2.46.0
 ruamel.yaml>=0.18.0
 json-repair>=0.55.0
+# JiuwenClaw core runtime dependencies added in the main-branch merge.
+latex2mathml>=3.81.0
+markdown>=3.8
+markdown-it-py>=4.0.0,<5.0.0
+pyyaml>=6.0
+fastapi>=0.115
+mcp>=1.27.2,<2
 
 # ============================================================
 # 时间和调度

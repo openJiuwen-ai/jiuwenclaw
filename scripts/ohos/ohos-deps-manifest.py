@@ -33,6 +33,7 @@ IMPORT_BY_PACKAGE: dict[str, str] = {
     "python-json-logger": "pythonjsonlogger",
     "mermaid-py": "mermaid",
     "json-repair": "json_repair",
+    "markdown-it-py": "markdown_it",
     "ruamel.yaml": "ruamel.yaml",
     "google-genai": "google.genai",
     "discord.py": "discord",
