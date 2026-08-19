@@ -97,7 +97,11 @@ class TestLoggerSetup:
     def test_logger_handlers():
         """Test that logger has console and five rotating log files."""
         logger = utils.setup_logger("INFO")
-        handler_types = [type(h).__name__ for h in logger.handlers]
+        # QueueHandler/QueueListener 改造后，目标 handler 在 _log_listener 上
+        if utils._log_listener is not None:
+            handler_types = [type(h).__name__ for h in utils._log_listener.handlers]
+        else:
+            handler_types = [type(h).__name__ for h in logger.handlers]
         assert "StreamHandler" in handler_types
         assert handler_types.count("SafeRotatingFileHandler") == 5
 
