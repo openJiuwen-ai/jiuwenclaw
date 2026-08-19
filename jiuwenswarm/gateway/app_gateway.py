@@ -194,6 +194,15 @@ def _inject_session_work_mode(msg: Message) -> None:
     if not isinstance(params, dict):
         return
     channel_id = getattr(msg, "channel_id", None)
+    # AgentServer 自 2026-08-01 起拒绝非 TUI 渠道的 session.create 携带 session_id
+    # ("session.create no longer accepts session_id; use session.switch to restore")。
+    # 本函数仅对 web 的 session.create 生效(TUI 的 session.create 不在
+    # CLI_FORWARD_REQ_METHODS,不走 forward 路径,可合法携带外部 session_id)。
+    # 与 fallback _session_create 的 create_params.pop("session_id") 对齐,摘掉
+    # legacy 客户端携带的 session_id,避免被 AgentServer 拒绝。恢复已有会话应
+    # 使用 session.switch,而非 session.create 带 session_id。
+    if str(channel_id or "").strip().lower() != "tui":
+        params.pop("session_id", None)
     try:
         from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
         binding = resolve_session_work_mode_params(params, channel_id=channel_id)
