@@ -150,8 +150,8 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
     }
 
 
-CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
-CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
+CRON_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
+CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
 CRON_MAX_TIMEOUT_SECONDS: int = 72 * 60 * 60
 # Backward-compatible alias used by older imports/tests.
 CRON_TEAM_STREAM_TIMEOUT_SECONDS: float = float(CRON_TEAM_DEFAULT_TIMEOUT_SECONDS)
@@ -263,7 +263,7 @@ class CronJob:
     mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
-    # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
+    # 单次执行超时（秒）；未配置时普通模式与 team 模式默认均为 1 小时
     timeout_seconds: int | None = None
     # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
     project_id: str = ""
