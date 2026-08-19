@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for the Phase 6B FastPath recogniser.
+"""Unit tests for the FastPath recogniser.
 
 The recogniser decides whether an exec request may run on the persistent
 ForkServer instead of a fresh ``subprocess.Popen``. Converting a command that
@@ -204,7 +204,7 @@ def test_dash_c_hits_even_when_script_mode_is_disabled(stub_host, monkeypatch):
     assert _plan(["bash", "-lc", "python app.py"]) is None
 
 
-# Phase 6C-1: the ForkServer worker is a warm ``python3 -c`` interpreter whose
+# The ForkServer worker is a warm ``python3 -c`` interpreter whose
 # ``sys.flags`` and startup are fixed; it cannot reproduce any interpreter
 # flag a per-request ``-c`` might carry. Each of these flags changes
 # observable ``sys.flags`` (``-I``/``-S``/``-E``/``-B``) or stdout buffering
@@ -258,7 +258,7 @@ def test_python_dash_c_requires_identity_match(stub_host, monkeypatch):
 
 
 def test_dash_c_with_trailing_args_falls_back(stub_host):
-    """Phase 8A-1: only the exact ``python[3] -c CODE`` shape hits.
+    """Only the exact ``python[3] -c CODE`` shape hits.
 
     A trailing arg lands in a fresh interpreter's ``sys.argv`` but is dropped by
     the worker's ``-c`` path, so the request must fall back to Popen (which
@@ -296,7 +296,7 @@ def test_dash_c_with_trailing_args_falls_back(stub_host):
     ["bash", "-lc", "python app"],
     ["python3", "app.sh"],
     ["python3"],                                  # REPL
-    # -- interpreter by path: identity not verified in this POC -------------
+    # -- interpreter by path: identity not verified -------------------------
     ["bash", "-lc", "/usr/bin/python app.py"],
     ["/usr/bin/python3", "app.py"],
     ["bash", "-lc", "python3.11 app.py"],

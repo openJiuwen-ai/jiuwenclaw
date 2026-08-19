@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for Phase 6C-2 FastPath stats accounting and throttled flush.
+"""Unit tests for FastPath stats accounting and throttled flush.
 
-Covers the observability contract fixed in Phase 6C-2:
+Covers the observability contract:
 
 * **Counting invariant** ``requests == hits + fallbacks``. ``record_request``
   is taken at the *entry* of ``_try_fastpath_exec`` (so ``not_eligible`` is
@@ -221,7 +221,7 @@ def test_route_submit_raises_counts_fallback(isolated_stats, monkeypatch, drain_
 
 
 # --------------------------------------------------------------------------- #
-# Phase 8A-2: post-dispatch no-replay boundary
+# post-dispatch no-replay boundary
 # --------------------------------------------------------------------------- #
 def _fake_live_worker():
     """A live, idle worker triple stub: (proc, sock, wlock) all fake.
@@ -394,7 +394,7 @@ def test_mixed_traffic_invariant_closed(isolated_stats, monkeypatch, drain_conn)
 
 def test_nonempty_stdin_falls_back_without_submit(isolated_stats, monkeypatch,
                                                    drain_conn):
-    """Phase 8A-1: a non-empty stdin never reaches the worker (deadlock guard).
+    """A non-empty stdin never reaches the worker (deadlock guard).
 
     The request is counted and bucketed as ``nonempty_stdin``; ``submit`` must
     not run, so the daemon takes the normal Popen path before any child.
@@ -419,7 +419,7 @@ def test_nonempty_stdin_falls_back_without_submit(isolated_stats, monkeypatch,
 
 
 def test_capacity_busy_falls_back(monkeypatch, drain_conn):
-    """Phase 8A-1: all workers busy -> ``capacity_busy`` fallback, no breaker bump.
+    """All workers busy -> ``capacity_busy`` fallback, no breaker bump.
 
     ``submit`` raising ``capacity_busy`` is recorded as a fallback reason; the
     daemon takes the Popen path. Capacity is a signal, not a failure, so the
@@ -510,7 +510,7 @@ def test_throttled_write_sets_dirty_and_flush_persists(monkeypatch, tmp_path):
 
 
 def test_not_eligible_path_writes_snapshot_via_record(monkeypatch, tmp_path):
-    """Regression for the Phase 6B bug: not_eligible never flushed."""
+    """Regression: ``not_eligible`` was never flushed."""
     path = tmp_path / "stats.json"
     monkeypatch.setattr(sd, "FASTPATH_STATS_PATH", str(path))
     monkeypatch.setattr(sd._FORK_POOL, "stats", FastPathStats())

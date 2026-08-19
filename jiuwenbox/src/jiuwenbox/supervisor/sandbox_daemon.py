@@ -239,8 +239,8 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 
         stdin_bytes = _recv_exact(conn, stdin_size) if stdin_size else b""
 
-        # Python ForkServer fast path (default ON since Phase 8A-4 -- a
-        # transparent optimisation, no env var required). Activated when BOTH
+        # Python ForkServer fast path (default ON -- a transparent optimisation,
+        # no env var required). Activated when BOTH
         # the server marked the request (``python_fastpath``) and the fast path
         # is enabled (it is, unless ``JIUWENBOX_PYTHON_FASTPATH=0`` opts out).
         # Falls back to the normal ``subprocess.Popen`` path below otherwise.
@@ -351,7 +351,7 @@ def _handle_exec(conn: socket.socket, header: dict[str, Any], state: DaemonState
 # ---------------------------------------------------------------------------
 # Python ForkServer fast path (feature-flagged, default OFF; release candidate).
 #
-# When the fast path is enabled (default ON since Phase 8A-4; opt out with
+# When the fast path is enabled (default ON; opt out with
 # ``JIUWENBOX_PYTHON_FASTPATH=0``), ``python3 -c <code>`` exec requests that the
 # server marked with ``python_fastpath: true`` are routed to a small persistent
 # in-sandbox ForkServer instead of spawning a fresh interpreter per call. The
@@ -369,7 +369,7 @@ FASTPATH_DEFAULT_WORKERS = 2
 FASTPATH_MARKER = "JIWENBOX_FORK_WORKER"
 # Worker control fd is socketpair'd by the daemon; the fd number is passed
 # as ``sys.argv[1]`` to the ``python3 -c`` worker.
-# Phase 8A-3: the worker->daemon response frame carries the child's stdout +
+# The worker->daemon response frame carries the child's stdout +
 # stderr (JSON-encoded). This cap must not be a *tighter* bound than the
 # normal ``subprocess.Popen`` /exec path's output contract, or FastPath would
 # fail on outputs that Popen succeeds with -- breaking the "transparent
@@ -385,7 +385,7 @@ FASTPATH_MARKER = "JIWENBOX_FORK_WORKER"
 # accumulation, capped by the sandbox cgroup's memory limit.
 _FASTPATH_MAX_FRAME = 256 * 1024 * 1024
 
-# --- Phase 2: lifecycle / resilience / resource knobs --------------------
+# --- lifecycle / resilience / resource knobs ----------------------------
 # Every knob is env-overridable but hard-clamped so a bad override can never
 # grow the worker pool without bound or defeat the circuit breaker.
 FASTPATH_MAX_WORKERS = 4            # per-sandbox hard ceiling
@@ -405,7 +405,7 @@ FASTPATH_STATS_THROTTLE = 1.0       # min seconds between snapshot writes
 def _fastpath_enabled() -> bool:
     """Whether the Python ForkServer fast path is active.
 
-    Phase 8A-4: the fast path is a **transparent optimisation** and is ON by
+    The fast path is a **transparent optimisation** and is ON by
     default -- no environment variable is required to benefit from it.
 
     Semantics of ``JIUWENBOX_PYTHON_FASTPATH``:
@@ -463,7 +463,7 @@ def _fastpath_idle_timeout() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6B (POC): direct-script and EDPA-wrapper eligibility.
+# Direct-script and EDPA-wrapper eligibility.
 #
 # Real EDPA traffic never reaches the daemon as ``python3 -c``. The upstream
 # provider hard-codes ``["bash", "-lc", command]``, and 99.93% of those
@@ -476,7 +476,7 @@ def _fastpath_idle_timeout() -> float:
 # pipes, redirects, ``;``, command substitution, globs, variable expansion,
 # escapes, env prefixes, extra commands after the interpreter - is rejected
 # and the request takes the normal ``subprocess.Popen`` path. The governing
-# rule for this phase is "rather miss a hit than convert one wrongly".
+# rule is "rather miss a hit than convert one wrongly".
 FASTPATH_SCRIPT_ENV = "JIUWENBOX_PYTHON_FASTPATH_SCRIPT"
 
 # Unquoted words may only contain these characters. Every shell metacharacter
@@ -489,7 +489,7 @@ _FASTPATH_SAFE_WORD_CHARS = frozenset(
 )
 # Only these bare interpreter names are recognised. A path (``/usr/bin/python``)
 # or a versioned name is not accepted: it would have to be identity-checked
-# against the worker interpreter, which is out of scope for this POC.
+# against the worker interpreter, which is out of scope.
 _FASTPATH_INTERP_NAMES = frozenset(("python", "python3"))
 # Env vars a login shell is allowed to introduce/change. Anything else means
 # the sandbox image has profile scripts with real side effects, and the
@@ -777,7 +777,7 @@ def _fastpath_plan(
     #     ``-c`` (``-I`` / ``-S`` / ``-E`` / ``-u`` / ``-B`` ...) changes
     #     observable ``sys.flags`` or buffering/startup that the worker
     #     cannot reproduce, so a flagged ``-c`` must not take the code fast
-    #     path. (Phase 6C-1: previously every flag was silently dropped and
+    #     path. (Previously every flag was silently dropped and
     #     the request still hit -- e.g. ``python3 -I -c`` ran with
     #     ``sys.flags.isolated == 0``.)
     #
@@ -792,7 +792,7 @@ def _fastpath_plan(
         if len(command) >= 2 and command[1] == "-c":
             if len(command) < 3:
                 return None  # bare ``-c`` with no code -> let it error
-            # Phase 8A-1: only the exact ``python[3] -c CODE`` shape (3 tokens)
+            # Only the exact ``python[3] -c CODE`` shape (3 tokens)
             # is convertible. Any trailing arg would land in a fresh
             # interpreter's ``sys.argv`` but is currently dropped by the
             # worker's ``-c`` path, so refuse rather than run wrongly.
@@ -903,7 +903,7 @@ def _exec_script_in_child(plan):
     """Run ``python <script>.py [args]`` the way CPython itself would.
 
     Each step mirrors a property measured against the real interpreter on the
-    target image (Phase 6B ground truth):
+    target image (measured ground truth):
 
       * ``sys.argv[0]`` keeps the *token as written* ("p.py"), while
         ``__file__`` and traceback filenames are the *absolute* path -- these
@@ -997,7 +997,7 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
     Signal deaths are reported as ``-signum`` (same as ``subprocess``).
 
     When ``plan`` is given it describes a ``python <script>.py`` execution
-    (Phase 6B) instead of a ``-c`` payload; see ``_exec_script_in_child``.
+    instead of a ``-c`` payload; see ``_exec_script_in_child``.
     """
     r_out, w_out = os.pipe()
     r_err, w_err = os.pipe()
@@ -1036,7 +1036,7 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
             if plan:
                 _exec_script_in_child(plan)
             else:
-                # Phase 8A-1: install a fresh ``__main__`` module the way
+                # Install a fresh ``__main__`` module the way
                 # ``python3 -c`` does, so ``import __main__`` returns the module
                 # whose namespace is the code's own globals -- previously it
                 # returned the worker's own ``__main__``. This runs in the forked
@@ -1047,14 +1047,14 @@ def _run_child(code, stdin_bytes, workdir, env_overrides, timeout, control_fd,
                 main_mod = types.ModuleType("__main__")
                 main_mod.__builtins__ = builtins
                 sys.modules["__main__"] = main_mod
-                # Phase 8A-3: ``python3 -c CODE`` sets ``sys.argv`` to
+                # ``python3 -c CODE`` sets ``sys.argv`` to
                 # ``['-c']``. The worker itself was launched as
                 # ``python -c <worker_source> <control_fd>``, so without this
                 # the forked child would inherit a ``sys.argv`` carrying the
                 # internal control fd. Set it here (in the forked child only;
                 # copy-on-write + os._exit discards it, so the parent worker is
                 # unaffected) to match CPython ``-c`` semantics. The matcher
-                # still rejects ``-c CODE arg1`` (8A-1 §2), so there is no
+                # still rejects ``-c CODE arg1``, so there is no
                 # argv tail to preserve.
                 sys.argv = ["-c"]
                 exec(coded, main_mod.__dict__)
@@ -1234,7 +1234,7 @@ class FastPathStats:
       ``fallback_reasons``: ``not_eligible`` / ``nonempty_stdin`` /
       ``breaker_open`` / ``capacity_busy`` / ``worker_unavailable`` /
       ``spawn_failed`` / ``worker_error`` / ``exec_uncertain``.
-      ``exec_uncertain`` (Phase 8A-2) is a *post-dispatch* failure: the
+      ``exec_uncertain`` is a *post-dispatch* failure: the
       request was sent to a worker and the code may have run, so the daemon
       reports an explicit failure instead of replaying via ``subprocess.Popen``.
       All other reasons are *pre-dispatch* (safe Popen fallback).
@@ -1421,7 +1421,7 @@ class ForkServerPool:
     requests concurrently. The pool lock only guards pool state (spawn/prune/
     selection), never a blocking worker round-trip.
 
-    Phase 2 resilience (all daemon-side, no new privileges):
+    Resilience (all daemon-side, no new privileges):
 
     * **Auto-recovery**: killed/crashed workers are reaped and respawned on
       the next request; the daemon (PID 1) is never affected. Killing a
@@ -1707,7 +1707,7 @@ class ForkServerPool:
             break
 
         proc, sock, wlock = chosen
-        # Phase 8A-2: once we begin sending the request header to the worker
+        # Once we begin sending the request header to the worker
         # the code may run in the forked child, so any subsequent failure must
         # NOT fall back to ``subprocess.Popen`` (that would replay side effects).
         # ``dispatched`` marks the no-replay boundary. It is set the instant we
@@ -1793,7 +1793,7 @@ def _try_fastpath_exec(
 ) -> bool:
     """Route an eligible exec to the ForkServer.
 
-    Eligible shapes (Phase 6B): ``python3 [flags] -c CODE`` (as released),
+    Eligible shapes: ``python3 [flags] -c CODE`` (as released),
     ``python|python3 <script>.py [args]``, and the real EDPA wrapper
     ``bash -lc 'cd <dir> && python <script>.py [args]'``. Anything else -
     including any shell construct the strict recogniser does not fully
@@ -1809,10 +1809,10 @@ def _try_fastpath_exec(
     or one ``fallbacks`` reason -- so ``requests == hits + fallbacks``.
     """
     _FORK_POOL.stats.record_request()
-    # Phase 8A-1: the worker writes stdin to the child synchronously before
+    # The worker writes stdin to the child synchronously before
     # draining stdout, which deadlocks when the child writes >64KB before
-    # reading stdin. The worker I/O state machine is not being rewritten this
-    # round, so any request with a non-empty stdin takes the normal Popen path.
+    # reading stdin. The worker I/O state machine does not handle this case,
+    # so any request with a non-empty stdin takes the normal Popen path.
     # The real EDPA wrapper carries no stdin, so this does not affect current
     # gains.
     if stdin_bytes:
@@ -1849,7 +1849,7 @@ def _try_fastpath_exec(
         _FORK_POOL.stats.record_fallback(exc.reason)
         return False
     except FastPathExecUncertain:
-        # Phase 8A-2: the request was dispatched -- the code may already have
+        # The request was dispatched -- the code may already have
         # run in the forked child. Replaying via ``subprocess.Popen`` would
         # risk duplicate side effects, so report an explicit execution-uncertain
         # failure and tell the caller a response was sent (it must NOT Popen).

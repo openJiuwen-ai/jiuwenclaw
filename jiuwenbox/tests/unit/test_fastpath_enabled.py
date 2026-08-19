@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Phase 8A-4: FastPath default-ON enable semantics.
+"""FastPath default-ON enable semantics.
 
 The fast path is now a *transparent optimisation*: it is ON by default and no
 environment variable is required to benefit from it. ``JIUWENBOX_PYTHON_FASTPATH``

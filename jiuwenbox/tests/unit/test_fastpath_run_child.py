@@ -67,7 +67,7 @@ def test_nonzero_exit_preserves_code_and_stderr():
 
 @_SKIP_NON_POSIX
 def test_dash_c_main_module_matches_real_interpreter():
-    """Phase 8A-1: ``import __main__`` under ``-c`` sees the code's own globals.
+    """``import __main__`` under ``-c`` sees the code's own globals.
 
     Previously the FastPath ``-c`` path exec'd into a bare dict, so
     ``import __main__`` returned the worker's own module (exposing ``_run_child``
@@ -90,7 +90,7 @@ def test_dash_c_main_module_matches_real_interpreter():
 
 @_SKIP_NON_POSIX
 def test_dash_c_argv_matches_real_interpreter():
-    """Phase 8A-3: ``sys.argv`` under bare ``-c`` is ``['-c']`` like CPython.
+    """``sys.argv`` under bare ``-c`` is ``['-c']`` like CPython.
 
     The worker is launched as ``python -c <worker_source> <control_fd>``, so
     without the explicit ``sys.argv = ['-c']`` the child would inherit an argv
@@ -120,7 +120,7 @@ def test_stdin_forwarded_and_json_stdout():
 
 @_SKIP_NON_POSIX
 def test_long_lived_grandchild_marker_written_once():
-    """Phase 8A-2: a long-lived grandchild must not cause double execution.
+    """A long-lived grandchild must not cause double execution.
 
     The child writes a side-effect marker, forks a grandchild that holds the
     stdout/stderr pipe write-ends longer than the request timeout, then exits.
@@ -128,7 +128,7 @@ def test_long_lived_grandchild_marker_written_once():
     loop keeps running until the grandchild releases the pipes. The marker
     must appear exactly once: ``_run_child`` forks the code a single time; the
     no-replay guarantee against a *Popen* replay lives at the ``submit`` /
-    daemon layer and is covered by the Phase 8A-2 pool-level marker bench.
+    daemon layer and is covered by the pool-level marker bench.
 
     The grandchild sleeps longer than ``timeout`` but is bounded so the test
     completes: the deadline kill fires on the (already dead) child, the
@@ -262,9 +262,9 @@ def test_script_exiting_124_gets_no_timeout_marker():
 @_SKIP_NON_POSIX
 @pytest.mark.parametrize("payload_mib", [2, 16])
 def test_large_output_within_popen_contract_is_returned_intact(payload_mib):
-    """Phase 8A-3: output up to the Popen contract succeeds, no frame cap.
+    """Output up to the Popen contract succeeds, no frame cap.
 
-    The worker->daemon frame cap was raised (8A-3) to align with the
+    The worker->daemon frame cap was raised to align with the
     daemon->box-server response contract (``DAEMON_MAX_RESPONSE_BYTES =
     256 MiB``). A 2 MiB stdout -- which previously triggered the 1 MiB
     ``frame too large`` replay path -- now returns intact, matching Popen.

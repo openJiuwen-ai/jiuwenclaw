@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Differential tests for the Phase 6B FastPath script child.
+"""Differential tests for the FastPath script child.
 
 Running a script on the fast path means ``exec``-ing it inside an
 already-warm forked interpreter instead of spawning ``python3 script.py``.

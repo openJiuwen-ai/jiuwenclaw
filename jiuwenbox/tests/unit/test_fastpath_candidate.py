@@ -8,7 +8,7 @@ consider it; the daemon still falls back on anything it does not fully
 understand. So the pre-filter may be narrow but must not exclude a shape the
 daemon can actually convert.
 
-Phase 6C-1: ``python -c CODE`` was previously excluded here (the gate
+Note: ``python -c CODE`` was previously excluded here (the gate
 returned ``head == PYTHON_EXECUTABLE`` for the ``-c`` shape, i.e. python3
 only), so ``python -c`` never reached the daemon and always ran via a fresh
 ``subprocess``. The gate now offers the bare ``python[3] -c CODE`` shape for
@@ -37,7 +37,7 @@ def _candidate(command):
 
 
 @pytest.mark.parametrize("command,expected", [
-    # bare -c: both interpreters are offered (6C-1: python now too).
+    # bare -c: both interpreters are offered (python and python3).
     (["python3", "-c", "print(1)"], True),
     (["python", "-c", "print(1)"], True),
     # bare -c with no code: not offered (let it error on subprocess).

@@ -142,8 +142,8 @@ _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
 _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
-# Python ForkServer fast path (transparent optimisation, default ON since
-# Phase 8A-4). Exec requests whose command is the simple ``python3 -c CODE``
+# Python ForkServer fast path (transparent optimisation, default ON).
+# Exec requests whose command is the simple ``python3 -c CODE``
 # shape are marked ``python_fastpath: true`` in the daemon IPC payload (when
 # the fast path is enabled, which it is unless ``JIUWENBOX_PYTHON_FASTPATH=0``
 # opts out). The in-sandbox daemon routes those to a persistent ForkServer
@@ -178,7 +178,7 @@ def _fastpath_max_sandboxes() -> int:
 def _python_fastpath_enabled() -> bool:
     """Whether the server marks exec requests as FastPath candidates.
 
-    Phase 8A-4: the fast path is a **transparent optimisation** and is ON by
+    The fast path is a **transparent optimisation** and is ON by
     default. Mirrors ``sandbox_daemon._fastpath_enabled`` so both sides agree
     (the flag is inherited into the sandbox daemon via the bwrap env, so the
     two must read it identically):
@@ -216,7 +216,7 @@ def _python_fastpath_candidate(command: list[str]) -> bool:
     imports live on. Marking a request merely lets the daemon consider it;
     the daemon still falls back on anything it does not fully understand.
 
-    Recognised shapes (Phase 6B / 6C-1):
+    Recognised shapes:
       * ``python|python3 -c CODE``                    (bare ``-c`` only)
       * ``python|python3 <script>.py [args]``          (direct script)
       * ``bash -lc|-c '<small payload>'``              (real EDPA wrapper)
