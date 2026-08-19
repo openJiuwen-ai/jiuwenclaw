@@ -873,18 +873,14 @@ class TeamManager:
         one active session per channel.
         """
         normalized_previous = str(previous_session_id or "").strip()
-        pre_signaled_session_ids: set[str] = set()
         if normalized_previous and normalized_previous != target_session_id:
-            await self.offload_session_kv_cache(
-                normalized_previous,
-                reason=f"{reason}session-switch",
-            )
+            # Product foreground/task facts own KVC offload.  A navigation
+            # event must not offload a Team that is still running.
             await self.stop_paused_session_runtime(
                 normalized_previous,
                 reason=f"{reason}session-switch: ",
                 offload=False,
             )
-            pre_signaled_session_ids.add(normalized_previous)
 
         if not self._is_distributed_mode(get_config()):
             logger.info(
@@ -898,7 +894,6 @@ class TeamManager:
             await self._stop_stale_distributed_sessions(
                 target_session_id,
                 reason=reason,
-                pre_signaled_session_ids=pre_signaled_session_ids,
             )
 
     async def offload_session_kv_cache(self, session_id: str, reason: str = "") -> bool:
@@ -924,7 +919,6 @@ class TeamManager:
         target_session_id: str,
         *,
         reason: str,
-        pre_signaled_session_ids: set[str] | None = None,
     ) -> None:
         """Stop active or pending distributed sessions except the target."""
         stale_sessions = [
@@ -946,13 +940,7 @@ class TeamManager:
             list(dict.fromkeys(stale_sessions)),
         )
 
-        already_signaled = pre_signaled_session_ids or set()
         for stale_session_id in dict.fromkeys(stale_sessions):
-            if stale_session_id not in already_signaled:
-                await self.offload_session_kv_cache(
-                    stale_session_id,
-                    reason=f"{reason}session-switch",
-                )
             await self.stop_session_runtime(
                 stale_session_id,
                 reason=reason,

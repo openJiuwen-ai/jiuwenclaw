@@ -242,6 +242,21 @@ def get_config():
     return config_base
 
 
+def get_configured_read_image_multimodal(
+    config: dict[str, Any] | None = None,
+) -> bool | None:
+    """Return the explicit native-image policy, or ``None`` for auto mode."""
+
+    resolved = config if isinstance(config, dict) else get_config()
+    react = resolved.get("react")
+    value = (
+        react.get("enable_read_image_multimodal")
+        if isinstance(react, dict)
+        else None
+    )
+    return value if isinstance(value, bool) else None
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)

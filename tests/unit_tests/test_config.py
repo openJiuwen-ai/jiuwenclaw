@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from jiuwenswarm.common.config import (
+    get_configured_read_image_multimodal,
     get_config_raw,
     get_evolution_auto_save_enabled,
     get_skill_evolution_enabled,
@@ -20,6 +21,18 @@ from jiuwenswarm.common.config import (
     update_setup_guide_enabled_in_config,
     update_xiaoyi_runtime_in_config,
 )
+
+
+def test_configured_read_image_multimodal_preserves_explicit_value() -> None:
+    assert get_configured_read_image_multimodal(
+        {"react": {"enable_read_image_multimodal": False}}
+    ) is False
+
+
+def test_configured_read_image_multimodal_returns_none_for_auto() -> None:
+    assert get_configured_read_image_multimodal(
+        {"react": {"enable_read_image_multimodal": None}}
+    ) is None
 
 
 class TestResolveEnvVars:
