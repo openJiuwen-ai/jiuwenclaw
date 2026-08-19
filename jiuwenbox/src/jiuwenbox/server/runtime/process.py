@@ -2419,14 +2419,16 @@ class ProcessRuntime(RuntimeAdapter):
     def _fastpath_admit(self, sandbox_id: str) -> bool:
         """Whether ``sandbox_id`` may use the Python fast path (global cap).
 
-        The first fast-path request from a sandbox activates that sandbox's
-        worker pool inside its daemon. Once ``_fastpath_max_sandboxes``
-        sandboxes have activated in this process, further sandboxes are not
-        marked and their ``python3 -c`` requests take the normal ``/exec``
-        path. ``cleanup`` (sandbox delete) releases the slot. This yields a
-        hard worst-case worker bound of ``cap × per-sandbox cap`` and bounds
-        the startup-storm blast radius when many sandboxes cold-start
-        together.
+        The first fast-path *candidate* request from a sandbox activates that
+        sandbox's worker pool inside its daemon. Callers must have already
+        confirmed the command is a fast-path candidate before admitting, so
+        the quota is only consumed by commands that will actually take the fast
+        path (not by e.g. ``ls``). Once ``_fastpath_max_sandboxes`` sandboxes
+        have activated in this process, further sandboxes are not marked and
+        their ``python3 -c`` requests take the normal ``/exec`` path.
+        ``cleanup`` (sandbox delete) releases the slot. This yields a hard
+        worst-case worker bound of ``cap × per-sandbox cap`` and bounds the
+        startup-storm blast radius when many sandboxes cold-start together.
         """
         if sandbox_id in self._fastpath_activated:
             return True
@@ -2450,8 +2452,14 @@ class ProcessRuntime(RuntimeAdapter):
         }
         if (
             _python_fastpath_enabled()
-            and self._fastpath_admit(call.sandbox_id)
+            # Candidate check BEFORE admit: the global admit quota must only be
+            # consumed by commands that will actually take the fast path. A
+            # non-candidate command (e.g. ``ls``) reaching here first used to
+            # activate the sandbox and consume an admit slot, so a mixed load
+            # could fill ``_fastpath_activated`` with sandboxes that never use
+            # the fast path and silently degrade later Python requests.
             and _python_fastpath_candidate(list(call.command))
+            and self._fastpath_admit(call.sandbox_id)
         ):
             request_payload["python_fastpath"] = True
         if call.env:
