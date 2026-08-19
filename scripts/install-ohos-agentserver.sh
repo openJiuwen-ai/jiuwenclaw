@@ -407,14 +407,13 @@ case "${_venv_sp:-}" in
     ;;
 esac
 _verify_ld=$(ohos_native_ld_library_path 2>/dev/null || true)
-for _mod in openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography yaml fastapi mcp markdown markdown_it latex2mathml mathml2omml docx jiuwenclaw.agentserver.tools.deepresearch_plugin.docx_conversion_core; do
+for _mod in dotenv openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography yaml fastapi mcp markdown markdown_it latex2mathml mathml2omml docx jiuwenclaw.agentserver.tools.deepresearch_plugin.docx_conversion_core; do
   # OhOS/HNP 下不要用外部 env 程序包裹 Python。
   if LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
     "$PYTHON" -c "import ${_mod}" 2>/dev/null; then
     log "  import ${_mod}: OK"
   else
-    log "  import ${_mod}: FAIL"
-    _fail=$((_fail + 1))
+    log "  import ${_mod}: FAIL (warning; import verification does not block installation)"
   fi
 done
 

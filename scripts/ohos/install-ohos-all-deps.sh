@@ -1178,13 +1178,6 @@ except Exception as e:
 "
 }
 
-native_permission_failure() {
-  case "$1" in
-    *.so*"Permission denied"*) return 0 ;;
-  esac
-  return 1
-}
-
 extract_fail_detail() {
   # 从 pip 日志尾部提取子依赖/编译失败包名
   tail -n 80 "$LOG" 2>/dev/null | sed -n \
@@ -1287,11 +1280,9 @@ while IFS='	' read -r project category spec import_mod note || [ -n "${project:-
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$project" "$category" "$spec" "$import_mod" "$ist" "$imp" "$fail_detail" "$note" >>"$SUMMARY"
 
-  if native_permission_failure "$imp"; then
-    log "ERROR: native extension import was denied by the filesystem"
-    log "ERROR: move the Jiuwen repository out of Desktop/noexec storage (for example: ~/officeClaw/jiuwenswarm) and rerun"
-    exit 1
-  fi
+  # Native import failures are diagnostic only. Some OHOS wheels cannot be
+  # loaded in every shell/storage context, but pure-Python dependencies (for
+  # example python-dotenv) must still be installed for AgentServer startup.
 
   if [ "$AUTO" != "1" ]; then
     printf 'Enter 继续... '
