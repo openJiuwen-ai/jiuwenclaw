@@ -47,8 +47,12 @@ a2ui:
 
 A2UI exposes two independent controls:
 
-- `generation_enabled` controls runtime prompt injection, client-event handling,
-  response finalization, repair, and retry processing.
+- `generation_enabled` controls runtime A2UI generation instructions,
+  client-event handling, response finalization, repair, and retry processing.
+  When disabled, Web requests receive a narrow guard: explicit A2UI generation
+  requests are redirected to a plain-text alternative and told how to re-enable
+  the switch, without searching for or invoking A2UI skills for generation.
+  Knowledge, documentation, and code questions about A2UI remain allowed.
 - `rendering_enabled` controls whether the Web frontend parses and renders A2UI
   content. When generation is disabled but rendering remains enabled, historical
   A2UI content is rendered read-only.

@@ -47,8 +47,10 @@ a2ui:
 
 提供两个相互独立的开关：
 
-- `generation_enabled`：控制运行时提示词注入、客户端事件处理、response
-  finalizer、repair 和重试流程。
+- `generation_enabled`：控制运行时 A2UI 生成指令、客户端事件处理、response
+  finalizer、repair 和重试流程。关闭后，Web 请求会收到一段禁用守卫：明确要求生成
+  A2UI 时，Agent 会提示用户重新打开“A2UI 生成支持”并提供纯文本替代回复，不会为生成
+  A2UI 主动搜索或调用相关 skill；仅查询、学习或讨论 A2UI 信息仍可正常回答和使用工具。
 - `rendering_enabled`：控制 Web 前端是否解析并渲染 A2UI 内容。关闭生成但保留
   渲染时，历史 A2UI 内容仍会以只读方式显示。
 
