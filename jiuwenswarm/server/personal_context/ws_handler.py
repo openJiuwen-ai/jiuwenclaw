@@ -288,15 +288,18 @@ async def _notify_runtime_enabled(
 
     if callback is None:
         return
+    cancelled: asyncio.CancelledError | None = None
     try:
         await callback(enabled)
-    except asyncio.CancelledError:
-        raise
+    except asyncio.CancelledError as exc:
+        cancelled = exc
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "PersonalContext runtime Rail refresh failed: %s",
             type(exc).__name__,
         )
+    if cancelled is not None:
+        raise cancelled
 
 
 async def handle_personal_context_request(

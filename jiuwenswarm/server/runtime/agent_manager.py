@@ -482,6 +482,7 @@ class AgentManager:
             if not isinstance(channel_agents, dict):
                 continue
             for agent in list(channel_agents.values()):
+                cancelled: asyncio.CancelledError | None = None
                 try:
                     setter = getattr(
                         agent, "set_personal_context_runtime_enabled", None
@@ -491,13 +492,15 @@ class AgentManager:
                     refresher = getattr(agent, "refresh_personal_context_rail", None)
                     if callable(refresher):
                         await refresher()
-                except asyncio.CancelledError:
-                    raise
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[AgentManager] PersonalContext Rail refresh failed: %s",
                         type(exc).__name__,
                     )
+                if cancelled is not None:
+                    raise cancelled
 
     async def initialize(
         self, channel_id: str = "", extra_config: dict[str, Any] | None = None

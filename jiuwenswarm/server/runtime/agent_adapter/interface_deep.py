@@ -7112,16 +7112,19 @@ class JiuWenSwarmDeepAdapter:
             await self._sync_personal_context_rail(mode)
         if not self._is_session_scoped_adapter:
             for adapter in list(self._session_adapters.values()):
+                cancelled: asyncio.CancelledError | None = None
                 try:
                     await adapter.refresh_personal_context_rail()
-                except asyncio.CancelledError:
-                    raise
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[JiuWenSwarmDeepAdapter] optional PersonalContext session "
                         "Rail refresh failed: %s",
                         type(exc).__name__,
                     )
+                if cancelled is not None:
+                    raise cancelled
 
     async def _sync_personal_context_rail(self, mode: str) -> None:
         """Register or detach the fixed-path Core Rail for normal agent modes."""
