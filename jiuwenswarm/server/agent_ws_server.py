@@ -1243,51 +1243,53 @@ class AgentWebSocketServer:
                     sandbox_env["JIUWENBOX_VENV_DIR"] = str(venv_dir)
                     bundled_python = resolve_base_python()
                     sandbox_env["JIUWENBOX_BUNDLED_PYTHON"] = str(bundled_python.parent)
-                    if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
-                            or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
-                        logger.info(
-                            "[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON "
-                            "未注入, 探测候选路径..."
-                        )
-                        # 探测标准 CPython (非 venv trampoline): jbx-sandbox 跑不了 uv
-                        import shutil as _shutil
-                        import glob as _glob
-                        _runner_py: str | None = None
-                        _candidates: list[str] = []
-                        # 1. 打包
-                        _candidates.append(
-                            str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
-                        # 2. C:\Python3* (系统安装, 逐版本 glob 覆盖 3.10-3.13+)
-                        _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
-                        # 3. %LOCALAPPDATA%\Programs\Python\Python3* (用户级安装)
-                        _lad = os.environ.get("LOCALAPPDATA", "")
-                        if _lad:
-                            _candidates += sorted(_glob.glob(
-                                str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
-                        for _cand in _candidates:
-                            if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
-                                _runner_py = _cand
-                                break
-                        # 4. PATH 里的 python.exe (校验非 venv)
-                        if not _runner_py:
-                            _which = _shutil.which("python") or _shutil.which("python3")
-                            if _which and _is_std_cpython(_which):
-                                _runner_py = _which
-                        if _runner_py:
-                            sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
-                    logger.info(
-                        "[AgentWebSocketServer][sandbox] injected env: "
-                        "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
-                        "JIUWENBOX_RUNNER_PYTHON=%s",
-                        venv_dir,
-                        bundled_python.parent,
-                        sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
-                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[AgentWebSocketServer] inject JIUWENBOX_BUNDLED_PYTHON/VENV_DIR failed: %s",
                         exc,
                     )
+                if not (sandbox_env.get("JIUWENBOX_RUNNER_PYTHON")
+                        or os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip():
+                    logger.info(
+                        "[AgentWebSocketServer][sandbox] JIUWENBOX_RUNNER_PYTHON "
+                        "未注入, 探测候选路径..."
+                    )
+                    import shutil as _shutil
+                    import glob as _glob
+                    _runner_py: str | None = None
+                    _candidates: list[str] = []
+                    _candidates.append(
+                        str(Path(__file__).resolve().parents[2] / "tools" / "python" / "python.exe"))
+                    _candidates += sorted(_glob.glob(r"C:\Python3*\python.exe"))
+                    _lad = os.environ.get("LOCALAPPDATA", "")
+                    if _lad:
+                        _candidates += sorted(_glob.glob(
+                            str(Path(_lad) / "Programs" / "Python" / "Python3*" / "python.exe")))
+                    # uv 管理的标准 CPython (非 Scripts trampoline)
+                    _roaming = os.environ.get("APPDATA", "")
+                    if _roaming:
+                        _candidates += sorted(_glob.glob(
+                            str(Path(_roaming) / "uv" / "python" / "cpython-*" / "python.exe")))
+                    if sys.executable and _is_std_cpython(sys.executable):
+                        _candidates.insert(0, sys.executable)
+                    for _cand in _candidates:
+                        if _cand and Path(_cand).is_file() and _is_std_cpython(_cand):
+                            _runner_py = str(Path(_cand).resolve())
+                            break
+                    if not _runner_py:
+                        _which = _shutil.which("python") or _shutil.which("python3")
+                        if _which and _is_std_cpython(_which):
+                            _runner_py = str(Path(_which).resolve())
+                    if _runner_py:
+                        sandbox_env["JIUWENBOX_RUNNER_PYTHON"] = _runner_py
+                logger.info(
+                    "[AgentWebSocketServer][sandbox] injected env: "
+                    "JIUWENBOX_VENV_DIR=%s, JIUWENBOX_BUNDLED_PYTHON=%s, "
+                    "JIUWENBOX_RUNNER_PYTHON=%s",
+                    sandbox_env.get("JIUWENBOX_VENV_DIR") or "<未注入>",
+                    sandbox_env.get("JIUWENBOX_BUNDLED_PYTHON") or "<未注入>",
+                    sandbox_env.get("JIUWENBOX_RUNNER_PYTHON") or "<未注入>",
+                )
 
             ok = await self._jiuwenbox_runner.ensure_running(
                 host=host,
@@ -1300,7 +1302,7 @@ class AgentWebSocketServer:
                 # 会在 install 未完成时报 box-server 不健康而被杀 (实测日志:
                 # "health check timeout after 30.0s" → SetEvent 日志还没打出主进程就被
                 # 杀). 提到 2min, 给 install 足够时间完成 SetEvent 解除阻塞.
-                timeout=120.0,
+                timeout=180.0,
             )
             if not ok:
                 stderr_tail = self._jiuwenbox_runner.get_stderr_tail(10)

@@ -210,9 +210,8 @@ DAEMON_STARTUP_GRACE_SECONDS = 0.3
 # Windows runner 在 resume 后才自行 bind/listen 控制端口 (与 Linux box-server
 # 先 listen 再 spawn 相反), _create_windows 必须主动 TCP 探活确认就绪, 否则首个
 # exec 请求会在 DAEMON_CONNECT_TIMEOUT_SECONDS 内撞上 connect 超时 (runner 尚未
-# 进入 accept). 给探活一个独立预算: 实测 runner 从 resume 到 listen < 1s, 5s
-# 上限已足够覆盖 CreateRestrictedToken + makedirs(TEMP) + bind + listen(64).
-WIN_RUNNER_READY_TIMEOUT_SECONDS = 5.0
+# 进入 accept). 放宽到 30s 覆盖 ACL + bind/listen.
+WIN_RUNNER_READY_TIMEOUT_SECONDS = 30.0
 WIN_RUNNER_READY_PROBE_INTERVAL = 0.1
 DAEMON_MAX_RESPONSE_BYTES = 256 * 1024 * 1024
 # Upper bound on how much of the daemon's spawn-time stdout/stderr we
@@ -3106,6 +3105,21 @@ class ProcessRuntime(RuntimeAdapter):
         env.setdefault("USERPROFILE", _profile_root)
         env.setdefault("LOCALAPPDATA", os.path.join(_profile_root, "AppData", "Local"))
         env.setdefault("APPDATA", os.path.join(_profile_root, "AppData", "Roaming"))
+        # CreateProcessWithLogonW 传自定义 env 块会替换整个环境, 必须把 box-server
+        # 自己的 PYTHONPATH 带给 runner, 否则 ``python -m jiuwenbox.supervisor.win_exec``
+        # 立刻 ModuleNotFoundError 退出 → 沙箱 phase=error.
+        for _inherit_key in (
+            "PYTHONPATH", "PYTHONHOME", "PYTHONIOENCODING", "PYTHONUTF8",
+            "PATHEXT", "SystemRoot", "windir", "COMSPEC",
+            "JIUWENBOX_RUNNER_PYTHON",
+        ):
+            if not env.get(_inherit_key):
+                _inherit_val = os.environ.get(_inherit_key)
+                if _inherit_val:
+                    env[_inherit_key] = _inherit_val
+        for _k, _v in os.environ.items():
+            if _k.startswith("JIUWENBOX_") and _k not in env and _v:
+                env[_k] = _v
         logger.debug(
             "[SandboxWin] %s sandbox-writable temp injected: TEMP=%s",
             sandbox_id, win_tmp_dir,
@@ -3114,6 +3128,25 @@ class ProcessRuntime(RuntimeAdapter):
         # 合成 SID 的 ACE 对它不生效, apply_sandbox_acl 会对 allow_read 路径
         # 给真实 SID 也 grant Allow Read, 否则 runner 读不了 venv python.
         sandbox_user_sid = win_setup.get_sandbox_user_sid()
+        # runner python 在宿主 AppData 下时, 必须给 jbx-sandbox 父目录 traverse,
+        # 否则 CreateProcessWithLogonW WinError 5.
+        _runner_py = (
+            (os.environ.get("JIUWENBOX_RUNNER_PYTHON") or "").strip()
+            or sys.executable
+        )
+        if sandbox_user_sid and _runner_py:
+            logger.info(
+                "[SandboxWin] %s grant_parent_traverse python=%s",
+                sandbox_id, _runner_py,
+            )
+            try:
+                win_acl.grant_parent_traverse(_runner_py, sandbox_user_sid)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[SandboxWin] %s grant_parent_traverse 失败 python=%s",
+                    sandbox_id, _runner_py, exc_info=True,
+                )
+            logger.info("[SandboxWin] %s grant_parent_traverse done", sandbox_id)
         # 增量检测: per-sandbox policy 的 deny/allow 路径是否需要预授 WRITE_DAC.
         # 运行时 box-server 是普通用户, 对 owner=Administrators 的目录 (如 D:/software)
         # 没有 WRITE_DAC, grant_ace 会 WinError 5 → Deny Read ACE 不生效.
