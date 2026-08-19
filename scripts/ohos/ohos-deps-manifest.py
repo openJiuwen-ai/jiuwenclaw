@@ -34,6 +34,7 @@ IMPORT_BY_PACKAGE: dict[str, str] = {
     "mermaid-py": "mermaid",
     "json-repair": "json_repair",
     "markdown-it-py": "markdown_it",
+    "mathml2omml": "mathml2omml",
     "ruamel.yaml": "ruamel.yaml",
     "google-genai": "google.genai",
     "discord.py": "discord",
@@ -112,7 +113,7 @@ TRANSITIVE_NATIVE_AGENTSERVER: list[tuple[str, str, str]] = [
     ("cryptography>=48.0.0,<49", "cryptography", "preload:ohos wheel;abi3"),
     ("jiter>=0.5", "jiter", "preload:ohos-wheel-build/wheels"),
     ("cffi>=1.16", "cffi", "parent:cryptography"),
-    ("lxml>=5.2", "lxml", "parent:trafilatura;native"),
+    ("lxml>=6.1.0,<6.1.1", "lxml", "parent:trafilatura;native;ohos-wheel"),
 ]
 
 # Phase 3：fastmcp → fakeredis[lua] → lupa（native，需 ohos wheel）

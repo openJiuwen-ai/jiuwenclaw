@@ -9,6 +9,7 @@ from typing import Any
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse
 from jiuwenclaw.schema.message import ReqMethod
+from jiuwenclaw.runtime.platform import is_ohos_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,12 @@ def _trigger_apply(kind: str) -> None:
 
 def dispatch_sandbox_config_request(request: AgentRequest) -> AgentResponse:
     """执行一条 sandbox 配置 RPC (与 dispatch_permissions_config_request 同形态)."""
+    if is_ohos_runtime():
+        return _err(
+            request,
+            "JiuwenBox sandbox is not supported on HarmonyOS",
+            code="UNSUPPORTED_PLATFORM",
+        )
     from jiuwenclaw.config import (
         get_sandbox_runtime,
         update_sandbox_runtime,

@@ -69,6 +69,7 @@ from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config
 from jiuwenclaw.agentserver.sandbox_config_rpc import get_sandbox_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
+from jiuwenclaw.runtime.platform import is_ohos_runtime, sandbox_supported
 from jiuwenclaw.security.ws_origin import (
     extract_handshake_request,
     forbidden_origin_response,
@@ -430,6 +431,13 @@ class AgentWebSocketServer:
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。"""
         try:
+            if is_ohos_runtime() or not sandbox_supported():
+                logger.info(
+                    "[AgentWebSocketServer] skipping jiuwenbox auto-start: "
+                    "sandbox is unsupported on runtime platform %r",
+                    os.environ.get("JIUWENCLAW_RUNTIME_PLATFORM") or sys.platform,
+                )
+                return
             if sys.platform not in ("linux", "win32"):
                 logger.info(
                     "[AgentWebSocketServer] skipping jiuwenbox auto-start: "

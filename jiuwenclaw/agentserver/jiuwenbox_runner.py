@@ -352,6 +352,9 @@ class JiuwenBoxRunner:
                 "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
                 "HOME", "LANG", "LC_ALL", "LC_CTYPE",
                 "PYTHONPATH", "PYTHONHOME", "PYTHONIOENCODING",
+                # HNP Python and native wheels need the parent loader paths.
+                "LD_LIBRARY_PATH", "OPENSSL_DIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
+                "JIUWENCLAW_RUNTIME_PLATFORM",
                 "JIUWENCLAW_DATA_DIR", "OFFICE_CLAW_DATA_DIR",
             }
             env: dict[str, str] = {}

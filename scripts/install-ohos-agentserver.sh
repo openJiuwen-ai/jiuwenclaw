@@ -407,7 +407,7 @@ case "${_venv_sp:-}" in
     ;;
 esac
 _verify_ld=$(ohos_native_ld_library_path 2>/dev/null || true)
-for _mod in openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography yaml fastapi mcp markdown markdown_it latex2mathml; do
+for _mod in openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography yaml fastapi mcp markdown markdown_it latex2mathml mathml2omml docx jiuwenclaw.agentserver.tools.deepresearch_plugin.docx_conversion_core; do
   # OhOS/HNP 下不要用外部 env 程序包裹 Python。
   if LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
     "$PYTHON" -c "import ${_mod}" 2>/dev/null; then
@@ -425,15 +425,13 @@ else
   _fail=$((_fail + 1))
 fi
 
-_libdir=$("$OHOS_REAL_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
 echo ""
 echo "完成。报告目录: $REPORT_DIR"
 echo ""
 echo "启动 AgentServer:"
 echo "  cd $REPO_ROOT"
-echo "  source $VENV_DIR/bin/activate"
-echo "  export LD_LIBRARY_PATH=\"${_libdir}\${OPENSSL_DIR:+:\$OPENSSL_DIR/lib}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
-echo "  jiuwenclaw-agentserver --port 18092"
+echo "  sh scripts/start-ohos-agentserver.sh 18092"
+echo "  # 或：node start-agentserver.mjs 18092"
 echo ""
 
 [ "$_fail" -eq 0 ] || exit 1

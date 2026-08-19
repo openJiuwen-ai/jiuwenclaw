@@ -45,11 +45,13 @@ greenlet>=3.3.2
 pydantic>=2.11.0
 pydantic-core>=2.46.0
 ruamel.yaml>=0.18.0
-json-repair>=0.55.0
+json-repair>=0.58.0
 # JiuwenClaw core runtime dependencies added in the main-branch merge.
 latex2mathml>=3.81.0
+mathml2omml==0.0.2
 markdown>=3.8
 markdown-it-py>=4.0.0,<5.0.0
+python-docx>=1.2.0
 pyyaml>=6.0
 fastapi>=0.115
 mcp>=1.27.2,<2
@@ -114,6 +116,7 @@ trafilatura>=1.6.0,<2
 # 1.x 要求 lxml>=5.2.2，可命中本地预编 wheel (lxml-6.1.0)；
 # 2.x 强制 lxml>=6.1.1 会触发源码编译（鸿蒙缺 libxml2 dev，失败）
 # lxml_html_clean 0.4.5 要求 lxml>=6.1.1；锁定到 0.4.4 以兼容本地 lxml 6.1.0 预编 wheel
+lxml>=6.1.0,<6.1.1
 lxml_html_clean>=0.4.0,<0.4.5
 
 # ============================================================
