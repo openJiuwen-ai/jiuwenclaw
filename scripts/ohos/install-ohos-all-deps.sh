@@ -618,6 +618,28 @@ _prepend_path_var() {
   esac
 }
 
+_force_prepend_ld() {
+  _dir=$1
+  [ -n "$_dir" ] && [ -d "$_dir" ] || return 0
+  _cur=${LD_LIBRARY_PATH:-}
+  _out=
+  _old_ifs=$IFS
+  IFS=:
+  # shellcheck disable=SC2086
+  set -- $_cur
+  IFS=$_old_ifs
+  for _p in "$@"; do
+    [ -n "$_p" ] || continue
+    [ "$_p" = "$_dir" ] && continue
+    case ":${_out}:" in
+      *":$_p:"*) ;;
+      *) _out="${_out:+${_out}:}${_p}" ;;
+    esac
+  done
+  LD_LIBRARY_PATH="$_dir${_out:+:${_out}}"
+  export LD_LIBRARY_PATH
+}
+
 _dedupe_path_var() {
   _var=$1
   _cur=
@@ -689,8 +711,15 @@ _discover_pkgconfig_dir() {
 ensure_native_lib_env() {
   # Python libdir（pydantic_core/tiktoken 等）+ cmd-pkgs OpenSSL/libffi（cryptography/cffi）
   _py_for_libdir=${OHOS_REAL_PYTHON:-$PYTHON}
-  _pylibdir=$("$_py_for_libdir" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
+  _pylibdir=$(CDPATH= cd -- "$(dirname "$_py_for_libdir")/../lib" 2>/dev/null && pwd || true)
+  if [ -z "$_pylibdir" ] || [ ! -d "$_pylibdir" ]; then
+    _pylibdir=$("$_py_for_libdir" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
+  fi
   _prepend_path_var LD_LIBRARY_PATH "$_pylibdir"
+
+  # The path may already contain the HNP Python libdir behind HarmonyBrew.
+  # Move it to the front so Python loads its matching libintl ABI.
+  _force_prepend_ld "$_pylibdir"
 
   _openssl_prefix=$(detect_openssl_prefix) || _openssl_prefix=
   if [ -n "$_openssl_prefix" ]; then
@@ -764,6 +793,10 @@ ensure_native_lib_env() {
     _prepend_path_var LD_LIBRARY_PATH "${OPENSSL_DIR}/lib"
     _dedupe_path_var LD_LIBRARY_PATH
   fi
+
+  # All native discovery above prepends its own paths. Restore HNP Python's
+  # runtime directory to position zero before any venv Python/pip invocation.
+  _force_prepend_ld "$_pylibdir"
 }
 
 verify_native_libs() {
@@ -1167,6 +1200,9 @@ extract_fail_detail() {
 }
 
 log "依赖逐包安装（PyPI 清单，含传递依赖）"
+# Repair the loader environment before venv creation/reuse. The base HNP
+# Python must be able to start before any pip or PEP517 subprocess is spawned.
+ensure_native_lib_env
 ensure_install_venv
 export PYTHON="${INSTALL_VENV_PYTHON:-$PYTHON}"
 log "SCRIPT_ID=$INSTALL_SCRIPT_ID"
