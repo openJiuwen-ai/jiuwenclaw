@@ -643,11 +643,22 @@ async def test_normal_evolution_watcher_ends_sdk_noop_outcome_after_generation(m
 
 
 @pytest.mark.asyncio
-async def test_normal_evolution_watcher_pushes_passive_progress_before_approval(monkeypatch):
+async def test_normal_evolution_watcher_does_not_push_progress_as_reasoning(monkeypatch):
     _FakeTransport.pushes = []
     rail = _FakeEvolutionRail(
         [
-            [_progress_event("evolution progress")],
+            [
+                _progress_event(
+                    "starting regular skill evolution review for completed conversation",
+                    stage="started",
+                )
+            ],
+            [
+                _progress_event(
+                    "checking 2 regular skill(s) for evolution signals",
+                    stage="detecting_signals",
+                )
+            ],
             [_approval_event("skill_evolve_progress_req")],
         ]
     )
@@ -662,17 +673,19 @@ async def test_normal_evolution_watcher_pushes_passive_progress_before_approval(
 
     event_types = [push["payload"]["event_type"] for push in _FakeTransport.pushes]
     assert event_types == [
-        "chat.reasoning",
         "chat.evolution_status",
         "chat.ask_user_question",
         "chat.evolution_status",
     ]
-    assert _FakeTransport.pushes[0]["payload"]["content"] == "evolution progress"
-    assert _FakeTransport.pushes[1]["payload"]["status"] == "start"
-    assert _FakeTransport.pushes[1]["payload"]["stage"] == "approval_required"
-    assert _FakeTransport.pushes[2]["payload"]["request_id"] == "skill_evolve_progress_req"
-    assert _FakeTransport.pushes[3]["payload"]["status"] == "end"
-    assert _FakeTransport.pushes[3]["payload"]["stage"] == "approval_required"
+    assert not any(
+        push["payload"].get("event_type") == "chat.reasoning"
+        for push in _FakeTransport.pushes
+    )
+    assert _FakeTransport.pushes[0]["payload"]["status"] == "start"
+    assert _FakeTransport.pushes[0]["payload"]["stage"] == "approval_required"
+    assert _FakeTransport.pushes[1]["payload"]["request_id"] == "skill_evolve_progress_req"
+    assert _FakeTransport.pushes[2]["payload"]["status"] == "end"
+    assert _FakeTransport.pushes[2]["payload"]["stage"] == "approval_required"
     assert rail.cleanup_calls == 1
     assert rail.drain_waits
     assert set(rail.drain_waits) == {False}
