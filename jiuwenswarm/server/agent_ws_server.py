@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -126,6 +127,43 @@ from jiuwenswarm.common.schema.message import ReqMethod, EventType
 from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
+
+_SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
+
+
+def _mask_text_for_log(value: str) -> str:
+    return "******" if len(value) <= 20 else f"{value[:5]}******{value[-5:]}"
+
+
+def _mask_system_prompt_for_log(system_prompt: str) -> str:
+    return _SYSTEM_PROMPT_USER_HISTORY_PATTERN.sub(
+        lambda match: f"{match.group(1)}{_mask_text_for_log(match.group(2).strip())}{match.group(3)}",
+        system_prompt,
+    )
+
+
+def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return data
+
+    masked_params = dict(params)
+    query = params.get("query")
+    if isinstance(query, str) and query:
+        masked_params["query"] = _mask_text_for_log(query)
+
+    system_prompt = params.get("system_prompt")
+    if isinstance(system_prompt, str) and system_prompt:
+        masked_params["system_prompt"] = _mask_system_prompt_for_log(system_prompt)
+
+    supplementary_info = params.get("supplementary_info")
+    if isinstance(supplementary_info, str) and supplementary_info:
+        masked_params["supplementary_info"] = _mask_text_for_log(supplementary_info)
+
+    if masked_params == params:
+        return data
+    return {**data, "params": masked_params}
+
 
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
@@ -1384,6 +1422,11 @@ class AgentWebSocketServer:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
+            logger.info(
+                "[AgentWebSocketServer] Inbound raw payload: %s",
+                _mask_query_for_log(data),
+                extra={'user_visible': 'critical'}
+            )
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
                 request_id="",
