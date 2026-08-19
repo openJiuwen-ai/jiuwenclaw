@@ -26,7 +26,7 @@ export function formatCharCount(s: string): string {
 
 // ── 详情 Section 类型 ─────────────────────────────────────
 
-export type DetailSectionKey = 'prompt' | 'human_prompt' | 'human_reply' | 'outcome' | 'error';
+export type DetailSectionKey = 'prompt' | 'human_prompt' | 'human_reply' | 'outcome' | 'error' | 'result';
 export type DetailAccent = 'blue' | 'amber' | 'emerald' | 'red';
 export interface DetailSection {
   key: DetailSectionKey;
@@ -195,6 +195,8 @@ export function AgentDetailModal({ state, agentName, onClose, onTabChange }: Age
   const content = activeSection?.content ?? '';
   // 仅对输入/输出尝试 JSON 渲染
   const isJsonSection = activeSection?.key === 'prompt' || activeSection?.key === 'outcome';
+  // 错误/结果为纯文本（traceback / 摘要），不套 Markdown
+  const isPlainTextSection = activeSection?.key === 'error' || activeSection?.key === 'result';
   const jsonData = isJsonSection && !rawMode ? tryParseJson(content) : null;
 
   return (
@@ -282,7 +284,7 @@ export function AgentDetailModal({ state, agentName, onClose, onTabChange }: Age
             <pre className="text-xs text-text whitespace-pre-wrap break-words font-mono">{content}</pre>
           ) : jsonData !== null ? (
             <JsonTreeView data={jsonData} />
-          ) : isJsonSection ? (
+          ) : isJsonSection || isPlainTextSection ? (
             <pre className="text-xs text-text whitespace-pre-wrap break-words font-mono">{content}</pre>
           ) : (
             <MarkdownRenderer

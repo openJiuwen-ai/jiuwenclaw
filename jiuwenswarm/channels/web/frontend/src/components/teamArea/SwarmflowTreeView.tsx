@@ -723,6 +723,7 @@ function RunNode({
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
+  const [runDetail, setRunDetail] = useState<AgentModalState | null>(null);
   const completedCount = (run.phases ?? []).reduce(
     (sum, p) => sum + (p.agents ?? []).filter((a) => a.status === 'completed').length,
     0,
@@ -815,16 +816,38 @@ function RunNode({
       </div>
 
       {run.error && (
-        <div className="flex items-start gap-1.5 px-3 py-1.5 text-xs text-red-400/90">
+        <button
+          type="button"
+          onClick={() =>
+            setRunDetail({
+              sections: [
+                { key: 'error', label: '错误', icon: '✕', content: run.error!, accent: 'red' },
+              ],
+              activeKey: 'error',
+            })
+          }
+          className="flex w-full items-start gap-1.5 px-3 py-1.5 text-left text-xs text-red-400/90 hover:bg-red-500/5"
+        >
           <CircleX className="w-3.5 h-3.5 shrink-0 mt-0.5 text-red-400/70" />
-          <span className="break-words min-w-0 whitespace-pre-wrap">{run.error}</span>
-        </div>
+          <span className="flex-1 min-w-0 truncate">{run.error}</span>
+        </button>
       )}
       {run.result && (
-        <div className="flex items-start gap-1.5 px-3 py-1.5 text-xs text-text-muted">
+        <button
+          type="button"
+          onClick={() =>
+            setRunDetail({
+              sections: [
+                { key: 'result', label: '结果', icon: '✓', content: run.result!, accent: 'emerald' },
+              ],
+              activeKey: 'result',
+            })
+          }
+          className="flex w-full items-start gap-1.5 px-3 py-1.5 text-left text-xs text-text-muted hover:bg-emerald-500/5"
+        >
           <CircleCheck className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-500/70" />
-          <span className="break-words min-w-0 whitespace-pre-wrap">{run.result}</span>
-        </div>
+          <span className="flex-1 min-w-0 truncate">{run.result}</span>
+        </button>
       )}
 
       {expanded && (
@@ -858,6 +881,13 @@ function RunNode({
           ))}
         </div>
       )}
+
+      <AgentDetailModal
+        state={runDetail}
+        agentName={run.name}
+        onClose={() => setRunDetail(null)}
+        onTabChange={(key) => setRunDetail((prev) => (prev ? { ...prev, activeKey: key } : prev))}
+      />
     </div>
   );
 }
