@@ -264,8 +264,15 @@ def _set_evolution_auto_save(
 ) -> None:
     monkeypatch.setattr(
         "jiuwenswarm.gateway.message_handler.message_handler.get_evolution_auto_save_enabled",
-        lambda: enabled,
+        lambda _config=None: enabled,
     )
+    original_init = MessageHandler.__init__
+
+    def _init_with_cached_auto_save(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._evolution_auto_save_enabled = enabled
+
+    monkeypatch.setattr(MessageHandler, "__init__", _init_with_cached_auto_save)
 
 
 async def _deliver_evolution_question(

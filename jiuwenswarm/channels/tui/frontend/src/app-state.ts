@@ -67,6 +67,7 @@ import {
   getCurrentCwd,
 } from "./core/tui-trusted-dirs-store.js";
 import { loadTuiConfig } from "./core/tui-config-store.js";
+import { runStatusLineCommand } from "./core/statusline-runner.js";
 import { generateCreateToken } from "./core/session-state.js";
 import {
   applyWorkflowUpdate,
@@ -84,11 +85,7 @@ import {
   type WorkflowRun,
 } from "./core/workflows.js";
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
-import { execFile, spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export interface ModelUsageEntry {
   model: string;
@@ -146,6 +143,8 @@ export interface AppSnapshot {
   workflowRuns: WorkflowRun[];
   pendingHumanPrompts: Map<string, PendingHumanPrompt>;
   evolutionStatus: "idle" | "running";
+  /** 后端 config.get 成功读取到的技能自演进展示开关。 */
+  skillEvolutionEnabled: boolean;
   contextCompression: ContextCompressionStats | null;
   contextWindowLimit: number | null;
   contextUsedPercentage: number | null;
@@ -191,6 +190,13 @@ function normalizePreferredLanguage(value: unknown): PreferredLanguage {
   return typeof value === "string" && value.trim().toLowerCase() === "en" ? "en" : "zh";
 }
 
+/** config.get 将技能自演进开关展平为 skill_evolution；未知/缺失值必须保持关闭。 */
+function parseSkillEvolutionEnabled(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== "string") return false;
+  return ["true", "1", "yes", "on", "enabled"].includes(value.trim().toLowerCase());
+}
+
 const LOCAL_FILE_SEARCH_TOOL_NAMES = new Set([
   "grep",
   "rg",
@@ -224,7 +230,11 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return (
+    mode === "agent.plan" ||
+    mode === "code.plan" ||
+    mode.startsWith("team.plan")
+  );
 }
 
 // ── Auto-recap (自动回顾) 常量 ──
@@ -234,37 +244,6 @@ const AUTO_RECAP_IDLE_THRESHOLD_MS = 5 * 60_000;
 const AUTO_RECAP_CHECK_INTERVAL_MS = 30_000;
 const ACTIVE_TURN_RECONNECT_TIMEOUT_MS = 60_000;
 const ACTIVE_NETWORK_CHECK_INTERVAL_MS = 8_000;
-
-function probeTcp(host: string, port: number, timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = createConnection({ host, port });
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.removeAllListeners();
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
-    socket.once("timeout", () => finish(false));
-    socket.once("error", () => finish(false));
-  });
-}
-
-async function hasExternalNetwork(): Promise<boolean> {
-  if (process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "1" || process.env.JIUWENSWARM_SKIP_NETWORK_CHECK === "true") {
-    return true;
-  }
-  const probes = [
-    probeTcp("223.5.5.5", 53, 1500),
-    probeTcp("114.114.114.114", 53, 1500),
-    probeTcp("1.1.1.1", 443, 1500),
-  ];
-  const results = await Promise.all(probes);
-  return results.some(Boolean);
-}
 
 function isLocalFileSearchTool(name: string): boolean {
   return LOCAL_FILE_SEARCH_TOOL_NAMES.has(name.trim().toLowerCase());
@@ -332,6 +311,7 @@ export class CliPiAppState {
    * `session.create` 原子恢复或登记，并明确绕过预热。
    */
   private bootSessionId: string | null = null;
+  private readonly bootPersistSession: boolean = false;
   /** 幂等守卫：boot session creation 只在首次 connection.ack 触发一次（重连/重发不重试）。 */
   private bootSessionHandled = false;
   /** connection.ack 到来时放行启动会话创建；构造期即存在，避免 connected 回调抢跑。 */
@@ -362,6 +342,8 @@ export class CliPiAppState {
   private workflowRuns: WorkflowRun[] = [];
   private pendingHumanPrompts: Map<string, PendingHumanPrompt> = new Map();
   private evolutionStatus: "idle" | "running" = "idle";
+  /** 配置读取失败时保持 false，避免前端暴露不可用的演进命令。 */
+  private skillEvolutionEnabled = false;
   private contextCompression: ContextCompressionStats | null = null;
   private contextWindowLimit: number | null = null;
   private contextUsedPercentage: number | null = null;
@@ -407,7 +389,6 @@ export class CliPiAppState {
   private activeTurnReconnectNoticeShown = false;
   private lastStreamActivityAt: number | null = null;
   private streamStallNoticeTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamStallNoticeShown = false;
   private streamStalled = false;
   /** 静默中断当前任务时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
@@ -469,6 +450,14 @@ export class CliPiAppState {
   private reauthPort: ReauthenticationPort | null = null;
   /** UiLifecyclePort；统一顶层关闭路径。 */
   private uiLifecycle: UiLifecyclePort | null = null;
+  /**
+   * Remote 模式：--url 指向远端服务器时为 true。
+   * 本地 PC 路径不可被远端沙箱访问，故请求时不发送本地 project_dir/cwd/trusted_dirs，
+   * 改用 {@link remoteProjectDir}（服务器侧 /home/<user-id>）作为 workspace。
+   */
+  private isRemote = false;
+  /** Remote 模式下的服务器侧 project_dir：/home/<user-id>；非 remote 时为空串。 */
+  private remoteProjectDir = "";
   /** interrupt_result 事件订阅器；等待型取消按 requestId 关联。 */
   private interruptResultListeners = new Set<
     (requestId: string, sessionId: string, success: boolean, message?: string) => void
@@ -634,14 +623,18 @@ export class CliPiAppState {
   constructor(
     private readonly wsClient: WsClient,
     cliSession?: string,
+    cliPersistSession?: boolean,
     supervision?: {
       handoffPort?: HandoffPort | null;
       taskLifecycle?: TaskLifecyclePort | null;
       reauthPort?: ReauthenticationPort | null;
       uiLifecycle?: UiLifecyclePort | null;
+      isRemote?: boolean;
+      remoteProjectDir?: string;
     },
   ) {
-    this.sessionId = cliSession || "new";
+    this.sessionId = cliSession || generateCreateToken();
+    this.bootPersistSession = Boolean(cliPersistSession);
     this.bootSessionId = cliSession ? cliSession : null;
     const startGate = new Promise<void>((resolve) => {
       this.bootSessionStart = resolve;
@@ -668,6 +661,8 @@ export class CliPiAppState {
     this.taskLifecycle = supervision?.taskLifecycle ?? null;
     this.reauthPort = supervision?.reauthPort ?? null;
     this.uiLifecycle = supervision?.uiLifecycle ?? null;
+    this.isRemote = supervision?.isRemote ?? false;
+    this.remoteProjectDir = supervision?.remoteProjectDir ?? "";
   }
 
   start(): void {
@@ -728,6 +723,14 @@ export class CliPiAppState {
     this.wsClient.disconnect();
   }
 
+  private setSkillEvolutionEnabled(enabled: boolean): void {
+    if (this.skillEvolutionEnabled === enabled) {
+      return;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.emitChange();
+  }
+
   private async fetchModelInfo(): Promise<void> {
     try {
       const [configPayload, modelsPayload, memoryPayload] = await Promise.allSettled([
@@ -755,6 +758,7 @@ export class CliPiAppState {
         ? models.find((m) => m.model_name === activeModelName)
         : models[0];
       this.preferredLanguage = normalizePreferredLanguage(config.preferred_language);
+      this.setSkillEvolutionEnabled(parseSkillEvolutionEnabled(config.skill_evolution));
       this.autoRecapEnabled = config.auto_recap_enabled !== "false";
       // 同步 auto-recap timer：WS 连接后才拿到配置，需根据实际值启停 timer
       if (this.autoRecapEnabled) {
@@ -865,7 +869,6 @@ export class CliPiAppState {
     }
     this.lastStreamActivityAt = Date.now();
     this.streamStalled = false;
-    this.streamStallNoticeShown = false;
     this.scheduleStreamStallWatchdog();
   }
 
@@ -891,7 +894,6 @@ export class CliPiAppState {
   private clearStreamStallWatchdog(): void {
     this.clearStreamStallTimers();
     this.lastStreamActivityAt = null;
-    this.streamStallNoticeShown = false;
     this.streamStalled = false;
   }
 
@@ -899,18 +901,14 @@ export class CliPiAppState {
     if (!this.hasActiveResponseStream()) {
       return;
     }
-    if (await hasExternalNetwork()) {
-      this.lastStreamActivityAt = Date.now();
-      this.scheduleStreamStallWatchdog();
-      return;
-    }
-    if (this.streamStallNoticeShown) {
-      return;
-    }
-    this.streamStallNoticeShown = true;
-    this.failActiveTurnAfterConnectionLoss(
-      "Network appears offline while the task is running. Stopped the current TUI response; reconnect and retry.",
-    );
+    // 到达此处时 connectionStatus 必为 "connected"（hasActiveResponseStream 已隐含，
+    // 且本函数 fire 于定时器回调、其间无 await 改写该字段）。ws 仍 connected 即认为
+    // 本地服务（Gateway/AgentServer）还活着、任务在跑只是暂未吐帧，故续期不报错。
+    // air-gapped 内网里 ws 恒 connected，故永远续期，消除公网探针必然失败导致的误报。
+    // 公网用户真断网时 ws 会先变 reconnecting（见 handleConnectionStatusChanged，走 60s
+    // 重连看门狗），本函数在 reconnecting 下不会被调到，故公网保护语义不变。
+    this.lastStreamActivityAt = Date.now();
+    this.scheduleStreamStallWatchdog();
   }
 
   private frameBelongsToActiveSession(frame: EventFrame): boolean {
@@ -1105,6 +1103,7 @@ export class CliPiAppState {
       })),
       pendingHumanPrompts: new Map(this.pendingHumanPrompts),
       evolutionStatus: this.evolutionStatus,
+      skillEvolutionEnabled: this.skillEvolutionEnabled,
       contextCompression: this.contextCompression ? { ...this.contextCompression } : null,
       contextWindowLimit: this.contextWindowLimit,
       contextUsedPercentage: this.contextUsedPercentage,
@@ -1400,6 +1399,25 @@ export class CliPiAppState {
     return this.reauthPort;
   }
 
+  /**
+   * 计算随请求发送的本地上下文路径（project_dir/cwd/trusted_dirs）。
+   * Remote 模式下本地 PC 路径不可被远端沙箱访问，故只发送服务器侧 /home/<user-id>
+   * 作为 project_dir/cwd，不发送 trusted_dirs；非 remote 时沿用本地 trusted_dirs/cwd。
+   */
+  private resolveRequestPaths(): {
+    projectDir: string;
+    cwd: string;
+    trustedDirs: string[];
+  } {
+    if (this.isRemote && this.remoteProjectDir) {
+      return { projectDir: this.remoteProjectDir, cwd: this.remoteProjectDir, trustedDirs: [] };
+    }
+    const trustedDirs = getTrustedDirs();
+    const projectDir = getCurrentProjectDir() || process.cwd();
+    const cwd = getCurrentCwd() || projectDir;
+    return { projectDir, cwd, trustedDirs };
+  }
+
   readonly sendEventOnly = (
     method: string,
     params: Record<string, unknown>,
@@ -1407,9 +1425,7 @@ export class CliPiAppState {
   ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     const send = () => {
-      const trustedDirs = getTrustedDirs();
-      const projectDir = getCurrentProjectDir() || process.cwd();
-      const cwd = getCurrentCwd() || projectDir;
+      const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
       this.wsClient.send({
         type: "req",
         id,
@@ -1447,9 +1463,7 @@ export class CliPiAppState {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     // 记录当前命令请求 ID，以便 Ctrl+C 时能立即取消 WS 请求
     this.activeCommandRequestId = id;
-    const trustedDirs = getTrustedDirs();
-    const projectDir = getCurrentProjectDir() || process.cwd();
-    const cwd = getCurrentCwd() || projectDir;
+    const { projectDir, cwd, trustedDirs } = this.resolveRequestPaths();
     try {
       const response = await this.wsClient.request(
         id,
@@ -1465,6 +1479,20 @@ export class CliPiAppState {
         },
         timeoutMs ?? 30000,
       );
+      if (method === "config.get") {
+        const payload = response.payload;
+        const enabled =
+          payload && typeof payload === "object" && !Array.isArray(payload)
+            ? parseSkillEvolutionEnabled((payload as Record<string, unknown>).skill_evolution)
+            : false;
+        this.setSkillEvolutionEnabled(enabled);
+      } else if (
+        method === "config.set" &&
+        Object.prototype.hasOwnProperty.call(params, "skill_evolution")
+      ) {
+        // config.set 响应只确认写盘；重新读取权威 payload，保证 hot reload 后 UI 与后端一致。
+        void this.fetchModelInfo();
+      }
       return response.payload as T;
     } finally {
       // 请求完成后清理追踪（无论成功/失败/取消）
@@ -3188,7 +3216,7 @@ export class CliPiAppState {
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
-    const cwd = getCurrentCwd() || process.cwd();
+    const { cwd, trustedDirs } = this.resolveRequestPaths();
     return {
       session_id: snapshot.sessionId,
       session_name: snapshot.sessionTitle,
@@ -3212,7 +3240,7 @@ export class CliPiAppState {
       evolution_status: snapshot.evolutionStatus,
       active_subtask_count: snapshot.activeSubtasks.length,
       todo_count: snapshot.todos.length,
-      trusted_dirs: getTrustedDirs(),
+      trusted_dirs: trustedDirs,
       usage: {
         total_input_tokens: usage.total_input_tokens,
         total_output_tokens: usage.total_output_tokens,
@@ -3240,57 +3268,22 @@ export class CliPiAppState {
     }
     const jsonInput = JSON.stringify(this.buildStatusLineJsonInput());
     const cmd = sl.command;
-    const isWindows = process.platform === "win32";
-
     try {
-      if (isWindows) {
-        // On Windows: pipe stdin (like POSIX) so `jq -r '.field'` works directly.
-        // Also write a temp file and export JIUWENSWARM_SL_FILE as a fallback for
-        // `$(cat "$JIUWENSWARM_SL_FILE")` style commands (sh -c can't $(cat) stdin).
-        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
-        writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile
-          .split(sep)
-          .join("/")
-          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
-        const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
-        const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
-
-        const child = execFile(
-          "sh",
-          ["-c", fullCmd],
-          { timeout: 3_000, maxBuffer: 10_240, cwd: getCurrentCwd() || process.cwd() },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        // Pipe stdin so commands that read stdin directly (jq, python, etc.) work
-        // on Windows the same way they do on POSIX — aligning with Claude Code behavior.
-        child.stdin?.end(jsonInput);
-      } else {
-        // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile(
-          "sh",
-          ["-c", cmd],
-          { timeout: 3_000, maxBuffer: 10_240 },
-          (err, stdout) => {
-            if (err) return;
-            const text = stdout.trim().replace(/\r\n/g, "\n");
-            if (text !== this.statusLineText) {
-              this.statusLineText = text || null;
-              this.emitChange();
-            }
-          },
-        );
-        child.stdin?.end(jsonInput);
-      }
+      runStatusLineCommand(
+        cmd,
+        jsonInput,
+        getCurrentCwd() || process.cwd(),
+        (err, stdout) => {
+          if (err) return;
+          const text = stdout.trim().replace(/\r\n/g, "\n");
+          if (text !== this.statusLineText) {
+            this.statusLineText = text || null;
+            this.emitChange();
+          }
+        },
+      );
     } catch {
-      // Silently ignore — sh may not be in PATH on Windows
+      // Ignore launch errors; invalid commands should not disrupt the TUI.
     }
   }
 
@@ -3380,6 +3373,7 @@ export class CliPiAppState {
         "session.create",
         {
           ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+          ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
           previous_session_id: "",
           previous_mode: previousMode,
           mode: previousMode,
@@ -3394,7 +3388,7 @@ export class CliPiAppState {
       const placeholderId = this.sessionId;
       const pendingVisibleRequest = this.lastVisibleUserRequest;
       this.updateSession(createdId);
-      if (target === null && placeholderId === "new") {
+      if (target === null && placeholderId !== createdId) {
         this.entries = this.entries.map((entry) =>
           entry.sessionId === placeholderId ? { ...entry, sessionId: createdId } : entry,
         );

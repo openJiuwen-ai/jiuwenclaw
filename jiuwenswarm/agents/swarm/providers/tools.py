@@ -24,7 +24,6 @@ The generic web / vision / audio tools are provided by openjiuwen
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -101,7 +100,6 @@ IMAGE_GEN = "swarm.image_gen"
 XIAOYI_PHONE = "swarm.xiaoyi_phone"
 SYMPHONY_TOOLKIT = "swarm.symphony_toolkit"
 CODE_EXTRA_TOOLS = "swarm.code_extra_tools"
-_CODE_MODES = frozenset({"code.team", "team.plan"})
 
 # xiaoyi phone tool objects, gated by ``channels.xiaoyi.phone_tools_enabled``.
 _XIAOYI_PHONE_TOOLS = (
@@ -156,75 +154,81 @@ def _workspace_root(ctx: SwarmBuildContext) -> str | None:
     return getattr(ctx.workspace, "root_path", None) if ctx.workspace else None
 
 
-def _scan_skill_names_from_dirs(skill_dirs: list[str], disabled_skills: set[str]) -> set[str]:
+def _skill_library_dir(ctx: SwarmBuildContext) -> Path:
+    """Return the one physical Skill library this context reads."""
+    from jiuwenswarm.common.utils import get_agent_skills_dir
+
+    raw = getattr(ctx, "global_skills_dir", None)
+    return Path(raw).expanduser() if raw else get_agent_skills_dir()
+
+
+def _scan_library_skill_names(library_dir: Path) -> set[str]:
+    """Return every installed Skill name in the library, ignoring visibility.
+
+    A directory counts as a Skill when it holds a ``SKILL.md``; ``_``- and
+    ``.``-prefixed directories are internal (state files, locks) and never
+    Skills.
+
+    Args:
+        library_dir: The single physical Skill library.
+
+    Returns:
+        The installed Skill names (empty when the library does not exist yet).
+    """
+    if not library_dir.is_dir():
+        return set()
     names: set[str] = set()
-    for raw_dir in skill_dirs:
-        root = Path(raw_dir).expanduser()
-        if not root.is_dir():
+    for child in library_dir.iterdir():
+        if not child.is_dir() or child.name.startswith(("_", ".")):
             continue
-        for child in sorted(root.iterdir(), key=lambda path: path.name.lower()):
-            if not child.is_dir() or child.name.startswith("_") or child.name.startswith("."):
-                continue
-            if child.name in disabled_skills:
-                continue
-            if (child / "SKILL.md").is_file():
-                names.add(child.name)
+        if (child / "SKILL.md").is_file():
+            names.add(child.name)
     return names
 
 
-def _collect_disabled_skills_from_state(skill_dirs: list[str]) -> set[str]:
-    disabled: set[str] = set()
-    for raw_dir in skill_dirs:
-        state_path = Path(raw_dir).expanduser() / "skills_state.json"
-        if not state_path.is_file():
-            continue
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            logger.warning("[swarm.skill_retrieval] failed to read skills state: %s", state_path)
-            continue
-        skill_configs = data.get("skill_configs", {})
-        if not isinstance(skill_configs, dict):
-            continue
-        for name, cfg in skill_configs.items():
-            if isinstance(cfg, dict) and cfg.get("enabled") is False:
-                disabled.add(str(name))
-    return disabled
+def _apply_skill_visibility(
+    names: set[str],
+    enabled_skills: set[str],
+    disabled_skills: set[str],
+) -> set[str]:
+    """Filter *names* exactly the way ``SkillUseRail`` filters its own view.
 
+    An empty ``enabled_skills`` means "no allow filtering", not "deny
+    everything"; ``disabled_skills`` always wins. Keeping the two rules
+    byte-identical to the rail is what makes ``list_skill`` agree with what the
+    member can actually invoke.
 
-def _list_skill_dirs_for_context(ctx: SwarmBuildContext) -> list[str]:
-    workspace = getattr(ctx, "workspace", None)
-    skill_dirs: list[str] = []
-    if workspace is not None:
-        get_node_path = getattr(workspace, "get_node_path", None)
-        if callable(get_node_path):
-            skills_base = get_node_path("skills")
-            if skills_base:
-                skill_dirs.append(str(skills_base))
+    Args:
+        names: Candidate Skill names from the library.
+        enabled_skills: Composed allow-list (possibly empty).
+        disabled_skills: Composed deny-list.
 
-        list_team_links = getattr(workspace, "list_team_links", None)
-        if callable(list_team_links):
-            for _team_id, target_path in list_team_links():
-                skill_dirs.append(str(Path(target_path) / "skills"))
-
-    team_skills_dir = getattr(ctx, "team_skills_dir", None)
-    if team_skills_dir:
-        skill_dirs.append(str(team_skills_dir))
-    return list(dict.fromkeys(skill_dirs))
+    Returns:
+        The visible subset.
+    """
+    visible = names & enabled_skills if enabled_skills else set(names)
+    return visible - disabled_skills
 
 
 def visible_skill_names_for_list_skill(ctx: SwarmBuildContext) -> set[str]:
-    """Return the skill names that the matching SkillUseRail would expose."""
-    if ctx.mode in _CODE_MODES:
-        from jiuwenswarm.common.utils import get_agent_skills_dir
-        from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
+    """Return the skill names that the matching SkillUseRail would expose.
 
-        skill_dirs = [str(Path(ctx.global_skills_dir) if ctx.global_skills_dir else get_agent_skills_dir())]
-        return _scan_skill_names_from_dirs(skill_dirs, set(load_execution_disabled_skills()))
+    Reads the member/team visibility metadata instead of scanning a
+    materialized per-member directory view: there is one physical library and
+    the documents decide who sees what. Deliberately evaluated on every call so
+    a runtime authorization change is reflected without rebuilding the tools.
 
-    skill_dirs = _list_skill_dirs_for_context(ctx)
-    disabled_skills = _collect_disabled_skills_from_state(skill_dirs)
-    return _scan_skill_names_from_dirs(skill_dirs, disabled_skills)
+    Args:
+        ctx: The per-member build context.
+
+    Returns:
+        The Skill names visible to this member.
+    """
+    from jiuwenswarm.agents.swarm.providers.skills import compose_member_skill_visibility
+
+    names = _scan_library_skill_names(_skill_library_dir(ctx))
+    enabled_skills, disabled_skills = compose_member_skill_visibility(ctx)
+    return _apply_skill_visibility(names, enabled_skills, disabled_skills)
 
 
 def _parse_int(value: Any, default: int) -> int:
@@ -323,10 +327,17 @@ def audio_model_config_params(config: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _build_skill_toolkit_tools(workspace_root: str | None) -> list[Any]:
-    """Build the skill-management tools bound to the member workspace."""
+def _build_skill_toolkit_tools() -> list[Any]:
+    """Build the skill-management tools bound to the shared agent workspace.
+
+    Installs land in the one physical Skill library, so the manager is rooted
+    at the shared agent workspace rather than at the member workspace — a
+    member workspace holds a visibility document, never Skill sources.
+    """
+    from jiuwenswarm.common.utils import get_agent_workspace_dir
+
     try:
-        manager = SkillManager(workspace_dir=workspace_root)
+        manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         toolkit = SkillToolkit(manager=manager)
         return list(toolkit.get_tools())
     except Exception as exc:
@@ -415,7 +426,8 @@ class SkillToolkitInput(ConstructionInput):
 
     workspace_root: str | None = context_field(
         resolver=_workspace_root,
-        description="Member workspace root; the SkillManager resolves skills from it.",
+        description="Member workspace root (gate; skipped when absent). Skills "
+        "themselves come from the single shared library, not from here.",
     )
 
 
@@ -437,7 +449,9 @@ class SkillRetrievalInput(ConstructionInput):
 def build_skill_toolkit(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any]:
     """Build the whitelist-filtered skill toolkit tools."""
     inp = SkillToolkitInput.resolve(params, ctx)
-    return _filter_whitelist(_build_skill_toolkit_tools(inp.workspace_root))
+    if not inp.workspace_root:
+        return []
+    return _filter_whitelist(_build_skill_toolkit_tools())
 
 
 @harness_element(

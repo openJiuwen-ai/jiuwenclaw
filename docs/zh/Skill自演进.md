@@ -12,7 +12,7 @@ JiuwenSwarm 的 Skill 自演进机制通过内置的演进信号检测系统，�
 
 Skill 自演进机制的核心价值在于：
 
-- **无需人工干预**：智能体在日常运转过程中自动完成对自身的改进
+- **降低日常干预成本**：智能体自动识别可复用经验，再按审批配置保存
 - **持续能力提升**：随着使用时间增加，Skills 的准确性和可靠性不断提高
 - **自适应场景变化**：能够根据实际使用场景自动调整和优化
 - **降低维护成本**：减少了手动更新和维护 Skills 的工作量
@@ -21,15 +21,28 @@ Skill 自演进机制的核心价值在于：
 
 ### 2.1 自演进配置开关
 
-Skill 自动演进功能通过在配置信息中开启自演进配置项 `evolution_auto_scan` 开关启用。
+Skill 自动学习功能通过配置项 `react.evolution.skill_evolution` 启用，默认为 `false`。Web 和 TUI 的配置页只展示这一个开关；开启后，系统可以自动提炼经验、建议创建 Skill，并提供 `/evolve` 演进命令和工具。
+
+关闭开关会同时禁用上述自动学习和手动演进能力，但不影响用户显式使用通用 `skill-creator` 或 `swarmskill-creator` 能力。升级前使用 `enabled`、`auto_scan`、`skill_create` 或相关环境变量的配置不会自动启用新开关，需要显式迁移。
+
+最小配置如下：
+
+```yaml
+react:
+  evolution:
+    skill_evolution: true
+    auto_save: false
+```
+
+`auto_save` 是仅在 YAML 中使用的高级审批选项：`false` 时，Single Agent 和 Team leader 的常规演进结果需要审批；`true` 时可自动保存常规演进结果。Teammate 使用固定自动审批策略。
 
 ![打开自演进自动检测](../assets/images/skill演进_自动检测开关.png)
 
-### 2.2 自动演进（无需干预）
+### 2.2 自动演进
 
-系统会在每次工具执行和对话结束后自动检测演进信号。当检测到执行异常或用户纠错时，会自动生成演进记录并存入 `evolutions.json`。
+系统会在**每次完整对话结束后**（`after_invoke` 阶段）统一检测演进信号，确保拥有完整的对话上下文来判断。当检测到执行异常或用户纠错时，会生成演进记录。
 
-你无需做任何操作，演进在后台静默进行。下次调用该 Skill 时，会自动加载包含演进经验的内容。
+系统会自动识别可演进信号并生成候选经验。是否需要用户确认取决于角色和 `auto_save` 配置；经验保存后，下次调用该 Skill 时会自动加载。
 
 ![自动触发](../assets/images/skill演进_自动触发.png)
 
@@ -65,15 +78,17 @@ Skill 自动演进功能通过在配置信息中开启自演进配置项 `evolut
 
 ### 2.5 管理演进经验
 
-演进经验存储在 Skill 目录下的 `evolutions.json` 文件中，你可以直接编辑该文件来管理演进经验：
+演进经验存储在 Skill 目录下的 `evolutions.json` 文件中（首次触发演进时才会创建该文件，未触发时可能不存在），你可以直接编辑该文件来管理演进经验：
 
 **目录位置：**
 ```
-~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
+~/.jiuwenswarm/agent/workspace/skills/<skill_name>/
 ├── SKILL.md           # Skill 源文档
-├── evolutions.json    # 演进经验记录 ← 在这里编辑
+├── evolutions.json    # 演进经验记录 ← 首次触发演进后创建
 └── ...
 ```
+
+> **集群（Agent Team）模式下路径完全相同。** 技能实体只有一份，就在上面这个全局技能库里；团队工作区和成员工作空间下没有 `skills/` 目录，也没有副本。团队成员产生的演进记录，写的就是全局技能库中该 Skill 目录下的同一份 `evolutions.json`。团队成员能看见库里哪些技能，由可见性声明决定，参见 [Agent Team](AgentTeam.md) 的「Team Skills」小节。
 
 **常用操作：**
 - 添加新记录：在 `entries` 数组中追加新对象
@@ -180,27 +195,27 @@ SkillCallOperator 是 JiuwenSwarm 与 Skills 交互的核心入口，负责 Skil
 
 当系统检测到需要改进的地方，这些改进会先存入 `evolutions.json`，SkillCallOperator 会把它们合并后一起返回给 Agent。
 
-#### 4.1.2 SkillOptimizer
+#### 4.1.2 SkillExperienceOptimizer
 
-SkillOptimizer 是驱动整个 Skill 演进流程的优化器：
+SkillExperienceOptimizer 是驱动 Skill 经验生成的优化器：
 
 1. **接收信号**：从 SignalDetector 接收异常信号，理解当前 Skill 遇到的问题
 2. **分析判断**：结合对话上下文，判断问题是否值得记录
 3. **生成改进**：调用 LLM 生成具体的改进建议
-4. **执行记录**：将生成的改进方案写入演进记录
+4. **暂存记录**：将生成的改进方案暂存，待审批后写入（或直接写入，取决于 `auto_save` 配置）
 
-使用 `/evolve` 命令时，背后就是 SkillOptimizer 在工作。
+使用 `/evolve` 命令时，背后就是 SkillExperienceOptimizer 在工作。
 
-#### 4.1.3 SkillEvolutionManager
+#### 4.1.3 SkillEvolutionRail
 
-SkillEvolutionManager 是演进生命周期的核心管理者，负责协调各个阶段的演进工作：
+SkillEvolutionRail 是整个 Skill 自演进系统的核心 Rails 组件，在 `after_invoke`（完整对话结束后）阶段执行演进逻辑：
 
 - **信号扫描**：调用 SignalDetector 提取需要演进的事件
-- **记录生成**：调用 LLM 将信号转化为可执行的改进方案
-- **存储管理**：维护 `evolutions.json` 文件的读写
-- **内容固化**：将待定演进记录合并到原始 SKILL.md
+- **经验生成**：调度 SkillExperienceOptimizer 将信号转化为可执行的改进方案
+- **审批流程**：根据 `auto_save` 配置，自动写入或弹出审批请求
+- **存储管理**：通过 EvolutionStore 维护 `evolutions.json` 文件的读写
 
-它衔接了 SignalDetector、SkillOptimizer 和 SkillCallOperator，形成完整的演进闭环。
+它继承自 EvolutionRail，衔接 SignalDetector、SkillExperienceOptimizer 和 EvolutionStore，形成完整的演进闭环。核心方法包括 `run_evolution`（执行演进）、`generate_and_emit_experience`（生成并发送经验）。
 
 #### 4.1.4 SignalDetector
 
@@ -253,21 +268,34 @@ SignalDetector 基于规则工作，不需要调用 LLM，因此响应速度快�
              │
              ▼
 ┌─────────────────────────────┐
-│    SkillEvolutionManager    │
-│       .generate()          │  LLM 生成演进记录
-└────────────┬───────────────┘
+│  SkillExperienceOptimizer   │  LLM 生成演进记录
+└────────────┬────────────────┘
              │
              ▼
+    ┌─────────────────┐
+    │ auto_save: true? │
+    └────┬─────────┬──┘
+         │Yes      │No
+         ▼          ▼
+┌──────────────┐  ┌──────────────────┐
+│ 直接写入     │  │ 弹出审批请求     │
+│evolutions.json│ │ (用户确认后写入)  │
+└──────┬───────┘  └────────┬─────────┘
+       │                    │
+       └─────────┬──────────┘
+                 ▼
 ┌─────────────────────────────┐
-│      evolutions.json        │  写入待固化记录
-│    (Skill 目录下)          │
-└────────────┬───────────────┘
+│       evolutions.json       │  存储待固化记录
+│      (Skill 目录下)         │
+└────────────┬────────────────┘
              │
              ▼ (可选)
 ┌─────────────────────────────┐
-│         .solidify()         │  合并到 SKILL.md
+│      SkillCallOperator      │  加载经验 + SKILL.md 一起返回
 └─────────────────────────────┘
 ```
+
+> **关于固化（Solidify）**：演进经验不需要单独的固化步骤。当 Skill 被调用时，系统自动将 `evolutions.json` 中的经验与 `SKILL.md` 一起加载。如需将经验永久合并到 `SKILL.md` 中，可使用 `/evolve rebuild <skill_name>` 命令重建 Skill。
 
 ### 4.4 演进记录存储
 
@@ -298,3 +326,9 @@ SignalDetector 基于规则工作，不需要调用 LLM，因此响应速度快�
 其中：
 - `applied: false` 表示待固化状态
 - `applied: true` 表示已固化到 SKILL.md
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

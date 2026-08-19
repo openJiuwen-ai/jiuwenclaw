@@ -228,22 +228,10 @@ react:
       trigger_context_ratio: 0.8
       min_target_context_ratio: 0.1
       keep_recent_messages: 4
-    reasoning_tool_loop_compact_config:
-      enabled: true
-      consecutive_threshold: 3
-      tool_args_consecutive_threshold: 5
-      reasoning_min_chars: 4
-      reasoning_preview_max_chars: 512
-      bailout_threshold: 3
-      tool_args_bailout_threshold: 2
   # Skills 在线自演进配置
   evolution:
-    enabled: true             # true = 启用在线 Skills 自演进
-    auto_scan: false           # 兼容开关：leader 触发 review
-    signal_trigger:            # leader 规则触发保持关闭；保留字段以对齐通用配置
-    review_trigger:            # true / false = 显式覆盖软触发；留空时回退 auto_scan
-    auto_save: false           # true = 自演进审批无需用户点击自动通过（内部开关）
-    skill_base_dir: "agent/skills"  # Skill 根目录
+    skill_evolution: false     # true = 启用技能演进与创建（自动及手动）
+    auto_save: false           # true = 自演进审批无需用户点击自动通过
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0
@@ -302,6 +290,24 @@ heartbeat:
   active_hours:
     start: 08:00
     end: 22:00
+
+# 执行护栏：工具循环检测与主动中断（分布式模板为完整配置，不合并基础 config.yaml）
+execution_guard:
+  # 模型异常检测护栏：重复输出/流式帧超时重试，以及连续相同工具调用压缩
+  model_anomaly_detection_rail:
+    enabled: true
+    max_retries: 2
+    repeat_min_pattern_chars: 2
+    repeat_max_pattern_chars: 64
+    repeat_min_count: 6
+    repeat_min_total_chars: 160
+    repeat_window_chars: 1024
+    single_char_repeat_count: 90
+    # 连续相同工具名+入参+返回值时，折叠重复轮次；第 N 次命中时兜底中止
+    tool_loop_compact:
+      enabled: true
+      consecutive_threshold: 4
+      bailout_threshold: 3
 
 channels:
   web:
@@ -631,8 +637,8 @@ updater:
   repo_owner: openJiuwen
   repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern: "JiuwenSwarm-setup-{version}.exe"
-  sha256_name_pattern: "JiuwenSwarm-setup-{version}.exe.sha256"
+  # Windows/macOS use .exe/.dmg; multiple candidates prefer a unique WorkSwarm name.
+  asset_name_pattern_linux: "JiuwenSwarm-{version}.tar.gz"
   timeout_seconds: 20
 
 extensions:

@@ -8,6 +8,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 """
 
 from __future__ import annotations
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ parse_dotenv_early("jiuwenswarm-app")
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
     cleanup_team_files,
+    ensure_default_builtin_skills,
     get_env_file,
     get_user_workspace_dir,
     prepare_workspace,
@@ -38,9 +40,20 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
 cleanup_team_files(_workspace_dir)
 
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration),
+# or if the preset MCP package dir isn't seated yet (e.g. an install predating
+# the mcp_builtins zip-seed feature — the gate above would otherwise skip an
+# already-initialized workspace, leaving mcp_builtins absent and mcp.list empty).
+_mcp_builtins_dir = _new_workspace / "mcp" / "mcp_builtins"
+config_missing = not _config_file.exists()
+workspace_migration_needed = _old_workspace.exists() and not _new_workspace.exists()
+mcp_builtins_missing = not _mcp_builtins_dir.is_dir()
+
+if config_missing or workspace_migration_needed or mcp_builtins_missing:
     prepare_workspace(overwrite=False)
+
+# 幂等地补齐默认内置技能（对已有工作区也生效，新增默认技能时自动安装）
+ensure_default_builtin_skills()
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -65,6 +78,17 @@ def main() -> None:
         help="Start a named instance from instances.yaml.",
     )
     args = parser.parse_args()
+
+    # Route SIGTERM through the same shutdown path as Ctrl-C.
+    #
+    # Python's default SIGTERM disposition kills this process outright, so the
+    # ``finally: _terminate_all()`` below never runs and the AgentServer /
+    # Gateway children keep running as orphans holding their ports. That is
+    # exactly what happens when a launcher stops this process by PID (e.g.
+    # ``jiuwenswarm-start --stop <name>``); Ctrl-C never showed the bug because
+    # SIGINT reaches the whole foreground process group, children included.
+    # Mirrors the same call in ``start_services.main()``.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     install_async_dump_handler("app")
 
@@ -99,16 +123,9 @@ def main() -> None:
         except (TypeError, ValueError, OverflowError):
             os.environ["JIUWENSWARM_START_CMD"] = json.dumps([str(a) for a in sys.argv[:]])
 
-    agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
-    gateway = None
-    try:
-        gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
-    except Exception:
-        if agent.poll() is None:
-            agent.terminate()
-        raise
-
-    procs: list[subprocess.Popen] = [agent] + ([gateway] if gateway else [])
+    # Populated as each child spawns, so _terminate_all() always covers exactly
+    # what is currently running - including when the second spawn never happens.
+    procs: list[subprocess.Popen] = []
 
     def _terminate_all() -> None:
         for p in procs:
@@ -125,11 +142,20 @@ def main() -> None:
 
     exit_code = 0
     try:
+        # Spawning happens inside the try so that a signal (or a failing second
+        # Popen) arriving between the two spawns still tears the first one down.
+        # KeyboardInterrupt is a BaseException, so an `except Exception` guard
+        # around the second spawn would have let it orphan the AgentServer.
+        agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
+        procs.append(agent)
+        gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
+        procs.append(gateway)
+
         while True:
             if agent.poll() is not None:
                 exit_code = agent.returncode or 0
                 break
-            if gateway is not None and gateway.poll() is not None:
+            if gateway.poll() is not None:
                 exit_code = gateway.returncode or 0
                 break
             time.sleep(0.25)

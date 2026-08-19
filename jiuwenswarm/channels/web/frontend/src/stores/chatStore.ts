@@ -93,6 +93,8 @@ export interface ReasoningSegment {
   text: string;
   startedAt: number;
   closed: boolean;
+  /** 最近一个 delta 到达时刻；即使 final 丢失，耗时终点也能落在最后一个真实帧。 */
+  updatedAt?: number;
   /** 收尾时刻；用于延迟折进 streak。历史可省略。 */
   closedAt?: number;
 }
@@ -226,7 +228,7 @@ interface ChatState {
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
   appendReasoning: (sessionId: string, content: string, options?: { atMs?: number }) => void;
   closeReasoning: (sessionId: string, options?: { atMs?: number }) => void;
-  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string }[]) => void;
+  restoreReasoningSegments: (sessionId: string, items: { at: string; text: string; updatedAt?: number }[]) => void;
   startStreaming: (sessionId: string, messageId: string, streamKey?: string) => void;
   stopStreaming: (sessionId: string, streamKey?: string) => void;
   finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
@@ -338,8 +340,8 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
             ...runtime,
             messages: [...runtime.messages, ...messages],
             messageRenderKeySeq,
-            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
-          },
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: runtime.reasoningSegments.filter((s) => s.closed) } : {}),
+          },  
         },
       };
     });
@@ -447,12 +449,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           : Date.now();
       let next: ReasoningSegment[];
       if (last && !last.closed) {
-        next = segments.slice(0, -1).concat({ ...last, text: last.text + content });
+        // 每个 delta 都推进 updatedAt，使耗时终点不依赖 closeReasoning 收尾事件
+        next = segments.slice(0, -1).concat({ ...last, text: last.text + content, updatedAt: atMs });
       } else {
         next = segments.concat({
           id: createReasoningSegmentId(),
           text: content,
           startedAt: atMs,
+          updatedAt: atMs,
           closed: false,
         });
       }
@@ -485,6 +489,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
               ...last,
               closed: true,
               closedAt: atMs,
+              updatedAt: atMs,
             }),
           },
         },
@@ -510,6 +515,13 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           return;
         }
         const startedAt = parsed - 1;
+        // updatedAt 取落盘的 reasoning_updated_at（末帧时刻）；缺失/非法时回退 startedAt，
+        // 使异常结束的耗时终点也能落在最后一个真实帧。
+        const replayUpdatedAt = parseTimestampToMs(item.updatedAt);
+        const updatedAt =
+          Number.isFinite(replayUpdatedAt) && replayUpdatedAt > 1_000_000_000_000
+            ? replayUpdatedAt
+            : startedAt;
         segments.push({
           id: `hist-rsn-${sessionId}-${index}-${createReasoningSegmentId()}`,
           text,
@@ -517,6 +529,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           closed: true,
           // 历史已结束：closedAt 用 startedAt，立刻 settled，且比魔法 0 更可解释。
           closedAt: startedAt,
+          updatedAt,
         });
       });
       segments.sort((a, b) => a.startedAt - b.startedAt);
@@ -1606,7 +1619,14 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
       return;
     }
     const runtime = get().runtimes[sessionId] ?? createEmptyRuntime();
-    const busy = Boolean(runtime.isProcessing || runtime.currentStreamId);
+    // 暂存的目的是"避免插进当前回答中间拆轮"——只有存在可被拆的 assistant 轮次时才有意义。
+    // 后端 _should_defer_goal_objective_history 也是精确判断"有无活跃 user round / 并发任务"，
+    // idle 时不 defer（test_should_not_defer_when_idle）。这里用"已有 assistant 消息且仍在处理"
+    // 对齐该语义：新会话首次设目标时 messages 里没有 assistant 消息，即便
+    // registerCreatedConversation 把 isProcessing 乐观置 true 也不暂存，立即落地，避免用户
+    // 气泡被推迟到 agent 回复完成之后才 append 到末尾（顺序错乱、时间戳变落地时刻）。
+    const hasAssistantTurn = (runtime.messages ?? []).some((message) => message.role === 'assistant');
+    const busy = hasAssistantTurn && Boolean(runtime.isProcessing || runtime.currentStreamId);
     if (busy) {
       get().setPendingGoalObjectiveBubble(sessionId, trimmed);
       return;

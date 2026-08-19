@@ -22,6 +22,8 @@ export interface SessionCreatePayload {
   projectDir?: string;
   work_mode?: WorkMode | string;
   workMode?: WorkMode | string;
+  persist_session?: boolean;
+  persistSession?: boolean;
 }
 
 export interface CreatedConversationSession {
@@ -29,6 +31,7 @@ export interface CreatedConversationSession {
   project_id?: string;
   project_dir?: string;
   work_mode?: WorkMode;
+  persist_session: boolean;
 }
 
 export interface CreateConversationSessionOptions {
@@ -70,6 +73,7 @@ function normalizeCreatedSession(payload: SessionCreatePayload): CreatedConversa
     project_id: payload.project_id ?? payload.projectId,
     project_dir: payload.project_dir ?? payload.projectDir,
     work_mode: normalizeWorkMode(payload.work_mode ?? payload.workMode),
+    persist_session: (payload.persist_session ?? payload.persistSession) === true,
   };
 }
 

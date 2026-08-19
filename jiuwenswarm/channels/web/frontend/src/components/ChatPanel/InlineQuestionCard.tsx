@@ -41,7 +41,7 @@ function ApprovalQuestionContent({ question }: { question: Question }) {
  * - 执行：`plan_execute`，批准并退出计划模式，本轮到此结束；随后由前端补发的
  *   普通消息开启新一轮真正执行。
  * - 修改框留空 + 跳过：`plan_skip`，留在计划模式并结束本轮。
- * - 修改框有内容 + 下一步：`reject` + `custom_input`，继续完善同一份计划。
+ * - 修改框有内容 + 下一步：`plan_revise` + `custom_input`，继续完善同一份计划。
  */
 function PlanApprovalActions({
   disabled,
@@ -55,12 +55,13 @@ function PlanApprovalActions({
   const hasRevision = revision.trim().length > 0;
 
   return (
-    <div className="px-4 pb-3 flex flex-col gap-2">
+    <div className="px-4 pb-3 flex flex-col gap-2" data-testid="chat-panel-plan-approval-actions">
       <button
         type="button"
         disabled={disabled}
         onClick={() => onAct('plan_execute', '')}
         className="w-full px-4 py-2.5 text-sm font-medium rounded-lg text-white"
+        data-testid="chat-panel-plan-approval-execute"
         style={{
           background: 'linear-gradient(135deg, var(--color-feedback-success), var(--color-action-primary))',
           opacity: disabled ? 0.6 : 1,
@@ -78,6 +79,7 @@ function PlanApprovalActions({
           disabled={disabled}
           rows={2}
           className="flex-1 px-3 py-2 text-sm rounded-lg resize-none focus:outline-none"
+          data-testid="chat-panel-plan-approval-revision-input"
           style={{
             backgroundColor: 'var(--color-surface-elevated)',
             border: '1px solid var(--color-border-default)',
@@ -92,7 +94,7 @@ function PlanApprovalActions({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && hasRevision) {
               e.preventDefault();
-              onAct('reject', revision.trim());
+              onAct('plan_revise', revision.trim());
             }
           }}
         />
@@ -100,9 +102,11 @@ function PlanApprovalActions({
           type="button"
           disabled={disabled}
           onClick={() =>
-            hasRevision ? onAct('reject', revision.trim()) : onAct('plan_skip', '')
+            hasRevision ? onAct('plan_revise', revision.trim()) : onAct('plan_skip', '')
           }
           className="px-4 py-2 text-sm font-medium rounded-lg whitespace-nowrap"
+          data-testid="chat-panel-plan-approval-next"
+          data-variant={hasRevision ? 'next' : 'skip'}
           style={{
             backgroundColor: hasRevision
               ? 'var(--color-action-primary-subtle)'
@@ -282,7 +286,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
     : 'var(--color-action-primary)';
 
   return (
-    <div className="animate-rise mx-2 my-3">
+    <div className="animate-rise mx-2 my-3" data-testid="chat-panel-inline-question-card">
       <div
         className="w-full rounded-xl overflow-hidden"
         style={{
@@ -293,12 +297,13 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
         {/* 标题行 */}
         <div
           className="px-4 py-2.5 flex items-center justify-between"
+          data-testid="chat-panel-inline-question-header"
           style={{
             borderBottom: '1px solid var(--color-border-default)',
             backgroundColor: 'var(--color-surface-panel-strong)',
           }}
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" data-testid="chat-panel-inline-question-header-main">
             {isEvolution ? (
               <svg
                 className="w-3.5 h-3.5 flex-shrink-0"
@@ -332,6 +337,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             )}
             <span
               className="text-xs font-semibold"
+              data-testid="chat-panel-inline-question-title"
               style={{ color: isEvolution ? borderColor : 'var(--color-action-primary)' }}
             >
               {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
@@ -339,6 +345,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             {isBatch && (
               <span
                 className="text-xs"
+                data-testid="chat-panel-inline-question-entry-count"
                 style={{ color: 'var(--color-text-secondary)' }}
               >
                 {t('chatUi.inlineQuestion.entryCount', { count: pendingQuestion.questions.length })}
@@ -349,6 +356,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             <button
               onClick={handleAcceptAll}
               className="text-xs font-medium px-2.5 py-1 rounded-md  hover:opacity-80"
+              data-testid="chat-panel-inline-question-accept-all"
               style={{
                 color: 'white',
                 background: 'linear-gradient(135deg, var(--color-feedback-success), var(--color-action-primary))',
@@ -362,6 +370,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
         {/* 问题列表 */}
         <div
           className="overflow-y-auto"
+          data-testid="chat-panel-inline-question-list"
           style={{ maxHeight: '60vh' }}
         >
           {pendingQuestion.questions.map((question, qIndex) => {
@@ -370,6 +379,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             return (
               <div
                 key={qIndex}
+                data-testid="chat-panel-inline-question-item"
+                data-variant={qIndex}
                 style={
                   qIndex > 0
                     ? { borderTop: '1px solid var(--color-border-default)' }
@@ -379,6 +390,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                 {/* 问题正文。计划审批的正文已作为对话气泡展示，这里只留一行提示 */}
                 <div
                   className="px-4 pt-3 pb-2 text-sm prose prose-sm max-w-none prose-headings:font-semibold prose-headings:text-sm prose-ul:my-1 prose-li:my-0 prose-li:pl-1"
+                  data-testid="chat-panel-inline-question-item-body"
                   style={{ color: 'var(--color-text-primary)' }}
                 >
                   {isPlanApproval ? (
@@ -395,7 +407,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                     onAct={handlePlanAction}
                   />
                 ) : (
-                <div className="px-4 pb-3 flex flex-col gap-2">
+                <div className="px-4 pb-3 flex flex-col gap-2" data-testid="chat-panel-inline-question-item-options">
                   {question.options.map((option) => {
                     const optionValue = isOtherOption(option) ? OTHER_VALUE : (option.value || option.label);
                     const isAccept = option.label === t('chatUi.inlineQuestion.accept')
@@ -415,6 +427,8 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                         onClick={() => handleSelect(qIndex, option)}
                         disabled={submitted}
                         className="w-full text-left px-4 py-2.5 text-sm font-medium rounded-lg "
+                        data-testid="chat-panel-inline-question-item-option"
+                        data-variant={optionValue}
                         style={{
                           backgroundColor: isSelected
                             ? (isAccept
@@ -470,10 +484,10 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                           el.style.color = 'var(--color-text-primary)';
                         }}
                       >
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center justify-between gap-3" data-testid="chat-panel-inline-question-item-option-content">
                           <span>{option.label}</span>
                           {option.description && (
-                            <span className="text-xs font-normal" style={{ color: 'var(--color-text-secondary)' }}>
+                            <span className="text-xs font-normal" data-testid="chat-panel-inline-question-item-option-desc" style={{ color: 'var(--color-text-secondary)' }}>
                               {option.description}
                             </span>
                           )}
@@ -484,7 +498,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
 
                   {/* 选中 Other 后展开自定义输入框：填完再提交 */}
                   {selectedValue === OTHER_VALUE && (
-                    <div className="mt-1 flex flex-col gap-2">
+                    <div className="mt-1 flex flex-col gap-2" data-testid="chat-panel-inline-question-item-custom" data-variant="other">
                       <textarea
                         autoFocus
                         value={customInputs.get(qIndex) || ''}
@@ -493,6 +507,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                         disabled={submitted}
                         rows={2}
                         className="w-full px-3 py-2 text-sm rounded-lg resize-none focus:outline-none"
+                        data-testid="chat-panel-inline-question-item-custom-input"
                         style={{
                           backgroundColor: 'var(--color-surface-elevated)',
                           border: '1px solid var(--color-border-default)',
@@ -514,6 +529,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                             onClick={() => handleSubmitOther(qIndex)}
                             disabled={submitted || !hasText}
                             className="self-end px-4 py-1.5 text-xs font-medium text-white rounded-lg transition-opacity"
+                            data-testid="chat-panel-inline-question-item-custom-submit"
                             style={{
                               background: hasText
                                 ? 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))'
@@ -539,6 +555,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
         {isBatch && !submitted && (
           <div
             className="px-4 py-3 flex items-center justify-between"
+            data-testid="chat-panel-inline-question-footer"
             style={{
               borderTop: '1px solid var(--color-border-default)',
               backgroundColor: 'var(--color-surface-panel-strong)',
@@ -546,6 +563,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
           >
             <span
               className="text-xs"
+              data-testid="chat-panel-inline-question-selected-count"
               style={{ color: 'var(--color-text-secondary)' }}
             >
               {selections.size}/{pendingQuestion.questions.length}
@@ -554,6 +572,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
               onClick={handleSubmitBatch}
               disabled={!allAnswered}
               className="px-4 py-1.5 text-xs font-medium text-text-inverse rounded-lg "
+              data-testid="chat-panel-inline-question-submit"
               style={{
                 background: allAnswered
                   ? 'linear-gradient(135deg, var(--color-action-primary), var(--color-brand-secondary))'

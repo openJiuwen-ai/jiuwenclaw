@@ -13,6 +13,7 @@ from jiuwenswarm.common.schema import Message
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.message_handler.message_handler import ChannelMode, MessageHandler
+from jiuwenswarm.gateway.routing.session_sharing import SubRole
 
 
 class _FakeAgentClient:
@@ -117,6 +118,21 @@ def _chat_send_message(
         ok=True,
         req_method=ReqMethod.CHAT_SEND,
         is_stream=True,
+    )
+
+
+def _team_transport_message(*, request_id: str, method: ReqMethod, ws_id: str) -> Message:
+    return Message(
+        id=request_id,
+        type="req",
+        channel_id="web",
+        session_id="sess-godview",
+        params={"mode": "team"},
+        timestamp=0.0,
+        ok=True,
+        req_method=method,
+        is_stream=method == ReqMethod.CHAT_SEND,
+        metadata={"ws_id": ws_id, "user_id": "web-user"},
     )
 
 
@@ -653,6 +669,19 @@ async def test_disconnect_recovers_session_from_stale_request_keys() -> None:
     assert len(_FakeAgentClient.sent_requests) == 1
 
 
+def test_disconnect_accepts_agent_ref_scoped_route_keys() -> None:
+    handler = _TestMessageHandler.create()
+    handler._stream_sessions["rid-scoped"] = "sess_request"
+
+    merged, recovered = handler._merge_disconnect_session_keys(
+        [("tui", "sess_direct", "team:default")],
+        stale_request_keys=[("tui", "rid-scoped", "team:default")],
+    )
+
+    assert merged == [("tui", "sess_direct"), ("tui", "sess_request")]
+    assert recovered == [("tui", "sess_request")]
+
+
 @pytest.mark.asyncio
 async def test_disconnect_cancel_marks_request_as_client_disconnect() -> None:
     handler = _TestMessageHandler.create()
@@ -787,6 +816,46 @@ async def test_disconnect_backward_compatible_without_request_keys_kwarg() -> No
 
 
 # ---------- ChannelMode.is_team_mode ----------
+
+
+@pytest.mark.asyncio
+async def test_team_mq_publish_does_not_register_publisher_as_godview() -> None:
+    handler = _TestMessageHandler.create()
+
+    await handler._maybe_register_godview(
+        _team_transport_message(
+            request_id="publisher-request",
+            method=ReqMethod.TEAM_MQ_PUBLISH,
+            ws_id="publisher-ws",
+        )
+    )
+
+    registry = handler.get_session_sharing_registry()
+    assert registry.lookup_member("sess-godview", SubRole.GODVIEW) == []
+
+
+@pytest.mark.asyncio
+async def test_godview_registration_is_unique_per_websocket() -> None:
+    handler = _TestMessageHandler.create()
+
+    first = _team_transport_message(
+        request_id="web-request-1",
+        method=ReqMethod.CHAT_SEND,
+        ws_id="web-ws-1",
+    )
+    second = _team_transport_message(
+        request_id="web-request-2",
+        method=ReqMethod.CHAT_SEND,
+        ws_id="web-ws-2",
+    )
+    await handler._maybe_register_godview(first)
+    await handler._maybe_register_godview(first)
+    await handler._maybe_register_godview(second)
+
+    registry = handler.get_session_sharing_registry()
+    subscriptions = registry.lookup_member("sess-godview", SubRole.GODVIEW)
+    assert {sub.delivery.ws_id for sub in subscriptions} == {"web-ws-1", "web-ws-2"}
+    assert len(subscriptions) == 2
 
 
 @pytest.mark.parametrize(

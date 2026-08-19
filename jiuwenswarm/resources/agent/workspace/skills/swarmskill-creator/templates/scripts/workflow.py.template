@@ -221,8 +221,25 @@ async def run(args):
 # - Use workflow(...) only to reuse a child workflow script that already exists
 #   and needs its own journal namespace. Await direct serial calls. For sibling
 #   fan-out, return workflow(...) from each parallel thunk and bind loop
-#   variables in lambda defaults. Prefer a stable string-literal name or path;
-#   validate any path selected from args.
+#   variables in lambda defaults.
+# - workflow(...) must receive an absolute child script path. For a sibling
+#   Swarm Skill installed under the same skills root, add `from pathlib import
+#   Path` and derive the path from this script rather than from cwd, the user
+#   home, JIUWENSWARM_DATA_DIR, or a machine-specific literal:
+#
+#       CHILD_WORKFLOW = (
+#           Path(__file__).resolve().parents[2]
+#           / "<child-skill-name>"
+#           / "scripts"
+#           / "workflow.py"
+#       ).resolve()
+#       result = await workflow(str(CHILD_WORKFLOW), child_args)
+#
+#   Here parents[2] is the installed skills root because this file lives at
+#   <skills-root>/<parent-skill>/scripts/workflow.py. Do not pass a bare Skill
+#   name, a relative path, `~/.jiuwenswarm/...`, or a hardcoded absolute user
+#   path. If the user explicitly supplies an external path through args,
+#   require an absolute `.py` path and validate the allowed location before use.
 # - Workflow composition is capped at one level. A child script's run() MUST NOT
 #   call workflow(...) again; flatten recursive designs into one script with
 #   loops, parallel, or pipeline. The child shares the parent Runtime,

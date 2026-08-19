@@ -6,16 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CUSTOM_ENV_FILE="${SCRIPT_DIR}/.env.custom"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
-CLAW_META_PROCESS_TEMPLATE_FILE="${SCRIPT_DIR}/conf/claw_meta_process.template.json"
-CLAW_META_PROCESS_FILE="${SCRIPT_DIR}/conf/claw_meta_process.json"
-
 GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-config-yuanrong.template.yaml"
 GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/gateway-config.yaml"
 GATEWAY_ENV_FILE="${SCRIPT_DIR}/conf/gateway.env"
 
 REG_FUNC_FILE="${SCRIPT_DIR}/../../jiuwenswarm/extensions/clawee.py"
 
-META_PORT=""
 CMD=""
 
 declare -ga MODULES=()
@@ -31,7 +27,6 @@ declare -A DEPLOY_VARS=(
     ["CLUSTER_HOSTS"]=""
     ["YR_PYTHON_VERSION"]="3.11"
     ["YR_FUNC_CODE_DIR"]=""
-    ["YR_SESSION_DIR"]=""
     ["JIUWENSWARM_PACKAGE_URL"]=""
     ["JIUWENSWARM_INSTANCE_NAME"]=""
     ["GATEWAY_CONCURRENCY"]="1"
@@ -47,15 +42,25 @@ declare -A DEPLOY_VARS=(
     ["FRONTEND_PORT"]=""
     ["FUNCTION_ID"]=""
     ["MASTER_NODE_IP"]=""
+    ["INGRESS_VIP"]=""
     ["REGISTRY_PORT"]=""
     ["SSH_PORT"]=""
-    # TUI GatewayServer bind host; empty → default to MASTER_NODE_IP at deploy check time
+    # TUI GatewayServer bind host; empty → default to 0.0.0.0 at deploy check time
     ["GATEWAY_HOST"]=""
     ["GATEWAY_PORT"]=""
-    # WebChannel bind host; empty → default to MASTER_NODE_IP at deploy check time
+    # WebChannel bind host; empty → default to 0.0.0.0 at deploy check time
     ["WEB_HOST"]=""
     ["WEB_PORT"]=""
+    # jiuwenswarm web 静态服务器 (jiuwenswarm-web, serve frontend/dist)
+    # /ws 代理到 gateway 的 WEB_PORT; 独立变量, 不复用 FRONTEND_PORT(后者指 yuanrong frontend 8888)
+    ["WEB_STATIC_HOST"]=""
+    ["WEB_STATIC_PORT"]=""
     ["SANDBOX_IDLE_TIMEOUT_SECONDS"]=""
+    # Channel timeout cleanup; empty -> default to gateway.agentos.disconnect_cleanup_timeout_seconds
+    ["DISCONNECT_CLEANUP_TIMEOUT_SECONDS"]=""
     ["OS_TYPE"]=""
     ["EXTENSION_DIRS"]=""
+    # AgentOS IAM; empty URL → http://MASTER_NODE_IP:8090 at deploy check time
+    ["AGENTOS_AUTH_SERVICE_URL"]=""
+    ["AGENTOS_AUTH_TIMEOUT"]=""
 )

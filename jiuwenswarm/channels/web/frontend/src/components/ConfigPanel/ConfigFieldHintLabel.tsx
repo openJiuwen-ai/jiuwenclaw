@@ -16,13 +16,14 @@ export function ConfigFieldHintLabel({
   mono?: boolean;
 }) {
   if (!help) {
-    return <div className={`${mono ? "mono" : ""} ${className ?? ""}`.trim()}>{label}</div>;
+    return <div data-testid="config-panel-field-hint-label-1" className={`${mono ? "mono" : ""} ${className ?? ""}`.trim()}>{label}</div>;
   }
 
   return (
-    <div className={`inline-flex max-w-full items-center gap-1 ${mono ? "mono" : ""} ${className ?? ""}`.trim()}>
+    <div data-testid="config-panel-field-hint-label-2" className={`inline-flex max-w-full items-center gap-1 ${mono ? "mono" : ""} ${className ?? ""}`.trim()}>
       <span>{label}</span>
       <span
+        data-testid="config-panel-field-hint-label-2-help"
         className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border text-[10px] font-normal text-text-muted cursor-help"
         title={help}
         aria-label={help}

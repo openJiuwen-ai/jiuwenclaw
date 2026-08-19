@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.server.runtime.agent_adapter import interface_code
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 
@@ -80,12 +81,48 @@ def test_code_adapter_builds_coding_memory_rail_without_embedding_config(monkeyp
     )
 
     assert isinstance(rail, _FakeCodingMemoryRail)
-    assert created["coding_memory_dir"] == str(
-        tmp_path / "agent_workspace" / "coding_memory" / "project"
+    assert created["coding_memory_dir"] == resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=project_dir,
     )
     assert created["embedding_config"].model_name == "text-embedding-v3"
     assert created["embedding_config"].base_url == ""
     assert created["embedding_config"].api_key is None
+
+
+def test_coding_memory_tools_use_system_storage_without_workspace_node(monkeypatch, tmp_path):
+    """The dedicated tool context resolves global storage without a Workspace node."""
+    from openjiuwen.core.memory.lite.coding_memory_tool_ops import (
+        validate_coding_memory_path,
+    )
+
+    coding_memory_dir = str(tmp_path / "agent_workspace" / "coding_memory" / "project")
+    rail = interface_code.CodingMemoryRail(
+        coding_memory_dir=coding_memory_dir,
+        embedding_config=SimpleNamespace(model_name="test", base_url="", api_key=None),
+        language="en",
+    )
+    project_workspace = SimpleNamespace(get_node_path=lambda _name: None)
+    rail.workspace = project_workspace
+    captured: dict[str, object] = {}
+
+    def create_tools(ctx, **_kwargs):
+        captured["context"] = ctx
+        return []
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.memory.coding_memory_rail.create_coding_memory_tools",
+        create_tools,
+    )
+
+    rail._register_coding_memory_tools(SimpleNamespace(ability_manager=SimpleNamespace()))
+
+    tool_context = captured["context"]
+    assert rail.workspace is project_workspace
+    assert tool_context.coding_memory_dir == coding_memory_dir
+    is_valid, resolved = validate_coding_memory_path("preference.md", tool_context.workspace)
+    assert is_valid
+    assert resolved == str(tmp_path / "agent_workspace" / "coding_memory" / "project" / "preference.md")
 
 
 @pytest.mark.asyncio

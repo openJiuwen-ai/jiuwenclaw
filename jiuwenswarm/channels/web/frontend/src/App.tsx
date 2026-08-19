@@ -66,7 +66,13 @@ import {
   registerCreatedConversation,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
+import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
+import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
+import {
+  resolvePendingPreviousSession,
+  type PendingPreviousSession,
+} from './multi-session/state/newConversationPreviousSession';
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
@@ -76,11 +82,7 @@ import {
   buildA2UIClientEventContent,
   setA2UIActionHandler,
 } from './features/a2ui/actionBridge';
-import {
-  isDesktopSaveCancelled,
-  isDesktopSaveOk,
-} from './utils/desktopSave';
-import type { DesktopSaveApiResult } from './utils/desktopSave';
+import { saveBlob } from './utils/desktopSave';
 import { generateUuidV4 } from './utils/uuid';
 import {
   ModelSetupGuide,
@@ -89,7 +91,13 @@ import {
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
 import './App.css';
 
-const TEAM_SESSION_MODES = new Set(['team', 'team.plan', 'code.team']);
+const TEAM_SESSION_MODES = new Set([
+  'team',
+  'team.plan',
+  'team.plan.normal',
+  'team.plan.code',
+  'code.team',
+]);
 const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
 const CHAT_PANEL_MIN_WIDTH_PCT = 20;
 const CHAT_PANEL_MAX_WIDTH_PCT = 70;
@@ -102,6 +110,14 @@ type ChatPanelResizeDrag = {
 };
 const PREVIEW_MODEL_SETUP_GUIDE = import.meta.env.DEV
   && new URLSearchParams(window.location.search).get('modelSetupGuide') === '1';
+const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
+  "external_cli_agent_claude_enabled",
+  "external_cli_agent_claude_use_builtin",
+  "external_cli_agent_claude_cli_path",
+  "external_cli_agent_codex_enabled",
+  "external_cli_agent_codex_use_builtin",
+  "external_cli_agent_codex_cli_path",
+]);
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -109,6 +125,15 @@ function isTeamMode(mode: string): boolean {
 
 function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
+}
+
+function normalizeConfigBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(
+    String(value ?? '').trim().toLowerCase(),
+  );
 }
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
@@ -130,6 +155,8 @@ type AgentsTeamsSavePayload = {
     teammate_mode: string;
     spawn_mode: string;
     enable_permissions: boolean;
+    external_cli_agents?: Array<{ cli_agent: "claude" | "codex"; cli_path?: string }>;
+    external_cli_publish_url?: string;
     leader: { member_name: string; display_name: string; persona: string; agent_key: string };
     teammate: { agent_key: string };
     predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
@@ -143,16 +170,55 @@ type ConfigSaveAllPayload = {
   team?: AgentsTeamsSavePayload["team"];
 };
 
-type WindowWithPyWebview = Window & {
-  pywebview?: {
-    api?: {
-      save_data_url?: (
-        dataUrl: string,
-        filename: string,
-      ) => DesktopSaveApiResult;
-    };
-  };
+type ConfigSaveResult = {
+  updated?: string[];
+  applied_without_restart?: boolean;
+  models_count?: number | null;
+  external_cli_dependency_installs?: Partial<Record<ExternalCliAgentKind, ExternalCliDependencyInstallStatus>>;
 };
+
+type ExternalCliAgentKind = "claude" | "codex";
+
+type ExternalCliDependencyInstallStatus = {
+  cli_agent?: ExternalCliAgentKind;
+  status?: string;
+  phase?: string;
+  error?: string;
+  last_log?: string;
+  log_tail?: string[];
+  started_at?: number;
+  finished_at?: number;
+  updated_at?: number;
+};
+
+function externalCliDependencyInstallAgents(result: ConfigSaveResult | void): Set<ExternalCliAgentKind> {
+  const installs = result?.external_cli_dependency_installs ?? {};
+  return new Set(
+    Object.entries(installs)
+      .filter((entry): entry is [ExternalCliAgentKind, ExternalCliDependencyInstallStatus] => {
+        const [cliAgent, status] = entry;
+        return (cliAgent === "claude" || cliAgent === "codex") && !!status?.status;
+      })
+      .map(([cliAgent]) => cliAgent),
+  );
+}
+
+function hasExternalCliDependencyInstallResult(result: ConfigSaveResult | void): boolean {
+  return externalCliDependencyInstallAgents(result).size > 0;
+}
+
+function removeExternalCliAgentsFromTeamPayload(
+  team: AgentsTeamsSavePayload["team"],
+  cliAgents: Set<ExternalCliAgentKind>,
+): AgentsTeamsSavePayload["team"] {
+  if (cliAgents.size === 0) {
+    return team;
+  }
+  return team.map((item) => ({
+    ...item,
+    external_cli_agents: item.external_cli_agents?.filter((agent) => !cliAgents.has(agent.cli_agent)),
+  }));
+}
 
 function getWorkContextForSession(sessionId: string): {
   project_id?: string;
@@ -223,20 +289,21 @@ class ErrorBoundary extends Component<
 function ErrorFallback({ error }: { error: Error | null }) {
   const { t } = useTranslation();
   return (
-    <div className="flex items-center justify-center h-screen bg-bg text-text p-8">
-      <div className="max-w-2xl card">
-        <h1 className="text-2xl font-bold text-danger mb-4">
+    <div className="flex items-center justify-center h-screen bg-bg text-text p-8" data-testid="app-error-fallback">
+      <div className="max-w-2xl card" data-testid="app-error-fallback-card">
+        <h1 className="text-2xl font-bold text-danger mb-4" data-testid="app-error-fallback-title">
           {t('app.errorTitle')}
         </h1>
-        <p className="text-text-muted mb-4">
+        <p className="text-text-muted mb-4" data-testid="app-error-fallback-message">
           {error?.message || t('app.unknownError')}
         </p>
-        <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono">
+        <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono" data-testid="app-error-fallback-stack">
           {error?.stack}
         </pre>
         <button
           onClick={() => window.location.reload()}
           className="btn primary mt-4"
+          data-testid="app-error-fallback-reload"
         >
           {t('app.reload')}
         </button>
@@ -245,29 +312,12 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-function downloadDataUrl(dataUrl: string, filename: string): void {
-  const link = document.createElement('a');
-  link.href = dataUrl;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-async function saveShareImage(dataUrl: string, filename: string): Promise<boolean> {
-  const pywebviewApi = (window as WindowWithPyWebview).pywebview?.api;
-  if (pywebviewApi?.save_data_url) {
-    const result = await pywebviewApi.save_data_url(dataUrl, filename);
-    if (isDesktopSaveCancelled(result)) {
-      return false;
-    }
-    if (!isDesktopSaveOk(result)) {
-      throw new Error('share_desktop_save_failed');
-    }
-    return true;
+async function saveShareImage(blob: Blob, filename: string): Promise<boolean> {
+  const outcome = await saveBlob(blob, filename);
+  if (outcome === 'failed') {
+    throw new Error('share_desktop_save_failed');
   }
-  downloadDataUrl(dataUrl, filename);
-  return true;
+  return outcome === 'saved';
 }
 
 function AppContent() {
@@ -282,6 +332,9 @@ function AppContent() {
 
   const [activeNav, setActiveNav] = useState<MainNavKey>('chat');
   const [serverConfig, setServerConfig] = useState<Record<string, unknown> | null>(null);
+  const kvCacheAffinityEnabled = normalizeConfigBoolean(
+    serverConfig?.kv_cache_affinity_enabled,
+  );
   const [configError, setConfigError] = useState<string | null>(null);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
   const [restartModalOpen, setRestartModalOpen] = useState(false);
@@ -359,6 +412,8 @@ function AppContent() {
   const [historyBootstrapKey, setHistoryBootstrapKey] = useState(0);
   const sessionIdRef = useRef(sessionId);
   const sessionRestoreQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const kvcViewIdRef = useRef(generateUuidV4());
+  const kvcPreparedInputSessionRef = useRef<string | null>(null);
   const historyLoadingSessionsRef = useRef(new Set<string>());
   const historyRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
@@ -366,16 +421,13 @@ function AppContent() {
   const historyPageCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
-  const promotedFromNewSessionIdsRef = useRef(new Set<string>());
+  const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
   const preserveSelectedProjectOnChatNewRef = useRef(false);
   const newConversationProjectRef = useRef<Pick<Session, 'project_id' | 'project_dir'> | null>(null);
-  const newConversationPreviousSessionRef = useRef<{
-    sessionId: string;
-    mode: AgentMode;
-  } | null>(null);
+  const newConversationPreviousSessionRef = useRef<PendingPreviousSession | null>(null);
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
   const { loadProjects, setSelectedProject } = useWorkspaceStore();
@@ -397,9 +449,36 @@ function AppContent() {
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
+    // A new foreground visit gets one fresh input-intent opportunity. Merely
+    // switching to the Session still does not prefetch; the first real editor
+    // insertion below does.
+    kvcPreparedInputSessionRef.current = null;
     setHistoryLoadingMore(false);
     setHistoryPrepending(historyLoadingSessionsRef.current.has(sessionId));
   }, [sessionId]);
+
+  useEffect(() => {
+    // A Session can stay mounted in its own browser tab/window while another
+    // Session is used elsewhere. In that case `sessionId` never changes, so
+    // the per-visit input latch above would otherwise remain consumed by the
+    // Session's initial turn. Re-arm only when this page returns to the
+    // foreground; focus/visibility alone still does not issue a prefetch.
+    const rearmInputIntent = () => {
+      kvcPreparedInputSessionRef.current = null;
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        rearmInputIntent();
+      }
+    };
+
+    window.addEventListener('focus', rearmInputIntent);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', rearmInputIntent);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   const {
     teamAreaExpanded,
@@ -454,7 +533,8 @@ function AppContent() {
     const session = currentSession?.session_id === sessionId
       ? currentSession
       : sessions.find((s) => s.session_id === sessionId);
-    return session?.title?.trim() ?? '';
+    const raw = session?.title?.trim() ?? '';
+    return toDisplaySessionTitle(raw);
   }, [currentSession, sessions, sessionId]);
   const sessionProjectName = useMemo(() => {
     const session = currentSession?.session_id === sessionId
@@ -675,6 +755,23 @@ function AppContent() {
     onConfigChanged: () => {
       handleConfigChanged();
     },
+    onModelsUpdated: () => {
+      handleModelsRefresh();
+    },
+    onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
+      // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
+      // - 多个任务同时返回结果时，不会互相跳转覆盖
+      // - 用户已手动切走时不打扰
+      // - 定时调度（非"立即执行"）不自动跳转
+      // lastRunSessionId[jobId] 是点击"立即执行"时存入的会话 ID，
+      // sessionIdRef.current 是当前会话，两者一致说明用户还在等这个任务的结果。
+      if (cronJobId) {
+        const lastSid = useCronStore.getState().lastRunSessionId[cronJobId] ?? '';
+        if (lastSid && sessionIdRef.current === lastSid) {
+          void handleRestoreSession(cronSessionId);
+        }
+      }
+    },
   });
 
   const applyHistoryPageResult = useCallback((sid: string, result: FetchHistoryPageResult) => {
@@ -763,6 +860,8 @@ function AppContent() {
       const currentItems = current.map((segment) => ({
         at: new Date(segment.startedAt + 1).toISOString(),
         text: segment.text,
+        // live 内存里的真实末帧时刻并入 replay，刷新重建后耗时终点不丢。
+        updatedAt: segment.updatedAt,
       }));
       store.restoreReasoningSegments(sid, [...result.reasoningReplay, ...currentItems]);
     }
@@ -929,7 +1028,7 @@ function AppContent() {
         if (shouldPreviewModelSetupGuide() || isSetupGuideEnabled(config.setup_guide_enabled)) {
           setActiveNav('chat');
           setModelSetupGuideManual(false);
-          setModelSetupGuideStep(1);
+          setModelSetupGuideStep(0);
         }
       }
     } catch (error) {
@@ -1067,23 +1166,79 @@ function AppContent() {
     }
   }, [request, setAvailableModels]);
 
-  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>) => {
-    const payload = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+  const detectExternalCli = useCallback(async (cliAgent: ExternalCliAgentKind, cliPath?: string) => {
+    return request<{
+      cli_agent: ExternalCliAgentKind;
+      status: "ok" | "warning" | "missing" | "unsupported" | "unavailable";
+      path?: string;
+      version?: string;
+      reference_version?: string;
+      message?: string;
+    }>("external_cli.detect", {
+      cli_agent: cliAgent,
+      cli_path: cliPath || "",
+    });
+  }, [request]);
+
+  const selectExternalCliPath = useCallback(async (cliAgent: ExternalCliAgentKind, initialPath?: string) => {
+    const desktopPicker = window.pywebview?.api?.select_local_file_path;
+    const title = t("config.externalCli.selectFileTitle", { agent: cliAgent });
+    if (typeof desktopPicker === "function") {
+      const selectedPath = await desktopPicker(initialPath || "", title);
+      return selectedPath || null;
+    }
+    const payload = await request<{ path?: string | null; cancelled?: boolean }>(
+      "path.select_file",
+      {
+        cli_agent: cliAgent,
+        initial_path: initialPath || "",
+        title,
+      },
+      { timeoutMs: 10 * 60 * 1000 },
+    );
+    if (payload?.cancelled || !payload?.path) {
+      return null;
+    }
+    return payload.path;
+  }, [request, t]);
+
+  const getExternalCliDependencyInstallStatus = useCallback(
+    async (cliAgent: ExternalCliAgentKind): Promise<ExternalCliDependencyInstallStatus> => {
+      return request<ExternalCliDependencyInstallStatus>(
+        "external_cli.install_status",
+        { cli_agent: cliAgent },
+        { timeoutMs: 10 * 1000 },
+      );
+    },
+    [request],
+  );
+
+  const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
+    const payload = await request<ConfigSaveResult>(
       'config.set',
       updates
     );
+    const hasExternalCliDependencyInstall = hasExternalCliDependencyInstallResult(payload);
+    const effectiveUpdates = hasExternalCliDependencyInstall
+      ? Object.fromEntries(
+          Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
+        )
+      : updates;
     setServerConfig((prev) => {
-      if (!prev) return updates;
-      const next: Record<string, unknown> = { ...prev, ...updates };
+      if (!prev) return effectiveUpdates;
+      const next: Record<string, unknown> = { ...prev, ...effectiveUpdates };
       // Keep the bilingual memory_forbidden_description dictionary structure.
       if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
-          && !Array.isArray(prev.memory_forbidden_description) && updates.memory_forbidden_description !== undefined) {
+          && !Array.isArray(prev.memory_forbidden_description) && effectiveUpdates.memory_forbidden_description !== undefined) {
         const prevDict = prev.memory_forbidden_description as Record<string, string>;
         const lang = i18n.language || 'zh';
-        next.memory_forbidden_description = { ...prevDict, [lang]: updates.memory_forbidden_description };
+        next.memory_forbidden_description = { ...prevDict, [lang]: effectiveUpdates.memory_forbidden_description };
       }
       return next;
     });
+    if (hasExternalCliDependencyInstall) {
+      return payload;
+    }
     setConfigError(null);
     setRestartModalOpen(true);
     setRestartSuccess(false);
@@ -1107,6 +1262,7 @@ function AppContent() {
         }, 5000);
       }
     }
+    return payload;
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
@@ -1140,6 +1296,21 @@ function AppContent() {
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal]);
 
+  const saveSymphonyEnabled = useCallback(async (enabled: boolean) => {
+    const updates = { symphony_enabled: enabled ? 'true' : 'false' };
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.set',
+      updates,
+    );
+    setServerConfig((prev) => ({ ...(prev ?? {}), ...updates }));
+    setConfigError(null);
+    const appliedWithoutRestart = result?.applied_without_restart === true;
+    if (!appliedWithoutRestart) {
+      applyConfigSaveUiState(false);
+    }
+    return appliedWithoutRestart;
+  }, [applyConfigSaveUiState, request]);
+
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
     const agentCount = Object.keys(payload.agents).length;
@@ -1168,6 +1339,9 @@ function AppContent() {
       updates[`team_${idx}_predefined_members`] = team.predefined_members?.length
         ? JSON.stringify(team.predefined_members)
         : "";
+      updates[`team_${idx}_external_cli_agents`] = team.external_cli_agents?.length
+        ? JSON.stringify(team.external_cli_agents)
+        : "";
     });
     for (let i = payload.team.length; i < 10; i++) {
       // 使用与后端一致的键名格式：team_${i}_name
@@ -1182,6 +1356,7 @@ function AppContent() {
       updates[`team_${i}_leader_agent_key`] = "";
       updates[`team_${i}_teammate_agent_key`] = "";
       updates[`team_${i}_predefined_members`] = "";
+      updates[`team_${i}_external_cli_agents`] = "";
     }
     return updates;
   }, []);
@@ -1197,30 +1372,37 @@ function AppContent() {
     applyConfigSaveUiState(result?.applied_without_restart === true);
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
-  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload) => {
+  const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
     const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+    const result = await request<ConfigSaveResult>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
     );
+    const pendingExternalCliAgents = externalCliDependencyInstallAgents(result);
+    const hasExternalCliDependencyInstall = pendingExternalCliAgents.size > 0;
     setServerConfig((prev) => {
       const next: Record<string, unknown> = { ...(prev ?? {}) };
       if (payload.config) {
-        Object.assign(next, payload.config);
+        const effectiveConfig = hasExternalCliDependencyInstall
+          ? Object.fromEntries(
+              Object.entries(payload.config).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
+            )
+          : payload.config;
+        Object.assign(next, effectiveConfig);
         if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
             && !Array.isArray(prev.memory_forbidden_description)
-            && payload.config.memory_forbidden_description !== undefined) {
+            && effectiveConfig.memory_forbidden_description !== undefined) {
           const prevDict = prev.memory_forbidden_description as Record<string, string>;
           const lang = i18n.language || 'zh';
           next.memory_forbidden_description = {
             ...prevDict,
-            [lang]: payload.config.memory_forbidden_description,
+            [lang]: effectiveConfig.memory_forbidden_description,
           };
         }
       }
       if (payload.agents !== undefined || payload.team !== undefined) {
         const agents = payload.agents || {};
-        const team = payload.team || [];
+        const team = removeExternalCliAgentsFromTeamPayload(payload.team || [], pendingExternalCliAgents);
         Object.assign(next, buildAgentsTeamsFlatConfig({
           agents,
           team,
@@ -1228,6 +1410,9 @@ function AppContent() {
       }
       return next;
     });
+    if (hasExternalCliDependencyInstall) {
+      return result;
+    }
     if (isA2UIChange) {
       // Show modal then refresh page after 5 seconds
       setConfigError(null);
@@ -1244,6 +1429,7 @@ function AppContent() {
     } else {
       applyConfigSaveUiState(result?.applied_without_restart === true);
     }
+    return result;
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, i18n.language, request]);
 
   useEffect(() => {
@@ -1348,7 +1534,7 @@ function AppContent() {
   useEffect(() => {
     if (!isConnected || !sessionId || sessionId === NEW_CONVERSATION_ID) return;
     
-    if (promotedFromNewSessionIdsRef.current.has(sessionId)) {
+    if (sessionIdsCreatedInThisPageRef.current.has(sessionId)) {
       setHistoryPagerMeta(sessionId, null);
       setHistoryLoadingMore(false);
       setLoadingHistory(sessionId, false);
@@ -1364,8 +1550,8 @@ function AppContent() {
       return;
     }
 
-    // 已有完整历史恢复状态则跳过历史加载，直接使用内存数据。
-    // historyPagerMeta 是唯一可靠的"history 是否完整加载过"标记。
+    // 当前页面新建的会话已在上方复用实时内存数据；对于其他会话，
+    // historyPagerMeta 表示已完成 history 首屏恢复，可直接复用并继续补齐剩余分页。
     const existingRuntime = useChatStore.getState().getRuntime(sessionId);
     if (existingRuntime && existingRuntime.historyPagerMeta) {
       setLoadingHistory(sessionId, false);
@@ -1605,21 +1791,29 @@ function AppContent() {
     setComposerFocusNonce((nonce) => nonce + 1);
   }, []);
 
-  const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
+  const enterNewConversation = useCallback((
+    targetMode: AgentMode = mode,
+    options: NewConversationOptions = {},
+    lifecycle: { clearPreviousSession?: boolean } = {},
+  ) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
-    newConversationPreviousSessionRef.current =
-      currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
-        ? {
-          sessionId: currentSessionId,
-          mode: currentRuntime?.mode ?? mode,
-        }
-        : null;
+    newConversationPreviousSessionRef.current = resolvePendingPreviousSession({
+      currentSessionId,
+      currentMode: currentRuntime?.mode ?? mode,
+      pending: newConversationPreviousSessionRef.current,
+      newConversationId: NEW_CONVERSATION_ID,
+      clear: lifecycle.clearPreviousSession,
+    });
     // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
     const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
-    const projectDir = options.project?.project_dir ?? selectedProject?.project_dir ?? null;
+    const projectDir = resolveNewConversationProjectDir(
+      options.preserveProject,
+      options.project?.project_dir,
+      selectedProject?.project_dir,
+    );
     disposeInFlightHistoryHandles(
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
@@ -1664,6 +1858,40 @@ function AppContent() {
     enterNewConversation(targetMode);
   }, [enterNewConversation, setMode]);
 
+  const handleKVCInputIntent = useCallback((targetSessionId: string) => {
+    // OFF must remain the ordinary JiuwenSwarm path: do not emit even the
+    // best-effort prepare control request. AgentServer keeps its own gate as
+    // a fail-closed boundary for stale or non-Web clients.
+    if (!kvCacheAffinityEnabled) return;
+    if (!targetSessionId || targetSessionId === NEW_CONVERSATION_ID) return;
+    if (kvcPreparedInputSessionRef.current === targetSessionId) return;
+
+    // Leading-edge intent: start prefetch on the first real insertion instead
+    // of waiting until the user stops typing. InputArea reports beforeinput,
+    // paste and input as browser-compatible fallbacks; this latch collapses
+    // them into one control request for the current foreground visit.
+    kvcPreparedInputSessionRef.current = targetSessionId;
+    const runtime = useSessionStore.getState().getRuntime(targetSessionId);
+    void request<{ scheduled?: boolean; outcome?: string }>('session.kvc.prepare', {
+      session_id: targetSessionId,
+      intent_id: generateUuidV4(),
+      view_id: kvcViewIdRef.current,
+      mode: runtime?.mode ?? mode,
+    }).then((response) => {
+      if (response?.outcome === 'failed'
+          && kvcPreparedInputSessionRef.current === targetSessionId) {
+        kvcPreparedInputSessionRef.current = null;
+      }
+    }).catch((error) => {
+      // Allow the next editor event to retry when the control request itself
+      // could not reach AgentServer. KVC remains an optional optimization.
+      if (kvcPreparedInputSessionRef.current === targetSessionId) {
+        kvcPreparedInputSessionRef.current = null;
+      }
+      console.debug('session.kvc.prepare skipped:', error);
+    });
+  }, [kvCacheAffinityEnabled, mode, request]);
+
   const handleSendMessage = useCallback(async (content: string, mediaItems?: MediaItem[]) => {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
@@ -1676,6 +1904,7 @@ function AppContent() {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
+        persistSession: newRuntime?.persistSession ?? false,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       const preservedProject = newConversationProjectRef.current;
@@ -1691,6 +1920,8 @@ function AppContent() {
           is_swarm: runtimeSettings.mode === 'team',
           title: createConversationTitle(content).slice(0, 100),
           work_mode: workContext.work_mode,
+          view_id: kvcViewIdRef.current,
+          persist_session: runtimeSettings.persistSession,
         };
         const previousSession = newConversationPreviousSessionRef.current;
         if (previousSession) {
@@ -1710,13 +1941,14 @@ function AppContent() {
         const newSid = created.session_id;
         const createdSession = registerCreatedConversation(
           created.session_id,
-          runtimeSettings,
+          { ...runtimeSettings, persistSession: created.persist_session },
           Date.now(),
           content,
           {
             project_id: created.project_id || workContext.project_id,
             project_dir: created.project_dir || workContext.project_dir,
             work_mode: created.work_mode || workContext.work_mode,
+            persist_session: created.persist_session,
           },
         );
         // 迁移 'new' 会话的已选技能到新会话
@@ -1737,7 +1969,7 @@ function AppContent() {
         }
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
-        promotedFromNewSessionIdsRef.current.add(newSid);
+        sessionIdsCreatedInThisPageRef.current.add(newSid);
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
@@ -1948,6 +2180,7 @@ function AppContent() {
             previous_session_id: previousSessionId,
             previous_mode: previousMode,
             mode: resolvedMode,
+            view_id: kvcViewIdRef.current,
           });
         } catch (error) {
           if (isTeamMode(resolvedMode)) {
@@ -1959,7 +2192,6 @@ function AppContent() {
         }
       }
 
-      setHistoryPagerMeta(targetSessionId, null);
       setHistoryLoadingMore(false);
       const existingRuntime = useChatStore.getState().getRuntime(targetSessionId);
       if (!existingRuntime) {
@@ -2017,7 +2249,6 @@ function AppContent() {
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
-      setHistoryPagerMeta,
       setMode,
       setPaused,
       setProcessing,
@@ -2092,7 +2323,10 @@ function AppContent() {
   const handleDeleteConversation = useCallback(async () => {
     if (!deleteTarget) return;
     const runtime = useChatStore.getState().getRuntime(deleteTarget.session_id);
-    if (runtime?.isProcessing || runtime?.pendingQuestion) return;
+    if (runtime?.isProcessing || runtime?.pendingQuestion) {
+      setDialogError(t('multiSession.deleteRunningDisabled'));
+      return;
+    }
     setDialogBusy(true); setDialogError(null);
     try {
       const deletedSession = deleteTarget;
@@ -2116,11 +2350,13 @@ function AppContent() {
         }
       }
       if (deletingCurrent) {
-        enterNewConversation();
+        // session.delete already owns B's KVC eviction. Do not carry the
+        // deleted Session into C's session.create as previous_session_id.
+        enterNewConversation(mode, {}, { clearPreviousSession: true });
       }
     } catch { setDialogError(t('multiSession.errors.delete')); }
     finally { setDialogBusy(false); }
-  }, [deleteTarget, enterNewConversation, request, t]);
+  }, [deleteTarget, enterNewConversation, mode, request, t]);
 
   const handleNavigate = useCallback((nav: MainNavKey) => {
     setActiveNav(nav);
@@ -2134,6 +2370,31 @@ function AppContent() {
   const skipModelSetupGuide = useCallback(() => {
     setModelSetupGuideStep(null);
     setModelSetupGuideManual(false);
+
+    void request('config.set', { setup_guide_enabled: 'false' })
+      .then(() => {
+        setServerConfig((current) => ({
+          ...(current ?? {}),
+          setup_guide_enabled: 'false',
+        }));
+      })
+      .catch((error) => {
+        console.error('Failed to disable setup guide:', error);
+      });
+  }, [request]);
+
+  const quickSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(null);
+    setModelSetupGuideManual(false);
+    // 显式指定使用 huawei-cloud-maas-setup skill，避免 agent 自行上网搜索
+    void handleSendMessage(
+      '请使用 huawei-cloud-maas-setup 技能帮我配置华为云 MaaS 服务。'
+      + '严格按照其中的步骤引导我完成购买、获取 API Key 和配置写入。'
+    );
+  }, [handleSendMessage]);
+
+  const manualSetupModelSetupGuide = useCallback(() => {
+    setModelSetupGuideStep(1);
   }, []);
 
   const acknowledgeModelSetupGuide = useCallback(() => {
@@ -2151,12 +2412,6 @@ function AppContent() {
         console.error('Failed to disable setup guide:', error);
       });
   }, [request]);
-
-  const openModelSetupGuide = useCallback(() => {
-    setActiveNav('chat');
-    setModelSetupGuideManual(true);
-    setModelSetupGuideStep(1);
-  }, []);
 
   const handleExportShare = useCallback(async () => {
     const currentSessionId = sessionIdRef.current;
@@ -2196,8 +2451,7 @@ function AppContent() {
       setShareExportSnapshot(payload.snapshot);
     } catch (error) {
       console.error('Failed to export share image:', error);
-      const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-      window.alert(`${t('share.exportFailed')}${detail}`);
+      window.alert(t('share.exportFailed'));
       setIsExportingShare(false);
       setShareExportSnapshot(null);
     }
@@ -2216,18 +2470,17 @@ function AppContent() {
         if (!node) {
           throw new Error('share_image_node_missing');
         }
-        const dataUrl = await exportShareImageNode(node);
+        const imageBlob = await exportShareImageNode(node);
         if (shareExportTokenRef.current !== token) {
           return;
         }
-        const saved = await saveShareImage(dataUrl, shareExportFilenameRef.current);
+        const saved = await saveShareImage(imageBlob, shareExportFilenameRef.current);
         if (saved) {
           showSaveToast();
         }
       } catch (error) {
         console.error('Failed to render share image:', error);
-        const detail = error instanceof Error && error.message ? `: ${error.message}` : '';
-        window.alert(`${t('share.exportFailed')}${detail}`);
+        window.alert(t('share.exportFailed'));
       } finally {
         if (shareExportTokenRef.current === token) {
           setIsExportingShare(false);
@@ -2243,7 +2496,7 @@ function AppContent() {
     && isConversationMissing(routeSessionId, true, sessions);
   const showConversationNotFound = route.kind === 'not-found' || routeSessionMissing;
   const showWorkspaceDivider = isTeamAreaExpanded && !showConversationNotFound;
-  const isNewSessionPromotion = Boolean(sessionId && promotedFromNewSessionIdsRef.current.has(sessionId));
+  const isNewSessionPromotion = Boolean(sessionId && sessionIdsCreatedInThisPageRef.current.has(sessionId));
   const composerFocusKey = showConversationNotFound ? null : `${sessionId}:${composerFocusNonce}`;
 
   useEffect(() => {
@@ -2269,22 +2522,23 @@ function AppContent() {
         showNewSession={false}
         hiddenNavItems={['sessions']}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
-        onSetupGuideRequest={openModelSetupGuide}
       />
 
-      {modelSetupGuideStep ? (
+      {modelSetupGuideStep !== null ? (
         <ModelSetupGuide
           step={modelSetupGuideStep}
           manual={modelSetupGuideManual}
           onAcknowledge={acknowledgeModelSetupGuide}
           onSkip={skipModelSetupGuide}
+          onQuickSetup={quickSetupModelSetupGuide}
+          onManualSetup={manualSetupModelSetupGuide}
         />
       ) : null}
 
       {/* Main Content */}
       <main className={`content ${activeNav === 'chat' ? 'content--chat' : ''} ${isTeamAreaExpanded ? 'content--team-expanded' : ''}`}>
         {configError && (
-          <div className="card mb-4">
+          <div className="card mb-4" data-testid="app-config-error">
             <div className="text-sm text-text-muted">
               {configError}. {t('app.configErrorHint')}
               <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
@@ -2308,10 +2562,10 @@ function AppContent() {
               />
               <div className="chat-workspace flex-1 flex min-h-0 overflow-hidden">
                 {showConversationNotFound && (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-4">
-                    <h1 className="text-lg font-semibold text-text">{t('multiSession.notFound.title')}</h1>
+                  <div className="flex-1 flex flex-col items-center justify-center gap-4" data-testid="app-conversation-not-found">
+                    <h1 className="text-lg font-semibold text-text" data-testid="app-conversation-not-found-title">{t('multiSession.notFound.title')}</h1>
                     <div className="flex gap-2">
-                      <button className="btn primary" onClick={() => enterNewConversation()}>
+                      <button className="btn primary" onClick={() => enterNewConversation()} data-testid="app-conversation-not-found-new-button">
                         {t('multiSession.notFound.newConversation')}
                       </button>
                     </div>
@@ -2321,10 +2575,12 @@ function AppContent() {
                 <div
                   className={`${showConversationNotFound ? 'hidden' : 'flex'} chat-layout__surface p-3 pt-0 flex-col min-w-0 min-h-0 ${isTeamAreaExpanded ? '' : 'flex-1'}`}
                   style={isTeamAreaExpanded ? { width: `${chatPanelWidthPct}%` } : undefined}
+                  data-testid="app-chat-surface"
                 >
                   <div className={`flex-1 min-h-0`}>
                     <ChatPanel
                       onSendMessage={handleSendMessage}
+                      onInputIntent={kvCacheAffinityEnabled ? handleKVCInputIntent : undefined}
                       onPersistMedia={handlePersistMedia}
                       onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
@@ -2363,6 +2619,7 @@ function AppContent() {
                     role="separator"
                     aria-orientation="vertical"
                     onPointerDown={handleDividerPointerDown}
+                    data-testid="app-workspace-divider"
                     onPointerMove={handleDividerPointerMove}
                     onPointerUp={finishDividerResize}
                     onPointerCancel={finishDividerResize}
@@ -2474,6 +2731,9 @@ function AppContent() {
               onModelsRefresh={handleModelsRefresh}
               onAgentsTeamsSave={handleAgentsTeamsSave}
               onHasChangesChange={handleHasChangesChange}
+              onDetectExternalCli={detectExternalCli}
+              onSelectExternalCliPath={selectExternalCliPath}
+              onGetExternalCliDependencyInstallStatus={getExternalCliDependencyInstallStatus}
             />
           </div>
         )}
@@ -2492,7 +2752,10 @@ function AppContent() {
           <div className={`app-section ${activeNav === 'skills' ? '' : 'is-hidden'}`}>
             <SkillPanel
               sessionId={sessionId}
+              isConnected={isConnected}
               isActive={activeNav === 'skills'}
+              symphonyEnabled={normalizeConfigBoolean(serverConfig?.symphony_enabled)}
+              onSymphonyEnabledChange={saveSymphonyEnabled}
               onNavigateToConfig={() => {
                 setConfigInitialExpandGroup('third_party_api');
                 setActiveNav('configpanel');
@@ -2524,24 +2787,24 @@ function AppContent() {
 
       {/* 连接状态提示 */}
       {!isConnected && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-connection-toast animate-rise">
+        <div className="app-toast-wrapper app-toast-wrapper--top" data-testid="app-connection-toast">
+          <div className="app-connection-toast animate-rise" data-testid="app-connection-toast-message" data-variant={serverConfig ? 'connecting' : 'loadingConfig'}>
             {serverConfig ? t('connection.connecting') : t('connection.loadingConfig')}
           </div>
         </div>
       )}
 
       {saveToastVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top-center">
-          <div className="app-session-toast animate-rise">
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="app-save-toast">
+          <div className="app-session-toast animate-rise" data-testid="app-save-toast-message">
             {t('common.saveSuccess')}
           </div>
         </div>
       )}
 
       {proactiveToastVisible && proactiveToastMessage && (
-        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="proactive-notification-toast">
-          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm">
+        <div className="app-toast-wrapper app-toast-wrapper--top-center" data-testid="app-proactive-notification-toast">
+          <div className="bg-warn-subtle text-warn px-4 py-2 rounded-lg shadow-lg animate-rise text-sm" data-testid="app-proactive-notification-toast-message">
             {proactiveToastMessage}
           </div>
         </div>
@@ -2549,12 +2812,12 @@ function AppContent() {
 
       {/* 安全警告提示 */}
       {securityAlertVisible && (
-        <div className="app-toast-wrapper app-toast-wrapper--top">
-          <div className="app-security-alert animate-rise">
-            <div className="app-security-alert__header">
-              <div className="app-security-alert__title">
+        <div className="app-toast-wrapper app-toast-wrapper--top" data-testid="app-security-alert">
+          <div className="app-security-alert animate-rise" data-testid="app-security-alert-panel">
+            <div className="app-security-alert__header" data-testid="app-security-alert-header">
+              <div className="app-security-alert__title" data-testid="app-security-alert-title">
                 <span>⚠️</span>
-                <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
+                <span className="text-xs font-medium text-text" data-testid="app-security-alert-title-text">{t('app.securityAlertTitle')}</span>
               </div>
               <button
                 type="button"
@@ -2566,13 +2829,14 @@ function AppContent() {
                   }
                 }}
                 className="app-security-alert__close"
+                data-testid="app-security-alert-close"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-            <div className="app-security-alert__content text-sm">
+            <div className="app-security-alert__content text-sm" data-testid="app-security-alert-content">
               {securityAlertContent}
             </div>
           </div>
@@ -2581,20 +2845,20 @@ function AppContent() {
 
       {/* 配置保存后重启状态弹窗 */}
       {restartModalOpen && (
-        <div className="app-restart-modal">
-          <div className="app-restart-modal__backdrop" />
-          <div className="app-restart-modal__panel">
-            <div className="flex flex-col items-center text-center">
+        <div className="app-restart-modal" data-testid="app-restart-modal">
+          <div className="app-restart-modal__backdrop" data-testid="app-restart-modal-backdrop" />
+          <div className="app-restart-modal__panel" data-testid="app-restart-modal-panel">
+            <div className="flex flex-col items-center text-center" data-testid="app-restart-modal-body">
               {!restartSuccess ? (
-                <div className="w-12 h-12 rounded-full border-4 border-border border-t-accent animate-spin mb-4" />
+                <div className="w-12 h-12 rounded-full border-4 border-border border-t-accent animate-spin mb-4" data-testid="app-restart-modal-status-icon" data-variant="loading" />
               ) : (
-                <div className="w-12 h-12 rounded-full bg-ok/15 text-ok flex items-center justify-center mb-4">
+                <div className="w-12 h-12 rounded-full bg-ok/15 text-ok flex items-center justify-center mb-4" data-testid="app-restart-modal-status-icon" data-variant="success">
                   <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
                 </div>
               )}
-              <h3 className="text-base font-semibold text-text mb-1">
+              <h3 className="text-base font-semibold text-text mb-1" data-testid="app-restart-modal-title">
                 {!restartSuccess
                   ? t('app.restarting')
                   : a2uiRefreshPending
@@ -2603,7 +2867,7 @@ function AppContent() {
                       ? t('app.configApplied')
                       : t('app.restartSuccess')}
               </h3>
-              <p className="text-sm text-text-muted mb-5">
+              <p className="text-sm text-text-muted mb-5" data-testid="app-restart-modal-description">
                 {!restartSuccess
                   ? t('app.restartWaiting')
                   : a2uiRefreshPending
@@ -2623,6 +2887,7 @@ function AppContent() {
                     }
                   }}
                   className="btn primary !px-4 !py-2"
+                  data-testid="app-restart-modal-ok"
                 >
                   {t('common.ok')}
                 </button>
@@ -2633,22 +2898,22 @@ function AppContent() {
       )}
 
       {configChangedConfirmOpen && (
-        <div className="app-restart-modal">
-          <div className="app-restart-modal__backdrop" />
-          <div className="app-restart-modal__panel">
-            <div className="flex flex-col items-center text-center">
-              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4">
+        <div className="app-restart-modal" data-testid="app-config-changed-modal">
+          <div className="app-restart-modal__backdrop" data-testid="app-config-changed-modal-backdrop" />
+          <div className="app-restart-modal__panel" data-testid="app-config-changed-modal-panel">
+            <div className="flex flex-col items-center text-center" data-testid="app-config-changed-modal-body">
+              <div className="w-12 h-12 rounded-full bg-warn-subtle text-warn flex items-center justify-center mb-4" data-testid="app-config-changed-modal-icon">
                 <svg className="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
                 </svg>
               </div>
-              <h3 className="text-base font-semibold text-text mb-1">{t('config.errors.configChangedTitle')}</h3>
-              <p className="text-sm text-text-muted mb-5">{t('config.errors.configChangedDesc')}</p>
-              <div className="flex gap-3">
-                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2">
+              <h3 className="text-base font-semibold text-text mb-1" data-testid="app-config-changed-modal-title">{t('config.errors.configChangedTitle')}</h3>
+              <p className="text-sm text-text-muted mb-5" data-testid="app-config-changed-modal-description">{t('config.errors.configChangedDesc')}</p>
+              <div className="flex gap-3" data-testid="app-config-changed-modal-actions">
+                <button type="button" onClick={() => { setConfigChangedConfirmOpen(false); void fetchConfig(); }} className="btn primary !px-4 !py-2" data-testid="app-config-changed-modal-confirm">
                   {t('config.errors.configChangedConfirm')}
                 </button>
-                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2">
+                <button type="button" onClick={() => setConfigChangedConfirmOpen(false)} className="btn !px-4 !py-2" data-testid="app-config-changed-modal-cancel">
                   {t('config.errors.configChangedCancel')}
                 </button>
               </div>
@@ -2657,7 +2922,7 @@ function AppContent() {
         </div>
       )}
 
-      <div className="share-image-stage" aria-hidden="true">
+      <div className="share-image-stage" aria-hidden="true" data-testid="app-share-image-stage">
         <ShareImageDocument ref={shareExportRef} snapshot={shareExportSnapshot} />
       </div>
     </div>
