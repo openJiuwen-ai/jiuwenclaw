@@ -10343,6 +10343,12 @@ class JiuWenSwarmDeepAdapter:
         reasoning_content = projection.get("reasoning_content")
         if isinstance(reasoning_content, str) and reasoning_content.strip():
             extra["reasoning_content"] = reasoning_content.strip()
+        try:
+            phase_id = int(projection.get("phase_id") or 0)
+        except (TypeError, ValueError):
+            phase_id = 0
+        if phase_id > 0:
+            extra["phase_id"] = phase_id
         nested_extra = projection.get("extra")
         if isinstance(nested_extra, dict):
             extra.update(nested_extra)
