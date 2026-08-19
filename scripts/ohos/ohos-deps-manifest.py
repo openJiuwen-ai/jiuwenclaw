@@ -28,6 +28,7 @@ except ImportError:
 IMPORT_BY_PACKAGE: dict[str, str] = {
     "beautifulsoup4": "bs4",
     "python-docx": "docx",
+    "python-dotenv": "dotenv",
     "pycryptodome": "Crypto",
     "python-dateutil": "dateutil",
     "python-json-logger": "pythonjsonlogger",
