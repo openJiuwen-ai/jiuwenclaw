@@ -342,6 +342,10 @@ export interface SessionRuntime {
   teamHistoryMessages: Message[];
   /** 当前会话输入栏已选中的技能名（用于随消息发送） */
   selectedSkills: string[];
+  /** SwarmFlow 是否激活（曾收到过 swarmflow 事件即置真，粘性） */
+  swarmflowActive: boolean;
+  /** SwarmFlow 工作流运行列表（树视图渲染） */
+  workflowRuns: WorkflowRun[];
 }
 
 function createEmptyRuntime(): SessionRuntime {
@@ -365,6 +369,8 @@ function createEmptyRuntime(): SessionRuntime {
     teamMemberContextCompression: {},
     teamHistoryMessages: [],
     selectedSkills: [],
+    swarmflowActive: false,
+    workflowRuns: [],
   };
 }
 
@@ -445,6 +451,12 @@ interface SessionState {
   clearTeamMemberContextCompressionStatus: (sessionId: string, memberId: string) => void;
   clearAllTeamMemberContextCompressionStatus: (sessionId: string) => void;
   setTeamHistoryMessages: (sessionId: string, messages: Message[]) => void;
+
+  // SwarmFlow actions
+  /** 增量合并一条 workflow 更新到 workflowRuns */
+  applyWorkflowUpdate: (sessionId: string, workflow: WorkflowRun) => void;
+  /** 切换 swarmflowActive（粘性：置真后不再回 false） */
+  setSwarmflowActive: (sessionId: string, active: boolean) => void;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -1236,6 +1248,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, teamHistoryMessages: messages },
+        },
+      };
+    });
+  },
+
+  applyWorkflowUpdate: (sessionId, workflow) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            swarmflowActive: true,
+            workflowRuns: applyWorkflowUpdateImpl(runtime.workflowRuns, workflow),
+          },
+        },
+      };
+    });
+  },
+
+  setSwarmflowActive: (sessionId, active) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, swarmflowActive: active },
         },
       };
     });
