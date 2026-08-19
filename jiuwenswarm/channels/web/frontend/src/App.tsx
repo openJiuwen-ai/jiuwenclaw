@@ -35,6 +35,7 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
+import { isPlanWireMode } from './features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
@@ -94,15 +95,9 @@ import {
   type ModelSetupGuideStep,
 } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
+import { isTeamAgentMode } from './features/planMode/wireMode';
 import './App.css';
 
-const TEAM_SESSION_MODES = new Set([
-  'team',
-  'team.plan',
-  'team.plan.normal',
-  'team.plan.code',
-  'code.team',
-]);
 const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
 const CHAT_PANEL_MIN_WIDTH_PCT = 20;
 const CHAT_PANEL_MAX_WIDTH_PCT = 70;
@@ -123,10 +118,6 @@ const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
   "external_cli_agent_codex_use_builtin",
   "external_cli_agent_codex_cli_path",
 ]);
-
-function isTeamMode(mode: string): boolean {
-  return TEAM_SESSION_MODES.has(mode);
-}
 
 function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
@@ -2187,7 +2178,7 @@ function AppContent() {
             view_id: kvcViewIdRef.current,
           });
         } catch (error) {
-          if (isTeamMode(resolvedMode)) {
+          if (isTeamAgentMode(resolvedMode)) {
             console.error('Failed to switch team session:', error);
             window.alert(t('sessions.errors.switchSession'));
             return;
@@ -2228,6 +2219,16 @@ function AppContent() {
       }
       if (resolvedMode) {
         setMode(targetSessionId, resolvedMode as AgentMode);
+        // 恢复会话时同步 Plan 开关：后端回传的 mode 可能是三段命名
+        // `agent.{work|code}.plan` / `team.{work|code}.plan`，而 setMode 会把
+        // 它归一成基础模式（normalizeAgentMode 折叠成 `agent` / `team`）。若不
+        // 补一次 setActive，planStore 仍是空 runtime（active:false），后续
+        // sendMessage 走 resolveOutgoingMode 时 isActive 为 false，出站 mode
+        // 退回基础模式，Plan 流程静默丢失。按 isPlanWireMode 判定，非 plan
+        // 会话不受影响。
+        if (isPlanWireMode(resolvedMode)) {
+          usePlanStore.getState().setActive(targetSessionId, true);
+        }
       }
       setActiveNav('chat');
       navigate({ kind: 'chat-session', sessionId: targetSessionId });

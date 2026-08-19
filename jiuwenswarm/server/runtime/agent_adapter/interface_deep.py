@@ -373,7 +373,13 @@ from jiuwenswarm.common.utils import (
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+    is_code_profile_mode,
+    is_team_mode,
+)
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()
@@ -1443,9 +1449,10 @@ class JiuWenSwarmDeepAdapter:
         self._parent_session_id = session_id
 
     # chat.send equipment: apply package load/unload at the fresh-turn boundary.
-    _SKIP_EXTENSION_MODES: "frozenset[str]" = frozenset(
-        {"team", "team.plan", "code.team", "auto_harness"}
-    )
+    # 团队会话（新旧 canonical：team / team.plan / code.team / team.work.* /
+    # team.code.*）一律不装配 chat extension，由 is_team_mode 统一判定；
+    # 此处仅保留 auto_harness 单例。
+    _SKIP_EXTENSION_MODES: "frozenset[str]" = frozenset({"auto_harness"})
 
     @staticmethod
     def _equipment_error_response(request: AgentRequest, message: str) -> AgentResponse:
@@ -1462,7 +1469,7 @@ class JiuWenSwarmDeepAdapter:
         """Apply agent_template / plugin equipment for the upcoming turn."""
         params = request.params if isinstance(request.params, dict) else {}
         mode = str(params.get("mode") or "").strip() or "agent"
-        if mode in self._SKIP_EXTENSION_MODES:
+        if mode in self._SKIP_EXTENSION_MODES or is_team_mode(mode):
             return None
 
         has_at = "agent_template_name" in params
@@ -6741,7 +6748,19 @@ class JiuWenSwarmDeepAdapter:
         await self.set_checkpoint()
         await asyncio.sleep(0)
 
-        self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
+        # dreaming 只区分 agent 工作族 / code profile 两种形态。新三段命名 canonical
+        # （agent.work.normal / agent.code.normal / team.code.normal 等）已取代旧
+        # agent / code 串：先 deprecate 归一再按 profile 归一成二元 token（"agent" /
+        # "code"），保证下游 sweeper 的 == "agent" 判定、output_dir 与 prompt 选择都正确。
+        # 裸 "code" 经 deprecate -> agent.code.normal，也能被 is_code_profile_mode 命中；
+        # team 等未知模式沿用历史 agent 兜底。
+        _deprecated_mode = deprecate_mode(mode) if mode else ""
+        if _deprecated_mode in (NEW_AGENT_WORK_NORMAL, NEW_AGENT_WORK_PLAN):
+            self._dreaming_mode = "agent"
+        elif is_code_profile_mode(_deprecated_mode):
+            self._dreaming_mode = "code"
+        else:
+            self._dreaming_mode = "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
@@ -7199,7 +7218,7 @@ class JiuWenSwarmDeepAdapter:
 
         return (
             not self._is_code_agent
-            and mode in {"agent", "agent.fast", "agent.plan"}
+            and deprecate_mode(mode) in {NEW_AGENT_WORK_NORMAL, NEW_AGENT_WORK_PLAN}
             and self._personal_context_runtime_enabled
         )
 
@@ -9612,7 +9631,14 @@ class JiuWenSwarmDeepAdapter:
         Returns None when the rail is (or becomes) available, or an error message string.
         """
         # 合并后演进能力在 agent 模式可用（兼容历史 agent.plan token）。
-        if mode not in ("agent", "agent.plan"):
+        # 各自保留各自的旧放行集合，只追加新三段命名等价串：旧 {agent, agent.plan}
+        # + 新 {agent.work.normal, agent.work.plan}。注意本闸门旧集合不含 team；
+        # code 系 / team 系（含 team.work.*）均不放行。不用 deprecate_mode，因为
+        # 它会把 agent.fast 归一到 agent.work.normal 而误放行。
+        if mode not in {
+            "agent", "agent.plan",
+            "agent.work.normal", "agent.work.plan",
+        }:
             display_mode = str(mode or "当前").strip() or "当前"
             return f"{display_mode} 模式下演进功能不可用。"
         if not get_skill_evolution_enabled(self._config_base_cache or self._config_cache):
@@ -13344,7 +13370,14 @@ class JiuWenSwarmDeepAdapter:
             from jiuwenswarm.common.utils import get_agent_sessions_dir
             sessions_dir = str(get_agent_sessions_dir() or "")
             mode = getattr(self, "_dreaming_mode", "agent")
-            output_name = "memory" if mode == "agent" else "coding_memory"
+            # _dreaming_mode 在 create_instance 已归一到二元 "agent"/"code"；这里仍用
+            # deprecate 归一判定，防御未来某处直接塞入完整 canonical 串（如
+            # agent.work.normal）时 output_dir 不会错算成 coding_memory。
+            output_name = (
+                "memory"
+                if deprecate_mode(mode) in (NEW_AGENT_WORK_NORMAL, NEW_AGENT_WORK_PLAN)
+                else "coding_memory"
+            )
             base_dir = getattr(self, "_agent_workspace_dir", None) or self._workspace_dir
             output_dir = os.path.join(base_dir, output_name)
             orch = await start_dreaming(

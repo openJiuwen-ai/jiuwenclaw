@@ -45,6 +45,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.chat_send import PLAN_ENTRY_SOURCES
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
@@ -87,6 +88,7 @@ from jiuwenswarm.common.mode_matrix import (
     canonicalize_mode_text,
     is_plan_mode,
     is_team_mode,
+    resolve_new_canonical_mode,
     resolve_request_mode,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.permissions_config_rpc import (
@@ -240,7 +242,9 @@ _SESSION_PREVIOUS_MODE_KEY = "_session_previous_mode"
 
 # ``plan_entry_source`` 的合法取值，表示"用户这一条消息明确要求进入 plan"。
 # 一次性字段：TUI 的 ``/plan`` 命令、Web 用户手动打开 Plan 开关后的第一条消息。
-_PLAN_ENTRY_SOURCES = frozenset({"slash_command", "plan_toggle"})
+# 字面量定义在 ``jiuwenswarm.common.schema.chat_send`` 的
+# ``PLAN_ENTRY_SOURCES``，前后端共享同一契约，本文件直接引用。
+# 跨层契约测试见 ``tests/unit_tests/test_plan_entry_source_contract.py``。
 
 _CODE_MODE_SYNC_METHODS = frozenset({
     ReqMethod.CHAT_SEND,
@@ -628,12 +632,26 @@ def resolve_agent_request_mode(
 ) -> tuple[str, str | None, str]:
     """Resolve request params.mode into manager mode, sub_mode, and canonical value.
 
-    plan / fast 已合并为单一 ``agent`` 模式：任何 ``agent`` / ``agent.plan`` /
-    ``agent.fast`` 请求都归一到 ``agent``（sub_mode=None）。历史裸 ``plan`` /
-    ``fast``（无 ``agent.`` 前缀，如旧 cron job 存量数据）同样归一到 ``agent``，
-    与 CLI ``MODE_ALIASES``、记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
+    plan / fast 已合并为单一 ``agent`` 模式：``agent`` / ``agent.fast`` 请求
+    归一到 ``agent``（sub_mode=None），历史裸 ``plan`` / ``fast``（无 ``agent.``
+    前缀，如旧 cron job 存量数据）同样归一到 ``agent``。与 CLI ``MODE_ALIASES``、
+    记忆配置 ``_resolve_mode_memory`` 的裸 token 处理保持一致。
+
+    例外：``agent.plan`` 是真实 plan 模式（与 mode_matrix ``_WEB_MODE_TABLE`` /
+    ``_PLAN_EXIT_MODES`` / ``DEPRECATION_MAP`` 同源，deprecate 后落
+    ``agent.work.plan``），不并入 ``agent``。若存量 agent.plan 会话被惰性迁移成
+    ``agent.work.plan``（plan），此处运行时解析也按 plan 处理，避免同一旧值在
+    迁移后变 plan、运行时仍非 plan 的语义错位。
     """
     mode_text = canonicalize_mode_text(raw_mode)
+
+    # 新三段命名 canonical 自带 environment/state 段，按串自身语义直接解析，
+    # 不经过下方的 legacy 归并（否则 agent.work.plan 会被 work_mode="code"
+    # 折叠成 code.normal，造成 TUI 显示与模型感知的模式不一致）。
+    new_mode_resolved = resolve_new_canonical_mode(mode_text)
+    if new_mode_resolved is not None:
+        return new_mode_resolved
+
     normalized_work_mode = (
         work_mode.strip().lower() if isinstance(work_mode, str) else ""
     )
@@ -648,10 +666,17 @@ def resolve_agent_request_mode(
     if mode_text == TEAM_PLAN_CODE_MODE:
         return "code", "team", TEAM_PLAN_CODE_MODE
 
+    # agent.plan 按 plan 解析（work/code profile 与 mode_matrix _WEB_MODE_TABLE
+    # 的 (WEB_PLAN_AGENT, work/code) 项一一对应），保持 plan 语义统一。
+    if mode_text == "agent.plan":
+        if normalized_work_mode == "code":
+            return "code", "plan", "code.plan"
+        return "agent", "plan", "agent.plan"
+
     parts = mode_text.split(".")
     mode = parts[0] or "agent"
     if mode == "agent":
-        # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
+        # 合并模式：忽略历史子模式（fast），统一 canonical "agent"。
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
         return "agent", None, "agent"
@@ -2250,7 +2275,7 @@ class AgentWebSocketServer:
         """
         if not isinstance(request.params, dict):
             return False
-        return request.params.get("plan_entry_source") in _PLAN_ENTRY_SOURCES
+        return request.params.get("plan_entry_source") in PLAN_ENTRY_SOURCES
 
     @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
@@ -2683,9 +2708,11 @@ class AgentWebSocketServer:
         if resolved.is_team:
             return False
         is_code_single = mode == "code" and sub_mode != "team"
-        is_work_single_plan_capable = (
-            resolved.from_web_composition and resolved.manager_mode == "agent"
-        )
+        # work 单 agent：Web 组合（agent / agent.plan + work_mode）与 TUI 直发的新
+        # canonical（agent.work.plan）都归属 manager_mode="agent"，plan 状态统一放在
+        # DeepAgentState.plan_mode。不再依赖 from_web_composition，否则 TUI /plan 进入
+        # 的 agent.work.plan 会漏同步 plan 状态。
+        is_work_single_plan_capable = resolved.manager_mode == "agent"
         if not (is_code_single or is_work_single_plan_capable):
             return False
         # 目标 plan 状态由 canonical mode 决定：code 单 agent 沿用 sub_mode，
@@ -9347,7 +9374,16 @@ class AgentWebSocketServer:
             is_swarm = bool(params.get("is_swarm")) or resolved.is_team
             prewarm_eligible = (
                 not is_swarm
-                and canonical_mode in {"agent", "code", "code.normal"}
+                and canonical_mode
+                in {
+                    # 排除 *.plan 模式：plan 模式需先注入 plan reminder 并初始化 plan_state，
+                    # prewarm 对 plan 无意义甚至可能与 plan_slug 清理逻辑冲突，只对 normal 系有意义
+                    "agent",
+                    "code",
+                    "code.normal",
+                    "agent.work.normal",
+                    "agent.code.normal",
+                }
             )
             create_token = str(params.get("create_token") or "").strip()
             if external_tui_session:

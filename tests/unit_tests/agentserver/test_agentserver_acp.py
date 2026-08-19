@@ -800,8 +800,12 @@ async def test_handle_session_create_returns_session_id(monkeypatch, tmp_path):
     assert len(fake_manager.claim_session_calls) == 1
     assert fake_manager.claim_session_calls[0]["channel_id"] == "acp"
     assert fake_manager.claim_session_calls[0]["create_token"] == "create-acp-001"
-    metadata = json.loads((sessions_root / "acp_session_001" / "metadata.json").read_text(encoding="utf-8"))
-    assert metadata["mode"] == "agent"
+    # 读路径惰性迁移：旧 canonical agent → 新 canonical agent.work.normal。
+    # 直接用 get_session_metadata 读取，避免与 create 流程里 resolve_session_switch_context
+    # 触发的异步惰性迁移写回（agent → agent.work.normal）构成原始文件读竞态。
+    from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
+    metadata = get_session_metadata("acp_session_001", cache_bust=True)
+    assert metadata["mode"] == "agent.work.normal"
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create",
@@ -1338,7 +1342,8 @@ async def test_handle_session_create_injected_default_work_mode_does_not_mismatc
     from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
     metadata = get_session_metadata("sess_code_project", cache_bust=True)
-    assert metadata["mode"] == "code.normal"
+    # 读路径惰性迁移：旧 canonical code.normal → 新 canonical agent.code.normal
+    assert metadata["mode"] == "agent.code.normal"
     assert metadata["work_mode"] == "code"
 
 

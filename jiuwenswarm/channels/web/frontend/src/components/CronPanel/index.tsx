@@ -14,6 +14,7 @@ import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
 import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
 import { resolveCronJobProjectName } from './cronProjectDisplay';
+import { isTeamCronModeValue } from './cronMode';
 import { useClickOutside } from './useClickOutside';
 import SimpleSelect from './SimpleSelect';
 import { hasXiaoyiPushApiId, isCronTargetOptionDisabled } from './xiaoyiCronTarget';
@@ -206,20 +207,9 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
   };
 }
 
-// 后端 CronJob.mode 合法值集合（对齐 jiuwenswarm/gateway/cron/models.py 的 _TEAM_CRON_MODES）。
-// 用于 cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——只有 'team' 这一类算集群，
-// 其余一律按单 Agent 处理。inline 在这里而不是放到 types/cron.ts 是因为它只服务于本文件的归一逻辑，
-// 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
-function isTeamCronModeValue(raw: string | undefined | null): boolean {
-  const value = String(raw ?? '').trim().toLowerCase();
-  return (
-    value === 'team' ||
-    value === 'team.plan' ||
-    value === 'team.plan.normal' ||
-    value === 'team.plan.code' ||
-    value === 'code.team'
-  );
-}
+// isTeamCronModeValue 从 ./cronMode 引入（对齐后端 CRON_JOB_MODES / mode_matrix 的
+// TEAM_CANONICAL_MODES），cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——
+// 只有 'team' 这一类算集群，其余一律按单 Agent 处理。
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
 

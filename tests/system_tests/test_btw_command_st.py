@@ -149,6 +149,9 @@ async def test_btw_command_system_roundtrip(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -235,6 +238,9 @@ async def test_btw_command_empty_question(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -325,6 +331,9 @@ async def test_btw_no_context_when_no_session(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"

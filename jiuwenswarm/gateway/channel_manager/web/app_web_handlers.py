@@ -93,6 +93,7 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     validate_a2ui_config_update,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.mode_matrix import is_team_mode
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.utils import (
@@ -3809,7 +3810,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 logger.warning("[session.delete] forward to agent failed, fallback local: %s", e)
 
         metadata = get_session_metadata(session_id_to_delete)
-        if str(metadata.get("mode") or "").strip().lower() == "team":
+        if is_team_mode(metadata.get("mode")):
             await channel.send_response(
                 ws,
                 req_id,

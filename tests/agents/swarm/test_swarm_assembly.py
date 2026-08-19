@@ -2157,7 +2157,16 @@ async def test_code_plan_approval_still_contains_inline_choices(tmp_path: Path) 
 
 
 def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch) -> None:
-    """Approved team plans should resume the Leader into team execution semantics."""
+    """Approved team plans should resume the Leader into team execution semantics.
+
+    ``team.plan.code`` leader routes through ``CodeAgentModeRail`` (code profile
+    prompts + team exit notification); ``code.team`` leader keeps the code
+    profile prompts without an exit notification. The fake rail records every
+    kwarg passed by either caller so we can assert on both shapes.
+    """
+    from jiuwenswarm.agents.swarm.providers.code_rails import (
+        _TEAM_PLAN_EXIT_NOTIFICATION_EN,
+    )
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
         _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
         _PLAN_MODE_SYSTEM_NOTE,
@@ -2168,23 +2177,12 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     captured_configs: list[dict[str, object]] = []
 
     class FakeCodeAgentModeRail:
-        def __init__(
-            self,
-            *,
-            allowed_tools,
-            plan_mode_system_note,
-            enter_plan_instructions,
-            exit_plan_notification,
-        ):
-            captured_configs.append(
-                {
-                    "allowed_tools": allowed_tools,
-                    "plan_mode_system_note": plan_mode_system_note,
-                    "enter_plan_instructions": enter_plan_instructions,
-                    "exit_plan_notification": exit_plan_notification,
-                }
-            )
+        def __init__(self, **kwargs: object) -> None:
+            captured_configs.append(dict(kwargs))
 
+    # build_code_agent_mode lazy-imports CodeAgentModeRail at call time, so
+    # patching the module attribute is enough to capture both callers — both
+    # team.plan.code and code.team leaders resolve to the code rail branch.
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail.CodeAgentModeRail",
         FakeCodeAgentModeRail,
@@ -2193,14 +2191,22 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     code_rails.build_code_agent_mode({}, code_team_leader)
 
     team_config, code_config = captured_configs
+    # team.plan.code leader goes through CodeAgentModeRail with the code
+    # profile prompts plus the team exit notification prompting Team Leader
+    # to use build_team.
     assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert "plan_mode_attachment_note" not in team_config
     assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert team_config["exit_plan_notification"] == _TEAM_PLAN_EXIT_NOTIFICATION_EN
     assert "Team Leader" in team_config["exit_plan_notification"]
     assert "build_team" in team_config["exit_plan_notification"]
+    assert "ask_user" in team_config["allowed_tools"]
+    # code.team leader stays on the code profile prompts with no exit
+    # notification (only Team Plan leaders receive the Team Leader reminder).
     assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert "plan_mode_attachment_note" not in code_config
     assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
     assert code_config["exit_plan_notification"] is None
-    assert "ask_user" in team_config["allowed_tools"]
     assert "ask_user" in code_config["allowed_tools"]
 
 

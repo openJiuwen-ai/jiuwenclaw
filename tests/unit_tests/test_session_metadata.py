@@ -24,10 +24,14 @@ def sessions_dir(tmp_path, monkeypatch):
     # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
     from jiuwenswarm.server.runtime.session.session_metadata import (
         _METADATA_CACHE,
+        _METADATA_QUEUE,
         _SESSION_REBIND_GEN,
     )
     _METADATA_CACHE.clear()
     _SESSION_REBIND_GEN.clear()
+    # 排空异步写队列，避免上一个用例残留的 write task 在 init 之后写盘，
+    # 把 project_dir 等字段回写为旧值（mode 惰性迁移 + 额外写回放大窗口）。
+    _METADATA_QUEUE.join()
     return d
 
 
@@ -1324,7 +1328,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s1", mode="agent.plan", explicit_mode_provided=True
         )
         _drain_queue()
-        assert get_session_metadata("s1")["mode"] == "agent.plan"
+        # 读路径惰性迁移：旧 canonical agent.plan → 新 canonical agent.work.plan
+        assert get_session_metadata("s1")["mode"] == "agent.work.plan"
 
     @staticmethod
     def test_sync_mode_not_overwritten_when_implicit(sessions_dir):
@@ -1345,7 +1350,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s_team", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_team")["mode"] == "team", \
+        # 读路径惰性迁移：旧 canonical team → 新 canonical team.work.normal
+        assert get_session_metadata("s_team")["mode"] == "team.work.normal", \
             "未显式携带 mode 时不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1370,7 +1376,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s_ws", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_ws")["mode"] == "team", \
+        # 读路径惰性迁移：旧 canonical team → 新 canonical team.work.normal
+        assert get_session_metadata("s_ws")["mode"] == "team.work.normal", \
             "空白/未显式 mode 不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1396,7 +1403,8 @@ class TestSyncSessionRequestMetadata:
         meta = get_session_metadata("s_new")
         assert meta["project_dir"] == "E:\\newproj"
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["last_user_message_at"] == 1234.0
         assert meta["status"] == "idle"
 
@@ -1461,7 +1469,7 @@ class TestSyncSessionRequestMetadata:
         assert data["pin_order"] == 1, "pin_order 不应丢失"
         # 请求级字段仍按语义写入
         assert data["model"] == "glm-5"
-        assert data["mode"] == "code"
+        assert data["mode"] == "agent.code.normal"
         assert data["last_user_message_at"] == 9999.0
 
     @staticmethod
@@ -1540,7 +1548,8 @@ class TestSyncChatRequestMetadata:
         assert effective == "E:\\projA"
         meta = get_session_metadata("sess_1")
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["project_dir"] == "E:\\projA"
         assert meta["channel_id"] == "web"
         # last_user_message_at 被刷新为当前时刻（chat 轮次 → is_chat_turn=True → 真正写入）
@@ -1694,7 +1703,8 @@ class TestSyncChatRequestMetadata:
         assert effective == "E:\\newproj"
         meta = get_session_metadata("s_new")
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["project_dir"] == "E:\\newproj"
         assert meta["status"] == "idle"
 
@@ -1893,7 +1903,8 @@ class TestSessionGetMetadataHandler:
         assert resp["ok"] is True
         payload = resp["payload"]
         assert payload["session_id"] == "sess_x"
-        assert payload["mode"] == "agent.plan"
+        # 读路径惰性迁移：旧 canonical agent.plan → 新 canonical agent.work.plan
+        assert payload["mode"] == "agent.work.plan"
         assert payload["model"] == "glm-5"
         assert payload["project_dir"] == "E:\\myproj"
         assert payload["last_user_message_at"] == 1234.0

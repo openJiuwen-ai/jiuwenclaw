@@ -30,8 +30,12 @@ import {
   type HarnessExtensionReady,
   type HarnessActivateInteraction,
 } from "./core/event-handlers.js";
-import { isTeamMode, type ClientMode } from "./core/modes.js";
+import { isTeamMode, normalizeToClientMode, type ClientMode } from "./core/modes.js";
 import { isEventFrame, type EventFrame, type FileAttachment } from "./core/protocol.js";
+import {
+  PLAN_ENTRY_SOURCE_SLASH_COMMAND,
+  type PlanEntrySource,
+} from "./core/plan-entry-source.js";
 import {
   StreamingState,
   type ContextCompressionStats,
@@ -230,11 +234,7 @@ const DEFERRED_TRANSCRIPT_EVENTS = new Set([
 ]);
 
 function isPlanClientMode(mode: ClientMode): boolean {
-  return (
-    mode === "agent.plan" ||
-    mode === "code.plan" ||
-    mode.startsWith("team.plan")
-  );
+  return mode.endsWith(".plan");
 }
 
 // ── Auto-recap (自动回顾) 常量 ──
@@ -320,7 +320,7 @@ export class CliPiAppState {
   private bootSessionCreation: Promise<void> | null = null;
   /** 普通启动的幂等创建 token；重连期间保持稳定。 */
   private readonly bootCreateToken = generateCreateToken();
-  private mode: ClientMode = "code.normal";
+  private mode: ClientMode = "agent.code.normal";
   private themeName: ThemeName = getCurrentThemeName();
   private accentColor: AccentColorName = getCurrentAccentColor();
   private transcriptMode: "compact" | "detailed" = "compact";
@@ -417,7 +417,7 @@ export class CliPiAppState {
   private activeCommandRequestId: string | null = null;
   /** 当前正在执行的命令名称，用于追踪不可中断命令。 */
   private runningCommand: string | null = null;
-  private pendingPlanEntrySource: "slash_command" | null = null;
+  private pendingPlanEntrySource: PlanEntrySource | null = null;
   private lastVisibleUserRequest: VisibleUserRequest | null = null;
   /** 保存 askQuestions 之前的 streamingState，用于在对话框关闭后恢复。 */
   private streamingStateBeforeQuestion: StreamingState | null = null;
@@ -1939,7 +1939,7 @@ export class CliPiAppState {
   };
 
   readonly markPlanEntryFromSlashCommand = (): void => {
-    this.pendingPlanEntrySource = "slash_command";
+    this.pendingPlanEntrySource = PLAN_ENTRY_SOURCE_SLASH_COMMAND;
   };
 
   readonly setModel = (name: string): void => {
@@ -3399,7 +3399,13 @@ export class CliPiAppState {
       }
       const resolvedMode = res?.mode;
       if (typeof resolvedMode === "string" && resolvedMode) {
-        this.setMode(resolvedMode as ClientMode);
+        // 后端可能回旧 canonical 串（历史 session 重连），走 normalizeToClientMode
+        // 归一到新串；未知串丢弃，避免 ``as`` 强转把旧串写入 this.mode 让
+        // isTeamMode / isPlanClientMode / formatModeForDisplay 误判。
+        const normalized = normalizeToClientMode(resolvedMode);
+        if (normalized) {
+          this.setMode(normalized);
+        }
       }
       if (target !== null) {
         this.safeRestoreHistory(createdId);

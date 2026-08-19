@@ -12,6 +12,7 @@ from jiuwenswarm.common.work_mode import (
 from jiuwenswarm.common.mode_matrix import (
     TEAM_PLAN_CODE_MODE,
     TEAM_PLAN_NORMAL_MODE,
+    deprecate_mode,
     is_team_mode,
 )
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
@@ -80,15 +81,32 @@ CRON_JOB_MODES: frozenset[str] = frozenset(
         "agent",       # 合并后的单一 agent 模式
         "plan",        # legacy shorthand（归一到 agent）
         "team",        # multi-agent team mode
-        "agent.plan",  # legacy（归一到 agent）
+        "agent.plan",  # legacy（真实 plan 模式，deprecate 后 agent.work.plan）
         "agent.fast",  # legacy（归一到 agent）
         "team.plan",
         TEAM_PLAN_NORMAL_MODE,
         TEAM_PLAN_CODE_MODE,
         "code.team",
+        # standalone code profile canonical（与 Mode.from_raw / DEPRECATION_MAP 同源）。
+        # 不加会导致同串在非 cron 路径合法、在 cron 路径被拒（400）。
+        "code",
+        "code.normal",
+        "code.plan",
+        "team.code",
         # 不走 chat.send，scheduler 消费时直接发 PROACTIVE_TICK WS 请求
         # 触发 AgentServer ProactiveEngine.tick_now()。由 proactive_cron_sync 自动注册。
         "proactive.tick",
+        # 新三段命名 canonical（P3 引入，与 message_handler /mode 同源）。
+        # 创建/更新 cron 任务时可直接传新串；存量 cron 数据读取走 coerce + 运行时
+        # deprecate_mode 兜底，二者均无需扩 _CRON_JOB_MODE_ALIASES。
+        "agent.work.normal",
+        "agent.work.plan",
+        "agent.code.normal",
+        "agent.code.plan",
+        "team.work.normal",
+        "team.work.plan",
+        "team.code.normal",
+        "team.code.plan",
     }
 )
 
@@ -103,7 +121,8 @@ CRON_JOB_DESCRIPTION_MAX_LENGTH: int = 500
 
 _CRON_JOB_MODE_ALIASES: dict[str, str] = {
     "plan": "agent",
-    "agent.plan": "agent",
+    # agent.plan 是真实 plan 模式：不并入 agent，交由 deprecate_mode
+    # 映射到 agent.work.plan，与运行时 resolve_agent_request_mode / 会话迁移一致。
     "agent.fast": "agent",
     "team.plan": TEAM_PLAN_NORMAL_MODE,
 }
@@ -112,8 +131,20 @@ _CRON_JOB_MODE_ALIASES: dict[str, str] = {
 def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
     """Normalize and validate a cron job execution mode (strict, for create/update APIs).
 
-    legacy 别名（plan / agent.plan / agent.fast）在此处即归一为 "agent" 后落库，
-    而非仅依赖运行时（AgentServer 侧）兜底归一。
+    两步归一（P3 重写）：
+    1. legacy 别名经 ``_CRON_JOB_MODE_ALIASES`` 映射到旧 canonical
+       （plan → agent；team.plan → team.plan.normal；agent.fast → agent；
+       agent.plan 不并入 agent，是真实 plan 模式，经第 2 步落到 agent.work.plan）。
+       这一步把 ``team.plan`` 单一映射到 ``team.plan.normal``，避免原方案中
+       ``team.plan`` 同时被 ``_CRON_JOB_MODE_ALIASES`` 映成
+       ``TEAM_PLAN_NORMAL_MODE``、又被 deprecate_mode 映成 ``team.work.normal``
+       的双键冲突。
+    2. 旧 canonical 经 ``deprecate_mode`` 静默映射到新 canonical（如
+       agent → agent.work.normal；agent.plan → agent.work.plan；
+       team.plan.normal → team.work.plan）。
+
+    新 canonical（8 个新串）不在 ``_CRON_JOB_MODE_ALIASES`` 中，第一步直通，
+    第二步 deprecate_mode 也原样返回，最终落库为新 canonical。
     """
     if raw is None:
         return default
@@ -125,17 +156,40 @@ def normalize_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -
             f"Invalid cron job mode {raw!r}. "
             f"Valid: {', '.join(sorted(CRON_JOB_MODES))}"
         )
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+    # 步骤1：legacy 别名归一到旧 canonical。
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        logger.debug(
+            "normalize_cron_job_mode: step1 legacy alias '%s' -> '%s'",
+            value, legacy,
+        )
+        value = legacy
+    # 步骤2：旧 canonical 经 deprecate_mode 转新 canonical。
+    new_value = deprecate_mode(value)
+    if new_value != value:
+        logger.debug(
+            "normalize_cron_job_mode: step2 deprecate '%s' -> '%s'",
+            value, new_value,
+        )
+    return new_value
 
 
 def coerce_cron_job_mode(raw: Any, *, default: str = CRON_JOB_DEFAULT_MODE) -> str:
-    """Normalize mode for runtime/persistence; unknown values pass through lowercased."""
+    """Normalize mode for runtime/persistence; unknown values pass through lowercased.
+
+    与 ``normalize_cron_job_mode`` 同走两步归一：legacy 别名（``_CRON_JOB_MODE_ALIASES``）
+    → 旧 canonical → ``deprecate_mode`` → 新 canonical。这样磁盘读出的旧串在 coerce
+    后即落新 canonical，cron_jobs.json 经一次读改写回即完成迁移。
+    """
     if raw is None:
         return default
     value = str(raw).strip().lower()
     if not value:
         return default
-    return _CRON_JOB_MODE_ALIASES.get(value, value)
+    legacy = _CRON_JOB_MODE_ALIASES.get(value)
+    if legacy is not None:
+        value = legacy
+    return deprecate_mode(value)
 
 
 def cron_job_modes_for_tools() -> list[str]:
