@@ -42,7 +42,7 @@ export function MemberListItem({
       type="button"
       onClick={onClick}
       data-testid="team-area-member-item"
-      data-variant={compact ? 'compact' : 'expanded'}
+      data-variant={member.member_id}
       className={`flex w-full items-center gap-3 rounded-md text-left  ${
         compact ? 'p-2' : 'p-3'
       } ${

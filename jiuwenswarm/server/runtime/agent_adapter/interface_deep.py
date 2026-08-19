@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_config_service import AgentDefinition
 
 import yaml
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
@@ -171,7 +171,10 @@ from jiuwenswarm.agents.harness.common.browser_defaults import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
-from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
+from jiuwenswarm.agents.harness.common.auto_harness import (
+    AutoHarnessService,
+    validate_harness_config,
+)
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     build_permission_rail,
@@ -216,6 +219,10 @@ from jiuwenswarm.common.model_config_validation import (
     is_placeholder_api_base,
     is_placeholder_model_entry,
     model_client_config_view,
+)
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    build_kv_cache_affinity_config,
+    model_provider,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import (
     TOOL_PERMISSION_CHANNEL_ID,
@@ -864,113 +871,67 @@ def _deep_agent_context_engine_config(
     model_name: str | None = None,
     model: Any = None,
 ) -> ContextEngineConfig:
-    """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
+    """Build the agent-core Context Engine configuration.
 
-    仅承接 ContextEngine 自身配置；KV cache affinity 由独立
-    ``react.kv_cache_affinity_config`` 管理。
-
-    AgentOS per-model 覆盖——"选中哪个模型配置就用哪个的 max_tokens"：
-
-    路径 A（首选，精确）：传入 ``model``（当前选中的 ``Model`` 对象）时，直接从其
-    普通属性 ``_agentos_ctx_window`` 读 agentos 输入侧上下文窗口值。该属性由
-    ``build_model_from_entry`` 在构造完 agentos 的 ``Model`` 后挂到 Model 实例上
-    （从原始 mco 取 max_tokens 值——该值已在 reasoning_injector 公共出口被 pop、
-    不在 ModelRequestConfig 里）。**该属性不进 ModelRequestConfig 的 extra**，
-    故不经 ``model_dump`` 流到厂商 SDK；Model 是普通 Python 类，挂普通属性即可。
-    每个 agentos 条目各造各的 Model 对象、各带自己的属性，故同名多条目也能精确
-    区分"选中哪个用哪个的值"。
-
-    路径 B（回退，兼容）：仅在**未传 ``model``**（调用方拿不到选中 Model 变量，
-    如 usage 回调 L10215）时，从 ``full_config["models"]["agentos"]`` 按
-    ``model_name`` 反查，取首个匹配条目。此路径在同名多条目时无法区分，仅供兜底；
-    且**不**在"传了 model 但路径 A 读不到值"时启用——否则本条目未配 max_tokens、
-    却存在同名带 max_tokens 条目时，会取到别人的值错误覆盖。
-    defaults 不受影响（不带 _agentos_ctx_window 属性，路径 A 读到 None；defaults 的
-    model_name 也不匹配 agentos 列表，路径 B 不会命中）。
+    Processor-only fields such as ``round_level_compressor_config`` are
+    filtered out, while every field owned by ``ContextEngineConfig`` is
+    preserved.  The selected AgentOS model may override the configured context
+    window without leaking ``max_tokens`` into the provider request.
     """
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
     cec = cec if isinstance(cec, dict) else {}
-    cw_tokens = parse_int(cec.get("context_window_tokens"), None)
 
-    # AgentOS per-model 覆盖。
-    # 路径 A：传了 model 时，从选中 Model 的普通属性直接读（精确，同名可区分；
-    # 不进 model_dump，不流到 SDK）。若该 Model 无此属性（如 defaults，或 agentos
-    # 未配 max_tokens）-> agentos_cw 为 None，保持全局基础值，**不**回退路径 B：
-    # 否则当本条目未配 max_tokens、却存在同名带 max_tokens 的 agentos 条目时，
-    # 路径 B 会取到别人的值错误覆盖。
+    defaults = ReActAgentConfig().context_engine_config
+    supported = {
+        key: value
+        for key, value in cec.items()
+        if key in ContextEngineConfig.model_fields
+    }
+    # Preserve the established tolerant behavior for malformed window values.
+    if "context_window_tokens" in supported:
+        supported["context_window_tokens"] = parse_int(
+            supported["context_window_tokens"], None
+        )
+
+    # Prefer the selected Model object so duplicate AgentOS entries with the
+    # same model name cannot borrow another entry's max_tokens value.
     agentos_cw: int | None = None
     if model is not None:
         agentos_cw = parse_int(getattr(model, "_agentos_ctx_window", None), None)
-    # 路径 B：仅在**未传 model**（如 usage 回调拿不到选中 Model 变量）时，
-    # 从 config 的 agentos 列表按 model_name 反查取首个匹配（兜底，同名无法区分）。
-    if model is None and full_config and model_name:
+    elif full_config and model_name:
         agentos_raw = (full_config.get("models") or {}).get("agentos")
         agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
-        for blk in agentos_list:
-            if not isinstance(blk, dict):
+        for block in agentos_list:
+            if not isinstance(block, dict):
                 continue
-            blk_mcc = blk.get("model_client_config") or {}
-            if isinstance(blk_mcc, dict) and blk_mcc.get("model_name") == model_name:
-                agentos_cw = parse_int((blk.get("model_config_obj") or {}).get("max_tokens"), None)
+            model_client_config = block.get("model_client_config") or {}
+            if (
+                isinstance(model_client_config, dict)
+                and model_client_config.get("model_name") == model_name
+            ):
+                model_config = block.get("model_config_obj") or {}
+                agentos_cw = parse_int(model_config.get("max_tokens"), None)
                 break
     if agentos_cw is not None:
-        cw_tokens = agentos_cw
+        supported["context_window_tokens"] = agentos_cw
 
-    recall = cec.get("compression_recall_config")
-    recall = recall if isinstance(recall, dict) else {}
-    return ReActAgentConfig().context_engine_config.model_copy(
-        update={
-            "enable_reload": bool(cec.get("enable_reload", False)),
-            "enable_openrouter_model_context_window_tokens": bool(
-                cec.get("enable_openrouter_model_context_window_tokens", False)
-            ),
-            # 显式设置的上下文窗口上限；非法值回退 None（由 agent-core 按模型解析）
-            "context_window_tokens": cw_tokens,
-            # 上下文压缩 debug 落盘开关；目录缺省时由 agent-core 按
-            # OPENJIUWEN_CONTEXT_DEBUG_DIR / workspace 默认路径解析
-            "enable_context_debug": bool(cec.get("enable_context_debug", False)),
-            "context_debug_dir": cec.get("context_debug_dir") or None,
-            # 压缩召回：压缩时归档原始消息，供模型按需召回
-            "compression_recall_config": CompressionRecallConfig(
-                enabled=bool(recall.get("enabled", False)),
-                chunk_size_tokens=parse_int(recall.get("chunk_size_tokens"), 3000),
-                chunk_overlap_tokens=parse_int(recall.get("chunk_overlap_tokens"), 300),
-            ),
+    return ContextEngineConfig.model_validate(
+        {
+            **defaults.model_dump(),
+            **supported,
         }
     )
 
 
-def _model_provider(model: Any) -> str:
-    for owner in (model, getattr(model, "_client", None)):
-        model_client_config = getattr(owner, "model_client_config", None)
-        provider = getattr(model_client_config, "client_provider", None)
-        if provider is not None:
-            return str(getattr(provider, "value", provider) or "").strip()
-    return ""
-
-
 def _deep_agent_kv_cache_affinity_config(
-        react_cfg: dict[str, Any] | None,
-        model: Model | None = None,
+    react_cfg: dict[str, Any] | None,
+    model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
-    react_cfg = react_cfg or {}
-    kv_cfg = react_cfg.get("kv_cache_affinity_config")
-    kv_cfg = kv_cfg if isinstance(kv_cfg, dict) else {}
-    affinity_enabled = bool(kv_cfg.get("enable_kv_cache_affinity", False))
-    if affinity_enabled and model is not None:
-        provider = _model_provider(model)
-        if provider != "AscendAffinity":
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] KV cache affinity failed closed: "
-                "model provider=%s requires=AscendAffinity",
-                provider or "<empty>",
-            )
-            affinity_enabled = False
-    return KVCacheAffinityConfig(
-        enable_kv_cache_release=bool(kv_cfg.get("enable_kv_cache_release", False)),
-        enable_kv_cache_affinity=affinity_enabled,
+    return build_kv_cache_affinity_config(
+        react_cfg,
+        provider=model_provider(model),
     )
 
 
@@ -5135,6 +5096,16 @@ class JiuWenSwarmDeepAdapter:
 
         loaded: list[str] = []
         for config_path in config_paths:
+            # Skip packages failing the hot-load guards.
+            try:
+                validate_harness_config(Path(config_path))
+            except ValueError as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] Skipping active package %s: %s",
+                    config_path,
+                    exc,
+                )
+                continue
             try:
                 resources = await self._instance.load_harness_config(config_path)
                 if resources:
@@ -5171,6 +5142,12 @@ class JiuWenSwarmDeepAdapter:
         try:
             if operation == "deactivate":
                 return await self._instance.unload_harness_config(config_path)
+            # Never activate a package failing the hot-load guards.
+            # load_harness_config would spawn a declared subprocess (mcps) or
+            # exec an out-of-package .py (escaped path). The import-time
+            # guard blocks new imports; this catches packages that slipped
+            # through before it existed or were placed on disk directly.
+            validate_harness_config(Path(config_path))
             return await self._instance.load_harness_config(config_path)
         except Exception as exc:
             logger.error(
@@ -6578,8 +6555,9 @@ class JiuWenSwarmDeepAdapter:
 
         Returns:
             The live DeepAgent, or None when this session has not started one yet
-            (first turn of a session) — the caller should then fall back to the
-            checkpointer, which ``start_interaction`` reads on creation.
+            (first turn of a session). Prefer :meth:`ensure_live_session_instance`
+            when the caller is about to write plan state: that starts the same
+            session the chat turn will reuse, instead of a throwaway Session.
         """
         if self._is_session_scoped_adapter:
             return self._instance
@@ -6589,6 +6567,17 @@ class JiuWenSwarmDeepAdapter:
         # 子适配器一定是 session 级的（``_new_session_scoped_adapter`` 建完就
         # ``mark_as_session_scoped``），所以这一跳递归只会走上面那个分支返回它自己的
         # 实例，不会再往下递归。
+        return adapter.get_live_session_instance(session_id)
+
+    async def ensure_live_session_instance(self, session_id: str | None) -> Any | None:
+        """Start the session-scoped adapter if needed and return its DeepAgent.
+
+        Plan-mode sync must write onto the Session ``start_interaction`` binds.
+        A throwaway Session only updates the checkpointer; a concurrent first
+        ``chat.send`` / ``command.goal`` can already have bound a normal-mode
+        snapshot that the running turn keeps using.
+        """
+        adapter = await self._get_or_create_session_adapter(session_id)
         return adapter.get_live_session_instance(session_id)
 
     async def ensure_instance(self) -> Any:
@@ -7866,6 +7855,7 @@ class JiuWenSwarmDeepAdapter:
 
     async def cleanup(self) -> None:
         """Release adapter-owned external runtime resources."""
+        await self._cleanup_evolution_background_tasks()
         if not self._is_session_scoped_adapter:
             for adapter in list(self._session_adapters.values()):
                 try:
@@ -7916,6 +7906,22 @@ class JiuWenSwarmDeepAdapter:
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
         await self._close_a2x_client()
+
+    async def _cleanup_evolution_background_tasks(self) -> None:
+        """Drain detached evolution work before adapter-owned state is released."""
+        rail = getattr(self, "_skill_evolution_rail", None)
+        cleanup = getattr(rail, "cleanup_background_tasks", None)
+        if not callable(cleanup):
+            return
+        try:
+            await cleanup()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] evolution cleanup failed during "
+                "adapter teardown: %s",
+                exc,
+            )
+            raise
 
     def _teardown_agent_owned_tools(self) -> None:
         """Drop this agent's stateful tool registrations from the global resource manager.

@@ -168,8 +168,8 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
             <span className="text-xs text-text-muted tracking-wider font-medium" data-testid="browser-panel-config-help">{t('browser.pathConfigHelp')}</span>
           </div>
           <div className="p-4 space-y-4">
-            <label className="block space-y-1.5">
-              <span className="text-xs uppercase tracking-wide text-text-muted">{t('browser.browserType')}</span>
+            <label className="block space-y-1.5" data-testid="browser-panel-field-browser-type">
+              <span className="text-xs uppercase tracking-wide text-text-muted" data-testid="browser-panel-field-browser-type-label">{t('browser.browserType')}</span>
               <select
                 value={browserType}
                 onChange={(event) => {
@@ -178,12 +178,13 @@ export function BrowserPanel({ isConnected, request }: BrowserPanelProps) {
                 }}
                 className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] text-text outline-none focus:border-accent"
                 disabled={loading || saving}
+                data-testid="browser-panel-field-browser-type-select"
               >
-                <option value="auto">{t('browser.browserTypeAuto')}</option>
-                <option value="chrome">{t('browser.browserTypeChrome')}</option>
-                <option value="msedge">{t('browser.browserTypeEdge')}</option>
+                <option value="auto" data-testid="browser-panel-field-browser-type-option" data-variant="auto">{t('browser.browserTypeAuto')}</option>
+                <option value="chrome" data-testid="browser-panel-field-browser-type-option" data-variant="chrome">{t('browser.browserTypeChrome')}</option>
+                <option value="msedge" data-testid="browser-panel-field-browser-type-option" data-variant="msedge">{t('browser.browserTypeEdge')}</option>
               </select>
-              <p className="text-xs text-text-muted">{t('browser.browserTypeHelp')}</p>
+              <p className="text-xs text-text-muted" data-testid="browser-panel-field-browser-type-help">{t('browser.browserTypeHelp')}</p>
             </label>
 
             <label className="block space-y-1.5" data-testid="browser-panel-field-chrome-path">

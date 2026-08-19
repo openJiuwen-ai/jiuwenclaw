@@ -43,7 +43,7 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+import { isPlanWireMode, resolvePlanWireMode, stripPlanSuffix } from '../features/planMode/wireMode';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
@@ -421,14 +421,37 @@ function resolveInterruptResumeMode(sessionId: string): AgentMode {
 }
 
 /**
+ * 取该会话的 work_mode（`work` / `code`）。
+ *
+ * 与 `getSessionWorkContext` 同一套取值顺序：session → selectedProject →
+ * workspaceStore。这里单独抽出，是因为 team + plan 时 `resolvePlanWireMode`
+ * 要据此区分 `team.plan.normal` / `team.plan.code`，而那个函数不读 store。
+ */
+function getSessionWorkMode(sessionId: string): string | undefined {
+  const sessionStore = useSessionStore.getState();
+  const workspaceStore = useWorkspaceStore.getState();
+  const session =
+    sessionStore.currentSession?.session_id === sessionId
+      ? sessionStore.currentSession
+      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+  const selectedProject = workspaceStore.selectedProject;
+  return session?.work_mode || selectedProject?.work_mode || workspaceStore.workMode;
+}
+
+/**
  * 组合出本次请求要发送的 mode。
  *
  * UI 的 `AgentMode` 只有 agent / team / auto_harness；Plan 是独立开关。所有出站
  * 请求（普通消息、队列重发、interrupt resume）都必须走这里，否则 Plan 状态会被
- * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。
+ * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。team + plan 时还要带上
+ * work_mode，以便 `resolvePlanWireMode` 路由到 `team.plan.normal` / `team.plan.code`。
  */
 function resolveOutgoingMode(sessionId: string, baseMode: AgentMode | string | undefined): string {
-  return resolvePlanWireMode(baseMode, usePlanStore.getState().isActive(sessionId));
+  return resolvePlanWireMode(
+    baseMode,
+    usePlanStore.getState().isActive(sessionId),
+    getSessionWorkMode(sessionId)
+  );
 }
 
 /**
@@ -543,6 +566,8 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
   onError?: (error: string) => void;
   onConfigChanged?: (updatedKeys?: string[]) => void;
+  /** 免费模型后台重试成功后触发，前端自动刷新模型列表 */
+  onModelsUpdated?: () => void;
   /** cron 最终结果（非占位）广播到达后触发，用于自动跳转到执行会话并加载完整历史 */
   onCronResultArrived?: (sessionId: string, jobId: string) => void;
 }
@@ -684,7 +709,10 @@ interface PendingContextCompressionStart {
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent';
-  const normalized = rawMode.trim().toLowerCase();
+  // 后端 session.mode 可能带 `.plan` 后缀（`agent.plan` / `team.plan.normal` /
+  // `team.plan.code`），先剥掉后缀再归一化，否则 `team.plan.*` 会落进下面的
+  // 兜底分支被误判成单 agent。
+  const normalized = stripPlanSuffix(rawMode.trim().toLowerCase());
   if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
     return 'team';
   }
@@ -816,6 +844,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnect,
     onError,
     onConfigChanged,
+    onModelsUpdated,
     onCronResultArrived,
   } = options;
 
@@ -833,6 +862,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
   const onConfigChangedRef = useRef(onConfigChanged);
+  const onModelsUpdatedRef = useRef(onModelsUpdated);
   const onCronResultArrivedRef = useRef(onCronResultArrived);
   const sendMessageRef = useRef<typeof sendMessage>();
   // 标记本地 sendMessage 刚发起但后端尚未确认 processing_status=true 的 session。
@@ -1921,8 +1951,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
     onConfigChangedRef.current = onConfigChanged;
+    onModelsUpdatedRef.current = onModelsUpdated;
     onCronResultArrivedRef.current = onCronResultArrived;
-  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError]);
+  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError, onModelsUpdated]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -3257,6 +3288,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ? payload.updated_keys.filter((key): key is string => typeof key === 'string')
           : undefined;
         onConfigChangedRef.current?.(updatedKeys);
+      }),
+      webClient.on('models.updated', () => {
+        onModelsUpdatedRef.current?.();
       }),
       webClient.on('task.global_running', ({ payload }) => {
         useChatStore.getState().setGlobalTaskRunning(Boolean(payload?.running));

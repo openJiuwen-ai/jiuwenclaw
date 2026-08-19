@@ -1952,18 +1952,19 @@ export function SkillPanel({
 
         {activeTab === "graph" ? (
           <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
-            <div
-              data-testid="skill-panel-graph-definition"
-              className="flex flex-none items-start gap-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-[10px] leading-4 text-text-muted"
-            >
-              <Music2 size={14} className="mt-px flex-shrink-0 text-accent" aria-hidden="true" />
-              <span>{t('skills.graph.orchestration.graphDefinition')}</span>
-            </div>
             <div data-testid="skill-panel-graph-orchestration-card" className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
               <div className="min-w-[240px] flex-1">
-                <p data-testid="skill-panel-graph-orchestration-description" className="text-xs leading-5 text-text-muted">
-                  {t('skills.graph.orchestration.description')}
-                </p>
+                <div className="flex items-start gap-2">
+                  <Music2 size={28} className="mt-1 flex-shrink-0 text-accent" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <p data-testid="skill-panel-graph-definition" className="text-xs leading-5 text-text-muted">
+                      {t('skills.graph.orchestration.graphDefinition')}
+                    </p>
+                    <p data-testid="skill-panel-graph-orchestration-description" className="text-xs leading-5 text-text-muted">
+                      {t('skills.graph.orchestration.description')}
+                    </p>
+                  </div>
+                </div>
                 {symphonySaveError ? (
                   <p data-testid="skill-panel-graph-orchestration-error" className="mt-1 text-xs leading-5 text-danger" role="alert">
                     {symphonySaveError}

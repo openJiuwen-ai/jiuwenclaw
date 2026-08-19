@@ -3347,6 +3347,20 @@ class JiuWenSwarm:
             return None
         return getter(session_id)
 
+    async def ensure_live_session_instance(self, session_id: str | None):
+        """Start the session-scoped adapter if needed and return its DeepAgent.
+
+        Used by plan-mode sync so the first turn writes ``plan_mode`` onto the
+        same Session the upcoming ``chat.send`` will invoke, not a throwaway.
+        """
+        adapter = self._adapter
+        if adapter is None:
+            return None
+        starter = getattr(adapter, "ensure_live_session_instance", None)
+        if starter is None:
+            return self.get_live_session_instance(session_id)
+        return await starter(session_id)
+
     # --- Phase-2: targeted single-MCP control (forwarded to the deep adapter) ---
     async def apply_mcp_change(self, name: str, action: str, *, enabled: bool = True) -> bool:
         """Apply a single-MCP change without a full config reload.

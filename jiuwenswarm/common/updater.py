@@ -373,18 +373,29 @@ class UpdaterService:
                     "in the latest release."
                 )
             if len(candidates) > 1:
-                preferred = [
+                preferred_name = (
+                    f"{PACKAGE_NAME}-{release.version}-{platform_key}{desktop_suffix}"
+                ).lower()
+                exact_matches = [
                     asset
                     for asset in candidates
-                    if "workswarm" in asset.name.lower()
+                    if asset.name.lower() == preferred_name
                 ]
-                if len(preferred) != 1:
+                compatible_matches = [
+                    asset
+                    for asset in candidates
+                    if PACKAGE_NAME.lower() in asset.name.lower()
+                ]
+                if len(exact_matches) == 1:
+                    matched = exact_matches[0]
+                elif len(compatible_matches) == 1:
+                    matched = compatible_matches[0]
+                else:
                     names = ", ".join(asset.name for asset in candidates)
                     raise RuntimeError(
                         f"Multiple {platform_key} desktop installers "
                         f"({desktop_suffix}) found in the latest release: {names}"
                     )
-                matched = preferred[0]
             else:
                 matched = candidates[0]
             asset_name = matched.name
