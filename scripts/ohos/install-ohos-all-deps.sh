@@ -896,6 +896,9 @@ export_pip_build_env() {
       fi
     done
   fi
+  if [ -n "${OHOS_LLVM_BIN:-}" ] && [ -x "${OHOS_LLVM_BIN}/clang" ]; then
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="${OHOS_LLVM_BIN}/clang"
+  fi
   if command -v rustc >/dev/null 2>&1; then
     export RUSTC=$(_realpath "$(command -v rustc)" 2>/dev/null || command -v rustc)
     export CARGO=$(_realpath "$(command -v cargo)" 2>/dev/null || command -v cargo)
@@ -1054,6 +1057,23 @@ preload_local_wheels() {
   pip_install "pydantic>=2.11" >>"$LOG" 2>&1 || true
 }
 
+normalize_native_extension_permissions() {
+  _site_packages=$("$PYTHON" -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
+  if [ -z "$_site_packages" ] || [ ! -d "$_site_packages" ]; then
+    log "WARN: skip native permission normalization (site-packages unavailable)"
+    return 0
+  fi
+
+  # HNP deployment paths can preserve wheels with non-executable shared
+  # objects. Keep the correction scoped to this virtual environment.
+  if find "$_site_packages" -type f -name '*.so*' ! -perm -111 -exec chmod 755 {} \; 2>/dev/null \
+    && find "$_site_packages" -type d ! -perm -111 -exec chmod 755 {} \; 2>/dev/null; then
+    log "native extension permissions normalized: $_site_packages"
+  else
+    log "WARN: unable to normalize native extension permissions: $_site_packages"
+  fi
+}
+
 pip_install() {
   export_pip_build_env
   write_ohos_toolchain_env
@@ -1090,23 +1110,26 @@ pip_install() {
   export PIP_INDEX_URL PIP_TRUSTED_HOST PATH
 
   "$PYTHON" -m pip install --no-cache-dir $_nbi $_find_links $_index_args "$@"
+  _pip_status=$?
+  [ "$_pip_status" -eq 0 ] && normalize_native_extension_permissions
+  return "$_pip_status"
 }
 
 try_import() {
   mod=$1
   export_pip_build_env
   _libdir=$("${OHOS_REAL_PYTHON:-$PYTHON}" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
-  _native_ld=
+  _detected_ld=
   if [ -n "${OPENSSL_DIR:-}" ] && [ -d "${OPENSSL_DIR}/lib" ]; then
-    _native_ld="${OPENSSL_DIR}/lib"
+    _detected_ld="${OPENSSL_DIR}/lib"
   fi
   if [ -n "$_libdir" ] && [ -d "$_libdir" ]; then
-    _native_ld="${_native_ld:+${_native_ld}:}${_libdir}"
+    _detected_ld="${_detected_ld:+${_detected_ld}:}${_libdir}"
   fi
-  if [ -n "$_native_ld" ] && [ -n "${LD_LIBRARY_PATH:-}" ]; then
-    _native_ld="${_native_ld}:${LD_LIBRARY_PATH}"
+  _native_ld=${LD_LIBRARY_PATH:-}
+  if [ -n "$_detected_ld" ]; then
+    _native_ld="${_native_ld:+${_native_ld}:}${_detected_ld}"
   fi
-  [ -n "$_native_ld" ] || _native_ld=${LD_LIBRARY_PATH:-}
 
   # 使用 POSIX shell 的临时变量赋值，不调用外部 env 程序。
   # 这样既能为当前 import 覆盖 native lib 路径，又不会破坏 OhOS/HNP 运行时环境。
