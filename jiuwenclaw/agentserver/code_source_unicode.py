@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import io
 import logging
@@ -162,7 +163,8 @@ async def _normalize_code_artifact_hook(ctx: Any) -> None:
         path = str(raw_path or "").strip()
         if not path:
             continue
-        count = normalize_python_script_file(path)
+        # 同步文件 I/O 移到线程池，避免阻塞事件循环
+        count = await asyncio.to_thread(normalize_python_script_file, path)
         if count > 0:
             logger.info(
                 "[code_source_unicode] normalized path=%s count=%d",
