@@ -2459,6 +2459,13 @@ async def _consume_stream_with_query(
                     )
                     continue
                 elif parsed.get("event_type") == "team.idle":
+                    # A swarmflow workflow may still be running while the leader
+                    # is idle; do not end the round until it reaches terminal.
+                    wf_handler = get_team_manager(channel_id).get_workflow_handler(session_id)
+                    if wf_handler is not None and any(
+                        not run.is_terminal for run in wf_handler.get_run_states().values()
+                    ):
+                        continue
                     # Every member has been at rest for the framework's debounce
                     # window: nothing is producing output any more, even though
                     # the leader stream deliberately stays open in case the team
