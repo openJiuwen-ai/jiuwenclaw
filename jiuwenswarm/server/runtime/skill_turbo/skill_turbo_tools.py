@@ -277,10 +277,11 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     outer_task_id = get_current_task_id()
     has_outer_todo = outer_task_id is not None
     logger.info(
-        "[SkillTurboTool] outer todo active=%s outer_task_id=%s, "
+        "[SkillTurboTool] outer todo active=%s outer_task_id=%s parent_session=%s, "
         "task events will be %s",
         has_outer_todo,
         outer_task_id,
+        type(parent_session).__name__ if parent_session is not None else None,
         "skipped" if has_outer_todo else "forwarded as-is",
     )
 
@@ -324,6 +325,16 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 "[SkillTurboTool] workspace_base 设置为 output_dir: %s",
                 output_dir.strip()
             )
+    if "workspace_base" not in inputs:
+        try:
+            from jiuwenswarm.common.utils import get_agent_workspace_dir
+
+            inputs["workspace_base"] = str(get_agent_workspace_dir())
+        except Exception:
+            logger.debug(
+                "[SkillTurboTool] fallback workspace_base 使用 agent workspace 失败",
+                exc_info=True,
+            )
 
     if isinstance(request_metadata, dict):
         inputs["metadata"] = request_metadata
@@ -365,8 +376,29 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 )
                 try:
                     await parent_session.write_stream(output)
+                    if event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
+                        tasks = chunk.payload.get("tasks") if isinstance(chunk.payload, dict) else None
+                        n_tasks = len(tasks) if isinstance(tasks, list) else 0
+                        logger.info(
+                            "[SkillTurboTool] forwarded %s via write_stream "
+                            "output_type=%s tasks=%s parent_session=%s",
+                            event_type,
+                            output_type,
+                            n_tasks,
+                            type(parent_session).__name__,
+                        )
                 except Exception:
-                    logger.debug("[SkillTurboTool] write_stream failed, skipping", exc_info=True)
+                    logger.warning(
+                        "[SkillTurboTool] write_stream failed for event_type=%s",
+                        event_type,
+                        exc_info=True,
+                    )
+            elif event_type in _SKILL_TURBO_TASK_EVENT_TYPES:
+                logger.warning(
+                    "[SkillTurboTool] drop %s: parent_session is None "
+                    "(task list will not reach frontend)",
+                    event_type,
+                )
 
         # 过程输出已通过 write_stream 实时推给前端，tool result 仅返回精简完成信号 + 产物摘要
         return _wrap_skill_turbo_result(
