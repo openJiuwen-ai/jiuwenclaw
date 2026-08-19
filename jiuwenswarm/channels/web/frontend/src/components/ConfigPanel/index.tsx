@@ -5031,7 +5031,9 @@ export function ConfigPanel({
           return;
         }
         setExternalCliInstallStatuses({});
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        // enable_free_models 属于配置变更而非模型变更，但后端会 warm 免费模型缓存，
+        // 前端需重新拉取 models.list 才能在下拉框中显示免费模型
+        if ((hasModelChanges || "enable_free_models" in configUpdates) && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
@@ -5076,6 +5078,8 @@ export function ConfigPanel({
             return;
           }
           setExternalCliInstallStatuses({});
+          // enable_free_models 配置变更后也需刷新模型列表，与新后端路径行为一致
+          if ("enable_free_models" in configUpdates && onModelsRefresh) await onModelsRefresh();
         }
       }
   } catch (saveError) {
