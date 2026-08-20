@@ -32,10 +32,12 @@ from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import Respons
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
 from jiuwenswarm.agents.harness.team.rails.team_workspace_report_path_rail import TeamWorkspaceReportPathRail
+from jiuwenswarm.agents.harness.team.rails.rigor_audit_rail import RigorAuditRail
 from jiuwenswarm.common.config import (
     get_config,
     get_evolution_auto_save_enabled,
     get_evolution_auto_scan_enabled,
+    get_rigor_audit_enabled,
     get_skill_create_enabled,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
@@ -237,6 +239,18 @@ def build_member_rails(
         logger.info("[TeamRuntime] AvatarPromptRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] AvatarPromptRail failed: %s", exc)
+
+    # Mounted for every member, not just the reviewer: the arithmetic errors this
+    # rail catches are made by whoever writes the number, so the floor has to sit
+    # under the writer as well as the reviewer. It issues no model call, so
+    # mounting it everywhere costs nothing.
+    if get_rigor_audit_enabled(config):
+        try:
+            rail = RigorAuditRail(language=language)
+            rails_list.append(rail)
+            logger.info("[TeamRuntime] RigorAuditRail created: role=%s", role)
+        except Exception as exc:
+            logger.warning("[TeamRuntime] RigorAuditRail failed: %s", exc)
 
     if team_ws_root:
         try:

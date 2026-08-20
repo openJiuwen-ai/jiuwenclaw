@@ -183,6 +183,24 @@ def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
     return _get_evolution_config(config).get("skill_create", False)
 
 
+def get_rigor_audit_enabled(config: dict[str, Any] | None) -> bool:
+    """Whether RigorAuditRail is mounted on team members.
+
+    Defaults to True: the rail costs zero model calls, so the usual reason to
+    gate a capability off -- budget -- does not apply. Set ``rigor_audit.enabled:
+    false`` (or ``RIGOR_AUDIT=0``) to opt out.
+    """
+    env_rigor = _get_bool_env(os.getenv("RIGOR_AUDIT"))
+    if env_rigor is not None:
+        return env_rigor
+    if not isinstance(config, dict):
+        return True
+    section = config.get("rigor_audit")
+    if not isinstance(section, dict):
+        return True
+    return section.get("enabled", True) is not False
+
+
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether evolution approvals may auto-save without user action."""
     try:

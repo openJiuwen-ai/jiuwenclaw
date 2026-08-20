@@ -125,6 +125,27 @@ class TestRailContract:
         with pytest.raises(Exception):
             f.code = "D2"
 
+    def test_rail_is_actually_mounted_on_team_members(self):
+        """Exporting the class is not enough -- it has to reach the rail chain.
+
+        This is the regression that matters most: a rail that is importable but
+        never mounted looks fine in review and does nothing at runtime.
+        """
+        from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+            build_member_rails,
+        )
+
+        names = [type(r).__name__ for r in build_member_rails()]
+        assert "RigorAuditRail" in names
+
+    def test_mounting_can_be_disabled_by_config(self):
+        from jiuwenswarm.common.config import get_rigor_audit_enabled
+
+        assert get_rigor_audit_enabled(None) is True
+        assert get_rigor_audit_enabled({}) is True
+        assert get_rigor_audit_enabled({"rigor_audit": {"enabled": False}}) is False
+        assert get_rigor_audit_enabled({"rigor_audit": {"enabled": True}}) is True
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
