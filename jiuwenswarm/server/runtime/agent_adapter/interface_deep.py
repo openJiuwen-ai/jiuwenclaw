@@ -14463,6 +14463,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 chunk_type = chunk.type
@@ -14598,6 +14601,9 @@ class JiuWenSwarmDeepAdapter:
                                 payload=note_chat_payload(parsed),
                                 is_complete=False,
                             )
+                            if hitl_pending_stream:
+                                suppress_stream_after_hitl = True
+                                continue
                         continue
                     parsed = self._parse_stream_chunk(chunk)
                     parsed = self._adapt_goal_intermediate_final(parsed)
@@ -14614,6 +14620,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 if accumulated_text:
@@ -14647,8 +14656,11 @@ class JiuWenSwarmDeepAdapter:
                         payload=note_chat_payload(parsed),
                         is_complete=False,
                     )
+                    if hitl_pending_stream:
+                        suppress_stream_after_hitl = True
+                        continue
 
-            if accumulated_text:
+            if accumulated_text and not hitl_pending_stream:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
                 if self._should_demote_goal_intermediate_final():
@@ -14669,7 +14681,7 @@ class JiuWenSwarmDeepAdapter:
                     payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
-            if accumulated_reasoning:
+            if accumulated_reasoning and not hitl_pending_stream:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -14680,7 +14692,9 @@ class JiuWenSwarmDeepAdapter:
             # pause→clear (and similar): round cancelled, iterator ends without
             # a model chat.final. Synthesize a real final so the frontend can
             # stopStreaming; do not demote.
-            if self._should_emit_stream_end_chat_final(
+            # HITL 暂停时跳过合成 final：由循环后的 chat.invocation_paused 终结帧
+            # 收尾，避免 relayclaw sidecar 提前关闭 FrameQueue 导致 recoverable_pause 丢失。
+            if not hitl_pending_stream and self._should_emit_stream_end_chat_final(
                 had_assistant_output=had_assistant_output,
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):
