@@ -216,7 +216,7 @@ class TestHandleCommandWorkflows:
         assert payload["has_more"] is False
 
     @pytest.mark.anyio
-    async def test_get_phase_returns_full_agents(self) -> None:
+    async def test_get_phase_returns_agent_summaries(self) -> None:
         from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
         server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -246,7 +246,10 @@ class TestHandleCommandWorkflows:
         assert phase["id"] == "phase-1"
         agent = phase["agents"][0]
         assert agent["id"] == "agent-1"
-        assert agent["prompt"] == "hello world"
+        assert agent["detail_pending"] is True
+        # Heavy text fields are omitted from the summary — fetched via get_agent.
+        assert "prompt" not in agent
+        assert "outcome" not in agent
         assert payload["agent_total"] == 1
         assert payload["has_more"] is False
 

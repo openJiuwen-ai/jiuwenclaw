@@ -1611,18 +1611,13 @@ export class CliPiAppState {
     const phase = payload.phase as WorkflowPhase & { workflow_id?: string };
     const existing = this.workflowRuns.find((item) => item.id === workflowId);
     if (!existing) return;
-    const updatedPhases = (existing.phases ?? []).map((p) =>
-      p.id === phaseId
-        ? {
-            ...p,
-            ...phase,
-            agents: (phase.agents ?? p.agents ?? []).map((a) =>
-              reassembleAgentFieldParts(a),
-            ),
-          }
-        : p,
-    );
-    this.applyWorkflowUpdate({ ...existing, phases: updatedPhases });
+    // Hand the incoming phase (agent summaries) to applyWorkflowUpdate's merge
+    // path — mergeWorkflowAgent preserves already-loaded full bodies (from
+    // get_agent) and stamps detail_pending on summary-only agents.
+    this.applyWorkflowUpdate({
+      ...existing,
+      phases: [...(existing.phases ?? []), phase],
+    });
   };
 
   readonly loadAgentDetail = async (

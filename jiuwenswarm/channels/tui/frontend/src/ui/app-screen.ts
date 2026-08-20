@@ -6115,6 +6115,13 @@ export class AppScreen implements Component, Focusable {
       item.value,
     );
     if (!lookup) return;
+    // Agent 进入详情视图前，若仅为 get_phase 摘要（detail_pending，无 prompt/outcome
+    // 等大文本），按需拉取完整体（get_agent，通用，不限 human 节点）。
+    if (lookup.agent.detail_pending === true) {
+      void this.state
+        .loadAgentDetail(workflowId, lookup.phase.id, item.value)
+        .catch(() => undefined);
+    }
     this.swarmWorkflowsViewState = {
       phase: "agent",
       workflowId,
