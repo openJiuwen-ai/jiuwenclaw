@@ -64,7 +64,7 @@ from openjiuwen.harness.factory import (
     _inject_general_purpose_subagent,
     create_deep_agent,
 )
-from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.prompts import PromptSection, resolve_language
 from openjiuwen.harness.rails import (
     ModelAnomalyDetectionRail,
     SkillUseRail,
@@ -180,7 +180,10 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
 )
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
+    build_agent_conventions_section,
+    build_agent_persona_text,
+)
 from jiuwenswarm.agents.harness.common.rails import (
     BrowserTaskPromptRail,
     JiuSwarmStreamEventRail,
@@ -224,6 +227,9 @@ from jiuwenswarm.server.runtime.session.session_history import append_history_re
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
 _pending_goal_objective_history: dict[str, dict[str, Any]] = {}
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.agent_adapter.expert_capability import (
+    ExpertCapabilityMixin,
+)
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -1168,7 +1174,7 @@ class _RuntimeCronToolContext:
         return self._tool_scope
 
 
-class JiuWenSwarmDeepAdapter:
+class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
@@ -4212,6 +4218,41 @@ class JiuWenSwarmDeepAdapter:
 
         return loaded
 
+    def _restore_dynamic_prompt_sections(self) -> None:
+        """prompt_builder 被重建后（create_deep_agent / configure 热重配）补回动态 section。
+
+        core 只会从 system_prompt 字符串重建 identity + prompt_attachments
+        两个 section（deep_agent._hot_reload_system_prompt），conventions 必须
+        由宿主补挂，否则专家替换 identity 时规则会被连带覆盖。
+        """
+        instance = self._instance
+        builder = getattr(instance, "system_prompt_builder", None)
+        if builder is None:
+            return
+        builder.add_section(
+            build_agent_conventions_section(self._resolve_prompt_language())
+        )
+        instance.apply_prompt_builder_to_react_agent()
+
+    @property
+    def is_session_scoped(self) -> bool:
+        """是否 session 级子适配器。"""
+        return self._is_session_scoped_adapter
+
+    def get_cached_child_adapter(
+            self, session_id: str
+    ) -> "JiuWenSwarmDeepAdapter | None":
+        """取已装配的 session 子适配器（不触发创建）。"""
+        return self._get_cached_session_adapter(session_id)
+
+    def has_live_instance(self) -> bool:
+        """是否已有运行中的 DeepAgent 实例。"""
+        return self._instance is not None
+
+    def is_session_live(self, session_id: str) -> bool:
+        """该 session 是否有请求在处理或有 DeepAgent 在执行（公开别名）。"""
+        return self._is_session_live(session_id)
+
     async def apply_package_change(
         self, operation: str, config_path: str
     ) -> list[str] | None:
@@ -5094,7 +5135,8 @@ class JiuWenSwarmDeepAdapter:
             model=model,
             card=agent_card,
             tool_owner_id=self._tool_owner_id(),
-            system_prompt=build_agent_identity_prompt(
+            # 同 create_instance：只传纯人设文本，conventions 由 reload 路径补挂
+            system_prompt=build_agent_persona_text(
                 language=self._resolve_prompt_language(),
             ),
             context_engine_config=_deep_agent_context_engine_config(
@@ -5618,7 +5660,10 @@ class JiuWenSwarmDeepAdapter:
             model=model,
             card=agent_card,
             tool_owner_id=self._tool_owner_id(),
-            system_prompt=build_agent_identity_prompt(
+            # 只传纯人设文本：core 会把 system_prompt 字符串整段塞进 identity
+            # section；conventions 以独立 section 在 ensure_initialized 后补挂，
+            # 否则专家替换 identity 时规则会被连带覆盖
+            system_prompt=build_agent_persona_text(
                 language=self._resolve_prompt_language(),
             ),
             tools=tool_cards if tool_cards else [],
@@ -5657,6 +5702,16 @@ class JiuWenSwarmDeepAdapter:
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
 
+        # 实例重建：旧 LoadRecord 在新实例的 _load_records 账本里是未知 id
+        # （卸载会静默 no-op），必须丢弃；专家由入口 create_instance() 按 metadata 重放
+        self._expert_load_record = None
+        self._current_expert_id = None
+
+        await asyncio.sleep(0)
+        await self._instance.ensure_initialized()
+        # create_deep_agent 只从 system_prompt 字符串重建 identity + prompt_attachments，
+        # conventions 等动态 section 在此补挂（专家替换 identity 时不受影响）
+        self._restore_dynamic_prompt_sections()
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
@@ -5677,6 +5732,11 @@ class JiuWenSwarmDeepAdapter:
         # 加载已激活的 packages（skills, rails, tools）
         await self._load_active_packages()
         await asyncio.sleep(0)
+
+        # 专家（仅 session 级子适配器）：按 session metadata 重放，
+        # 保证驱逐重建/首次装配后人设不丢（root 不装专家）
+        if self._is_session_scoped_adapter and self._parent_session_id:
+            await self._replay_expert_from_metadata()
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -5885,6 +5945,11 @@ class JiuWenSwarmDeepAdapter:
             self._instance.configure(deep_cfg)
         finally:
             self._restore_omitted_reload_fields(deep_cfg, omitted_fields)
+        # configure 在 system_prompt 未省略时会整体重建 prompt_builder（只剩 identity +
+        # prompt_attachments，专家人设/notice/conventions 全丢）——补回 conventions 并重挂专家
+        if "system_prompt" not in omitted_fields:
+            self._restore_dynamic_prompt_sections()
+            await self._reapply_expert_after_prompt_rebuild()
         self._commit_reload_fingerprints(reload_fingerprints)
         self._sync_active_evolution_review_agent_after_reload()
 

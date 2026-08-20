@@ -219,6 +219,11 @@ class ReqMethod(Enum):
     HARNESS_PACKAGES_IMPORT = "harness.packages.import"
     HARNESS_PACKAGES_EXPORT = "harness.packages.export"
 
+    # Expert management
+    EXPERTS_LIST = "experts.list"
+    EXPERT_LOAD = "expert.load"
+    EXPERT_UNLOAD = "expert.unload"
+
     # Schedule task management
     SCHEDULE_CHECK_CONFIG = "schedule.check_config"
     SCHEDULE_UPDATE_CONFIG = "schedule.update_config"
