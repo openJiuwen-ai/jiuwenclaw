@@ -282,6 +282,102 @@ def grant_ace(
     )
 
 
+def grant_aces(
+    path: str,
+    aces: list[tuple[str | object, int, Literal["ALLOW", "DENY"]]],
+    *,
+    recursive: bool = True,
+) -> None:
+    """对 ``path`` 一次 Get/Set 施加多条 ACE (避免多次重建 DACL).
+
+    ``aces`` 元素为 ``(sid, rights, mode)``, 与 ``grant_ace`` 参数同义.
+    """
+    _require_windows()
+    win32security, _, _ = _ensure_pywin32()
+    inherit_flags = const.RECURSIVE_ACE_FLAGS if recursive else 0
+    new_aces: list[tuple[int, int, int, object]] = []
+    for sid, rights, mode in aces:
+        sid_obj = _resolve_sid(sid) if isinstance(sid, str) else sid
+        ace_type = (
+            const.ACCESS_ALLOWED_ACE_TYPE if mode == "ALLOW"
+            else const.ACCESS_DENIED_ACE_TYPE
+        )
+        new_aces.append((ace_type, inherit_flags, int(rights), sid_obj))
+    sd = win32security.GetNamedSecurityInfo(
+        path,
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION,
+    )
+    acl = _rebuild_acl_with_order(sd.GetSecurityDescriptorDacl(), new_aces)
+    win32security.SetNamedSecurityInfo(
+        path,
+        win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        acl,
+        None,
+    )
+    logger.debug("施加 %d 条 ACE: path=%s recursive=%s", len(new_aces), path, recursive)
+
+
+def grant_parent_traverse(path: str, sid: str | object) -> None:
+    """给 ``path`` 到用户目录的每一级父目录授非递归 traverse.
+
+    必须用 SetFileSecurity (不向子对象传播). SetNamedSecurityInfo 即使
+    inherit_flags=0 也会把可继承 ACE 自动传播到全部子文件, 在 AppData /
+    CPython 安装目录上会卡数分钟.
+
+    停在 USERPROFILE (含), 不改 ``C:\\Users`` / ``C:\\``.
+    """
+    _require_windows()
+    win32security, _, _ = _ensure_pywin32()
+    try:
+        current = Path(path).resolve()
+    except OSError:
+        return
+    if current.is_file():
+        current = current.parent
+    stop_keys: set[str] = set()
+    for env_key in ("USERPROFILE", "HOME"):
+        raw = (os.environ.get(env_key) or "").strip()
+        if not raw:
+            continue
+        try:
+            stop_keys.add(os.path.normcase(str(Path(raw).resolve())))
+        except OSError:
+            continue
+    sid_obj = _resolve_sid(sid) if isinstance(sid, str) else sid
+    seen: set[str] = set()
+    while True:
+        key = os.path.normcase(str(current))
+        if key in seen:
+            break
+        seen.add(key)
+        try:
+            sd = win32security.GetFileSecurity(
+                str(current), win32security.DACL_SECURITY_INFORMATION,
+            )
+            existing_dacl = sd.GetSecurityDescriptorDacl()
+            acl = _rebuild_acl_with_order(
+                existing_dacl,
+                (const.ACCESS_ALLOWED_ACE_TYPE, 0, const.FILE_GENERIC_EXECUTE, sid_obj),
+            )
+            new_sd = win32security.SECURITY_DESCRIPTOR()
+            new_sd.SetSecurityDescriptorDacl(1, acl, 0)
+            win32security.SetFileSecurity(
+                str(current), win32security.DACL_SECURITY_INFORMATION, new_sd,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("parent traverse 失败 path=%s: %s", current, exc)
+        if key in stop_keys:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
 def apply_sandbox_acl(
     workspace: str,
     allow_write: list[str],

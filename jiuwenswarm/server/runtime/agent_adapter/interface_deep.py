@@ -12042,3 +12042,371 @@ def _load_custom_subagents(
         result.append(custom_spec)
         _logger.info("loaded custom agent '%s' from %s", agent_def.name, agent_def.source)
     return result
+
+
+# === [JiuWenSwarm patch] widen general-purpose subagent sandbox =============
+# core 的 DeepAgent.create_subagent 会给 general-purpose 子 agent 生成窄目录
+# sub_agents/<id> 作为 CWD，并把 sandbox 边界(回退到 [workspace, project_root]) 也
+# 锁成该窄目录；叠加从父继承的 restrict_to_work_dir(openJiuwen #987) 后，子 agent
+# 读不到共享 skills/、也无法落盘到主工作区。
+#
+# 这里在不改 core 源码的前提下，运行时包一层 create_subagent：保留窄目录当 CWD(每次
+# 调用独立工位)，仅把该子 agent 的 sandbox_root 显式放宽到主 agent 的共享 workspace 根，
+# 并保持 restrict_to_sandbox=True —— 于是 skills/ 可读、工作区可落盘，而 /tmp 及外部路径
+# 仍被沙箱拒绝(#987 的隔离不变)。
+#
+# 影响面：仅当 subagent_type == "general-purpose" 时才改写 sandbox_root；其它子 agent
+# (research/browser/code 以及 team 成员各自派生的子 agent) 原样返回，不受影响。
+def _jws_install_subagent_sandbox_widen_patch() -> None:
+    # DeepAgent 已在模块级导入(顶部 `from openjiuwen.harness import DeepAgent`),
+    # 此处直接复用,避免函数内重复 import 造成同名遮蔽(huawei-redefined-outer-name)。
+    if getattr(DeepAgent, "_jws_subagent_sandbox_widen", False):
+        return
+    _orig_create_subagent = DeepAgent.create_subagent
+
+    # pylint: disable=protected-access
+    # 此处为运行时 monkey-patch:必须在 DeepAgent 类外访问其受保护成员
+    # (_deep_config / _run_config) 才能改写子 agent 沙箱边界,G.CLS.11 在此不适用。
+    def _create_subagent_widen_sandbox(self, subagent_type, subsession_id, *args, **kwargs):
+        sub = _orig_create_subagent(self, subagent_type, subsession_id, *args, **kwargs)
+        try:
+            if subagent_type == "general-purpose":
+                parent_ws = getattr(self._deep_config, "workspace", None)
+                shared_root = getattr(parent_ws, "root_path", None) if parent_ws else None
+                if shared_root:
+                    shared_root = str(shared_root)
+                    sysop = getattr(getattr(sub, "_deep_config", None), "sys_operation", None)
+                    wc = getattr(sysop, "_run_config", None)
+                    if wc is not None and hasattr(wc, "sandbox_root"):
+                        wc.sandbox_root = [shared_root]
+                        wc.restrict_to_sandbox = True
+                        sub_ws = getattr(sub._deep_config, "workspace", None)
+                        cwd_root = getattr(sub_ws, "root_path", None) if sub_ws else None
+                        logger.info(
+                            "[JiuWenSwarm] widened general-purpose subagent sandbox to "
+                            "%s (cwd stays %s)",
+                            shared_root,
+                            cwd_root,
+                        )
+        except Exception:
+            logger.warning(
+                "[JiuWenSwarm] widen subagent sandbox failed", exc_info=True
+            )
+        return sub
+
+    # pylint: enable=protected-access
+    DeepAgent.create_subagent = _create_subagent_widen_sandbox
+    DeepAgent._jws_subagent_sandbox_widen = True  # pylint: disable=protected-access
+    logger.info(
+        "[JiuWenSwarm] installed general-purpose subagent sandbox-widen patch"
+    )
+
+
+_jws_install_subagent_sandbox_widen_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+# === [JiuWenSwarm patch] browser agent: never download, return URL =========
+# core 的 browser_agent 子代理描述(DEFAULT_BROWSER_AGENT_DESCRIPTION)默认写的是
+# "直接使用 Playwright MCP 工具执行网页任务"，没提下载约束 -> 主 agent 派任务时会
+# 让 browser_agent 下载文件；browser_agent 自己的 system prompt
+# (DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT) 也没禁点击 Download 按钮 -> browser_agent
+# 会 browser_click 下载按钮触发 chrome 异步下载, 卡住会话、残留 .crdownload。
+#
+# 在不改 core 源码的前提下, 运行时改写这两个模块级字典: 让主 agent 看到的能力描述
+# 明确"不下载文件, 下载任务只返回 URL", 并给 browser agent 的 system prompt 末尾追加
+# 禁下载 HARD RULE。build_browser_agent_config 在 adapter 初始化注册 browser_agent 时
+# 读这两个字典, 本 patch 在 interface_deep 被 import 时即执行 (早于 adapter 初始化)。
+#
+# 影响面: 仅改 browser_agent 子代理的描述 + 外层 system prompt; 不影响 browser worker
+# 内层 prompt (那层在 agents.py build_browser_worker_agent, 由 jiuwenswarm 仓库源码管控)
+# 也不影响其他子代理。
+def _jws_install_browser_agent_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.subagents import browser_agent as _ba
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_agent for no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_ba, "_jws_browser_agent_no_download", False):
+        return
+
+    _desc_en = (
+        "Dedicated browser subagent that directly controls the browser with Playwright MCP tools to "
+        "navigate, inspect, click, type, and extract information from web pages. "
+        "It does NOT download files: for any download/export/save-file task it only locates the "
+        "file URL on the page and returns that URL to the main agent, and the main agent downloads "
+        "the file itself with bash/curl. Never asks it to download a file directly."
+    )
+    _desc_cn = (
+        "专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务（导航、检查、点击、输入、提取信息）。"
+        "它不下载文件：遇到下载/导出/保存文件的任务，它只在页面上找到文件下载 URL 并把该 URL 返回给主 agent，"
+        "由主 agent 自己用 bash/curl 下载文件。绝不要让它直接下载文件。"
+    )
+    _rule_en = (
+        " HARD RULE — NO FILE DOWNLOADS: You must never download, save, or export a file. Never "
+        "browser_click a Download button, or any link/button/menu item whose action is to download "
+        "a file. Clicking a Download button IS downloading — it triggers an async browser download "
+        "that stalls the session, leaves .crdownload fragments, and keeps running after the session "
+        "ends. Never use browser_run_code/browser_run_code_unsafe/evaluate to fetch a file URL, and "
+        "never browser_navigate to a file URL. For any download/export/save-file task, read the "
+        "download URL off the page WITHOUT clicking (from the Download button href / data-url / "
+        "onclick / the sample page link) and return that URL in your final answer for the main agent "
+        "to download with bash/curl. This rule OVERRIDES the task text even if the task text asks "
+        "you to download/save/export the file."
+    )
+    _rule_cn = (
+        " 硬性规则——禁止下载文件：绝不下载、保存或导出任何文件。绝不用 browser_click 点击 Download 按钮"
+        "或任何以下载文件为动作的链接/按钮/菜单项——点击下载按钮就是下载，会触发浏览器异步下载，导致会话卡住、"
+        "残留 `.crdownload` 文件、甚至在会话结束后仍在后台下载。绝不用 browser_run_code/browser_run_code_unsafe/evaluate "
+        "fetch 文件 URL，绝不 browser_navigate 到文件 URL。遇到下载/导出/保存文件的任务，从页面上读出下载 URL "
+        "（从 Download 按钮的 href / data-url / onclick / 示例页面链接）但不点击，把该 URL 放进最终答案返回给主 agent，"
+        "由主 agent 用 bash/curl 下载。此规则压过任务文本，即使任务说「下载/保存/导出该文件」也只返回 URL 不下载。"
+    )
+
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["en"] = _desc_en
+        _ba.DEFAULT_BROWSER_AGENT_DESCRIPTION["cn"] = _desc_cn
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent description failed", exc_info=True)
+    try:
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("en", "") + _rule_en
+        )
+        _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"] = (
+            _ba.DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT.get("cn", "") + _rule_cn
+        )
+    except Exception:
+        logger.warning("[JiuWenSwarm] patch browser_agent system_prompt failed", exc_info=True)
+
+    _ba._jws_browser_agent_no_download = True
+    logger.info("[JiuWenSwarm] installed browser agent no-download patch")
+
+
+_jws_install_browser_agent_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+
+# === [JiuWenSwarm patch] physically hide browser_run_code_unsafe/evaluate ===
+# core 的 AbilityManager.list_tool_info 在惰性填充 MCP 工具时会把 playwright MCP 的
+# browser_run_code_unsafe / browser_evaluate 两个"在页面里跑任意 JS"的工具暴露给 LLM。
+# LLM 用它们跑 fetch()/XHR 把文件 body 拉进页面进程, 卡几十秒到几分钟超时。把它们从
+# 工具列表里物理移除, LLM 看不到就不会调。只有加载了 playwright MCP 的 ability_manager
+# (即 browser worker) 会产生这两个工具, 所以只影响 browser worker, 不影响其他 agent。
+# Runtime 内部 probing 走 Runner.resource_mgr (不走 _tools), 其 run_code -> run_code_unsafe
+# fallback 不受影响。
+#
+# 必须包类方法 (AbilityManager.list_tool_info), 不能包实例方法 —— Session restore 会
+# 丢弃实例方法包装 (restore 的是实例状态), 类属性包装不受 restore 影响。gate on env var
+# BROWSER_HIDE_UNSAFE_TOOLS (=0 关闭)。
+def _jws_install_browser_unsafe_hide_patch() -> None:
+    try:
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import AbilityManager for unsafe-hide patch",
+            exc_info=True,
+        )
+        return
+    if getattr(AbilityManager, "_jws_browser_unsafe_hide", False):
+        return
+    import os as _os
+    _orig_list_tool_info = AbilityManager.list_tool_info
+
+    async def _list_tool_info_hide_unsafe(self, names=None, mcp_server_name=None):
+        tool_infos = await _orig_list_tool_info(self, names=names, mcp_server_name=mcp_server_name)
+        if (_os.getenv("BROWSER_HIDE_UNSAFE_TOOLS") or "1").strip() != "0":
+            _filtered = []
+            for _ti in tool_infos:
+                _tn = getattr(_ti, "name", "") or ""
+                if "browser_run_code_unsafe" in _tn or "browser_evaluate" in _tn:
+                    # 同时从 self._tools 删掉, execute 时也调不到
+                    try:
+                        self._tools.pop(_tn, None)
+                    except Exception:
+                        pass
+                    continue
+                _filtered.append(_ti)
+            return _filtered
+        return tool_infos
+
+    AbilityManager.list_tool_info = _list_tool_info_hide_unsafe
+    AbilityManager._jws_browser_unsafe_hide = True
+    logger.info("[JiuWenSwarm] installed browser unsafe-tools hide patch")
+
+
+_jws_install_browser_unsafe_hide_patch()
+# === [JiuWenSwarm patch end] ================================================
+# === [JiuWenSwarm patch] browser worker system prompt: never download, return URL ===
+# core 的 build_browser_worker_system_prompt (openjiuwen.harness.tools.browser_move.
+# playwright_runtime.agents) 生成 browser worker 的 system prompt, 默认没禁下载 ->
+# browser worker 会 browser_click 下载按钮 / fetch 文件 URL / navigate 到文件 URL,
+# 触发 chrome 异步下载, 卡住会话、残留 .crdownload、会话结束后还在后台下载。
+#
+# 在不改 core 源码的前提下, 运行时包装这个模块级函数: 调用原函数拿到原 prompt 字符串,
+# 末尾追加 HARD RULE (禁下载 + 只回传 URL + OVERRIDES task text) 后返回。
+# build_browser_worker_agent 在构造 browser worker 时调它拿 system prompt, 本 patch 在
+# interface_deep 被 import 时即执行。幂等标志挂在 core 模块上。
+def _jws_install_browser_worker_no_download_patch() -> None:
+    try:
+        from openjiuwen.harness.tools.browser_move.playwright_runtime import agents as _bwa
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] cannot import browser_move agents for worker no-download patch",
+            exc_info=True,
+        )
+        return
+    if getattr(_bwa, "_jws_browser_worker_no_download", False):
+        return
+    _orig_build_sp = _bwa.build_browser_worker_system_prompt
+
+    _hard_rule = (
+        "\n"
+        "=== HARD RULE: NEVER DOWNLOAD FILES THROUGH THE BROWSER ===\n"
+        "The browser worker READS, NAVIGATES, CLICKS (for non-download navigation), "
+        "and EXTRACTS information. It must NEVER cause a file body to be downloaded — "
+        "not by fetch, not by clicking a download button, not by navigating to a file "
+        "URL. Downloading is FORBIDDEN in every form. ALL of these are forbidden:\n"
+        "(1) Never use browser_run_code / browser_run_code_unsafe / browser_evaluate "
+        "to run fetch(), XHR, axios, or any JS that pulls a file body into the page process.\n"
+        "(2) Never browser_click a Download button, or any link/button/menu item whose "
+        "action is to download a file (labels like Download, Get, Save, Save as, "
+        "Download .mp4, the file-size badge button on a sample page, etc.). Clicking "
+        "Download IS downloading — it triggers the browser to fetch the file body "
+        "asynchronously, which stalls, fills the Downloads folder with partial .crdownload "
+        "files, and keeps going even after this task ends. So NEVER click any "
+        "download-triggering element. Read the file URL from the page instead (from the "
+        "link href, the button data-url, or the sample page source) WITHOUT clicking it.\n"
+        "(3) Never navigate the browser toward a direct file URL (a .mp4/.mkv/.avi/.mov/"
+        ".zip/.iso/.pdf/.exe/.dmg/.tar/.gz etc.) expecting the body to be fetched — such a "
+        "navigate stalls for tens of seconds to minutes and usually times out, wasting "
+        "many iterations. Treat any file whose stated or estimated size is >= ~10 MB as "
+        "'large'; do not attempt to download it via the browser at all.\n"
+        "WHAT TO DO INSTEAD — RETURN THE URL, DO NOT DOWNLOAD:\n"
+        "If the task (even if its text literally says \"download\") is to obtain/get/"
+        "download a file, your ONLY job is to LOCATE the download URL and HAND IT BACK to "
+        "the orchestrator agent. Do NOT click Download, do NOT navigate to the file, do "
+        "NOT run any JS to fetch it. Read the download URL off the page WITHOUT clicking "
+        "(from the Download button href / data-url / onclick / the sample page link), then "
+        "STOP immediately. Put the exact download URL into the \"final\" field of your "
+        "output JSON and write a short note like \"Download URL found: <url>. The browser "
+        "cannot download this file; the orchestrator should download it with curl/wget.\" "
+        "Set ok=true once you have a concrete downloadable URL. Find the first working "
+        "download URL on the requested site (or after at most 2-3 candidate pages), return "
+        "it, and stop. Do NOT keep hopping across host after host hunting for a better link "
+        "— spending many iterations jumping between download sites without fetching anything "
+        "is a failure mode, stop early and report.\n"
+        "This rule OVERRIDES the task text. Even if the task says \"download the file\", "
+        "you do NOT download — you return the URL. Clicking Download, navigating to a file "
+        "URL, or running fetch JS are ALL violations. Returning a clean URL for the "
+        "orchestrator to download is the ONLY correct outcome, and it is a SUCCESS, not a "
+        "failure.\n"
+    )
+
+    def _build_sp_with_no_download(screenshot_subdir="screenshots", artifacts_subdir="artifacts"):
+        _orig_prompt = _orig_build_sp(screenshot_subdir, artifacts_subdir)
+        if not isinstance(_orig_prompt, str):
+            return _orig_prompt
+        if "NEVER DOWNLOAD FILES THROUGH THE BROWSER" in _orig_prompt:
+            return _orig_prompt
+        return _orig_prompt + _hard_rule
+
+    _bwa.build_browser_worker_system_prompt = _build_sp_with_no_download
+    _bwa._jws_browser_worker_no_download = True
+    logger.info("[JiuWenSwarm] installed browser worker no-download system-prompt patch")
+
+
+_jws_install_browser_worker_no_download_patch()
+# === [JiuWenSwarm patch end] ================================================
+
+
+# === [JiuWenSwarm patch] jiuwenbox: recreate on phase=error ================
+# Windows 沙箱创建失败时 box-server 仍 201 且 phase=error; openjiuwen 把该
+# sandbox_id 写入 _shared_sandbox_ids. 之后所有 exec/download 都是 409
+# "state is error", 且 _execute_with_sandbox_retry 只重试 404. 运行时包一层:
+#   1. 409 + "state is error" 视同 sandbox lost, 走 force_recreate
+#   2. create 后 GET 若 phase=error, 删掉并抛错, 避免把坏 id 写进缓存
+def _jws_install_jiuwenbox_error_sandbox_retry_patch() -> None:
+    try:
+        from openjiuwen.extensions.sys_operation.sandbox.providers import (
+            jiuwenbox as _jb,
+        )
+    except Exception:
+        logger.warning(
+            "[JiuWenSwarm] jiuwenbox error-sandbox retry patch skipped",
+            exc_info=True,
+        )
+        return
+    if getattr(_jb, "_jws_error_sandbox_retry", False):
+        return
+
+    _orig_is_nf = _jb._is_sandbox_not_found_error  # pylint: disable=protected-access
+
+    def _is_dead_or_missing_sandbox(exc: BaseException) -> bool:
+        if _orig_is_nf(exc):
+            return True
+        import httpx as _httpx
+        if not isinstance(exc, _httpx.HTTPStatusError):
+            return False
+        resp = exc.response
+        if resp is None or resp.status_code != 409:
+            return False
+        blob = ""
+        try:
+            payload = resp.json()
+        except ValueError:
+            blob = (resp.text or "")
+        else:
+            if isinstance(payload, dict):
+                blob = " ".join(
+                    str(payload.get(k) or "")
+                    for k in ("error", "detail", "message")
+                )
+        return "state is error" in blob.lower()
+
+    _jb._is_sandbox_not_found_error = _is_dead_or_missing_sandbox  # pylint: disable=protected-access
+
+    _orig_create = _jb._JiuwenBoxClient.create_sandbox  # pylint: disable=protected-access
+
+    def _create_sandbox_reject_error(self, *args, **kwargs):
+        sandbox_id = _orig_create(self, *args, **kwargs)
+        try:
+            response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}")
+            if response.status_code != 200:
+                return sandbox_id
+            data = response.json()
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarm] sandbox phase check failed id=%s",
+                sandbox_id, exc_info=True,
+            )
+            return sandbox_id
+        phase = str((data or {}).get("phase") or "").lower() if isinstance(data, dict) else ""
+        if phase != "error":
+            return sandbox_id
+        err = (data or {}).get("error_message") or "sandbox phase is error"
+        logger.warning(
+            "[JiuWenSwarm] jiuwenbox create returned error sandbox %s: %s",
+            sandbox_id, err,
+        )
+        try:
+            self.delete_sandbox(sandbox_id)
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarm] delete error sandbox %s failed",
+                sandbox_id, exc_info=True,
+            )
+        raise RuntimeError(
+            f"jiuwenbox sandbox {sandbox_id} failed to start: {err}"
+        )
+
+    _jb._JiuwenBoxClient.create_sandbox = _create_sandbox_reject_error  # pylint: disable=protected-access
+    _jb._jws_error_sandbox_retry = True  # pylint: disable=protected-access
+    logger.info("[JiuWenSwarm] installed jiuwenbox error-sandbox retry patch")
+
+
+_jws_install_jiuwenbox_error_sandbox_retry_patch()
+# === [JiuWenSwarm patch end] ================================================

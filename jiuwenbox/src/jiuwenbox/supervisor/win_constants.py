@@ -195,6 +195,12 @@ FILE_GENERIC_WRITE = 0x00120116
 FILE_GENERIC_EXECUTE = 0x001200A0
 FILE_DELETE_ACCESS = 0x00010000  # DELETE 位
 FILE_READ_ATTRIBUTES = 0x00000080
+# STANDARD_RIGHTS: install 预授给当前用户, 运行时才能改外部目录 DACL.
+# winnt.h: READ_CONTROL=0x20000, WRITE_DAC=0x40000.
+READ_CONTROL = 0x00020000
+WRITE_DAC = 0x00040000
+# FILE_EXECUTE / FILE_TRAVERSE 同值; 父目录非递归 traverse 用.
+FILE_TRAVERSE = 0x00000020
 
 FILE_WRITE_DATA       = 0x00000002
 FILE_APPEND_DATA      = 0x00000004
@@ -203,6 +209,9 @@ FILE_WRITE_ATTRIBUTES = 0x00000100
 
 # allow_write 路径授予的写权限组合.
 ALLOW_WRITE_RIGHTS = FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | FILE_DELETE_ACCESS
+# 工具目录 / python.exe 预装: FILE_GENERIC_READ 不含 FILE_EXECUTE/FILE_TRAVERSE,
+# 只授 Read 时 jbx-sandbox 无法 CreateProcessWithLogonW (WinError 5).
+ALLOW_READ_EXECUTE_RIGHTS = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
 # deny_write 路径封锁的写权限组合: 只拒绝写特定位, 不含 SYNCHRONIZE/READ_CONTROL
 # (这两个位也属于 FILE_GENERIC_READ, 若出现在 Deny mask 中会阻断读访问).
 DENY_WRITE_RIGHTS = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES
@@ -388,6 +397,9 @@ REG_VALUE_READ_ACL_PROGRESS = "read_acl_progress"
 # 本次 preinstall_paths, 若有新增路径 (如用户改了 tool_paths 后首次起 sandbox)
 # 则提示需 --force 重装让管理员补预装; 运行时普通用户无权改外部目录 DACL.
 REG_VALUE_PREINSTALLED_PATHS = "preinstalled_paths"
+# install 时已预授 WRITE_DAC 的 deny/allow 路径集合 (JSON).
+# ensure_windows_setup 增量检测: runtime policy 新增 deny/allow 路径时自动弹 UAC 补授权.
+REG_VALUE_ACL_POLICY_PATHS = "acl_policy_paths"
 
 # UAC 提权子进程的命令行标记.
 INSTALL_SUBCOMMAND = "--install"

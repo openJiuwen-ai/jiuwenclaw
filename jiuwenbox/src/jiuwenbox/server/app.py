@@ -23,6 +23,7 @@ from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.models.sandbox import InvalidJobIdError, InvalidSandboxIdError
 from jiuwenbox.server.runtime.process import BackgroundJobNotFoundError
 from jiuwenbox.server.sandbox_manager import (
+    CodePolicyDenialError,
     SandboxConflictError,
     SandboxManager,
     SandboxNotFoundError,
@@ -505,6 +506,14 @@ def create_app() -> FastAPI:
     @application.exception_handler(SandboxStateError)
     async def state_error_handler(request: Request, exc: SandboxStateError):
         return JSONResponse(status_code=409, content={"error": str(exc)})
+
+    @application.exception_handler(CodePolicyDenialError)
+    async def code_policy_denial_handler(request: Request, exc: CodePolicyDenialError):
+        # 403 = code-level policy enforcement blocked the file operation.
+        # Distinct from 409 (SandboxStateError) so callers can differentiate
+        # ACL/Landlock-style denials (which this fallback mirrors) from
+        # sandbox lifecycle / state issues.
+        return JSONResponse(status_code=403, content={"error": str(exc)})
 
     @application.exception_handler(SandboxConflictError)
     async def conflict_error_handler(request: Request, exc: SandboxConflictError):
