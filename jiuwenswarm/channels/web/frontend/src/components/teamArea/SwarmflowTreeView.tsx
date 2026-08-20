@@ -326,8 +326,9 @@ function PhaseLoopNode({
                   第{phase.iteration ?? i + 1}轮
                 </span>
                 <span className="text-xs text-text-muted/70 shrink-0">
-                  {(phase.agents ?? []).filter((a) => a.status === 'completed').length}/
-                  {(phase.agents ?? []).length}
+                  {phase.completed_agent_count ??
+                    (phase.agents ?? []).filter((a) => a.status === 'completed').length}/
+                  {phase.agent_count ?? (phase.agents ?? []).length}
                 </span>
               </div>
             ),
@@ -615,10 +616,13 @@ function PhaseNode({
     () => childPhasesOf(workflow, phase),
     [workflow, phase],
   );
-  const completedCount = (phase.agents ?? []).filter(
-    (a) => a.status === 'completed',
-  ).length;
-  const totalCount = phase.agents?.length ?? 0;
+  // Prefer backend aggregate counters: a parent phase's agent_count already
+  // includes its child phases' agents (same behavior as the TUI); fall back
+  // to counting direct agents when the fields are absent.
+  const completedCount =
+    phase.completed_agent_count ??
+    (phase.agents ?? []).filter((a) => a.status === 'completed').length;
+  const totalCount = phase.agent_count ?? phase.agents?.length ?? 0;
   const hasChildren =
     sessions.length > 0 || uniqueAgents.length > 0 || agentLoops.length > 0 || childPhases.length > 0;
 
