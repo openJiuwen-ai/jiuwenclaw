@@ -139,8 +139,13 @@ const RunGraphNode = ({ data }: NodeProps) => {
 
 const PhaseGraphNode = ({ data }: NodeProps) => {
   const phase = data.phase as WorkflowPhase;
-  const completed = (phase.agents ?? []).filter((a) => a.status === 'completed').length;
-  const total = phase.agents?.length ?? 0;
+  // Prefer backend aggregate counters: a parent phase's agent_count already
+  // includes its child phases' agents (same behavior as the TUI); fall back
+  // to counting direct agents when the fields are absent.
+  const completed =
+    phase.completed_agent_count ??
+    (phase.agents ?? []).filter((a) => a.status === 'completed').length;
+  const total = phase.agent_count ?? phase.agents?.length ?? 0;
 
   return (
     <div className={`px-2.5 py-1.5 rounded-md border bg-card shadow-sm min-w-[110px] ${statusBorder(phase.status)}`}>
