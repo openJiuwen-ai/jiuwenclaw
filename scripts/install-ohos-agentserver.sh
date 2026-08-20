@@ -27,7 +27,7 @@
 #   OPENJIUWEN_GIT_REPO / OPENJIUWEN_GIT_REF  默认 openJiuwen/agent-core @ enterprise-dev
 #   DEEPSEARCH_PATH     本地 deepsearch 仓库（优先于 Git；仓库根或 deepsearch/ 子项目）
 #   DEEPSEARCH_GIT_REPO / DEEPSEARCH_GIT_REF  默认 openJiuwen/deepsearch @ enterprise_dev
-#   SKIP_DEEPSEARCH=1   明确禁用 DeepSearch 安装（默认必须安装并通过 import 校验）
+#   SKIP_DEEPSEARCH=0   显式安装 DeepSearch（鸿蒙默认跳过，基础对话不依赖它）
 #   REUSE_INSTALLED=1   import 正常时跳过已安装依赖和运行时（默认 1）
 #   FORCE_REINSTALL=1   忽略复用检查，强制重新安装
 #   CREATE_VENV=1      默认创建 $REPO_ROOT/.venv
@@ -68,7 +68,7 @@ DEEPSEARCH_PATH=${DEEPSEARCH_PATH:-}
 DEEPSEARCH_GIT_REPO=${DEEPSEARCH_GIT_REPO:-https://gitcode.com/openJiuwen/deepsearch.git}
 DEEPSEARCH_GIT_REF=${DEEPSEARCH_GIT_REF:-enterprise_dev}
 DEEPSEARCH_SRC_DIR=${DEEPSEARCH_SRC_DIR:-$REPO_ROOT/.cache/deepsearch-src}
-SKIP_DEEPSEARCH=${SKIP_DEEPSEARCH:-0}
+SKIP_DEEPSEARCH=${SKIP_DEEPSEARCH:-1}
 REUSE_INSTALLED=${REUSE_INSTALLED:-1}
 FORCE_REINSTALL=${FORCE_REINSTALL:-0}
 
@@ -481,7 +481,7 @@ else
   log "SKIP phase 3 (agentcore-minimal manifest)"
 fi
 
-# ---------- DeepSearch（产品能力，默认强制安装并验证）----------
+# ---------- DeepSearch（鸿蒙可选能力，默认跳过）----------
 if [ "$SKIP_DEEPSEARCH" != "1" ]; then
   log "======== phase deepsearch: openjiuwen_deepsearch + runtime deps ========"
   install_deepsearch
