@@ -8952,7 +8952,8 @@ class AgentWebSocketServer:
         # 切片器拿到的就只剩 16KB，分片就失去意义。
         page_messages = list(ordered[start:end])
         logger.debug(
-            "[history.get] session_id=%s subagent_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
+            "[history.get] session_id=%s subagent_id=%s page_idx=%s "
+            "raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,
             normalized_subagent_id or "",
             page_idx,

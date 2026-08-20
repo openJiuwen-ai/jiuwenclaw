@@ -87,7 +87,11 @@ from openjiuwen.harness.rails.context_engineer.context_assemble_rail import Cont
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
-from openjiuwen.harness.subagent_runtime import SUBAGENT_ACTIVITY_EVENT_TYPE, SUBAGENT_MESSAGE_EVENT_TYPE, SUBAGENT_UPDATED_EVENT_TYPE
+from openjiuwen.harness.subagent_runtime import (
+    SUBAGENT_ACTIVITY_EVENT_TYPE,
+    SUBAGENT_MESSAGE_EVENT_TYPE,
+    SUBAGENT_UPDATED_EVENT_TYPE,
+)
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -12224,6 +12228,44 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[_parse_stream_chunk] 解析异常", exc_info=True)
 
         return None
+
+    @staticmethod
+    def parse_stream_chunk(
+        chunk,
+        *,
+        has_streamed_content: bool = False,
+        stage: str = "",
+        parent_session_id: str | None = None,
+    ) -> dict | None:
+        """Public entry for OutputSchema stream chunk parsing."""
+        return JiuWenSwarmDeepAdapter._parse_stream_chunk(
+            chunk,
+            _has_streamed_content=has_streamed_content,
+            _stage=stage,
+            _parent_session_id=parent_session_id,
+        )
+
+    @staticmethod
+    def project_subagent_updated_for_web(projection: dict) -> dict:
+        """Public entry for subagent roster projection."""
+        return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+
+    @staticmethod
+    def persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
+
+    @staticmethod
+    def persist_subagent_activity(projection: dict[str, Any]) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_activity(projection)
+
+    @staticmethod
+    def persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
+
+    @classmethod
+    def clear_subagent_progress_batches(cls) -> None:
+        with cls._subagent_progress_batches_lock:
+            cls._subagent_progress_batches.clear()
 
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()

@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from openjiuwen.harness.subagent_runtime import (
+    SUBAGENT_ACTIVITY_EVENT_TYPE,
+    SUBAGENT_UPDATED_EVENT_TYPE,
+)
+
 from jiuwenswarm.common.config import is_subagent_runtime_enabled
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as interface_deep_module
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-from openjiuwen.harness.subagent_runtime import SUBAGENT_UPDATED_EVENT_TYPE
 
 
 class TestSubagentRuntimeConfig:
-    def test_disabled_by_default(self) -> None:
+    @staticmethod
+    def test_disabled_by_default() -> None:
         assert is_subagent_runtime_enabled({"react": {}}) is False
 
-    def test_enabled_when_configured(self) -> None:
+    @staticmethod
+    def test_enabled_when_configured() -> None:
         config = {"react": {"subagent_runtime": {"enabled": True}}}
         assert is_subagent_runtime_enabled(config) is True
 
@@ -22,14 +32,16 @@ def _map_subagent_updated_chunk(chunk_type: str, payload: dict) -> dict | None:
     projection = payload.get("subagent_updated")
     if not isinstance(projection, dict):
         return None
-    return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+    return JiuWenSwarmDeepAdapter.project_subagent_updated_for_web(projection)
 
 
 class TestSubagentStreamMapping:
-    def setup_method(self) -> None:
-        JiuWenSwarmDeepAdapter._subagent_progress_batches.clear()
+    @staticmethod
+    def setup_method() -> None:
+        JiuWenSwarmDeepAdapter.clear_subagent_progress_batches()
 
-    def test_maps_subagent_updated_to_chat_subtask_update(self) -> None:
+    @staticmethod
+    def test_maps_subagent_updated_to_chat_subtask_update() -> None:
         projection = {
             "subagent_id": "sess_sub_general_abc123",
             "parent_session_id": "parent-sess-1",
@@ -52,7 +64,8 @@ class TestSubagentStreamMapping:
         assert parsed["total"] == 1
         assert parsed["is_parallel"] is False
 
-    def test_parallel_subagents_get_distinct_indexes(self) -> None:
+    @staticmethod
+    def test_parallel_subagents_get_distinct_indexes() -> None:
         parent_session_id = "parent-sess-parallel"
         first = {
             "subagent_id": "sub-a",
@@ -83,7 +96,8 @@ class TestSubagentStreamMapping:
         assert first_parsed["is_parallel"] is False
         assert second_parsed["is_parallel"] is True
 
-    def test_maps_idle_completed_to_legacy_completed(self) -> None:
+    @staticmethod
+    def test_maps_idle_completed_to_legacy_completed() -> None:
         parsed = _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
             {
@@ -104,7 +118,8 @@ class TestSubagentStreamMapping:
         assert parsed["legacy_status"] == "completed"
         assert parsed["can_send_input"] is True
 
-    def test_maps_idle_failed_preserves_error_and_legacy(self) -> None:
+    @staticmethod
+    def test_maps_idle_failed_preserves_error_and_legacy() -> None:
         parsed = _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
             {
@@ -123,7 +138,8 @@ class TestSubagentStreamMapping:
         assert parsed["error"] == {"code": "TIMEOUT", "message": "turn timeout"}
         assert parsed["message"] == "turn timeout"
 
-    def test_maps_closed_completed_to_legacy_completed(self) -> None:
+    @staticmethod
+    def test_maps_closed_completed_to_legacy_completed() -> None:
         parsed = _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
             {
@@ -143,7 +159,8 @@ class TestSubagentStreamMapping:
         assert parsed["legacy_status"] == "completed"
         assert parsed["needs_resume"] is True
 
-    def test_maps_closed_failed_to_legacy_error(self) -> None:
+    @staticmethod
+    def test_maps_closed_failed_to_legacy_error() -> None:
         parsed = _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
             {
@@ -160,8 +177,107 @@ class TestSubagentStreamMapping:
         assert parsed["legacy_status"] == "error"
         assert parsed["message"] == "turn timeout"
 
-    def test_invalid_subagent_updated_payload_is_skipped(self) -> None:
+    @staticmethod
+    def test_invalid_subagent_updated_payload_is_skipped() -> None:
         assert _map_subagent_updated_chunk(
             SUBAGENT_UPDATED_EVENT_TYPE,
             {"subagent_updated": "bad"},
         ) is None
+
+    @staticmethod
+    def test_subagent_activity_is_persisted_for_subagent_history() -> None:
+        projection = {
+            "subagent_id": "sub-a",
+            "task_id": "turn-1",
+            "seq": 4,
+            "kind": "tool_call",
+            "summary": "search market data",
+            "at_ms": 1787019579059,
+            "phase_id": 2,
+            "tool_name": "web_search",
+            "tool_call_id": "call-4",
+        }
+
+        with patch.object(interface_deep_module, "append_history_record") as append_history:
+            parsed = JiuWenSwarmDeepAdapter.parse_stream_chunk(
+                SimpleNamespace(
+                    type=SUBAGENT_ACTIVITY_EVENT_TYPE,
+                    payload={"subagent_activity": projection},
+                ),
+                parent_session_id="parent-sess-activity",
+            )
+
+        assert parsed == {"event_type": "chat.subagent_activity", **projection}
+        append_history.assert_called_once()
+        assert append_history.call_args.kwargs["subagent_id"] == "sub-a"
+        assert append_history.call_args.kwargs["session_id"] == "parent-sess-activity"
+        assert append_history.call_args.kwargs["event_type"] == "chat.subagent_activity"
+        assert append_history.call_args.kwargs["extra"]["subagent_activity"] == {
+            **projection,
+            "parent_session_id": "parent-sess-activity",
+        }
+
+    @staticmethod
+    def test_subagent_roster_is_persisted_for_subagent_history() -> None:
+        projection = {
+            "subagent_id": "sub-a",
+            "parent_session_id": "parent-sess-roster",
+            "status": "idle",
+            "lifecycle": "live",
+            "turn_outcome": "completed",
+            "updated_at": 1787019579059,
+            "revision": 5,
+        }
+        web_payload = {
+            "event_type": "chat.subtask_update",
+            "subagent_id": "sub-a",
+            "parent_session_id": "parent-sess-roster",
+            "status": "idle",
+        }
+
+        with patch.object(interface_deep_module, "append_history_record") as append_history:
+            JiuWenSwarmDeepAdapter.persist_subagent_roster_history(projection, web_payload)
+
+        assert append_history.call_args.kwargs["session_id"] == "parent-sess-roster"
+        assert append_history.call_args.kwargs["subagent_id"] == "sub-a"
+        assert append_history.call_args.kwargs["event_type"] == "chat.subtask_update"
+
+    @staticmethod
+    def test_subagent_activity_without_seq_uses_stable_request_id() -> None:
+        projection_without_seq = {
+            "subagent_id": "sub-a",
+            "task_id": "turn-1",
+            "kind": "thinking",
+            "summary": "without sequence",
+            "at_ms": 1787019579060,
+        }
+
+        with patch.object(interface_deep_module, "append_history_record") as append_history:
+            JiuWenSwarmDeepAdapter.persist_subagent_activity({
+                **projection_without_seq,
+                "parent_session_id": "parent-sess-activity",
+            })
+
+        request_id = append_history.call_args.kwargs["request_id"]
+        assert request_id.startswith("sub-a:activity:turn-1:")
+        assert not request_id.endswith(":None")
+
+    @staticmethod
+    def test_subagent_transcript_persists_parent_session_scope() -> None:
+        projection = {
+            "parent_session_id": "parent-sess-final",
+            "subagent_id": "sub-a",
+            "seq": 7,
+            "event_type": "chat.final",
+            "content": "final answer",
+            "at_ms": 1787019579059,
+        }
+
+        with patch.object(interface_deep_module, "append_history_record") as append_history:
+            JiuWenSwarmDeepAdapter.persist_subagent_transcript_message(projection)
+
+        append_history.assert_called_once()
+        assert append_history.call_args.kwargs["session_id"] == "parent-sess-final"
+        assert append_history.call_args.kwargs["subagent_id"] == "sub-a"
+        assert append_history.call_args.kwargs["event_type"] == "chat.final"
+        assert append_history.call_args.kwargs["extra"]["parent_session_id"] == "parent-sess-final"

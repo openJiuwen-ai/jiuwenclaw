@@ -115,7 +115,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
     if chunk_type in ("subagent_updated", "subagent_activity", "subagent_message"):
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
-        return JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)
+        return JiuWenSwarmDeepAdapter.parse_stream_chunk(chunk)
 
     if isinstance(chunk_type, str) and "." in chunk_type:
         if chunk_type == "context.compression_state":
