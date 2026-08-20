@@ -922,21 +922,18 @@ class SkillTurboExecutor:
         metadata = inputs.get("metadata")
         meta_copy = dict(metadata) if isinstance(metadata, dict) else {}
         interactive_ask = resolve_interactive_ask_from_inputs(inputs)
-        if interactive_ask is not None:
-            meta_copy["interactive_ask"] = interactive_ask
-        if meta_copy:
-            self._stream_event_rail.set_skill_turbo_request_metadata(meta_copy)
-        if interactive_ask is not None:
-            try:
-                tokens["interactive_ask"] = set_interactive_ask(interactive_ask)
-                logger.info(
-                    "[SkillTurboExecutor] interactive_ask ContextVar bound: %s",
-                    interactive_ask,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[SkillTurboExecutor] set interactive_ask context failed: %s", exc
-                )
+        meta_copy["interactive_ask"] = interactive_ask
+        self._stream_event_rail.set_skill_turbo_request_metadata(meta_copy)
+        try:
+            tokens["interactive_ask"] = set_interactive_ask(interactive_ask)
+            logger.info(
+                "[SkillTurboExecutor] interactive_ask ContextVar bound: %s",
+                interactive_ask,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SkillTurboExecutor] set interactive_ask context failed: %s", exc
+            )
 
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():

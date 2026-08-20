@@ -4,34 +4,48 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 
-def resolve_interactive_ask_from_inputs(inputs: dict[str, Any] | None) -> bool | None:
-    """Read guided-mode flag from SkillTurbo inputs / metadata.
+def _raw_interactive_ask(source: Mapping[str, Any] | None) -> Any:
+    if not isinstance(source, Mapping):
+        return None
+    return source.get("interactive_ask", source.get("interactiveAsk"))
 
-    Returns True/False when the request declared the flag, otherwise None so
-    callers can keep the ContextVar default (False).
+
+def extract_interactive_ask(*sources: Mapping[str, Any] | None) -> bool:
+    """Guided mode is explicit opt-in only.
+
+    Missing / None means off. Never infer from ``supports_user_interaction``.
     """
+    for source in sources:
+        raw = _raw_interactive_ask(source)
+        if raw is not None:
+            return bool(raw)
+    return False
+
+
+def resolve_interactive_ask_from_inputs(inputs: dict[str, Any] | None) -> bool:
+    """Read guided-mode flag from SkillTurbo inputs / metadata."""
     if not isinstance(inputs, dict):
-        return None
-    raw = inputs.get("interactive_ask", inputs.get("interactiveAsk"))
+        return False
     metadata = inputs.get("metadata")
-    if raw is None and isinstance(metadata, dict):
-        raw = metadata.get("interactive_ask", metadata.get("interactiveAsk"))
-    if raw is None:
-        return None
-    return bool(raw)
+    return extract_interactive_ask(
+        inputs,
+        metadata if isinstance(metadata, dict) else None,
+    )
 
 
 def apply_interactive_ask_to_inputs(
     inputs: dict[str, Any] | None,
     raw_interactive: Any,
 ) -> dict[str, Any]:
-    """Copy inputs and stamp ``metadata.interactive_ask`` when the flag is present."""
+    """Copy inputs and stamp ``metadata.interactive_ask``.
+
+    Omitted resume params mean guided mode is off, so a polluted saved True
+    from ``supports_user_interaction`` fallback cannot leak into P5.
+    """
     merged = dict(inputs or {})
-    if raw_interactive is None:
-        return merged
     metadata = merged.get("metadata")
     meta = dict(metadata) if isinstance(metadata, dict) else {}
     meta["interactive_ask"] = bool(raw_interactive)
