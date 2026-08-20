@@ -998,7 +998,7 @@ class _RuntimeCronToolContext:
 
 
 class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
-    SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
+    SESSION_ADAPTER_IDLE_TTL_SEC = 24 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
@@ -7199,6 +7199,13 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     try:
                         return await cached.process_interrupt(request)
                     finally:
+                        # 方案A：用户 cancel/supplement 单回合后，agent 实例仍存活、会话仍
+                        # 会被复用。刷新主 adapter 的 last_used，避免本会话被随后的
+                        # _evict_idle_session_adapters() 当成 idle 而 cleanup()。
+                        # cleanup 会 _teardown_agent_owned_tools 清空本会话全部工具，
+                        # 而 cancel 后 agent 不重建 → 工具永不恢复 → [120001] not found。
+                        if request.session_id:
+                            self._touch_session_adapter(request.session_id)
                         await self._evict_idle_session_adapters()
             else:
                 # pause/resume：需要 session-scoped adapter 的 StreamEventRail，按原逻辑创建。
@@ -7427,6 +7434,14 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             # 写入历史记录，确保刷新网页后工具状态正确显示
             self._append_cancelled_tools_to_history(request, cancelled_tool_results)
 
+        # 方案A：用户 cancel/supplement 单回合后，agent 实例仍存活、会话仍
+        # 会被复用。刷新主 adapter 的 last_used，避免本会话被随后的
+        # _evict_idle_session_adapters() 当成 idle 而 cleanup()。
+        # cleanup 会 _teardown_agent_owned_tools 清空本会话全部工具，
+        # 而 cancel 后 agent 不重建 → 工具永不恢复 → [120001] not found。
+        if request.session_id and intent in ("cancel", "supplement"):
+            self._touch_session_adapter(request.session_id)
+
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -7525,6 +7540,14 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] 标记 todo cancelled 失败: %s", exc,
                 )
+
+        # 方案A：用户 cancel/supplement 单回合后，agent 实例仍存活、会话仍
+        # 会被复用。刷新主 adapter 的 last_used，避免本会话被随后的
+        # _evict_idle_session_adapters() 当成 idle 而 cleanup()。
+        # cleanup 会 _teardown_agent_owned_tools 清空本会话全部工具，
+        # 而 cancel 后 agent 不重建 → 工具永不恢复 → [120001] not found。
+        if request.session_id and intent in ("cancel", "supplement"):
+            self._touch_session_adapter(request.session_id)
 
         return AgentResponse(
             request_id=request.request_id,
