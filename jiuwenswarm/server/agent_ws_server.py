@@ -47,6 +47,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
     encode_json_parse_error_wire,
+    encode_request_error_wire,
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.invocation_context import (
@@ -71,6 +72,7 @@ from jiuwenswarm.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenswarm.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenswarm.server.invocation_context_builder import build_invocation_context
 from jiuwenswarm.server.runtime.agent_warm_pool import WarmClaim
+from jiuwenswarm.server.runtime.expert.expert_service import ExpertService
 from jiuwenswarm.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenswarm.server.runtime.session.session_history import (
     append_compact_history_records,
@@ -943,6 +945,13 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # 专家会话操作编排（experts.list / expert.load / expert.unload 的业务内核）
+        # adapter_resolver 必须延迟绑定（调用时查 self._resolve_adapter），
+        # 保证测试对实例属性 _resolve_adapter 的 monkeypatch 生效
+        self._expert_service = ExpertService(
+            agent_manager=self._agent_manager,
+            adapter_resolver=lambda agent: self._resolve_adapter(agent),
+        )
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1580,24 +1589,50 @@ class AgentWebSocketServer:
             request = _payload_to_request(data)
         else:
             jw = (env.channel_context or {}).get(E2A_INTERNAL_CONTEXT_KEY)
-            if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
-                legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)
-                logger.warning(
-                    "[E2A][fallback] using legacy_agent_request request_id=%s",
+            try:
+                if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
+                    legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)
+                    logger.warning(
+                        "[E2A][fallback] using legacy_agent_request request_id=%s",
+                        env.request_id,
+                    )
+                    if not isinstance(legacy, dict):
+                        raise ValueError("legacy_agent_request missing or not a dict")
+                    request = _payload_to_request(legacy)
+                else:
+                    logger.info(
+                        "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
+                        env.request_id,
+                        env.channel,
+                        env.method,
+                        env.is_stream,
+                    )
+                    request = e2a_to_agent_request(env)
+            except ValueError as exc:
+                # 协议漂移（如客户端比服务端新，未知 req_method）。异常不能逃逸到
+                # fire-and-forget task：否则响应帧永远不发，客户端只能等 RPC 超时。
+                logger.exception(
+                    "[AgentWebSocketServer] 请求解析失败 request_id=%s method=%s: %s",
                     env.request_id,
-                )
-                if not isinstance(legacy, dict):
-                    raise ValueError("legacy_agent_request missing or not a dict")
-                request = _payload_to_request(legacy)
-            else:
-                logger.info(
-                    "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
-                    env.request_id,
-                    env.channel,
                     env.method,
-                    env.is_stream,
+                    exc,
                 )
-                request = e2a_to_agent_request(env)
+                wire = encode_request_error_wire(
+                    request_id=str(env.request_id or ""),
+                    channel_id=str(env.channel or ""),
+                    code="E2A.UNKNOWN_METHOD",
+                    message=f"无法识别的请求（协议版本可能不匹配）: {exc}",
+                    details_kind="request_convert_error",
+                )
+                try:
+                    async with send_lock:
+                        await send_wire_payload(ws, wire)
+                except WebSocketConnectionClosed as send_exc:
+                    logger.info(
+                        "[AgentWebSocketServer] WebSocket 已关闭，请求解析错误未发送: %s",
+                        describe_ws_exception(send_exc),
+                    )
+                return
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -1802,6 +1837,16 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
                 await self._handle_harness_packages_delete(ws, request, send_lock)
+                return
+            # Expert management
+            if request.req_method == ReqMethod.EXPERTS_LIST:
+                await self._handle_experts_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXPERT_LOAD:
+                await self._handle_expert_load(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXPERT_UNLOAD:
+                await self._handle_expert_unload(ws, request, send_lock)
                 return
             # Schedule task management
             if request.req_method == ReqMethod.SCHEDULE_CHECK_CONFIG:
@@ -3580,6 +3625,63 @@ class AgentWebSocketServer:
                 item["updated_at"] = float(metadata.get("last_message_at") or session_dir.stat().st_mtime)
                 item["last_session_id"] = session_dir.name
         return list(legacy.values())
+
+    async def _send_expert_response(
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
+            *,
+            ok: bool,
+            payload: dict[str, Any],
+    ) -> None:
+        resp = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=ok,
+            payload=payload,
+            metadata=request.metadata,
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    @staticmethod
+    def _extract_expert_params(request: AgentRequest) -> tuple[str, str]:
+        """从请求提取 expert 方法的两个公共参数（session_id 支持 request 级回退）。"""
+        params = request.params if isinstance(request.params, dict) else {}
+        session_id = str(params.get("session_id") or request.session_id or "").strip()
+        expert_id = str(params.get("expert_id") or "").strip()
+        return session_id, expert_id
+
+    async def _handle_experts_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        result = await self._expert_service.list_experts()
+        await self._send_expert_response(
+            ws, request, send_lock, ok=result.ok, payload=result.payload
+        )
+
+    async def _handle_expert_load(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """业务编排在 ExpertService.load_expert（先应用成功才写 metadata）。"""
+        session_id, expert_id = self._extract_expert_params(request)
+        result = await self._expert_service.load_expert(
+            channel_id=request.channel_id or "default",
+            session_id=session_id,
+            expert_id=expert_id,
+        )
+        await self._send_expert_response(
+            ws, request, send_lock, ok=result.ok, payload=result.payload
+        )
+
+    async def _handle_expert_unload(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """业务编排在 ExpertService.unload_expert。"""
+        session_id, _ = self._extract_expert_params(request)
+        result = await self._expert_service.unload_expert(
+            channel_id=request.channel_id or "default",
+            session_id=session_id,
+        )
+        await self._send_expert_response(
+            ws, request, send_lock, ok=result.ok, payload=result.payload
+        )
 
     async def _handle_team_templates_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenswarm.agents.harness.team import list_team_template_summaries
@@ -8279,6 +8381,7 @@ class AgentWebSocketServer:
                     project_id=project_id,
                     work_mode=final_work_mode,
                     cron_id=str(params.get("cron_id") or "").strip(),
+                    expert_id=str(params.get("expert_id") or "").strip(),
                     channel_metadata=channel_metadata,
                 )
                 if not external_tui_session:

@@ -603,6 +603,19 @@ def test_stream_end_skips_final_when_already_emitted() -> None:
     )
 
 
+def test_stream_end_skips_empty_final_while_waiting_for_user_interaction() -> None:
+    """A permission/ask-user card owns the unfinished turn boundary."""
+    goals = _FakeGoals()
+    adapter = _adapter(goals)
+    goals.record = None
+
+    assert not adapter._should_emit_stream_end_chat_final(
+        had_assistant_output=True,
+        emitted_terminal_chat_final=False,
+        emitted_ask_user_question=True,
+    )
+
+
 def test_record_goal_set_history_writes_objective_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[dict] = []
     monkeypatch.setattr(

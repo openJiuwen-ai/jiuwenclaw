@@ -1,0 +1,22 @@
+{
+  "name": "xiaoyi-web-search",
+  "version": "1.0.0",
+  "description": "华为云AI联网搜索API进行网页内容检索",
+  "main": "scripts/search.js",
+  "bin": {
+    "xiaoyi-web-search": "./scripts/search.js"
+  },
+  "scripts": {
+    "search": "node scripts/search.js"
+  },
+  "keywords": [
+    "search",
+    "web",
+    "xiaoyi",
+    "huawei"
+  ],
+  "dependencies": {
+    "axios": "^1.6.0",
+    "fs": "^0.0.1-security"
+  }
+}

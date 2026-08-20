@@ -1,0 +1,9 @@
+{
+  "schema": "exec",
+  "bin": "scripts/search.js",
+  "env": [],
+  "name": "xiaoyi-web-search",
+  "description": "华为云AI联网搜索API进行网页内容检索",
+  "tags": ["search", "web", "news"],
+  "autoLoad": true
+}

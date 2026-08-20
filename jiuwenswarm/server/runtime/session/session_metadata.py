@@ -461,6 +461,7 @@ def init_session_metadata(
     model: str = "",
     cron_id: str = "",
     work_mode: str = "",
+    expert_id: str = "",
     channel_metadata: dict[str, Any] | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)
@@ -495,6 +496,7 @@ def init_session_metadata(
         "pin_order": 0,
         "status": "idle",
         "work_mode": resolved_work_mode,
+        "expert_id": expert_id,
     }
     if isinstance(channel_metadata, dict) and channel_metadata:
         metadata["channel_metadata"] = channel_metadata
@@ -527,6 +529,7 @@ def update_session_metadata(
     sync: bool = False,
     sync_write: bool = False,
     work_mode: str | None = None,
+    expert_id: str | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -598,6 +601,7 @@ def update_session_metadata(
             "pin_order": pin_order if pin_order is not None else 0,
             "status": "idle",
             "work_mode": resolved_work_mode,
+            "expert_id": expert_id or "",
         }
         # 首次创建时写入 channel_metadata
         if channel_metadata:
@@ -640,6 +644,10 @@ def update_session_metadata(
             existing_wm = metadata.get("work_mode")
             if not _has_valid_work_mode(existing_wm):
                 metadata["work_mode"] = normalized_wm
+        # expert_id：覆盖式——专家绑定/切换/退出由 expert.load / expert.unload 显式驱动，
+        # "" 表示清除（退出专家）
+        if expert_id is not None:
+            metadata["expert_id"] = expert_id
         # 显式清除优先级高于 title 入参
         if clear_title:
             metadata["title"] = ""
@@ -849,6 +857,7 @@ def get_session_metadata(
         )
         metadata.setdefault("team_name", "")
         metadata.setdefault("team_template_id", "")
+        metadata.setdefault("expert_id", "")
     return metadata
 
 

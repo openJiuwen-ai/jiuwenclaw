@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
     JiuSwarmStreamEventRail,
 )
@@ -264,3 +268,123 @@ async def test_permission_interrupt_for_read_file_emits_approval_question():
     assert output.payload["request_id"] == "tool-read-1"
     assert output.payload["source"] == "permission_interrupt"
     assert output.payload["questions"][0]["header"] == "权限审批: read_file"
+
+
+@pytest.mark.asyncio
+async def test_before_tool_permission_interrupt_emits_question_on_tool_exception_once():
+    """A BEFORE_TOOL_CALL interrupt must publish HITL before AFTER_TOOL_CALL runs."""
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-bash-1",
+        name="bash",
+        arguments={"command": "curl https://www.google.com"},
+    )
+    interrupt = ToolInterruptException(
+        request=InterruptRequest(
+            message="**工具 `bash` 需要授权才能执行**\n\n请确认是否允许该操作。",
+        ),
+        tool_call=tool_call,
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="bash",
+            tool_args=tool_call.arguments,
+        ),
+        exception=interrupt,
+    )
+    rail = _TestRail()
+
+    await rail.on_tool_exception(ctx)
+
+    questions = [output for output in session.outputs if output.type == "chat.ask_user_question"]
+    assert len(questions) == 1
+    assert questions[0].payload["request_id"] == "tool-bash-1"
+    assert questions[0].payload["source"] == "permission_interrupt"
+    assert questions[0].payload["questions"][0]["header"] == "权限审批: bash"
+
+    await rail.after_tool_call(ctx)
+
+    questions = [output for output in session.outputs if output.type == "chat.ask_user_question"]
+    assert len(questions) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupt_enrichment_preserves_metadata_and_ui_options():
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-structured-1",
+        name="custom_review_tool",
+        arguments={"target": "demo"},
+    )
+    interrupt = ToolInterruptException(
+        request=InterruptRequest(
+            message="Review this structured operation",
+            ui_options=[
+                {
+                    "label": "Approve once",
+                    "value": "allow_once",
+                    "description": "Approve only this operation",
+                }
+            ],
+            metadata={
+                "source": "evolution_interrupt",
+                "approval_kind": "simplify",
+            },
+        ),
+        tool_call=tool_call,
+    )
+
+    await _TestRail().emit_ask_user_question_if_interrupted(
+        session,
+        tool_call,
+        tool_call.name,
+        interrupt,
+    )
+
+    output = session.outputs[0]
+    assert output.payload["source"] == "evolution_interrupt"
+    assert output.payload["approval_kind"] == "simplify"
+    assert output.payload["questions"][0]["options"][0] == {
+        "label": "Approve once",
+        "value": "allow_once",
+        "description": "Approve only this operation",
+    }
+
+
+@pytest.mark.asyncio
+async def test_interrupt_enrichment_preserves_dict_backed_message():
+    class ToolInterruptException(Exception):
+        def __init__(self, request, tool_call):
+            self.request = request
+            self.tool_call = tool_call
+            super().__init__(str(request.get("message") or ""))
+
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-plan-1",
+        name="exit_plan_mode",
+        arguments={"plan": "demo"},
+    )
+    interrupt = ToolInterruptException(
+        request={
+            "message": "Review the exact plan before execution",
+            "payload_schema": {"type": "object"},
+        },
+        tool_call=tool_call,
+    )
+
+    await _TestRail().emit_ask_user_question_if_interrupted(
+        session,
+        tool_call,
+        tool_call.name,
+        interrupt,
+    )
+
+    output = session.outputs[0]
+    assert output.payload["source"] == "confirm_interrupt"
+    assert output.payload["questions"][0]["question"] == (
+        "Review the exact plan before execution"
+    )
