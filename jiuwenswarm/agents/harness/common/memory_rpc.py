@@ -166,6 +166,11 @@ def _classify_memory_file(path: str, workspace: str) -> str:
     return "project"
 
 
+def _is_creatable_memory_file(path: str) -> bool:
+    """Whether a validated missing path is a user-managed memory entrypoint."""
+    return os.path.basename(path) in ("JIUWENSWARM.md", "JIUWENSWARM.local.md")
+
+
 def _relative_path(abs_path: str, workspace: str, project_dir: str | None = None) -> str:
     abs_path_norm = os.path.normpath(abs_path)
     if project_dir:
@@ -315,13 +320,14 @@ async def handle_memory_edit(
     kind = _classify_memory_file(resolved, workspace)
 
     if not exists:
+        editable = _is_creatable_memory_file(resolved)
         return {
             "path": resolved,
             "exists": False,
             "content_preview": "",
             "kind": kind,
-            "editable": False,
-            "reason": "memory file does not exist",
+            "editable": editable,
+            "reason": None if editable else "memory file does not exist",
         }
 
     try:
