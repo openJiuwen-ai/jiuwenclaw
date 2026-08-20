@@ -153,21 +153,28 @@ export function isWorkflowBudgetExhausted(
 }
 
 /**
- * Which ledger exhausted on a failed run: "workflow" (per-run, retryable by
- * revising the workflow), "session" (team-wide, not retryable), or null when
- * the failure was not budget-caused. Prefers the structured
- * ``budget_exhausted_scope`` field; falls back to legacy signals (older
- * backends only had the team-wide ledger).
+ * Which ledger ran dry: "workflow" (per-run, retryable by revising the
+ * workflow), "session" (team-wide, not retryable), or null when neither
+ * ceiling was crossed. Not gated on the run status: a run whose ceiling was
+ * crossed mid-flight can still finish "completed" (the rail force-finishes
+ * in-flight agents and the engine's gate only blocks *new* agents), so the
+ * ledgers themselves are the source of truth. Session wins when both are
+ * dry (terminal, not retryable — same priority as the rail). Prefers the
+ * structured ``budget_exhausted_scope`` field; falls back to the ledgers'
+ * ``exhausted`` flags, then to the legacy error-text signal (older backends
+ * only had the team-wide ledger).
  */
 export function workflowBudgetExhaustedScope(
-  workflow: Pick<WorkflowRun, "status" | "budget" | "error" | "budget_exhausted_scope">,
+  workflow: Pick<
+    WorkflowRun,
+    "status" | "budget" | "workflow_budget" | "error" | "budget_exhausted_scope"
+  >,
 ): "session" | "workflow" | null {
-  if (workflow.status !== "failed") return null;
   if (workflow.budget_exhausted_scope === "workflow") return "workflow";
   if (workflow.budget_exhausted_scope === "session") return "session";
-  // Legacy fallback: only the team-wide ledger existed, so any budget
-  // exhaustion signal points at the session ledger.
   if (workflow.budget?.exhausted === true) return "session";
+  if (workflow.workflow_budget?.exhausted === true) return "workflow";
+  // Legacy fallback (failed runs only — error text is the sole signal there).
   if (workflow.error && /budget exhausted/i.test(workflow.error)) return "session";
   return null;
 }
