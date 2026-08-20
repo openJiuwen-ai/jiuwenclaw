@@ -237,9 +237,12 @@ class XYFileUploadService:
             headers = {
                 "Content-Type": "application/json",
                 "x-uid": self.uid,
-                "x-api-key": self.api_key,
                 "x-request-from": "openclaw",
             }
+            # api_key 可选：桌面客户端场景 file_upload_url 指向客户端本地代理
+            #（127.0.0.1），鉴权由代理注入 businessCredential，无需 x-api-key
+            if self.api_key:
+                headers["x-api-key"] = self.api_key
 
             async with self.session.post(prepare_url, json=prepare_data, headers=headers) as resp:
                 if not resp.ok:
@@ -3211,7 +3214,8 @@ class XiaoyiChannel(BaseChannel):
             api_key = self.file_upload_config.get("apiKey")
             uid = self.file_upload_config.get("uid")
 
-            if not all([base_url, api_key, uid]):
+            # api_key 可选：桌面客户端经本地代理注入 credential 鉴权时无需配置
+            if not all([base_url, uid]):
                 logger.error("XiaoyiChannel OSMS配置不完整，无法上传大文件")
                 return
 
