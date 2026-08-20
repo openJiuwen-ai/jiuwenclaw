@@ -21,8 +21,10 @@ from jiuwenswarm.server.runtime.mcp.cli_driver import (
     CliDriver,
     CliManifest,
     CommandResult,
+    ERR_BINARY_NOT_FOUND,
     StatusResult,
     _extract_url,
+    _is_binary_not_found,
     _parse_version,
     _version_ge,
 )
@@ -141,6 +143,49 @@ class TestCliDriverInstall:
         assert res.version == "1.0.90"
         # init (npm install) must NOT run when versionCheck already passes
         assert "npm install -g @larksuite/cli" not in runner.calls
+
+    def test_install_binary_not_found_classified(self) -> None:
+        """Runtime/CLI binary missing (node/npm/dws not on PATH) surfaces as
+        error_kind=binary_not_found on InstallResult, so _connect_cli can map
+        it to MCP_RUNTIME_MISSING instead of leaking "[WinError 2]". The fake
+        runner returns a CommandResult carrying the kind that default_runner
+        would set when subprocess raises FileNotFoundError."""
+        runner = _FakeRunner({
+            "lark-cli.cmd --version": CommandResult(
+                "lark-cli.cmd --version", -1,
+                stderr="[WinError 2] 系统找不到指定的文件",
+                error_kind=ERR_BINARY_NOT_FOUND,
+            ),
+            "npm install -g @larksuite/cli": CommandResult(
+                "npm install -g @larksuite/cli", -1,
+                stderr="[WinError 2]",
+                error_kind=ERR_BINARY_NOT_FOUND,
+            ),
+        })
+        drv = CliDriver("feishu", _mkmanifest(), runner)
+        res = drv.install()
+        assert res.version_ok is False
+        assert res.error_kind == ERR_BINARY_NOT_FOUND
+        assert res.runtime == "node"
+
+    def test_install_network_failure_not_classified_as_binary(self) -> None:
+        """npm install ran (rc!=0) with a network error stays error_kind=''
+        — it is NOT binary_not_found, so _classify_install_failure maps it to
+        MCP_INSTALL_NETWORK via stderr markers, not MCP_RUNTIME_MISSING."""
+        runner = _FakeRunner({
+            "lark-cli.cmd --version": CommandResult(
+                "lark-cli.cmd --version", -1, stderr="not found",
+            ),
+            "npm install -g @larksuite/cli": CommandResult(
+                "npm install -g @larksuite/cli", 1,
+                stderr="npm ERR! code ETIMEDOUT registry timeout",
+            ),
+        })
+        drv = CliDriver("feishu", _mkmanifest(), runner)
+        res = drv.install()
+        assert res.version_ok is False
+        assert res.error_kind == ""
+        assert "ETIMEDOUT" in res.error
 
 class TestCliDriverAuth:
     def test_auth_step_skipif_skips(self) -> None:
@@ -510,3 +555,106 @@ class TestFlatSkillLayout:
 
         import asyncio
         asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Boundary-failure classification: _is_binary_not_found + _classify_install_failure
+# ---------------------------------------------------------------------------
+
+class TestBinaryNotFoundDetection:
+    def test_file_not_found_error_is_binary_missing(self) -> None:
+        assert _is_binary_not_found(FileNotFoundError("[WinError 2] x")) is True
+
+    def test_errno_enoent_is_binary_missing(self) -> None:
+        class _Err(OSError):
+            def __init__(self) -> None:
+                super().__init__(2, "no such file")
+
+        assert _is_binary_not_found(_Err()) is True
+
+    def test_permission_error_is_not_binary_missing(self) -> None:
+        assert _is_binary_not_found(PermissionError("denied")) is False
+
+    def test_generic_oserror_not_binary_missing(self) -> None:
+        assert _is_binary_not_found(OSError("broken pipe")) is False
+
+
+class TestClassifyInstallFailure:
+    """_classify_install_failure maps an InstallResult onto a CliConnectError
+    carrying a structured code + runtime, so mcp.connect can surface an
+    actionable i18n hint instead of raw WinError."""
+
+    def _mk(self, **kw) -> "InstallResult":
+        from jiuwenswarm.server.runtime.mcp.cli_driver import InstallResult
+        base = dict(
+            name="dingtalk", installed=True, version=None,
+            min_version="1.0.54", version_ok=False, error="boom", error_kind="",
+            runtime="node", install_cmd="npm install -g dingtalk-workspace-cli",
+        )
+        base.update(kw)
+        return InstallResult(**base)
+
+    def test_binary_not_found_maps_to_runtime_missing(self) -> None:
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CODE_RUNTIME_MISSING, _classify_install_failure,
+        )
+        exc = _classify_install_failure("dingtalk", self._mk(error_kind="binary_not_found"))
+        assert exc.code == CODE_RUNTIME_MISSING
+        assert exc.runtime == "node"
+        assert exc.install_cmd == "npm install -g dingtalk-workspace-cli"
+
+    def test_network_error_maps_to_install_network(self) -> None:
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CODE_INSTALL_NETWORK, _classify_install_failure,
+        )
+        exc = _classify_install_failure(
+            "dingtalk", self._mk(error="npm ERR! ETIMEDOUT registry timeout"),
+        )
+        assert exc.code == CODE_INSTALL_NETWORK
+
+    def test_network_error_uppercase_code_matches_case_insensitively(self) -> None:
+        """npm emits uppercase error codes (ETIMEDOUT/ECONNREFUSED). The
+        match runs against a lowercased error string, so markers must be
+        lowercase too — a regression where markers stayed uppercase would
+        silently fall through to MCP_CLI_INCOMPLETE. Use an error containing
+        ONLY an uppercase code (no lowercase 'registry'/'network' word) so
+        the marker case-normalization is actually exercised."""
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CODE_INSTALL_NETWORK, _classify_install_failure,
+        )
+        exc = _classify_install_failure(
+            "dingtalk", self._mk(error="request failed: ECONNREFUSED 127.0.0.1:443"),
+        )
+        assert exc.code == CODE_INSTALL_NETWORK
+
+    def test_other_failure_maps_to_cli_incomplete(self) -> None:
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CODE_CLI_INCOMPLETE, _classify_install_failure,
+        )
+        exc = _classify_install_failure("dingtalk", self._mk(error="version too low"))
+        assert exc.code == CODE_CLI_INCOMPLETE
+        # C scenario surfaces the install/upgrade command so the frontend can
+        # show it — not a vague "uninstall and retry".
+        assert exc.install_cmd == "npm install -g dingtalk-workspace-cli"
+
+    def test_empty_runtime_does_not_crash(self) -> None:
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CODE_RUNTIME_MISSING, _classify_install_failure,
+        )
+        exc = _classify_install_failure(
+            "dingtalk", self._mk(error_kind="binary_not_found", runtime=""),
+        )
+        assert exc.code == CODE_RUNTIME_MISSING
+        assert exc.runtime == ""
+
+    def test_cli_connect_error_is_value_error_subclass(self) -> None:
+        """except ValueError in _handle_mcp_connect still catches CliConnectError
+        as a fallback (it's caught by the dedicated except CliConnectError first,
+        but the subclass relationship guarantees no NameError fallback gap)."""
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CliConnectError, _classify_install_failure,
+        )
+        exc = _classify_install_failure("dingtalk", self._mk())
+        assert isinstance(exc, CliConnectError)
+        assert isinstance(exc, ValueError)
+

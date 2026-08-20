@@ -414,3 +414,47 @@ def test_get_mcp_custom_returns_config_fields_for_edit_prefill(tmp_path: Path, m
     assert detail["headers"] == {"Authorization": "Bearer abc"}
     assert detail["env"] == {"FOO": "bar"}
     assert detail["timeout_s"] == 30
+
+
+def test_register_custom_rejects_name_conflicting_with_builtin(tmp_path: Path, monkeypatch) -> None:
+    """A custom MCP whose name collides with a builtin marketplace package dir
+    is refused: connect_mcp dispatches by package dir existence, so a custom
+    named "feishu" would be silently shadowed by the builtin at connect time.
+    Raise McpRegistryError(code=MCP_NAME_CONFLICT) so the frontend can prompt
+    the user to rename."""
+    from jiuwenswarm.server.runtime.mcp import state_store
+    from jiuwenswarm.server.runtime.mcp.registry import (
+        CODE_NAME_CONFLICT, McpRegistryError,
+    )
+    monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    # Create a builtin package dir so the name collides.
+    (tmp_path / "mcp" / "mcp_builtins" / "feishu").mkdir(parents=True)
+    with pytest.raises(McpRegistryError) as exc_info:
+        registry.register_custom_mcp("feishu", {
+            "transport": "stdio", "command": "my-feishu",
+        })
+    assert exc_info.value.code == CODE_NAME_CONFLICT
+    # Nothing was written — the builtin record stays untouched.
+    assert state_store.get_mcp_record("feishu") is None
+
+
+def test_register_custom_allows_edit_of_existing_custom_same_name(tmp_path: Path, monkeypatch) -> None:
+    """Custom-vs-custom same name is an edit (upsert overwrites the prior
+    record), NOT a conflict — only builtin names are reserved. Re-registering
+    a custom that already exists must succeed and update the record."""
+    from jiuwenswarm.server.runtime.mcp import state_store
+    monkeypatch.setattr(registry, "get_workspace_dir", lambda: tmp_path)
+    monkeypatch.setattr(state_store, "get_workspace_dir", lambda: tmp_path)
+    state_store.upsert_mcp_record(
+        "my-custom", {"name": "my-custom", "transport": "stdio",
+                      "command": "old", "server_id_scope": "mcp:my-custom"},
+        state="connected", integration_type="stdio-mcp",
+    )
+    result = registry.register_custom_mcp("my-custom", {
+        "transport": "stdio", "command": "new",
+    })
+    assert result["command"] == "new"
+    rec = state_store.get_mcp_record("my-custom")
+    assert rec["command"] == "new"
+

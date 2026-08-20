@@ -6592,6 +6592,7 @@ class AgentWebSocketServer:
         backend may be headless/remote), then sends ``mcp.wait_auth`` which
         holds-open polling ``complete_cli_auth`` until OAuth completes.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import CliConnectError
         try:
             from jiuwenswarm.server.runtime.mcp.registry import connect_mcp
             params = request.params or {}
@@ -6709,6 +6710,23 @@ class AgentWebSocketServer:
                 ok=False,
                 payload={"type": "connect_failed", "error": str(exc), "code": "MCP_NOT_FOUND"},
             )
+        except CliConnectError as exc:
+            # Classifiable CLI failure (runtime missing / network / incomplete).
+            # Surface code + runtime + install_cmd so the frontend shows an
+            # actionable i18n hint instead of the raw "[WinError 2]" string.
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "type": "connect_failed",
+                    "error": str(exc),
+                    "code": exc.code,
+                    "runtime": exc.runtime,
+                    "install_cmd": exc.install_cmd,
+                    "name": name,
+                },
+            )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -6740,6 +6758,7 @@ class AgentWebSocketServer:
         ``connected``/``auth_failed`` response. Holds the RPC open for minutes;
         the frontend shows a "connecting…" spinner while waiting.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import CliConnectError
         try:
             params = request.params or {}
             name = str(params.get("name", "")).strip()
@@ -6762,6 +6781,20 @@ class AgentWebSocketServer:
                     ok=True,
                     payload=result,
                 )
+        except CliConnectError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "type": "connect_failed",
+                    "error": str(exc),
+                    "code": exc.code,
+                    "runtime": exc.runtime,
+                    "install_cmd": exc.install_cmd,
+                    "name": name,
+                },
+            )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -6936,7 +6969,10 @@ class AgentWebSocketServer:
         ``itype == "cli"`` calls ``_connect_cli`` which can return the
         ``auth_required`` sentinel). No form A/B/D path triggers this loop.
         """
-        from jiuwenswarm.server.runtime.mcp.registry import complete_cli_auth
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CliConnectError,
+            complete_cli_auth,
+        )
 
         cur_step = max(0, int(step_index))
         last_output = ""
@@ -6975,6 +7011,11 @@ class AgentWebSocketServer:
             if last_output:
                 timeout_error = f"{timeout_error} (last status: {last_output})"
             return {"type": "auth_failed", "name": name, "error": timeout_error}
+        except CliConnectError:
+            # Re-raise so _handle_mcp_wait_auth's except CliConnectError can
+            # surface the structured code; otherwise the generic except below
+            # flattens it into an auth_failed string, dropping code/runtime.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] _await_cli_auth '%s' failed: %s", name, exc)
             return {"type": "auth_failed", "name": name, "error": str(exc)}
@@ -6989,6 +7030,7 @@ class AgentWebSocketServer:
         activate it. Editing an already-connected custom MCP removes the old live
         instance so the new config takes effect on connect.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import McpRegistryError
         try:
             from jiuwenswarm.server.runtime.mcp.registry import register_custom_mcp
             params = request.params or {}
@@ -7019,6 +7061,16 @@ class AgentWebSocketServer:
                     "name": name,
                     "item": self._mask_sensitive_fields(entry),
                 },
+            )
+        except McpRegistryError as exc:
+            # Classifiable registry failure (e.g. name collides with a builtin
+            # package). Surface code so the frontend shows an actionable hint
+            # ("name taken by a builtin, rename") instead of a generic bad_request.
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"type": "bad_request", "error": str(exc), "code": exc.code, "name": name},
             )
         except ValueError as exc:
             resp = AgentResponse(
