@@ -80,6 +80,7 @@ export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateVia
 
   const loadConnectorList = useConnectorStore((s) => s.loadList);
   const loadPluginList = usePluginPackageStore((s) => s.loadList);
+  const importPluginLocal = usePluginPackageStore((s) => s.importLocal);
 
   // 2026-08-11：connectorStore/pluginPackageStore 的所有 action（connect/disconnect/enable/
   // disable/registerCustom/deleteConnector/saveCredentialsAndConnect/waitAuth，插件那边同理）
@@ -243,9 +244,15 @@ export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateVia
       {uploadModalOpen && (
         <UploadFileCreateModal
           onCancel={() => setUploadModalOpen(false)}
-          onConfirm={() => {
-            setUploadModalOpen(false);
-            window.alert(t('connectorMarket.upload.notSupportedYet'));
+          onConfirm={async (filePath) => {
+            // 截图接口里的 session_id 用户明确要求先不带（2026-08-20），见 pluginPackagesApi.ts
+            // importLocal 注释。失败不在这里重复处理——pluginError 已经通过上面的 useEffect
+            // 统一弹红色 Toast，弹窗本身保持打开方便用户重试。
+            const ok = await importPluginLocal({ path: filePath });
+            if (ok) {
+              setUploadModalOpen(false);
+              setSuccessToast(t('connectorMarket.upload.importSuccess'));
+            }
           }}
         />
       )}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, Trash2, Plus, Wrench, Link2, Plug, Loader2, Unlink, ExternalLink, Pencil } from 'lucide-react';
+import { ChevronLeft, Trash2, Plus, Wrench, Link2, Plug, Loader2, X, ExternalLink, Pencil } from 'lucide-react';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { localizedText, type PluginCapabilityRef } from '../../types/pluginPackage';
 import { NewConversationIcon } from './icons';
@@ -203,15 +203,20 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse }: Plugi
       </div>
 
       {/* "已安装+依赖 connector 未就绪"断联提示（§1.6.4 已装重连）——"连接MCP"直接用
-          detail.pendingConnectors 驱动真实连接续跑，不再是空目的地占位。 */}
+          detail.pendingConnectors 驱动真实连接续跑，不再是空目的地占位。
+          2026-08-20 用户明确要求：文案不变，但图标/"连接MCP"文字颜色/整行底色直接抄
+          McpDetailPage.tsx 断联 banner 那一版视觉（浅红底 #FCE3E1 + 红圆底白X图标 + accent蓝
+          链接文字），不用这里原来的纯文字+danger红。 */}
       {installed && !linked && (
-        <div className="mb-6 flex items-center gap-1.5 text-[13px] text-text-muted">
-          <Unlink size={14} strokeWidth={2.75} className="text-danger" />
+        <div className="mb-6 flex items-center gap-1.5 rounded-lg bg-[#FCE3E1] px-3 py-2 text-[13px] text-text-muted">
+          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full bg-danger">
+            <X size={9} strokeWidth={3} className="text-text-inverse" />
+          </span>
           <span>{t('connectorMarket.detail.mcpDisconnectedBanner')}</span>
           <button
             type="button"
             disabled={reconnectFlow.active}
-            className="flex items-center gap-0.5 font-medium text-danger hover:opacity-80 disabled:opacity-60"
+            className="flex items-center gap-0.5 font-medium text-[color:var(--color-chat-accent)] hover:opacity-80 disabled:opacity-60"
             onClick={() => reconnectFlow.start(detail.pendingConnectors ?? [])}
           >
             {t('connectorMarket.detail.connectMcp')}

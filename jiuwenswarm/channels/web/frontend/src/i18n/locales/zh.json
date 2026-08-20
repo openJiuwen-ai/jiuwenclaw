@@ -2789,7 +2789,8 @@
       "next": "下一页"
     },
     "toast": {
-      "mcpConnected": "MCP已连接成功。"
+      "mcpCreated": "MCP已创建成功。",
+      "mcpCreatedAndConnected": "MCP已创建并连接成功。"
     },
     "tokenModal": {
       "title": "连接 {{name}}",
@@ -2835,7 +2836,7 @@
       "hint": "支持.zip和.tar文件，解压后的文件夹需要至少包含 manifest.json 文件和 README.md，.json 文件需包含 packageType 声明包类型。",
       "dropHint": "点击或拖动文件到此处",
       "invalidType": "仅支持 .zip / .tar 文件",
-      "notSupportedYet": "上传文件创建插件功能仍在等待后端支持"
+      "importSuccess": "插件导入成功"
     },
     "common": {
       "back": "返回",

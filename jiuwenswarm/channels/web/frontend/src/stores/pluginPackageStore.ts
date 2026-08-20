@@ -104,6 +104,7 @@ interface PluginPackageState {
   // "我的插件"卸载后的收尾逻辑：还能读到就留在详情页，读不到才退出到列表页），需要知道结果。
   loadDetail: (id: string) => Promise<boolean>;
   create: (params: { id: string; name: string; description: string; skills: string[] }) => Promise<boolean>;
+  importLocal: (params: { path: string }) => Promise<boolean>;
   install: (id: string) => Promise<void>;
   uninstall: (id: string) => Promise<void>;
   deletePackage: (id: string) => Promise<boolean>;
@@ -198,6 +199,20 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
       // 新建的包必然是 source==='local'，刷新 localPackages（'我的插件'桶）即可；2026-08-19
       // loadList() 的 filter 语义改成跟 MCP 侧对齐后，裸调 loadList()（等价于 filter='builtin'）
       // 会用只含 builtin 的结果覆盖 packages，刷不出刚创建的这条、还会短暂污染"插件广场"数据。
+      await usePluginPackageStore.getState().loadList('local');
+      return true;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  },
+
+  // 上传文件创建插件（plugin_packages.import_local，见 pluginPackagesApi.ts 头注释）：跟 create
+  // 一样是产出全新实体，没法安全地本地模拟成功，如实报错。成功后刷新 localPackages（'我的插件'
+  // 桶，导入的包必然是 source==='local'）。
+  importLocal: async (params) => {
+    try {
+      await pluginPackagesApi.importLocal(params);
       await usePluginPackageStore.getState().loadList('local');
       return true;
     } catch (error) {

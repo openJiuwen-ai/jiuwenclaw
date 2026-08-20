@@ -1,17 +1,28 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, UploadCloud, Info, FileArchive } from 'lucide-react';
+import { X, UploadCloud, Info, FileArchive, Loader2 } from 'lucide-react';
+import {
+  selectLocalFiles,
+  registerDesktopLocalFilesConsumer,
+  DESKTOP_FILE_DRAG_EVENT,
+  type LocalFilePick,
+} from '../../features/workspace/localFilePicker';
+import { useDesktopLocalFilePickerReady } from '../../hooks';
 
 interface UploadFileCreateModalProps {
   onCancel: () => void;
-  onConfirm: (fileName: string) => void;
+  onConfirm: (filePath: string) => void | Promise<void>;
 }
 
 const ACCEPTED_EXTENSIONS = ['.zip', '.tar'];
+const DROP_ZONE_CLASS = 'plugin-upload-dropzone';
+// 跟 ChatPanel/index.tsx 的 markDesktopFileDropZoneActive 同一套节流窗口：desktop_app.py 派发
+// 的 drop 事件坐标不总是准，给命中判定留一小段宽限期。
+const DROP_ACCEPT_WINDOW_MS = 1200;
 
-function isAcceptedFile(file: File): boolean {
-  const name = file.name.toLowerCase();
-  return ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext));
+function isAcceptedFilename(name: string): boolean {
+  const lower = name.toLowerCase();
+  return ACCEPTED_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 function formatFileSize(bytes: number): string {
@@ -22,35 +33,100 @@ function formatFileSize(bytes: number): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-// 对应高保真 3.5 上传文件创建。两份后端接口文档（connector.*/plugin_packages.*）都没有
-// "上传文件包创建插件"这个接口——不只是没设计安装/卸载，是这个入口本身完全没有后端对应，
-// 需要补进 backend-requests.md。onConfirm 目前只是把文件名回传给上层，上层不会真的创建成功。
-// 2026-08-20 用户反馈两点补上：① 原来的"拖动文件到此处"是假的——只接了 <input type=file> 的
-// click 上传，没有任何 onDrop/onDragOver 处理，拖文件上去完全没反应；② 选中文件后只有框内一行
-// 文字从提示语换成文件名，视觉反馈太弱。这版补上真实拖拽 + 点击/拖拽都做 .zip/.tar 后缀校验
-// （不通过就红框+错误提示，不接受这个文件）+ 选中后换成图标+文件名+大小+移除按钮的文件卡片。
+// 对应高保真 3.5 上传文件创建。2026-08-20 用户给出真实接口 plugin_packages.import_local
+// （{path, session_id}）——path 是后端要读的本地文件系统绝对路径，浏览器 <input type=file>/
+// 原生 drag&drop 的 File 对象拿不到这个路径（浏览器安全限制），必须走仓库已有的"本地文件选择"
+// 基础设施（features/workspace/localFilePicker.ts，ChatPanel 附件同一套）：
+// - 点击选择：selectLocalFiles()——桌面端走 pywebview 原生选择框，浏览器端走后端
+//   path.select_files 的原生选择框，两种情况下拿到的 LocalFilePick.path 都是真实绝对路径。
+// - 拖拽：只有桌面壳（pywebview webview）才能拿到路径——操作系统级拖拽由 desktop_app.py 的
+//   原生桥接经 registerDesktopLocalFilesConsumer 异步派发，携带真实 path；纯浏览器/whl 环境下
+//   OS 文件拖拽天然拿不到路径，这里跟 ChatPanel/InputArea.tsx 的 handleFileDragOver 同一个限制
+//   ——非桌面壳直接拒绝（dropEffect='none'），不做"能拖但拖了没用"的假交互。
+// 上一版（同日更早）用浏览器 File 对象 + 假路径糊弄 UI，这版整个换成上面这套真实基础设施。
 export function UploadFileCreateModal({ onCancel, onConfirm }: UploadFileCreateModalProps) {
   const { t } = useTranslation();
-  const [file, setFile] = useState<File | null>(null);
+  const [filePick, setFilePick] = useState<LocalFilePick | null>(null);
   const [invalid, setInvalid] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const desktopReady = useDesktopLocalFilePickerReady();
+  const dropAcceptUntilRef = useRef(0);
+  const lastDropIdRef = useRef<string | null>(null);
 
-  function handleFile(candidate: File | undefined) {
-    if (!candidate) return;
-    if (!isAcceptedFile(candidate)) {
+  function acceptPick(pick: LocalFilePick | undefined) {
+    if (!pick) return;
+    if (!isAcceptedFilename(pick.filename)) {
       setInvalid(true);
-      setFile(null);
+      setFilePick(null);
       return;
     }
     setInvalid(false);
-    setFile(candidate);
+    setFilePick(pick);
+  }
+
+  async function handleBrowse() {
+    if (browsing || filePick) return;
+    setBrowsing(true);
+    try {
+      const result = await selectLocalFiles(false);
+      if (result.ok) acceptPick(result.files[0]);
+    } finally {
+      setBrowsing(false);
+    }
   }
 
   function handleRemove() {
-    setFile(null);
+    setFilePick(null);
     setInvalid(false);
-    if (inputRef.current) inputRef.current.value = '';
+  }
+
+  // 桌面壳拖拽：弹窗打开期间接管 desktop-local-files 消费者。ConnectorMarket 面板和 ChatPanel
+  // 是 activeNav 下互斥挂载的视图，弹窗关闭时 unregister 不会顶掉一个仍在运行的 ChatPanel
+  // 消费者（同一时刻只有一边真的挂载着）。
+  useEffect(() => {
+    if (!desktopReady) return undefined;
+    const unregister = registerDesktopLocalFilesConsumer((detail, files) => {
+      if (detail?.source && detail.source !== 'drop') return;
+      if (!files.length) return;
+      const dropId = typeof detail?.dropId === 'string' ? detail.dropId : null;
+      if (dropId && lastDropIdRef.current === dropId) return;
+      const clientX = detail?.clientX;
+      const clientY = detail?.clientY;
+      const hasCoords = typeof clientX === 'number' && typeof clientY === 'number';
+      let inZone = false;
+      if (hasCoords) {
+        const hit = document.elementFromPoint(clientX, clientY);
+        inZone = Boolean(hit?.closest(`.${DROP_ZONE_CLASS}`));
+      }
+      const trusted = detail?.trusted === true;
+      const acceptByTime = Date.now() <= dropAcceptUntilRef.current;
+      if (!trusted && !acceptByTime && !inZone) return;
+      if (dropId) lastDropIdRef.current = dropId;
+      setDragActive(false);
+      acceptPick(files[0]);
+    });
+    return unregister;
+  }, [desktopReady]);
+
+  useEffect(() => {
+    const onFileDrag = (event: Event) => {
+      const active = Boolean((event as CustomEvent<{ active?: boolean }>).detail?.active);
+      if (active) dropAcceptUntilRef.current = Date.now() + DROP_ACCEPT_WINDOW_MS;
+    };
+    window.addEventListener(DESKTOP_FILE_DRAG_EVENT, onFileDrag as EventListener);
+    return () => window.removeEventListener(DESKTOP_FILE_DRAG_EVENT, onFileDrag as EventListener);
+  }, []);
+
+  async function handleConfirm() {
+    if (!filePick || submitting) return;
+    setSubmitting(true);
+    try {
+      await onConfirm(filePick.path);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -70,46 +146,59 @@ export function UploadFileCreateModal({ onCancel, onConfirm }: UploadFileCreateM
 
         <div
           onDragOver={(event) => {
+            if (!Array.from(event.dataTransfer.types).includes('Files')) return;
             event.preventDefault();
-            setDragOver(true);
+            if (!desktopReady) {
+              event.dataTransfer.dropEffect = 'none';
+              return;
+            }
+            event.dataTransfer.dropEffect = 'copy';
+            setDragActive(true);
           }}
-          onDragLeave={() => setDragOver(false)}
+          onDragLeave={() => setDragActive(false)}
           onDrop={(event) => {
+            if (!Array.from(event.dataTransfer.types).includes('Files')) return;
             event.preventDefault();
-            setDragOver(false);
-            handleFile(event.dataTransfer.files?.[0]);
+            setDragActive(false);
+            // 真正带 path 的文件经桌面桥接的 registerDesktopLocalFilesConsumer 异步到达，这里
+            // 只负责吃掉浏览器原生 drop 事件，避免触发系统默认的"在新标签页打开文件"行为。
           }}
-          className={`flex h-40 flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-bg text-text-muted transition-colors ${
+          onClick={handleBrowse}
+          className={`${DROP_ZONE_CLASS} flex h-40 flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-bg text-text-muted transition-colors ${
+            filePick ? 'cursor-default' : 'cursor-pointer'
+          } ${
             invalid
               ? 'border-danger'
-              : dragOver
+              : dragActive
                 ? 'border-[color:var(--color-chat-accent)]'
                 : 'border-border-strong hover:border-border-hover'
           }`}
         >
-          {file ? (
+          {filePick ? (
             <div className="flex w-full items-center gap-2.5 px-5">
               <FileArchive size={22} className="shrink-0 text-text-muted" />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[13px] text-text" title={file.name}>{file.name}</p>
-                <p className="text-[11px] text-text-muted">{formatFileSize(file.size)}</p>
+                <p className="truncate text-[13px] text-text" title={filePick.filename}>{filePick.filename}</p>
+                <p className="text-[11px] text-text-muted">{formatFileSize(filePick.size)}</p>
               </div>
-              <button type="button" onClick={handleRemove} className="shrink-0 text-text-muted hover:text-text">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleRemove();
+                }}
+                className="shrink-0 text-text-muted hover:text-text"
+              >
                 <X size={16} />
               </button>
             </div>
+          ) : browsing ? (
+            <Loader2 size={22} className="animate-spin" />
           ) : (
-            <label className="flex h-full w-full cursor-pointer flex-col items-center justify-center gap-2">
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2">
               <UploadCloud size={22} />
               <span className="text-[13px]">{t('connectorMarket.upload.dropHint')}</span>
-              <input
-                ref={inputRef}
-                type="file"
-                accept=".zip,.tar"
-                className="hidden"
-                onChange={(event) => handleFile(event.target.files?.[0])}
-              />
-            </label>
+            </div>
           )}
         </div>
         {invalid && <p className="mt-1.5 text-[11px] text-danger">{t('connectorMarket.upload.invalidType')}</p>}
@@ -120,8 +209,9 @@ export function UploadFileCreateModal({ onCancel, onConfirm }: UploadFileCreateM
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(file?.name ?? 'plugin-package.zip')}
-            className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse"
+            onClick={handleConfirm}
+            disabled={!filePick || submitting}
+            className="rounded-lg bg-text px-4 py-1.5 text-[13px] text-text-inverse disabled:opacity-60"
           >
             {t('connectorMarket.common.confirm')}
           </button>

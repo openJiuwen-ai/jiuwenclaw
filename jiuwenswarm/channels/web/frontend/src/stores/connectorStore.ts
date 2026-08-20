@@ -417,20 +417,22 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
       successMessage: null,
     }));
 
-    // 2) 长 RPC（最长 10min）。跑成功：patchConnection 到 connected + loadList 拉真实数据覆盖
-    //   占位卡 + 成功 Toast。跑失败：patchConnection 到 error（让"连失败"可见，旧版静默回原态
-    //   用户分不出）+ loadList 拉真实态覆盖（后端 §5.6 失败已回滚 state.json，list 返回的是真实
-    //   状态：bad_request 时这个 MCP 可能根本不在列表里，占位卡会被 loadList 全量覆盖自然消失；
-    //   connect_failed 已回滚到 disconnected，卡片显示未连接态）+ 失败 Toast 带真实后端错误。
-    // 用户已确认（2026-08-10）：失败后卡片保留、用 list 真实内容渲染，不在前端 fake error 态。
+    // 2) mcp.register_custom 本身仅落盘不连接（接口文档 §5.6："填表 → register_custom →
+    //   registered（仅落盘，秒回）→ mcp.connect → connected"）。2026-08-20 用户明确要求：注册
+    //   成功后紧接着真正调一次 connect，不要在没有真实连接的情况下就把卡片/Toast 冒充成"已连接"
+    //   （旧版就是这个 bug：不看响应 type，请求一成功就无条件 patch 成 'connected'）。
+    //   直接复用 connect() action 而不是在这里重新实现一遍 connecting/connected/error 状态机+
+    //   busyMap+friendlyCliError 兜底——connect() 失败时会自己把 store.error 写成友好文案，走
+    //   顶层已有的红色 Toast 通道；这里只需要另外补一条独立的绿色"已创建成功"Toast，不用拼一条
+    //   大字符串（两条 Toast 各管各的，成功/失败原因分别展示更清楚）。
     try {
       const response = await connectorApi.registerCustom(params);
-      set((state) => ({
-        connectors: patchConnection(state.connectors, params.name, 'connected'),
-        myConnectors: patchConnection(state.myConnectors, params.name, 'connected'),
-        detailCache: invalidateDetail(state.detailCache, params.name),
-        successMessage: successKey.mcpConnected,
-      }));
+      const connectResult = await get().connect(params.name);
+      set({
+        successMessage: connectResult?.type === 'connected'
+          ? successKey.mcpCreatedAndConnected
+          : successKey.mcpCreated,
+      });
       void get().loadList('local');
       return response;
     } catch (error) {
@@ -491,5 +493,6 @@ if (typeof window !== 'undefined') {
 // success Toast 文案 key——放 store 顶层而不是组件内联，是因为 registerCustom 是 fire-and-reload，
 // 成功发生在后台 .then 里，那时组件上下文已经不在了，得用稳定的常量 key 让顶层订阅者去翻译。
 const successKey = {
-  mcpConnected: 'connectorMarket.toast.mcpConnected',
+  mcpCreated: 'connectorMarket.toast.mcpCreated',
+  mcpCreatedAndConnected: 'connectorMarket.toast.mcpCreatedAndConnected',
 };
