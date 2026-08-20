@@ -7697,6 +7697,18 @@ class AgentWebSocketServer:
                         reason="model config change",
                     )
                 )
+            # 模型配置变更时同步刷新本进程（AgentServer）的 Zen 免费模型缓存
+            # （与上方 image modality 刷新同一 model scope）。Gateway 进程在
+            # config.set/config.save_all 时会 warm，但两进程缓存独立：若本进程
+            # 启动时免费模型开关关闭（后台重试循环已退出），之后经 web 打开开关，
+            # 本进程缓存会一直为空，免费模型解析将静默回退默认模型。放后台任务
+            # 执行——warm 自带超时且失败后自动调度后台重试，不阻塞 reload 响应。
+            if should_refresh_image_modality:
+                from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+
+                asyncio.create_task(
+                    warm_zen_free_models(reason="agent.reload_config")
+                )
             if should_reload_agents:
                 await self._agent_manager.reload_agents_config(
                     config_payload,
@@ -8356,6 +8368,10 @@ class AgentWebSocketServer:
                     project_dir=project_dir,
                     project_id=project_id,
                     work_mode=final_work_mode,
+                    # cron 执行会话（cron-session）创建时即写入 job 的 model（scheduler
+                    # SESSION_CREATE 携带 model_name），否则要等首条 chat.send 才落盘，
+                    # 前端首开会话会显示默认模型（刷新后才正确）。同步写盘，创建即可读。
+                    model=str(params.get("model_name") or "").strip(),
                     cron_id=str(params.get("cron_id") or "").strip(),
                     channel_metadata=channel_metadata,
                 )

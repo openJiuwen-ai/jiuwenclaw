@@ -3546,6 +3546,19 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] resolve zen free model %s failed",
                 requested, exc_info=True,
             )
+        # 显式请求的模型全部未命中（不在 config / model_cache / Zen 免费缓存）：
+        # 打 warning 暴露配置漂移（如 cron job 引用已下线模型、两进程缓存分歧），
+        # 不再静默回退默认模型——cron 无人值守场景，静默用错模型难以及时发现。
+        fallback_name = str(
+            getattr(getattr(self._model, "model_config", None), "model_name", "") or ""
+        )
+        logger.warning(
+            "[JiuWenSwarmDeepAdapter] requested model %r not found in "
+            "configured models or zen free-model cache; falling back to "
+            "default model %r",
+            requested,
+            fallback_name or type(self._model).__name__,
+        )
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
