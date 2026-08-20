@@ -8,6 +8,8 @@ legacy permissions implementation.
 
 from __future__ import annotations
 
+import contextvars
+
 from jiuwenswarm.agents.harness.common.channel_runtime_context import (
     CURRENT_CHANNEL_ID,
     CURRENT_SESSION_ID,
