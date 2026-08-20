@@ -278,3 +278,37 @@ def test_skill_creator_router_resource_exists() -> None:
     normal = get_builtin_skills_dir() / "skill-creator-normal" / "SKILL.md"
     assert normal.is_file()
     assert "name: skill-creator-normal" in normal.read_text(encoding="utf-8")
+
+
+def test_repair_skill_creator_normal_frontmatter_name(tmp_path) -> None:
+    from jiuwenswarm.common.utils import (
+        _migrate_skill_creator_router_rename,
+        _repair_skill_creator_normal_frontmatter,
+    )
+
+    skills_dir = tmp_path / "skills"
+    normal = skills_dir / "skill-creator-normal"
+    normal.mkdir(parents=True)
+    (normal / "SKILL.md").write_text(
+        "---\nname: skill-creator\ndescription: legacy monadic creator\n---\nbody\n",
+        encoding="utf-8",
+    )
+    # 新路由入口同名目录并存时，仅靠 frontmatter 会扫出两个 skill-creator
+    router = skills_dir / "skill-creator"
+    router.mkdir()
+    (router / "SKILL.md").write_text(
+        "---\nname: skill-creator\ndescription: Unified entry point\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    _repair_skill_creator_normal_frontmatter(normal)
+    assert "name: skill-creator-normal" in (normal / "SKILL.md").read_text(encoding="utf-8")
+
+    # 迁移入口也应幂等修复
+    (normal / "SKILL.md").write_text(
+        "---\nname: skill-creator\ndescription: legacy monadic creator\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _migrate_skill_creator_router_rename(skills_dir)
+    assert "name: skill-creator-normal" in (normal / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: skill-creator" in (router / "SKILL.md").read_text(encoding="utf-8")

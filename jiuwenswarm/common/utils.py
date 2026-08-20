@@ -612,6 +612,41 @@ def _update_skills_state_for_builtin(
         logger.error(f"保存技能状态文件失败: {e}")
 
 
+def _repair_skill_creator_normal_frontmatter(normal_dir: Path) -> None:
+    """将 ``skill-creator-normal/SKILL.md`` 中残留的 ``name: skill-creator`` 改为目录名.
+
+    仅改目录、不改正文 name 时，skills.list 会扫出两个同名 ``skill-creator``，
+    前端 ``key={skill.name}`` 在切换「团队技能」等过滤时会叠出重复卡片。
+    """
+    skill_md = normal_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "name: skill-creator-normal" in text:
+        return
+    if "name: skill-creator" not in text:
+        return
+    # 新路由入口文案不应落在 normal 目录；若误判则跳过
+    router_markers = (
+        "Routes skill creation",
+        "Unified entry point",
+        "统一入口",
+    )
+    if any(marker in text for marker in router_markers):
+        return
+    updated = text.replace("name: skill-creator", "name: skill-creator-normal", 1)
+    if updated == text:
+        return
+    try:
+        skill_md.write_text(updated, encoding="utf-8")
+        logger.info("已修复 skill-creator-normal frontmatter name")
+    except OSError as exc:
+        logger.warning(f"修复 skill-creator-normal frontmatter 失败: {exc}")
+
+
 def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
     """一次性迁移：skill-creator-router → skill-creator，旧 skill-creator → skill-creator-normal.
 
@@ -654,12 +689,18 @@ def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
                 logger.info("已移除冲突的旧 skill-creator，将安装新的路由 skill-creator")
             shutil.rmtree(old_router)
             logger.info("已移除旧 skill-creator-router，将安装新的路由 skill-creator")
-            return
-
-        # 仅有旧单体 skill-creator、尚无 skill-creator-normal
-        if old_creator.is_dir() and not normal.exists() and _looks_like_legacy_monadic_creator(old_creator):
+        elif (
+            old_creator.is_dir()
+            and not normal.exists()
+            and _looks_like_legacy_monadic_creator(old_creator)
+        ):
+            # 仅有旧单体 skill-creator、尚无 skill-creator-normal
             old_creator.rename(normal)
             logger.info("已迁移默认技能: skill-creator -> skill-creator-normal（无 router 目录）")
+
+        # 无论本次是否刚改名：修复已存在的 normal 目录残留 name
+        if normal.is_dir():
+            _repair_skill_creator_normal_frontmatter(normal)
     except OSError as exc:
         logger.warning(f"skill-creator 重命名迁移失败，将尝试按默认列表安装: {exc}")
 

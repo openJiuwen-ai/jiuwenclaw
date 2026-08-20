@@ -4150,8 +4150,9 @@ class SkillManager:
         if meta is None:
             return None
 
-        if meta.get("name") == md.stem:
-            meta["name"] = child.name
+        # 工作区技能身份以目录名为准，避免 frontmatter name 与目录不一致时
+        # （如 skill-creator-normal 仍写 name: skill-creator）产生重复列表项。
+        meta["name"] = child.name
 
         # 判断 source 类型
         installed = self._get_installed_plugins()

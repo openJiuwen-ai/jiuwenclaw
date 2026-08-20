@@ -51,6 +51,8 @@ type SkillItem = {
   enabled?: boolean;
   /** 是否已安装 */
   installed?: boolean;
+  /** 技能文件路径（列表去重 / React key） */
+  path?: string;
   /** 技能类型：skill | swarm_skill | multimodal_skill */
   skill_type?: string;
 };
@@ -1010,6 +1012,14 @@ export function SkillPanel({
         return true;
       });
     }
+    // 同名去重（防御 frontmatter/目录不一致导致的重复项）；保留先出现的条目
+    const seen = new Set<string>();
+    filtered = filtered.filter((skill) => {
+      const key = skill.name;
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     return filtered.sort((a, b) => {
       const aSkillNet = a.source === "skillnet" ? 1 : 0;
       const bSkillNet = b.source === "skillnet" ? 1 : 0;
@@ -3193,9 +3203,10 @@ export function SkillPanel({
                       const isPackage = isSkillPackage(skill);
                       const isPinned = pinnedSkillNames.has(skill.name);
                       const isMenuOpen = openMenuSkillName === skill.name;
+                      const listKey = skill.path || `${skill.source || "local"}:${skill.name}`;
                       return (
                         <div
-                          key={skill.name}
+                          key={listKey}
                           onClick={() => handleOpenSkill(skill.name)}
                           className="group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible"
                           style={{ height: "156px", width: '616px' }}
