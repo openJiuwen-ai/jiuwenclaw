@@ -249,7 +249,7 @@ conda activate jiuwenswarm
 git clone https://github.com/openJiuwen-ai/jiuwenswarm.git
 
 # Enter project directory
-cd jiuwenswarm
+cd jiuwenswarm/channels/web/frontend
 
 # Install dependencies
 pip install -e .
