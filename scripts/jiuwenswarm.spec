@@ -469,6 +469,7 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": build_config.display_name,
             "CFBundleDisplayName": build_config.display_name,
+            "CFBundleExecutable": build_config.executable_name,
             "CFBundleShortVersionString": build_config.version,
             "CFBundleVersion": build_config.version,
             "NSHighResolutionCapable": "True",
