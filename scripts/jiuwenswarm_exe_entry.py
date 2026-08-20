@@ -177,7 +177,7 @@ def _show_already_running_message() -> None:
 def _write_child_error(exc: BaseException) -> None:
     """将子进程的未捕获异常写入日志文件。"""
     try:
-        log_dir = Path(os.environ.get("JIUWENSARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
+        log_dir = Path(os.environ.get("JIUWENSWARM_DATA_DIR", Path.home() / ".jiuwenswarm")) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "jiuwenswarm_exe_error.log"
         with open(log_file, "a", encoding="utf-8", errors="replace") as f:

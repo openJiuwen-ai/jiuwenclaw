@@ -293,6 +293,16 @@ datas += _rust_datas
 hiddenimports += _rust_hidden
 _bundled_binaries = _bundled_binaries + _rust_binaries
 
+# grpc / pycryptodome 的原生扩展必须显式全量收集：它们经 openjiuwen 动态导入链
+# （memory_tools → runner → pymilvus → grpc；凭证加解密 → Crypto）进入依赖图，
+# 静态分析只能收到纯 Python 部分，cygrpc.cp312-win_amd64.pyd / Crypto Util *.pyd
+# 会漏收，frozen exe 启动即 ImportError/OSError 退出（code=1）。
+for _native_pkg in ("grpc", "Crypto"):
+    _np_datas, _np_binaries, _np_hidden = collect_all(_native_pkg)
+    datas += _np_datas
+    hiddenimports += _np_hidden
+    _bundled_binaries = _bundled_binaries + _np_binaries
+
 a = Analysis(
     [entry_script],
     pathex=[project_root, symphony_root],
