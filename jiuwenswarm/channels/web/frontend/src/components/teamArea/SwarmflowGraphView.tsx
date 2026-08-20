@@ -147,21 +147,27 @@ const RunGraphNode = ({ data }: NodeProps) => {
         <span className="text-[10px] text-text-muted tabular-nums shrink-0">{completed}/{total}</span>
       </div>
       {showBudget && (
-        <div className="flex items-center gap-1.5 mt-0.5 text-[10px] tabular-nums">
+        <div className="flex flex-wrap items-center gap-1 mt-0.5 text-[10px] tabular-nums">
           {run.budget && run.budget.total != null && (
             <span
-              className={run.budget.exhausted ? 'text-red-500' : 'text-text-muted'}
+              className={`px-1.5 rounded ${
+                run.budget.exhausted ? 'bg-red-500/10 text-red-500' : 'bg-secondary text-text-muted'
+              }`}
               title={t('swarmflow.sessionBudget')}
             >
-              {formatBudgetK(run.budget)}
+              {t('swarmflow.sessionBudgetShort')} {formatBudgetK(run.budget)}
             </span>
           )}
           {run.workflow_budget && run.workflow_budget.total != null && (
             <span
-              className={run.workflow_budget.exhausted ? 'text-red-500' : 'text-green-500'}
+              className={`px-1.5 rounded ${
+                run.workflow_budget.exhausted
+                  ? 'bg-red-500/10 text-red-500'
+                  : 'bg-green-500/10 text-green-500'
+              }`}
               title={t('swarmflow.runBudget')}
             >
-              {formatBudgetK(run.workflow_budget)}
+              {t('swarmflow.runBudgetShort')} {formatBudgetK(run.workflow_budget)}
             </span>
           )}
         </div>
