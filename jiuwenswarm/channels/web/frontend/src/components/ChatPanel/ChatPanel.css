@@ -3152,6 +3152,142 @@ overflow: hidden;
 }
 
 /* ===========================
+   Design mode welcome content
+   =========================== */
+
+.chat-design-welcome {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+  max-width: 480px;
+}
+
+.chat-design-category {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.chat-design-category__tab {
+  padding: 0.375rem 0.875rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-default);
+  background: transparent;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-design-category__tab:hover:not(.chat-design-category__tab--disabled) {
+  border-color: var(--color-action-primary);
+  color: var(--color-text-primary);
+}
+
+.chat-design-category__tab--active {
+  background: var(--color-chat-suggestion-hover);
+  border-color: var(--color-action-primary);
+  color: var(--color-text-strong);
+  font-weight: 600;
+}
+
+.chat-design-category__tab--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.chat-design-quick-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.chat-design-quick-action {
+  padding: 0.5rem 1.125rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-chat-suggestion-rest);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-design-quick-action:hover {
+  border-color: var(--color-action-primary);
+  background: var(--color-chat-suggestion-hover);
+  box-shadow: var(--effect-chat-suggestion-hover);
+  transform: translateY(-1px);
+}
+
+.chat-design-task-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.875rem;
+}
+
+.chat-design-task-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem 1.125rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-card);
+  box-shadow: var(--effect-chat-suggestion-rest);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-design-task-card:hover {
+  border-color: var(--color-action-primary);
+  background: var(--color-chat-suggestion-hover);
+  box-shadow: var(--effect-chat-suggestion-hover);
+  transform: translateY(-1px);
+}
+
+.chat-design-task-card__icon {
+  flex-shrink: 0;
+  font-size: 1.375rem;
+  line-height: 1;
+}
+
+.chat-design-task-card__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.chat-design-task-card__title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+.chat-design-task-card__desc {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
+.chat-design-task-card__arrow {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-secondary);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.chat-design-task-card:hover .chat-design-task-card__arrow {
+  color: var(--color-action-primary);
+  transform: translateX(2px);
+}
+
+/* ===========================
    HarnessProgressBar
    =========================== */
 

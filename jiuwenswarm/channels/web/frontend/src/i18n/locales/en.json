@@ -2278,8 +2278,10 @@
   "codeMode": {
     "work": "Work",
     "code": "Code",
+    "design": "Design",
     "workDescription": "Office, collaboration, and general tasks",
     "codeDescription": "Inspect and modify code in a project directory",
+    "designDescription": "Create PPT and other design deliverables",
     "environment": "Environment",
     "changes": "Changes",
     "review": "Review"

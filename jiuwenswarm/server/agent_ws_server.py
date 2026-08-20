@@ -674,6 +674,8 @@ def resolve_agent_request_mode(
     if mode_text in ("plan", "fast"):
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
+        if normalized_work_mode == "design":
+            return "design", None, "design"
         return "agent", None, "agent"
 
     parts = mode_text.split(".")
@@ -682,6 +684,8 @@ def resolve_agent_request_mode(
         # 合并模式：忽略历史子模式（plan / fast），统一 canonical "agent"。
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
+        if normalized_work_mode == "design":
+            return "design", None, "design"
         return "agent", None, "agent"
     if mode == "team":
         sub_mode = parts[1] if len(parts) > 1 and parts[1] else None
@@ -694,14 +698,17 @@ def resolve_agent_request_mode(
 
     default_sub_modes = {
         "code": "normal",
+        "design": None,
     }
     sub_mode = parts[1] if len(parts) > 1 and parts[1] else default_sub_modes.get(mode)
     if mode == "code" and sub_mode not in {"plan", "normal", "team"}:
         sub_mode = default_sub_modes.get(mode, "normal")
     canonical_mode = f"{mode}.{sub_mode}" if sub_mode else mode
-    if canonical_mode in {"agent", "code", "code.normal"}:
+    if canonical_mode in {"agent", "code", "code.normal", "design"}:
         if normalized_work_mode == "code":
             return "code", "normal", "code.normal"
+        if normalized_work_mode == "design":
+            return "design", None, "design"
         if normalized_work_mode == "work":
             return "agent", None, "agent"
     return mode, sub_mode, canonical_mode
