@@ -20,9 +20,8 @@ import logging
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
-from openjiuwen.harness.schema.task import TaskItem, TaskPlan, TaskStatus
+from openjiuwen.harness.schema.task import TaskPlan
 from openjiuwen.harness.tools import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
@@ -255,7 +254,7 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         )
 
     async def _refresh_task_plan_from_todos(self, ctx: AgentCallbackContext) -> None:
-        """Overwrite TaskPlan from persisted todos (TodoItem → TaskItem)."""
+        """Overwrite TaskPlan from persisted todos (TodoItem → TodoItem)."""
         if ctx.session is None:
             return
 
@@ -282,7 +281,7 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
 
         plan_tasks = [self._todo_to_task_item(todo) for todo in todos]
         in_progress = next(
-            (task for task in plan_tasks if task.status == TaskStatus.IN_PROGRESS),
+            (task for task in plan_tasks if task.status == TodoStatus.IN_PROGRESS),
             None,
         )
 
@@ -323,21 +322,16 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         return isinstance(result, dict) and result.get("result_type") == "interrupt"
 
     @staticmethod
-    def _todo_to_task_item(todo: TodoItem) -> TaskItem:
-        """Map a persisted TodoItem into a TaskPlan TaskItem."""
-        if todo.status == TodoStatus.COMPLETED:
-            task_status = TaskStatus.COMPLETED
-        elif todo.status == TodoStatus.IN_PROGRESS:
-            task_status = TaskStatus.IN_PROGRESS
-        elif todo.status == TodoStatus.CANCELLED:
-            task_status = TaskStatus.FAILED
-        else:
-            task_status = TaskStatus.PENDING
-        return TaskItem(
-            id=todo.id,
-            title=todo.content,
-            status=task_status,
-        )
+    def _todo_to_task_item(todo: TodoItem) -> TodoItem:
+        """Map a persisted TodoItem into a TaskPlan task item.
+
+        The framework unified TaskItem into TodoItem (TaskPlan.tasks is now
+        List[TodoItem]), so this is now an identity passthrough. The former
+        TodoStatus.CANCELLED -> TaskStatus.FAILED remap is gone because the
+        unified TodoStatus has no FAILED member. Kept as a seam in case a
+        status remap is needed again.
+        """
+        return todo
 
 
 __all__ = [

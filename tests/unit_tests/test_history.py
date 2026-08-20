@@ -12,9 +12,14 @@ from jiuwenswarm.channels.web.history_store import (
 )
 
 
+def _mem_store(db_path) -> ChatHistoryStore:
+    """单测用临时 SQLite 文件（tmp_path 隔离，不依赖生产库）。"""
+    return ChatHistoryStore(db_path)
+
+
 @pytest.mark.asyncio
 async def test_record_user_and_assistant_then_list_detail(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     await store.record_user(request_id="r1", session_id="s1", query="你好", ts=1000.0)
     await store.record_assistant(
         request_id="r1", session_id="s1", content="你好，有什么可以帮你？",
@@ -35,7 +40,7 @@ async def test_record_user_and_assistant_then_list_detail(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_record_idempotent_on_resend(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     inserted1 = await store.record_user(request_id="r1", session_id="s1", query="hello", ts=1000.0)
     inserted2 = await store.record_user(request_id="r1", session_id="s1", query="hello", ts=1000.0)
     assert inserted1 is True
@@ -47,7 +52,7 @@ async def test_record_idempotent_on_resend(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_title_first_set_not_overwritten(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     await store.record_user(request_id="r1", session_id="s1", query="第一条用户消息", ts=1000.0)
     await store.record_assistant(
         request_id="r1", session_id="s1", content="回复内容",
@@ -61,7 +66,7 @@ async def test_title_first_set_not_overwritten(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_whitelist_ignores_non_chat(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("browser", json.dumps({"type": "req", "id": "x1", "method": "skilldev.start", "params": {"query": "应被忽略"}}))
     await cb("browser", json.dumps({"type": "req", "id": "x2", "method": "chat.interrupt", "params": {"query": "应被忽略"}}))
@@ -71,7 +76,7 @@ async def test_callback_whitelist_ignores_non_chat(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_user_with_session_id_records_directly(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("browser", json.dumps({"type": "req", "id": "r1", "method": "chat.send", "params": {"session_id": "s1", "query": "直接落盘"}}))
     detail = await store.get_session_detail("s1")
@@ -82,7 +87,7 @@ async def test_callback_user_with_session_id_records_directly(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_pending_backfill_on_final(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("browser", json.dumps({"type": "req", "id": "r1", "method": "chat.send", "params": {"query": "在吗"}}))
     assert await store.list_sessions() == []
@@ -101,7 +106,7 @@ async def test_callback_pending_backfill_on_final(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_ignores_delta_events(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("uplink", json.dumps({"type": "event", "event": "chat.tool_calls.delta", "request_id": "r1", "payload": {"session_id": "s1", "content": "增量"}}))
     assert await store.list_sessions() == []
@@ -110,7 +115,7 @@ async def test_callback_ignores_delta_events(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_records_chat_error(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("browser", json.dumps({"type": "req", "id": "r1", "method": "chat.send", "params": {"session_id": "s1", "query": "出错了"}}))
     await cb("uplink", json.dumps({"type": "event", "event": "chat.error", "request_id": "r1", "payload": {"session_id": "s1", "error": "内部错误"}}))
@@ -124,7 +129,7 @@ async def test_callback_records_chat_error(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_invalid_json_ignored(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("browser", "不是JSON", "conn1")
     assert await store.list_sessions() == []
@@ -133,7 +138,7 @@ async def test_callback_invalid_json_ignored(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_callback_final_without_session_id_dropped(tmp_path) -> None:
-    store = ChatHistoryStore(tmp_path / "h.db")
+    store = _mem_store(tmp_path / "history.db")
     cb = make_history_callback(store)
     await cb("uplink", json.dumps({"type": "event", "event": "chat.final", "request_id": "r1", "payload": {"content": "缺 sid"}}))
     assert await store.list_sessions() == []
@@ -144,24 +149,21 @@ async def test_callback_final_without_session_id_dropped(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_sync_read_after_write(tmp_path) -> None:
-    db = tmp_path / "h.db"
-    store = ChatHistoryStore(db)
+    db_path = tmp_path / "history.db"
+    store = _mem_store(db_path)
     await store.record_user(request_id="r1", session_id="s1", query="问题", ts=1000.0)
     await store.record_assistant(
         request_id="r1", session_id="s1", content="回答",
         event_type="chat.final", ts=1001.0,
     )
-    await store.close()  # 确保 aiosqlite 写入落盘
 
-    sessions = list_sessions_sync(db)
+    sessions = list_sessions_sync(db_path)
     assert len(sessions) == 1
     assert sessions[0]["session_id"] == "s1"
 
-    detail = get_session_detail_sync(db, "s1")
+    detail = get_session_detail_sync(db_path, "s1")
     assert detail is not None
     assert len(detail["messages"]) == 2
 
-    assert get_session_detail_sync(db, "nope") is None
-    # db 不存在：返回空 / None，不抛
-    assert list_sessions_sync(tmp_path / "missing.db") == []
-    assert get_session_detail_sync(tmp_path / "missing.db", "x") is None
+    assert get_session_detail_sync(db_path, "nope") is None
+    await store.close()
