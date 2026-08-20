@@ -8,7 +8,7 @@ import asyncio
 import os
 import re
 from html import unescape
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 import urllib3
@@ -188,6 +188,35 @@ def _normalize_url(url: str) -> str:
     return f"https://{decoded}"
 
 
+def _github_search_api_url(url: str) -> str | None:
+    """Rewrite GitHub repository-search HTML pages to the public JSON API.
+
+    github.com/search is a client-rendered (JS) page: a plain HTTP fetch only
+    receives the SPA shell, so agents cannot see any results. The public search
+    API (api.github.com/search/repositories) returns plain JSON and works
+    without a browser. Only ``type=repositories`` (or no type) is rewritten;
+    other tabs (issues, pull requests, ...) keep their original URL.
+    """
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    host = parsed.netloc.lower()
+    if host not in {"github.com", "www.github.com"} or parsed.path != "/search":
+        return None
+    query = parse_qs(parsed.query)
+    q = (query.get("q") or [""])[0]
+    if not q:
+        return None
+    search_type = (query.get("type") or [""])[0].lower()
+    if search_type and search_type != "repositories":
+        return None
+    try:
+        per_page = min(max(int((query.get("per_page") or ["10"])[0]), 1), 30)
+    except (TypeError, ValueError):
+        per_page = 10
+    return f"https://api.github.com/search/repositories?q={quote(q)}&per_page={per_page}"
+
+
 def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     reader_url = f"https://r.jina.ai/{url}"
     response = _http_get(reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
@@ -201,6 +230,9 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
+    api_url = _github_search_api_url(url)
+    if api_url:
+        url = api_url
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
     if response.status_code in {401, 403, 429}:
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
