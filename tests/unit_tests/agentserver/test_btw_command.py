@@ -12,6 +12,8 @@ Covers commits:
 from __future__ import annotations
 
 import asyncio
+
+from jiuwenswarm.server.handlers import commands as commands_handlers
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +29,21 @@ from jiuwenswarm.server.runtime.agent_adapter.recap_prompts import (
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _try_add_cache_control,
 )
+from tests.unit_tests.conftest import patch_handler_name
+
+
+def _ctx_for_test(ws, request, send_lock, server=None):
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    return RequestContext(
+        request=request,
+        sink=WSSink(ws, send_lock),
+        connection_id=str(id(ws)),
+        services=AgentServerServices(server) if server is not None else None,
+    )
+
+
 
 
 # =============================================================================
@@ -47,7 +64,9 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_command_btw_for_test(
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
-        await self._handle_command_btw(ws, request, send_lock)
+        await commands_handlers.handle_command_btw(
+            _ctx_for_test(ws, request, send_lock, self)
+        )
 
     def get_agent_manager_for_test(self) -> Any:
         return self._agent_manager
@@ -75,10 +94,8 @@ def fake_ws() -> FakeWebSocket:
 
 @pytest.fixture(autouse=True)
 def _patch_wire_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_response_for_wire",
-        fake_encode_agent_response_for_wire,
+    patch_handler_name(
+        monkeypatch, "encode_agent_response_for_wire", fake_encode_agent_response_for_wire
     )
 
 
@@ -1000,11 +1017,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-ok",
@@ -1036,11 +1049,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent_none,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-no-agent",
@@ -1070,11 +1079,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-crash",
@@ -1109,11 +1114,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-mode",
@@ -1142,11 +1143,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-nocontext",
@@ -1184,11 +1181,7 @@ class TestHandleCommandBtw:
             "get_agent",
             mock_get_agent,
         )
-        monkeypatch.setattr(
-            agent_ws_server_module,
-            "resolve_request_project_dir",
-            lambda _req: None,
-        )
+        patch_handler_name(monkeypatch, "resolve_request_project_dir", lambda _req: None)
 
         request = AgentRequest(
             request_id="req-btw-defaultsid",

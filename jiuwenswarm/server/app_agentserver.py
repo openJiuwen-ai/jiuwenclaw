@@ -331,7 +331,40 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
     proactive_config = full_cfg.get("proactive_recommendation", {}) if isinstance(full_cfg, dict) else {}
     await init_proactive_engine(server, proactive_config)
 
-    logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
+    # ---------- HTTP/SSE 入口（可选，与 WebSocket 并列）----------
+    # 与 WS 共享同一套 handler（见 agent_http_server 模块说明）。
+    # 默认关闭。主配置入口是 config.yaml 的 http_server.enabled，
+    # 完整优先级与各场景说明见 resolve_http_server_settings 的 docstring。
+    http_server = None
+    try:
+        from jiuwenswarm.server.agent_http_server import (
+            AgentHTTPServer,
+            resolve_http_server_settings,
+        )
+
+        http_enabled, http_host, http_port = resolve_http_server_settings(host)
+        if http_enabled:
+            candidate = AgentHTTPServer(server, host=http_host, port=http_port)
+            # start() 自身不抛异常；失败返回 False，WebSocket 主链路不受影响。
+            http_server = candidate if await candidate.start() else None
+        else:
+            logger.info(
+                "[AgentServer] HTTP 入口未开启（config.yaml http_server.enabled 或 AGENT_HTTP_ENABLED）"
+            )
+    except Exception as exc:  # noqa: BLE001 - HTTP 入口不可用不应阻断 WS 主链路
+        logger.error("[AgentServer] HTTP 入口启动失败，仅 WebSocket 可用: %s", exc, exc_info=True)
+        http_server = None
+
+    if http_server is not None:
+        logger.info(
+            "[AgentServer] ready: ws://%s:%s + http://%s:%s/api/v1  Ctrl+C to stop",
+            host,
+            port,
+            host,
+            http_server.port,
+        )
+    else:
+        logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
     teammate_bootstrap_task: asyncio.Task | None = None
@@ -368,6 +401,11 @@ async def _run_with_telemetry(host: str, port: int, telemetry_lifecycle) -> None
                 pass
             except Exception as exc:
                 logger.warning("[AgentServer] teammate bootstrap daemon stop failed: %s", exc)
+        if http_server is not None:
+            try:
+                await http_server.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[AgentServer] HTTP 入口关闭失败: %s", exc)
         await server.stop()
         from jiuwenswarm.perf.guard import run_perf_safe
         from jiuwenswarm.perf.writer import flush_request_summary_writer

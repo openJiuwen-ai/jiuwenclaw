@@ -14,7 +14,7 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.handlers import _default
 
 
 def test_direct_plan_implement_requires_strong_signal() -> None:
@@ -48,4 +48,4 @@ def test_skills_list_does_not_sync_code_mode() -> None:
         req_method=ReqMethod.SKILLS_LIST,
         params={"mode": "code.normal"},
     )
-    assert AgentWebSocketServer._should_sync_code_mode_state(request) is False
+    assert _default._should_sync_code_mode_state(request) is False

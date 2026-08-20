@@ -24,11 +24,11 @@ def sessions_dir(tmp_path, monkeypatch):
     # 进程合一：_sync_chat_request_metadata 经 _sessions_dir_for_request →
     # resolve_tenant_sessions_dir 写盘；fixture 需与之对齐，避免读写分叉。
     monkeypatch.setattr(
-        "jiuwenswarm.server.agent_ws_server._sessions_dir_for_request",
+        "jiuwenswarm.server.handlers._shared._sessions_dir_for_request",
         lambda request: d,
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.agent_ws_server.resolve_tenant_sessions_dir",
+        "jiuwenswarm.server.handlers._shared.resolve_tenant_sessions_dir",
         lambda *args, **kwargs: d,
     )
     monkeypatch.setattr(
@@ -1470,7 +1470,7 @@ class TestSyncChatRequestMetadata:
         is_chat_turn=False、时间不被刷新、断言却靠 init 时间巧合通过的误导）。
         """
         from jiuwenswarm.common.schema.message import ReqMethod
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1502,7 +1502,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_project_dir_passed_through_to_sync(sessions_dir, clean_model_env):
         """project_dir 参数透传给 sync，由 sync 决定锁定/告警"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             update_session_metadata,
@@ -1526,7 +1526,7 @@ class TestSyncChatRequestMetadata:
         回归保护：只读 RPC 不带 model_name，不应把进程 MODEL_NAME 默认值回写覆盖
         用户在该会话用 /model 切换过的模型。model_name 未带 → explicit_model_provided=False。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1544,7 +1544,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_empty_model_name_keeps_existing(sessions_dir, monkeypatch):
         """params.model_name 为空白 → 同未显式携带，不写盘，保持磁盘原值"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1561,7 +1561,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_no_model_no_env_keeps_existing(sessions_dir, clean_model_env):
         """params 不带 model_name 且 env 也没设 → model=None → 不覆盖"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1579,7 +1579,7 @@ class TestSyncChatRequestMetadata:
         sessions_dir, clean_model_env
     ):
         """session_id 为空 → 返回 project_dir，不调 sync（不写盘）"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
 
         req = _make_agent_request(
             params={"model_name": "glm-5"}, session_id=None,
@@ -1589,7 +1589,7 @@ class TestSyncChatRequestMetadata:
 
     @staticmethod
     def test_empty_session_id_returns_project_dir(sessions_dir, clean_model_env):
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
 
         req = _make_agent_request(params={"model_name": "glm-5"}, session_id="   ")
         assert _sync_chat_request_metadata(req, "E:\\p", "code") == "E:\\p"
@@ -1599,7 +1599,7 @@ class TestSyncChatRequestMetadata:
         sessions_dir, clean_model_env, monkeypatch
     ):
         """sync 抛 OSError → 返回 project_dir，不抛"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         import jiuwenswarm.server.runtime.session.session_metadata as sm
 
         def _boom(**kwargs):
@@ -1615,7 +1615,7 @@ class TestSyncChatRequestMetadata:
     def test_returns_project_dir_on_value_error(
         sessions_dir, clean_model_env, monkeypatch
     ):
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         import jiuwenswarm.server.runtime.session.session_metadata as sm
 
         def _boom(**kwargs):
@@ -1629,7 +1629,7 @@ class TestSyncChatRequestMetadata:
     @staticmethod
     def test_creates_metadata_when_missing(sessions_dir, clean_model_env):
         """不先 init，直接 _sync → 经 sync 兜底新建分支创建"""
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
         )
@@ -1659,7 +1659,7 @@ class TestSyncChatRequestMetadata:
         _sync_chat_request_metadata，而时间字段无 chat-turn 守卫。
         修复后：只读 RPC 传 is_chat_turn=False → 时间字段不写盘。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1698,7 +1698,7 @@ class TestSyncChatRequestMetadata:
 
         契约对照：与上一用例互为镜像——只有用户真正发消息才更新排序时间。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             init_session_metadata,
             get_session_metadata,
@@ -1733,7 +1733,7 @@ class TestSyncChatRequestMetadata:
         本用例聚焦「只读 RPC 不该走到 sync」——由 _is_stateless_method_request 短路保证，
         此处补一层存储层兜底契约：即便只读 RPC 误走到 sync，时间字段也不得被改。
         """
-        from jiuwenswarm.server.agent_ws_server import _sync_chat_request_metadata
+        from jiuwenswarm.server.handlers._shared import _sync_chat_request_metadata
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
         )

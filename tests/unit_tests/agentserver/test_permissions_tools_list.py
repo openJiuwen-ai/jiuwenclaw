@@ -213,7 +213,22 @@ async def test_permissions_tools_list_handler_uses_runtime_catalog_without_reloa
         params={},
     )
 
-    await server._handle_permissions_config(object(), request, asyncio.Lock())
+    # handler 已搬到 handlers/permissions.py，改为经 ctx 直接调模块函数。
+    from jiuwenswarm.server.handlers import permissions as permissions_handlers
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    class _FakeWS:
+        async def send(self, payload):
+            sent.append(payload)
+
+    ctx = RequestContext(
+        request=request,
+        sink=WSSink(_FakeWS(), asyncio.Lock()),
+        services=AgentServerServices(server),
+        connection_id="test",
+    )
+    await permissions_handlers.handle_permissions_config(ctx)
 
     assert catalog_calls == [[swarm]]
     assert sent
