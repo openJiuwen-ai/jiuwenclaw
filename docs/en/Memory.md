@@ -8,14 +8,20 @@ Memory gives JiuwenSwarm **persistent, cross-session recall**: important facts a
 
 ## Engine Switch
 
-Control memory engine mounting via `memory.engine` config:
+Control memory engine mounting via `memory.engine` config. The config file is located at `~/.jiuwenswarm/config/config.yaml` in the `memory` section. Default config:
+
+```yaml
+memory:
+  engine: ${MEMORY_ENGINE:-builtin}    # default builtin, can be overridden by env var
+  mode: ${MEMORY_MODE:-local}           # built-in memory storage location: local | cloud
+```
 
 | Value | Description |
 |-------|-------------|
 | `builtin` | Only built-in memory (default, backward-compatible) |
 | `external` | Only external memory (LTM / Mem0 / OpenViking / plugin) |
 | `both` | Built-in + external coexist |
-| `none` | All disabled |
+| `none` | All disabled. Agent no longer auto-writes/retrieves memory; every conversation starts with a fresh context |
 
 ---
 
@@ -25,50 +31,58 @@ Control memory engine mounting via `memory.engine` config:
 
 Retrieval defaults to BM25 full-text search. Configure **`EMBED_API_KEY`** (and related embed settings) for vector + BM25 hybrid search.
 
-| Variable | Description |
-|----------|-------------|
-| `EMBED_API_KEY` | Embedding API key (mock provider if unset) |
-| `EMBED_API_BASE` | Embedding endpoint URL |
-| `EMBED_MODEL` | Embedding model name |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `EMBED_API_KEY` | Embedding API key (mock provider if unset) | `sk-xxxxxxxxxxxxxxxx` |
+| `EMBED_API_BASE` | Embedding endpoint URL | `https://api.siliconflow.cn/v1` |
+| `EMBED_MODEL` | Embedding model name | `BAAI/bge-m3` |
 
-![Memory config](../assets/images/memory_config.png)
+> ⚠️ **Mock Provider Limitation**: If Embedding service is not configured, the system uses a mock provider that only supports basic keyword search and **does not support semantic search**. To recall memories by fuzzy intent (e.g., "that database issue from last time"), you must configure an Embedding service.
+
+![Memory config](../assets/images/current-ui/25-配置信息-其他配置-详情.png)
 
 ### External Memory
 
-Config location: `memory.external` section in `config.yaml`.
+Config location: `~/.jiuwenswarm/config/config.yaml` in the `memory` section. Full config example:
 
 ```yaml
 memory:
-  engine: external   # or both
-  external:
-    provider: mem0   # Choose one: openjiuwen | mem0 | openviking | <plugin-name>
-    user_id: __default__
-    scope_id: __default__
+  engine: ${MEMORY_ENGINE:-builtin}        # builtin | external | both | none
+  mode: ${MEMORY_MODE:-local}               # built-in memory storage: local | cloud
 
-    # Provider-specific config
+  external:
+    provider: ${MEMORY_EXTERNAL_PROVIDER:-}  # '' | openjiuwen | mem0 | openviking | <plugin-name>
+    user_id: ${MEMORY_USER_ID:-__default__}
+    scope_id: ${MEMORY_SCOPE_ID:-__default__}
+
+    # OpenJiuwen LTM (local long-term memory: KV + Vector + DB)
     openjiuwen:
-      kv_type: shelve
+      kv_type: shelve                        # shelve | in_memory | sqlite
       vector_type: chroma
       db_type: sqlite
+
+    # Mem0 (cloud fact extraction + semantic retrieval)
     mem0:
-      api_key: ""
-      user_id: ""
-      agent_id: ""
-      rerank: true
+      api_key: ${MEM0_API_KEY:-}             # Get from mem0.ai
+      user_id: ${MEM0_USER_ID:-jiuwenswarm-user}
+      agent_id: ${MEM0_AGENT_ID:-jiuwenswarm}
+      rerank: true                            # Rerank search results (more accurate but slower)
+
+    # OpenViking (ByteDance context database)
     openviking:
-      endpoint: http://127.0.0.1:1933
-      api_key: ""
-      account: root
-      user: default
+      endpoint: ${OPENVIKING_ENDPOINT:-http://127.0.0.1:1933}
+      api_key: ${OPENVIKING_API_KEY:-}
+      account: ${OPENVIKING_ACCOUNT:-root}
+      user: ${OPENVIKING_USER:-default}
 ```
 
 #### Supported Providers
 
 | Provider | Description | Required Config |
 |----------|-------------|-----------------|
-| `openjiuwen` | Local long-term memory (KV + Vector + DB) | None (uses default ~/.jiuwenswarm/memory/ltm) |
-| `mem0` | Cloud fact extraction & semantic retrieval | `api_key` (from mem0.ai) |
-| `openviking` | ByteDance context database | `endpoint`, `api_key` |
+| `openjiuwen` | Local long-term memory LTM (Long Term Memory): an enhanced version of built-in memory, providing stronger vector retrieval, persistence guarantees, and structured storage. Supports KV + Vector + DB storage modes. | None (uses default ~/.jiuwenswarm/memory/ltm) |
+| `mem0` | Cloud fact extraction & semantic retrieval service. Automatically extracts key facts from conversations and persists them, supporting cross-session memory recall. | `api_key` (Steps: 1. Visit [mem0.ai](https://mem0.ai) to register → 2. Create a project → 3. Get API Key) |
+| `openviking` | ByteDance context database: ByteDance internal service providing enterprise-grade context storage and retrieval. ⚠️ This is an internal service; external users cannot obtain API keys on their own. | `endpoint`, `api_key` (contact ByteDance for access) |
 | `<plugin-name>` | Custom plugin | ~/.jiuwenswarm/plugins/memory/<name>/ |
 
 #### External Memory Environment Variables
@@ -125,6 +139,8 @@ Memory is plain Markdown; the agent uses file tools:
 ```
 ![Memory files](../assets/images/memory_files.png)
 
+> 💡 **More config options**: For complete Embedding configuration (including Web UI setup, example values, model selection tips), see the [Configuration](./Configuration.md#embed-configuration) document.
+
 ### `memory/MEMORY.md` (long-term)
 
 - **Use**: Decisions, preferences, stable facts.
@@ -151,8 +167,8 @@ During interactions with users, JiuwenSwarm automatically triggers memory writes
 | Daily notes, runtime context | `memory/YYYY-MM-DD.md` | write / edit tools | "Fixed login bug today", "Deployed v2.1" |
 | User says "remember this" | `memory/YYYY-MM-DD.md` | write tool | "Remember I stored project files on D drive" |
 
-![Memory Write Triggers](../assets/images/记忆.png)
-![Memory Write](../assets/images/记忆写入.png)
+![Memory Write Triggers](../assets/images/current-ui/08-智能体页面.png)
+![Memory Write](../assets/images/current-ui/08-智能体页面.png)
 
 ## Dreaming: Sleep-Time Memory Consolidation
 
@@ -195,14 +211,14 @@ In Agent Team mode, each team has two memory layers:
 ### Layout
 
 ```
-~/.openjiuwen/.agent_teams/{team_name}/
+~/.jiuwenswarm/.agent_teams/{team_name}/
 ├── team-memory/                          # Shared team memory
 │   └── TEAM_MEMORY.md
 ├── workspaces/
 │   ├── alice_workspace/                   # New member (created inside the team)
 │   │   ├── memory/                        # personal memory (general scenario)
 │   │   └── coding_memory/                 # personal memory (coding scenario)
-│   └── bob_workspace -> ~/.openjiuwen/bob_workspace/   # Predefined member (symlink)
+│   └── bob_workspace -> ~/.jiuwenswarm/bob_workspace/   # Predefined member (symlink)
 └── team-workspace/                        # Shared file area (not memory)
 ```
 
@@ -275,6 +291,11 @@ All three channels share the same **MemoryIndexManager** for indexing and retrie
 | File watch | Watchdog updates local indexes async |
 | Semantic search | Embeddings + BM25 hybrid recall |
 | Direct read | Read specific files to keep context small |
+
+> **Glossary**:
+> - **FTS5**: SQLite full-text search extension
+> - **vec0**: SQLite vector extension
+> - **watchdog**: File change monitor
 
 ### Technical stack
 
