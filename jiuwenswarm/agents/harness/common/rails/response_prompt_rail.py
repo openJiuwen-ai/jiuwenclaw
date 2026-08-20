@@ -10,14 +10,15 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
     LocalSectionName,
     PromptPriority,
     _input_prompt,
     _output_prompt,
 )
+from jiuwenswarm.common.context_keys import JIUWENSWARM_CHANNEL_CONTEXT_KEY
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
+    build_a2ui_generation_disabled_instruction,
     is_a2ui_browser_workflow_request,
 )
 
@@ -168,30 +169,41 @@ class ResponsePromptRail(DeepAgentRail):
 
         request_id, conversation_id = identity
         try:
-            from jiuwenswarm.server.runtime.a2ui.integration import is_a2ui_channel
             from jiuwenswarm.server.runtime.a2ui.config import get_current_a2ui_config
-            from jiuwenswarm.server.runtime.a2ui.runtime.prompt import build_a2ui_prompt_section
+            from jiuwenswarm.server.runtime.a2ui.integration import is_a2ui_channel
+            from jiuwenswarm.server.runtime.a2ui.runtime.prompt import (
+                build_a2ui_prompt_section,
+            )
 
             is_web_channel = is_a2ui_channel(channel)
-            enabled = get_current_a2ui_config().enabled if is_web_channel else False
-            injected = is_web_channel and enabled and not skip_a2ui
+            enabled = get_current_a2ui_config().generation_enabled if is_web_channel else False
+            injected = is_web_channel and not skip_a2ui
+            browser_workflows_injected = enabled and injected and include_browser_workflows
 
             if not injected:
                 self.system_prompt_builder.remove_section(LocalSectionName.A2UI)
             else:
+                content = (
+                    {
+                        "cn": build_a2ui_prompt_section(
+                            "cn",
+                            include_browser_workflows=include_browser_workflows,
+                        ),
+                        "en": build_a2ui_prompt_section(
+                            "en",
+                            include_browser_workflows=include_browser_workflows,
+                        ),
+                    }
+                    if enabled
+                    else {
+                        "cn": build_a2ui_generation_disabled_instruction("cn"),
+                        "en": build_a2ui_generation_disabled_instruction("en"),
+                    }
+                )
                 self.system_prompt_builder.add_section(
                     PromptSection(
                         name=LocalSectionName.A2UI,
-                        content={
-                            "cn": build_a2ui_prompt_section(
-                                "cn",
-                                include_browser_workflows=include_browser_workflows,
-                            ),
-                            "en": build_a2ui_prompt_section(
-                                "en",
-                                include_browser_workflows=include_browser_workflows,
-                            ),
-                        },
+                        content=content,
                         priority=PromptPriority.A2UI,
                     )
                 )
@@ -204,7 +216,7 @@ class ResponsePromptRail(DeepAgentRail):
                 channel or "-",
                 enabled,
                 injected,
-                include_browser_workflows if injected else False,
+                browser_workflows_injected,
                 skip_a2ui,
             )
         except Exception:

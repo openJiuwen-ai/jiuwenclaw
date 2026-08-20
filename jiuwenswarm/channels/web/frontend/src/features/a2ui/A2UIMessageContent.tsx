@@ -11,7 +11,10 @@ import {
   type A2UIContentPart,
 } from './a2uiContent';
 import { recordA2UIActionDefaults } from './actionDefaults';
-import { isA2UIFeatureEnabled } from './featureConfig';
+import {
+  isA2UIRenderingEnabled,
+  shouldDisableA2UIInteraction,
+} from './featureConfig';
 import { getA2UIRenderer } from './rendererRegistry';
 import { A2UIErrorBoundary } from './A2UIErrorBoundary';
 import { a2uiError } from './formDefaults';
@@ -55,11 +58,12 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
   const { processMessages } = useA2UIActions();
   const { t } = useTranslation();
   const namespace = useMemo(() => `msg_${safeNamespace(messageId)}`, [messageId]);
-  const a2uiEnabled = isA2UIFeatureEnabled();
+  const renderingEnabled = isA2UIRenderingEnabled();
+  const interactionDisabled = shouldDisableA2UIInteraction(disableInteraction);
 
   const renderParts = useMemo<RenderPart[]>(() => {
     const parsed = parseA2UIContent(content, {
-      enabled: a2uiEnabled,
+      enabled: renderingEnabled,
       isStreaming,
       pendingText: t('a2ui.generating'),
       invalidText: t('a2ui.unavailable'),
@@ -84,11 +88,11 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
         resetKey,
       };
     });
-  }, [a2uiEnabled, content, isStreaming, namespace, messageId, t]);
+  }, [content, isStreaming, namespace, renderingEnabled, t]);
 
   useEffect(() => {
     for (const part of renderParts) {
-      if (a2uiEnabled && part.kind === 'a2ui') {
+      if (renderingEnabled && part.kind === 'a2ui') {
         recordA2UIActionDefaults(part.messages);
 
         try {
@@ -119,7 +123,7 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
         }
       }
     }
-  }, [a2uiEnabled, processMessages, renderParts]);
+  }, [processMessages, renderParts, renderingEnabled]);
 
   // Dev-only diagnostic: log horizontal overflow containers after DOM layout
   useEffect(() => {
@@ -194,8 +198,8 @@ export const A2UIMessageContent = memo(function A2UIMessageContent({
                   </div>
                 )}
               >
-                {disableInteraction ? (
-                  <div className="pointer-events-none opacity-75">
+                {interactionDisabled ? (
+                  <div className="pointer-events-none opacity-75" data-testid="a2ui-readonly-surface">
                     <Renderer surfaceId={surfaceId} />
                   </div>
                 ) : (

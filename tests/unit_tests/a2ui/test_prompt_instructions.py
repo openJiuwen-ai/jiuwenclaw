@@ -3,6 +3,7 @@
 from jiuwenswarm.server.runtime.a2ui.prompt_instructions import (
     build_a2ui_autonomy_instruction,
     build_a2ui_browser_workflow_instruction,
+    build_a2ui_generation_disabled_instruction,
     is_a2ui_browser_workflow_request,
 )
 from jiuwenswarm.server.runtime.a2ui.runtime.prompt import (
@@ -27,6 +28,27 @@ def test_a2ui_prompt_is_autonomous_not_forced():
     assert "Do not promise to show the result with A2UI and then output only Markdown" in instruction
     assert "Mandatory A2UI account-action gate" not in instruction
     assert "browser_preflight_submit" not in instruction
+
+
+def test_a2ui_generation_disabled_instruction_blocks_ui_not_learning():
+    """The disabled guard should block generation without blocking A2UI knowledge."""
+    instruction = build_a2ui_generation_disabled_instruction("en")
+
+    assert "generation support has been manually disabled" in instruction
+    assert "Do not proactively search for" in instruction
+    assert "provide a helpful plain-text alternative" in instruction
+    assert "only wants to learn about, search for, or discuss A2UI" in instruction
+    assert "answer normally and use tools when needed" in instruction
+
+
+def test_a2ui_zh_generation_disabled_instruction_explains_recovery():
+    """The Chinese guard should name the switch and preserve knowledge queries."""
+    instruction = build_a2ui_generation_disabled_instruction("zh")
+
+    assert "A2UI 生成支持已由用户手动关闭" in instruction
+    assert "打开“A2UI 生成支持”后重试" in instruction
+    assert "仅使用纯文本" in instruction
+    assert "允许正常回答并按需使用工具" in instruction
 
 
 def test_a2ui_prompt_discourages_nested_templates():

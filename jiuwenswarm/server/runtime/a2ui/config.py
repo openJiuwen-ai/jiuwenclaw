@@ -8,7 +8,6 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-
 SUPPORTED_A2UI_PROTOCOL_VERSIONS = frozenset({"0.8"})
 
 
@@ -16,11 +15,18 @@ SUPPORTED_A2UI_PROTOCOL_VERSIONS = frozenset({"0.8"})
 class A2UIConfig:
     """Runtime switches controlling the optional A2UI feature."""
 
+    # ``enabled`` remains the constructor-compatible alias for generation.
     enabled: bool = False
+    rendering_enabled: bool = False
     protocol_version: str = "0.8"
     stream_validation_enabled: bool = True
     non_web_fallback_enabled: bool = False
     dev_smoke_tools_enabled: bool = False
+
+    @property
+    def generation_enabled(self) -> bool:
+        """Return whether A2UI generation and response processing are enabled."""
+        return self.enabled
 
 
 def _to_bool(value: Any, default: bool) -> bool:
@@ -43,10 +49,21 @@ def get_a2ui_config(config: dict[str, Any] | None = None) -> A2UIConfig:
     section = raw.get("a2ui") if isinstance(raw, dict) else {}
     section = section if isinstance(section, dict) else {}
 
-    enabled = _to_bool(section.get("enabled"), False)
-    env_enabled = os.getenv("JIUWENSWARM_A2UI_ENABLED")
-    if env_enabled is not None:
-        enabled = _to_bool(env_enabled, enabled)
+    legacy_enabled = _to_bool(section.get("enabled"), False)
+    generation_enabled = _to_bool(section.get("generation_enabled"), legacy_enabled)
+    rendering_enabled = _to_bool(section.get("rendering_enabled"), legacy_enabled)
+
+    legacy_env_enabled = os.getenv("JIUWENSWARM_A2UI_ENABLED")
+    env_generation_enabled = os.getenv("JIUWENSWARM_A2UI_GENERATION_ENABLED")
+    env_rendering_enabled = os.getenv("JIUWENSWARM_A2UI_RENDERING_ENABLED")
+    if env_generation_enabled is not None:
+        generation_enabled = _to_bool(env_generation_enabled, generation_enabled)
+    elif legacy_env_enabled is not None:
+        generation_enabled = _to_bool(legacy_env_enabled, generation_enabled)
+    if env_rendering_enabled is not None:
+        rendering_enabled = _to_bool(env_rendering_enabled, rendering_enabled)
+    elif legacy_env_enabled is not None:
+        rendering_enabled = _to_bool(legacy_env_enabled, rendering_enabled)
 
     protocol_version = str(
         os.getenv("JIUWENSWARM_A2UI_PROTOCOL_VERSION")
@@ -62,7 +79,8 @@ def get_a2ui_config(config: dict[str, Any] | None = None) -> A2UIConfig:
         dev_smoke_tools_enabled = _to_bool(env_smoke, dev_smoke_tools_enabled)
 
     return A2UIConfig(
-        enabled=enabled,
+        enabled=generation_enabled,
+        rendering_enabled=rendering_enabled,
         protocol_version=protocol_version,
         stream_validation_enabled=_to_bool(section.get("stream_validation_enabled"), True),
         non_web_fallback_enabled=_to_bool(section.get("non_web_fallback_enabled"), False),
@@ -78,5 +96,10 @@ def get_current_a2ui_config() -> A2UIConfig:
 
 
 def is_a2ui_enabled(config: dict[str, Any] | None = None) -> bool:
-    """Return whether A2UI is enabled for the supplied config."""
-    return get_a2ui_config(config).enabled
+    """Return whether A2UI generation is enabled for the supplied config."""
+    return is_a2ui_generation_enabled(config)
+
+
+def is_a2ui_generation_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether A2UI generation is enabled for the supplied config."""
+    return get_a2ui_config(config).generation_enabled

@@ -113,7 +113,27 @@ def test_get_a2ui_config_payload_defaults():
     """Config payloads should expose only user-facing A2UI Web keys."""
     payload = get_a2ui_config_payload({"a2ui": {}})
 
-    assert payload == {"a2ui_enabled": "false"}
+    assert payload == {
+        "a2ui_enabled": "false",
+        "a2ui_generation_enabled": "false",
+        "a2ui_rendering_enabled": "false",
+    }
+
+
+def test_get_a2ui_config_payload_exposes_independent_switches():
+    """Web config should preserve rendering when generation is disabled."""
+    payload = get_a2ui_config_payload({
+        "a2ui": {
+            "generation_enabled": False,
+            "rendering_enabled": True,
+        },
+    })
+
+    assert payload == {
+        "a2ui_enabled": "false",
+        "a2ui_generation_enabled": "false",
+        "a2ui_rendering_enabled": "true",
+    }
 
 
 def test_validate_a2ui_config_update_rejects_internal_keys():
@@ -126,12 +146,40 @@ def test_validate_a2ui_config_update_rejects_internal_keys():
 
 
 def test_validate_a2ui_config_update_maps_boolean_key():
-    """Web config keys should map to the YAML keys owned by the A2UI config."""
+    """The legacy Web switch should continue to update both capabilities."""
     ok, update, error = validate_a2ui_config_update("a2ui_enabled", "false")
 
     assert ok is True
-    assert update == {"enabled": False}
+    assert update == {
+        "generation_enabled": False,
+        "rendering_enabled": False,
+    }
     assert error == ""
+
+
+@pytest.mark.parametrize(
+    ("param_key", "config_key"),
+    [
+        ("a2ui_generation_enabled", "generation_enabled"),
+        ("a2ui_rendering_enabled", "rendering_enabled"),
+    ],
+)
+def test_validate_a2ui_config_update_maps_independent_switch(param_key, config_key):
+    """Each new Web switch should update only its matching YAML key."""
+    ok, update, error = validate_a2ui_config_update(param_key, "true")
+
+    assert ok is True
+    assert update == {config_key: True}
+    assert error == ""
+
+
+def test_generation_switch_gates_client_events_independently(monkeypatch):
+    """Rendering alone must not enable A2UI client-event generation flows."""
+    monkeypatch.setenv("JIUWENSWARM_A2UI_GENERATION_ENABLED", "false")
+    monkeypatch.setenv("JIUWENSWARM_A2UI_RENDERING_ENABLED", "true")
+    event = {"type": "a2ui.client_event", "userAction": {"context": {"value": "ok"}}}
+
+    assert build_user_prompt_if_a2ui_event(event, channel="web", language="zh") is None
 
 
 def test_normal_text_prompt_builder_keeps_string_flow(monkeypatch):

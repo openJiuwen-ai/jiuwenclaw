@@ -1,7 +1,10 @@
 ﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import type { A2UIClientEventMessage } from '@a2ui/react';
-import { isA2UIFeatureEnabled } from './featureConfig';
+import {
+  isA2UIGenerationEnabled,
+  isA2UIRenderingEnabled,
+} from './featureConfig';
 import { A2UI_PROTOCOL_VERSION } from './a2uiContent';
 import { enrichA2UIClientEventWithDefaults } from './actionDefaults';
 import { a2uiDebug, a2uiWarn } from './formDefaults';
@@ -125,7 +128,7 @@ export function setA2UIActionHandler(
 export async function dispatchA2UIAction(
   message: A2UIClientEventMessage
 ): Promise<void> {
-  if (!isA2UIFeatureEnabled()) {
+  if (!isA2UIRenderingEnabled() || !isA2UIGenerationEnabled()) {
     return;
   }
   if (!currentHandler) {

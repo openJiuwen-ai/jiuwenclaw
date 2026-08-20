@@ -1120,6 +1120,46 @@ class TestTeamModeWake:
         assert len(handler.cancel_calls) == 1
 
     @pytest.mark.asyncio
+    async def test_team_stream_error_returns_error_without_partial_result(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = _make_job(mode="team", session_id="user-session-1", targets="tui")
+
+        class PartialResultThenErrorStreamClient(FakeAgentClient):
+            async def send_request_stream(self, envelope):
+                self.stream_requests.append(envelope)
+                for payload in (
+                    {
+                        "event_type": "workflow.updated",
+                        "workflow": {
+                            "id": "wf-1",
+                            "status": "completed",
+                            "summary": "partial report",
+                        },
+                    },
+                    {"event_type": "execution.error", "message": "model API unavailable"},
+                ):
+                    yield AgentResponseChunk(
+                        request_id=envelope.request_id or "",
+                        channel_id=envelope.channel or "",
+                        payload=payload,
+                        is_complete=False,
+                    )
+
+        agent = PartialResultThenErrorStreamClient()
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler, agent_client=agent)
+
+        run_id = f"{job.id}:partial-error"
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        state = svc.runs[run_id]
+        assert state.status == "failed"
+        assert "model API unavailable" in (state.result_text or "")
+        assert "partial report" not in (state.result_text or "")
+        assert len(handler.cancel_calls) == 1
+
+    @pytest.mark.asyncio
     async def test_team_stream_ends_early_on_workflow_and_final(self, tmp_path):
         store = CronJobStore(path=tmp_path / "cron_jobs.json")
         job = _make_job(mode="team", session_id="user-session-1", targets="tui")

@@ -8,7 +8,6 @@ import json
 import re
 from typing import Any
 
-
 _BROWSER_WORKFLOW_ACTION_MARKERS = (
     "browser_preflight_submit",
     "run_browser_agent",
@@ -319,8 +318,40 @@ def build_a2ui_autonomy_instruction(language: str = "en") -> str:
     )
 
 
+def build_a2ui_generation_disabled_instruction(language: str = "en") -> str:
+    """Return the guard used when users disable A2UI generation."""
+    if language in {"zh", "cn"}:
+        return (
+            "A2UI 生成支持已由用户手动关闭。禁止生成或输出任何 A2UI 协议内容，"
+            "包括 <a2ui-json>、beginRendering、surfaceUpdate 和 dataModelUpdate。"
+            "不要为了生成 A2UI 而主动搜索、加载或调用 A2UI 相关的 skill、文档、工具或子代理。"
+            "如果用户明确要求创建、生成、展示或使用 A2UI 界面或组件，请先告知用户："
+            "当前 A2UI 生成支持已关闭；如需使用，请在设置中打开“A2UI 生成支持”后重试。"
+            "随后仅使用纯文本提供当前能力范围内有帮助的替代回复。"
+            "如果用户只是询问、学习、搜索或讨论 A2UI 的概念、协议、文档或代码，"
+            "而不是要求实际生成 A2UI 界面，则允许正常回答并按需使用工具；"
+            "但最终仍不得生成 A2UI 界面或协议内容。"
+        )
+    return (
+        "A2UI generation support has been manually disabled by the user. Do not "
+        "generate or output any A2UI protocol content, including <a2ui-json>, "
+        "beginRendering, surfaceUpdate, or dataModelUpdate. Do not proactively "
+        "search for, load, or invoke A2UI-related skills, documentation, tools, "
+        "or subagents for the purpose of generating A2UI. If the user explicitly "
+        "asks to create, generate, display, or use an A2UI interface or component, "
+        "first explain that A2UI generation support is currently disabled and that "
+        "they can enable 'A2UI Generation Support' in Settings, then provide a "
+        "helpful plain-text alternative within the currently available capabilities. "
+        "If the user only wants to learn about, search for, or discuss A2UI concepts, "
+        "protocols, documentation, or code rather than generate an A2UI interface, "
+        "answer normally and use tools when needed, but do not output A2UI protocol "
+        "content."
+    )
+
+
 __all__ = [
     "build_a2ui_autonomy_instruction",
     "build_a2ui_browser_workflow_instruction",
+    "build_a2ui_generation_disabled_instruction",
     "is_a2ui_browser_workflow_request",
 ]

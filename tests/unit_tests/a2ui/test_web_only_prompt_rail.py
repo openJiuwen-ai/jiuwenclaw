@@ -8,7 +8,9 @@ import pytest
 from openjiuwen.core.single_agent.rail.base import InvokeInputs, ModelCallInputs
 
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import LocalSectionName
-from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
+from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
+    ResponsePromptRail,
+)
 from jiuwenswarm.server.runtime.a2ui.config import A2UIConfig
 
 
@@ -56,6 +58,28 @@ async def test_response_prompt_rail_keeps_a2ui_for_web_channel(monkeypatch):
     assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
     content = rail.system_prompt_builder.sections[LocalSectionName.A2UI].content
     assert "browser_preflight_submit" not in content["en"]
+
+
+@pytest.mark.asyncio
+async def test_response_prompt_rail_injects_guard_when_generation_is_disabled(monkeypatch):
+    """Disabled generation should prevent requested A2UI while preserving text replies."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.a2ui.config.get_current_a2ui_config",
+        lambda: A2UIConfig(enabled=False, rendering_enabled=True),
+    )
+    rail = ResponsePromptRail()
+    rail.system_prompt_builder = _FakePromptBuilder()
+
+    await rail.before_model_call(
+        SimpleNamespace(inputs={"channel": "web", "query": "生成一个 A2UI 注册表单"})
+    )
+
+    content = rail.system_prompt_builder.sections[LocalSectionName.A2UI].content
+    assert "A2UI 生成支持已由用户手动关闭" in content["cn"]
+    assert "仅使用纯文本" in content["cn"]
+    assert "允许正常回答并按需使用工具" in content["cn"]
+    assert "generation support has been manually disabled" in content["en"]
+    assert "JiuwenSwarm supports an optional A2UI output format" not in content["en"]
 
 
 @pytest.mark.asyncio
@@ -147,7 +171,7 @@ async def test_response_prompt_rail_logs_switch_and_injection_decision(
         "sess-a2ui-log",
         "web",
         False,
-        False,
+        True,
         False,
     )
 
@@ -168,6 +192,23 @@ async def test_response_prompt_rail_removes_a2ui_when_request_skips_it(monkeypat
     await rail.before_model_call(SimpleNamespace(inputs={"channel": "web", "skip_a2ui": True}))
 
     assert {"input", "output"} <= rail.system_prompt_builder.sections.keys()
+    assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
+
+
+@pytest.mark.asyncio
+async def test_response_prompt_rail_skip_removes_disabled_generation_guard(monkeypatch):
+    """Request-scoped skip should remove both active and disabled A2UI instructions."""
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.a2ui.config.get_current_a2ui_config",
+        lambda: A2UIConfig(enabled=False, rendering_enabled=True),
+    )
+    rail = ResponsePromptRail()
+    rail.system_prompt_builder = _FakePromptBuilder()
+
+    await rail.before_model_call(SimpleNamespace(inputs={"channel": "web"}))
+    assert LocalSectionName.A2UI in rail.system_prompt_builder.sections
+
+    await rail.before_model_call(SimpleNamespace(inputs={"channel": "web", "skip_a2ui": True}))
     assert LocalSectionName.A2UI not in rail.system_prompt_builder.sections
 
 

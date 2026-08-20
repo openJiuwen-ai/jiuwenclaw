@@ -2724,7 +2724,28 @@ async def _run(
     # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
     # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
     try:
-        from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+        from jiuwenswarm.server.runtime.opencode_zen import (
+            warm_zen_free_models,
+            set_main_event_loop,
+            register_models_ready_callback,
+        )
+        # 注册 event loop，供后台重试线程通过 call_soon_threadsafe 调度回调
+        set_main_event_loop(asyncio.get_running_loop())
+
+        # 注册回调：后台重试成功后广播 models.updated 事件，前端自动刷新模型列表
+        async def _on_zen_models_ready():
+            try:
+                web_channel = channel_manager.get_channel("web")
+                if web_channel:
+                    await web_channel.broadcast_event("models.updated", {})
+                    logger.info("[App] broadcasted models.updated: zen free models ready")
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[App] broadcast models.updated failed: %s", e)
+
+        def _models_ready_cb():
+            asyncio.create_task(_on_zen_models_ready())
+
+        register_models_ready_callback(_models_ready_cb)
         await warm_zen_free_models(reason="gateway-startup")
     except Exception as e:  # noqa: BLE001 - 兜底
         logger.warning("[App] zen free models warm failed (non-fatal): %s", e)

@@ -58,6 +58,7 @@ export type RenderItem =
       key: string;
       showAvatar: boolean;
       message: Message;
+      hidden: boolean;
       hideMeta: boolean;
       turnId: number;
     }
@@ -118,7 +119,6 @@ export function buildTimelineItems(
   const messageItems: TimelineItem[] = messages
     .filter((msg) => {
       if (msg.role === 'tool') return false;
-      if (msg.role === 'user' && isA2UIClientEventContent(msg.content)) return false;
       return true;
     })
     .map((message, index) => ({
@@ -289,6 +289,8 @@ export function buildRenderItems(items: TimelineItem[], isTeamMode: boolean, isP
       key: item.key,
       showAvatar: true,
       message: item.message,
+      hidden:
+        item.message.role === 'user' && isA2UIClientEventContent(item.message.content),
       hideMeta: false,
       turnId: item.message.role === 'user' ? -1 : currentTurnId,
     });

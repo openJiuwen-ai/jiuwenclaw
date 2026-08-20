@@ -64,6 +64,7 @@ import {
   forgetCreatedConversation,
   isConversationMissing,
   registerCreatedConversation,
+  resolveNewConversationEntrySettings,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
 import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
@@ -72,7 +73,7 @@ import { createConversationSession } from './multi-session/state/createConversat
 import { useTranslation } from 'react-i18next';
 import {
   normalizeA2UIEnabled,
-  setA2UIFeatureEnabled,
+  setA2UIFeatureConfig,
 } from './features/a2ui/featureConfig';
 import {
   buildA2UIClientEventContent,
@@ -114,6 +115,46 @@ const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
   "external_cli_agent_codex_use_builtin",
   "external_cli_agent_codex_cli_path",
 ]);
+
+type A2UIConfigChange = {
+  generationEnabled?: boolean;
+  renderingEnabled?: boolean;
+};
+
+function getA2UIConfigChange(updates?: Record<string, unknown>): A2UIConfigChange | null {
+  if (!updates) return null;
+
+  const change: A2UIConfigChange = {};
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_enabled')) {
+    const enabled = normalizeA2UIEnabled(updates.a2ui_enabled);
+    change.generationEnabled = enabled;
+    change.renderingEnabled = enabled;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_generation_enabled')) {
+    change.generationEnabled = normalizeA2UIEnabled(updates.a2ui_generation_enabled);
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, 'a2ui_rendering_enabled')) {
+    change.renderingEnabled = normalizeA2UIEnabled(updates.a2ui_rendering_enabled);
+  }
+  return Object.keys(change).length > 0 ? change : null;
+}
+
+function getA2UIChangeDescriptionKey(change: A2UIConfigChange | null): string {
+  const generationChanged = change?.generationEnabled !== undefined;
+  const renderingChanged = change?.renderingEnabled !== undefined;
+  if (generationChanged && renderingChanged) return 'app.a2uiBothChangedDesc';
+  if (renderingChanged) {
+    return change?.renderingEnabled
+      ? 'app.a2uiRenderingEnabledDesc'
+      : 'app.a2uiRenderingDisabledDesc';
+  }
+  if (generationChanged) {
+    return change?.generationEnabled
+      ? 'app.a2uiGenerationEnabledDesc'
+      : 'app.a2uiGenerationDisabledDesc';
+  }
+  return 'app.a2uiRefreshDesc';
+}
 
 function isTeamMode(mode: string): boolean {
   return TEAM_SESSION_MODES.has(mode);
@@ -337,6 +378,7 @@ function AppContent() {
   const [restartSeenDisconnect, setRestartSeenDisconnect] = useState(false);
   const [appliedWithoutRestart, setAppliedWithoutRestart] = useState(false);
   const [a2uiRefreshPending, setA2uiRefreshPending] = useState(false);
+  const [a2uiConfigChange, setA2uiConfigChange] = useState<A2UIConfigChange | null>(null);
   const [saveToastVisible, setSaveToastVisible] = useState(false);
   const [configChangedConfirmOpen, setConfigChangedConfirmOpen] = useState(false);
   const [proactiveToastVisible, setProactiveToastVisible] = useState(false);
@@ -367,12 +409,11 @@ function AppContent() {
       setConfigInitialExpandGroup(null);
     }
     if (activeNav === 'chat') {
-      const { availableModels, setSelectedModelName } = useSessionStore.getState();
-      const defaultModel = availableModels[0];
+      const { defaultModelName, setSelectedModelName } = useSessionStore.getState();
       const runtime = useSessionStore.getState().getRuntime(sessionId);
-      if (defaultModel && !runtime?.selectedModelName) {
+      if (defaultModelName && !runtime?.selectedModelName) {
         useSessionStore.getState().ensureRuntime(sessionId);
-        setSelectedModelName(sessionId, defaultModel.alias || defaultModel.model_name);
+        setSelectedModelName(sessionId, defaultModelName);
       }
     }
   }, [activeNav, sessionId]);
@@ -412,6 +453,8 @@ function AppContent() {
   const historyPageCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
+  /** 离开新建任务页后，仍未发送的临时会话可以被再次打开。 */
+  const pendingNewConversationRef = useRef(route.kind === 'chat-new');
   const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
@@ -467,6 +510,7 @@ function AppContent() {
       setActiveNav('chat');
     } else if (route.kind === 'chat-new') {
       if (window.location.pathname !== '/chat/new') navigate({ kind: 'chat-new' }, { replace: true });
+      pendingNewConversationRef.current = true;
       if (preserveSelectedProjectOnChatNewRef.current) {
         preserveSelectedProjectOnChatNewRef.current = false;
       } else {
@@ -716,6 +760,9 @@ function AppContent() {
     },
     onConfigChanged: () => {
       handleConfigChanged();
+    },
+    onModelsUpdated: () => {
+      handleModelsRefresh();
     },
     onCronResultArrived: (cronSessionId: string, cronJobId: string) => {
       // 仅当用户当前停留在该任务的"立即执行"页面时才自动跳转：
@@ -979,7 +1026,15 @@ function AppContent() {
   const fetchConfig = useCallback(async () => {
     try {
       const config = await request<Record<string, unknown>>('config.get');
-      setA2UIFeatureEnabled(normalizeA2UIEnabled(config.a2ui_enabled));
+      const legacyEnabled = config.a2ui_enabled;
+      setA2UIFeatureConfig({
+        generationEnabled: normalizeA2UIEnabled(
+          config.a2ui_generation_enabled ?? legacyEnabled,
+        ),
+        renderingEnabled: normalizeA2UIEnabled(
+          config.a2ui_rendering_enabled ?? legacyEnabled,
+        ),
+      });
       setServerConfig(config);
       setConfigError(null);
       if (!modelSetupGuideEvaluatedRef.current) {
@@ -1039,6 +1094,7 @@ function AppContent() {
     setRestartSeenDisconnect(false);
     setAppliedWithoutRestart(false);
     setA2uiRefreshPending(false);
+    setA2uiConfigChange(null);
   }, [clearRestartAutoCloseTimer]);
 
   const clearSaveToastTimer = useCallback(() => {
@@ -1173,6 +1229,7 @@ function AppContent() {
   );
 
   const saveConfigAndRestart = useCallback(async (updates: Record<string, string>): Promise<ConfigSaveResult> => {
+    const a2uiChange = getA2UIConfigChange(updates);
     const payload = await request<ConfigSaveResult>(
       'config.set',
       updates
@@ -1202,9 +1259,10 @@ function AppContent() {
     setRestartModalOpen(true);
     setRestartSuccess(false);
     setRestartSeenDisconnect(false);
-    if ('a2ui_enabled' in updates) {
+    if (a2uiChange) {
       setAppliedWithoutRestart(false);
       setA2uiRefreshPending(true);
+      setA2uiConfigChange(a2uiChange);
       setRestartSuccess(true);
       clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
@@ -1332,7 +1390,7 @@ function AppContent() {
   }, [applyConfigSaveUiState, buildAgentsTeamsFlatConfig, request]);
 
   const saveAllConfigAndRestart = useCallback(async (payload: ConfigSaveAllPayload): Promise<ConfigSaveResult> => {
-    const isA2UIChange = payload.config && 'a2ui_enabled' in payload.config;
+    const a2uiChange = getA2UIConfigChange(payload.config);
     const result = await request<ConfigSaveResult>(
       'config.save_all',
       payload as unknown as Record<string, unknown>
@@ -1372,7 +1430,7 @@ function AppContent() {
     if (hasExternalCliDependencyInstall) {
       return result;
     }
-    if (isA2UIChange) {
+    if (a2uiChange) {
       // Show modal then refresh page after 5 seconds
       setConfigError(null);
       setRestartModalOpen(true);
@@ -1380,6 +1438,7 @@ function AppContent() {
       setRestartSeenDisconnect(false);
       setAppliedWithoutRestart(false);
       setA2uiRefreshPending(true);
+      setA2uiConfigChange(a2uiChange);
       clearRestartAutoCloseTimer();
       restartAutoCloseTimerRef.current = window.setTimeout(() => {
         closeRestartModal();
@@ -1753,6 +1812,11 @@ function AppContent() {
   const enterNewConversation = useCallback((targetMode: AgentMode = mode, options: NewConversationOptions = {}) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+    const pendingNewRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+    const shouldRestorePendingNewConversation =
+      currentSessionId !== NEW_CONVERSATION_ID
+      && pendingNewConversationRef.current
+      && Boolean(pendingNewRuntime);
     newConversationPreviousSessionRef.current =
       currentSessionId && currentSessionId !== NEW_CONVERSATION_ID
         ? {
@@ -1760,9 +1824,15 @@ function AppContent() {
           mode: currentRuntime?.mode ?? mode,
         }
         : null;
-    // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
+    // 返回尚未发送的新建任务时，恢复该临时会话自己的模式和模型；真正开始一个新任务时，
+    // 仍固定使用配置的默认模型，不继承当前正式会话手动切换过的模型。
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
-    const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
+    const { mode: nextMode, selectedModelName } = resolveNewConversationEntrySettings(
+      targetMode,
+      useSessionStore.getState().defaultModelName,
+      currentRuntime?.selectedModelName ?? null,
+      shouldRestorePendingNewConversation ? pendingNewRuntime : null,
+    );
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
     const projectDir = resolveNewConversationProjectDir(
       options.preserveProject,
@@ -1773,7 +1843,7 @@ function AppContent() {
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
     setHistoryLoadingMore(false);
-    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectDir });
+    resetNewConversationRuntime({ mode: nextMode, selectedModelName, projectDir });
     if (options.initialInputValue) {
       useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
     }
@@ -1872,6 +1942,8 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
+        pendingNewConversationRef.current = false;
+        useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
         // 会话，否则 sendMessage 取到的是新会话的默认值 false，这条消息就不会带
         // `.plan`，整个 Plan 流程（只读约束、计划审批弹窗）全都不会触发。
@@ -2125,9 +2197,9 @@ function AppContent() {
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
-        // 还原后端记录的会话模型：打开会话时若后端 metadata 带 model，写进
-        // runtime.selectedModelName，避免 selectedModelName 为空被全局默认兜底，
-        // 导致界面显示成默认模型（如定时任务选了非默认模型的会话，bug002）。
+        // 会话打开时若后端 metadata 带 model（首条 chat.send 显式携带 model_name 时
+        // 由后端落盘），写进 runtime.selectedModelName——单 Agent 与集群（team）会话
+        // 同样恢复，保证刷新页面后模型选择不回退到默认模型。
         if (targetSession.model) {
           useSessionStore.getState().setSelectedModelName(targetSessionId, targetSession.model);
         }
@@ -2780,11 +2852,16 @@ function AppContent() {
                 {!restartSuccess
                   ? t('app.restartWaiting')
                   : a2uiRefreshPending
-                    ? t('app.a2uiRefreshDesc')
+                    ? t(getA2UIChangeDescriptionKey(a2uiConfigChange))
                     : appliedWithoutRestart
                       ? t('app.configAppliedDesc')
                       : t('app.restartSuccessDesc')}
               </p>
+              {restartSuccess && a2uiRefreshPending && a2uiConfigChange?.renderingEnabled === false && (
+                <p className="text-sm text-danger mb-5" data-testid="app-a2ui-rendering-disabled-warning">
+                  {t('app.a2uiRenderingDisabledWarning')}
+                </p>
+              )}
               {restartSuccess && (
                 <button
                   type="button"

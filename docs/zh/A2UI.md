@@ -38,19 +38,28 @@ A2UI 是 JiuwenSwarm 的可选生成式界面能力，目前仅 Web channel 原�
 
 ```yaml
 a2ui:
-  enabled: false
+  generation_enabled: false
+  rendering_enabled: false
   protocol_version: "0.8"
   stream_validation_enabled: true
   non_web_fallback_enabled: false
 ```
 
-可通过以下方式控制：
+提供两个相互独立的开关：
 
-- Web 配置页：`A2UI` 顶层开关。
-- 用户工作区配置：修改 `config.yaml` 中的 `a2ui.enabled`。
-- 环境变量：`JIUWENSWARM_A2UI_ENABLED=false` 或 `true`。
+- `generation_enabled`：控制运行时 A2UI 生成指令、客户端事件处理、response
+  finalizer、repair 和重试流程。关闭后，Web 请求会收到一段禁用守卫：明确要求生成
+  A2UI 时，Agent 会提示用户重新打开“A2UI 生成支持”并提供纯文本替代回复，不会为生成
+  A2UI 主动搜索或调用相关 skill；仅查询、学习或讨论 A2UI 信息仍可正常回答和使用工具。
+- `rendering_enabled`：控制 Web 前端是否解析并渲染 A2UI 内容。关闭生成但保留
+  渲染时，历史 A2UI 内容仍会以只读方式显示。
 
-A2UI 默认关闭，需要显式开启后才会向 Web channel 注入 A2UI prompt 并执行 response finalizer。
+Web 配置页会展示这两个开关，也可以分别使用
+`JIUWENSWARM_A2UI_GENERATION_ENABLED` 和
+`JIUWENSWARM_A2UI_RENDERING_ENABLED` 覆盖。两项能力默认均关闭。
+
+为兼容旧配置，新 YAML 键缺失时，`a2ui.enabled` 会同时初始化两个开关；某项
+专用环境变量缺失时，旧 `JIUWENSWARM_A2UI_ENABLED` 仍会控制该项能力。
 
 `non_web_fallback_enabled` 是兼容旧配置的保留字段；当前 A2UI 为 Web-only，非 Web channel 始终 bypass A2UI。
 

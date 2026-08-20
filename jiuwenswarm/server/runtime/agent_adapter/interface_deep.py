@@ -179,6 +179,7 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
+from jiuwenswarm.common.cron_session import is_cron_execution_session
 from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
@@ -5089,18 +5090,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
-            _RailBuildInfo(
-                "_permission_rail",
-                build_permission_rail,
-                {
-                    "config": config_base,
-                    "llm": self._model,
-                    "model_name": config_base.get("models", {})
-                    .get("default", {})
-                    .get("model_client_config", {})
-                    .get("model_name", "gpt-4"),
-                },
-            ),
+            *self._permission_interrupt_rail_infos(config_base),
             _RailBuildInfo(
                 "_context_processor_rail",
                 _build_context_processor_rail,
@@ -5154,6 +5144,31 @@ class JiuWenSwarmDeepAdapter:
             )
 
         return self._instantiate_rails(rail_infos, config_base)
+
+    def _permission_interrupt_rail_infos(
+        self, config_base: dict[str, Any]
+    ) -> list[_RailBuildInfo]:
+        """PermissionInterruptRail recipe, omitted for unattended cron sessions."""
+        if is_cron_execution_session(self._parent_session_id):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail for cron session %s",
+                self._parent_session_id,
+            )
+            return []
+        return [
+            _RailBuildInfo(
+                "_permission_rail",
+                build_permission_rail,
+                {
+                    "config": config_base,
+                    "llm": self._model,
+                    "model_name": config_base.get("models", {})
+                    .get("default", {})
+                    .get("model_client_config", {})
+                    .get("model_name", "gpt-4"),
+                },
+            )
+        ]
 
     @staticmethod
     def _resolve_enable_task_loop(
@@ -5253,6 +5268,13 @@ class JiuWenSwarmDeepAdapter:
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
+        if is_cron_execution_session(self._parent_session_id):
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] skip PermissionInterruptRail hot-update "
+                "for cron session %s",
+                self._parent_session_id,
+            )
+            return
         permission_config = config_base.get("permissions", {}) if config_base else {}
         if self._permission_rail is not None:
             self._permission_rail.update_config(permission_config)
@@ -6071,6 +6093,14 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # cron 普通模式执行时 channel_id 是内部标识 "__cron__"（隔离执行会话），
+        # 真实推送渠道由 scheduler 通过 metadata["targets"] 下发（= job.targets，
+        # 与 cron 文本结果推送到同一批渠道）。这里归一为真实渠道，供 send_file
+        # 等按渠道开关的工具注册判定，并作为文件推送的 channel_id。
+        if normalized_channel == "__cron__":
+            cron_targets = str(normalized_metadata.get("targets") or "").strip()
+            if cron_targets:
+                normalized_channel = cron_targets
 
         session_metadata: dict[str, Any] = {}
         if isinstance(session_id, str) and session_id.strip():
@@ -6386,6 +6416,13 @@ class JiuWenSwarmDeepAdapter:
         channel = (
             str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         )
+        # cron 执行时 channel_id 是内部标识（如 "__cron__"），真实推送渠道由
+        # _bind_runtime_cron_context 归一后写入 contextvar（= job.targets，与 cron
+        # 文本结果推送到同一批渠道）。send_file 的注册判定与文件推送都按真实渠道进行。
+        if _CRON_TOOL_BOUND.get():
+            cron_channel = str(_CRON_TOOL_CHANNEL_ID.get() or "").strip()
+            if cron_channel:
+                channel = cron_channel
         send_file_enabled = (
             config_base.get("channels", {}).get(channel, {}).get("send_file_allowed")
         )
@@ -9187,7 +9224,9 @@ class JiuWenSwarmDeepAdapter:
                         parsed = self._parse_stream_chunk(chunk)
                         if parsed is not None:
                             event_type = str(parsed.get("event_type") or "").strip()
-                            if event_type in ("chat.error", "error"):
+                            # execution.error（DeepAgent round 级异常，如模型调用失败）
+                            # 与 chat.error / error 一样视为终端失败，透传其 message。
+                            if event_type in ("chat.error", "error", ERROR_EVENT_TYPE):
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
@@ -9235,12 +9274,17 @@ class JiuWenSwarmDeepAdapter:
 
         content = "".join(collected_content) if collected_content else ""
 
-        if not content and error_text:
+        if error_text:
+            # 模型/round 级错误：即使已流出部分内容，也按失败返回并透传错误消息，
+            # 避免 cron 等调用方误判为"执行完成但未返回结果"。
+            payload: dict[str, Any] = {"error": error_text}
+            if content:
+                payload["content"] = content
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": error_text},
+                payload=payload,
                 metadata=request.metadata,
             )
 

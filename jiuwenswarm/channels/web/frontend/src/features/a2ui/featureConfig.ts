@@ -1,15 +1,45 @@
 ﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-let a2uiFeatureEnabled = true;
+let a2uiGenerationEnabled = true;
+let a2uiRenderingEnabled = true;
 
-/** Set the frontend A2UI feature flag from the server config payload. */
-export function setA2UIFeatureEnabled(enabled: boolean) {
-  a2uiFeatureEnabled = enabled;
+interface A2UIFeatureConfig {
+  generationEnabled: boolean;
+  renderingEnabled: boolean;
 }
 
-/** Return whether the frontend should parse and dispatch A2UI content. */
+/** Set the independent frontend A2UI generation and rendering flags. */
+export function setA2UIFeatureConfig(config: A2UIFeatureConfig) {
+  a2uiGenerationEnabled = config.generationEnabled;
+  a2uiRenderingEnabled = config.renderingEnabled;
+}
+
+/** Set both flags for compatibility with the legacy combined switch. */
+export function setA2UIFeatureEnabled(enabled: boolean) {
+  setA2UIFeatureConfig({
+    generationEnabled: enabled,
+    renderingEnabled: enabled,
+  });
+}
+
+/** Return whether the frontend should parse and render A2UI content. */
 export function isA2UIFeatureEnabled() {
-  return a2uiFeatureEnabled;
+  return isA2UIRenderingEnabled();
+}
+
+/** Return whether A2UI client actions may continue through the generation flow. */
+export function isA2UIGenerationEnabled() {
+  return a2uiGenerationEnabled;
+}
+
+/** Return whether the frontend should parse and render A2UI content. */
+export function isA2UIRenderingEnabled() {
+  return a2uiRenderingEnabled;
+}
+
+/** Return whether rendered A2UI controls must be read-only. */
+export function shouldDisableA2UIInteraction(disableInteraction = false) {
+  return disableInteraction || !a2uiGenerationEnabled;
 }
 
 /** Normalize config values sent over the WebSocket config RPC boundary. */
