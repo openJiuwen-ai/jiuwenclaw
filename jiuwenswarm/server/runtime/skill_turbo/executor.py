@@ -646,6 +646,11 @@ class SkillTurboExecutor:
                     plan_failed = True
                     plan_error = str(payload.get("error") or "") or None
 
+                # 根节点可声明不向调用方转发的事件类型。Executor 只执行通用
+                # 可见性策略，不感知具体 skill 的业务类型。
+                if self._should_suppress_stream_event(root, event_type):
+                    continue
+
                 # 非缓冲事件类型：先 flush 所有缓冲，再透传当前事件
                 if event_type not in _BUFFERABLE_EVENT_TYPES:
                     async for flushed in self._flush_all_buffer_chunks(
@@ -1146,6 +1151,11 @@ class SkillTurboExecutor:
             if value is not None:
                 result[key] = value
         return result
+
+    @staticmethod
+    def _should_suppress_stream_event(root: PlanNode, event_type: Any) -> bool:
+        """Apply the root node's generic stream-event visibility policy."""
+        return event_type in root.suppressed_stream_event_types
 
     async def _emit_llm_usage(
         self,

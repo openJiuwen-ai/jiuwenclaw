@@ -50,6 +50,9 @@ def _result_status(result: Any) -> str:
 class PPTGenRootNode(PlanNode):
     # 节点显示名映射：供 Executor 读取，将内部 plan_name 转为前端展示的中文名。
     display_names: dict[str, str] = NODE_DISPLAY_NAMES
+    # PPT 的阶段进度由 task.* 事件独立承载；大纲、调研材料、页面代码和
+    # 模型推理仅供生成流程内部使用，不进入用户侧答案气泡。
+    suppressed_stream_event_types = frozenset({"chat.delta", "chat.reasoning"})
 
     def __init__(self) -> None:
         self._p0 = PipelineInitNode()

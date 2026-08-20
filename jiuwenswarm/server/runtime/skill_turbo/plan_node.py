@@ -42,6 +42,10 @@ __all__ = ["AbortError", "PlanNode"]
 class PlanNode(ABC):
     """规划节点 -- 递归结构，子类实现 async _execute，run 自带 fallback。"""
 
+    # 根节点可覆写此策略，声明不应向调用方转发的流式事件类型。
+    # 默认不抑制任何事件，保持现有 PlanNode 的输出行为不变。
+    suppressed_stream_event_types: frozenset[str] = frozenset()
+
     def __init__(
         self,
         plan_name: str,
