@@ -1,0 +1,72 @@
+{
+  "common": {
+    "ok": "确定",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "edit": "编辑",
+    "create": "新建",
+    "search": "搜索",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "empty": "暂无数据",
+    "yes": "是",
+    "no": "否",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "detail": "详情",
+    "view": "查看",
+    "actions": "操作",
+    "all": "全部",
+    "reload": "刷新页面",
+    "retry": "重试"
+  },
+  "brand": {
+    "title": "{{productName}}",
+    "sub": "Observability"
+  },
+  "nav": {
+    "observability": "观测"
+  },
+  "observability": {
+    "statInputTokens": "累计 input token",
+    "statOutputTokens": "累计 output token",
+    "statCallsTotal": "累计 LLM 调用数",
+    "chartTokenUsage": "累计 Token 用量",
+    "chartCallCount": "累计 LLM 调用次数",
+    "chartLlmLatency": "LLM 调用延迟（秒，平均）",
+    "chartAgentLatency": "Agent invoke 延迟（秒，平均）",
+    "tabs": {
+      "tokenUsage": "Token 用量",
+      "trace": "Trace 追踪",
+      "auditLog": "审核日志"
+    },
+    "placeholderHint": "该 Tab 内容待规划，敬请期待。",
+    "rangeLabel": "时间范围",
+    "dimensionLabel": "维度",
+    "searchPlaceholder": "输入 {{field}} 值进行搜索（如 alice / bot_main / g_demo_sales）",
+    "tokenUsageOverall": "累计 Token 用量（按 input / output 划分）",
+    "tokenUsageFor": "{{field}} = {{id}} 的累计 Token 用量（按 input / output 划分）",
+    "totalTokens": "Token 总量",
+    "topNTitle": "Top {{n}} · {{field}}",
+    "unknownId": "（未知 ID）",
+    "clickToFilter": "点击使用 {{id}} 作为搜索条件",
+    "howToUseTitle": "使用说明",
+    "howToUseSearch": "上方下拉切换维度（user_id / bot_id / group_id），输入具体 ID 后查看该 ID 的 token 用量曲线大图。",
+    "howToUseRanking": "下方三张卡片分别展示当前时间范围内 user_id / bot_id / group_id 三种维度 Top 5 的累计 token 用量。",
+    "howToUseLabel": "数据来源：gen_ai.client.token.usage 指标，已附加 jiuwenclaw.user.id / jiuwenclaw.group.id / jiuwenclaw.bot.id 标签。"
+  },
+  "trace": {
+    "searchPlaceholder": "输入 TraceID 或 user_id:3 bot_id:3 group_id:3 start_time:2026-08-12 组合筛选",
+    "recentTraces": "最近 20 次请求",
+    "searchResults": "搜索结果",
+    "traceDetail": "链路详情",
+    "selectHint": "← 点击左侧列表查看完整链路",
+    "duration": "总耗时",
+    "startTime": "开始时间",
+    "model": "模型",
+    "toolName": "工具",
+    "agentName": "Agent",
+    "iteration": "迭代"
+  }
+}

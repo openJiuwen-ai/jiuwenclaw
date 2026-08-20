@@ -34,6 +34,10 @@ render_manager_files() {
 
         render_config_template "${manager_web_template_file}" "${manager_web_file}" "DEPLOY_VARS"
         add_resource_if_set "MANAGER_WEB" "${manager_web_file}"
+
+        if [ "${DEPLOY_VARS["IS_MOUNT_MANAGER_WEB_CODE"]}" == "true" ]; then
+            enable_dev_mode_if_needed ${manager_web_file}
+        fi
     fi
 }
 

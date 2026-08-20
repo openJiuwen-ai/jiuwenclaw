@@ -1,0 +1,223 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: <<PROMETHEUS_NAME>>-sa
+  namespace: <<NAMESPACE>>
+automountServiceAccountToken: true
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: <<PROMETHEUS_NAME>>-role
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: <<PROMETHEUS_NAME>>-rolebinding
+subjects:
+  - kind: ServiceAccount
+    name: <<PROMETHEUS_NAME>>-sa
+    namespace: <<NAMESPACE>>
+roleRef:
+  kind: ClusterRole
+  name: <<PROMETHEUS_NAME>>-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: <<PROMETHEUS_NAME>>-config
+  namespace: <<NAMESPACE>>
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    scrape_configs:
+      # 采集OTel Collector DaemonSet指标
+      - job_name: '<<OTEL_NAME>>-metrics'
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: <<OTEL_NAME>>
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: prom-metrics
+            action: keep
+
+      # 采集K8s Node节点指标
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+
+      # 采集Pod内置/sidecar暴露的/metrics
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<PROMETHEUS_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<PROMETHEUS_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<PROMETHEUS_NAME>>
+    spec:
+      serviceAccountName: <<PROMETHEUS_NAME>>-sa
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: <<PROMETHEUS_NAME>>
+          image: <<PROMETHEUS_IMAGE>>
+          args:
+            - '--config.file=/etc/prometheus/prometheus.yml'
+            - '--storage.tsdb.path=/prometheus'
+            - '--storage.tsdb.retention.size=<<PROMETHEUS_RETENTION_SIZE>>' # 限制最大占用 4GB 磁盘空间
+            - '--storage.tsdb.retention.time=<<PROMETHEUS_RETENTION_TIME>>' # 限制最长保留 3 年时间
+            - '--web.enable-lifecycle'
+          ports:
+            - containerPort: 9090
+              name: web
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: web
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: web
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/prometheus/
+            - name: data-volume
+              mountPath: /prometheus
+      volumes:
+        - name: config-volume
+          configMap:
+            name: <<PROMETHEUS_NAME>>-config
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: <<PROMETHEUS_NAME>>-pvc
+---
+# Service：提供稳定 DNS 域名, 供集群内部访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<PROMETHEUS_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<PROMETHEUS_NAME>>
+  ports:
+    - port: 9090
+      targetPort: 9090
+  type: ClusterIP
+---
+# NodePort Service：供集群外部连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<PROMETHEUS_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - port: 9090       # 集群内部端口
+      targetPort: 9090 # 容器端口
+      nodePort: <<PROMETHEUS_NODE_PORT>>  # 外部访问端口（30000-32767）
+  selector:
+    app: <<PROMETHEUS_NAME>>
+---
+# PV 持久化存储
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: <<PROMETHEUS_NAME>>-pv
+  labels:
+    app: <<PROMETHEUS_NAME>>
+spec:
+  capacity:
+    storage: <<PROMETHEUS_STORAGE_SIZE>>
+  accessModes:
+    - ReadWriteOnce                       # RWX: 多个 Pod 可同时读写
+  persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
+  storageClassName: ""                    # 不使用 StorageClass
+  nfs:
+    server: <<NFS_SERVER_ADDR>>                        # NFS 服务器地址
+    path: <<NFS_SHARE_PATH>>/<<PROMETHEUS_NAME>>       # NFS 共享路径
+    readOnly: false
+  mountOptions:
+    - nfsvers=4
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
+    - noatime
+
+---
+# PVC 持久化存储（自动绑定 PV）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <<PROMETHEUS_NAME>>-pvc
+  namespace: <<NAMESPACE>>
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: <<PROMETHEUS_STORAGE_SIZE>>
+  storageClassName: ""       # 不使用 StorageClass
+  selector:
+    matchLabels:
+      app: <<PROMETHEUS_NAME>>

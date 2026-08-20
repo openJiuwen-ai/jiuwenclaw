@@ -10,7 +10,15 @@ from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.resources import Resource
 
-from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
+from jiuwenclaw.telemetry.attributes import (
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_SYSTEM,
+    JIUWENCLAW_BOT_ID,
+    JIUWENCLAW_CHANNEL_ID,
+    JIUWENCLAW_CLAW_ID,
+    JIUWENCLAW_GROUP_ID,
+    JIUWENCLAW_USER_ID,
+)
 
 _meter = metrics.get_meter("jiuwenclaw")
 _session_active_observer: Callable[[], int] | None = None
@@ -289,3 +297,49 @@ def add_queue_dequeued(value: int, attrs: dict) -> None:
 
 def add_message_processed(value: int, attrs: dict) -> None:
     message_processed.add(value, _with_resource_labels(attrs))
+
+
+def record_genai_token_usage(
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    model_name: str = "",
+    system: str = "unknown",
+    channel_id: str = "",
+    user_id: str = "",
+    group_id: str = "",
+    bot_id: str = "",
+) -> None:
+    """Record gen_ai.client.token.usage (input/output) for one LLM-driven agent step.
+
+    Fallback used when TelemetryRail cannot extract usage_metadata from the
+    streaming result (deep-agent / SDK-adapter mode: usage arrives via the
+    llm_usage chunk, not on the result object). TelemetryRail still records
+    operation.count / operation.duration / agent.duration via its callback hooks;
+    this function only fills the token-usage gap.
+
+    Records: gen_ai.client.token.usage (input/output).
+
+    The routing identity labels (user_id / group_id / bot_id) are attached so
+    the observability dashboard can break token usage down by these dimensions.
+    Empty values are dropped to avoid creating a "" bucket that pollutes
+    cardinality.
+    """
+    base = {
+        GEN_AI_REQUEST_MODEL: model_name,
+        GEN_AI_SYSTEM: system,
+        JIUWENCLAW_CHANNEL_ID: channel_id,
+    }
+    if user_id:
+        base[JIUWENCLAW_USER_ID] = user_id
+    if group_id:
+        base[JIUWENCLAW_GROUP_ID] = group_id
+    if bot_id:
+        base[JIUWENCLAW_BOT_ID] = bot_id
+    if input_tokens:
+        add_token_usage(input_tokens, {**base, "gen_ai.token.type": "input"})
+    if output_tokens:
+        add_token_usage(output_tokens, {**base, "gen_ai.token.type": "output"})
+
+
+

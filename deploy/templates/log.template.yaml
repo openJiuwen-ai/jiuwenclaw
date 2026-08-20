@@ -15,7 +15,7 @@ data:
     [INPUT]
         Name              tail
         Tag               kube.*
-        # 源头过滤：只采集满足命名空间和 Pod 前缀的文件，极大减少节点无效 IO
+        # 源头过滤：只采集 jiuwenclaw 的容器日志，极大减少节点无效 IO
         Path              /var/log/pods/*_jiuwenclaw*/*/*.log
         Parser            cri_or_docker
         DB                /var/lib/fluent-bit/positions.db
@@ -149,10 +149,10 @@ data:
           # 1. 获取 Fluent Bit 传过来的原始 Tag 字段 (路径已被转为点分格式)
           raw_tag = .tag || ""
 
-          # 2. 精准捕获 jiuwenclaw-\* 格式的 Pod 名字
+          # 2. 精准捕获 jiuwenclaw-* 格式的 Pod 名字
           captures = parse_regex(raw_tag, r'^kube\.var\.log\.pods\.(?<ns>[^_]+)_(?<pod>jiuwenclaw-.+?)_(?<uid>[^.]+)\.(?<container>[^.]+)\.') ?? null
           if captures == null {
-            # 如果不匹配，说明不是我们想要的业务日志，直接丢弃
+            # 如果不匹配，说明不是我们想要的目标日志，直接丢弃
             abort
           }
 

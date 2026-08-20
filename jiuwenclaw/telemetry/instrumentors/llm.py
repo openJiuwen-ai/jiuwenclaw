@@ -29,9 +29,12 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
+    JIUWENCLAW_BOT_ID,
     JIUWENCLAW_CHANNEL_ID,
+    JIUWENCLAW_GROUP_ID,
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
+    JIUWENCLAW_USER_ID,
 )
 from jiuwenclaw.telemetry.metrics import add_llm_call_count, add_token_usage, record_llm_duration
 
@@ -62,6 +65,9 @@ def instrument_llm() -> None:
         channel_id = getattr(self, "otel_channel_id", "")
         session_id = getattr(self, "otel_session_id", "")
         request_id = getattr(self, "otel_request_id", "")
+        user_id = getattr(self, "otel_user_id", "") or ""
+        group_id = getattr(self, "otel_group_id", "") or ""
+        bot_id = getattr(self, "otel_bot_id", "") or ""
         model_cfg = getattr(self._config, "model_config_obj", None)
         temperature = getattr(model_cfg, "temperature", None)
         top_p = getattr(model_cfg, "top_p", None)
@@ -76,6 +82,12 @@ def instrument_llm() -> None:
             JIUWENCLAW_CHANNEL_ID: channel_id,
             JIUWENCLAW_REQUEST_ID: request_id,
         }
+        if user_id:
+            span_attrs[JIUWENCLAW_USER_ID] = user_id
+        if group_id:
+            span_attrs[JIUWENCLAW_GROUP_ID] = group_id
+        if bot_id:
+            span_attrs[JIUWENCLAW_BOT_ID] = bot_id
         if temperature is not None:
             span_attrs[GEN_AI_REQUEST_TEMPERATURE] = float(temperature)
         if top_p is not None:
@@ -98,7 +110,10 @@ def instrument_llm() -> None:
                 )
 
                 # Token usage from AssistantMessage.usage_metadata
-                _record_token_usage(span, result, model_name, system, channel_id)
+                _record_token_usage(
+                    span, result, model_name, system, channel_id,
+                    user_id=user_id, group_id=group_id, bot_id=bot_id,
+                )
 
                 # Finish reason
                 finish_reason = getattr(result, "finish_reason", None)
@@ -196,7 +211,17 @@ def _record_output_message(span, result) -> None:
     span.add_event("gen_ai.assistant.message", attrs)
 
 
-def _record_token_usage(span, result, model_name: str, system: str, channel_id: str = "") -> None:
+def _record_token_usage(
+    span,
+    result,
+    model_name: str,
+    system: str,
+    channel_id: str = "",
+    *,
+    user_id: str = "",
+    group_id: str = "",
+    bot_id: str = "",
+) -> None:
     """Extract token usage from AssistantMessage.usage_metadata and record."""
     usage = getattr(result, "usage_metadata", None)
     if not usage:
@@ -213,8 +238,19 @@ def _record_token_usage(span, result, model_name: str, system: str, channel_id: 
     if cache_read:
         span.set_attribute(GEN_AI_USAGE_CACHE_READ_TOKENS, cache_read)
 
-    # Metric counters
-    base_attrs = {GEN_AI_REQUEST_MODEL: model_name, GEN_AI_SYSTEM: system, JIUWENCLAW_CHANNEL_ID: channel_id}
+    # Metric counters — attach routing identity (user_id/group_id/bot_id) so the
+    # observability dashboard can break token usage down by these dimensions.
+    base_attrs: dict[str, str] = {
+        GEN_AI_REQUEST_MODEL: model_name,
+        GEN_AI_SYSTEM: system,
+        JIUWENCLAW_CHANNEL_ID: channel_id,
+    }
+    if user_id:
+        base_attrs[JIUWENCLAW_USER_ID] = user_id
+    if group_id:
+        base_attrs[JIUWENCLAW_GROUP_ID] = group_id
+    if bot_id:
+        base_attrs[JIUWENCLAW_BOT_ID] = bot_id
     if input_tokens:
         add_token_usage(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
     if output_tokens:

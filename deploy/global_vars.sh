@@ -20,6 +20,21 @@ declare -A CONFIG=(
     ["MYSQL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/mysql.template.yaml"
     ["MYSQL_FILE"]="${CONFIG_DIR}/mysql.yaml"
 
+    ["OBSERVABILITY_TEMPLATE_FILE"]="${TEMPLATE_DIR}/observability.template.yaml"
+    ["OBSERVABILITY_FILE"]="${CONFIG_DIR}/observability.yaml"
+
+    ["OTEL_TEMPLATE_FILE"]="${TEMPLATE_DIR}/otel.template.yaml"
+    ["OTEL_FILE"]="${CONFIG_DIR}/otel.yaml"
+
+    ["PROMETHEUS_TEMPLATE_FILE"]="${TEMPLATE_DIR}/prometheus.template.yaml"
+    ["PROMETHEUS_FILE"]="${CONFIG_DIR}/prometheus.yaml"
+
+    ["LOKI_TEMPLATE_FILE"]="${TEMPLATE_DIR}/loki.template.yaml"
+    ["LOKI_FILE"]="${CONFIG_DIR}/loki.yaml"
+
+    ["TEMPO_TEMPLATE_FILE"]="${TEMPLATE_DIR}/tempo.template.yaml"
+    ["TEMPO_FILE"]="${CONFIG_DIR}/tempo.yaml"
+
     ["POSTGRES_TEMPLATE_FILE"]="${TEMPLATE_DIR}/postgresql.template.yaml"
     ["POSTGRES_FILE"]="${CONFIG_DIR}/postgresql.yaml"
 
@@ -77,7 +92,7 @@ declare -A ARGS=(
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "NFS-SC" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "MINIO" "LOG" "JINA" "MONITOR" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -105,6 +120,10 @@ declare -A DEPLOY_VARS=(
     ["ENABLE_EXTERNAL_POSTGRES"]="false"
     ["ENABLE_EXTERNAL_RABBITMQ"]="false"
     ["ENABLE_EXTERNAL_REDIS"]="false"
+    ["ENABLE_EXTERNAL_OTEL"]="false"
+    ["ENABLE_EXTERNAL_PROMETHEUS"]="false"
+    ["ENABLE_EXTERNAL_TEMPO"]="false"
+    ["ENABLE_EXTERNAL_LOKI"]="false"
     ["FLUENT_BIT_NAME"]="fluent-bit"
     ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
@@ -119,8 +138,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_INSTANCE_ID"]=""
     ["GATEWAY_SCHED_LABEL_ENABLED"]="false"
-    ["LOG_MASK_ENABLED"]="true"
-    ["LOG_TO_FILE_ENABLED"]="true"
     ["GATEWAY_NAME"]="jiuwenclaw-gateway"
     ["GATEWAY_PG_SCHEMA"]="public"
     ["GATEWAY_REPLICAS"]="1"
@@ -128,13 +145,19 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["IS_UP_MANAGER_WEB"]="true"
     ["IS_MOUNT_WEB_CODE"]="false"
+    ["IS_MOUNT_MANAGER_WEB_CODE"]="false"
+    ["IS_MOUNT_OBSERVABILITY_CODE"]="false"
     ["JIUWENBOX_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/jiuwenbox"
     ["JINA_NAME"]="jina"
     ["JINA_CACHE_IMAGE"]="nginx:alpine"
     ["JINA_READER_IMAGE"]="ghcr.1ms.run/jina-ai/reader:latest"
     ["JINA_READER_ENDPOINT"]="https://r.jinaai.cn"
     ["JINA_READER_NUM"]="2"
-    ["FLUENT_BIT_IMAGE"]="fluent/fluent-bit:3.0.0"
+    ["LOG_MASK_ENABLED"]="true"
+    ["LOG_TO_FILE_ENABLED"]="true"
+    ["LOKI_NAME"]="loki"
+    ["LOKI_IMAGE"]="grafana/loki:3.0.0"
+    ["LOKI_STORAGE_SIZE"]="4Gi"
     ["MANAGER_DB_NAME"]="manager"
     ["WEB_DB_NAME"]="web"
     ["MANAGER_PG_SCHEMA"]="public"
@@ -163,15 +186,25 @@ declare -A DEPLOY_VARS=(
     ["NFS_SC_NAME"]="nfs-storage"
     ["NFS_SHARE_PATH"]="/"
     ["NO_CHECK_PORTS"]="false"
+    ["OBSERVABILITY_NAME"]="observability"
+    ["OBSERVABILITY_DB_NAME"]="observability"
     ["OBS_ACCESS_KEY"]="minioadmin"
     ["OBS_SECRET_KEY"]="Minio@123456"
     ["OBS_BUCKET"]="jiuwenclaw"
     ["OBS_REGION"]="default"
     ["OBS_SECURE"]="false"
     ["OBS_PUBLIC_BASE_URL"]=""
+    ["OTEL_NAME"]="otel-collector"
+    ["OTEL_IMAGE"]="otel/opentelemetry-collector-contrib:latest"
+    ["OTEL_ENABLED"]="true"
+    ["PROMETHEUS_NAME"]="prometheus"
+    ["PROMETHEUS_IMAGE"]="prom/prometheus:v2.51.0"
+    ["PROMETHEUS_STORAGE_SIZE"]="4Gi"
+    ["PROMETHEUS_RETENTION_SIZE"]="4GB"
+    ["PROMETHEUS_RETENTION_TIME"]="3y"
     ["POOL_ID"]="claw"
-    ["POSTGRES_IMAGE"]="postgres:16"
     ["POSTGRES_NAME"]="postgresql"
+    ["POSTGRES_IMAGE"]="postgres:16"
     ["POSTGRES_PASSWORD"]="Root@123456"
     ["POSTGRES_MAX_CONNECTION"]="192"
     ["POSTGRES_STORAGE_SIZE"]="4Gi"
@@ -196,6 +229,9 @@ declare -A DEPLOY_VARS=(
     ["RUNTIME_CODE_POD_PATH"]="/usr/local/lib/python3.11/site-packages/openjiuwen_runtime"
     ["SECRET_CM_NAME"]="jiuwenclaw-secret-configmap"
     ["TIMEZONE"]="Asia/Shanghai"
+    ["TEMPO_NAME"]="tempo"
+    ["TEMPO_IMAGE"]="grafana/tempo:latest"
+    ["TEMPO_STORAGE_SIZE"]="4Gi"
     ["VECTOR_NAME"]="vector-receiver"
     ["VECTOR_IMAGE"]="timberio/vector:0.40.0-alpine"
     ["VAR_LIB_DOCKER_PATH"]="/var/lib/containerd"

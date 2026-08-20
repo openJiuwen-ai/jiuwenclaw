@@ -32,7 +32,6 @@ spec:
               value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
             - name: TZ
               value: "<<TIMEZONE>>"
-
 ---
 # NodePort Service：供外连接 Manager Web UI
 apiVersion: v1

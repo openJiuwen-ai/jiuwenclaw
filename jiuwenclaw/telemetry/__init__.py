@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import traceback
+
 _initialized = False
 
 
@@ -31,12 +33,14 @@ def init_telemetry() -> None:
         from jiuwenclaw.telemetry.instrumentors import apply_instrumentors
 
         logger.info(
-            "[Telemetry] Initializing: traces_exporter=%s, metrics_exporter=%s, "
-            "traces_endpoint=%s, metrics_endpoint=%s, log_messages=%s",
+            "[Telemetry] Initializing: traces_exporter=%s, metrics_exporter=%s, logs_exporter=%s, "
+            "traces_endpoint=%s, metrics_endpoint=%s, logs_endpoint=%s, log_messages=%s",
             cfg.traces_exporter,
             cfg.metrics_exporter,
+            cfg.logs_exporter,
             cfg.traces_endpoint,
             cfg.metrics_endpoint,
+            cfg.logs_endpoint,
             cfg.log_messages,
         )
 
@@ -51,6 +55,7 @@ def init_telemetry() -> None:
         logger.info("[Telemetry] Initialization complete")
     except Exception:
         logger.warning("[Telemetry] Initialization failed, continuing without telemetry", exc_info=True)
+        traceback.print_exc()
 
 
 def is_telemetry_initialized() -> bool:

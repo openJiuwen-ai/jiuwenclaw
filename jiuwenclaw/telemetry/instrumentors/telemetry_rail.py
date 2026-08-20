@@ -25,6 +25,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+from jiuwenclaw.telemetry.instrumentors.agent import RoutingCtx
 from jiuwenclaw.utils import logger
 from jiuwenclaw.telemetry.attributes import (
     ERROR_TYPE,
@@ -51,11 +52,14 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
     JIUWENCLAW_AGENT_NAME,
+    JIUWENCLAW_BOT_ID,
     JIUWENCLAW_CANCELED,
     JIUWENCLAW_CHANNEL_ID,
+    JIUWENCLAW_GROUP_ID,
     JIUWENCLAW_ITERATION,
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
+    JIUWENCLAW_USER_ID,
 )
 from jiuwenclaw.telemetry.metrics import (
     agent_duration,
@@ -173,6 +177,11 @@ class TelemetryRail(DeepAgentRail):
         # Active spans keyed by call_id (LLM/tool call IDs are unique per request)
         self._llm_spans: dict[str, tuple[trace.Span, float]] = {}
         self._tool_spans: dict[str, tuple[trace.Span, float, str]] = {}
+        # Last agent.invoke span (instance-level, survives across requests).
+        # Used as fallback parent for tool/LLM spans created in HITL resume
+        # path where before_invoke is skipped (so no agent.invoke span exists
+        # in current ContextVar). May be None or already-ended span.
+        self._last_agent_span: Optional[trace.Span] = None
         # Circuit breaker (instance-level, applies to all hooks)
         self._failure_count: int = 0
         self._degraded: bool = False
@@ -187,10 +196,9 @@ class TelemetryRail(DeepAgentRail):
 
     def set_telemetry_context(
         self,
-        channel_id: str = "",
-        session_id: str = "",
-        request_id: str = "",
+        routing: RoutingCtx,
         metadata: dict | None = None,
+        is_resume: bool = False,
     ) -> None:
         """Set telemetry context for the current request.
 
@@ -199,6 +207,15 @@ class TelemetryRail(DeepAgentRail):
 
         IMPORTANT: Always clears _trace_context when metadata is None or {},
         preventing inheritance from previous request's traceparent.
+
+        Args:
+            routing: RoutingCtx with channel/session/request/user/group/bot IDs.
+            metadata: Request metadata (may contain W3C trace context).
+            is_resume: True if this is a HITL resume request (i.e. user just
+                answered an interactive tool prompt). Used by before_invoke to
+                parent the new agent.invoke span onto the previous request's
+                agent.invoke span so the resume trace stays in the same trace
+                as the original request.
         """
         # Extract W3C TraceContext from metadata; explicitly clear if no metadata
         trace_ctx = None
@@ -207,11 +224,15 @@ class TelemetryRail(DeepAgentRail):
 
         # Store all request-scoped state in ContextVar
         _request_context.set({
-            "channel_id": channel_id,
-            "session_id": session_id,
-            "request_id": request_id,
+            "channel_id": routing.channel_id,
+            "session_id": routing.session_id,
+            "request_id": routing.request_id,
             "trace_context": trace_ctx,
             "iteration": 0,
+            "user_id": routing.user_id,
+            "group_id": routing.group_id,
+            "bot_id": routing.bot_id,
+            "is_resume": is_resume,
         })
 
     def _get_request_context(self) -> dict:
@@ -223,6 +244,10 @@ class TelemetryRail(DeepAgentRail):
             "request_id": "",
             "trace_context": None,
             "iteration": 0,
+            "user_id": "",
+            "group_id": "",
+            "bot_id": "",
+            "is_resume": False,
         }
 
     # ------------------------------------------------------------------
@@ -260,11 +285,32 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             JIUWENCLAW_REQUEST_ID: req_ctx["request_id"],
         }
+        if req_ctx.get("user_id"):
+            attrs[JIUWENCLAW_USER_ID] = req_ctx["user_id"]
+        if req_ctx.get("group_id"):
+            attrs[JIUWENCLAW_GROUP_ID] = req_ctx["group_id"]
+        if req_ctx.get("bot_id"):
+            attrs[JIUWENCLAW_BOT_ID] = req_ctx["bot_id"]
 
-        # Start span with extracted parent context (for cross-WebSocket propagation)
+        # Start span with extracted parent context (for cross-WebSocket propagation).
+        # If the request's metadata carried a W3C traceparent (injected by
+        # gateway), use it as parent so this agent.invoke joins the upstream
+        # trace. Otherwise, for HITL resume requests (identified by
+        # is_resume flag, see set_telemetry_context), fall back to the last
+        # agent.invoke span stored on this instance so the resume request
+        # stays in the same trace as the original request instead of starting
+        # a new orphan trace.
+        trace_ctx = req_ctx["trace_context"]
+        if req_ctx.get("is_resume"):
+            parent_in_trace_ctx = trace.get_current_span(context=trace_ctx)
+            if parent_in_trace_ctx is None or not parent_in_trace_ctx.get_span_context().is_valid:
+                fallback_span = self._last_agent_span
+                if fallback_span is not None and fallback_span.get_span_context().is_valid:
+                    trace_ctx = trace.set_span_in_context(fallback_span)
+
         agent_span = _tracer.start_span(
             "jiuwenclaw.agent.invoke",
-            context=req_ctx["trace_context"],
+            context=trace_ctx,
             kind=SpanKind.SERVER,
             attributes=attrs,
         )
@@ -277,6 +323,8 @@ class TelemetryRail(DeepAgentRail):
 
         # Store span state in ContextVar for this request
         _agent_span_ctx.set((agent_span, agent_start_time, ctx_token))
+        # Also keep on instance for HITL resume fallback (see before_tool_call)
+        self._last_agent_span = agent_span
 
     @_hook_safe
     async def after_invoke(self, ctx: Any) -> None:
@@ -375,11 +423,32 @@ class TelemetryRail(DeepAgentRail):
         attrs[GEN_AI_REQUEST_STREAMING] = streaming
 
         # Use the current OTel context — supports sub-agent / handoff nesting automatically.
-        span = _tracer.start_span(
-            "gen_ai.chat",
-            kind=SpanKind.INTERNAL,
-            attributes=attrs,
-        )
+        # Fallback: see before_tool_call for rationale (HITL resume path).
+        current_span = trace.get_current_span()
+        if current_span is not None and current_span.get_span_context().is_valid:
+            span = _tracer.start_span(
+                "gen_ai.chat",
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
+        elif req_ctx.get("is_resume"):
+            fallback_span = self._last_agent_span
+            if fallback_span is not None and fallback_span.get_span_context().is_valid:
+                fallback_ctx = trace.set_span_in_context(fallback_span)
+            else:
+                fallback_ctx = req_ctx.get("trace_context")
+            span = _tracer.start_span(
+                "gen_ai.chat",
+                context=fallback_ctx,
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
+        else:
+            span = _tracer.start_span(
+                "gen_ai.chat",
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
 
         inputs = getattr(ctx, "inputs", None)
 
@@ -551,11 +620,36 @@ class TelemetryRail(DeepAgentRail):
         }
 
         # Use the current OTel context — supports sub-agent / handoff nesting automatically.
-        span = _tracer.start_span(
-            f"gen_ai.tool.execute: {tool_name}",
-            kind=SpanKind.INTERNAL,
-            attributes=attrs,
-        )
+        # Fallback: if current context has no valid parent span AND this is a HITL
+        # resume request (is_resume flag), parent the tool span to the last
+        # agent.invoke span (instance-level, survives across requests) so it
+        # stays in the same trace as the original request. The last agent.invoke
+        # span may already be ended; OTel allows ended spans as parents.
+        current_span = trace.get_current_span()
+        if current_span is not None and current_span.get_span_context().is_valid:
+            span = _tracer.start_span(
+                f"gen_ai.tool.execute: {tool_name}",
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
+        elif req_ctx.get("is_resume"):
+            fallback_span = self._last_agent_span
+            if fallback_span is not None and fallback_span.get_span_context().is_valid:
+                fallback_ctx = trace.set_span_in_context(fallback_span)
+            else:
+                fallback_ctx = req_ctx.get("trace_context")
+            span = _tracer.start_span(
+                f"gen_ai.tool.execute: {tool_name}",
+                context=fallback_ctx,
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
+        else:
+            span = _tracer.start_span(
+                f"gen_ai.tool.execute: {tool_name}",
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+            )
 
         # Record arguments as span event
         span.add_event("tool.arguments", {"arguments": str(arguments)[:4096]})
@@ -608,6 +702,31 @@ class TelemetryRail(DeepAgentRail):
         # Record result
         result_str = str(result)[:4096] if result is not None else ""
         span.add_event("tool.result", {"result": result_str})
+
+        # If a multimodal tool (vision/audio/video) recorded token usage via
+        # record_multimodal_token_usage (now in agent-core's multimodal_telemetry),
+        # consume it here: write onto tool span + record metric.
+        try:
+            from openjiuwen.harness.tools.multimodal_telemetry import consume_multimodal_usage
+            from jiuwenclaw.telemetry.metrics import record_genai_token_usage
+            mm_usage = consume_multimodal_usage()
+            if mm_usage:
+                span.set_attribute(GEN_AI_REQUEST_MODEL, mm_usage["model"])
+                span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, mm_usage["input_tokens"])
+                span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, mm_usage["output_tokens"])
+                span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS, mm_usage["input_tokens"] + mm_usage["output_tokens"])
+                record_genai_token_usage(
+                    input_tokens=mm_usage["input_tokens"],
+                    output_tokens=mm_usage["output_tokens"],
+                    model_name=mm_usage["model"],
+                    system=mm_usage.get("system", "openai"),
+                    channel_id=req_ctx["channel_id"],
+                    user_id=req_ctx["user_id"],
+                    group_id=req_ctx["group_id"],
+                    bot_id=req_ctx["bot_id"],
+                )
+        except Exception as exc:
+            logger.warning("[TelemetryRail] multimodal token usage recording failed: %s", exc)
 
         # Error detection
         is_error = False
