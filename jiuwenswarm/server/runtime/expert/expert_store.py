@@ -119,6 +119,26 @@ def validate_expert_package(package_dir: Path) -> list[str]:
         # tool 条目是 Python 文件引用（loader: {"file": "tools/xxx.py", "class": ...}）
         if not tool_file or not (package_dir / str(tool_file)).is_file():
             raise InvalidExpertPackage(f"tools 条目引用的文件不存在: {tool_entry!r}")
+    pkg_root = package_dir.resolve()
+    for skill_entry in manifest.get("skills") or []:
+        skill_dir_raw = (
+            skill_entry.get("dir") if isinstance(skill_entry, dict) else None
+        )
+        # skill 条目是目录引用（loader: {"dir": "skills/xxx", "mode": ..., ...}）
+        if not skill_dir_raw:
+            raise InvalidExpertPackage(f"skills 条目缺少 dir: {skill_entry!r}")
+        skill_path = (package_dir / str(skill_dir_raw)).resolve()
+        # 声明路径必须仍在包目录内，拒绝路径逃逸（zip slip 同规）
+        if pkg_root not in skill_path.parents and skill_path != pkg_root:
+            raise InvalidExpertPackage(f"skills dir 逃逸包目录: {skill_dir_raw}")
+        if not skill_path.is_dir():
+            raise InvalidExpertPackage(f"skills dir 不存在或非目录: {skill_dir_raw}")
+        # 叶子形态：dir 直接含 SKILL.md（与 agent-core _skill_paths_to_rail_mounts 的
+        # is_leaf 分支对齐；父目录形态需扫子目录，本期不支持，留作扩展）
+        if not (skill_path / "SKILL.md").is_file():
+            raise InvalidExpertPackage(
+                f"skills dir 下缺少 SKILL.md: {skill_dir_raw}（叶子形态要求直接含 SKILL.md）"
+            )
     avatar = (manifest.get("metadata") or {}).get("avatar")
     if avatar:
         avatar_path = (package_dir / str(avatar)).resolve()

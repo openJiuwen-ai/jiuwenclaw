@@ -192,6 +192,9 @@ from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.expert_capability import (
     ExpertCapabilityMixin,
 )
+from jiuwenswarm.server.runtime.agent_adapter.skill_rail_reconcile import (
+    ReconcilingSkillUseRail,
+)
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -4151,11 +4154,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
     def _build_skill_rail(
         self, config: dict[str, Any], include_tools: bool = False
     ) -> SkillUseRail | None:
-        """Build SkillUseRail."""
+        """Build SkillUseRail（ReconcilingSkillUseRail 子类， baseline 刷新）."""
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
-            skill_rail = SkillUseRail(
+            skill_rail = ReconcilingSkillUseRail(
                 skills_dir=str(get_agent_skills_dir()),
                 skill_mode=skill_mode,
                 include_tools=include_tools,

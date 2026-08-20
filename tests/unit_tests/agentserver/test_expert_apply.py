@@ -67,7 +67,13 @@ def _make_model() -> Model:
     )
 
 
-def _make_package(root: Path, name: str, persona: str, tool_name: str | None = None) -> Path:
+def _make_package(
+        root: Path,
+        name: str,
+        persona: str,
+        tool_name: str | None = None,
+        skill_name: str | None = None,
+) -> Path:
     pkg = root / name
     (pkg / "agents").mkdir(parents=True)
     (pkg / "agents" / "00-identity.md").write_text(persona, encoding="utf-8")
@@ -86,6 +92,15 @@ def _make_package(root: Path, name: str, persona: str, tool_name: str | None = N
         manifest["tools"] = [
             {"file": f"tools/{tool_name}.py", "class": class_name}
         ]
+    if skill_name:
+        # 叶子形态：skills/<name>/SKILL.md，manifest 写 {"dir": "skills/<name>"}
+        skill_dir = pkg / "skills" / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: 测试技能\n---\n# {skill_name}\n",
+            encoding="utf-8",
+        )
+        manifest["skills"] = [{"dir": f"skills/{skill_name}"}]
     (pkg / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
@@ -106,6 +121,38 @@ def _make_adapter() -> JiuWenSwarmDeepAdapter:
     adapter._instance = agent
     adapter.mark_as_session_scoped("sess-test")
     return adapter
+
+
+async def _make_adapter_with_skill_rail() -> JiuWenSwarmDeepAdapter:
+    """同 _make_adapter，但额外挂一个空 SkillUseRail，用于 skills 装载测试。
+
+    生产环境的 create_instance 经 _build_skill_rail 总是挂 SkillUseRail（
+    interface_deep.py:4131 / :4861），但 _make_adapter 走精简构造——既未传
+    skills 也未开 enable_skill_discovery，按 factory.py 的默认 rail 表
+    （`bool(skills) or config.enable_skill_discovery`）不会挂 skill rail。
+    而 agent-core 的 _bind_skill 在无 rail 时直接 raise "No SkillUseRail
+    registered"，所以 skills 测试必须用本工厂补一个空 rail：skills_dir 传
+    空列表，专家装载时 _bind_skill 会把 skill 目录并入 skills_dir 再
+    reload_skills（非空），空 rail 本身不主动 reload 故不会触发空 skills_dir
+    的 ValueError。include_tools=False 避免重复注册 fs 工具。
+    """
+    from openjiuwen.harness.rails import SkillUseRail
+
+    adapter = _make_adapter()
+    rail = SkillUseRail(skills_dir=[], skill_mode="all", include_tools=False)
+    await adapter._instance.register_rail(rail)
+    return adapter
+
+
+def _skill_names(adapter: JiuWenSwarmDeepAdapter) -> set[str]:
+    """宿主 SkillUseRail 上当前挂载的 skill 名集合（经公开 API 取值）。"""
+    from openjiuwen.harness.rails import SkillUseRail
+
+    rails = adapter._instance.find_rails_by_type((SkillUseRail,))
+    if not rails:
+        return set()
+    rail = rails[0]
+    return {skill.name for skill in rail.get_skills_for_session()}
 
 
 def _identity_text(adapter: JiuWenSwarmDeepAdapter) -> str:
@@ -189,6 +236,47 @@ async def test_unload_restores_identity_and_removes_tools(experts_dir: Path) -> 
         "卸载后 identity 应经 previous_snapshot 还原为宿主人设"
     )
     assert "echo_a" not in _tool_names(adapter)
+
+
+@pytest.mark.asyncio
+async def test_apply_loads_skill(experts_dir: Path) -> None:
+    """专家携带的 skill 应挂到宿主 SkillUseRail（agent-core _bind_skill）。"""
+    _make_package(experts_dir, "expert-a", "你是专家阿甲。", skill_name="threat-modeling")
+    adapter = await _make_adapter_with_skill_rail()
+
+    await adapter.apply_expert("expert-a")
+
+    assert "threat-modeling" in _skill_names(adapter), (
+        "装载后专家 skill 应出现在宿主 SkillUseRail"
+    )
+
+
+@pytest.mark.asyncio
+async def test_switch_replaces_skill_without_residue(experts_dir: Path) -> None:
+    """A→B 切换后 A 的 skill 不残留、B 的 skill 生效（先卸后装的 skill 维度）。"""
+    _make_package(experts_dir, "expert-a", "你是专家阿甲。", skill_name="threat-modeling")
+    _make_package(experts_dir, "expert-b", "你是专家阿乙。", skill_name="vuln-triage")
+    adapter = await _make_adapter_with_skill_rail()
+
+    await adapter.apply_expert("expert-a")
+    await adapter.apply_expert("expert-b")
+
+    skills = _skill_names(adapter)
+    assert "vuln-triage" in skills
+    assert "threat-modeling" not in skills, "切换后上一位专家的 skill 应被摘除"
+
+
+@pytest.mark.asyncio
+async def test_unload_removes_skill(experts_dir: Path) -> None:
+    """退出专家后其 skill 应从宿主 SkillUseRail 摘除。"""
+    _make_package(experts_dir, "expert-a", "你是专家阿甲。", skill_name="threat-modeling")
+    adapter = await _make_adapter_with_skill_rail()
+
+    await adapter.apply_expert("expert-a")
+    assert "threat-modeling" in _skill_names(adapter)
+    await adapter.apply_expert(None)
+
+    assert "threat-modeling" not in _skill_names(adapter), "卸载后 skill 应从 rail 摘除"
 
 
 @pytest.mark.asyncio
