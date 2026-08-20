@@ -43,7 +43,7 @@ def _extract_declared_charset(response: requests.Response) -> str:
     if meta_match:
         try:
             return meta_match.group(1).decode("ascii", errors="ignore").strip()
-        except Exception:
+        except Exception:  # noqa: BLE001 - malformed charset falls back to ""
             return ""
     return ""
 
@@ -201,7 +201,14 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
-    response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    try:
+        response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+        # Network-level failures: try the reader fallback before giving up.
+        try:
+            return _fetch_via_jina_reader_sync(url, timeout_seconds)
+        except Exception:  # noqa: BLE001 - preserve the original error
+            raise exc
     if response.status_code in {401, 403, 429}:
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
@@ -226,12 +233,28 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     }
 
 
+def _classify_fetch_error(exc: Exception) -> str:
+    """Classify fetch failures so agents can tell access errors from empty results."""
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "connection"
+    if isinstance(exc, requests.exceptions.HTTPError):
+        return "http_error"
+    if isinstance(exc, requests.exceptions.RequestException):
+        return "request"
+    return "unknown"
+
+
 @tool(
     name="mcp_fetch_webpage",
     description=(
         "Fetch webpage text content from URL. Returns status/title/plain text content. "
         "Set max_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for slow websites."
+        "Use a larger timeout_seconds for slow websites. "
+        "A result starting with [FETCH_ERROR: <category>] means the page could NOT be "
+        "ACCESSED (network/HTTP failure), not that the content does not exist — try an "
+        "alternative source (API endpoint, search engine) before concluding absence."
     ),
 )
 async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
@@ -243,8 +266,7 @@ async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int =
         max_chars = int(max_chars)
     except (TypeError, ValueError):
         max_chars = 0
-    if max_chars < 0:
-        max_chars = 0
+    max_chars = max(max_chars, 0)
 
     try:
         timeout_seconds = int(timeout_seconds)
@@ -259,7 +281,15 @@ async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int =
 
     try:
         data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
-    except Exception as exc:
+    except requests.exceptions.RequestException as exc:
+        category = _classify_fetch_error(exc)
+        return (
+            f"[FETCH_ERROR: {category}] failed to fetch webpage: {exc}\n"
+            "This is an ACCESS failure (network/HTTP), not an empty result. "
+            "Retry with an alternative source (API endpoint, search engine) "
+            "before concluding the content does not exist."
+        )
+    except Exception as exc:  # noqa: BLE001 - surface any failure to the model
         return f"[ERROR]: failed to fetch webpage: {exc}"
 
     lines = [
