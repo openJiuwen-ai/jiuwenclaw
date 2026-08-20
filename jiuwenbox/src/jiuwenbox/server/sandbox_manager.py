@@ -1570,16 +1570,46 @@ class SandboxManager:
         self,
         policy_data: Mapping[str, object] | None,
         policy_mode: PolicyMode = PolicyMode.OVERRIDE,
+        update_default_policy: bool = False,
     ) -> dict[str, object]:
         """Apply the same network update to every registered sandbox.
 
         Request-body validation failures raise before any sandbox is touched.
         Per-sandbox host-mode sandboxes are skipped; other failures are
         collected without aborting the batch.
+
+        When ``update_default_policy`` is set, the same update is also merged
+        into ``self.policy`` -- the base every future ``create_sandbox`` call
+        resolves against -- so sandboxes created after this request inherit
+        the new rules. This only mutates process state; the policy YAML on
+        disk is never rewritten (same contract as
+        :meth:`update_timeout_policy`), so a restart falls back to the file.
         """
         egress, ingress = self.validate_network_policy_update(policy_data)
 
+        default_policy: dict[str, object] | None = None
         async with self._lock:
+            if update_default_policy:
+                # Rebase the default *before* snapshotting the registry:
+                # a sandbox created while the loop below is running is absent
+                # from ``sandbox_ids``, so it must already inherit the new
+                # rules from the default or it would miss this update.
+                merged = self._merge_network_rules_update(
+                    self.policy, egress, ingress, policy_mode,
+                )
+                self.policy_engine.validate_policy(merged)
+                # Replace only ``network``: ``update_timeout_policy`` mutates
+                # ``self.policy`` without holding this lock, so writing back
+                # a wholesale copy could swallow a concurrent timeout change.
+                self.policy = self.policy.model_copy(
+                    update={"network": merged.network},
+                )
+                default_policy = self.policy.model_dump(mode="json")
+                logger.info(
+                    "default sandbox policy network rules updated (mode=%s); "
+                    "applies to sandboxes created from now on",
+                    policy_mode.value,
+                )
             sandbox_ids = list(self._sandboxes.keys())
 
         updated_ids: list[str] = []
@@ -1623,4 +1653,6 @@ class SandboxManager:
             "updated": updated_ids,
             "skipped": skipped,
             "failed": failed,
+            "default_updated": update_default_policy,
+            "default_policy": default_policy,
         }

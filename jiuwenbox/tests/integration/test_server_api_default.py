@@ -1248,6 +1248,40 @@ class TestPolicyAPI:
         assert SANDBOX_WORKSPACE in resp.json()["error"]
 
 
+@pytest.fixture
+def restore_default_policy(client):
+    """Snapshot the server default policy's network rules and restore them.
+
+    Needed for the same reason as ``restore_timeout``: integration tests share
+    one jiuwenbox-server process, and ``update_default_policy: true`` mutates
+    ``mgr.policy`` for the rest of the session. Leaking a modified default
+    would silently change the effective policy of every sandbox that later
+    tests create without an explicit ``policy`` body.
+
+    Restore uses ``override`` with the *full* egress/ingress dicts returned by
+    the GET, which is an exact round-trip (override replaces a direction
+    wholesale, and every ``NetworkRulePolicy`` field is present in the
+    response).
+    """
+    snapshot_resp = client.get("/api/v1/policies")
+    assert snapshot_resp.status_code == 200, snapshot_resp.text
+    snapshot = snapshot_resp.json()
+    network = snapshot["network"]
+    try:
+        yield snapshot
+    finally:
+        client.put("/api/v1/policies", json={
+            "policy_mode": "override",
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "egress": network["egress"],
+                    "ingress": network["ingress"],
+                },
+            },
+        })
+
+
 class TestUpdatePolicyAPI:
     """End-to-end coverage for ``PUT /policies`` and ``PUT /policies/{id}``.
 
@@ -1738,6 +1772,223 @@ class TestUpdatePolicyAPI:
         assert result["updated"] == []
         assert result["skipped"] == []
         assert result["failed"] == []
+
+
+class TestDefaultPolicyAPI:
+    """Cover ``GET /policies`` and the ``update_default_policy`` switch on
+    ``PUT /policies``, i.e. rebasing the template that new sandboxes inherit.
+
+    Every test that flips the switch takes ``restore_default_policy`` so the
+    process-wide ``mgr.policy`` is rolled back even on a mid-test assert.
+    """
+
+    # TEST-NET-2 address: never routable, so appending it to the default
+    # egress block list cannot affect connectivity of unrelated tests.
+    MARKER_IP = "198.51.100.77/32"
+
+    @staticmethod
+    def _blocked_ips(policy: dict) -> list[str]:
+        return policy["network"]["egress"]["blocked_ips"]
+
+    @staticmethod
+    def test_get_default_policy(client):
+        resp = client.get("/api/v1/policies")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["name"]
+        assert data["network"]["mode"] in ("isolated", "host")
+        assert "egress" in data["network"]
+        assert "ingress" in data["network"]
+
+    @staticmethod
+    def test_get_default_policy_matches_inherited_sandbox_policy(client):
+        default = client.get("/api/v1/policies").json()
+
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201, create_resp.text
+        sandbox_id = create_resp.json()["id"]
+
+        effective = client.get(f"/api/v1/policies/{sandbox_id}").json()
+        assert effective["network"] == default["network"]
+
+    @staticmethod
+    def test_put_policies_without_flag_leaves_default_untouched(
+        client,
+        create_sandbox_with_policy,
+    ):
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        before = client.get("/api/v1/policies").json()
+        assert marker not in TestDefaultPolicyAPI._blocked_ips(before)
+
+        create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "append",
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert result["default_updated"] is False
+        assert result["default_policy"] is None
+
+        after = client.get("/api/v1/policies").json()
+        assert after["network"] == before["network"]
+
+        # A sandbox created afterwards must still inherit the pristine default.
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201, create_resp.text
+        inherited = client.get(
+            f"/api/v1/policies/{create_resp.json()['id']}"
+        ).json()
+        assert marker not in TestDefaultPolicyAPI._blocked_ips(inherited)
+
+    @staticmethod
+    def test_put_policies_update_default_applies_to_new_sandboxes(
+        client,
+        restore_default_policy,
+    ):
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        original_blocked = TestDefaultPolicyAPI._blocked_ips(
+            restore_default_policy,
+        )
+        assert marker not in original_blocked
+
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "append",
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert result["default_updated"] is True
+        assert marker in TestDefaultPolicyAPI._blocked_ips(
+            result["default_policy"],
+        )
+
+        after = client.get("/api/v1/policies").json()
+        blocked_after = TestDefaultPolicyAPI._blocked_ips(after)
+        assert marker in blocked_after
+        # ``append`` must preserve what the YAML already declared.
+        for entry in original_blocked:
+            assert entry in blocked_after
+
+        create_resp = client.post("/api/v1/sandboxes", json={})
+        assert create_resp.status_code == 201, create_resp.text
+        inherited = client.get(
+            f"/api/v1/policies/{create_resp.json()['id']}"
+        ).json()
+        assert marker in TestDefaultPolicyAPI._blocked_ips(inherited)
+
+    @staticmethod
+    def test_put_policies_update_default_ignored_by_override_create(
+        client,
+        create_sandbox_with_policy,
+        restore_default_policy,
+    ):
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "append",
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+
+        # ``policy_mode: override`` at create time replaces the base wholesale,
+        # so the freshly rebased default must not leak into it.
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        effective = client.get(f"/api/v1/policies/{sandbox['id']}").json()
+        assert marker not in TestDefaultPolicyAPI._blocked_ips(effective)
+
+    @staticmethod
+    def test_put_policies_update_default_with_empty_registry(
+        client,
+        restore_default_policy,
+    ):
+        """Rebasing the default is useful even with nothing to update."""
+        list_resp = client.get("/api/v1/sandboxes")
+        assert list_resp.status_code == 200
+        for item in list_resp.json():
+            client.delete(f"/api/v1/sandboxes/{item['id']}")
+
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        put_resp = client.put("/api/v1/policies", json={
+            "policy_mode": "append",
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        result = put_resp.json()
+        assert result["updated"] == []
+        assert result["failed"] == []
+        assert result["default_updated"] is True
+        assert marker in TestDefaultPolicyAPI._blocked_ips(
+            client.get("/api/v1/policies").json(),
+        )
+
+    @staticmethod
+    def test_put_policies_invalid_body_leaves_default_untouched(client):
+        before = client.get("/api/v1/policies").json()
+
+        put_resp = client.put("/api/v1/policies", json={
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                },
+            },
+        })
+        assert put_resp.status_code == 400, put_resp.text
+
+        after = client.get("/api/v1/policies").json()
+        assert after["network"] == before["network"]
+
+    @staticmethod
+    def test_single_sandbox_update_never_touches_default(
+        client,
+        create_sandbox_with_policy,
+    ):
+        """``update_default_policy`` is batch-only; the per-sandbox endpoint
+        silently ignores it (pydantic drops unknown fields)."""
+        marker = TestDefaultPolicyAPI.MARKER_IP
+        sandbox = create_sandbox_with_policy(
+            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+        )
+        before = client.get("/api/v1/policies").json()
+
+        put_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
+            "policy_mode": "append",
+            "update_default_policy": True,
+            "policy": {
+                "network": {
+                    "egress": {"blocked_ips": [marker]},
+                },
+            },
+        })
+        assert put_resp.status_code == 200, put_resp.text
+        assert marker in TestDefaultPolicyAPI._blocked_ips(put_resp.json())
+
+        after = client.get("/api/v1/policies").json()
+        assert after["network"] == before["network"]
 
 
 @pytest.fixture

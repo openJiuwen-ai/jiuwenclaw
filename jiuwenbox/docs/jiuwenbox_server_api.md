@@ -839,6 +839,27 @@ print(resp.json())
 
 ## Policy 接口
 
+### 查询默认沙箱策略
+
+接口：`GET /api/v1/policies`
+
+用途：返回当前生效的**默认沙箱策略**，即新建沙箱继承的基线。
+它等于 server 启动时加载的 policy YAML，叠加此后所有带
+`update_default_policy: true` 的 `PUT /api/v1/policies` 更新。
+创建沙箱时不传 `policy`（或 `policy_mode: append`）就以它为基线。
+
+Python 请求示例：
+
+```python
+import requests
+
+resp = requests.get("http://127.0.0.1:8321/api/v1/policies", timeout=30)
+print(resp.status_code)
+print(resp.json())
+```
+
+返回完整 `SecurityPolicy` JSON（与 `GET /policies/{sandbox_id}` 同形）。
+
 ### 查询沙箱策略
 
 接口：`GET /api/v1/policies/{sandbox_id}`
@@ -923,10 +944,34 @@ print(resp.json())
 接口：`PUT /api/v1/policies`
 
 用途：对当前所有已注册沙箱应用与单沙箱接口相同的网络规则更新。
-不修改 server 默认 policy。请求体非法时整请求 400，不落任何沙箱。
+请求体非法时整请求 400，不落任何沙箱。
 `host` 模式沙箱记入 `skipped`；单个沙箱热更新失败记入 `failed`，不阻断其余沙箱。
 
-请求体与 `PUT /api/v1/policies/{sandbox_id}` 相同。
+请求体在 `PUT /api/v1/policies/{sandbox_id}` 的基础上多一个可选字段：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `policy` | object | 是 | 同单沙箱接口，须含 `network`，且 `egress` / `ingress` 至少提供一个 |
+| `policy_mode` | string | 否 | `override`（默认）或 `append` |
+| `update_default_policy` | bool | 否 | 默认 `false`。为 `true` 时同一套规则也会写入 server 的**默认沙箱策略**，使**此后新建**的沙箱复用更新过的策略 |
+
+关于 `update_default_policy`：
+
+- 只影响**之后**创建、且未自带完整 policy 的沙箱：不传 `policy` 或
+  `policy_mode: append` 创建时会继承新规则；用 `policy_mode: override`
+  创建时完全以请求体为准，不受影响。
+- 默认策略不做 `host` 模式跳过——它只是模板，即便 `network.mode` 为 `host`
+  也照常写入字段。这与运行中的 host 沙箱被记入 `skipped` 不同，后者是
+  iptables 热更新能力的限制。
+- 注册表为空时依然生效，可用于「先设好默认，再批量建沙箱」。
+- **仅在进程内生效，不回写 policy YAML**：重启后默认策略回落到
+  `JIUWENBOX_POLICY_PATH` / 内置 `default-policy.yaml` 的内容。
+- 该字段只在批量接口上有效。发给 `PUT /api/v1/policies/{sandbox_id}`
+  会被静默忽略（不报错），单沙箱更新永远不会改动默认策略。
+- **`override` 会清空未列出的字段**：`override` 是整方向替换，请求体里没写的
+  键会落回模型默认值（列表清空、`default` 变回 `deny`）。作用在默认策略上时
+  这是全局影响，例如内置默认策略的 `allowed_domains` / `allowed_ports` 都会被
+  抹掉。想做增量修改请用 `append`；想整体替换请把该方向的字段写全。
 
 Python 请求示例：
 
@@ -937,6 +982,7 @@ resp = requests.put(
     "http://127.0.0.1:8321/api/v1/policies",
     json={
         "policy_mode": "append",
+        "update_default_policy": True,
         "policy": {
             "network": {
                 "egress": {
@@ -959,9 +1005,23 @@ print(resp.json())
   "skipped": [
     {"sandbox_id": "sb-host", "reason": "network.mode is host"}
   ],
-  "failed": []
+  "failed": [],
+  "default_updated": true,
+  "default_policy": {
+    "name": "default-policy",
+    "network": {
+      "mode": "isolated",
+      "egress": {
+        "default": "allow",
+        "blocked_ips": ["169.254.169.254/32", "203.0.113.50/32"]
+      }
+    }
+  }
 }
 ```
+
+`default_policy` 仅在 `default_updated` 为 `true` 时返回更新后的完整
+`SecurityPolicy`（否则为 `null`），省去再调一次 `GET /api/v1/policies`。
 
 ### 查询 timeout 配置
 

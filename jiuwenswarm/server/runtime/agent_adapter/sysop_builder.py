@@ -26,7 +26,6 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
 )
 from jiuwenswarm.common.utils import (
-    get_agent_root_dir,
     get_agent_workspace_dir,
     get_config_file,
 )
@@ -247,101 +246,48 @@ def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
     return f"project_{digest}"
 
 
-def _resolve_agent_root_dir() -> Path | None:
-    """Resolve agent_root for yuanrong identity mount (enterprise_dev-style)."""
-    try:
-        agent_root = Path(get_agent_root_dir()).expanduser().resolve()
-    except OSError as exc:
-        logger.debug("[sysop_builder] agent_root resolve failed: %s", exc)
-        return None
-    if agent_root == Path(agent_root.anchor):
-        logger.warning(
-            "[sysop_builder] refusing to mount filesystem root %s as agent_root",
-            agent_root,
-        )
-        return None
-    try:
-        agent_root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "[sysop_builder] could not ensure agent_root %s: %s",
-            agent_root,
-            exc,
-        )
-        return None
-    if not agent_root.is_dir():
-        logger.warning(
-            "[sysop_builder] agent_root %s is not a directory; skipping mount",
-            agent_root,
-        )
-        return None
-    return agent_root
-
-
-def _merge_yuanrong_mounts(
-    agent_root_mount: dict[str, Any],
-    config_mounts: list[Any] | None,
-) -> list[dict[str, Any]]:
-    """Merge forced agent_root mount with optional yaml mounts; dedupe by source+target."""
-    merged: list[dict[str, Any]] = [dict(agent_root_mount)]
-    seen = {
-        (
-            str(agent_root_mount.get("source") or ""),
-            str(agent_root_mount.get("target") or ""),
-        )
-    }
-    for entry in config_mounts or []:
-        if not isinstance(entry, dict):
-            continue
-        source = str(entry.get("source") or "").strip()
-        target = str(entry.get("target") or source).strip()
-        if not source or not target:
-            continue
-        key = (source, target)
-        if key in seen:
-            continue
-        seen.add(key)
-        mount = {
-            "source": source,
-            "target": target,
-            "readonly": bool(entry.get("readonly", False)),
-        }
-        merged.append(mount)
-    return merged
-
-
 def _build_yuanrong_extra_params() -> dict[str, Any]:
-    """Assemble yuanrong provider extra_params; always identity-mount agent_root."""
+    """Assemble yuanrong provider extra_params; always identity-mount workspace."""
     endpoint = get_sandbox_endpoint()
     executor = str(endpoint.get("executor") or "docker").strip().lower() or "docker"
-    agent_root = _resolve_workspace_dir()
-    real_agent_root = None
+    workspace = _resolve_workspace_dir()
+    project = Path("~/project").expanduser().resolve()
+    if workspace is None:
+        raise ValueError("yuanrong sandbox requires a resolvable workspace directory")
+    real_workspace = None
+    real_project = None
     user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
     if user_dir:
-        real_agent_root = Path(user_dir) / ".jiuwenswarm" / "agent" / "workspace"
-    if agent_root is None:
-        raise ValueError("yuanrong sandbox requires a resolvable agent_root directory")
+        real_workspace = Path(user_dir) / ".jiuwenswarm" / "agent" / "workspace"
+        real_project = Path(user_dir) / "project"
 
-    agent_root_str = str(agent_root)
-    agent_root_mount = {
-        "source": str(real_agent_root) if real_agent_root else agent_root_str,
-        "target": agent_root_str,
-        "readonly": False,
-    }
-    config_mounts = endpoint.get("mounts")
-    if not isinstance(config_mounts, list):
-        config_mounts = None
+    workspace_str = str(workspace)
+    project_str = str(project)
+    mounts: list[dict[str, Any]] = [
+        {
+            "source": str(real_workspace) if real_workspace else workspace_str,
+            "target": workspace_str,
+            "readonly": False,
+        }
+    ]
+
+    if real_project is not None:
+        mounts.append({
+            "source": str(real_project),
+            "target": project_str,
+            "readonly": False,
+        })
 
     extra_params: dict[str, Any] = {
         "executor": executor,
-        "mounts": _merge_yuanrong_mounts(agent_root_mount, config_mounts),
+        "mounts": mounts,
     }
 
     workdir = endpoint.get("workdir")
     if workdir is not None and str(workdir).strip():
         extra_params["workdir"] = str(workdir).strip()
     else:
-        extra_params["workdir"] = agent_root_str
+        extra_params["workdir"] = workspace_str
 
     for key in ("image", "cpu", "cpu_limit", "memory", "mem_limit", "rootfs"):
         if key not in endpoint:
@@ -350,11 +296,7 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
         if key == "rootfs":
             if isinstance(value, dict):
                 rootfs = dict(value)
-                existing = rootfs.get("mounts")
-                rootfs["mounts"] = _merge_yuanrong_mounts(
-                    agent_root_mount,
-                    existing if isinstance(existing, list) else None,
-                )
+                rootfs["mounts"] = mounts
                 if "workdir" not in rootfs or not str(rootfs.get("workdir") or "").strip():
                     rootfs["workdir"] = extra_params["workdir"]
                 extra_params["rootfs"] = rootfs
@@ -376,16 +318,7 @@ def build_yuanrong_sandbox_status_view() -> dict[str, Any]:
             "[sysop_builder] yuanrong status mounts fallback: %s",
             exc,
         )
-        config_mounts = endpoint.get("mounts")
-        mounts = [
-            {
-                "source": str(entry.get("source") or "").strip(),
-                "target": str(entry.get("target") or entry.get("source") or "").strip(),
-                "readonly": bool(entry.get("readonly", False)),
-            }
-            for entry in (config_mounts if isinstance(config_mounts, list) else [])
-            if isinstance(entry, dict) and str(entry.get("source") or "").strip()
-        ]
+        mounts = []
     return {
         "type": "yuanrong",
         "enabled": bool(runtime.get("enabled")),
