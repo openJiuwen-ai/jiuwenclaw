@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness.prompts import PromptSection
@@ -107,7 +108,14 @@ class ExpertCapabilityMixin:
                 raise RuntimeError("expert apply requires a live DeepAgent instance")
             previous_expert_id = self._current_expert_id
             if self._expert_load_record is not None:  # 1) 必须先卸
+                # unload_extension 内部 _unbind 的叶子分支只从 enabled_skills discard 技能名、
+                # 不删 mount_root，且空化后 enabled_skills 为空 set（≠ None）——下一轮
+                # _prepare_skills 重扫会把已卸载专家的技能概述捞回 SKILLS section。
+                # 故先从 record 抓 SKILL ref 的 directory（unload 后 record 置 None），
+                # 卸完再补做 agent-core 漏掉的那步：删 mount_root + 清 enabled + 重扫。
+                expert_skill_dirs = self._collect_expert_skill_dirs(self._expert_load_record)
                 await self._instance.unload_extension(self._expert_load_record)
+                await self._purge_expert_skill_mounts(expert_skill_dirs)
                 self._expert_load_record = None
                 self._current_expert_id = None
             warnings: list[str] = []
@@ -134,6 +142,92 @@ class ExpertCapabilityMixin:
                 self._refresh_expert_switch_notice(previous_expert_id, self._current_expert_id)
             await self._sync_expert_identity_attachment()
             return warnings
+
+    @staticmethod
+    def _collect_expert_skill_dirs(load_record: Any) -> list[Path]:
+        """从 LoadRecord.refs 抽出本专家绑定过的 SKILL ref 的 directory（叶子目录）。
+
+        agent-core 的 ``_bind_skill``（extension_binder.py:270-273）把
+        ``ResourceRef.extra["directory"]`` 写成专家包内技能的叶子目录；卸载前
+        抓取它们，供 ``_purge_expert_skill_mounts`` 补做 agent-core 漏掉的清理。
+        """
+        from openjiuwen.harness.resources import ResourceKind
+
+        refs = getattr(getattr(load_record, "refs", None), "__iter__", None)
+        if refs is None:
+            return []
+        dirs: list[Path] = []
+        for ref in load_record.refs:
+            if getattr(ref, "kind", None) != ResourceKind.SKILL:
+                continue
+            directory = (getattr(ref, "extra", None) or {}).get("directory")
+            if directory:
+                dirs.append(Path(str(directory)).expanduser().resolve())
+        return dirs
+
+    async def _purge_expert_skill_mounts(self, skill_dirs: list[Path]) -> None:
+        """卸载专家后补做 agent-core 漏掉的那步。
+
+        agent-core 的 ``_unbind`` SKILL 叶子分支（extension_binder.py:403-410）只
+        ``enabled_skills.discard(name)``、不删 ``skills_dir`` 里的 mount_root；当
+        该技能是 enabled 集合最后一个时 discard 后变空 set，``_filter_skills``
+        （skill_use_rail.py:257）又把空 set 当「不过滤」——下一轮 ``_prepare_skills``
+        重扫父目录把专家技能概述捞回 SKILLS section。本方法在 jiuwenswarm 侧补齐：
+        删 mount_root + 清 enabled（空则置 None，区别于 agent-core 留空 set）+ 重扫。
+
+        幂等：删一个不在的 root、discard 一个不在的 name 均不报错；若上游 openjiuwen
+        将来修复了 ``_unbind``/``_filter_skills``，本方法与之共存不冲突。
+        """
+        if not skill_dirs:
+            return
+        from openjiuwen.harness.rails import SkillUseRail
+
+        instance = self._instance
+        rails = []
+        skill_rail = getattr(self, "_skill_rail", None)
+        if skill_rail is not None:
+            rails.append(skill_rail)
+        finder = getattr(instance, "find_rails_by_type", None)
+        if callable(finder):
+            for rail in finder((SkillUseRail,)):
+                if rail not in rails:
+                    rails.append(rail)
+
+        for leaf in skill_dirs:
+            if not leaf.exists():
+                continue
+            is_leaf = (leaf / "SKILL.md").is_file()
+            mount_root = str(leaf.parent) if is_leaf else str(leaf)
+            skill_name = leaf.name if is_leaf else ""
+
+            for rail in rails:
+                current = list(rail.skills_dir or [])
+                mounted = {str(Path(item).expanduser().resolve()) for item in current}
+                if mount_root not in mounted:
+                    continue
+                rail.skills_dir = [
+                    item
+                    for item in current
+                    if str(Path(item).expanduser().resolve()) != mount_root
+                ]
+                if skill_name and getattr(rail, "enabled_skills", None) is not None:
+                    rail.enabled_skills.discard(skill_name)
+                    if not rail.enabled_skills:
+                        # 关键：空 set（agent-core 留的）在 _filter_skills 里 = 不过滤，
+                        # 必须置 None 才表示「无 enabled 限制」，否则残留技能通行。
+                        rail.enabled_skills = None
+                rail.enable_cache = False
+                rail.clear_skills()
+                if rail.skills_dir:
+                    try:
+                        await rail.reload_skills()
+                    except Exception as exc:
+                        logger.warning(
+                            "[session_id=%s] [JiuWenSwarmDeepAdapter] expert skill "
+                            "mount purge reload failed: %s",
+                            self._parent_session_id, exc,
+                        )
+                break
 
     def _refresh_expert_switch_notice(
         self, previous: str | None, current: str | None

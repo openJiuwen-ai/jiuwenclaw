@@ -25,6 +25,7 @@ def _make_package(
         model: bool = False,
         persona: bool = True,
         tools: list[str] | None = None,
+        skills: list[str] | None = None,
         card_id: str | None = None,
 ) -> Path:
     pkg = root / name
@@ -54,6 +55,16 @@ def _make_package(
             tool_path.parent.mkdir(parents=True, exist_ok=True)
             tool_path.write_text("# tool", encoding="utf-8")
         manifest["tools"] = [{"file": f} for f in tools]
+    if skills:
+        # skill 条目是叶子目录引用（{"dir": "skills/xxx"}），目录下须含 SKILL.md
+        for skill_dir in skills:
+            sd = pkg / skill_dir
+            sd.mkdir(parents=True, exist_ok=True)
+            (sd / "SKILL.md").write_text(
+                "---\nname: test-skill\ndescription: 测试技能\n---\n# body\n",
+                encoding="utf-8",
+            )
+        manifest["skills"] = [{"dir": d} for d in skills]
     (pkg / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
@@ -290,6 +301,62 @@ def test_validate_rejects_missing_tool_file(tmp_path: Path) -> None:
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
     )
     with pytest.raises(es.InvalidExpertPackage, match="tools"):
+        es.validate_expert_package(pkg)
+
+
+def test_validate_ok_with_skills(tmp_path: Path) -> None:
+    """合法 skills（叶子形态：dir 含 SKILL.md）应无警告通过。"""
+    pkg = _make_package(tmp_path, "security-reviewer", skills=["skills/threat-modeling"])
+    assert es.validate_expert_package(pkg) == []
+
+
+def test_validate_rejects_skill_missing_dir(tmp_path: Path) -> None:
+    """skills dir 指向不存在的目录 → 拒载。"""
+    pkg = _make_package(tmp_path, "security-reviewer")
+    manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+    manifest["skills"] = [{"dir": "skills/missing"}]
+    (pkg / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(es.InvalidExpertPackage, match="skills dir"):
+        es.validate_expert_package(pkg)
+
+
+def test_validate_rejects_skill_missing_skill_md(tmp_path: Path) -> None:
+    """skills dir 存在但无 SKILL.md（非叶子形态）→ 拒载。"""
+    pkg = _make_package(tmp_path, "security-reviewer")
+    (pkg / "skills" / "empty").mkdir(parents=True)
+    (pkg / "skills" / "empty" / ".keep").write_text("", encoding="utf-8")
+    manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+    manifest["skills"] = [{"dir": "skills/empty"}]
+    (pkg / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(es.InvalidExpertPackage, match="SKILL.md"):
+        es.validate_expert_package(pkg)
+
+
+def test_validate_rejects_skill_dir_escape(tmp_path: Path) -> None:
+    """skills dir 路径逃逸包目录 → 拒载（与 zip slip 同规）。"""
+    pkg = _make_package(tmp_path, "security-reviewer")
+    manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+    manifest["skills"] = [{"dir": "../outside"}]
+    (pkg / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(es.InvalidExpertPackage, match="逃逸"):
+        es.validate_expert_package(pkg)
+
+
+def test_validate_rejects_skill_entry_without_dir(tmp_path: Path) -> None:
+    """skills 条目缺 dir 键 → 拒载。"""
+    pkg = _make_package(tmp_path, "security-reviewer")
+    manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+    manifest["skills"] = [{"mode": "all"}]
+    (pkg / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+    with pytest.raises(es.InvalidExpertPackage, match="dir"):
         es.validate_expert_package(pkg)
 
 
