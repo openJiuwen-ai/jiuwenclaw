@@ -207,8 +207,8 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
         # Network-level failures: try the reader fallback before giving up.
         try:
             return _fetch_via_jina_reader_sync(url, timeout_seconds)
-        except Exception:  # noqa: BLE001 - preserve the original error
-            raise exc
+        except Exception as reader_exc:
+            raise exc from reader_exc
     if response.status_code in {401, 403, 429}:
         return _fetch_via_jina_reader_sync(url, timeout_seconds)
     response.raise_for_status()
