@@ -28,8 +28,13 @@ export interface WorkflowBudget {
   total: number | null;
   spent: number;
   remaining: number | null;
-  scope: 'leader';
+  scope: 'leader' | 'session' | 'workflow';
   exhausted: boolean;
+}
+
+/** Compact token-budget label, e.g. ``12K/50K`` (spent/total, K-rounded). */
+export function formatBudgetK(budget: WorkflowBudget): string {
+  return `${Math.round((budget.spent ?? 0) / 1000)}K/${Math.round((budget.total ?? 0) / 1000)}K`;
 }
 
 export interface WorkflowAgentPart {
@@ -105,6 +110,10 @@ export interface WorkflowRun {
   duration_ms?: number | null;
   estimated_token_count?: number | null;
   budget?: WorkflowBudget | null;
+  /** Per-run ledger snapshot (META.workflow_token_limit); null when unset. */
+  workflow_budget?: WorkflowBudget | null;
+  /** Which ledger triggered a budget failure: 'session' | 'workflow'. */
+  budget_exhausted_scope?: 'session' | 'workflow' | null;
   /** Absent on list summaries from ``action=list``. */
   phases?: WorkflowPhase[];
   detail_pending?: boolean;

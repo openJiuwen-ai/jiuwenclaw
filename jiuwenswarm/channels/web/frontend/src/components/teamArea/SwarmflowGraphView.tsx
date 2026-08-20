@@ -31,6 +31,7 @@ import {
   type WorkflowStatus,
   type PhaseLoopGroup,
   type AgentLoopGroup,
+  formatBudgetK,
   groupWorkflowAgentsByName,
   childPhasesOf,
   detectAgentLoops,
@@ -41,6 +42,7 @@ import {
 } from './workflowTypes';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { useTranslation } from 'react-i18next';
 import type { AskUserQuestionPayload } from '../../types/websocket';
 import {
   AgentDetailModal,
@@ -111,6 +113,7 @@ function statusDotColor(status: WorkflowStatus): string {
 // ── 自定义节点 ────────────────────────────────────────────
 
 const RunGraphNode = ({ data }: NodeProps) => {
+  const { t } = useTranslation();
   const run = data.run as WorkflowRun;
   const completed = (run.phases ?? []).reduce(
     (s, p) => s + (p.agents ?? []).filter((a) => a.status === 'completed').length,
@@ -119,6 +122,8 @@ const RunGraphNode = ({ data }: NodeProps) => {
   const total =
     run.agent_count ??
     (run.phases ?? []).reduce((s, p) => s + (p.agents ?? []).length, 0);
+  const showBudget =
+    (run.budget?.total ?? null) != null || (run.workflow_budget?.total ?? null) != null;
 
   return (
     <div className={`px-3 py-2 rounded-lg border-2 bg-card shadow-md min-w-[140px] ${statusBorder(run.status)}`}>
@@ -133,6 +138,30 @@ const RunGraphNode = ({ data }: NodeProps) => {
         </div>
         <span className="text-[10px] text-text-muted tabular-nums shrink-0">{completed}/{total}</span>
       </div>
+      {showBudget && (
+        <div className="flex items-center gap-1.5 mt-0.5 text-[10px] tabular-nums">
+          {run.budget && run.budget.total != null && (
+            <span className="text-text-muted" title={t('swarmflow.sessionBudget')}>
+              {formatBudgetK(run.budget)}
+            </span>
+          )}
+          {run.workflow_budget && run.workflow_budget.total != null && (
+            <span
+              className={run.workflow_budget.exhausted ? 'text-red-500' : 'text-violet-500'}
+              title={t('swarmflow.runBudget')}
+            >
+              {formatBudgetK(run.workflow_budget)}
+            </span>
+          )}
+        </div>
+      )}
+      {run.status === 'failed' && run.budget_exhausted_scope && (
+        <div className="mt-0.5 text-[10px] text-red-500">
+          {run.budget_exhausted_scope === 'workflow'
+            ? t('swarmflow.budgetExhaustedWorkflow')
+            : t('swarmflow.budgetExhaustedSession')}
+        </div>
+      )}
     </div>
   );
 };

@@ -2735,6 +2735,10 @@
     "layoutOrgChart": "架构图",
     "layoutGraph": "流程图",
     "pauseResumeHint": "暂停/恢复",
-    "stopHint": "停止"
+    "stopHint": "停止",
+    "sessionBudget": "会话预算（团队共享，不随运行重置）",
+    "runBudget": "本次运行预算（META.workflow_token_limit）",
+    "budgetExhaustedSession": "会话预算耗尽",
+    "budgetExhaustedWorkflow": "运行预算耗尽"
   }
 }
