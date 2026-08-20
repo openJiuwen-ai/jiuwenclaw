@@ -91,6 +91,15 @@ import {
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
 import { spawnSync } from "node:child_process";
 
+// A just-exited TUI can remain bound briefly while its WebSocket close is
+// observed by the gateway. Retry only this startup-specific ownership race.
+const BOOT_SESSION_IN_USE_RETRY_DELAYS_MS = [100, 200, 400, 800, 800, 800, 800];
+
+function isTransientSessionInUseError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("already active in another window");
+}
+
 export interface ModelUsageEntry {
   model: string;
   input_tokens: number;
@@ -3365,22 +3374,41 @@ export class CliPiAppState {
     const target = this.bootSessionId;
     const previousMode = this.mode;
     try {
-      const res = await this.requestAgentServer<{
+      type BootSessionResult = {
         session_id?: string;
         mode?: string;
         created?: boolean;
-      }>(
-        "session.create",
-        {
-          ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
-          ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
-          previous_session_id: "",
-          previous_mode: previousMode,
-          mode: previousMode,
-        },
-        undefined,
-        false,
-      );
+      };
+      let res: BootSessionResult;
+      let retryIndex = 0;
+      while (true) {
+        try {
+          res = await this.requestAgentServer<BootSessionResult>(
+            "session.create",
+            {
+              ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+              ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            },
+            undefined,
+            false,
+          );
+          break;
+        } catch (error) {
+          if (
+            target === null
+            || !isTransientSessionInUseError(error)
+            || retryIndex >= BOOT_SESSION_IN_USE_RETRY_DELAYS_MS.length
+          ) {
+            throw error;
+          }
+          const delayMs = BOOT_SESSION_IN_USE_RETRY_DELAYS_MS[retryIndex];
+          retryIndex += 1;
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
       const createdId = res?.session_id;
       if (typeof createdId !== "string" || !createdId) {
         throw new Error("session.create did not return a session id");

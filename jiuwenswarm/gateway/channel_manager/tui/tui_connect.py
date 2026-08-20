@@ -56,6 +56,7 @@ from jiuwenswarm.gateway.routing.agent_request_timeout import (
 logger = logging.getLogger(__name__)
 
 _HARMONYOS_DEV_INIT_TASKS_ATTR = "_jiuwenswarm_harmonyos_dev_init_tasks"
+_TUI_EXPLICIT_EXIT_CANCEL_GRACE_SECONDS = 1.0
 
 
 def _get_harmonyos_dev_init_tasks(
@@ -2400,41 +2401,53 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
     async def _tui_disconnect_request(ws, req_id, params, session_id):
         await _cancel_harmonyos_dev_init_tasks(ws)
         payload = {"accepted": True, "session_id": session_id}
-        try:
-            await channel.send_response(ws, req_id, ok=True, payload=payload)
-        except Exception:
-            logger.debug("[tui.disconnect] response skipped on closed ws", exc_info=True)
-
         mh = bind.message_handler
         sid = (session_id or "").strip()
         owns_session = True
         is_bound_to_client = getattr(channel, "is_session_bound_to_client", None)
         if callable(is_bound_to_client):
             owns_session = bool(is_bound_to_client("tui", sid, ws))
+        cleanup_handed_off = not (mh is not None and sid and owns_session)
         if mh is not None and sid and owns_session:
-            cleaned = await mh.cancel_agent_sessions_on_disconnect(
-                [("tui", sid)],
-                user_id=getattr(ws, "_gateway_user_id", None),
+            schedule_cleanup = getattr(
+                mh, "schedule_cancel_agent_sessions_on_disconnect", None
             )
-            if not cleaned:
+            try:
+                if callable(schedule_cleanup):
+                    await schedule_cleanup(
+                        [("tui", sid)],
+                        delay_seconds=_TUI_EXPLICIT_EXIT_CANCEL_GRACE_SECONDS,
+                        user_id=getattr(ws, "_gateway_user_id", None),
+                    )
+                    cleanup_handed_off = True
+                else:
+                    cleanup_handed_off = bool(
+                        await mh.cancel_agent_sessions_on_disconnect(
+                            [("tui", sid)],
+                            user_id=getattr(ws, "_gateway_user_id", None),
+                        )
+                    )
+            except Exception:
                 logger.warning(
-                    "[tui.disconnect] immediate cleanup failed; "
+                    "[tui.disconnect] cleanup handoff failed; "
                     "transport-close fallback remains enabled: session_id=%s",
                     sid,
+                    exc_info=True,
                 )
-                return
-            # Only suppress the transport-close fallback after the immediate
-            # cleanup has completed.  The TUI process can disappear after the
-            # acknowledgement and cancel this handler; marking the websocket
-            # earlier would make _tui_disconnect skip the only remaining
-            # cleanup path and leak the session runtime.
+
+        # The delayed cleanup is registered before acknowledging the exit.
+        # A replacement TUI binding cancels it, so cleanup from the old window
+        # cannot race with and cancel the newly started session.
+        if cleanup_handed_off:
             try:
                 setattr(ws, "_jiuwenswarm_tui_user_exit", True)
             except Exception:
-                logger.debug(
-                    "[tui.disconnect] mark completed user exit failed",
-                    exc_info=True,
-                )
+                logger.debug("[tui.disconnect] mark user exit failed", exc_info=True)
+
+        try:
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception:
+            logger.debug("[tui.disconnect] response skipped on closed ws", exc_info=True)
 
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
