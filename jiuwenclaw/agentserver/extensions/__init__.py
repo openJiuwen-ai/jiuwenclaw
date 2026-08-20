@@ -5,7 +5,8 @@
 from jiuwenclaw.agentserver.extensions.rail_manager import (
     RailExtension,
     RailManager,
+    RailManagerPool,
     get_rail_manager,
 )
 
-__all__ = ["RailExtension", "RailManager", "get_rail_manager"]
+__all__ = ["RailExtension", "RailManager", "RailManagerPool", "get_rail_manager"]

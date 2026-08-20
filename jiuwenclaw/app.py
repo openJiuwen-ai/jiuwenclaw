@@ -23,6 +23,10 @@ from jiuwenclaw.utils import (
 ensure_workspace_initialized(component_name="App")
 
 load_dotenv(dotenv_path=get_env_file())
+from jiuwenclaw.local_env_config import ingest_bare_business_into_tip
+
+# Parent must not leak Track B into child spawn environ (H1).
+ingest_bare_business_into_tip()
 
 
 def main() -> None:

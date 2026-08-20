@@ -9,23 +9,42 @@ from .types import (
     MemorySource,
     FileEntry,
 )
-from .manager import MemoryIndexManager, get_memory_manager, clear_memory_manager_cache
+from .manager import (
+    MemoryIndexManager,
+    get_memory_manager,
+    clear_memory_manager_cache,
+    invalidate_memory_manager_cache,
+    invalidate_memory_wiki_manager_cache,
+    build_index_cache_key,
+)
+from .cache_registry import (
+    acquire_memory_cache_session,
+    release_memory_cache_session,
+    bind_memory_cache_fingerprint,
+    reset_memory_cache_fingerprint,
+    get_bound_memory_cache_fingerprint,
+    get_memory_cache_ref_count,
+    clear_memory_cache_registry,
+    close_memory_cache_entry,
+    release_all_memory_cache_sessions,
+)
 from .wiki_manager import MemoryWikiManager
 from .config import (
     MemorySettings,
     WikiMemorySettings,
     create_memory_settings,
     create_wiki_memory_settings,
+    default_workspace_dir,
     is_memory_enabled,
     get_memory_mode,
     get_embed_config,
-    DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .external_memory_config import (
     get_external_memory_config,
     is_external_memory_enabled,
     build_openjiuwen_provider_config,
+    external_memory_fingerprint,
     get_memory_engine,
     is_builtin_memory_allowed,
     is_external_memory_allowed,
@@ -53,6 +72,18 @@ __all__ = [
     "WikiMemorySettings",
     "get_memory_manager",
     "clear_memory_manager_cache",
+    "invalidate_memory_manager_cache",
+    "invalidate_memory_wiki_manager_cache",
+    "build_index_cache_key",
+    "acquire_memory_cache_session",
+    "release_memory_cache_session",
+    "bind_memory_cache_fingerprint",
+    "reset_memory_cache_fingerprint",
+    "get_bound_memory_cache_fingerprint",
+    "get_memory_cache_ref_count",
+    "clear_memory_cache_registry",
+    "close_memory_cache_entry",
+    "release_all_memory_cache_sessions",
     "EmbeddingProvider",
     "create_embedding_provider",
     "MemorySearchResult",
@@ -76,7 +107,7 @@ __all__ = [
     "is_memory_enabled",
     "get_memory_mode",
     "get_embed_config",
-    "DEFAULT_WORKSPACE_DIR",
+    "default_workspace_dir",
     "estimate_tokens",
     "get_external_memory_config",
     "is_external_memory_enabled",
@@ -85,4 +116,5 @@ __all__ = [
     "get_memory_engine",
     "is_builtin_memory_allowed",
     "is_external_memory_allowed",
+    "external_memory_fingerprint",
 ]

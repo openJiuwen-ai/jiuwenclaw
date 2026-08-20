@@ -13,6 +13,11 @@ from jiuwenclaw.runtime.pip_env import (
     runtime_subprocess_env,
 )
 from jiuwenclaw.runtime.shell_pip_patch import apply_shell_pip_isolation_patch
+from jiuwenclaw.runtime.platform import (
+    is_ohos_runtime,
+    runtime_platform,
+    sandbox_supported,
+)
 
 __all__ = [
     "apply_shell_pip_isolation_patch",
@@ -24,4 +29,7 @@ __all__ = [
     "install_packages",
     "rewrite_shell_command",
     "runtime_subprocess_env",
+    "is_ohos_runtime",
+    "runtime_platform",
+    "sandbox_supported",
 ]

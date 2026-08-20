@@ -5,12 +5,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import Any
 
 from jiuwenclaw.agentserver.tools.web_search.http_client import http_request
 from jiuwenclaw.config import get_config
+from jiuwenclaw.local_env_config import read_env
+
+logger = logging.getLogger(__name__)
 
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
@@ -20,32 +24,19 @@ _TAVILY_MAX_CONTENT_LEN = 4000
 
 
 def _resolve_petal_search_url() -> str:
-    api_base = (
-        os.environ.get("API_BASE")
-        or os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("OPENAI_API_BASE")
-        or ""
-    ).strip()
-    if not api_base:
-        raise ValueError("API_BASE is not set")
-    trimmed = api_base.rstrip("/")
-    if trimmed.lower().endswith("/v2"):
-        trimmed = trimmed[:-3]
-    trimmed = trimmed.rstrip("/")
-    return f"{trimmed}/v1/ai-tools/web-search"
+    petal_url = read_env("PETAL_SEARCH_URL", "").strip()
+    if not petal_url:
+        raise ValueError("PETAL_SEARCH_URL is not set")
+    return petal_url
 
 
 def _load_llm_default_headers() -> dict[str, str]:
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
-        raise ValueError("default_headers is not set")
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("default_headers must be a JSON object")
-    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+    from jiuwenclaw.local_env_config import parse_default_headers
+    raw = read_env("PETAL_SEARCH_HEADERS", "")
+    header_map = parse_default_headers(raw)
+    if not header_map:
+        raise ValueError("PETAL_SEARCH_HEADERS is not set")
+    return header_map
 
 
 def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, str]:
@@ -146,12 +137,12 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
 def perplexity_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    perplexity_key = read_env("PERPLEXITY_API_KEY", "")
     if not perplexity_key:
         raise ValueError("PERPLEXITY_API_KEY is not set")
 
     payload = {
-        "model": os.environ.get("PPLX_MODEL", "sonar-pro"),
+        "model": read_env("PPLX_MODEL", "sonar-pro"),
         "messages": [
             {
                 "role": "system",
@@ -165,7 +156,7 @@ def perplexity_search_sync(
     }
     response = http_request(
         "POST",
-        os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+        read_env("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
         headers={
             "Authorization": f"Bearer {perplexity_key}",
             "Content-Type": "application/json",
@@ -191,7 +182,7 @@ def perplexity_search_sync(
 def serper_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    serper_key = os.environ.get("SERPER_API_KEY", "")
+    serper_key = read_env("SERPER_API_KEY", "")
     if not serper_key:
         raise ValueError("SERPER_API_KEY is not set")
 
@@ -214,7 +205,7 @@ def serper_search_sync(
 
 
 def jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
-    jina_key = os.environ.get("JINA_API_KEY", "")
+    jina_key = read_env("JINA_API_KEY", "")
     if not jina_key:
         raise ValueError("JINA_API_KEY is not set")
 
@@ -248,13 +239,13 @@ def jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
 def bocha_search_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> dict[str, Any]:
-    bocha_key = os.environ.get("BOCHA_API_KEY", "")
+    bocha_key = read_env("BOCHA_API_KEY", "")
     if not bocha_key:
         raise ValueError("BOCHA_API_KEY is not set")
 
     response = http_request(
         "POST",
-        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        read_env("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
         headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
         json={"query": query, "summary": True, "count": max_results},
         timeout=timeout_seconds,
@@ -294,12 +285,12 @@ def bocha_search_sync(
 
 
 def _resolve_tavily_api_key() -> str:
-    return os.environ.get("TAVILY_API_KEY", "").strip()
+    return read_env("TAVILY_API_KEY", "").strip()
 
 
 def _resolve_tavily_api_url() -> str:
     raw = (
-        os.environ.get("TAVILY_API_URL", "").strip()
+        read_env("TAVILY_API_URL", "").strip()
         or _TAVILY_DEFAULT_API_URL
     )
     return raw.rstrip("/")

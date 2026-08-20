@@ -19,12 +19,13 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import logger, get_agent_workspace_dir
+from jiuwenclaw.utils import logger, resolve_tenant_agent_workspace_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     set_current_agent_context,
     set_current_agent_subagent_id,
     set_subagent_parent_session,
 )
+from jiuwenclaw.perf.context import set_inherited_task_id, reset_react_iteration
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
     JiuClawStreamEventRail,
 )
@@ -32,6 +33,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import (
     get_current_task_id as get_global_task_id,
 )
+from jiuwenclaw.agentserver.thinking.rail import ThinkingInjectRail
 
 if TYPE_CHECKING:
     pass
@@ -149,6 +151,26 @@ class SubagentContextRail(DeepAgentRail):
         self._parent_session = parent_session  # Store parent session for event emission
         self._workspace = workspace
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Inherit parent todo task_id and bind subagent scope for perf attribution."""
+        set_inherited_task_id(get_global_task_id())
+        reset_react_iteration()
+        if self._subagent_id:
+            set_current_agent_subagent_id(self._subagent_id)
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Refresh inherited task/subagent binding before each LLM call in subagent."""
+        if get_global_task_id():
+            set_inherited_task_id(get_global_task_id())
+        if self._subagent_id:
+            set_current_agent_subagent_id(self._subagent_id)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Clear subagent perf scope after subagent invoke completes."""
+        set_current_agent_subagent_id(None)
+        set_current_agent_context(None)
+        set_subagent_parent_session(None)
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Set context variables for fork_agent to get correct messages and emit tool_call event."""
         setattr(ctx, '_tool_start_time', time.time())
@@ -257,11 +279,11 @@ class SubagentContextRail(DeepAgentRail):
                 logger.debug("[SubagentArtifact] Failed to get workspace node path: %s", e)
                 return getattr(self._workspace, 'root_path', None)
 
-        # Fallback to agent workspace
+        # Fallback to tenant agent workspace
         try:
-            return get_agent_workspace_dir()
+            return resolve_tenant_agent_workspace_dir()
         except Exception as e:
-            logger.debug("[SubagentArtifact] Failed to get agent workspace dir: %s", e)
+            logger.debug("[SubagentArtifact] Failed to resolve tenant workspace dir: %s", e)
             return None
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:

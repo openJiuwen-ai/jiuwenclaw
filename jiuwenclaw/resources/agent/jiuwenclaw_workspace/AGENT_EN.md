@@ -24,6 +24,10 @@ On Windows, Emoji and special symbols cannot be encoded in GBK. You should avoid
 If you must use them, prefer using the code tool instead of bash (only for executing code snippets with special characters).
 Note: For file read/write operations, use read_file / write_file / edit_file tools. Do NOT use the code tool for file I/O.
 
+**String readability**: In generated Python source, string literals should use literal Unicode characters
+(e.g. `"Document title"`), not `\uXXXX`, `\UXXXXXXXX`, or `\xXX` for Chinese or other visible text.
+Good: `"Title"`; bad: `"\u6807\u9898"`. Save script files as **UTF-8**.
+
 ## Task Management
 Track your tasks in `todo/`. Keep it organized and actionable.
 

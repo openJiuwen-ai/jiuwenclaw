@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,6 +32,7 @@ from jiuwenclaw.agentserver.tools.web_search.types import (
     WebSearchRecord,
     WebSearchSettings,
 )
+from jiuwenclaw.local_env_config import read_env_if_set
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def paid_provider_available(name: str) -> bool:
     if name == "petal":
         return enable_petal_search()
     env_key = PAID_API_KEYS.get(name)
-    return bool(env_key and os.environ.get(env_key))
+    return bool(env_key and read_env_if_set(env_key))
 
 
 def any_paid_provider_available(order: tuple[str, ...]) -> bool:
@@ -176,10 +176,18 @@ async def invoke_paid_provider(
 async def run_paid_chain(
     query: str,
     settings: WebSearchSettings,
+    preferred_provider: str | None = None,
 ) -> tuple[ProviderRun | None, list[str]]:
     tried: list[str] = []
     last_run: ProviderRun | None = None
-    for name in settings.paid_provider_order:
+    order: tuple[str, ...] = settings.paid_provider_order
+    if preferred_provider:
+        preferred = preferred_provider.strip().lower()
+        if preferred in order:
+            order = (preferred,) + tuple(n for n in order if n != preferred)
+        else:
+            order = (preferred,) + order
+    for name in order:
         run = await invoke_paid_provider(
             name,
             query,
@@ -188,7 +196,6 @@ async def run_paid_chain(
         )
         last_run = run
         if run.error == "skipped":
-            tried.append(f"{run.provider}(skipped)")
             continue
         if run.error:
             tried.append(f"{run.provider}(error)")

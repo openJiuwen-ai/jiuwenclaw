@@ -1,5 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -7,10 +9,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
+from openjiuwen.harness.tools.todo import TodoStatus
 from openjiuwen.harness.tools.todo_resume import TODO_RESUME_SNAPSHOT_PENDING_KEY
 
 from jiuwenclaw.agentserver.deep_agent import interrupt_resume_helpers as helpers
+
+
+class _DeepAdapterInterruptHarness:
+    """Expose DeepAdapter interrupt-clear helpers for unit tests."""
+
+    @classmethod
+    def for_clear_session_test(cls):
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+
+        adapter = JiuWenClawDeepAdapter.__new__(JiuWenClawDeepAdapter)
+        adapter._instance = SimpleNamespace(card=MagicMock())
+        adapter._checkpointer = MagicMock(name="checkpointer")
+        return adapter
+
+    @staticmethod
+    async def clear_session_persisted_interrupt_state(adapter, session_id: str, **kwargs):
+        return await adapter._clear_session_persisted_interrupt_state(session_id, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -32,7 +51,9 @@ async def test_prepare_interrupt_resume_sets_snapshot_pending_on_resume_query() 
     session = MagicMock()
     session.pre_run = AsyncMock()
     session.post_run = AsyncMock()
-    active_todo = TodoItem.create(content="task-a", status=TodoStatus.IN_PROGRESS)
+    active_todo = MagicMock()
+    active_todo.content = "task-a"
+    active_todo.status = TodoStatus.IN_PROGRESS
     modify_tool = MagicMock()
     modify_tool.load_todos = AsyncMock(return_value=[active_todo])
     adapter = SimpleNamespace(
@@ -49,23 +70,26 @@ async def test_prepare_interrupt_resume_sets_snapshot_pending_on_resume_query() 
         patch.object(helpers, "create_agent_session", return_value=session),
         patch.object(helpers, "post_agent_execute_for_session", new_callable=AsyncMock),
         patch.object(helpers, "read_plan_pause_from_session", return_value=(False, None)),
+        patch.object(helpers, "is_interrupt_recovery_injected", return_value=False),
+        patch.object(helpers, "has_active_todo_items", return_value=True),
+        patch.object(helpers, "is_resume_user_query", return_value=True),
     ):
         await helpers.prepare_interrupt_resume_for_request(adapter, request)
 
-    session.update_state.assert_called_once_with(
-        {TODO_RESUME_SNAPSHOT_PENDING_KEY: True}
-    )
+    # update_state 被调用两次：set_todo_resume_snapshot_pending 和 mark_interrupt_recovery_injected
+    from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import INTERRUPT_RECOVERY_INJECTED_KEY
+
+    assert session.update_state.call_count == 2
+    session.update_state.assert_any_call({TODO_RESUME_SNAPSHOT_PENDING_KEY: True})
+    session.update_state.assert_any_call({INTERRUPT_RECOVERY_INJECTED_KEY: True})
 
 
 @pytest.mark.asyncio
 async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending() -> None:
-    from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-
     session = MagicMock()
     session.pre_run = AsyncMock()
     session.post_run = AsyncMock()
-    adapter = JiuWenClawDeepAdapter.__new__(JiuWenClawDeepAdapter)
-    adapter._instance = SimpleNamespace(card=MagicMock())
+    adapter = _DeepAdapterInterruptHarness.for_clear_session_test()
 
     with (
         patch(
@@ -76,20 +100,29 @@ async def test_clear_session_persisted_interrupt_state_clears_snapshot_pending()
             "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_session_interrupt_state",
         ) as clear_interrupt,
         patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.clear_interrupt_recovery_injected",
+        ) as clear_recovery_injected,
+        patch(
             "jiuwenclaw.agentserver.deep_agent.interface_deep.set_todo_resume_snapshot_pending",
         ) as clear_pending,
         patch(
             "jiuwenclaw.agentserver.deep_agent.interface_deep.post_agent_execute_for_session",
             new_callable=AsyncMock,
         ) as post_execute,
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep._skill_turbo_clear_resume_ctx",
+            new_callable=AsyncMock,
+        ),
     ):
-        await adapter._clear_session_persisted_interrupt_state(
+        await _DeepAdapterInterruptHarness.clear_session_persisted_interrupt_state(
+            adapter,
             "sess-cancel",
             reason="interrupt(cancel)",
             clear_todo_resume_snapshot_pending=True,
         )
 
     clear_interrupt.assert_called_once_with(session)
+    clear_recovery_injected.assert_called_once_with(session)
     clear_pending.assert_called_once_with(session, pending=False)
-    post_execute.assert_awaited_once_with(session)
+    post_execute.assert_awaited_once_with(session, adapter._checkpointer)
     session.post_run.assert_awaited_once()

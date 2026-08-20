@@ -5,14 +5,22 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from typing import Any
 
 from openjiuwen.core.context_engine.qa_artifact.store import QAArtifactStore
+from openjiuwen.core.context_engine.qa_artifact.assembly_state import clear_assembly_qa_artifact_state
+from openjiuwen.core.context_engine.qa_artifact.window import make_processor_ctx
+from openjiuwen.core.context_engine.qa_block.messages import (
+    extract_qa_native_messages,
+    is_other_qa_message,
+    message_qa_id,
+)
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.context_engine.qa_block.catalog import (
     build_catalog_section,
     build_catalog_text,
-    maybe_compact_catalog_l1,
 )
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
 from openjiuwen.core.context_engine.qa_block.freezer import allocate_qa_id
@@ -25,22 +33,348 @@ from openjiuwen.core.context_engine.qa_block.selector import (
     fallback_rule_last_n,
     resolve_selector_model,
 )
+from openjiuwen.core.context_engine.qa_block.schema import QABlockEntry, QABlockRegistry
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    post_agent_execute_for_session,
     resolve_actual_session,
     resolve_context_engine,
+    session_id_from_session,
 )
+
+from jiuwenclaw.agentserver.deep_agent.rails.utils import is_ask_user_question_interrupt
 
 logger = logging.getLogger(__name__)
 
-_ASSEMBLED_KEY = "_qa_block_assembled"
 _WINDOW_QAS_KEY = "_window_qas"
 _LAYER_KEY = "_qa_block_layer"
-_CURRENT_QA_KEY = "_current_qa_id"
 _PRELOADED_QA_IDS_KEY = "_preloaded_qa_ids"
+_PENDING_ORPHAN_SALVAGE_KEY = "_qa_block_pending_orphan_salvage"
+_ASSEMBLY_COMMITTED_QA_ID_KEY = "_qa_block_assembly_committed_qa_id"
+# Set in before_invoke for InteractiveInput resume turns. before_model_call runs with
+# ModelCallInputs (query already replaced), so popup/resume identity must live on session.
+_INTERRUPT_RESUME_TURN_KEY = "_qa_block_interrupt_resume_turn"
+
+
+def _is_resume_invoke(ctx: AgentCallbackContext) -> bool:
+    inputs = ctx.inputs
+    if isinstance(inputs, InvokeInputs):
+        return isinstance(inputs.query, InteractiveInput)
+    return False
+
+
+def _set_interrupt_resume_turn(session: Any, *, enabled: bool) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_INTERRUPT_RESUME_TURN_KEY: bool(enabled)})
+
+
+def _is_interrupt_resume_turn(session: Any) -> bool:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return False
+    return bool(getter(_INTERRUPT_RESUME_TURN_KEY))
+
+
+def _is_popup_confirmation_resume(ctx: AgentCallbackContext) -> bool:
+    """检测弹窗确认恢复场景(如工具权限"本次允许")。
+
+    仅当 resume 的 result 标记为 interrupt 且包含 interrupt_ids 时，
+    才认为是弹窗恢复，跳过QA组装。普通 InteractiveInput resume（如 stale pointer
+    空上下文场景）仍需要走正常组装流程。
+
+    注意：``before_model_call`` 时 ``ctx.inputs`` 通常已是 ``ModelCallInputs``，
+    本函数在该钩子里几乎恒为 False；真正的 keep-current 依赖
+    ``_should_keep_current_qa_on_interrupt_resume``（session 标记）。
+    """
+    return is_ask_user_question_interrupt(ctx)
+
+
+def _should_keep_current_qa_on_interrupt_resume(
+    ctx: AgentCallbackContext,
+    session: Any,
+    registry: QABlockRegistry,
+) -> bool:
+    """Permission/HITL resume 后继续沿用未冻结的进行中 QA，避免错误新开轮次。
+
+    ``before_model_call`` 看不到 InteractiveInput，因此用 before_invoke 写入的
+    session 标记识别 resume 轮。
+
+    Keep 条件（满足其一即可）：
+    1. 本轮已 assembly commit 到该 QA；
+    2. context 上已有该 QA 的 native 工作内容；
+    3. 下一轮 user query 为空（权限/HITL resume 的预期形态）——避免误 allocate 空 QA。
+
+    若 resume 轮却带着非空 query、且无 commit/无 native work，视为 stale 指针，
+    放行给后续清理/组装逻辑。
+    """
+    if not _is_interrupt_resume_turn(session):
+        return False
+    active_qa_id = registry.current_qa_id
+    if not active_qa_id:
+        return False
+    entry = registry.blocks.get(active_qa_id)
+    if _is_frozen_entry(entry):
+        return False
+    if _get_assembly_committed_qa_id(session) == active_qa_id:
+        return True
+    if _context_has_active_qa_work(ctx, active_qa_id):
+        return True
+    messages: list = []
+    context = ctx.context
+    if context is not None:
+        getter = getattr(context, "get_messages", None)
+        if callable(getter):
+            messages = getter() or []
+    # Empty query is expected on permission/HITL resume; keep unfrozen QA.
+    if not extract_next_user_query(messages).strip():
+        return True
+    return False
+
+
+def _is_frozen_entry(entry: QABlockEntry | None) -> bool:
+    return bool(
+        entry is not None
+        and entry.is_history
+        and entry.freeze_committed_at
+    )
+
+
+def _get_assembly_committed_qa_id(session: Any) -> str | None:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return None
+    qa_id = getter(_ASSEMBLY_COMMITTED_QA_ID_KEY)
+    return str(qa_id) if qa_id else None
+
+
+def _set_assembly_committed_qa_id(session: Any, qa_id: str) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_ASSEMBLY_COMMITTED_QA_ID_KEY: qa_id})
+
+
+def clear_assembly_committed_qa_id(session: Any) -> None:
+    """Clear per-user-turn assembly marker (also called from freeze rail)."""
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_ASSEMBLY_COMMITTED_QA_ID_KEY: None})
+
+
+def _context_has_active_qa_work(ctx: AgentCallbackContext, qa_id: str) -> bool:
+    """True when context carries native messages for the active QA turn.
+
+    Aligns with ``_group_messages_by_qa`` / ``is_other_qa_message``: ReAct
+    messages without explicit ``metadata.qa_id`` belong to ``current_qa_id``.
+    """
+    context = ctx.context
+    if context is None:
+        return False
+    getter = getattr(context, "get_messages", None)
+    if not callable(getter):
+        return False
+    for message in getter() or ():
+        if not is_other_qa_message(message, qa_id):
+            return True
+    return False
+
+
+def _should_skip_reassembly(
+    ctx: AgentCallbackContext,
+    session: Any,
+    active_qa_id: str,
+    entry: QABlockEntry | None,
+) -> bool:
+    if _is_frozen_entry(entry):
+        return False
+    if (
+        entry is None
+        and _is_resume_invoke(ctx)
+        and not (ctx.context.get_messages() if ctx.context is not None else None)
+    ):
+        return False
+    if _get_assembly_committed_qa_id(session) == active_qa_id:
+        return True
+    if _context_has_active_qa_work(ctx, active_qa_id):
+        return True
+    return False
+
+
+def _clear_current_qa_pointer(session: Any, registry: QABlockRegistry, qa_id: str) -> None:
+    if registry.current_qa_id != qa_id:
+        return
+    registry.current_qa_id = None
+    save_registry(session, registry)
+    if _get_assembly_committed_qa_id(session) == qa_id:
+        clear_assembly_committed_qa_id(session)
+
+
+def _set_pending_orphan_salvage(session: Any, qa_id: str) -> None:
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_PENDING_ORPHAN_SALVAGE_KEY: qa_id})
+
+
+def _pop_pending_orphan_salvage(session: Any) -> str | None:
+    getter = getattr(session, "get_state", None)
+    if not callable(getter):
+        return None
+    qa_id = getter(_PENDING_ORPHAN_SALVAGE_KEY)
+    if not qa_id:
+        return None
+    updater = getattr(session, "update_state", None)
+    if callable(updater):
+        updater({_PENDING_ORPHAN_SALVAGE_KEY: None})
+    return str(qa_id)
+
+
+def _tail_unassigned_user_messages(messages: list) -> list:
+    """Trailing UserMessage copies without qa_id/source_qa_id (current-round input)."""
+    preserved: list = []
+    for message in reversed(messages):
+        if not isinstance(message, UserMessage):
+            break
+        if message_qa_id(message):
+            break
+        copy = message.model_copy(deep=True) if hasattr(message, "model_copy") else message
+        preserved.insert(0, copy)
+    return preserved
+
+
+def _strip_tail_unassigned_user_messages(messages: list) -> list:
+    preserved = _tail_unassigned_user_messages(messages)
+    if not preserved:
+        return list(messages)
+    return list(messages[: len(messages) - len(preserved)])
+
+
+def _orphan_needs_no_salvage(
+    ctx: AgentCallbackContext,
+    qa_id: str,
+    entry: QABlockEntry | None,
+    registry: QABlockRegistry,
+) -> bool:
+    """True when stale orphan pointer has nothing worth freezing (repair-only clear).
+
+    ``before_invoke`` often runs before ``ctx.context`` is ready. When the buffer
+    cannot be inspected, keep deferred salvage (do not clear blindly).
+    """
+    if _is_resume_invoke(ctx):
+        return False
+
+    context = ctx.context
+    if context is None:
+        return False
+    getter = getattr(context, "get_messages", None)
+    if not callable(getter):
+        return False
+
+    messages = getter() or []
+    if not messages:
+        return True
+    preserved_count = len(_tail_unassigned_user_messages(messages))
+    candidate = messages[: len(messages) - preserved_count] if preserved_count else messages
+    orphan_native = extract_qa_native_messages(candidate, registry)
+    return not orphan_native
+
+
+def _is_task_continuation(
+    ctx: AgentCallbackContext,
+    next_query: str,
+    session: Any | None = None,
+) -> bool:
+    resume_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
+    if isinstance(resume_input, InteractiveInput):
+        return True
+    if not next_query.strip() and _is_resume_invoke(ctx):
+        return True
+    if session is not None and _is_interrupt_resume_turn(session) and not next_query.strip():
+        return True
+    return False
+
+
+def _last_n_history_qa_ids(registry: Any, n: int = 1) -> list[str]:
+    entries = sorted(
+        (entry for entry in registry.blocks.values() if entry.is_history),
+        key=lambda entry: entry.qa_index,
+    )
+    if not entries:
+        return []
+    if n <= 0:
+        return []
+    return [entry.qa_id for entry in entries[-n:]]
+
+
+def _merge_hydrate_qa_ids(
+    default_ids: list[str],
+    selector_ids: list[str] | None,
+    registry: Any,
+    *,
+    max_total: int,
+    max_tokens: int,
+) -> list[str]:
+    """Merge default recent blocks with selector selections (dedup, chronological).
+
+    Token budget safety: if total approx_tokens exceeds *max_tokens*, drop oldest
+    blocks first.  Always keeps at least the most recent block.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    blocks = getattr(registry, "blocks", {}) or {}
+    for qa_id in default_ids or []:
+        # Skip ids absent from registry — they cannot be hydrated and must not
+        # collapse to qa_index=0 (would sort as oldest and bias drop order).
+        if qa_id not in seen and qa_id in blocks:
+            merged.append(qa_id)
+            seen.add(qa_id)
+    for qa_id in selector_ids or []:
+        if qa_id not in seen and qa_id in blocks:
+            merged.append(qa_id)
+            seen.add(qa_id)
+
+    if not merged:
+        return []
+
+    # Sort by qa_index (chronological order). Unknown ids (defensive) sort last.
+    def _qa_index(qa_id: str) -> int:
+        entry = blocks.get(qa_id)
+        return entry.qa_index if entry is not None else sys.maxsize
+
+    merged.sort(key=_qa_index)
+
+    # Token budget check: drop oldest first if exceeded
+    total_tokens = sum(
+        (registry.blocks[qa_id].approx_tokens or 0)
+        for qa_id in merged
+        if qa_id in registry.blocks
+    )
+    dropped: list[str] = []
+    while len(merged) > 1 and total_tokens > max_tokens:
+        dropped_qa = merged.pop(0)
+        dropped.append(dropped_qa)
+        entry = registry.blocks.get(dropped_qa)
+        if entry:
+            total_tokens -= entry.approx_tokens or 0
+
+    if dropped:
+        logger.warning(
+            "[QABlockAssemblyRail] hydrate token budget exceeded, dropped oldest "
+            "blocks=%s remaining_tokens=%s budget=%s",
+            dropped,
+            total_tokens,
+            max_tokens,
+        )
+
+    # Keep the newest max_total blocks (merged is sorted oldest→newest).
+    # Guard against max_total <= 0: merged[-0:] returns the full list (Python quirk).
+    if max_total <= 0:
+        return []
+    return merged[-max_total:]
 
 
 class JiuClawQABlockAssemblyRail(DeepAgentRail):
@@ -49,15 +383,219 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
     def __init__(self, config: QABlockConfig | None = None):
         super().__init__()
         self._config = config or QABlockConfig()
+        self._freeze_rail: Any | None = None
 
     @property
     def enabled(self) -> bool:
         return self._config.enabled
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+    def attach_freeze_rail(self, freeze_rail: Any | None) -> None:
+        """Wire freeze rail for orphan QA salvage on new user invoke."""
+        self._freeze_rail = freeze_rail
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Detect orphan QA left from a prior user invoke.
+
+        Registered as a DeepAgent outer-only hook (not bridged to inner
+        ReAct invoke). Task-loop iterations only fire before_model_call;
+        they do not re-enter this hook, so in-progress QA within the same
+        outer invoke is not subject to orphan deferral here.
+        """
         if not self._config.enabled:
             return
-        if ctx.extra.get(_ASSEMBLED_KEY):
+
+        session = resolve_actual_session(ctx.session)
+        if session is None:
+            logger.debug("[QABlockAssemblyRail] before_invoke skipped: no session")
+            return
+
+        if _is_resume_invoke(ctx):
+            # Mark resume turn so before_model_call (ModelCallInputs) can keep
+            # the in-progress QA instead of allocating a new one after tool resume.
+            _set_interrupt_resume_turn(session, enabled=True)
+            logger.debug("[QABlockAssemblyRail] before_invoke skipped: resume invoke")
+            return
+
+        _set_interrupt_resume_turn(session, enabled=False)
+        clear_assembly_committed_qa_id(session)
+
+        session_id = session_id_from_session(session)
+        registry = load_registry(session)
+        qa_id = registry.current_qa_id
+        if not qa_id:
+            logger.debug(
+                "[QABlockAssemblyRail] before_invoke skipped: no current_qa_id session_id=%s",
+                session_id,
+            )
+            return
+
+        entry = registry.blocks.get(qa_id)
+        if _is_frozen_entry(entry):
+            _clear_current_qa_pointer(session, registry, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] repaired stale current_qa_id session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+            return
+
+        if entry is None or not entry.freeze_committed_at:
+            if _orphan_needs_no_salvage(ctx, qa_id, entry, registry):
+                _clear_current_qa_pointer(session, registry, qa_id)
+                try:
+                    await post_agent_execute_for_session(session)
+                except Exception as exc:
+                    logger.warning(
+                        "[QABlockAssemblyRail] orphan pointer checkpoint flush failed "
+                        "session_id=%s qa_id=%s: %s",
+                        session_id,
+                        qa_id,
+                        exc,
+                    )
+                logger.info(
+                    "[QABlockAssemblyRail] repaired empty/stale orphan pointer without salvage "
+                    "session_id=%s qa_id=%s",
+                    session_id,
+                    qa_id,
+                )
+                return
+            _set_pending_orphan_salvage(session, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] deferred orphan salvage session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+
+    async def _salvage_orphan_qa(
+        self,
+        ctx: AgentCallbackContext,
+        session: Any,
+        session_id: str,
+        qa_id: str,
+    ) -> bool:
+        freeze_rail = self._freeze_rail
+        if freeze_rail is None:
+            return False
+
+        context = ctx.context
+        original_messages: list | None = None
+        preserved_users: list = []
+        if context is not None:
+            getter = getattr(context, "get_messages", None)
+            if callable(getter):
+                messages = list(getter() or [])
+                original_messages = messages
+                preserved_users = _tail_unassigned_user_messages(messages)
+                if preserved_users:
+                    context.set_messages(
+                        _strip_tail_unassigned_user_messages(messages),
+                        with_history=True,
+                    )
+
+        try:
+            # persist_context=False: avoid checkpointing the stripped buffer before
+            # current-round user messages are restored (crash-window / Problem A).
+            await freeze_rail.freeze_current_qa_sync(
+                session_id,
+                agent=ctx.agent,
+                session=session,
+                status="interrupted",
+                persist_context=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[QABlockAssemblyRail] orphan salvage freeze failed session_id=%s qa_id=%s: %s",
+                session_id,
+                qa_id,
+                exc,
+                exc_info=True,
+            )
+            if context is not None and original_messages is not None:
+                context.set_messages(original_messages, with_history=True)
+            return False
+
+        registry = load_registry(session, force_reload=True)
+        entry = registry.blocks.get(qa_id)
+        frozen = _is_frozen_entry(entry)
+
+        if context is not None and preserved_users:
+            if frozen:
+                # Successful freeze strips the active buffer; restore only this round's user.
+                context.set_messages(preserved_users, with_history=True)
+            elif original_messages is not None:
+                # Freeze returned None without strip; put the full pre-strip buffer back.
+                context.set_messages(original_messages, with_history=True)
+            logger.info(
+                "[QABlockAssemblyRail] orphan salvage preserved current-round user "
+                "session_id=%s qa_id=%s count=%s frozen=%s",
+                session_id,
+                qa_id,
+                len(preserved_users),
+                frozen,
+            )
+
+        # Persist only after restore so checkpoint never sees a stripped-without-user snapshot.
+        context_engine = resolve_context_engine(ctx.agent)
+        if context_engine is not None:
+            try:
+                await context_engine.save_contexts(session)
+                await post_agent_execute_for_session(session)
+            except Exception as exc:
+                logger.warning(
+                    "[QABlockAssemblyRail] orphan salvage checkpoint flush failed "
+                    "session_id=%s qa_id=%s: %s",
+                    session_id,
+                    qa_id,
+                    exc,
+                )
+
+        if frozen:
+            if registry.current_qa_id == qa_id:
+                _clear_current_qa_pointer(session, registry, qa_id)
+            logger.info(
+                "[QABlockAssemblyRail] orphan QA salvaged session_id=%s qa_id=%s",
+                session_id,
+                qa_id,
+            )
+            return True
+
+        logger.warning(
+            "[QABlockAssemblyRail] freeze completed but entry not fully frozen "
+            "session_id=%s qa_id=%s current_qa_id=%s",
+            session_id,
+            qa_id,
+            registry.current_qa_id,
+        )
+        return registry.current_qa_id != qa_id
+
+    async def _run_deferred_orphan_salvage(
+        self,
+        ctx: AgentCallbackContext,
+        session: Any,
+        session_id: str,
+    ) -> None:
+        pending = _pop_pending_orphan_salvage(session)
+        if not pending:
+            return
+
+        registry = load_registry(session)
+        if registry.current_qa_id != pending:
+            return
+
+        salvaged = await self._salvage_orphan_qa(ctx, session, session_id, pending)
+        if not salvaged:
+            if self._freeze_rail is not None:
+                registry = load_registry(session, force_reload=True)
+            _clear_current_qa_pointer(session, registry, pending)
+            logger.warning(
+                "[QABlockAssemblyRail] deferred salvage failed, cleared orphan "
+                "session_id=%s qa_id=%s",
+                session_id,
+                pending,
+            )
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        if not self._config.enabled:
             return
         if ctx.context is None:
             logger.info("[QABlockAssemblyRail] skipped: context not ready")
@@ -73,10 +611,72 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             return
 
         assembly_start = time.perf_counter()
-        session_id = session.get_session_id() if hasattr(session, "get_session_id") else ""
-        context = ctx.context
+        session_id = session_id_from_session(session)
+
+        # 弹窗确认恢复场景(如工具权限"本次允许")，跳过QA组装，沿用当前上下文
+        if _is_popup_confirmation_resume(ctx):
+            logger.info(
+                "[QABlockAssemblyRail] skip assembly for popup confirmation resume "
+                "session_id=%s", session_id,
+            )
+            return
+
         registry = load_registry(session)
-        registry = maybe_compact_catalog_l1(registry, self._config)
+        # Permission/HITL resume: after tool re-executes, the next model call uses
+        # ModelCallInputs so popup detection above is dead. Keep the unfrozen QA
+        # that holds prior ask_user_question answers.
+        if _should_keep_current_qa_on_interrupt_resume(ctx, session, registry):
+            logger.info(
+                "[QABlockAssemblyRail] keep current QA on interrupt resume "
+                "session_id=%s active_qa_id=%s committed=%s has_native_work=%s",
+                session_id,
+                registry.current_qa_id,
+                _get_assembly_committed_qa_id(session) == registry.current_qa_id,
+                _context_has_active_qa_work(ctx, registry.current_qa_id or ""),
+            )
+            return
+
+        await self._run_deferred_orphan_salvage(ctx, session, session_id)
+
+        registry = load_registry(session)
+        if registry.current_qa_id:
+            active_qa_id = registry.current_qa_id
+            entry = registry.blocks.get(active_qa_id)
+            if _is_frozen_entry(entry):
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+            elif (
+                entry is None
+                and _is_resume_invoke(ctx)
+                and not (ctx.context.get_messages() if ctx.context is not None else None)
+            ):
+                logger.warning(
+                    "[QABlockAssemblyRail] resume with empty context, clearing stale "
+                    "current_qa_id session_id=%s qa_id=%s",
+                    session_id,
+                    active_qa_id,
+                )
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+            elif _should_skip_reassembly(ctx, session, active_qa_id, entry):
+                logger.info(
+                    "[QABlockAssemblyRail] skip re-assembly session_id=%s active_qa_id=%s "
+                    "committed=%s has_native_work=%s",
+                    session_id,
+                    active_qa_id,
+                    _get_assembly_committed_qa_id(session) == active_qa_id,
+                    _context_has_active_qa_work(ctx, active_qa_id),
+                )
+                return
+            else:
+                logger.warning(
+                    "[QABlockAssemblyRail] stale current_qa_id without assembly commit or "
+                    "native work session_id=%s qa_id=%s",
+                    session_id,
+                    active_qa_id,
+                )
+                _clear_current_qa_pointer(session, registry, active_qa_id)
+
+        context = ctx.context
+        clear_assembly_qa_artifact_state(context)
 
         workspace_root = ""
         if self.workspace is not None:
@@ -95,7 +695,7 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                 recovered,
             )
 
-        catalog_text = build_catalog_text(registry)
+        catalog_text = build_catalog_text(registry, max_tokens=self._config.catalog_max_tokens)
         prompt_builder = getattr(agent, "system_prompt_builder", None)
         if prompt_builder is not None:
             lang = getattr(prompt_builder, "language", None) or "cn"
@@ -132,13 +732,14 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
             next_query = extract_next_user_query(context.get_messages())
             model = resolve_selector_model(agent)
             selector = QABlockSelector(self._config)
+            is_continuation = _is_task_continuation(ctx, next_query, session)
             try:
                 selected_qa_ids = await selector.select(
                     next_query,
                     registry,
                     history,
                     model=model,
-                    catalog_text=catalog_text,
+                    catalog_text=None,
                 )
             except Exception as exc:
                 logger.warning(
@@ -153,22 +754,73 @@ class JiuClawQABlockAssemblyRail(DeepAgentRail):
                     registry,
                     config=self._config,
                 )
-            ctx.extra[_PRELOADED_QA_IDS_KEY] = list(selected_qa_ids or [])
-            await layer.hydrate_history_into_window(context, selected_qa_ids=selected_qa_ids)
-        else:
-            ctx.extra[_PRELOADED_QA_IDS_KEY] = []
-            await layer.hydrate_history_into_window(context)
+            if not selected_qa_ids and is_continuation:
+                selected_qa_ids = _last_n_history_qa_ids(
+                    registry, n=self._config.max_preload_blocks
+                )
+                logger.info(
+                    "[QABlockAssemblyRail] task continuation fallback "
+                    "session_id=%s preloaded=%s reason=no_query_history_required",
+                    session_id,
+                    selected_qa_ids,
+                )
+
+        # Unify merge logic: always apply default recent blocks + token budget.
+        # When selector is enabled, selected_qa_ids holds selector selections.
+        # When selector is disabled, selected_qa_ids is None (default-only hydrate).
+        default_qa_ids = _last_n_history_qa_ids(
+            registry, n=self._config.default_hydrate_recent_blocks
+        )
+        merged_qa_ids = _merge_hydrate_qa_ids(
+            default_qa_ids,
+            selected_qa_ids,
+            registry,
+            max_total=self._config.max_total_hydrate_blocks,
+            max_tokens=self._config.hydrate_max_tokens,
+        )
+        if merged_qa_ids != list(selected_qa_ids or []):
+            logger.info(
+                "[QABlockAssemblyRail] hydrate merge "
+                "session_id=%s default=%s selector=%s merged=%s",
+                session_id,
+                default_qa_ids,
+                selected_qa_ids,
+                merged_qa_ids,
+            )
+        ctx.extra[_PRELOADED_QA_IDS_KEY] = list(merged_qa_ids or [])
+        await layer.hydrate_history_into_window(context, selected_qa_ids=merged_qa_ids)
+
+        if _is_interrupt_resume_turn(session) and not extract_next_user_query(
+            context.get_messages()
+        ).strip():
+            logger.info(
+                "[QABlockAssemblyRail] skip QA allocate on interrupt resume with empty query "
+                "session_id=%s",
+                session_id,
+            )
+            return
 
         qa_id, _ = allocate_qa_id(registry)
         registry.current_qa_id = qa_id
         save_registry(session, registry)
+        _set_assembly_committed_qa_id(session, qa_id)
 
         window_qas = layer.build_window_qas(context)
 
-        ctx.extra[_ASSEMBLED_KEY] = True
+        qa_mgr = context.get_qa_artifact_manager()
+        if qa_mgr is not None and window_qas:
+            proc_ctx = make_processor_ctx(context, sys_operation=self.sys_operation)
+            store = qa_mgr.build_store(proc_ctx, proc_ctx.workspace)
+            if qa_mgr.needs_history_artifact_work(context, store, window_qas):
+                await qa_mgr.apply_artifact_to_context(
+                    proc_ctx,
+                    workspace=proc_ctx.workspace,
+                    window_qas=window_qas,
+                    context=context,
+                )
+
         ctx.extra[_WINDOW_QAS_KEY] = window_qas
         ctx.extra[_LAYER_KEY] = layer
-        ctx.extra[_CURRENT_QA_KEY] = qa_id
 
         preloaded = ctx.extra.get(_PRELOADED_QA_IDS_KEY, [])
         elapsed_ms = (time.perf_counter() - assembly_start) * 1000

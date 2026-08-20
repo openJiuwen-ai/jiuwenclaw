@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import logging
+import re
 
+from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
 from jiuwenclaw.agentserver.tools.web_search.providers import (
     any_paid_provider_available,
+    paid_provider_available,
     run_free_chain,
     run_paid_chain,
 )
 from jiuwenclaw.agentserver.tools.web_search.log_util import (
     paid_availability_report,
+    paid_provider_skip_reason,
     provider_run_summary,
     settings_summary,
     truncate_query,
@@ -38,16 +42,79 @@ _SEARCH_MODE_ALIASES: dict[str, str] = {
 
 _SUPPORTED_SEARCH_MODES = frozenset({"default", "paid", "free"})
 
+_ENGINE_ALIAS_MAP: dict[str, str] = {
+    "duckduckgo": "duckduckgo", "ddg": "duckduckgo", "鸭子": "duckduckgo",
+    "谷歌": "google", "google": "google",
+    "必应": "bing", "bing": "bing",
+    "百度": "baidu", "baidu": "baidu",
+    "花瓣": "petal", "petal": "petal",
+    "博查": "bocha", "bocha": "bocha",
+    "360": "360", "好搜": "360", "so": "360",
+    "搜狗": "sogou", "sogou": "sogou",
+    "头条": "toutiao", "今日头条": "toutiao",
+}
 
-def normalize_search_mode(value: str | None) -> str:
+_PROVIDER_TO_ENGINE: dict[str, str] = {
+    "petal": "petal",
+    "bocha": "bocha",
+    "tavily": "tavily",
+    "perplexity": "perplexity",
+    "serper": "serper",
+    "jina": "jina",
+    "duckduckgo": "duckduckgo",
+    "duckduckgo-jina": "duckduckgo",
+    "bing": "bing",
+}
+
+
+def _detect_requested_engine(query: str) -> str | None:
+    query_lower = query.lower()
+    for alias, engine in _ENGINE_ALIAS_MAP.items():
+        if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", query_lower):
+            return engine
+    return None
+
+
+def _generate_engine_mismatch_warning(
+    query: str,
+    actual_provider: str,
+) -> str | None:
+    requested_engine = _detect_requested_engine(query)
+    if not requested_engine:
+        return None
+    actual_engine = _PROVIDER_TO_ENGINE.get(actual_provider, actual_provider)
+    if requested_engine == actual_engine:
+        return None
+    return (
+        f"⚠️ 用户请求使用 {requested_engine} 搜索，但该引擎不可用，"
+        f"已自动切换至 {actual_provider}。"
+    )
+
+
+def _parse_search_source(value: str | None) -> str | None:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    if raw in KNOWN_PAID_PROVIDERS:
+        return raw
+    return None
+
+
+def normalize_search_mode(value: str | None) -> tuple[str, str | None]:
     key = (value or "").strip().lower()
     if not key:
-        return "default"
-    return _SEARCH_MODE_ALIASES.get(key, key)
+        return "default", None
+    if ":" in key:
+        mode_part, source_part = key.split(":", 1)
+        mode = _SEARCH_MODE_ALIASES.get(mode_part.strip(), mode_part.strip())
+        source = _parse_search_source(source_part.strip())
+        return mode, source
+    return _SEARCH_MODE_ALIASES.get(key, key), None
 
 
 def is_valid_search_mode(value: str | None) -> bool:
-    return normalize_search_mode(value) in _SUPPORTED_SEARCH_MODES
+    mode, _source = normalize_search_mode(value)
+    return mode in _SUPPORTED_SEARCH_MODES
 
 
 def _has_usable_results(run: ProviderRun) -> bool:
@@ -100,14 +167,26 @@ async def run_web_search(
     query: str,
     *,
     search_mode: str = "default",
+    search_source: str | None = None,
     max_results: int | None = None,
 ) -> str:
     settings = resolve_web_search_settings(max_results)
-    mode = normalize_search_mode(search_mode)
+    mode, extracted_source = normalize_search_mode(search_mode)
+    preferred_source = extracted_source or _parse_search_source(search_source)
+    if mode != "free" and preferred_source and not paid_provider_available(preferred_source):
+        reason = paid_provider_skip_reason(preferred_source)
+        _log_failed(
+            query=query,
+            mode=mode,
+            reason=f"requested source {preferred_source} unavailable: {reason}",
+            detail=paid_availability_report(settings.paid_provider_order),
+        )
+        return f"[ERROR]: requested paid source '{preferred_source}' unavailable ({reason})."
     logger.debug(
-        "[web_search] start query=%r search_mode=%s %s",
+        "[web_search] start query=%r search_mode=%s search_source=%s %s",
         truncate_query(query),
         mode,
+        preferred_source or "-",
         settings_summary(settings),
     )
 
@@ -145,18 +224,24 @@ async def run_web_search(
             records=free_run.records,
             answer=free_run.answer,
             providers_tried=tried,
+            warning=_generate_engine_mismatch_warning(query, free_run.provider),
         )
 
     if mode == "paid":
-        if not any_paid_provider_available(settings.paid_provider_order):
-            _log_failed(
-                query=query,
-                mode=mode,
-                reason="paid unavailable",
-                detail=paid_availability_report(settings.paid_provider_order),
-            )
-            return "[ERROR]: paid search unavailable."
-        paid_run, tried = await run_paid_chain(query, settings)
+        paid_run: ProviderRun | None = None
+        tried: list[str] = []
+        if preferred_source:
+            paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
+        else:
+            if not any_paid_provider_available(settings.paid_provider_order):
+                _log_failed(
+                    query=query,
+                    mode=mode,
+                    reason="paid unavailable",
+                    detail=paid_availability_report(settings.paid_provider_order),
+                )
+                return "[ERROR]: paid search unavailable."
+            paid_run, tried = await run_paid_chain(query, settings)
         if paid_run and paid_run.quality_passed:
             _log_done(
                 query=query,
@@ -173,6 +258,7 @@ async def run_web_search(
                 records=paid_run.records,
                 answer=paid_run.answer,
                 providers_tried=tried,
+                warning=_generate_engine_mismatch_warning(query, paid_run.provider),
             )
         _log_failed(
             query=query,
@@ -183,7 +269,7 @@ async def run_web_search(
         )
         return "[ERROR]: paid search failed."
 
-    paid_run, tried = await run_paid_chain(query, settings)
+    paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
     if paid_run and paid_run.quality_passed:
         _log_done(
             query=query,
@@ -200,6 +286,7 @@ async def run_web_search(
             records=paid_run.records,
             answer=paid_run.answer,
             providers_tried=tried,
+            warning=_generate_engine_mismatch_warning(query, paid_run.provider),
         )
 
     earlier: list[WebSearchRecord] = []
@@ -248,4 +335,5 @@ async def run_web_search(
         answer=free_run.answer,
         supplementary_records=earlier,
         providers_tried=tried,
+        warning=_generate_engine_mismatch_warning(query, free_run.provider),
     )

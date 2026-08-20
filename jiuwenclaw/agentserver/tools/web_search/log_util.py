@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
 from jiuwenclaw.agentserver.tools.web_search.constants import PAID_API_KEYS
 from jiuwenclaw.agentserver.tools.web_search.paid import diagnose_petal_search
 from jiuwenclaw.agentserver.tools.web_search.types import ProviderRun, WebSearchSettings
+from jiuwenclaw.local_env_config import read_env_if_set
 
 
 def truncate_query(query: str, limit: int = 120) -> str:
@@ -46,7 +45,7 @@ def paid_provider_skip_reason(name: str) -> str:
     env_key = PAID_API_KEYS.get(name)
     if not env_key:
         return "unknown_provider"
-    if os.environ.get(env_key):
+    if read_env_if_set(env_key):
         return "available"
     return f"missing_{env_key}"
 

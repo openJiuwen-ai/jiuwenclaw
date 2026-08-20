@@ -26,7 +26,7 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.config import get_config
-from jiuwenclaw.utils import get_agent_workspace_dir
+from jiuwenclaw.utils import resolve_tenant_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -379,8 +379,10 @@ class LLMWiki:
 def _get_default_model() -> Model:
     config = get_config()
     default_model_conf = config.get("models", {}).get("default", {})
-    client_config = default_model_conf.get("model_client_config", {})
-    req_config = default_model_conf.get("model_config_obj", {})
+    # Defensive copies: these dicts are mutated below, so we must not
+    # modify the shared get_config() cache.
+    client_config = dict(default_model_conf.get("model_client_config", {}))
+    req_config = dict(default_model_conf.get("model_config_obj", {}))
 
     if client_config and client_config.get("custom_headers") == "":
         del client_config["custom_headers"]
@@ -403,7 +405,7 @@ def _get_default_model() -> Model:
 
 def _resolve_workspace(workspace: str) -> Path:
     cleaned_workspace = (workspace or "").strip()
-    base_dir = get_agent_workspace_dir()
+    base_dir = resolve_tenant_agent_workspace_dir()
 
     if not cleaned_workspace or cleaned_workspace == DEFAULT_WIKI_DIR:
         return (base_dir / DEFAULT_WIKI_DIR).resolve()
@@ -442,7 +444,7 @@ async def wiki_ingest(
 
         src_path = Path(source).expanduser()
         if not src_path.is_absolute():
-            src_path = get_agent_workspace_dir() / src_path
+            src_path = resolve_tenant_agent_workspace_dir() / src_path
 
         if not src_path.exists():
             return f"Error: Source {source} not found."

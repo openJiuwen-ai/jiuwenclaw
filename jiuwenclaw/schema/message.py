@@ -43,6 +43,10 @@ class ReqMethod(Enum):
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    SYNC_AGENTS_CONFIGS = "sync_agents_configs"
+
+    TEAM_CATALOG_LIST = "team.catalog.list"
+    TEAM_RUNTIME_DISSOLVE = "team.runtime.dissolve"
 
     MEMORY_COMPUTE = "memory.compute"
 
@@ -71,6 +75,9 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_STATUS = "skills.evolution.status"
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
+    SKILLS_EVOLUTION_ARCHIVES = "skills.evolution.archives"
+    SKILLS_EVOLUTION_ROLLBACK = "skills.evolution.rollback"
+    SKILLS_EVOLUTION_REBUILD = "skills.evolution.rebuild"
 
     EXTENSIONS_LIST = "extensions.list"
     EXTENSIONS_IMPORT = "extensions.import"
@@ -120,6 +127,20 @@ class ReqMethod(Enum):
     UPDATER_DOWNLOAD = "updater.download"
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
+
+    # 沙箱配置（officeAce 经 WS 控制 jiuwenbox 沙箱开关/启动方式/文件/网络配置）。
+    # enabled = 是否开启沙箱（false→LOCAL，true→SANDBOX）；
+    # startup_mode = 开了沙箱后 box-server 的拉起方式（internal=agent-server 拉起，
+    #   external=K8s/外部部署）；两者独立，均开放给 officeAce。
+    # files/network 配置直接写进 windows-policy 运行时副本的对应字段（不存 config.yaml）。
+    SANDBOX_ENABLED_GET = "sandbox.enabled.get"
+    SANDBOX_ENABLED_SET = "sandbox.enabled.set"
+    SANDBOX_STARTUP_MODE_GET = "sandbox.startup_mode.get"
+    SANDBOX_STARTUP_MODE_SET = "sandbox.startup_mode.set"
+    SANDBOX_FILES_GET = "sandbox.files.get"
+    SANDBOX_FILES_SET = "sandbox.files.set"
+    SANDBOX_NETWORK_GET = "sandbox.network.get"
+    SANDBOX_NETWORK_SET = "sandbox.network.set"
 
 # SkillDev 模式请求方法
     SKILLDEV_START = "skilldev.start"  # 发起新任务（create/upgrade 由 params 自动判断）
@@ -171,6 +192,7 @@ class EventType(Enum):
     TEAM_MESSAGE = "team.message"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
+    SYNC_AGENTS_CONFIGS_RESULT = "sync_agents_configs.result"
     # SkillDev 事件类型
     SKILLDEV_STARTED = "skilldev.started"
     SKILLDEV_STAGE_CHANGED = "skilldev.stage_changed"
@@ -190,6 +212,14 @@ class EventType(Enum):
     SKILLDEV_COMPLETED = "skilldev.completed"
     SKILLDEV_TOOL_CALL = "skilldev.tool_call"
     SKILLDEV_TOOL_RESULT = "skilldev.tool_result"
+
+
+# Recorded to history.json but not emitted on the E2A WebSocket wire.
+# 单一事实源：interface.py（E2A 转发层抑制）与 team_helpers.py（stall 看门狗补发判定）共用，
+# 防止两处名单漂移。
+E2A_SUPPRESSED_EVENT_TYPES: frozenset[str] = frozenset({
+    EventType.CHAT_TOOL_CALLS_DELTA.value,
+})
 
 
 class Mode(Enum):

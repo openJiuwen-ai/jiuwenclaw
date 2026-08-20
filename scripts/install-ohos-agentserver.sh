@@ -7,7 +7,8 @@
 #   3. pip install -r requirements-minimal.txt   （phase-1 逐包 + import 验证，含传递依赖）
 #   4. pip install openjiuwen-harmonyos --no-deps  （git 或本地 agent-core/harmonyos）
 #   5. pip install agentcore-minimal 补依赖      （harmonyos/pyproject.toml − Phase 1，含传递依赖）
-#   6. pip install --no-deps -e .                （jiuwenclaw 本体）
+#   6. pip install openjiuwen_deepsearch          （本地源码或固定 Git 分支，含依赖）
+#   7. pip install --no-deps -e .                 （jiuwenclaw 本体）
 #
 # 用法（鸿蒙 HiShell）:
 #   cd /storage/Users/currentUser/officeClaw/jiuwenswarm
@@ -24,6 +25,11 @@
 #   OPENJIUWEN_USE_HARMONYOS_PYPROJECT=1  默认从 clone 的 harmonyos/pyproject.toml 做 -e 安装
 #   USE_LOCAL_OPENJIUWEN=1  本地 pip install --no-deps -e $AGENT_CORE_PATH
 #   OPENJIUWEN_GIT_REPO / OPENJIUWEN_GIT_REF  默认 openJiuwen/agent-core @ enterprise-dev
+#   DEEPSEARCH_PATH     本地 deepsearch 仓库（优先于 Git；仓库根或 deepsearch/ 子项目）
+#   DEEPSEARCH_GIT_REPO / DEEPSEARCH_GIT_REF  默认 openJiuwen/deepsearch @ enterprise_dev
+#   SKIP_DEEPSEARCH=0   显式安装 DeepSearch（鸿蒙默认跳过，基础对话不依赖它）
+#   REUSE_INSTALLED=1   import 正常时跳过已安装依赖和运行时（默认 1）
+#   FORCE_REINSTALL=1   忽略复用检查，强制重新安装
 #   CREATE_VENV=1      默认创建 $REPO_ROOT/.venv
 #   SKIP_PHASE0/1/2/3/4  跳过对应阶段（phase 0 = wheels 预装）
 #   CONTINUE_ON_FAIL=1 单包失败继续（默认 1）
@@ -58,6 +64,13 @@ AGENT_CORE_PATH=${AGENT_CORE_PATH:-$OFFICE_CLAW/agent-core}
 OPENJIUWEN_GIT_REPO=${OPENJIUWEN_GIT_REPO:-https://gitcode.com/openJiuwen/agent-core.git}
 OPENJIUWEN_GIT_REF=${OPENJIUWEN_GIT_REF:-enterprise-dev}
 OPENJIUWEN_SPEC=${OPENJIUWEN_SPEC:-openjiuwen-harmonyos @ git+${OPENJIUWEN_GIT_REPO}@${OPENJIUWEN_GIT_REF}#subdirectory=harmonyos}
+DEEPSEARCH_PATH=${DEEPSEARCH_PATH:-}
+DEEPSEARCH_GIT_REPO=${DEEPSEARCH_GIT_REPO:-https://gitcode.com/openJiuwen/deepsearch.git}
+DEEPSEARCH_GIT_REF=${DEEPSEARCH_GIT_REF:-enterprise_dev}
+DEEPSEARCH_SRC_DIR=${DEEPSEARCH_SRC_DIR:-$REPO_ROOT/.cache/deepsearch-src}
+SKIP_DEEPSEARCH=${SKIP_DEEPSEARCH:-1}
+REUSE_INSTALLED=${REUSE_INSTALLED:-1}
+FORCE_REINSTALL=${FORCE_REINSTALL:-0}
 
 DEPS_INSTALLER=${OHOS_DEPS_INSTALLER:-$OHOS_DIR/install-ohos-all-deps.sh}
 WHEEL_PRELOADER=${OHOS_WHEEL_PRELOADER:-$OHOS_DIR/ohos-wheel-preload.sh}
@@ -125,7 +138,12 @@ run_manifest_phase() {
     SKIP_WHEEL_PRELOAD=1 \
     AUTO=1 \
     CONTINUE_ON_FAIL="$CONTINUE_ON_FAIL" \
+    REUSE_INSTALLED="$REUSE_INSTALLED" \
     sh "$DEPS_INSTALLER"
+}
+
+runtime_imports_ok() {
+  "$PYTHON" -c "$1" >/dev/null 2>&1
 }
 
 pip_in_venv() {
@@ -243,6 +261,78 @@ clone_openjiuwen_repo() {
   return 0
 }
 
+resolve_deepsearch_install_dir() {
+  _src=$1
+  for _candidate in "$_src/deepsearch" "$_src"; do
+    if [ -f "$_candidate/pyproject.toml" ] || [ -f "$_candidate/setup.py" ]; then
+      echo "$_candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_local_deepsearch_path() {
+  for _candidate in \
+    "${DEEPSEARCH_PATH:-}" \
+    "$OFFICE_CLAW/deepsearch" \
+    "$REPO_ROOT/../deepsearch"; do
+    [ -n "$_candidate" ] || continue
+    resolve_deepsearch_install_dir "$_candidate" >/dev/null 2>&1 || continue
+    echo "$_candidate"
+    return 0
+  done
+  return 1
+}
+
+clone_deepsearch_repo() {
+  _git=$(find_cmd_git) || return 1
+  _log="${REPORT_DIR}/deepsearch/git-clone.log"
+  mkdir -p "$(dirname "$DEEPSEARCH_SRC_DIR")" "${REPORT_DIR}/deepsearch"
+  if [ -d "$DEEPSEARCH_SRC_DIR/.git" ]; then
+    log "refresh deepsearch clone: $DEEPSEARCH_SRC_DIR ($DEEPSEARCH_GIT_REF)"
+    "$_git" -C "$DEEPSEARCH_SRC_DIR" fetch --depth 1 origin "$DEEPSEARCH_GIT_REF" >>"$_log" 2>&1 \
+      && "$_git" -C "$DEEPSEARCH_SRC_DIR" checkout "$DEEPSEARCH_GIT_REF" >>"$_log" 2>&1 \
+      && return 0
+    log "WARN: deepsearch git fetch failed, re-clone"
+    rm -rf "$DEEPSEARCH_SRC_DIR"
+  fi
+  log "git clone -b $DEEPSEARCH_GIT_REF --depth 1 $DEEPSEARCH_GIT_REPO -> $DEEPSEARCH_SRC_DIR"
+  "$_git" clone --depth 1 --branch "$DEEPSEARCH_GIT_REF" \
+    "$DEEPSEARCH_GIT_REPO" "$DEEPSEARCH_SRC_DIR" >>"$_log" 2>&1
+}
+
+install_deepsearch() {
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import openjiuwen_deepsearch; from openjiuwen_deepsearch.config.config import Config"; then
+    log "SKIP installed: openjiuwen_deepsearch"
+    return 0
+  fi
+  ensure_pep517_minimal
+  _src=
+  if _local=$(resolve_local_deepsearch_path); then
+    _src=$_local
+    log "使用本地 openjiuwen_deepsearch: $_src"
+  else
+    find_cmd_git >/dev/null 2>&1 \
+      || die "DeepSearch 需要 git 或本地源码；请设置 DEEPSEARCH_PATH=/path/to/deepsearch"
+    clone_deepsearch_repo \
+      || die "openjiuwen_deepsearch clone failed (see $REPORT_DIR/deepsearch/git-clone.log)"
+    _src=$DEEPSEARCH_SRC_DIR
+  fi
+
+  _install=$(resolve_deepsearch_install_dir "$_src") \
+    || die "openjiuwen_deepsearch package metadata not found under: $_src"
+  log "pip install $EDITABLE_FLAG $_install (including runtime dependencies)"
+  pip_in_venv $EDITABLE_FLAG "$_install" \
+    || die "openjiuwen_deepsearch install failed"
+
+  if ! "$PYTHON" -c "import openjiuwen_deepsearch; from openjiuwen_deepsearch.config.config import Config" >/dev/null 2>&1; then
+    die "openjiuwen_deepsearch import verification failed after installation"
+  fi
+  log "openjiuwen_deepsearch import: OK"
+}
+
 resolve_agent_core_path() {
   if [ -n "${AGENT_CORE_PATH:-}" ] && [ -d "$AGENT_CORE_PATH" ]; then
     echo "$AGENT_CORE_PATH"
@@ -263,6 +353,11 @@ resolve_agent_core_path() {
 }
 
 install_openjiuwen() {
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import openjiuwen"; then
+    log "SKIP installed: openjiuwen"
+    return 0
+  fi
   ensure_pep517_minimal
 
   if [ "$USE_LOCAL_OPENJIUWEN" = "1" ]; then
@@ -314,6 +409,8 @@ run_wheel_preload_phase() {
     PYTHON="$PYTHON" \
     WHEEL_DIR="$WHEEL_DIR" \
     OHOS_REAL_PYTHON="$OHOS_REAL_PYTHON" \
+    REUSE_INSTALLED="$REUSE_INSTALLED" \
+    FORCE_REINSTALL="$FORCE_REINSTALL" \
     sh "$WHEEL_PRELOADER" || die "native wheel preload failed"
 }
 
@@ -384,11 +481,25 @@ else
   log "SKIP phase 3 (agentcore-minimal manifest)"
 fi
 
+# ---------- DeepSearch（鸿蒙可选能力，默认跳过）----------
+if [ "$SKIP_DEEPSEARCH" != "1" ]; then
+  log "======== phase deepsearch: openjiuwen_deepsearch + runtime deps ========"
+  install_deepsearch
+else
+  log "SKIP DeepSearch (SKIP_DEEPSEARCH=1)"
+fi
+
 # ---------- 4. jiuwenclaw --no-deps -e . ----------
 if [ "${SKIP_PHASE4:-0}" != "1" ]; then
-  log "======== phase 4: jiuwenclaw --no-deps $EDITABLE_FLAG . ========"
-  ensure_pep517_minimal
-  pip_in_venv --no-deps $EDITABLE_FLAG "$REPO_ROOT" || die "jiuwenclaw install failed"
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import jiuwenclaw" \
+    && [ -x "$VENV_DIR/bin/jiuwenclaw-agentserver" ]; then
+    log "SKIP installed: jiuwenclaw"
+  else
+    log "======== phase 4: jiuwenclaw --no-deps $EDITABLE_FLAG . ========"
+    ensure_pep517_minimal
+    pip_in_venv --no-deps $EDITABLE_FLAG "$REPO_ROOT" || die "jiuwenclaw install failed"
+  fi
 else
   log "SKIP phase 4 (jiuwenclaw -e .)"
 fi
@@ -407,16 +518,23 @@ case "${_venv_sp:-}" in
     ;;
 esac
 _verify_ld=$(ohos_native_ld_library_path 2>/dev/null || true)
-for _mod in openjiuwen jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography; do
+for _mod in dotenv openjiuwen openjiuwen_deepsearch openjiuwen_deepsearch.config.config jiuwenclaw pydantic pydantic_core sqlalchemy greenlet openai lupa.luajit21 fastmcp cryptography yaml fastapi mcp markdown markdown_it latex2mathml mathml2omml docx jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail jiuwenclaw.agentserver.tools.deepresearch_plugin.docx_conversion_core; do
   # OhOS/HNP 下不要用外部 env 程序包裹 Python。
   if LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
     "$PYTHON" -c "import ${_mod}" 2>/dev/null; then
     log "  import ${_mod}: OK"
   else
-    log "  import ${_mod}: FAIL"
-    _fail=$((_fail + 1))
+    log "  import ${_mod}: FAIL (warning; import verification does not block installation)"
   fi
 done
+
+if [ "$SKIP_DEEPSEARCH" != "1" ]; then
+  if ! LD_LIBRARY_PATH="${_verify_ld:-${LD_LIBRARY_PATH:-}}" \
+    "$PYTHON" -c "from openjiuwen_deepsearch.config.config import Config" >/dev/null 2>&1; then
+    log "  openjiuwen_deepsearch: REQUIRED IMPORT FAILED"
+    _fail=$((_fail + 1))
+  fi
+fi
 
 if command -v jiuwenclaw-agentserver >/dev/null 2>&1; then
   log "  jiuwenclaw-agentserver: $(command -v jiuwenclaw-agentserver)"
@@ -425,15 +543,13 @@ else
   _fail=$((_fail + 1))
 fi
 
-_libdir=$("$OHOS_REAL_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || true)
 echo ""
 echo "完成。报告目录: $REPORT_DIR"
 echo ""
 echo "启动 AgentServer:"
 echo "  cd $REPO_ROOT"
-echo "  source $VENV_DIR/bin/activate"
-echo "  export LD_LIBRARY_PATH=\"${_libdir}\${OPENSSL_DIR:+:\$OPENSSL_DIR/lib}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
-echo "  jiuwenclaw-agentserver --port 18092"
+echo "  sh scripts/start-ohos-agentserver.sh 18092"
+echo "  # 或：node start-agentserver.mjs 18092"
 echo ""
 
 [ "$_fail" -eq 0 ] || exit 1

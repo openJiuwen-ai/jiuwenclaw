@@ -32,7 +32,9 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail = RuntimePromptRail(language=language, timezone_offset=timezone_offset)
         builder = SystemPromptBuilder(language=language)
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        # 真实场景中 agent 持有 system_prompt_builder 引用，rail 在 before_model_call
+        # 里从 ctx.agent 现取最新 builder，故测试需让 agent 暴露同一个 builder。
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
         return rail, builder, ctx
 
@@ -136,7 +138,7 @@ class TestBeforeModelCallBuilderSections(unittest.TestCase):
         rail = RuntimePromptRail(language="cn")
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -151,7 +153,7 @@ class TestBeforeModelCallBuilderSections(unittest.TestCase):
         rail = RuntimePromptRail(language="cn")
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -164,7 +166,7 @@ class TestBeforeModelCallBuilderSections(unittest.TestCase):
         rail = RuntimePromptRail(language="en")
         builder = SystemPromptBuilder(language="en")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -178,7 +180,7 @@ class TestBeforeModelCallBuilderSections(unittest.TestCase):
         rail = RuntimePromptRail(language="en")
         builder = SystemPromptBuilder(language="en")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -191,7 +193,7 @@ class TestBeforeModelCallBuilderSections(unittest.TestCase):
         rail = RuntimePromptRail(language="cn")
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -216,7 +218,8 @@ class TestUninit(unittest.TestCase):
         builder.add_section(PromptSection(name="runtime", content={"cn": "runtime", "en": "runtime"}, priority=95))
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        # uninit 的 agent 不再持有 builder（热更后引用已替换），走回退到 self.system_prompt_builder
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         assert not builder.has_section("runtime")
 
@@ -229,7 +232,7 @@ class TestUninit(unittest.TestCase):
         ))
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         assert not builder.has_section("workspace")
 
@@ -242,7 +245,7 @@ class TestUninit(unittest.TestCase):
         ))
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         assert not builder.has_section("request_system_prompt")
 
@@ -254,7 +257,7 @@ class TestUninit(unittest.TestCase):
         builder.add_section(PromptSection(name="time", content={"cn": "时间", "en": "time"}, priority=92))
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         # "time" should still be there (uninit no longer calls remove_section("time"))
         assert builder.has_section("time")
@@ -265,7 +268,7 @@ class TestUninit(unittest.TestCase):
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         assert rail.system_prompt_builder is None
 
@@ -275,7 +278,7 @@ class TestUninit(unittest.TestCase):
         rail.system_prompt_builder = None
 
         # Should not raise
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
     def test_uninit_removes_all_three_sections_at_once(self):
         """uninit() removes runtime, workspace, request_system_prompt simultaneously."""
@@ -289,7 +292,7 @@ class TestUninit(unittest.TestCase):
         # "time" is NOT added here — that's the new reality
         rail.system_prompt_builder = builder
 
-        rail.uninit(MagicMock())
+        rail.uninit(MagicMock(system_prompt_builder=None))
 
         assert not builder.has_section("runtime")
         assert not builder.has_section("workspace")
@@ -357,17 +360,21 @@ class TestRailConfiguration(unittest.TestCase):
 class TestEdgeCases(unittest.TestCase):
     """Edge-case tests for RuntimePromptRail."""
 
-    def test_before_model_call_with_no_builder_skips_injection(self):
-        """before_model_call with no builder returns early (logs warning)."""
+    def test_before_model_call_with_no_builder_skips_builder_sections(self):
+        """before_model_call with no builder: date is still injected (builder-independent),
+        but builder sections are skipped via early return (logs warning)."""
         rail = RuntimePromptRail(language="cn")
         rail.system_prompt_builder = None
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=None))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
 
-        # No reminder should be written when builder is None
-        assert "environment_context" not in ctx.extra
+        # Date injection does not depend on system_prompt_builder; only the
+        # builder-backed sections (runtime/workspace) are skipped.
+        entries = ctx.extra["environment_context"]
+        assert len(entries) == 1
+        assert entries[0]["source"] == "time_rail"
 
     def test_request_system_prompt_added_to_builder_when_set(self):
         """request_system_prompt is added to builder when self._request_system_prompt is set."""
@@ -375,7 +382,7 @@ class TestEdgeCases(unittest.TestCase):
         rail.set_request_system_prompt("额外提示内容")
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         asyncio.run(rail.before_model_call(ctx))
@@ -390,7 +397,7 @@ class TestEdgeCases(unittest.TestCase):
         rail.set_request_system_prompt("临时内容")
         builder = SystemPromptBuilder(language="cn")
         rail.system_prompt_builder = builder
-        ctx = AgentCallbackContext(agent=MagicMock())
+        ctx = AgentCallbackContext(agent=MagicMock(system_prompt_builder=builder))
         ctx.extra = {}
 
         # Add section first

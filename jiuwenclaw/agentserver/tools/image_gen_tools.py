@@ -15,18 +15,15 @@ from openjiuwen.core.foundation.llm import Model, UserMessage
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import tool
 
-from jiuwenclaw.agentserver.tools.image_gen_post_watermark import (
-    PostWatermarkConfig,
-    apply_post_watermark_to_file,
-    load_post_watermark_config,
-)
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_image_gen_model_config_from_yaml
+from jiuwenclaw.http_proxy_config import requests_get
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_workspace_dir,
 )
 from jiuwenclaw.config import get_config
-from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
+from jiuwenclaw.local_env_config import read_env
+from jiuwenclaw.utils import get_config_file, resolve_tenant_agent_workspace_dir
 
 
 logger = logging.getLogger(__name__)
@@ -125,10 +122,9 @@ def _build_image_gen_kwargs(
         "n": n,
     }
     if _is_huawei_maas_config(provider, api_base):
-        # Huawei MaaS: single image, b64_json only; supports seed/watermark.
+        # Huawei MaaS: single image, b64_json only; supports seed.
         gen_kwargs["n"] = 1
         gen_kwargs["response_format"] = "b64_json"
-        gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
         seed = _parse_optional_seed(inputs)
         if seed is not None:
             gen_kwargs["seed"] = seed
@@ -138,7 +134,6 @@ def _build_image_gen_kwargs(
         return gen_kwargs
 
     gen_kwargs["prompt_extend"] = bool(inputs.get("prompt_extend", True))
-    gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
     negative_prompt = inputs.get("negative_prompt")
     if negative_prompt is not None and str(negative_prompt).strip():
         gen_kwargs["negative_prompt"] = str(negative_prompt).strip()
@@ -149,10 +144,10 @@ def _build_image_gen_kwargs(
 
 
 def _get_image_gen_credentials() -> tuple[str, str, str, str]:
-    api_key = os.environ.get("IMAGE_GEN_API_KEY", "").strip()
-    api_base = os.environ.get("IMAGE_GEN_API_BASE", "").strip()
-    model_name = os.environ.get("IMAGE_GEN_MODEL_NAME", "").strip()
-    provider = os.environ.get("IMAGE_GEN_PROVIDER", "").strip() or "DashScope"
+    api_key = read_env("IMAGE_GEN_API_KEY", "").strip()
+    api_base = read_env("IMAGE_GEN_API_BASE", "").strip()
+    model_name = read_env("IMAGE_GEN_MODEL_NAME", "").strip()
+    provider = read_env("IMAGE_GEN_PROVIDER", "").strip() or "DashScope"
     return api_key, api_base, model_name, provider
 
 
@@ -180,18 +175,18 @@ def _sanitize_filename_part(value: str, max_len: int = 48) -> str:
 
 
 def _output_dir() -> Path:
-    """Resolve save directory: effective_project_dir/generated_images, else agent workspace."""
+    """Resolve save directory: effective_project_dir/generated_images, else tenant workspace."""
     request_workspace = get_effective_request_workspace_dir()
     if request_workspace and str(request_workspace).strip():
         out = Path(str(request_workspace).strip()) / _OUTPUT_SUBDIR
     else:
-        out = get_agent_workspace_dir() / _OUTPUT_SUBDIR
+        out = resolve_tenant_agent_workspace_dir() / _OUTPUT_SUBDIR
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 def _download_image(url: str, dest: Path, timeout: int = 120) -> None:
-    response = requests.get(url, timeout=timeout, verify=get_requests_verify())
+    response = requests_get(url, timeout=timeout, verify=get_requests_verify())
     response.raise_for_status()
     dest.write_bytes(response.content)
 
@@ -315,12 +310,7 @@ def _describe_response_for_error(response: Any) -> str:
     return repr(response)[:500]
 
 
-def _save_generated_images(
-    response: Any,
-    *,
-    prompt: str,
-    watermark_config: PostWatermarkConfig | None = None,
-) -> list[Path]:
+def _save_generated_images(response: Any, *, prompt: str) -> list[Path]:
     items = _iter_response_image_items(response)
     if not items:
         raise ValueError(
@@ -332,9 +322,6 @@ def _save_generated_images(
     slug = _sanitize_filename_part(prompt)
     saved: list[Path] = []
     out_dir = _output_dir()
-    wm_cfg = watermark_config if watermark_config is not None else load_post_watermark_config(
-        get_config()
-    )
 
     for idx, item in enumerate(items, start=1):
         url = str(item.get("url") or "").strip()
@@ -346,12 +333,10 @@ def _save_generated_images(
             _download_image(url, dest)
             if dest.stat().st_size == 0:
                 raise ValueError(f"Downloaded empty image from URL: {url}")
-            apply_post_watermark_to_file(dest, wm_cfg)
             saved.append(dest.resolve())
             continue
         if b64:
             _write_base64_image(b64, dest)
-            apply_post_watermark_to_file(dest, wm_cfg)
             saved.append(dest.resolve())
             continue
 
@@ -376,8 +361,10 @@ def _build_image_gen_model(api_key: str, api_base: str, model_name: str, provide
 
 
 async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
-    apply_image_gen_model_config_from_yaml(get_config())
     api_key, api_base, model_name, provider = _get_image_gen_credentials()
+    if not api_key or not api_base or not model_name:
+        apply_image_gen_model_config_from_yaml(get_config())
+        api_key, api_base, model_name, provider = _get_image_gen_credentials()
     if not api_key:
         return _make_missing_key_error()
     if not api_base or not model_name:
@@ -416,11 +403,7 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         model=model_name,
         **gen_kwargs,
     )
-    paths = _save_generated_images(
-        response,
-        prompt=prompt,
-        watermark_config=load_post_watermark_config(get_config()),
-    )
+    paths = _save_generated_images(response, prompt=prompt)
     lines = [
         f"Generated {len(paths)} image(s) from prompt.",
         "Local file paths (use for attachments or send_file):",
@@ -436,9 +419,7 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         "输入：prompt（必填文本描述）；可选 size"
         "（DashScope: 1920*1080；OpenAI/华为 MaaS: 1024x1024，* 与 x 均可）、"
         "negative_prompt、n（图片数量；DashScope 独有 prompt_extend；"
-        "华为 MaaS/OpenAI 兼容 watermark、seed）。"
-        "保存后可配置后处理水印（默认右下角半透明「AI Generated」，"
-        "见 config models.image_gen.post_watermark）。"
+        "华为 MaaS/OpenAI 兼容 seed）。"
         "输出为本地文件路径。有 effective_project_dir 时保存到其 generated_images/；"
         "否则保存到 agent 工作区 generated_images。"
     ),
@@ -450,3 +431,10 @@ async def text_to_image(inputs: dict[str, Any], **kwargs) -> str:
     except Exception as exc:
         logger.warning("[text_to_image] failed: %s", exc, exc_info=True)
         return f"[ERROR]: text-to-image failed: {exc}"
+
+
+def create_session_text_to_image_tool(agent_card_id: str):
+    """Return a session-scoped text_to_image tool for Runner.resource_mgr."""
+    from jiuwenclaw.agentserver.deep_agent.tool_qualify import clone_tool_for_session
+
+    return clone_tool_for_session(text_to_image, agent_card_id)

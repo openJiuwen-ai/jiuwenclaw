@@ -4,9 +4,14 @@
 
 from __future__ import annotations
 import json
-from pathlib import Path
 
 from openjiuwen.core.foundation.tool import Tool, McpServerConfig
+
+# 显式导入 MCP 客户端模块，触发 __init_subclass__ 自动注册到客户端注册表
+# 必须在 create_mcp_tool 被调用前完成
+from openjiuwen.core.foundation.tool.mcp.client import sse_client as _sse_client  # noqa: F401
+from openjiuwen.core.foundation.tool.mcp.client import stdio_client as _stdio_client  # noqa: F401
+from openjiuwen.core.foundation.tool.mcp.client import streamable_http_client as _streamable_http_client  # noqa: F401
 
 from jiuwenclaw.agentserver.tools.command_tools import mcp_exec_command
 from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
@@ -14,20 +19,25 @@ from jiuwenclaw.agentserver.tools.web_search import web_search
 
 
 def _normalize_stdio_command_kind(command: str) -> str:
-    """将 command 归一化为 'node' 或 'python'。
+    """将 command 归一化为 'node'、'python'、'npx' 或 'uvx'。
 
     支持绝对路径如 /usr/local/bin/node、C:\\Program Files\\node.exe 等。
+    npx/uvx为包运行器，参数为包名而非本地脚本路径，安全模型与 node/python 不同。
     """
     raw = str(command or "").strip()
     if not raw:
         raise ValueError("工具配置缺少 'command' 字段")
 
-    normalized = Path(raw).name.lower()
+    normalized = raw.replace("\\", "/").rsplit("/", 1)[-1].lower()
     if normalized in ("node", "node.exe"):
         return "node"
     if normalized.startswith("python"):
         return "python"
-    raise ValueError(f"不支持的 command 类型: '{command}'，目前仅支持 node/python 及其绝对路径")
+    if normalized in ("npx", "npx.exe", "npx.cmd", "npx.bat"):
+        return "npx"
+    if normalized in ("uvx", "uvx.exe"):
+        return "uvx"
+    raise ValueError(f"不支持的 command 类型: '{command}'，目前仅支持 node/python/npx/uvx 及其绝对路径")
 
 
 def _normalize_mcp_client_type(raw_type: object) -> str:
@@ -98,8 +108,8 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
         config_str: JSON 格式配置字符串，格式为：
             {
                 "name": "tool_name",
-                "command": "node" | "python",
-                "args": ["xxx.js"] | ["xxx.py"]
+                "command": "node" | "python" | "npx" | "uvx",
+                "args": ["xxx.js"] | ["xxx.py"] | ["-y", "@scope/pkg"] | ["pkg"]
             }
 
         2.streamable-http类型:

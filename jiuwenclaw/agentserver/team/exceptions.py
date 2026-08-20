@@ -46,3 +46,23 @@ class TeamSessionError(TeamError):
 class TeamStorageError(TeamError):
     """Team 存储错误."""
     pass
+
+
+class TeamDissolveError(TeamError):
+    """Team 保上下文解散（dissolve keep-context）失败."""
+    pass
+
+
+class TeamDissolveConflictError(TeamDissolveError):
+    """解散被拒绝：runtime 正在运行（stream task 存活或池条目 RUNNING）."""
+    pass
+
+
+class TeamDissolveUnsupportedError(TeamDissolveError):
+    """解散被拒绝：当前模式不支持（如分布式模式）."""
+    pass
+
+
+class TeamDissolveNameMismatchError(TeamDissolveError):
+    """解散被拒绝：传入 team_name 与 session 实际团队名不符."""
+    pass

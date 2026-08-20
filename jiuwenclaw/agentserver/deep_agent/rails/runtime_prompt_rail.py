@@ -4,13 +4,17 @@
 
 Dynamic content (time, channel, agent, model, language) is decoupled from the
 static identity prompt and refreshed on every model call via before_model_call().
+Supports `sections` gating: team mode passes ("time",) to inject only the date
+(without touching system_prompt_builder or workspace paths).
 """
 from __future__ import annotations
 
 import platform
 import subprocess
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from logging import getLogger
+from pathlib import Path
 from shutil import which
 from typing import Optional
 
@@ -18,14 +22,11 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+from jiuwenclaw.config import get_sandbox_runtime
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
-    get_agent_memory_dir,
-    get_agent_registered_skill_dirs,
-    get_shared_agent_skills_dirs,
-    get_agent_workspace_dir,
-    get_deepagent_todo_dir,
     get_multi_tenant_user_workspace_dir,
+    normalize_tenant_scope_id,
+    resolve_agent_registered_skill_dirs,
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -34,7 +35,11 @@ logger = getLogger(__name__)
 
 
 class RuntimePromptRail(DeepAgentRail):
-    """在 before_model_call 中注入运行时动态 section（时间、运行时信息）。"""
+    """在 before_model_call 中注入运行时动态 section（时间、运行时信息）。
+
+    支持 `sections` 门控：team 模式传 ("time",)，只注入日期（不依赖
+    system_prompt_builder，也不带 workspace 路径段）。
+    """
 
     priority = 5  # 高优先级，确保早于其他 rail 执行
 
@@ -50,6 +55,7 @@ class RuntimePromptRail(DeepAgentRail):
         service_id: Optional[str] = None,
         request_identify: str = "",
         request_soul: str = "",
+        sections: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -58,12 +64,49 @@ class RuntimePromptRail(DeepAgentRail):
         self._tz = timezone(timedelta(hours=timezone_offset))
         self._agent_name = agent_name
         self._model_name = model_name
+        self._mode: str = ""
+        self._session_id: str | None = None
         self._workspace_dir = workspace_dir
         self._agent_id = agent_id
         self._service_id = service_id
         self._request_system_prompt: str = ""
         self._request_identify: str = request_identify.strip() if request_identify else ""
         self._request_soul: str = request_soul.strip() if request_soul else ""
+        self._registered_skill_dirs: list[str] | None = None
+        # None → 全部段落（普通模式默认，行为与历史一致）；
+        # team 模式传 ("time",)，只注入日期，不碰 builder、不带路径。
+        self._sections = ("time", "runtime", "workspace") if sections is None else tuple(sections)
+
+    def set_registered_skill_dirs(self, dirs: list[str] | None) -> None:
+        """Use adapter snapshot (reload session isolation); None falls back to resolve."""
+        if dirs is None:
+            self._registered_skill_dirs = None
+            return
+        self._registered_skill_dirs = [str(d) for d in dirs if str(d).strip()]
+
+    def set_model_name(self, model_name: str) -> None:
+        """Per-request model name used in the runtime prompt section."""
+        self._model_name = model_name or ""
+
+    def set_mode(self, mode: str) -> None:
+        """Per-request mode label (team/plan/…); stored for prompt/runtime context."""
+        self._mode = mode or ""
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Per-request session id for session-scoped runtime context."""
+        self._session_id = (
+            session_id.strip()
+            if isinstance(session_id, str) and session_id.strip()
+            else None
+        )
+
+    def _skills_dirs_display(self, workspace_root: Path) -> str:
+        if self._registered_skill_dirs:
+            return ", ".join(self._registered_skill_dirs)
+        resolved = resolve_agent_registered_skill_dirs()
+        if resolved:
+            return ", ".join(str(p) for p in resolved)
+        return str(workspace_root / "skills")
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -71,6 +114,11 @@ class RuntimePromptRail(DeepAgentRail):
 
     def uninit(self, agent) -> None:
         """清理注入的 section 并释放引用。"""
+        # 热重载后 agent.system_prompt_builder 可能已是新引用，退休清理前先同步缓存，
+        # 确保 remove_section 落到当前生效的 builder 上。
+        _builder = getattr(agent, "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("runtime")
             self.system_prompt_builder.remove_section("workspace")
@@ -105,72 +153,65 @@ class RuntimePromptRail(DeepAgentRail):
         self._request_soul = value
 
     def _get_workspace_dirs(self) -> dict[str, str]:
-        """获取工作空间目录路径，支持多租户。"""
-        if self._agent_id and self._service_id:
-            # 多租户模式
-            base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
-            if base_workspace:
-                workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
-                return {
-                    "config": str(base_workspace / "config"),
-                    "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
-                    "memory": str(workspace_root / "memory"),
-                    "daily_memory": str(workspace_root / "memory" / "daily_memory"),
-                    "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
-                    if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
-                    "todo": str(workspace_root / "todo"),
-                }
-        
-        # 单租户模式
+        """获取工作空间目录路径（始终按租户树；缺省为 default/default）。"""
+        service_id = normalize_tenant_scope_id(self._service_id)
+        agent_id = normalize_tenant_scope_id(self._agent_id)
+        base_workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+        if base_workspace is None:
+            # normalize 后两侧均非空，理论上不会走到；防御性回退 default/default。
+            base_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+        if base_workspace is None:
+            raise RuntimeError(
+                "failed to resolve multi-tenant workspace for RuntimePromptRail "
+                f"(service_id={service_id!r}, agent_id={agent_id!r})"
+            )
+        workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
         return {
-            "config": str(get_user_workspace_dir() / "config"),
-            "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
-            "memory": str(get_agent_memory_dir()),
-            "daily_memory": str(get_agent_memory_dir() / "daily_memory"),
-            "skills": ", ".join(str(d) for d in get_agent_registered_skill_dirs()),
-            "todo": str(get_deepagent_todo_dir()),
+            "config": str(base_workspace / "config"),
+            "workspace": self._workspace_dir or str(workspace_root),
+            "memory": str(workspace_root / "memory"),
+            "daily_memory": str(workspace_root / "memory" / "daily_memory"),
+            "skills": self._skills_dirs_display(workspace_root),
+            "todo": str(workspace_root / "todo"),
         }
 
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """每次 model call 注入最新的时间和运行时信息。"""
-        logger.info(
-            "[RuntimePromptRail] before_model_call 开始执行: language=%s channel=%s agent=%s model=%s",
-            self._language, self._channel, self._agent_name, self._model_name
-        )
-
-        if not self.system_prompt_builder:
-            logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
-            return
-
-        now = datetime.now(tz=self._tz)
-        now_str = now.strftime("%Y-%m-%d")
-        current_year = now.strftime("%Y")
-
-        if self._language == "cn":
-            time_content = (
-                f"# 当前日期\n\n"
-                f"- 当前日期：{now_str}\n"
-                f"- 当前年份：{current_year}\n"
-                '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
-                '搜索 query 必须优先使用当前年份或日期'
-            )
-        else:
-            time_content = (
-                f"# Current Date\n\n"
-                f"- Current date: {now_str}\n"
-                f"- Current year: {current_year}\n"
-                "- When the user asks for latest/current/this-year/recent information and search is needed, "
-                "search queries must prefer the current year or date."
-            )
-
-        ctx.extra.setdefault("environment_context", []).append({
-            "content": time_content,
-            "source": "time_rail",
-        })
-
+    def _add_runtime_section(self) -> None:
+        """构建并注入 runtime 段（平台/Python/命令语法规范）。"""
         plat = f"{platform.system()} {platform.machine()}"
         python_ver = platform.python_version()
         os_type = platform.system().lower()
+
+        # 沙箱权限提示词仅在 sandbox.enabled=True 时注入; 关闭沙箱时命令可自由访问
+        # 全盘, 不应让 LLM 误以为工作区外一律无权限而在真实 PermissionError 上过早放弃.
+        sandbox_enabled = bool(get_sandbox_runtime().get("enabled"))
+        sandbox_perm_cn = ""
+        sandbox_perm_en = ""
+        if sandbox_enabled:
+            sandbox_perm_cn = (
+                "\n\n## 命令执行环境与权限\n\n"
+                "- 你的命令在一个**受限沙箱**中执行，只能读写你自己的工作区目录，"
+                "工作区之外的路径（例如 `C:\\` 系统盘、其他用户目录、桌面）很可能**没有访问权限**。\n"
+                "- 一旦命令返回**权限拒绝**类错误（如 `拒绝访问` / `PermissionError` / `WinError 5` / "
+                "`Access is denied`），**立即停止**对该路径的进一步尝试。"
+                "**不要**换一种命令（改 `dir`/`powershell`/`wsl`/换路径写法）反复重试同一目标——"
+                "权限是按路径授予的，换命令语法不会改变结果，只会浪费轮次。\n"
+                "- 正确做法：将该路径视为不可达，向用户说明权限受限并给出替代方案"
+                "（例如请用户把文件放进工作区，或在工作区内完成等效任务）。\n"
+            )
+            sandbox_perm_en = (
+                "\n\n## Command Execution Environment and Permissions\n\n"
+                "- Your commands run inside a **restricted sandbox**. You can read/write your own "
+                "workspace directory, but paths outside it (e.g. `C:\\` system drive, other user "
+                "directories, the Desktop) very likely have **no access**.\n"
+                "- As soon as a command returns a **permission-denied** error "
+                "(`PermissionError` / `WinError 5` / `Access is denied`), **stop immediately**. "
+                "Do NOT retry the same target with a different command (switching "
+                "`dir`/`powershell`/`wsl`/path syntax) — permissions are granted per-path, so "
+                "changing command syntax will not change the result; it only wastes turns.\n"
+                "- Correct action: treat that path as unreachable, tell the user about the "
+                "restriction, and offer an alternative (e.g. ask the user to place the file in "
+                "the workspace, or complete the equivalent task within the workspace).\n"
+            )
 
         if self._language == "cn":
             runtime_content = (
@@ -198,7 +239,7 @@ class RuntimePromptRail(DeepAgentRail):
                 "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
                 "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
                 "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
-                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+                f"或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`.{sandbox_perm_cn}"
             )
         else:
             runtime_content = (
@@ -228,7 +269,7 @@ class RuntimePromptRail(DeepAgentRail):
                 "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
                 'To create nested directories on Windows, use either PowerShell '
                 '`New-Item -ItemType Directory -Path "parent/child" -Force` '
-                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
+                f"or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.{sandbox_perm_en}"
             )
 
         self.system_prompt_builder.add_section(PromptSection(
@@ -238,53 +279,105 @@ class RuntimePromptRail(DeepAgentRail):
         ))
         logger.info("[RuntimePromptRail] runtime section 已注入")
 
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """每次 model call 注入最新的时间和运行时信息。"""
+        logger.info(
+            "[RuntimePromptRail] before_model_call 开始执行: language=%s channel=%s agent=%s model=%s",
+            self._language, self._channel, self._agent_name, self._model_name
+        )
+
+        # 日期注入不依赖 system_prompt_builder：团队模式成员可能没有 builder，
+        # 日期也必须注入（environment_context 由 ReActAgent 消费）。
+        if "time" in self._sections:
+            now = datetime.now(tz=self._tz)
+            now_str = now.strftime("%Y-%m-%d")
+            current_year = now.strftime("%Y")
+
+            if self._language == "cn":
+                time_content = (
+                    f"# 当前日期\n\n"
+                    f"- 当前日期：{now_str}\n"
+                    f"- 当前年份：{current_year}\n"
+                    '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
+                    '搜索 query 必须优先使用当前年份或日期'
+                )
+            else:
+                time_content = (
+                    f"# Current Date\n\n"
+                    f"- Current date: {now_str}\n"
+                    f"- Current year: {current_year}\n"
+                    "- When the user asks for latest/current/this-year/recent information and search is needed, "
+                    "search queries must prefer the current year or date."
+                )
+
+            ctx.extra.setdefault("environment_context", []).append({
+                "content": time_content,
+                "source": "time_rail",
+            })
+
+        # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
+        # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
+        # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
+        # builder 并刷新缓存，使后续 add_section 都落到当前生效的 builder 上。
+        _builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
+        if not self.system_prompt_builder:
+            if "runtime" in self._sections or "workspace" in self._sections:
+                logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
+            return
+
+        if "runtime" in self._sections:
+            self._add_runtime_section()
+
         # soul / identify 由 JiuClawContextEngineeringRail 写入 context 段（## SOUL / ## IDENTITY）
 
         # 使用多租户感知的方法获取路径
-        dirs = self._get_workspace_dirs()
-        config_dir = dirs["config"]
-        resolved_workspace = dirs["workspace"]
-        memory_dir = dirs["memory"]
-        daily_memory_dir = dirs["daily_memory"]
-        skills_dir = dirs["skills"]
-        todo_dir = dirs["todo"]
+        if "workspace" in self._sections:
+            dirs = self._get_workspace_dirs()
+            config_dir = dirs["config"]
+            resolved_workspace = dirs["workspace"]
+            memory_dir = dirs["memory"]
+            daily_memory_dir = dirs["daily_memory"]
+            skills_dir = dirs["skills"]
+            todo_dir = dirs["todo"]
 
-        #  关键诊断：检查 output_dir ContextVar 的实际值
-        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
-        actual_output_dir = get_effective_request_output_dir()
-        logger.info(
-            "[RuntimePromptRail]  workspace paths 已获取: "
-            "resolved_workspace=%s | output_dir_from_ContextVar=%s | workspace_dir_from_request=%s",
-            resolved_workspace,
-            actual_output_dir,
-            self._workspace_dir
-        )
-
-        # ⭐ 方案B：根据 actual_output_dir 是否有值，生成不同的指导内容
-        # 直接给出路径值，不指导 Agent 调用 API（与方案A形成双重保障）
-        if actual_output_dir:
-            # 有值：直接给出 output_dir 路径
-            output_dir_guidance_cn = f"当前会话的 output_dir 路径：`{actual_output_dir}`"
-            output_dir_example_cn = f"{actual_output_dir}/filename.ext"
-            output_dir_guidance_en = f"Current session output_dir path: `{actual_output_dir}`"
-            output_dir_example_en = f"{actual_output_dir}/filename.ext"
+            #  关键诊断：检查 output_dir ContextVar 的实际值
+            from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+            actual_output_dir = get_effective_request_output_dir()
             logger.info(
-                "[RuntimePromptRail] ⭐ output_dir 有值，直接注入路径: %s",
-                actual_output_dir
-            )
-        else:
-            # 无值：明确告知未设置，使用 resolved_workspace
-            output_dir_guidance_cn = f"output_dir 未设置，使用 resolved_workspace：`{resolved_workspace}`"
-            output_dir_example_cn = f"{resolved_workspace}/filename.ext"
-            output_dir_guidance_en = f"output_dir not set, use resolved_workspace: `{resolved_workspace}`"
-            output_dir_example_en = f"{resolved_workspace}/filename.ext"
-            logger.info(
-                "[RuntimePromptRail] ⭐ output_dir 为 None，使用 resolved_workspace 备选: %s",
-                resolved_workspace
+                "[RuntimePromptRail]  workspace paths 已获取: "
+                "resolved_workspace=%s | output_dir_from_ContextVar=%s | workspace_dir_from_request=%s",
+                resolved_workspace,
+                actual_output_dir,
+                self._workspace_dir
             )
 
-        if self._language == "cn":
-            workspace_content = f"""# 你的家
+            # ⭐ 方案B：根据 actual_output_dir 是否有值，生成不同的指导内容
+            # 直接给出路径值，不指导 Agent 调用 API（与方案A形成双重保障）
+            if actual_output_dir:
+                # 有值：直接给出 output_dir 路径
+                output_dir_guidance_cn = f"当前会话的 output_dir 路径：`{actual_output_dir}`"
+                output_dir_example_cn = f"{actual_output_dir}/filename.ext"
+                output_dir_guidance_en = f"Current session output_dir path: `{actual_output_dir}`"
+                output_dir_example_en = f"{actual_output_dir}/filename.ext"
+                logger.info(
+                    "[RuntimePromptRail] ⭐ output_dir 有值，直接注入路径: %s",
+                    actual_output_dir
+                )
+            else:
+                # 无值：明确告知未设置，使用 resolved_workspace
+                output_dir_guidance_cn = f"output_dir 未设置，使用 resolved_workspace：`{resolved_workspace}`"
+                output_dir_example_cn = f"{resolved_workspace}/filename.ext"
+                output_dir_guidance_en = f"output_dir not set, use resolved_workspace: `{resolved_workspace}`"
+                output_dir_example_en = f"{resolved_workspace}/filename.ext"
+                logger.info(
+                    "[RuntimePromptRail] ⭐ output_dir 为 None，使用 resolved_workspace 备选: %s",
+                    resolved_workspace
+                )
+
+            if self._language == "cn":
+                workspace_content = f"""# 你的家
                 以下目录信息仅供你执行任务时内部参考。
                 你的默认工作空间和相关配置位于 `.jiuwenclaw` 目录下；除非完成任务确有必要，不要主动向用户展示其中的内部目录名或实现细节。
 
@@ -330,10 +423,11 @@ class RuntimePromptRail(DeepAgentRail):
                 - 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）
                 - 用户明确请求下载、导出、发送文件
                 - 用户询问生成的文件如何获取
+                - 用户主动调用`write_file`、`write_text_file`这类文件生成/修改工具后
 
                 **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
-        else:
-            workspace_content = f"""# Your Home
+            else:
+                workspace_content = f"""# Your Home
                 The following paths are for your internal task execution only.
 Your default workspace and related configuration live under the `.jiuwenclaw` directory. Do not proactively expose
                 internal directory names or implementation details to the user unless necessary for task completion.
@@ -342,16 +436,16 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
                 |------|---------|------------|
                 | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
                 | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; 
+                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory;
                 consult it anytime |
-                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; 
+                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records;
                 call memory_index after creating/editing |
                 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
                 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
                 ## Configuration
 
-                Be careful with your configuration. If changes are required, remember to restart your service 
+                Be careful with your configuration. If changes are required, remember to restart your service
                 afterwards.
 
                 | Path | Purpose |
@@ -361,7 +455,7 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## File Output and Sending Guidelines
 
-                Generated artifacts (code files, documents, data files, etc.) produced during user task execution 
+                Generated artifacts (code files, documents, data files, etc.) produced during user task execution
                 should be stored according to the following rules:
 
                 ### Files to Deliver to User
@@ -380,32 +474,34 @@ Your default workspace and related configuration live under the `.jiuwenclaw` di
 
                 ## Sending Files
 
-                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it 
+                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it
                 in these scenarios:
-                - Task completion produces files that need to be delivered to the user (reports, documents, 
+                - Task completion produces files that need to be delivered to the user (reports, documents,
                 data files, images, etc.)
                 - User explicitly requests to download, export, or receive files
                 - User asks how to obtain generated files
+                - After the user actively invokes file generation/modification tools such as
+                  `write_file` and `write_text_file`
 
-                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` 
+                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user`
                 tool."""
 
-        self.system_prompt_builder.add_section(PromptSection(
-            name="workspace",
-            content={"cn": workspace_content, "en": workspace_content},
-            priority=15,
-        ))
-        logger.info(
-            "[RuntimePromptRail]  workspace section 已注入（包含 output_dir 指导）"
-            " | resolved_workspace=%s | output_dir_API返回值=%s",
-            resolved_workspace,
-            actual_output_dir
-        )
-
-        self.system_prompt_builder.remove_section("request_system_prompt")
-        if self._request_system_prompt:
             self.system_prompt_builder.add_section(PromptSection(
-                name="request_system_prompt",
-                content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
-                priority=95,
+                name="workspace",
+                content={"cn": workspace_content, "en": workspace_content},
+                priority=15,
             ))
+            logger.info(
+                "[RuntimePromptRail]  workspace section 已注入（包含 output_dir 指导）"
+                " | resolved_workspace=%s | output_dir_API返回值=%s",
+                resolved_workspace,
+                actual_output_dir
+            )
+
+            self.system_prompt_builder.remove_section("request_system_prompt")
+            if self._request_system_prompt:
+                self.system_prompt_builder.add_section(PromptSection(
+                    name="request_system_prompt",
+                    content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
+                    priority=95,
+                ))

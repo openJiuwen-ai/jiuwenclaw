@@ -26,7 +26,8 @@ from typing import Any
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+
+from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_skill_use_rail import JiuWenSkillUseRail
 
 
 def _extract_skill_complete_arg(tool_call: Any, key: str) -> str:
@@ -93,7 +94,7 @@ _SUBAGENT_SKILL_PROMPT = {
 }
 
 
-class SubagentSkillUseRail(SkillUseRail):
+class SubagentSkillUseRail(JiuWenSkillUseRail):
     """SkillUseRail 子类：仅保留 lift/pin 行为，不渲染 skill 列表 prompt。"""
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:

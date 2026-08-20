@@ -72,9 +72,17 @@ async def list_stdio_mcp_tool_defs(params: dict[str, Any]) -> list[dict[str, Any
 class EphemeralStdioMcpTool(Tool):
     """每次 invoke 单独 connect → call_tool → 关闭子进程。"""
 
-    def __init__(self, card: ToolCard, get_stdio_params: Callable[[], dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        card: ToolCard,
+        get_stdio_params: Callable[[], dict[str, Any]],
+        raw_tool_name: str | None = None,
+    ) -> None:
         super().__init__(card)
         self._get_stdio_params = get_stdio_params
+        # card.name 是 LLM 可见的带 server 前缀的 qualified name，不能直接拿去 call_tool；
+        # raw_tool_name 才是 MCP server 上真正注册的名字；缺省时回退到 card.name。
+        self._raw_tool_name = raw_tool_name if raw_tool_name is not None else card.name
 
     async def stream(self, inputs: Any, **kwargs: Any):
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
@@ -99,19 +107,22 @@ class EphemeralStdioMcpTool(Tool):
             read, write = read_write
             session = await stack.enter_async_context(ClientSession(read, write, sampling_callback=None))
             await session.initialize()
-            tool_result = await session.call_tool(self._card.name, arguments=arguments)
+            tool_result = await session.call_tool(self._raw_tool_name, arguments=arguments)
             result_content: str | None = None
             if tool_result.content and len(tool_result.content) > 0:
                 try:
                     logger.info(
                         "[EphemeralStdioMcp] tool=%s raw_content=%s",
-                        self._card.name,
+                        self._raw_tool_name,
                         repr(tool_result.content),
                     )
                 except Exception:
-                    logger.debug("[EphemeralStdioMcp] tool=%s raw content debug failed", self._card.name, exc_info=True)
+                    logger.debug(
+                        "[EphemeralStdioMcp] tool=%s raw content debug failed",
+                        self._raw_tool_name, exc_info=True,
+                    )
                 result_content = tool_result.content[-1].text
-            logger.info("[EphemeralStdioMcp] tool=%s done", self._card.name)
+            logger.info("[EphemeralStdioMcp] tool=%s done", self._raw_tool_name)
             return {"result": result_content}
         except Exception as e:
             raise build_error(

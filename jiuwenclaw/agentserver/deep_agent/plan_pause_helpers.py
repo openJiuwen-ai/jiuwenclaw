@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from pathlib import Path
 
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.single_agent import create_agent_session
@@ -48,6 +49,12 @@ def session_id_from_session(session: Any) -> str:
 
 PLAN_PAUSED_SESSION_KEY = "jiuwenclaw_plan_paused"
 PLAN_PAUSED_SNAPSHOT_KEY = "jiuwenclaw_plan_paused_snapshot"
+INTERRUPT_ARTIFACTS_SUMMARY_KEY = "jiuwenclaw_interrupt_artifacts_summary"
+# 生命周期：运行期 list[dict]（tool 产物日志，task_execution_rail 追加）
+# → 取消时 str（格式化摘要文本，_persist_interrupt_artifacts_summary 转换）
+# → 注入后 None（clear_interrupt_artifacts_summary_from_session 清空）
+INTERRUPT_RECOVERY_INJECTED_KEY = "jiuwenclaw_interrupt_recovery_injected"
+SKIP_INVOKE_TASK_UPDATE_SYNC_KEY = "jiuwenclaw_skip_invoke_task_update_sync"
 
 PAUSED_PLAN_DECISION_PROMPT_CN = """【系统：plan 暂停后的用户消息】
 用户已 cancel；**未完成**待办已从 todo 文件移除（`todo_list` 通常仅含 completed）。取消时的计划状态见下方快照。
@@ -85,23 +92,34 @@ def _format_snapshot_block(language: str, snapshot: str) -> str:
     return f"\n取消时计划状态（参考）：\n{text}\n"
 
 
-def build_paused_plan_decision_prompt(language: str, *, snapshot: str = "") -> str:
+def build_paused_plan_decision_prompt(language: str, *, snapshot: str = "", has_new_file: bool = False) -> str:
     snapshot_block = _format_snapshot_block(language, snapshot)
     template = (
         PAUSED_PLAN_DECISION_PROMPT_EN
         if language in ("en", "english")
         else PAUSED_PLAN_DECISION_PROMPT_CN
     )
-    return template.format(snapshot_block=snapshot_block)
+    result = template.format(snapshot_block=snapshot_block)
+    if has_new_file:
+        if language in ("en", "english"):
+            result += ("\n\n⚠️ Note: The user uploaded a new file with this message. "
+                       "This is likely a new task (option 2), not a resume of the old plan (option 1). "
+                       "Unless the user explicitly says to continue the old task, prioritize the new file.")
+        else:
+            result += ("\n\n⚠️ 注意：用户本次上传了新文件，这很可能是一个全新任务（选项 2），而非续跑旧计划（选项 1）。"
+                       "除非用户明确表示要继续旧任务，否则应优先处理新上传的文件。")
+    return result
 
 
 def build_paused_plan_decision_prompt_from_session_snapshot(
     language: str,
     snapshot: dict[str, Any] | None,
+    has_new_file: bool = False,
 ) -> str:
     return build_paused_plan_decision_prompt(
         language,
         snapshot=format_plan_pause_handoff_snapshot(snapshot),
+        has_new_file=has_new_file,
     )
 
 
@@ -200,11 +218,12 @@ async def persist_checkpoint_for_session(
             await session.post_run()
 
 
-async def post_agent_execute_for_session(session: Any) -> None:
+async def post_agent_execute_for_session(session: Any, checkpointer: Any | None = None) -> None:
     """Flush session state to checkpointer without post_run."""
     actual_session = getattr(session, "_parent", session) or session
     inner = getattr(actual_session, "_inner", actual_session)
-    await CheckpointerFactory.get_checkpointer().post_agent_execute(inner)
+    cp = checkpointer if checkpointer is not None else CheckpointerFactory.get_checkpointer()
+    await cp.post_agent_execute(inner)
 
 
 def format_paused_plan_snapshot(todos: list[TodoItem]) -> str:
@@ -436,3 +455,200 @@ def append_supplementary_to_inputs_query(inputs: dict[str, Any], supplementary: 
             payload["supplementary_info"] = supplementary.strip()
         inputs["query"] = prefix + json.dumps(payload, ensure_ascii=False)
         return
+
+
+# ---------------------------------------------------------------------------
+# Interrupt artifacts summary (fallback when plan_pause / interrupt_resume fail)
+# ---------------------------------------------------------------------------
+
+ARTIFACTS_RESUME_PROMPT_CN = """【中断恢复提示】
+之前的任务被中断取消。以下是中断前已完成的工作产物摘要：
+
+{summary}
+
+请据此判断当前任务状态：
+- 如果产物显示目标文件已存在且内容较完整，请先 read_file 查看当前状态，再决定是补充完善还是从头重建
+- 如果产物显示目标文件尚未创建或内容很少，可以重新创建
+- 不要盲目从头 write_file 重建一个已存在的完整文件"""
+
+ARTIFACTS_RESUME_PROMPT_EN = """[Interrupt recovery hint]
+The previous task was interrupted and cancelled. Here is a summary of completed work artifacts before the interruption:
+
+{summary}
+
+Based on this, judge the current task state:
+- If artifacts show the target file already exists with substantial content, read_file first before deciding to supplement or rebuild from scratch
+- If artifacts show the target file was not created or has minimal content, you may create it anew
+- Do not blindly write_file to rebuild a file that already exists and is complete"""
+
+
+def build_interrupt_artifacts_resume_prompt(language: str, *, summary: str) -> str:
+    template = (
+        ARTIFACTS_RESUME_PROMPT_EN
+        if language in ("en", "english")
+        else ARTIFACTS_RESUME_PROMPT_CN
+    )
+    return template.format(summary=summary.strip() or "(empty)")
+
+
+def write_interrupt_artifacts_summary_to_session(session: Any, summary: str) -> None:
+    """Write interrupt artifacts summary into session state (one-shot, cleared after use)."""
+    session.update_state({INTERRUPT_ARTIFACTS_SUMMARY_KEY: summary})
+
+
+def read_interrupt_artifacts_summary_from_session(session: Any) -> str | None:
+    """Read interrupt artifacts summary from session state."""
+    value = session.get_state(INTERRUPT_ARTIFACTS_SUMMARY_KEY)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def clear_interrupt_artifacts_summary_from_session(session: Any) -> None:
+    """Clear interrupt artifacts summary from session state (after injection)."""
+    session.update_state({INTERRUPT_ARTIFACTS_SUMMARY_KEY: None})
+
+
+# ---------------------------------------------------------------------------
+# Unified sentinel: prevents multiple recovery mechanisms from injecting
+# into the same request cycle
+# ---------------------------------------------------------------------------
+
+def is_interrupt_recovery_injected(session: Any) -> bool:
+    """Check whether any interrupt recovery mechanism has already injected a prompt."""
+    return bool(session.get_state(INTERRUPT_RECOVERY_INJECTED_KEY))
+
+
+def mark_interrupt_recovery_injected(session: Any) -> None:
+    """Mark that an interrupt recovery prompt has been injected for this request."""
+    session.update_state({INTERRUPT_RECOVERY_INJECTED_KEY: True})
+
+
+def clear_interrupt_recovery_injected(session: Any) -> None:
+    """Clear the recovery injected marker (for new conversation cycles)."""
+    session.update_state({INTERRUPT_RECOVERY_INJECTED_KEY: None})
+
+
+def mark_skip_invoke_task_update_sync(session: Any) -> None:
+    """Mark that before_invoke should not broadcast a stale todo snapshot this turn."""
+    session.update_state({SKIP_INVOKE_TASK_UPDATE_SYNC_KEY: True})
+
+
+def is_skip_invoke_task_update_sync(session: Any) -> bool:
+    return session.get_state(SKIP_INVOKE_TASK_UPDATE_SYNC_KEY) is True
+
+
+def clear_skip_invoke_task_update_sync(session: Any) -> None:
+    session.update_state({SKIP_INVOKE_TASK_UPDATE_SYNC_KEY: None})
+
+
+# ---------------------------------------------------------------------------
+# Recovery file on disk (fallback when session state is lost, e.g. process restart)
+# ---------------------------------------------------------------------------
+
+_RECOVERY_DIR_NAME = "recovery"
+_RECOVERY_FILE_NAME = "recovery.json"
+_PLAN_PAUSE_FILE_NAME = "plan_pause.json"
+
+
+def _get_recovery_dir(workspace_dir: Path, session_id: str) -> Path:
+    """Get the recovery directory for a given session.
+
+    Path: <workspace_dir>/context/<session_id>/recovery/
+    """
+    return workspace_dir / "context" / session_id / _RECOVERY_DIR_NAME
+
+
+def write_plan_pause_to_file(
+    workspace_dir: Path,
+    session_id: str,
+    snapshot: dict[str, Any] | None = None,
+) -> None:
+    """Persist plan_paused to disk so a later live checkpoint overwrite cannot drop it."""
+    if not session_id:
+        return
+    recovery_dir = _get_recovery_dir(workspace_dir, session_id)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    file_path = recovery_dir / _PLAN_PAUSE_FILE_NAME
+    try:
+        with file_path.open("w", encoding="utf-8") as fh:
+            json.dump(
+                {"paused": True, "snapshot": snapshot, "session_id": session_id},
+                fh,
+                ensure_ascii=False,
+            )
+    except Exception:
+        logger.warning("[recovery] write_plan_pause_to_file failed session=%s", session_id)
+
+
+def read_plan_pause_from_file(
+    workspace_dir: Path,
+    session_id: str,
+) -> tuple[bool, dict[str, Any] | None]:
+    """Read plan_paused flag/snapshot from disk. Returns (False, None) when absent."""
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _PLAN_PAUSE_FILE_NAME
+    try:
+        if not file_path.exists():
+            return False, None
+        with file_path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        if data.get("paused") is not True:
+            return False, None
+        snapshot = data.get("snapshot")
+        if isinstance(snapshot, dict):
+            return True, snapshot
+        return True, None
+    except Exception:
+        logger.debug("[recovery] read_plan_pause_from_file failed session=%s", session_id)
+        return False, None
+
+
+def clear_plan_pause_file(workspace_dir: Path, session_id: str) -> None:
+    """Delete the plan_pause recovery file after successful decision-prompt injection."""
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _PLAN_PAUSE_FILE_NAME
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception:
+        logger.debug("[recovery] clear_plan_pause_file failed session=%s", session_id)
+
+
+def write_interrupt_artifacts_to_file(workspace_dir: Path, session_id: str, summary: str) -> None:
+    """Write interrupt artifacts summary to a JSON file on disk (process-restart safe)."""
+    if not summary.strip():
+        return
+    recovery_dir = _get_recovery_dir(workspace_dir, session_id)
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    file_path = recovery_dir / _RECOVERY_FILE_NAME
+    try:
+        json.dump({"summary": summary, "session_id": session_id}, file_path.open("w", encoding="utf-8"))
+    except Exception:
+        logger.warning("[recovery] write_interrupt_artifacts_to_file failed session=%s", session_id)
+
+
+def read_interrupt_artifacts_from_file(workspace_dir: Path, session_id: str) -> str | None:
+    """Read interrupt artifacts summary from the JSON file on disk.
+
+    Returns the summary string, or None if the file doesn't exist or is invalid.
+    """
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _RECOVERY_FILE_NAME
+    try:
+        if not file_path.exists():
+            return None
+        data = json.load(file_path.open(encoding="utf-8"))
+        summary = data.get("summary", "")
+        if isinstance(summary, str) and summary.strip():
+            return summary
+    except Exception:
+        logger.debug("[recovery] read_interrupt_artifacts_from_file failed session=%s", session_id)
+    return None
+
+
+def clear_interrupt_artifacts_file(workspace_dir: Path, session_id: str) -> None:
+    """Delete the recovery file for a session (after successful injection)."""
+    file_path = _get_recovery_dir(workspace_dir, session_id) / _RECOVERY_FILE_NAME
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception:
+        logger.debug("[recovery] clear_interrupt_artifacts_file failed session=%s", session_id)

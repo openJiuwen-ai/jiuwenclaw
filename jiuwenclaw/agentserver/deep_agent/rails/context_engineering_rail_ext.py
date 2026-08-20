@@ -17,7 +17,6 @@ from typing import Optional
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.sections.context import (
-    _build_context_content,
     _read_context_file,
     _read_daily_memory,
     build_tools_section,
@@ -33,11 +32,19 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
 )
 from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
 
+from jiuwenclaw.agentserver.memory.external_memory_config import is_builtin_memory_allowed
+from jiuwenclaw.config import get_config
+
 logger = getLogger(__name__)
 
 # Per-request overrides use the same slot/order as workspace files, with relay-provided headings.
 _OVERRIDE_HEADING_SOUL = "## SOUL"
 _OVERRIDE_HEADING_IDENTITY = "## IDENTITY"
+
+# 当 memory.engine=none 时，应一并跳过的「记忆衍生上下文」文件
+# USER.md = 用户画像，被 openjiuwen 视为「项目上下文」直接注入 system prompt；
+# MEMORY.md 当前不在 SDK 的 CONTEXT_FILES 里，但保留进 skip 集合做前向防御。
+_MEMORY_DERIVED_CONTEXT_FILES = frozenset({"USER.md", "MEMORY.md"})
 
 # Relay-claw empty personality becomes a lone label line in system prompt.
 _SOUL_LABEL_ONLY = re.compile(r"^性格[：:]\s*$")
@@ -131,25 +138,54 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         self._request_soul = normalize_soul_override(soul)
 
     def uninit(self, agent) -> None:
+        # 热重载后 agent.system_prompt_builder 可能已是新引用，退休清理前先同步缓存，
+        # 确保 remove_section 落到当前生效的 builder 上。
+        _builder = getattr(agent, "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         self._skip_context_files = set()
         self._request_identify = None
         self._request_soul = None
         super().uninit(agent)
 
+    @staticmethod
+    def _memory_engine_disabled() -> bool:
+        """Return True when memory.engine=none (即 builtin/external 都不允许)。
+
+        与 ``_cleanup_builtin_memory_artifacts`` / ``AvatarPromptRail`` 中的判定保持一致。
+        engine=none 时，``USER.md`` / ``MEMORY.md`` / daily_memory 这类「记忆衍生上下文」
+        都不应再注入 system prompt，否则模型仍能从 system prompt 里看到历史。
+        """
+        try:
+            return not is_builtin_memory_allowed(get_config())
+        except Exception as exc:
+            logger.debug(
+                "[JiuClawContextEngineeringRail] is_builtin_memory_allowed lookup failed: %s",
+                exc,
+            )
+            return False
+
+    def _effective_skip_files(self) -> set[str]:
+        """合并 per-request skip 集合与「记忆关闭时强制 skip」集合。"""
+        skip = set(self._skip_context_files)
+        if self._memory_engine_disabled():
+            skip |= _MEMORY_DERIVED_CONTEXT_FILES
+        return skip
+
     async def _build_context_content_with_overrides(self, lang: str) -> str:
-        """Build context section; replace SOUL.md / IDENTITY.md slots with request overrides."""
+        """Build context section; replace SOUL.md / IDENTITY.md slots with request overrides.
+
+        始终走完整渲染路径以保证 ``_skip_context_files`` 与记忆关闭时的 skip 都生效；
+        早期版本曾在无 soul/identity override 时走 SDK fast path，会把 USER.md 等
+        skip 集合内的文件一并注入 —— 此处不再做该 fast path 短路。
+        """
         if self.workspace is None or self.sys_operation is None:
             return ""
 
         soul_override = self._request_soul
         identify_override = self._request_identify
-
-        if not soul_override and not identify_override:
-            return await _build_context_content(
-                self.sys_operation,
-                self.workspace,
-                lang,
-            )
+        skip_files = self._effective_skip_files()
+        memory_disabled = self._memory_engine_disabled()
 
         header = CONTEXT_HEADER.get(lang, CONTEXT_HEADER["cn"])
         titles = CONTEXT_FILE_TITLES.get(lang, CONTEXT_FILE_TITLES["cn"])
@@ -157,7 +193,7 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         parts = [header]
 
         for file_key in CONTEXT_FILES:
-            if file_key in self._skip_context_files:
+            if file_key in skip_files:
                 continue
             if file_key == "SOUL.md" and soul_override:
                 parts.append(f"{_OVERRIDE_HEADING_SOUL}\n\n{soul_override}\n\n")
@@ -179,13 +215,15 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
                 "empty files are skipped]\n\n"
             )
 
-        daily_content = await _read_daily_memory(self.sys_operation, self.workspace)
-        if daily_content:
-            from openjiuwen.harness.prompts.sections.context import _format_date
+        # 记忆关闭时同样跳过 daily_memory —— 它是 memory 目录下的衍生上下文
+        if not memory_disabled:
+            daily_content = await _read_daily_memory(self.sys_operation, self.workspace)
+            if daily_content:
+                from openjiuwen.harness.prompts.sections.context import _format_date
 
-            date = _format_date("Asia/Shanghai")
-            title = daily_title_tpl.format(date=date)
-            parts.append(f"{title}\n\n{daily_content}\n\n")
+                date = _format_date("Asia/Shanghai")
+                title = daily_title_tpl.format(date=date)
+                parts.append(f"{title}\n\n{daily_content}\n\n")
 
         return "".join(parts)
 
@@ -250,6 +288,13 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace + context (if not minimal), then offload section."""
+        # 热重载（DeepAgent._hot_reload_system_prompt）会新建 SystemPromptBuilder 并替换
+        # agent.system_prompt_builder，但保留型 rail 不会重新 init()，缓存的
+        # self.system_prompt_builder 可能指向旧 builder。这里每次从 ctx.agent 现取最新
+        # builder 并刷新缓存，使后续 add_section 都落到当前生效的 builder 上。
+        _builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if _builder is not None:
+            self.system_prompt_builder = _builder
         if not self._minimal:
             await self._inject_workspace_context_tools(ctx)
 

@@ -35,3 +35,27 @@ def get_chat_id(request: AgentRequest) -> str | None:
             request.metadata.get('xiaoyi_session_id')
         )
     return None
+
+
+def extract_uploaded_files(params: dict):
+    """检查 request.params.files 中是否有新上传的文件。
+
+     当用户中断后上传了新文件（任何类型），该函数返回 True，用于
+     plan_pause 提示中引导 LLM 选择"全新任务"而非"续跑旧计划"。
+
+     兼容两种 files 格式：
+     - dict 格式（OfficeClaw）: {"uploaded": [{"name": "...", "path": "...", "type": "..."}]}
+     - list 格式（各 channel）: [{"name": "...", "path": "...", "type": "..."}]
+    """
+    files = params.get("files")
+    if files is None:
+        return None
+    if isinstance(files, dict):
+        entries = files.get("uploaded", [])
+    elif isinstance(files, list):
+        entries = files
+    else:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return entries

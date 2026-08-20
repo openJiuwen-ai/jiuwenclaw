@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
@@ -20,7 +21,20 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.tools.todo_resume import todo_create_blocked_message
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.utils import (
+    get_agent_sessions_dir,
+    resolve_tenant_agent_workspace_dir,
+    resolve_tenant_sessions_dir,
+)
+from jiuwenclaw.agentserver.deep_agent.artifact_body_scan import (
+    _clean_path_candidate,
+    _path_identity,
+    scan_body_text_for_paths,
+)
+from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    clear_skip_invoke_task_update_sync,
+    is_skip_invoke_task_update_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +62,7 @@ def _mark_as_sent(path: str) -> None:
     for k in expired_keys:
         _ARTIFACT_SEND_CACHE.pop(k, None)
 
-# 文件路径检测的正则表达式模式（仅用于正文回退扫描）
-_FILE_PATH_PATTERNS = [
-    # 变量路径：{workspace}/... 或 {output_dir}/...
-    re.compile(
-        r'\{(?:workspace|output_dir)\}[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
-        re.IGNORECASE,
-    ),
-    # 绝对/相对路径：必须包含 workspace 或 output 目录段
-    re.compile(
-        r'(?:(?:[A-Za-z]:)?[/\\]|\.{1,2}[/\\])?[^\s\]\}\)\,\'\"`<>，。；、：]*'
-        r'[/\\](?:workspace|output)[/\\][^\s\]\}\)\,\'\"`<>，。；、：]*'
-        r'[^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
-        re.IGNORECASE,
-    ),
-]
+# 文件路径检测的正则表达式模式（仅用于正文回退扫描，实现见 artifact_body_scan）
 
 # 需要排除的路径模式（非产物文件），系统敏感目录基于时间戳校验过滤
 _ALWAYS_EXCLUDED_PATH_PATTERNS = [
@@ -92,8 +92,6 @@ _STRUCTURED_PATH_FIELD_KEYWORDS = frozenset({
     "result",
 })
 
-_PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
-
 
 def _is_excluded_path(path_str: str) -> bool:
     """检查路径是否应排除（非产物）
@@ -103,16 +101,6 @@ def _is_excluded_path(path_str: str) -> bool:
         if pattern.search(path_str):
             return True
     return False
-
-
-def _clean_path_candidate(path_str: str) -> str:
-    """清理正则或结构化字段中提取到的路径候选。"""
-    return path_str.strip().strip(_PATH_TRAILING_CHARS).strip()
-
-
-def _path_identity(path_str: str) -> str:
-    """生成用于去重的路径标识，兼容 Windows/Unix 分隔符和变量大小写。"""
-    return path_str.replace("\\", "/").lower()
 
 
 def _iter_structured_path_values(value: Any, parent_key: str = "") -> list[str]:
@@ -146,6 +134,7 @@ def _extract_artifact_paths_from_tool_result(
     *,
     scan_body_text: bool = False,
     skip_mtime_check: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """从工具输出结果中提取文件路径并验证是否为有效的工件。
     
@@ -193,6 +182,8 @@ def _extract_artifact_paths_from_tool_result(
         )
 
         for p in potential_paths:
+            if cancel_event is not None and cancel_event.is_set():
+                return []
             if not p:
                 continue
             if _is_excluded_path(p):
@@ -242,42 +233,39 @@ def _extract_artifact_paths_from_tool_result(
         len(result_text),
     )
 
-    # 使用正则表达式从文本中提取路径
-    seen_paths: set[str] = set()
-    total_regex_matches = 0
-    for pattern in _FILE_PATH_PATTERNS:
-        matches = pattern.findall(result_text)
-        total_regex_matches += len(matches)
-        for match in matches:
-            # 清理路径（去除尾部的非法字符）
-            cleaned_path = _clean_path_candidate(match)
-            if not cleaned_path:
-                continue
-            candidate_identity = _path_identity(cleaned_path)
-            if candidate_identity in seen_paths:
-                continue
-            seen_paths.add(candidate_identity)
+    path_candidates, total_regex_matches, lines_scanned, lines_skipped = (
+        scan_body_text_for_paths(result_text, cancel_event=cancel_event)
+    )
 
-            # 排除非产物路径（skill文件、示例路径等）
-            if _is_excluded_path(cleaned_path):
-                continue
+    if cancel_event is not None and cancel_event.is_set():
+        logger.info("[ArtifactDetector] Body scan cancelled")
+        return []
 
-            artifact = _validate_and_build_artifact(
-                cleaned_path,
-                workspace_base,
-                tool_start_time=tool_start_time,
-                skip_mtime_check=skip_mtime_check,
-            )
-            if not artifact:
-                continue
+    for cleaned_path in path_candidates:
+        if cancel_event is not None and cancel_event.is_set():
+            return []
+        if _is_excluded_path(cleaned_path):
+            continue
 
-            identity = _path_identity(artifact.get("path", cleaned_path))
-            if identity not in seen_artifact_paths:
-                artifacts.append(artifact)
-                seen_artifact_paths.add(identity)
+        artifact = _validate_and_build_artifact(
+            cleaned_path,
+            workspace_base,
+            tool_start_time=tool_start_time,
+            skip_mtime_check=skip_mtime_check,
+        )
+        if not artifact:
+            continue
+
+        identity = _path_identity(artifact.get("path", cleaned_path))
+        if identity not in seen_artifact_paths:
+            artifacts.append(artifact)
+            seen_artifact_paths.add(identity)
     logger.info(
-        "[ArtifactDetector] Body scan fallback done: regex_matches=%d artifacts=%d",
+        "[ArtifactDetector] Body scan fallback done: regex_matches=%d "
+        "lines_scanned=%d lines_skipped=%d artifacts=%d",
         total_regex_matches,
+        lines_scanned,
+        lines_skipped,
         len(artifacts),
     )
     
@@ -437,6 +425,7 @@ class TaskExecutionRail(DeepAgentRail):
 
     _BINDING_IN_PROGRESS = frozenset({"in_progress"})
     _BINDING_PENDING = frozenset({"pending", "waiting"})
+    _TODO_DONE_STATUSES = frozenset({"completed", "cancelled"})
 
     priority = 85
 
@@ -453,6 +442,7 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool: dict[str, dict[str, Any]] = {}
         self._active_tasks: dict[str, TaskExecutionContext] = {}
         self._todo_started: set[str] = set()
+        self._stale_todo_ids: set[str] = set()
         self._deep_agent: Any | None = None
 
     def get_current_task_id(self) -> str | None:
@@ -481,16 +471,38 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool = {}
         self._active_tasks = {}
         self._todo_started = set()
+        self._stale_todo_ids = set()
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
+            # fresh turn after stale todo cleanup: record prior todo ids so
+            # _emit_task_update_event can filter them out and prevent
+            # cross-request task/update leakage (BUG0061/0063/0034).
+            if ctx.session is not None and is_skip_invoke_task_update_sync(ctx.session):
+                self._stale_todo_ids = set(self._todo_map.keys())
             has_active_tasks = any(
                 t.get("status") in ("pending", "in_progress")
                 for t in self._todo_map.values()
             )
-            if has_active_tasks:
+            if has_active_tasks and self._should_emit_invoke_task_update(ctx):
                 parent_request_id = self._extract_request_id(ctx)
                 await self._emit_task_update_event(ctx.session, parent_request_id)
+        self._bind_context_to_in_progress_task()
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Bind task_id before LLM calls (tool path already binds in before_tool_call)."""
+        self._bind_context_to_in_progress_task()
+
+    def _should_emit_invoke_task_update(self, ctx: AgentCallbackContext) -> bool:
+        """Whether before_invoke should broadcast todo snapshot to the frontend."""
+        session = ctx.session
+        if session is not None and is_skip_invoke_task_update_sync(session):
+            logger.info(
+                "[TaskExecutionRail] skip before_invoke task.update: "
+                "fresh user turn after stale todo cleanup"
+            )
+            return False
+        return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         setattr(ctx, '_tool_start_time', time.time())
@@ -524,6 +536,22 @@ class TaskExecutionRail(DeepAgentRail):
                 map_summary,
             )
             self._todo_map_before_tool = dict(self._todo_map)
+            return
+
+        if tool_name in self.SKILL_COMPLETE_TOOLS:
+            if self._has_incomplete_todos(self._todo_map):
+                tc = ctx.inputs.tool_call
+                tool_call_id = str(getattr(tc, "id", "") or "")
+                msg = (
+                    "[SKILL_COMPLETE_BLOCKED] todo.json 中仍有未完成任务，"
+                    "请先用 todo_modify 将全部已完成项标为 completed。"
+                )
+                ctx.extra["_skip_tool"] = True
+                ctx.inputs.tool_result = msg
+                
+                ctx.inputs.tool_msg = ToolMessage(
+                    content=msg, tool_call_id=tool_call_id,
+                )
             return
 
         self._bind_context_to_in_progress_task()
@@ -613,8 +641,15 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
-            parent_request_id = self._extract_request_id(ctx)
-            await self._emit_task_update_event(ctx.session, parent_request_id)
+            if self._todo_map:
+                parent_request_id = self._extract_request_id(ctx)
+                await self._emit_task_update_event(ctx.session, parent_request_id)
+            else:
+                logger.debug(
+                    "[TaskExecutionRail] skip empty task.update after skill_complete "
+                    "session_id=%s",
+                    session_id,
+                )
             logger.debug(
                 "[TaskExecutionRail] after_tool_call done session_id=%s tool=%s total_elapsed_ms=%.1f",
                 session_id,
@@ -631,6 +666,9 @@ class TaskExecutionRail(DeepAgentRail):
         )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        if ctx.session is not None:
+            clear_skip_invoke_task_update_sync(ctx.session)
+        self._stale_todo_ids = set()
         self._todo_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 
@@ -682,35 +720,89 @@ class TaskExecutionRail(DeepAgentRail):
             elapsed_ms,
         )
 
+        # 记录工具调用产物信息到 session state，用于中断恢复时生成产物摘要
+        try:
+            from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+                INTERRUPT_ARTIFACTS_SUMMARY_KEY,
+            )
+            tool_name = ctx.inputs.tool_name
+            tool_args = ctx.inputs.tool_args
+            # 从 tool_args 中提取关键信息（文件路径、大小等）
+            entry = {"tool": tool_name}
+            if isinstance(tool_args, dict):
+                fp = str(tool_args.get("file_path", "") or "")
+                if fp:
+                    entry["file_path"] = fp.replace("\\", "/")
+            elif isinstance(tool_args, str):
+                try:
+                    parsed = json.loads(tool_args)
+                    fp = str(parsed.get("file_path", "") or "")
+                    if fp:
+                        entry["file_path"] = fp.replace("\\", "/")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            # 如果有产物（emitted=True），记录产物信息
+            if emitted:
+                entry["artifacts_emitted"] = True
+            existing_log = session.get_state(INTERRUPT_ARTIFACTS_SUMMARY_KEY)
+            if not isinstance(existing_log, list):
+                existing_log = []
+            existing_log.append(entry)
+            session.update_state({INTERRUPT_ARTIFACTS_SUMMARY_KEY: existing_log})
+        except Exception as exc:
+            logger.debug("[TaskExecutionRail] 记录产物摘要失败: %s", exc)
+
     def _get_workspace_base_path(self) -> Path | None:
         """获取工作空间基准路径。
-        
+
         用于验证文件路径是否在合法的工作目录中。
-        优先使用Rail配置的workspace，其次使用agent工作空间。
-        
+        优先使用 Rail 配置的 workspace，其次按 sid/aid 解析租户工作空间。
+
         Returns:
-            工作空间路径，若未配置则返回None
+            工作空间路径，若未配置则返回 None
         """
-        # 优先使用Rail配置的workspace
+        # 优先使用 Rail 配置的 workspace
         if self.workspace is not None:
             try:
                 return self.workspace.get_node_path(WorkspaceNode.TODO)
             except Exception as e:
                 logger.warning(
-                    "获取workspace节点路径失败，将尝试使用agent工作空间: %s",
-                    str(e)
+                    "获取 workspace 节点路径失败，将尝试使用租户 workspace: %s",
+                    str(e),
+                )
+
+        service_id: str | None = None
+        agent_id: str | None = None
+        if self._deep_agent is not None:
+            service_id = getattr(self._deep_agent, "_env_service_id", None) or getattr(
+                self._deep_agent, "_service_id", None
+            )
+            agent_id = getattr(self._deep_agent, "_env_agent_id", None) or getattr(
+                self._deep_agent, "_agent_id", None
+            )
+        if service_id is None or agent_id is None:
+            try:
+                from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+                ns = get_bound_agent_env_ns()
+                if ns is not None:
+                    service_id, agent_id = ns
+            except Exception:
+                logger.debug(
+                    "TaskExecutionRail resolve bound env_ns for workspace failed",
+                    exc_info=True,
                 )
 
         try:
-            from jiuwenclaw.utils import get_agent_workspace_dir
-            return get_agent_workspace_dir()
+            if service_id is not None or agent_id is not None:
+                return resolve_tenant_agent_workspace_dir(service_id, agent_id)
+            return resolve_tenant_agent_workspace_dir()
         except Exception as e:
             logger.warning(
-                "获取agent工作空间目录失败，将返回None: %s",
-                str(e)
+                "获取租户 workspace 失败，将返回 None: %s",
+                str(e),
             )
-
-        return None
+            return None
 
     async def _init_task_tracking(self, session: Session | None) -> None:
         if session is None:
@@ -758,7 +850,7 @@ class TaskExecutionRail(DeepAgentRail):
         mapped: dict[str, dict[str, Any]] = {}
         total = len(items)
         for index, item in enumerate(items):
-            task_id = item.get("id", str(index))
+            task_id = self._get_todo_key(item, index)
             status = item.get("status", "pending")
             normalized_status = status.lower() if isinstance(status, str) else str(status).lower()
             mapped[task_id] = {
@@ -768,6 +860,21 @@ class TaskExecutionRail(DeepAgentRail):
                 "total": total,
             }
         return mapped
+
+    @staticmethod
+    def _get_todo_key(item: dict[str, Any], index: int) -> str:
+        """Generate a stable key for a todo item, used by _build_map_from_todo_items
+        and _emit_task_update_event filtering to ensure consistent fallback logic."""
+        return str(item.get("id", item.get("idx", str(index))))
+
+    @staticmethod
+    def _has_incomplete_todos(todo_map: dict[str, dict[str, Any]]) -> bool:
+        if not todo_map:
+            return False
+        return any(
+            str(task.get("status", "pending")).lower() not in TaskExecutionRail._TODO_DONE_STATUSES
+            for task in todo_map.values()
+        )
 
 
     async def _sync_todo_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:
@@ -805,7 +912,12 @@ class TaskExecutionRail(DeepAgentRail):
                 completed_in_batch.append(task_id)
                 if prev_status == "in_progress":
                     await self._emit_task_complete_event(
-                        ctx.session, task_id, current, status="succeeded")
+                        ctx.session,
+                        task_id,
+                        current,
+                        status="succeeded",
+                        parent_request_id=parent_request_id,
+                    )
                 else:
                     logger.info(
                         "[TaskExecutionRail] skip task.complete (gate1): %s "
@@ -875,6 +987,7 @@ class TaskExecutionRail(DeepAgentRail):
         *,
         status: Literal["succeeded", "failed", "skipped"],
         error: str | None = None,
+        parent_request_id: str = "",
     ) -> None:
         full_task_id = f"todo:{task_id}"
         context = self._active_tasks.get(full_task_id)
@@ -885,12 +998,14 @@ class TaskExecutionRail(DeepAgentRail):
             payload_task_id = context.task_id
             task_content = context.task_content
             source = context.source
+            started_at = context.start_time
             self._active_tasks.pop(full_task_id, None)
         else:
             duration_ms = 0
             payload_task_id = full_task_id
             task_content = str(task.get("content", ""))
             source = "todo"
+            started_at = timestamp
 
         if get_current_task_id() == full_task_id:
             _ACTIVE_TASK_ID.set(None)
@@ -913,6 +1028,24 @@ class TaskExecutionRail(DeepAgentRail):
             )
         )
 
+        from jiuwenclaw.perf.task_hooks import notify_task_complete
+        from jiuwenclaw.perf.guard import run_perf_safe
+
+        run_perf_safe(
+            "TaskExecutionRail",
+            "perf task.complete record",
+            lambda: notify_task_complete(
+                task_id=payload_task_id,
+                task_content=task_content,
+                source=source,
+                started_at=started_at,
+                ended_at=timestamp,
+                duration_ms=float(duration_ms),
+                status=status,
+                request_id=parent_request_id,
+            ),
+        )
+
     async def _emit_task_update_event(
         self,
         session: Session,
@@ -930,6 +1063,14 @@ class TaskExecutionRail(DeepAgentRail):
         session_id = session.get_session_id()
 
         todo_items = self._load_todo_from_json(session_id)
+
+        # 过滤掉上一轮 request 的残留 todo，防止跨请求串台
+        if self._stale_todo_ids:
+            todo_items = [
+                t for i, t in enumerate(todo_items)
+                if self._get_todo_key(t, i) not in self._stale_todo_ids
+            ]
+
         todo_tasks = self._format_tasks_for_update(todo_items, source="todo")
 
         all_tasks = todo_tasks
@@ -1086,6 +1227,30 @@ class TaskExecutionRail(DeepAgentRail):
     def _get_todo_workspace_path(self, session_id: str) -> Path:
         if self.workspace is not None:
             return Path(self.workspace.get_node_path(WorkspaceNode.TODO)) / session_id / "todo.json"
+
+        service_id: str | None = None
+        agent_id: str | None = None
+        if self._deep_agent is not None:
+            service_id = getattr(self._deep_agent, "_env_service_id", None) or getattr(
+                self._deep_agent, "_service_id", None
+            )
+            agent_id = getattr(self._deep_agent, "_env_agent_id", None) or getattr(
+                self._deep_agent, "_agent_id", None
+            )
+        if service_id is None or agent_id is None:
+            try:
+                from jiuwenclaw.local_env_config import get_bound_agent_env_ns
+
+                ns = get_bound_agent_env_ns()
+                if ns is not None:
+                    service_id, agent_id = ns
+            except Exception:
+                logger.debug(
+                    "TaskExecutionRail resolve bound env_ns for todo path failed",
+                    exc_info=True,
+                )
+        if service_id is not None or agent_id is not None:
+            return resolve_tenant_sessions_dir(service_id, agent_id) / session_id / "todo.json"
         return get_agent_sessions_dir() / session_id / "todo.json"
 
 

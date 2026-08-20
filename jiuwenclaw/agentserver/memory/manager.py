@@ -8,7 +8,7 @@ import sqlite3
 import struct
 import asyncio
 import datetime
-from typing import List, Optional, Dict, Any, Set
+from typing import Callable, List, Optional, Dict, Any, Set
 from dataclasses import dataclass
 
 from jiuwenclaw.utils import logger
@@ -30,6 +30,54 @@ EMBEDDING_CACHE_TABLE = "embedding_cache"
 SESSION_DIRTY_DEBOUNCE_MS = 5000
 
 INDEX_CACHE: Dict[str, 'MemoryIndexManager'] = {}
+# normpath(workspace_dir) -> cache_key of manager that owns the file watcher
+_WORKSPACE_WATCH_OWNER: Dict[str, str] = {}
+
+
+def build_index_cache_key(agent_id: str, workspace_dir: str, embed_fingerprint: str) -> str:
+    return f"{agent_id}:{workspace_dir}:{embed_fingerprint}"
+
+
+def _workspace_norm(workspace_dir: str) -> str:
+    return os.path.normpath(workspace_dir)
+
+
+def try_claim_workspace_file_watcher(workspace_dir: str, cache_key: str) -> bool:
+    ws = _workspace_norm(workspace_dir)
+    owner = _WORKSPACE_WATCH_OWNER.get(ws)
+    if owner is None or owner == cache_key:
+        _WORKSPACE_WATCH_OWNER[ws] = cache_key
+        return True
+    return False
+
+
+def release_workspace_file_watcher(manager: 'MemoryIndexManager') -> None:
+    ws = _workspace_norm(manager.workspace_dir)
+    if _WORKSPACE_WATCH_OWNER.get(ws) != manager.cache_key:
+        return
+    _WORKSPACE_WATCH_OWNER.pop(ws, None)
+    _elect_workspace_file_watcher(ws)
+
+
+def _elect_workspace_file_watcher(workspace_norm: str) -> None:
+    for cache_key, mgr in INDEX_CACHE.items():
+        if mgr.closed:
+            continue
+        if _workspace_norm(mgr.workspace_dir) != workspace_norm:
+            continue
+        if not mgr.settings.sync.get("watch", True):
+            continue
+        if mgr.file_watcher_active:
+            _WORKSPACE_WATCH_OWNER[workspace_norm] = cache_key
+            return
+        if try_claim_workspace_file_watcher(mgr.workspace_dir, cache_key):
+            mgr.activate_file_watcher()
+            logger.info(
+                "[MemoryIndexManager] Elected new file watcher for workspace=%s cache_key=%s",
+                workspace_norm,
+                cache_key,
+            )
+            return
 
 
 @dataclass
@@ -107,17 +155,34 @@ class MemoryIndexManager:
         self._watcher_paths: Set[str] = set()
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._watcher_initialized: bool = False
+        self._file_watcher_active: bool = False
         self._file_stability_tracker: Dict[str, float] = {}
+
+        self.embed_fingerprint: str = ""
+        self.cache_key: str = ""
+
+    @property
+    def file_watcher_active(self) -> bool:
+        return self._file_watcher_active
+
+    def activate_file_watcher(self) -> None:
+        self._setup_file_watcher()
+        self._file_watcher_active = True
+
+    async def initialize(self) -> None:
+        await self._initialize()
 
     @classmethod
     async def get(
             cls,
             agent_id: str,
             workspace_dir: str,
-            settings: Optional[MemorySettings] = None
+            settings: Optional[MemorySettings] = None,
+            *,
+            embed_fingerprint: str,
     ) -> Optional['MemoryIndexManager']:
-        """Get or create memory index manager."""
-        cache_key = f"{agent_id}:{workspace_dir}"
+        """Get or create memory index manager for a config fingerprint."""
+        cache_key = build_index_cache_key(agent_id, workspace_dir, embed_fingerprint)
 
         if cache_key in INDEX_CACHE:
             manager = INDEX_CACHE[cache_key]
@@ -126,9 +191,11 @@ class MemoryIndexManager:
 
         settings = settings or MemorySettings()
         manager = cls(agent_id, workspace_dir, settings)
+        manager.embed_fingerprint = embed_fingerprint
+        manager.cache_key = cache_key
 
         try:
-            await manager._initialize()
+            await manager.initialize()
             INDEX_CACHE[cache_key] = manager
             return manager
         except Exception as e:
@@ -154,7 +221,14 @@ class MemoryIndexManager:
         await self.sync(reason="initial")
 
         if self.settings.sync.get("watch", True):
-            self._setup_file_watcher()
+            if try_claim_workspace_file_watcher(self.workspace_dir, self.cache_key):
+                self._setup_file_watcher()
+                self._file_watcher_active = True
+            else:
+                logger.info(
+                    "[MemoryIndexManager] Shared workspace watcher active; skipping watch for %s",
+                    self.cache_key,
+                )
 
         self._ensure_interval_sync()
 
@@ -1224,23 +1298,91 @@ class MemoryIndexManager:
         if self.db:
             self.db.close()
 
-        cache_key = f"{self.agent_id}:{self.workspace_dir}"
-        if cache_key in INDEX_CACHE:
-            del INDEX_CACHE[cache_key]
+        if self.cache_key and self.cache_key in INDEX_CACHE:
+            del INDEX_CACHE[self.cache_key]
 
         logger.info("Memory manager closed")
 
 
-def clear_memory_manager_cache() -> None:
-    """清除 memory manager 缓存，使下次 get_memory_manager 使用最新配置（如 embed_api_base 等）创建新实例。"""
-    INDEX_CACHE.clear()
+
+async def invalidate_memory_wiki_manager_cache(
+        agent_id: str = "default",
+        workspace_dir: str = ".",
+        *,
+        embed_fingerprint: str | None = None,
+) -> None:
+    """Close and remove a cached MemoryWikiManager."""
+    from .wiki_manager import MemoryWikiManager
+    from .cache_registry import build_memory_cache_key, close_memory_cache_entry
+
+    if embed_fingerprint:
+        await close_memory_cache_entry(
+            build_memory_cache_key(agent_id, workspace_dir, embed_fingerprint)
+        )
+        return
+
+    prefix = f"{agent_id}:{workspace_dir}:"
+    for key in MemoryWikiManager.iter_cache_keys():
+        if key.startswith(prefix) or key == f"{agent_id}:{workspace_dir}":
+            await close_memory_cache_entry(key)
+
+
+async def invalidate_memory_manager_cache(
+        agent_id: str = "default",
+        workspace_dir: str = ".",
+        *,
+        embed_fingerprint: str | None = None,
+) -> None:
+    """Close and remove cached memory managers."""
+    from .cache_registry import build_memory_cache_key, close_memory_cache_entry
+
+    if embed_fingerprint:
+        await close_memory_cache_entry(
+            build_memory_cache_key(agent_id, workspace_dir, embed_fingerprint)
+        )
+        return
+
+    prefix = f"{agent_id}:{workspace_dir}:"
+    for key in list(INDEX_CACHE):
+        if key.startswith(prefix) or key == f"{agent_id}:{workspace_dir}":
+            await close_memory_cache_entry(key)
+
+
+async def clear_memory_manager_cache() -> None:
+    """Clear all memory manager caches with proper resource cleanup."""
+    from .cache_registry import (
+        clear_memory_cache_registry,
+        close_memory_cache_entry,
+        release_all_memory_cache_sessions,
+    )
+    from .wiki_manager import MemoryWikiManager
+
+    await release_all_memory_cache_sessions()
+
+    for key in list(INDEX_CACHE):
+        await close_memory_cache_entry(key)
+
+    for key in MemoryWikiManager.iter_cache_keys():
+        wiki = MemoryWikiManager.pop_cached(key)
+        if wiki is not None and not wiki.is_closed:
+            await wiki.close()
+
+    _WORKSPACE_WATCH_OWNER.clear()
+    clear_memory_cache_registry()
 
 
 async def get_memory_manager(
         agent_id: str = "default",
         workspace_dir: str = ".",
-        settings: Optional[MemorySettings] = None
+        settings: Optional[MemorySettings] = None,
+        *,
+        embed_fingerprint: str,
 ) -> Optional[MemoryIndexManager]:
-    """Get or create memory manager."""
+    """Get or create memory manager for the given config fingerprint."""
     settings = settings or MemorySettings()
-    return await MemoryIndexManager.get(agent_id, workspace_dir, settings)
+    return await MemoryIndexManager.get(
+        agent_id,
+        workspace_dir,
+        settings,
+        embed_fingerprint=embed_fingerprint,
+    )

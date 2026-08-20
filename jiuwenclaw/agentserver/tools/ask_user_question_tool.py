@@ -17,13 +17,14 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
     AskUserQuestionRegistry,
     get_ask_request_context,
+    get_ask_runtime_scope,
 )
 
 logger = logging.getLogger(__name__)
 
 _ASK_TOOL_MAX_QUESTIONS = 4
 _ASK_TOOL_MIN_OPTIONS = 2
-_ASK_TOOL_MAX_OPTIONS = 4
+_ASK_TOOL_MAX_OPTIONS_DEFAULT = 4
 
 _OTHER_FALLBACK_LABEL = "其他"
 
@@ -91,7 +92,13 @@ def _normalize_user_answer_option_ids(answers: list[Any]) -> list[Any]:
     return out
 
 
-def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = False) -> list[dict[str, Any]]:
+def _coerce_raw_options(
+    opts: Any,
+    question_index: int,
+    *,
+    has_preview: bool = False,
+    max_options: int | None = None,
+) -> list[dict[str, Any]]:
     """Ensure 2–4 labeled options; trim excess, pad singles, tolerate str entries."""
     if has_preview:
         return [
@@ -101,6 +108,7 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
     if not isinstance(opts, list) or not opts:
         raise ValueError(f"questions[{question_index}].options 必须为非空数组")
     normalized: list[dict[str, Any]] = []
+    has_other = False
     for j, opt in enumerate(opts):
         if isinstance(opt, str):
             entry = {"label": opt.strip()}
@@ -111,18 +119,45 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
         label = str(entry.get("label", "") or "").strip()
         if not label:
             raise ValueError(f"questions[{question_index}].options[{j}].label 不能为空")
+        # free_input=True 时强制将 label 替换为「其他」；下方 elif 分支则处理显式 label 为「其他」的情况。
+        # 两者共享 has_other 唯一性约束，确保最终选项中至多出现一个「其他」类型选项。
+        if entry.pop("free_input", None):
+            if has_other:
+                raise ValueError(f"questions[{question_index}].options 中「其他」选项不能超过1个")
+            entry["label"] = _OTHER_FALLBACK_LABEL
+            has_other = True
+            if not entry.get("description"):
+                entry["description"] = "请在下一句补充说明你的选择"
+        elif label == _OTHER_FALLBACK_LABEL:
+            if has_other:
+                raise ValueError(f"questions[{question_index}].options 中「其他」选项不能超过1个")
+            has_other = True
         normalized.append(entry)
 
-    if len(normalized) > _ASK_TOOL_MAX_OPTIONS:
+    if max_options is not None:
+        try:
+            max_options = int(max_options)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_options 必须为整数，收到 {type(max_options).__name__}: {max_options}"
+            ) from exc
+        if max_options < _ASK_TOOL_MIN_OPTIONS:
+            raise ValueError(
+                f"max_options 必须 >= {_ASK_TOOL_MIN_OPTIONS}，收到 {max_options}"
+            )
+
+    effective_max = max_options if max_options is not None else _ASK_TOOL_MAX_OPTIONS_DEFAULT
+    if len(normalized) > effective_max:
         logger.info(
-            "[ask_user_question] questions[%s].options 共 %s 项，裁剪为 %s 项",
+            "[ask_user_question] questions[%s].options 共 %s 项，max_options=%s，裁剪为 %s 项",
             question_index,
             len(normalized),
-            _ASK_TOOL_MAX_OPTIONS,
+            max_options,
+            effective_max,
         )
-        normalized = normalized[: _ASK_TOOL_MAX_OPTIONS]
+        normalized = normalized[: effective_max]
 
-    if len(normalized) == 1:
+    if len(normalized) == 1 and not has_other:
         logger.info(
             "[ask_user_question] questions[%s].options 仅 1 项，补充「%s」选项以便交互选择",
             question_index,
@@ -132,13 +167,13 @@ def _coerce_raw_options(opts: Any, question_index: int, *, has_preview: bool = F
             {"label": _OTHER_FALLBACK_LABEL, "description": "请在下一句补充说明你的选择"},
         )
 
-    if len(normalized) < _ASK_TOOL_MIN_OPTIONS:
+    if len(normalized) < _ASK_TOOL_MIN_OPTIONS and not has_other:
         raise ValueError(f"questions[{question_index}].options 至少需要 {_ASK_TOOL_MIN_OPTIONS} 个有效选项")
 
     return normalized
 
 
-def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
+def _normalize_questions(raw: Any, max_options: int | None = None) -> list[dict[str, Any]]:
     if isinstance(raw, str):
         raw_st = raw.strip()
         if not raw_st:
@@ -170,7 +205,7 @@ def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
 
         has_preview = preview_norm is not None
         raw_opts = item.get("options", item.get("Options", []))
-        coerced = _coerce_raw_options(raw_opts, i, has_preview=has_preview)
+        coerced = _coerce_raw_options(raw_opts, i, has_preview=has_preview, max_options=max_options)
         norm_opts: list[dict[str, str]] = []
         for opt in coerced:
             label = str(opt.get("label", "") or "").strip()
@@ -242,13 +277,14 @@ def _first_outline_preview(questions: list[dict[str, Any]]) -> dict[str, Any] | 
     return None
 
 
-async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
+async def _ask_user_question_impl(questions: Any, max_options: int | None = None) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
+    scope = get_ask_runtime_scope()
     reg = AskUserQuestionRegistry.get_instance()
     if stream_rid and not interactive:
-        interactive = reg.stream_interactive_ask_enabled(stream_rid)
+        interactive = reg.stream_interactive_ask_enabled(scope, stream_rid)
     try:
-        normalized = _normalize_questions(questions)
+        normalized = _normalize_questions(questions, max_options=max_options)
     except Exception as exc:
         return {"status": "error", "message": f"参数错误: {exc}", "answers": []}
 
@@ -291,10 +327,11 @@ async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
 
     registry = AskUserQuestionRegistry.get_instance()
     try:
-        answers = await registry.wait_for_answer(ask_id)
+        answer_result = await registry.wait_for_answer(ask_id)
     except asyncio.CancelledError:
         return {"status": "cancelled", "message": "会话已取消。", "answers": []}
 
+    answers = answer_result if isinstance(answer_result, list) else []
     normalized_answers = _normalize_user_answer_option_ids(answers)
     return {
         "status": "answered",
@@ -308,7 +345,8 @@ _ASK_TOOL_CARD = ToolCard(
     description=(
         "向用户展示一组带选项的结构化问题（可多题），推送选择 UI 并阻塞等待用户作答。"
         "questions 为 JSON 数组，每项含 question、"
-        "options[{label, description?, id?}]、可选 header、multi_select；"
+        "options[{label, description?, id?, free_input?}]、可选 header、multi_select；free_input=true 的选项 label 自动设为「其他」；"
+        "可选 max_options 指定每题选项数量上限（默认4），当用户明确要求N个选项时应设为N，未指定时使用默认值；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
         "用于 PPT 大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）；"
         "仅带 preview 的大纲确认受引导模式约束，未开启引导时返回 skipped 不弹窗。"
@@ -321,7 +359,12 @@ _ASK_TOOL_CARD = ToolCard(
                 # OpenAI 等校验器要求 array 必须带 items；对 string 实例 items 不适用。
                 "items": {"type": "object"},
                 "description": "问题列表：JSON 数组，或 JSON 数组的字符串形式",
-            }
+            },
+            "max_options": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "每题选项数量上限，默认4。当用户明确要求N个选项时设为N；未指定时使用默认值。",
+            },
         },
         "required": ["questions"],
     },

@@ -18,6 +18,8 @@ from openjiuwen.core.foundation.tool import tool
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_config_file
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_video_model_config_from_yaml
+from jiuwenclaw.local_env_config import get_local_config
+from jiuwenclaw.http_proxy_config import requests_post
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 
@@ -69,12 +71,7 @@ class VideoUnderstandingRequest:
 
 def _http_post(url: str, **kwargs) -> requests.Response:
     kwargs.setdefault("verify", get_requests_verify())
-    try:
-        return requests.post(url, **kwargs)
-    except requests.exceptions.ProxyError:
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.post(url, **kwargs)
+    return requests_post(url, **kwargs)
 
 
 def _guess_video_mime(path: str) -> str:
@@ -129,7 +126,7 @@ def _extract_answer(data: dict[str, Any]) -> str:
 def _normalize_request(inputs: dict[str, Any]) -> VideoUnderstandingRequest:
     query = str(inputs.get("query", "") or "").strip()
     video_path = str(inputs.get("video_path", "") or "").strip()
-    default_model = (os.environ.get("VIDEO_MODEL_NAME") or "glm-4.6v").strip() or "glm-4.6v"
+    default_model = (get_local_config("VIDEO_MODEL_NAME") or "glm-4.6v").strip() or "glm-4.6v"
     model = str(inputs.get("model", default_model) or default_model).strip()
     timeout_seconds = max(10, min(int(inputs.get("timeout_seconds", 120)), 600))
     max_tokens = max(128, min(int(inputs.get("max_tokens", 2048)), 8192))
@@ -156,8 +153,8 @@ def _resolve_chat_completions_url(base: str) -> str:
 
 
 def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
-    yaml_key = os.environ.get("VIDEO_API_KEY", "").strip()
-    yaml_base = os.environ.get("VIDEO_API_BASE", "").strip()
+    yaml_key = str(get_local_config("VIDEO_API_KEY", "") or "").strip()
+    yaml_base = str(get_local_config("VIDEO_API_BASE", "") or "").strip()
     
     if yaml_key and yaml_base:
         api_key = yaml_key
@@ -165,13 +162,19 @@ def _glm_video_understanding_sync(req: VideoUnderstandingRequest) -> str:
     elif yaml_key and not yaml_base:
         raise ValueError("VIDEO_API_BASE is required when VIDEO_API_KEY is set.")
     else:
-        api_key = os.environ.get("ZHIPU_API_KEY", "").strip()
+        api_key = str(get_local_config("ZHIPU_API_KEY", "") or "").strip()
         if not api_key:
             raise ValueError(
                 f"No video API credentials. Config file: {get_config_file()}\n"
                 "Set models.video.model_config with api_key and api_base, or set ZHIPU_API_KEY."
             )
-        api_url = os.environ.get("ZHIPU_API_URL", "https://open.bigmodel.cn/api/paas/v4/chat/completions").strip()
+        api_url = str(
+            get_local_config(
+                "ZHIPU_API_URL",
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            )
+            or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        ).strip()
     
     video_url = _video_path_to_url(req.video_path)
     
@@ -226,7 +229,7 @@ async def video_understanding(inputs: dict[str, Any], **kwargs) -> str:
         logger.info(
             "[video_understanding] using model: %s (api_base: %s)",
             req.model, 
-            os.environ.get("VIDEO_API_BASE", "")
+            str(get_local_config("VIDEO_API_BASE", "") or ""),
         )
         return await asyncio.to_thread(_glm_video_understanding_sync, req)
     except Exception as exc:

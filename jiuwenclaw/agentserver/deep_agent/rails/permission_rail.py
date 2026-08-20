@@ -57,6 +57,74 @@ TOOL_NAME_ALIASES = {
 INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY = "jiuwenclaw_pending_permission_contexts"
 _SHELL_PERMISSION_TOOLS = SHELL_PERMISSION_TOOLS
 
+# ── 权限 ASK 待答索引（session_id → 待答 tool_call_id 集合）──
+# 团队模式 leader/成员的 ASK（如 send_file_to_user 命中 defaults.guard）会把审批卡
+# 发给用户、run 随即结束，等待期间流零 chunk 且成员快照不 busy；sidecar 团队流的
+# idle-break 靠本索引识别"在等用户决策"，避免误拆（2026-08-13 团队流被 240s
+# idle-break 误拆、用户随后作答撞 not_active 事故）。与会话 state 里的 pending
+# context 同生命周期：_store 登记、_pop 移除、clear_session_interrupt_state 全清。
+_PENDING_PERMISSION_BY_SESSION: dict[str, set[str]] = {}
+
+
+def _session_id_of(session: Any) -> str:
+    for attr_name in ("get_session_id", "session_id"):
+        value = getattr(session, attr_name, None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception as exc:
+                logger.debug("session.%s() raised, skip: %s", attr_name, exc)
+                value = None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _track_pending_permission(session: Any, tool_call_id: str) -> None:
+    sid = _session_id_of(session)
+    if not sid or not tool_call_id:
+        return
+    _PENDING_PERMISSION_BY_SESSION.setdefault(sid, set()).add(tool_call_id)
+
+
+def _untrack_pending_permission(session: Any, tool_call_id: str) -> None:
+    sid = _session_id_of(session)
+    if not sid:
+        return
+    pending = _PENDING_PERMISSION_BY_SESSION.get(sid)
+    if not pending:
+        return
+    pending.discard(tool_call_id)
+    if not pending:
+        _PENDING_PERMISSION_BY_SESSION.pop(sid, None)
+
+
+def has_pending_permission_for_session(session_id: str) -> bool:
+    """True while any permission ASK card for this session awaits the user."""
+    sid = str(session_id or "").strip()
+    return bool(sid) and bool(_PENDING_PERMISSION_BY_SESSION.get(sid))
+
+# ── skill_turbo 外层统一审批：通用兜底描述 + 工具清单 ──
+# skill_turbo 审批通过后，内部所有工具调用直接放行（不再逐个审批）。
+# 当前采用通用兜底描述 + PPT 工具清单（PPT 场景工具最全，覆盖其他 skill 也通用）。
+# 后续若多 skill 并存且需 skill-specific 内容，可升级为注册表 + 预匹配机制。
+SKILL_TURBO_APPROVAL_DESCRIPTION = (
+    "即将调用 skill加速 执行技能任务，需要一次性授权下列工具。"
+    "确认后执行过程中不再逐个询问。"
+)
+
+SKILL_TURBO_APPROVAL_TOOLS: list[tuple[str, str]] = [
+    ("bash", "执行 shell 命令（依赖安装、PPT 导出等）"),
+    ("read_file", "读取文件内容"),
+    ("write_file", "写入文件"),
+    ("list_dir", "列出目录"),
+    ("glob", "搜索文件"),
+    ("image_ocr", "图片文字识别"),
+    ("visual_question_answering", "图片视觉理解"),
+    ("text_to_image", "生成图片"),
+    ("send_file_to_user", "发送最终产物"),
+]
+
 
 def clear_session_interrupt_state(session: Any) -> None:
     """Clear persisted interrupt-related state for one session.
@@ -66,6 +134,9 @@ def clear_session_interrupt_state(session: Any) -> None:
     """
     if session is None:
         return
+    sid = _session_id_of(session)
+    if sid:
+        _PENDING_PERMISSION_BY_SESSION.pop(sid, None)
     try:
         session.update_state({
             INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY: {},
@@ -226,10 +297,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return False
         if persist_requested:
             logger.info(
-                "[PermissionEngine] permission.auto_confirm.skip key=%s reason=persist_failed",
+                "[PermissionEngine] permission.auto_confirm.fallback"
+                " key=%s reason=persist_failed_storing_session_fallback",
                 auto_confirm_key,
             )
-            return False
         return True
 
     @staticmethod
@@ -264,6 +335,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         pending = dict(cls._get_pending_permission_contexts(session))
         pending[tool_call_id] = context
         session.update_state({INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY: pending})
+        _track_pending_permission(session, tool_call_id)
 
     @classmethod
     def _pop_pending_permission_context(
@@ -279,6 +351,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         pending = dict(cls._get_pending_permission_contexts(session))
         payload = pending.pop(tool_call_id, None)
         session.update_state({INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY: pending})
+        _untrack_pending_permission(session, tool_call_id)
         if not isinstance(payload, dict):
             return None
         if payload.get("tool_name") != tool_name:
@@ -878,8 +951,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                 should_persist = confirm_payload.persist_allow
                 persisted = False
+                allow_rule_persisted = False
                 if should_persist:
-                    persisted = persist_permission_allow_rule(
+                    allow_rule_persisted = persist_permission_allow_rule(
                         normalized_name,
                         tool_args,
                         permission_context=self._build_pending_permission_context(
@@ -888,6 +962,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                             result,
                         ),
                     )
+                    persisted = allow_rule_persisted
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s channel=acp persisted=%s",
                         tool_name,
@@ -896,14 +971,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     if result.file_operations:
                         try:
                             persist_file_operations_allow(list(result.file_operations))
-                            persisted = True
                             logger.info(
                                 "[PermissionEngine] permission.persist.file_operations tool=%s channel=acp count=%s",
                                 tool_name,
                                 len(result.file_operations),
                             )
                         except Exception:
-                            persisted = False
                             logger.exception(
                                 "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                                 tool_name,
@@ -912,7 +985,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     auto_confirm=confirm_payload.auto_confirm,
                     session=ctx.session,
                     auto_confirm_key=auto_confirm_key,
-                    persisted=persisted,
+                    persisted=allow_rule_persisted if should_persist else persisted,
                     persist_requested=confirm_payload.persist_allow,
                 ):
                     self._store_auto_confirm(ctx, auto_confirm_key)
@@ -975,6 +1048,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
         persisted = False
+        allow_rule_persisted = False
         pending_context = self._pop_pending_permission_context(
             ctx,
             tool_call_id,
@@ -982,11 +1056,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             tool_args,
         )
         if payload.persist_allow:
-            persisted = persist_permission_allow_rule(
+            allow_rule_persisted = persist_permission_allow_rule(
                 normalized_name,
                 tool_args,
                 permission_context=pending_context,
             )
+            persisted = allow_rule_persisted
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s channel=%s persisted=%s",
                 tool_name,
@@ -997,7 +1072,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if file_ops:
                 try:
                     persist_file_operations_allow(file_ops)
-                    persisted = True
                     logger.info(
                         "[PermissionEngine] permission.persist.file_operations tool=%s channel=%s count=%s",
                         tool_name,
@@ -1005,7 +1079,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         len(file_ops),
                     )
                 except Exception:
-                    persisted = False
                     logger.exception(
                         "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                         tool_name,
@@ -1015,7 +1088,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             auto_confirm=payload.auto_confirm,
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
-            persisted=persisted,
+            persisted=allow_rule_persisted if payload.persist_allow else persisted,
             persist_requested=payload.persist_allow,
         ):
             self._store_auto_confirm(ctx, auto_confirm_key)
@@ -1399,6 +1472,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         result: PermissionResult,
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
+        if tool_name == "skill_acceleration_exec":
+            return self._build_skill_turbo_message(tool_call, result)
         tool_args = self._parse_tool_args(tool_call)
         preview = self._build_persist_preview(tool_name, tool_args, result)
         risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
@@ -1441,6 +1516,31 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         # parts.append(self._build_always_allow_hint(tool_name, preview))
 
         return "".join(parts)
+
+    def _build_skill_turbo_message(
+        self,
+        tool_call: Optional[ToolCall],
+        result: PermissionResult,
+    ) -> str:
+        """skill_turbo 外层统一审批消息：通用兜底描述 + 工具清单。
+
+        skill_turbo 审批通过后内部所有工具直接放行，因此审批消息需提前展示
+        可能用到的工具，让用户一次性授权。
+        """
+        tool_name = tool_call.name if tool_call else ""
+        tool_args = self._parse_tool_args(tool_call)
+        preview = self._build_persist_preview(tool_name, tool_args, result)
+        risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
+
+        tool_lines = "\n".join(
+            f"- `{name}` — {desc}" for name, desc in SKILL_TURBO_APPROVAL_TOOLS
+        )
+        return (
+            f"**即将调用 `skill加速`，需要授权后整体放行：**\n\n"
+            f"{SKILL_TURBO_APPROVAL_DESCRIPTION}\n\n"
+            f"**可能用到的工具：**\n\n{tool_lines}\n\n"
+            f"**风险等级：{risk.get('level', '')}风险**\n\n"
+        )
 
     @staticmethod
     def _render_file_operations_section(file_ops: list[FileOperation]) -> str:
@@ -1522,4 +1622,5 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 __all__ = [
     "PermissionInterruptRail",
     "clear_session_interrupt_state",
+    "has_pending_permission_for_session",
 ]

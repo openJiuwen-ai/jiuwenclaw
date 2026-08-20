@@ -258,6 +258,18 @@ class DingTalkChannel(BaseChannel):
         """返回通道的唯一标识"""
         return self.name
 
+    def _im_tenant_ids(
+        self, conversation_id: str = "", sender_id: str = ""
+    ) -> tuple[str, str]:
+        """Resolve SessionMap-aligned tenant ids for DingTalk inbound traffic."""
+        from jiuwenclaw.channel.tenant_paths import tenant_ids_from_im_identity
+
+        return tenant_ids_from_im_identity(
+            str(conversation_id or "").strip(),
+            str(self.config.client_id or ""),
+            str(sender_id or "").strip(),
+        )
+
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """注册钉钉通道的回调函数"""
         self._gateway_callback = callback
@@ -354,15 +366,17 @@ class DingTalkChannel(BaseChannel):
             self._running = True
             self._http = httpx.AsyncClient()
 
-            # 初始化文件服务
-            workspace_dir = self.config.workspace_dir or os.path.expanduser("~/.jiuwenclaw/agent/workspace")
+            # 初始化文件服务（workspace 按消息租户懒解析；config.workspace_dir 可覆盖）
+            workspace_dir = (
+                str(self.config.workspace_dir).strip() if self.config.workspace_dir else None
+            )
             self._file_service = DingTalkFileService(
                 client_id=self.config.client_id,
                 get_token_func=self._get_access_token,
                 http_client=self._http,
                 max_download_size=self.config.max_download_size,
                 download_timeout=self.config.download_timeout,
-                workspace_dir=workspace_dir,
+                workspace_dir=workspace_dir or None,
             )
 
             self._initialize_stream_client()
@@ -613,7 +627,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[图片: 缺少下载码]", None
 
-        file_info = await self._file_service.download_image(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_image(download_code, message_id)
         if not file_info:
             return "[图片: 下载失败]", None
 
@@ -643,7 +659,11 @@ class DingTalkChannel(BaseChannel):
         if file_size > 0 and file_size > self.config.max_download_size:
             return f"[文件过大: {file_name}]", None
 
-        file_info = await self._file_service.download_file(download_code, message_id, file_name)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_file(
+                download_code, message_id, file_name
+            )
         if not file_info:
             return f"[文件: {file_name} 下载失败]", None
 
@@ -672,7 +692,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[音频: 缺少下载码]", None
 
-        file_info = await self._file_service.download_audio(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_audio(download_code, message_id)
         if not file_info:
             return "[音频: 下载失败]", None
 
@@ -697,7 +719,9 @@ class DingTalkChannel(BaseChannel):
         if not download_code:
             return "[视频: 缺少下载码]", None
 
-        file_info = await self._file_service.download_video(download_code, message_id)
+        _svc, _aid = self._im_tenant_ids(conversation_id, sender_id)
+        with self._file_service.tenant_scope(_svc, _aid):
+            file_info = await self._file_service.download_video(download_code, message_id)
         if not file_info:
             return "[视频: 下载失败]", None
 
@@ -1089,7 +1113,13 @@ class DingTalkChannel(BaseChannel):
         if not self._file_service or not self.config.send_file_allowed:
             return
 
-        workspace_dir = self.config.workspace_dir or os.path.expanduser("~/.jiuwenclaw/agent/workspace")
+        from jiuwenclaw.channel.tenant_paths import (
+            resolve_channel_agent_workspace,
+            tenant_ids_from_message,
+        )
+
+        sid, aid = tenant_ids_from_message(msg)
+        workspace_dir = str(resolve_channel_agent_workspace(sid, aid))
         if not os.path.isdir(workspace_dir):
             return
 

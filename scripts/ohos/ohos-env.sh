@@ -39,6 +39,28 @@ _ohos_prepend_ld() {
   esac
 }
 
+_ohos_force_prepend_ld() {
+  _dir=$1
+  [ -n "$_dir" ] && [ -d "$_dir" ] || return 0
+  _cur=${LD_LIBRARY_PATH:-}
+  _out=
+  _old_ifs=$IFS
+  IFS=:
+  # shellcheck disable=SC2086
+  set -- $_cur
+  IFS=$_old_ifs
+  for _p in "$@"; do
+    [ -n "$_p" ] || continue
+    [ "$_p" = "$_dir" ] && continue
+    case ":${_out}:" in
+      *":$_p:"*) ;;
+      *) _out="${_out:+${_out}:}${_p}" ;;
+    esac
+  done
+  LD_LIBRARY_PATH="$_dir${_out:+:${_out}}"
+  export LD_LIBRARY_PATH
+}
+
 _ohos_resolve_scripts_dir() {
   if [ -n "${OHOS_ENV_SCRIPTS_DIR:-}" ] && [ -d "$OHOS_ENV_SCRIPTS_DIR" ]; then
     CDPATH= cd -- "$OHOS_ENV_SCRIPTS_DIR" && pwd
@@ -205,6 +227,7 @@ _ohos_export_ld_runtime() {
   elif [ -n "$_tail" ]; then
     LD_LIBRARY_PATH="${_tail}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   fi
+  _ohos_force_prepend_ld "${_py_libdir:-${_libdir:-}}"
 }
 
 # HNP cmd-pkgs 包目录（libxml2/libxslt 等），供 install-ohos-all-deps 探测

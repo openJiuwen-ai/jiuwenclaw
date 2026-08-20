@@ -41,6 +41,9 @@ E2A_LEGACY_AGENT_REQUEST_KEY = "legacy_agent_request"
 MAX_LEGACY_AGENT_REQUEST_JSON_BYTES = 512_000
 DEFAULT_STREAM_SOURCE_ID = "main"
 STREAM_SOURCE_ID_FIELD = "stream_source_id"
+# Survives chat.delta's specialized wire body (content-only delta) so relay can
+# attribute teammate tokens via payload.member_name / role.
+_TEAM_WIRE_ATTR_KEYS = ("member_name", "role", "rid")
 
 
 def _resolve_stream_source_id(payload: dict[str, Any] | None) -> str:
@@ -418,6 +421,9 @@ def e2a_response_from_agent_chunk(
         )
 
     event_type = pl.get("event_type")
+    # Team attribution must survive the chat.delta specialized wire shape.
+    # Relay routes teammate frames via payload.member_name (+ role); dropping
+    # them here makes all teammate tokens fall back to the leader bubble.
     if event_type == "chat.delta":
         sct = pl.get("source_chunk_type")
         delta_kind = "reasoning" if sct == "llm_reasoning" else "text"
@@ -428,6 +434,9 @@ def e2a_response_from_agent_chunk(
             "source_chunk_type": sct,
             STREAM_SOURCE_ID_FIELD: stream_source_id,
         }
+        for key in _TEAM_WIRE_ATTR_KEYS:
+            if key in pl and pl[key] is not None and pl[key] != "":
+                body_chunk[key] = pl[key]
     else:
         body_chunk = {
             "delta_kind": "custom",
@@ -435,6 +444,11 @@ def e2a_response_from_agent_chunk(
             "event_type": event_type,
             STREAM_SOURCE_ID_FIELD: stream_source_id,
         }
+        # Mirror attribution on the E2A body (not only inside delta) so relay
+        # / USAGE_DEBUG can see member_name on chat.reasoning & chat.tool_*.
+        for key in _TEAM_WIRE_ATTR_KEYS:
+            if key in pl and pl[key] is not None and pl[key] != "":
+                body_chunk[key] = pl[key]
 
     return E2AResponse(
         protocol_version=E2A_PROTOCOL_VERSION,
@@ -573,6 +587,10 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 pl["source_chunk_type"] = sct
             if stream_source_id is not None:
                 pl[STREAM_SOURCE_ID_FIELD] = stream_source_id
+            for key in _TEAM_WIRE_ATTR_KEYS:
+                val = body.get(key)
+                if val is not None and val != "":
+                    pl[key] = val
             return AgentResponseChunk(
                 request_id=rid,
                 channel_id=ch,
@@ -592,6 +610,11 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             pl2["event_type"] = et
         if stream_source_id is not None and STREAM_SOURCE_ID_FIELD not in pl2:
             pl2[STREAM_SOURCE_ID_FIELD] = stream_source_id
+        for key in _TEAM_WIRE_ATTR_KEYS:
+            if key not in pl2 or pl2[key] is None or pl2[key] == "":
+                val = body.get(key)
+                if val is not None and val != "":
+                    pl2[key] = val
         return AgentResponseChunk(
             request_id=rid,
             channel_id=ch,
@@ -606,6 +629,8 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             "status": body.get("status"),
             "data": body.get("data"),
             "message": body.get("message"),
+            "service_id": body.get("service_id"),
+            "agent_id": body.get("agent_id"),
         }
         return AgentResponseChunk(
             request_id=rid,

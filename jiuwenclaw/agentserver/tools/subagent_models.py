@@ -50,6 +50,23 @@ class SubagentConfig(BaseModel):
     default_role: str = "MainAgent"
 
 
+class SpawnSubagentParams(BaseModel):
+    """LLM-facing arguments for the ``spawn_subagent`` tool (G.FNM.03).
+
+    Kept separate from :class:`SubagentTaskSpec` so tool schema stays flat and
+    does not expose internal fields (``task_id`` / ``timeout``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str
+    role_id: str = "MainAgent"
+    prompt: str = ""
+    model_name: str = ""
+    model_tier: str = ""
+    thinking: str = ""  # "" | default | off | on — semantic only; framework maps to vendor
+
+
 class SubagentTaskSpec(BaseModel):
     """Specification for a single subagent task.
 
@@ -66,6 +83,7 @@ class SubagentTaskSpec(BaseModel):
     prompt: str = ""
     model_name: str = ""
     model_tier: str = ""
+    thinking: str = ""  # "" | default | off | on — semantic only; framework maps to vendor
     timeout: float | None = None  # 执行超时（秒），None 使用默认值 _DEFAULT_TIMEOUT_SECONDS
 
 
@@ -104,6 +122,7 @@ class ForkAgentTaskSpec(BaseModel):
     prompt: str = ""
     model_name: str = ""
     model_tier: str = ""
+    thinking: str = ""  # "" | default | off | on — semantic only; framework maps to vendor
     role_id: str = "ForkedWorker"  # 内部使用，不再从工具入参传入
     timeout: float | None = None  # 执行超时（秒），None 使用默认值 _DEFAULT_TIMEOUT_SECONDS
 

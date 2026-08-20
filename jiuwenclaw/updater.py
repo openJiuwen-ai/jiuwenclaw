@@ -15,6 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from jiuwenclaw.config import get_config_raw
+from jiuwenclaw.local_env_config import read_env
 from jiuwenclaw.utils import get_user_workspace_dir
 from jiuwenclaw.version import __version__
 
@@ -304,7 +305,7 @@ class WindowsUpdaterService:
             "Accept": "application/vnd.github+json",
             "User-Agent": f"JiuwenClaw-Updater/{__version__}",
         }
-        token = os.getenv("GITHUB_TOKEN", "").strip()
+        token = read_env("GITHUB_TOKEN", "").strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers

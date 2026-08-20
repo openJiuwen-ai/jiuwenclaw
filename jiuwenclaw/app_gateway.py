@@ -46,17 +46,25 @@ from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
-from jiuwenclaw.local_env_config import decrypt
+from jiuwenclaw.local_env_config import get_local_config, mirror_bare_business_env_to_default_ns
 
 # 确保工作区已初始化（使用跨进程锁保护并发访问）
 ensure_workspace_initialized(component_name="Gateway")
+
+# SessionMap 路径布局迁移：agent_default/.checkpoint → {JIUWENCLAW_DATA_DIR}/.gateway/
+from jiuwenclaw.gateway.session_map import migrate_legacy_session_map_if_needed
+
+migrate_legacy_session_map_if_needed()
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
 configure_openjiuwen_logging_under_jiuwenclaw()
 for _lg in LogManager.get_all_loggers().values():
     _lg.set_level(logging.INFO)
 
+# Load env from user workspace config/.env, then mirror business bare keys into
+# default__default__* so get_local_config / get_default_models see cold-start tip.
 load_dotenv(dotenv_path=get_env_file())
+mirror_bare_business_env_to_default_ns()
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +834,7 @@ async def _run(
     web_port: int,
     web_path: str,
 ) -> None:
+    from openjiuwen.core.runner import Runner
     from jiuwenclaw.channel.dingding import DingTalkChannel, DingTalkConfig
     from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
     from jiuwenclaw.channel.whatsapp_channel import WhatsAppChannel, WhatsAppChannelConfig
@@ -839,7 +848,7 @@ async def _run(
     from jiuwenclaw.config import get_config
     from jiuwenclaw.gateway.agent_client import WebSocketAgentServerClient
     from jiuwenclaw.gateway.channel_manager import ChannelManager
-    from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
+    from jiuwenclaw.gateway.cron import CronTenantRegistry
     from jiuwenclaw.gateway.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenclaw.gateway.message_handler import MessageHandler
     from jiuwenclaw.app_web_handlers import (
@@ -862,7 +871,6 @@ async def _run(
     from jiuwenclaw.schema.hooks_context import WebChannelCreatedHookContext
     from jiuwenclaw.updater import WindowsUpdaterService
     from jiuwenclaw.telemetry import init_telemetry
-    from openjiuwen.core.runner import Runner
 
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
 
@@ -878,6 +886,10 @@ async def _run(
 
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
+
+    from jiuwenclaw.perf.config import init_perf_summary_config
+
+    init_perf_summary_config()
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
@@ -906,14 +918,11 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
+    cron_registry = CronTenantRegistry.get_instance(
         agent_client=client,
         message_handler=message_handler,
     )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
+    message_handler.set_cron_registry(cron_registry)
 
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
@@ -930,10 +939,11 @@ async def _run(
         channels_cfg = None
         sync_config_cfg = None
 
-    # 配置解密后存储在内存中
+    # 配置从 tip 读取（明文），再推给 agentserver
     env_dict = {}
     for env_key in _CONFIG_SET_ENV_MAP.values():
-        env_dict[env_key] = decrypt(env_key, os.getenv(env_key))
+        tip_val = get_local_config(env_key)
+        env_dict[env_key] = tip_val if tip_val is not None else ""
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
         env=env_dict
@@ -987,6 +997,7 @@ async def _run(
         *,
         env_updates: dict[str, str] | None = None,
         config_payload: dict[str, Any] | None = None,
+        config_set_req_id: str | None = None,
     ) -> bool:
         browser_runtime_keys = {
             "MODEL_PROVIDER",
@@ -1010,7 +1021,24 @@ async def _run(
             "IMAGE_GEN_API_BASE",
             "IMAGE_GEN_API_KEY",
         }
+        reload_trace_id = f"agent-reload-{uuid_module.uuid4().hex[:8]}"
+        from jiuwenclaw.agentserver.reload_result import (
+            log_agent_config_hot_reload,
+            log_reload_config_changes,
+            redact_reload_error_message,
+            summarize_reload_payload,
+        )
         try:
+            log_reload_config_changes(
+                logger,
+                env=env_updates,
+                config=config_payload,
+                reload_trace_id=reload_trace_id,
+                source="AppGateway",
+                updated_param_keys=updated_env_keys,
+                config_set_req_id=config_set_req_id,
+            )
+
             client.set_or_update_server_config(
                 config=dict(config_payload or {}),
                 env=dict(env_updates or {}),
@@ -1022,7 +1050,7 @@ async def _run(
             # 发送给 AgentServer 前解密扩展敏感配置
             decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
             reload_env = e2a_from_agent_fields(
-                request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
+                request_id=reload_trace_id,
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
                 params={
@@ -1042,6 +1070,15 @@ async def _run(
                 )
                 raise RuntimeError(f"agent.reload_config rejected: {err_msg}")
 
+            payload = getattr(reload_resp, "payload", None) or {}
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="completed",
+                source="AppGateway",
+                **summarize_reload_payload(payload),
+            )
+
             if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
                 restart_env = e2a_from_agent_fields(
                     request_id=f"browser-restart-{uuid_module.uuid4().hex[:8]}",
@@ -1050,18 +1087,26 @@ async def _run(
                 )
                 await client.send_request(restart_env)
             return True
-        except Exception as e:  # noqa: BLE001
-            logger.error("[App] hot config reload failed: %s", e)
+        except Exception as e:
+            log_agent_config_hot_reload(
+                logger,
+                reload_trace_id=reload_trace_id,
+                phase="failed",
+                source="AppGateway",
+                level=logging.ERROR,
+                error=redact_reload_error_message(str(e)),
+            )
             return False
     # 启动时将配置同步给agentserver（可通过配置关闭）
     sync_config_enabled_cfg = sync_config_cfg.get("enabled") if isinstance(sync_config_cfg, dict) else None
     sync_config_on_startup = _get_bool_config("SYNC_CONFIG_ON_STARTUP", sync_config_enabled_cfg, default=True)
 
     if sync_config_on_startup:
+        # env is incremental on reload; startup sync relies on config snapshot only.
         callback_result = _on_config_saved(
-            set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
-            env_updates=dict(env_dict),
-            config_payload=dict(full_cfg or {})
+            set(_CONFIG_YAML_KEYS),
+            env_updates={},
+            config_payload=dict(full_cfg or {}),
         )
         if inspect.isawaitable(callback_result):
             await callback_result
@@ -1088,7 +1133,7 @@ async def _run(
             channel_manager=channel_manager,
             on_config_saved=_on_config_saved,
             heartbeat_service=heartbeat_service if heartbeat_enabled else None,
-            cron_controller=cron_controller,
+            cron_registry=cron_registry,
             updater_service=updater_service,
         )
     )
@@ -1696,7 +1741,6 @@ async def _run(
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
-    await cron_scheduler.start()
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
     try:
@@ -1838,7 +1882,7 @@ async def _run(
                 pass
             await wechat_channel.stop()
 
-        await cron_scheduler.stop()
+        await cron_registry.stop_all()
         await channel_manager.stop_dispatch()
         if heartbeat_enabled:
             await heartbeat_service.stop()

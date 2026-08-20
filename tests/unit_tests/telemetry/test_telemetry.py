@@ -2058,7 +2058,12 @@ class TestProviderInitialization:
         assert bundle.tracer_provider is not None
         assert bundle.meter_provider is not None
         assert bundle.tracer_provider._active_span_processor._span_processors == ()
-        assert bundle.meter_provider._sdk_config.metric_readers == []
+        # OTel SDK 1.44+ 移除了 SdkConfiguration.metric_readers, 改存 MeterProvider._metric_readers
+        mp = bundle.meter_provider
+        metric_readers = getattr(mp, "_metric_readers", None)
+        if metric_readers is None:
+            metric_readers = mp._sdk_config.metric_readers
+        assert list(metric_readers) == []
 
     @staticmethod
     def test_build_default_providers_adds_claw_id_resource_attribute():

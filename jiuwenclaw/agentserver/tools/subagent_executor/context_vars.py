@@ -52,6 +52,14 @@ _current_fork_agent_executor: ContextVar[Optional["ForkAgentExecutor"]] = Contex
     "current_fork_agent_executor", default=None
 )
 
+# Per-request send_file routing context (session_id / request_id / channel_id / metadata).
+# send_file_to_user 工具按全局名注册成单例，并发请求间会互相覆盖实例字段。
+# 此 ContextVar 按 async 上下文隔离，工具执行时据此动态解析当前请求的路由信息，
+# 避免「最后一次注册的 session」串扰到其它并发请求（与 output_dir 同款隔离机制）。
+_send_file_request_context: ContextVar[Optional[dict]] = ContextVar(
+    "send_file_request_context", default=None
+)
+
 
 def set_subagent_parent_session(session: Optional["Session"]) -> None:
     """Set the parent session context for subagent execution."""
@@ -123,6 +131,40 @@ def set_effective_request_output_dir(output_dir: Optional[str]) -> None:
 def get_effective_request_output_dir() -> Optional[str]:
     """Output dir for the current request, or None if not set."""
     return _effective_request_output_dir.get()
+
+
+def set_send_file_request_context(
+    *,
+    request_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> Token:
+    """Bind send_file routing context for the current async request.
+
+    返回 Token 供调用方在请求结束时 ``reset_send_file_request_context`` 恢复。
+    仅记录非空字段，避免覆盖为 None；调用方应在请求入口设置、finally 中重置。
+    """
+    ctx: dict = {}
+    if request_id is not None:
+        ctx["request_id"] = request_id
+    if session_id is not None:
+        ctx["session_id"] = session_id
+    if channel_id is not None:
+        ctx["channel_id"] = channel_id
+    if metadata is not None:
+        ctx["metadata"] = dict(metadata)
+    return _send_file_request_context.set(ctx)
+
+
+def get_send_file_request_context() -> Optional[dict]:
+    """Return send_file routing context for the current request, or None if unset."""
+    return _send_file_request_context.get()
+
+
+def reset_send_file_request_context(token: Token) -> None:
+    """Restore the previous send_file routing context binding."""
+    _send_file_request_context.reset(token)
 
 
 def set_current_fork_agent_executor(

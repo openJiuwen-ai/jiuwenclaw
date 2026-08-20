@@ -10,11 +10,13 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+import warnings
+from contextlib import aclosing, contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, ClassVar, Dict, List, Mapping
 
 from openjiuwen_deepsearch.config.config import Config
 from openjiuwen_deepsearch.config.method import ExecutionMethod
@@ -25,11 +27,27 @@ from openjiuwen_deepsearch.utils.log_utils.log_common import session_id_ctx
 from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
+from jiuwenclaw.agentserver.runtime_scope import RuntimeScopeKey
+from jiuwenclaw.agentserver.tools.deepresearch.tls import (
+    TASK_MANAGER_TLS_ENV,
+    iterate_with_scoped_tls_initialization,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
+from jiuwenclaw.local_env_config import (
+    bind_agent_env_ns,
+    bind_task_env_overlay,
+    build_effective_env_overlay,
+    get_task_env_overlay,
+    read_default_headers_raw,
+    get_local_config,
+    reset_agent_env_ns,
+    reset_task_env_overlay,
+)
 from jiuwenclaw.utils import get_logs_dir
-from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_workspace_dir
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+    get_effective_request_workspace_dir,
+    set_effective_request_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 SAVE_REPORT_PATH = "workspace/reports"
@@ -59,6 +77,10 @@ class DeepResearchTask:
     session_id: str = ""
     channel_id: str = ""
     request_id: str = ""
+    service_id: str = "default"
+    agent_id: str = "default"
+    env_snapshot: dict[str, str] = field(default_factory=dict)
+    workspace_dir: str = ""
     # 协作取消事件
     cancel_event: threading.Event | None = None
 
@@ -76,16 +98,26 @@ class DeepResearchTask:
         return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
-class DeepResearchTaskManager:
-    """DeepResearch 任务池管理器（全局单例）.
+@dataclass
+class DeepResearchTaskRequest:
+    """Create/run DeepResearch task parameters (G.FNM.03)."""
 
-    管理所有 DeepResearch 任务的创建、执行、状态查询、取消等功能。
+    query: str
+    file_name: str
+    session_id: str = ""
+    channel_id: str = ""
+    request_id: str = ""
+    service_id: str | None = None
+    agent_id: str | None = None
+
+
+class DeepResearchTaskManager:
+    """DeepResearch 任务池管理器（按租户 ``(service_id, agent_id)`` 分桶）.
+
+    管理本租户 DeepResearch 任务的创建、执行、状态查询、取消等功能。
     """
 
-    _instance: DeepResearchTaskManager | None = None
-    _lock = asyncio.Lock()
-
-    # 资源上限配置
+    # 资源上限配置（按租户实例计）
     MAX_ACTIVE_TASKS = 10  # 最大活跃任务数
     MAX_TOTAL_TASKS = 100  # 最大保留任务数（包括已完成）
     MAX_TASKS_PER_SESSION = 5  # 每个会话最大任务数
@@ -93,41 +125,170 @@ class DeepResearchTaskManager:
     MAX_INFER_MESSAGES = 20  # 最大推理图数量
     MAX_SINGLE_HTML_BASE64_BYTES = 5 * 1024 * 1024  # 单个推理图最大大小（5MB）
 
-    def __new__(cls):
-        """实现单例模式."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    # LogManager 会改类级全局状态；跨任务并发时需串行化整段 capture 生命周期
+    _log_capture_async_lock: ClassVar[asyncio.Lock | None] = None
 
-    def __init__(self):
-        """初始化任务池管理器."""
-        if hasattr(self, '_initialized'):
-            return
+    @classmethod
+    def _get_log_capture_lock(cls) -> asyncio.Lock:
+        if cls._log_capture_async_lock is None:
+            cls._log_capture_async_lock = asyncio.Lock()
+        return cls._log_capture_async_lock
 
+    # 节点显示名称与功能描述映射（用于进度推送）
+    # 格式: (中文名称, 功能描述)
+    NODE_DISPLAY_INFO: ClassVar[Dict[str, tuple[str, str]]] = {
+        # 主图节点
+        "start": ("系统就绪", "初始化研究任务上下文"),
+        "intent_recognition": ("意图识别", "分析研究主题与报告类型策略"),
+        "generate_questions": ("澄清问题", "生成澄清问题供用户确认研究方向"),
+        "feedback_handler": ("处理反馈", "根据用户反馈调整研究意图"),
+        "outline": ("生成大纲", "基于研究主题规划报告章节结构"),
+        "outline_interaction": ("大纲确认", "等待用户审阅或修订大纲"),
+        "editor_team": ("编排章节", "管理各章节的并行调研与撰写"),
+        "reporter": ("汇聚报告", "合成所有章节为完整研究报告"),
+        "vlm_chart_generator": ("图表生成", "在报告中插入数据分析图表"),
+        "source_tracer": ("溯源校验", "验证整份报告的引用来源准确性"),
+        "source_tracer_infer": ("推理图谱", "生成关键结论的可视化溯源推理图"),
+        "user_feedback_processor": ("局部改写", "根据反馈对特定章节进行定向修改"),
+        "end": ("流程完成", "研究报告生成完毕"),
+        # 章节子图节点
+        "plan_reasoning": ("规划调研", "为当前章节制定分步信息采集计划"),
+        "info_collector": ("信息采集", "执行多源检索、抓取并评估文档质量"),
+        "sub_reporter": ("撰写章节", "基于采集信息撰写当前章节内容"),
+        "sub_source_tracer": ("引用标注", "为章节内容添加引文来源标注"),
+        # 信息采集子图节点
+        "collector_query_generation": ("生成搜索词", "根据调研步骤生成检索关键词"),
+        "collector_info_retrieval": ("执行检索", "使用搜索引擎获取相关文档"),
+        "collector_supervisor": ("评估信息", "判断已采集信息是否充分并补充检索"),
+        "collector_summary": ("总结采集", "汇总采集结果并生成评估摘要"),
+        # 搜索模式节点
+        "search_info_collector": ("搜索采集", "执行快速搜索获取信息"),
+        "search_plan_reasoning": ("搜索规划", "为搜索任务规划检索步骤"),
+        # 框架层
+        "framework": ("框架层", "框架级事件或异常信号"),
+    }
+
+    # 仅发单次 summary_response 的终态节点：首次收到 chunk 时推 start + 立即推 done
+    # 这些节点不调用 custom_stream_output（不发 event=start/done），
+    # 只通过 write_custom_stream 发一次 event=summary_response。
+    # 从消费者角度，chunk 到达即表示节点已完成（尽管节点内部可能有 LLM 调用耗时）。
+    INSTANT_COMPLETE_NODES: ClassVar[set[str]] = {"collector_summary"}
+
+    def __init__(self, *, service_id: str = "default", agent_id: str = "default"):
+        """初始化本租户任务池管理器."""
+        self.service_id = (service_id or "default").strip() or "default"
+        self.agent_id = (agent_id or "default").strip() or "default"
         self._tasks: Dict[str, DeepResearchTask] = {}
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._task_semaphore = asyncio.Semaphore(DeepResearchTaskManager.MAX_ACTIVE_TASKS)
-        self._initialized = True
         self._gateway_push: GatewayPushTransport = WebSocketGatewayPushTransport()
-        logger.info("[DeepResearchTaskManager] 初始化完成（全局单例）")
+        logger.info(
+            "[DeepResearchTaskManager] 初始化完成 tenant=(%s, %s)",
+            self.service_id,
+            self.agent_id,
+        )
+
+    @staticmethod
+    def _capture_env_snapshot(service_id: str, agent_id: str) -> dict[str, str]:
+        """Snapshot effective tip (+ current task overlay) for background execution."""
+        extra = get_task_env_overlay()
+        merged = build_effective_env_overlay(
+            extra,
+            service_id=service_id,
+            agent_id=agent_id,
+        )
+        return {str(k): str(v) for k, v in merged.items()}
+
+    @staticmethod
+    def _bind_task_runtime(task: DeepResearchTask) -> dict[str, Any]:
+        """Bind tenant env + workspace for a background/blocking DR task."""
+        tokens: dict[str, Any] = {
+            "ns": bind_agent_env_ns(task.service_id, task.agent_id),
+            "overlay": bind_task_env_overlay(task.env_snapshot or {}),
+            "tenant": None,
+        }
+        workspace = (task.workspace_dir or "").strip()
+        if workspace:
+            set_effective_request_workspace_dir(workspace)
+            try:
+                from jiuwenclaw.agentserver.tenant_context import bind_tenant_workspace_dirs
+
+                ws_path = Path(workspace)
+                tokens["tenant"] = bind_tenant_workspace_dirs(
+                    jiuwenclaw_workspace=workspace,
+                    agent_root=str(ws_path.parent),
+                    tenant_root=str(ws_path.parent.parent),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[DeepResearchTaskManager] bind tenant workspace failed task_id=%s: %s",
+                    task.task_id,
+                    exc,
+                )
+        return tokens
+
+    @staticmethod
+    def _reset_task_runtime(tokens: dict[str, Any]) -> None:
+        tenant = tokens.get("tenant")
+        if tenant is not None:
+            try:
+                from jiuwenclaw.agentserver.tenant_context import reset_tenant_workspace_dirs
+
+                reset_tenant_workspace_dirs(tenant)
+            except Exception:
+                logger.debug(
+                    "[DeepResearchTaskManager] reset_tenant_workspace_dirs failed",
+                    exc_info=True,
+                )
+        overlay = tokens.get("overlay")
+        if overlay is not None:
+            reset_task_env_overlay(overlay)
+        ns = tokens.get("ns")
+        if ns is not None:
+            reset_agent_env_ns(ns)
 
     @classmethod
     async def get_instance(cls) -> DeepResearchTaskManager:
-        """获取全局单例实例（线程安全）."""
-        async with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls()
-            return cls._instance
+        """Legacy: explicitly return default/default tenant manager."""
+        warnings.warn(
+            "DeepResearchTaskManager.get_instance() is deprecated; "
+            "use get_deepresearch_manager(scope) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await get_deepresearch_manager(RuntimeScopeKey.from_ids("default", "default"))
 
     @staticmethod
-    def _resolve_petal_search_url() -> str:
+    @staticmethod
+    def _read_config_value(
+        name: str,
+        default: str = "",
+        env: Mapping[str, str] | None = None,
+    ) -> str:
+        """Read an explicit snapshot, or the active tenant-aware configuration."""
+        if env is not None:
+            return str(env.get(name, default) or default)
+        return str(get_local_config(name, default) or default)
+
+    @staticmethod
+    def _resolve_petal_search_url(env: Mapping[str, str] | None = None) -> str:
         """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
+        petal_api_url = read("PETAL_API_URL").strip()
+        if petal_api_url:
+            return petal_api_url
         api_base = (
-                os.environ.get("API_BASE")
-                or os.environ.get("OPENAI_BASE_URL")
-                or os.environ.get("OPENAI_API_BASE")
-                or ""
-        ).strip()
+            read("API_BASE")
+            or read("OPENAI_BASE_URL")
+            or read("OPENAI_API_BASE")
+            or ""
+        )
+        if isinstance(api_base, str):
+            api_base = api_base.strip()
+        else:
+            api_base = str(api_base or "").strip()
         if not api_base:
             return ""
         trimmed = api_base.rstrip("/")
@@ -137,38 +298,69 @@ class DeepResearchTaskManager:
         return f"{trimmed}/v1/ai-tools/web-search"
 
     @staticmethod
-    def _detect_configured_search_engines() -> Dict[str, str]:
+    def _detect_configured_search_engines(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """自动识别环境变量中已配置的检索引擎.
 
         返回：
-            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
+            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"bocha": "sk-xxx", "petal": "url"}
         """
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         configured_engines = {}
 
         # SerpAPI 搜索引擎
-        serper_api_key = os.environ.get("SERPER_API_KEY", "").strip()
+        serper_api_key = read("SERPER_API_KEY").strip()
         if serper_api_key:
             configured_engines[SearchEngine.SERPER.value] = serper_api_key
 
         # JINA 搜索引擎
-        jina_api_key = os.environ.get("JINA_API_KEY", "").strip()
+        jina_api_key = read("JINA_API_KEY").strip()
         if jina_api_key:
             configured_engines[SearchEngine.JINA.value] = jina_api_key
 
         # 博查搜索引擎
-        bocha_api_key = os.environ.get("BOCHA_API_KEY", "").strip()
+        bocha_api_key = read("BOCHA_API_KEY").strip()
         if bocha_api_key:
             configured_engines[SearchEngine.BOCHA.value] = bocha_api_key
 
         # Perplexity 搜索引擎
-        perplexity_api_key = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+        perplexity_api_key = read("PERPLEXITY_API_KEY").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
+
+        petal_url = str(get_local_config("PETAL_SEARCH_URL", "") or "").strip()
+        petal_headers = str(get_local_config("PETAL_SEARCH_HEADERS", "") or "").strip()
+        if petal_url and petal_headers:
+            configured_engines[SearchEngine.PETAL.value] = petal_url
 
         return configured_engines
 
     @staticmethod
-    def _load_config() -> Dict[str, str]:
+    def _build_general_llm_configs(
+        config: Dict[str, str],
+        extension: dict,
+    ) -> tuple[dict, dict]:
+        """Build isolated LLM configs for the workflow and report styling."""
+
+        def build_config(model_type: str) -> dict:
+            return {
+                "model_name": config["LLM_MODEL_NAME"],
+                "model_type": model_type,
+                "base_url": config["LLM_BASE_URL"],
+                "extension": extension,
+                "api_key": bytearray(config["LLM_API_KEY"], encoding="utf-8"),
+            }
+
+        workflow_model_type = config["LLM_MODEL_TYPE"]
+        report_style_model_type = workflow_model_type.strip().lower()
+        if report_style_model_type not in ("openai", "siliconflow"):
+            report_style_model_type = "openai"
+
+        return build_config(workflow_model_type), build_config(report_style_model_type)
+
+    @staticmethod
+    def _load_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
         """从环境变量加载 DeepSearch 配置.
 
         策略：
@@ -180,29 +372,32 @@ class DeepResearchTaskManager:
           WEB_SEARCH_ENGINE_NAME, WEB_SEARCH_API_KEY, WEB_SEARCH_URL, EXECUTION_METHOD
         - 项目全局：MODEL_NAME, MODEL_PROVIDER, API_BASE, API_KEY
         """
+        def read(name: str, default: str = "") -> str:
+            return DeepResearchTaskManager._read_config_value(name, default, env)
+
         # 大模型相关配置：DeepSearch 专属优先，fallback 到项目全局
         llm_model_name = (
-                os.environ.get("LLM_MODEL_NAME", "").strip()
-                or os.environ.get("MODEL_NAME", "").strip()
+            read("LLM_MODEL_NAME").strip()
+            or read("MODEL_NAME").strip()
         )
         llm_model_type = (
-                os.environ.get("LLM_MODEL_TYPE", "").strip().lower()
-                or os.environ.get("MODEL_PROVIDER", "").strip().lower()
+            read("LLM_MODEL_TYPE").strip().lower()
+            or read("MODEL_PROVIDER").strip().lower()
         )
         llm_base_url = (
-                os.environ.get("LLM_BASE_URL", "").strip()
-                or os.environ.get("API_BASE", "").strip()
+            read("LLM_BASE_URL").strip()
+            or read("API_BASE").strip()
         )
         llm_api_key = (
-                os.environ.get("LLM_API_KEY", "").strip()
-                or os.environ.get("API_KEY", "").strip()
+            read("LLM_API_KEY").strip()
+            or read("API_KEY").strip()
         )
 
         # 自动识别已配置的检索引擎
-        configured_engines = DeepResearchTaskManager._detect_configured_search_engines()
+        configured_engines = DeepResearchTaskManager._detect_configured_search_engines(env)
 
         # 确定搜索引擎名称：WEB_SEARCH_ENGINE_NAME > 已配置搜索引擎 > petal
-        web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "").strip()
+        web_search_engine_name = read("WEB_SEARCH_ENGINE_NAME").strip().lower()
         if not web_search_engine_name and configured_engines:
             # 使用第一个已配置的搜索引擎
             web_search_engine_name = next(iter(configured_engines.keys()))
@@ -210,28 +405,31 @@ class DeepResearchTaskManager:
             web_search_engine_name = SearchEngine.PETAL.value
 
         # 确定搜索引擎 API Key：WEB_SEARCH_API_KEY > 已配置搜索引擎的 API Key > OPENAI_DEFAULT_HEADERS/default_headers
-        web_search_api_key = os.environ.get("WEB_SEARCH_API_KEY", "").strip()
+        web_search_api_key = read("WEB_SEARCH_API_KEY").strip()
+        if not web_search_api_key and web_search_engine_name:
+            web_search_api_key = read(f"{web_search_engine_name.upper()}_API_KEY").strip()
         if not web_search_api_key and configured_engines and web_search_engine_name in configured_engines:
             # 使用对应引擎的 API Key
             web_search_api_key = configured_engines[web_search_engine_name]
         if not web_search_api_key:
-            # Fallback 到 OPENAI_DEFAULT_HEADERS 或 default_headers
-            web_search_api_key = (
-                    os.environ.get("OPENAI_DEFAULT_HEADERS")
-                    or os.environ.get("default_headers", "")
-            ).strip()
+            for header_name in ("default_headers", "DEFAULT_HEADERS", "OPENAI_DEFAULT_HEADERS"):
+                web_search_api_key = read(header_name).strip()
+                if web_search_api_key:
+                    break
+        if not web_search_api_key and env is None:
+            web_search_api_key = read_default_headers_raw()
 
-        web_search_url = os.environ.get("WEB_SEARCH_URL", "").strip()
+        web_search_url = read("WEB_SEARCH_URL").strip()
         if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:
-            web_search_url = DeepResearchTaskManager._resolve_petal_search_url()
+            web_search_url = DeepResearchTaskManager._resolve_petal_search_url(env)
 
-        execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
+        execution_method = read("EXECUTION_METHOD", "parallel").strip()
 
         # 检查 VISION 相关配置
-        vision_api_key = os.environ.get("VISION_API_KEY", "").strip()
-        vision_api_base = os.environ.get("VISION_API_BASE", "").strip()
-        vision_provider = os.environ.get("VISION_PROVIDER", "").strip().lower()
-        vision_model_name = os.environ.get("VISION_MODEL_NAME", "").strip()
+        vision_api_key = read("VISION_API_KEY").strip()
+        vision_api_base = read("VISION_API_BASE").strip()
+        vision_provider = read("VISION_PROVIDER").strip().lower()
+        vision_model_name = read("VISION_MODEL_NAME").strip()
 
         # 如果 VISION 相关环境变量已配置，启用 VLM 图表生成器
         vlm_chart_generator_enable = "False"
@@ -245,7 +443,6 @@ class DeepResearchTaskManager:
         )
         if has_valid_vision_config:
             vlm_chart_generator_enable = "True"
-
         config = {
             "LLM_MODEL_NAME": llm_model_name,
             "LLM_MODEL_TYPE": llm_model_type,
@@ -260,7 +457,7 @@ class DeepResearchTaskManager:
             "WORKFLOW_HUMAN_IN_THE_LOOP": "False",
             "OUTLINE_INTERACTION_ENABLED": "False",
             "SOURCE_TRACER_INFER_SWITCHES": "True",
-            "VLM_CHART_GENERATOR_ENABLE": vlm_chart_generator_enable,
+            "VLM_CHART_GENERATOR_ENABLE": "False",
             "VLM_CHART_GENERATOR_MAX_ITERATIONS": 3,
             "VISION_API_KEY": vision_api_key,
             "VISION_API_URL": vision_api_base,
@@ -268,6 +465,8 @@ class DeepResearchTaskManager:
             "VISION_MODEL_NAME": vision_model_name,
         }
         return config
+
+    load_config = _load_config
 
     @staticmethod
     def _validate_config(config: Dict[str, str]) -> tuple[bool, str]:
@@ -515,15 +714,16 @@ class DeepResearchTaskManager:
         return str(data), infer_dir, chart_dir
 
     @staticmethod
-    def _write_report_artifacts(
-            data: Any,
-            file_name: str,
-            output_dir: str = SAVE_REPORT_PATH,
-            *,
-            task_id: str = "",
-            cancel_event: threading.Event | None = None,
+    async def _write_report_artifacts(
+        data: Any,
+        file_name: str,
+        output_dir: str = SAVE_REPORT_PATH,
+        *,
+        task_id: str = "",
+        cancel_event: threading.Event | None = None,
+        llm_config: dict,
     ) -> dict[str, str]:
-        """写出 markdown/html/docx 报告及推理图目录（支持协作取消）."""
+        """写出 Markdown/HTML 报告及推理图目录（支持协作取消）."""
         # 检查取消状态
         if cancel_event and cancel_event.is_set():
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过报告写出 task_id=%s", task_id)
@@ -540,10 +740,12 @@ class DeepResearchTaskManager:
                 file_name,
                 exc,
             )
-            safe_base_name = f"report_{task_id or 'default'}"
+            safe_base_name = task_id or "default"
 
-        report_file = os.path.join(output_dir,
-                                   f"report_{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+        report_file = os.path.join(
+            output_dir,
+            f"{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        )
 
         # 路径 containment 校验
         if not DeepResearchTaskManager._verify_path_containment(output_dir, report_file):
@@ -551,17 +753,23 @@ class DeepResearchTaskManager:
 
         report_file_md = f"{report_file}.md"
         report_file_html = f"{report_file}.html"
-        report_file_docx = f"{report_file}.docx"
 
-        report_content, infer_dir, chart_dir = DeepResearchTaskManager._build_report_content(data, report_file)
+        report_content, infer_dir, chart_dir = await asyncio.to_thread(
+            DeepResearchTaskManager._build_report_content,
+            data,
+            report_file,
+        )
 
         # 再次检查取消状态
         if cancel_event and cancel_event.is_set():
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过报告文件写入 task_id=%s", task_id)
             return {}
 
-        with open(report_file_md, "w", encoding="utf-8") as f:
-            f.write(report_content)
+        await asyncio.to_thread(
+            Path(report_file_md).write_text,
+            report_content,
+            encoding="utf-8",
+        )
 
         artifacts = {"md": report_file_md}
         if infer_dir:
@@ -574,38 +782,300 @@ class DeepResearchTaskManager:
             logger.info("[DeepResearchTaskManager] 任务已取消，跳过HTML转换 task_id=%s", task_id)
             return artifacts
 
+        html_infer_dir = f"{report_file}_infer"
+        html_chart_dir = f"{report_file}_charts"
+        html_export_started_at = time.monotonic()
+        logger.info(
+            "[DeepResearchTaskManager] Styled html report export started "
+            "task_id=%s output=%s",
+            task_id,
+            report_file_html,
+        )
         try:
-            convert_md_to_html(report_file_md, report_file_html)
+            from jiuwenclaw.agentserver.tools.deepresearch_plugin.styled_html_export import (
+                export_styled_html,
+            )
+
+            styled_result = await export_styled_html(
+                data,
+                llm_config,
+                html_path=report_file_html,
+            )
         except Exception as exc:
             logger.warning(
-                "[DeepResearchTaskManager] Optional html report generation failed. "
-                "task_id=%s output=%s error=%s",
+                "[DeepResearchTaskManager] Styled html report generation failed. "
+                "task_id=%s elapsed_seconds=%.3f output=%s error=%s: %s",
                 task_id,
+                time.monotonic() - html_export_started_at,
                 report_file_html,
+                type(exc).__name__,
                 exc,
             )
         else:
             artifacts["html"] = report_file_html
-
-        # DOCX转换前检查取消状态
-        if cancel_event and cancel_event.is_set():
-            logger.info("[DeepResearchTaskManager] 任务已取消，跳过DOCX转换 task_id=%s", task_id)
-            return artifacts
-
-        try:
-            convert_md_to_docx(report_file_md, report_file_docx)
-        except Exception as exc:
-            logger.warning(
-                "[DeepResearchTaskManager] Optional docx report generation failed. "
-                "task_id=%s output=%s error=%s",
+            if Path(html_infer_dir).is_dir() and any(Path(html_infer_dir).iterdir()):
+                artifacts["infer_dir"] = html_infer_dir.replace("\\", "/")
+            if Path(html_chart_dir).is_dir() and any(Path(html_chart_dir).iterdir()):
+                artifacts["chart_dir"] = html_chart_dir.replace("\\", "/")
+            logger.info(
+                "[DeepResearchTaskManager] Styled html report exported "
+                "task_id=%s style_status=%s style_applied=%s "
+                "elapsed_seconds=%.3f output=%s",
                 task_id,
-                report_file_docx,
-                exc,
+                styled_result.style_status,
+                styled_result.style_applied,
+                time.monotonic() - html_export_started_at,
+                report_file_html,
             )
-        else:
-            artifacts["docx"] = report_file_docx
 
         return artifacts
+
+    @staticmethod
+    def _extract_section_titles(outline_content: str) -> dict[str, str]:
+        """从大纲内容中提取章节标题，映射到 section_idx.
+
+        支持两种内容格式：
+        1. JSON 格式：尝试 json.loads 解析，从 "sections"/"outline" 等结构中提取
+        2. Markdown 格式：解析多种标题样式（第N章、N. 标题等）
+
+        注意：一级标题 # 通常用于报告总标题（如 "# 研究报告：XXX"），
+        此类标题会被跳过，仅提取二级/子级标题作为章节标题。
+
+        Args:
+            outline_content: 大纲内容（JSON 或 markdown 文本）
+
+        Returns:
+            dict[str, str]：section_idx -> 章节标题 的映射
+        """
+        section_titles: dict[str, str] = {}
+        if not outline_content or not outline_content.strip():
+            return section_titles
+
+        # 尝试 JSON 格式解析
+        stripped_content = outline_content.strip()
+        if stripped_content.startswith('{') or stripped_content.startswith('['):
+            try:
+                data = json.loads(stripped_content)
+                json_titles = DeepResearchTaskManager._extract_titles_from_json(data)
+                if json_titles:
+                    return json_titles
+            except (json.JSONDecodeError, TypeError):
+                pass  # JSON 解析失败，回退到 markdown 解析
+
+        lines = outline_content.split('\n')
+        title_index = 0
+
+        for line in lines:
+            stripped = line.strip()
+            # 提取标题内容：支持 #、##、### 级别
+            heading = ""
+            if stripped.startswith('## '):
+                heading = stripped[3:].strip()
+            elif stripped.startswith('### '):
+                heading = stripped[4:].strip()
+            elif stripped.startswith('# '):
+                # 一级标题通常是报告总标题，不作为章节标题
+                # 但如果格式如 "# 第1章节：XXX" 则仍提取
+                heading = stripped[2:].strip()
+                # 检查是否为报告总标题（不含章节编号关键词）
+                if not re.match(r'第\d+[章节篇部]', heading) and not re.match(r'\d+[.、)]\s', heading):
+                    # 跳过报告总标题（如 "# 深度研究报告：XXX"）
+                    continue
+            else:
+                continue
+
+            if not heading:
+                continue
+
+            title_index += 1
+            idx = str(title_index)
+
+            # 模式1：第N章/章节/篇/部 标题
+            m = re.match(r'第(\d+)[章节篇部]\s*[：:]*\s*(.+)', heading)
+            if m:
+                section_titles[m.group(1)] = m.group(2).strip()
+                continue
+
+            # 模式2：N. 标题 或 N、标题 或 N) 标题
+            m = re.match(r'(\d+)[.、)]\s*(.+)', heading)
+            if m:
+                section_titles[m.group(1)] = m.group(2).strip()
+                continue
+
+            # 模式3：按出现顺序映射
+            section_titles[idx] = heading
+
+        return section_titles
+
+    extract_section_titles = _extract_section_titles
+
+    @staticmethod
+    def _extract_titles_from_json(data: Any) -> dict[str, str]:
+        """从 JSON 结构中提取章节标题.
+
+        支持的结构：
+        - {"sections": [{"title": "...", "name": "..."}, ...]}
+        - {"outline": [{"title": "...", "name": "..."}, ...]}
+        - [{"title": "...", "name": "..."}, ...]（顶层列表）
+
+        Args:
+            data: 解析后的 JSON 数据
+
+        Returns:
+            dict[str, str]：section_idx -> 章节标题 的映射
+        """
+        section_titles: dict[str, str] = {}
+        sections: list = []
+
+        if isinstance(data, dict):
+            for key in ("sections", "outline", "chapters", "章节"):
+                if key in data and isinstance(data[key], list):
+                    sections = data[key]
+                    break
+            if not sections:
+                for v in data.values():
+                    if isinstance(v, list):
+                        sections = v
+                        break
+        elif isinstance(data, list):
+            sections = data
+
+        for i, item in enumerate(sections, start=1):
+            title = ""
+            if isinstance(item, dict):
+                title = item.get("title") or item.get("name") or item.get("heading") or ""
+            elif isinstance(item, str):
+                title = item
+            if title:
+                section_titles[str(i)] = title.strip()
+
+        return section_titles
+
+    @staticmethod
+    def _build_progress_entry(
+        agent_name: str,
+        display_name: str,
+        description: str,
+        section_idx: str,
+        section_titles: dict[str, str],
+        content_preview: str,
+        query: str,
+    ) -> str | None:
+        """构建进度条目字符串（用于工具返回值）.
+
+        Args:
+            agent_name: 节点名称（如 "outline", "plan_reasoning"）
+            display_name: 中文显示名（如 "生成大纲", "规划调研"）
+            description: 功能描述
+            section_idx: Section 编号
+            section_titles: 章节标题映射
+            content_preview: 内容预览（前50字符）
+            query: 用户查询
+
+        Returns:
+            进度条目字符串，或 None（无需条目的节点）
+        """
+        # 过滤低价值节点：start/end/framework/entry/outline_interaction 不向用户展示进度
+        _SKIP_PROGRESS_NODES = {"start", "end", "framework", "entry", "outline_interaction"}
+        if agent_name in _SKIP_PROGRESS_NODES:
+            return None
+
+        # outline 节点：注入研究主题
+        if agent_name == "outline":
+            short_query = query[:80] + "..." if len(query) > 80 else query
+            enhanced_desc = description.replace("研究主题", f"「{short_query}」")
+            return f"{display_name} - {enhanced_desc}"
+
+        # 章节级节点（有 section_idx）：注入章节标题
+        if section_idx != "0":
+            title = section_titles.get(section_idx, "")
+            if title:
+                return f"{display_name} - {description}（第{section_idx}章节：{title}）"
+            elif content_preview:
+                return f"{display_name} - {description}（第{section_idx}章节：{content_preview}）"
+            else:
+                return f"{display_name} - {description}（第{section_idx}章节）"
+
+        # 主图节点：注入动态内容信息
+        # editor_team / reporter：注入章节数量和大纲概要
+        if agent_name in ("editor_team", "reporter"):
+            section_count = len(section_titles)
+            if section_count:
+                titles_preview = "、".join(list(section_titles.values())[:3])
+                if section_count > 3:
+                    titles_preview += f"等{section_count}个章节"
+                return f"{display_name} - {description}（{titles_preview}）"
+            # section_titles 尚未解析时，使用 content_preview 或 query
+            if content_preview:
+                return f"{display_name} - {description}（{content_preview[:50]}）"
+            short_query = query[:50] + "..." if len(query) > 50 else query
+            return f"{display_name} - 基于「{short_query}」{description}"
+
+        # source_tracer / source_tracer_infer：注入校验范围
+        if agent_name in ("source_tracer", "source_tracer_infer"):
+            section_count = len(section_titles)
+            if section_count:
+                return f"{display_name} - {description}（覆盖{section_count}个章节）"
+            return f"{display_name} - {description}"
+
+        # 其他主图节点：默认格式（不再返回 None）
+        return f"{display_name} - {description}"
+
+    @staticmethod
+    def _build_push_preview(
+        agent_name: str,
+        section_idx: str,
+        section_titles: dict[str, str],
+        content_preview: str,
+        query: str,
+    ) -> str:
+        """构建 WebSocket 推送的 content_preview 字段.
+
+        Args:
+            agent_name: 节点名称
+            section_idx: Section 编号
+            section_titles: 章节标题映射
+            content_preview: 原始内容预览
+            query: 用户查询
+
+        Returns:
+            用于 _send_progress_push 的 content_preview 值
+        """
+        # outline 节点：截断后的研究主题
+        if agent_name == "outline":
+            return query[:80] + "..." if len(query) > 80 else query
+
+        # 章节级节点：优先 section_titles，其次 content_preview
+        if section_idx != "0":
+            title = section_titles.get(section_idx, "")
+            if title:
+                return title
+            # content_preview 来自 start chunk 可能为空，
+            # 但仍返回原值以便 _send_progress_push 尝试使用
+            return content_preview
+
+        # 主图节点：为关键节点构建有意义的 preview
+        if agent_name in ("editor_team", "reporter"):
+            section_count = len(section_titles)
+            if section_count:
+                titles_preview = "、".join(list(section_titles.values())[:3])
+                if section_count > 3:
+                    titles_preview += f"等{section_count}个章节"
+                return titles_preview
+            # section_titles 尚未解析时 fallback 到 content_preview 或 query
+            if content_preview:
+                return content_preview
+            short_query = query[:50] + "..." if len(query) > 50 else query
+            return short_query
+
+        if agent_name in ("source_tracer", "source_tracer_infer"):
+            section_count = len(section_titles)
+            if section_count:
+                return f"覆盖{section_count}个章节"
+            return content_preview
+
+        # 其他节点：保持原值
+        return content_preview
 
     @staticmethod
     def _format_report_result(report_paths: dict[str, str]) -> str:
@@ -613,8 +1083,6 @@ class DeepResearchTaskManager:
         parts = []
         if report_paths.get("html"):
             parts.append(f"html报告已保存到{report_paths['html']}\n")
-        if report_paths.get("docx"):
-            parts.append(f"docx报告已保存到{report_paths['docx']}\n")
         parts.append(f"markdown报告已保存到{report_paths['md']}\n")
         if report_paths.get("infer_dir"):
             parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}\n")
@@ -622,13 +1090,37 @@ class DeepResearchTaskManager:
             parts.append(f"图表图片已保存到{report_paths['chart_dir']}\n")
         return "".join(parts)
 
+    @staticmethod
+    def _format_progress_result(
+        progress_entries: list[str],
+        report_paths: dict[str, str],
+    ) -> str:
+        """生成包含进度条目和报告路径的结果字符串.
+
+        Args:
+            progress_entries: 进度条目列表（如 "生成大纲 - 基于XX规划报告章节结构"）
+            report_paths: 报告文件路径字典
+
+        Returns:
+            格式化的结果字符串
+        """
+        parts = []
+        for entry in progress_entries:
+            parts.append(f"{entry}\n")
+        parts.append("\n")
+        parts.append(DeepResearchTaskManager._format_report_result(report_paths))
+        return "".join(parts)
+
     async def _run_jiuwen_workflow(
             self,
             query: str,
             agent_config: Dict,
             report_template: str,
-            task_id: str = "",
-            log_output_dir: str = "",
+            # 新增路由参数
+            session_id: str = "",
+            channel_id: str = "",
+            request_id: str = "",
+            collect_progress: bool = False,
     ) -> Any:
         """运行 openJiuwen-DeepResearch 工作流，捕获执行日志到任务目录.
 
@@ -636,46 +1128,200 @@ class DeepResearchTaskManager:
             query: 用户查询字符串
             agent_config: Agent 配置字典
             report_template: 报告模板
-            task_id: 任务 ID（用于日志文件命名）
-            log_output_dir: 日志输出目录路径（默认为项目日志目录下的 DeepResearch 子文件夹）
+            collect_progress: 是否收集进度条目（用于工具输出）。
+                为 True 时返回 (report_content, progress_entries)，否则返回 report_content
 
         Returns:
-            最终研究报告内容
+            collect_progress=False: 最终研究报告内容
+            collect_progress=True: (最终研究报告内容, 进度条目列表)
         """
-        # === 日志捕获设置 ===
-        log_capture_context = self._setup_log_capture(task_id, log_output_dir)
-
         try:
-            agent_factory = AgentFactory()
-            agent = agent_factory.create_agent(agent_config)
-
             last_report = None
             chunk_count = 0
 
-            async for chunk in agent.run(
+            # === 进度追踪变量 ===
+            # 使用字典追踪所有活跃节点的状态，支持并行执行的多个章节。
+            # 每个节点独立管理生命周期，避免并行节点相互干扰。
+            # node_key -> {"started": bool, "done": bool, "agent_name": str, "section_idx": str}
+            active_nodes: dict[str, dict[str, Any]] = {}
+
+            # === 内容收集变量 ===
+            outline_content_parts: list[str] = []
+            section_titles: dict[str, str] = {}
+            progress_entries: list[str] = []
+
+            def create_agent_stream():
+                agent_factory = AgentFactory()
+                agent = agent_factory.create_agent(agent_config)
+                return agent.run(
                     message=query,
                     conversation_id=str(secrets.token_hex(16)),
                     report_template=report_template,
                     interrupt_feedback="",
                     agent_config=agent_config
-            ):
-                chunk_count += 1
-                logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
-                chunk_content = json.loads(chunk)
-                report_result = parse_endnode_content(chunk_content)
-                if report_result:
-                    last_report = report_result
-                    logger.info(
-                        "[DeepResearchTaskManager] Final report received at chunk #%d",
-                        chunk_count,
-                        extra={'user_visible': 'critical'}
+                )
+
+            stream = iterate_with_scoped_tls_initialization(
+                create_agent_stream,
+                TASK_MANAGER_TLS_ENV,
+            )
+            async with aclosing(stream):
+                async for chunk in stream:
+                    chunk_count += 1
+                    logger.debug("[DeepResearchTaskManager] Stream chunk #%d from node", chunk_count)
+                    chunk_content = json.loads(chunk)
+
+                    # === 解析节点进度信息 ===
+                    agent_name = chunk_content.get("agent", "")
+                    event = chunk_content.get("event", "")
+                    section_idx = chunk_content.get("section_idx", "0")
+                    content_preview = chunk_content.get("content", "")[:50] if chunk_content.get("content") else ""
+
+                    # 构建唯一节点标识（包含 section 编号）
+                    node_key = f"{agent_name}_{section_idx}" if section_idx != "0" else agent_name
+
+                    # === 收集大纲内容并持续解析章节标题 ===
+                    # （不受 collect_progress 限制，因为 WebSocket 推送也需要 section_titles）
+                    if agent_name == "outline":
+                        chunk_text = chunk_content.get("content", "")
+                        if chunk_text:
+                            outline_content_parts.append(chunk_text)
+                            # 每次收到 outline 内容都重新解析章节标题
+                            # （大纲是流式到达的，每次可能有新的标题出现）
+                            full_outline = "".join(outline_content_parts)
+                            parsed = self._extract_section_titles(full_outline)
+                            if parsed and parsed != section_titles:
+                                new_count = len(parsed)
+                                old_count = len(section_titles)
+                                section_titles = parsed
+                                if old_count == 0:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 从大纲中提取到 %d 个章节标题: %s",
+                                        new_count,
+                                        section_titles,
+                                    )
+                                else:
+                                    logger.info(
+                                        "[DeepResearchTaskManager] 大纲更新，章节标题从 %d 个增至 %d 个: %s",
+                                        old_count, new_count,
+                                        section_titles,
+                                    )
+
+                    # === 节点生命周期管理（支持并行执行） ===
+                    # DeepSearch 引擎的多数节点不发送 event=start CustomSchema chunk，
+                    # 但每个 chunk 都携带 agent 字段。当首次收到某节点的 chunk 时，
+                    # 视为该节点开始执行；收到显式 event=done 时，视为节点完成。
+                    # 使用 active_nodes 字典独立追踪每个节点的状态，支持并行章节。
+                    if agent_name and node_key not in active_nodes:
+                        display_info = self.NODE_DISPLAY_INFO.get(agent_name)
+                        if display_info:
+                            # 首次收到该节点的 chunk，发送开始推送
+                            display_name = display_info[0]
+                            description = display_info[1]
+                            push_preview = self._build_push_preview(
+                                agent_name, section_idx, section_titles, content_preview, query,
+                            )
+                            # 进度条目（工具返回值）
+                            if collect_progress:
+                                entry = self._build_progress_entry(
+                                    agent_name, display_name, description,
+                                    section_idx, section_titles, content_preview, query,
+                                )
+                                if entry:
+                                    progress_entries.append(entry)
+                            # 修改1：推同一 section 内未完成节点的 done
+                            # 同一 section 内节点串行执行，新节点出现意味着上一节点已完成。
+                            # 必须按 section_idx 过滤，避免并行 section 的误推。
+                            for other_key, other_state in active_nodes.items():
+                                if (other_state["started"] and not other_state["done"]
+                                        and other_state["section_idx"] == section_idx
+                                        and other_key != node_key):
+                                    await self._send_progress_push(
+                                        session_id, channel_id, request_id,
+                                        other_state["agent_name"], "done", other_state["section_idx"],
+                                        section_titles=section_titles,
+                                    )
+                                    other_state["done"] = True
+                            # WebSocket 推送（前端实时进度）
+                            await self._send_progress_push(
+                                session_id, channel_id, request_id,
+                                agent_name, "start", section_idx, push_preview,
+                                section_titles=section_titles,
+                            )
+                            # 记录节点状态
+                            active_nodes[node_key] = {
+                                "started": True,
+                                "done": False,
+                                "agent_name": agent_name,
+                                "section_idx": section_idx,
+                            }
+                            # 修改2：终态节点立即推 done
+                            if agent_name in self.INSTANT_COMPLETE_NODES:
+                                await self._send_progress_push(
+                                    session_id, channel_id, request_id,
+                                    agent_name, "done", section_idx,
+                                    section_titles=section_titles,
+                                )
+                                active_nodes[node_key]["done"] = True
+
+                    # === 处理显式 event=done 事件 ===
+                    # 部分节点（outline、plan_reasoning）通过 custom_stream_output
+                    # 显式发送 event=done，这些事件可能携带更精确的信息
+                    # （如 outline 的 done 触发 section_titles 最终解析）。
+                    if agent_name and event == "done":
+                        # outline 完成时：对累积大纲做最终一次 section_titles 解析
+                        if agent_name == "outline" and outline_content_parts:
+                            full_outline = "".join(outline_content_parts)
+                            final_parsed = self._extract_section_titles(full_outline)
+                            if final_parsed and final_parsed != section_titles:
+                                logger.info(
+                                    "[DeepResearchTaskManager] outline done: 最终解析章节标题 "
+                                    "从 %d 个增至 %d 个: %s",
+                                    len(section_titles), len(final_parsed),
+                                    final_parsed,
+                                )
+                                section_titles = final_parsed
+
+                        # 节点完成：仅在已开始且未完成时推送
+                        node_state = active_nodes.get(node_key)
+                        if node_state and node_state["started"] and not node_state["done"]:
+                            await self._send_progress_push(
+                                session_id, channel_id, request_id,
+                                agent_name, "done", section_idx,
+                                section_titles=section_titles,
+                            )
+                            node_state["done"] = True
+
+                    # 现有逻辑：解析最终报告
+                    report_result = parse_endnode_content(chunk_content)
+                    if report_result:
+                        last_report = report_result
+                        logger.info(
+                            "[DeepResearchTaskManager] Final report received at chunk #%d",
+                            chunk_count,
+                            extra={'user_visible': 'critical'}
+                        )
+
+            # === 发送所有活跃节点的完成通知 ===
+            # 遍历所有已开始但未完成的节点，发送完成推送。
+            # 这确保即使 DeepSearch 引擎没有显式发送 event=done，
+            # 前端也能收到所有节点的完成通知。
+            for node_key, node_state in active_nodes.items():
+                if node_state["started"] and not node_state["done"]:
+                    await self._send_progress_push(
+                        session_id, channel_id, request_id,
+                        node_state["agent_name"], "done", node_state["section_idx"],
+                        section_titles=section_titles,
                     )
+                    node_state["done"] = True
 
             logger.info(
                 "[DeepResearchTaskManager] Workflow completed. Total chunks: %d",
                 chunk_count
             )
 
+            if collect_progress:
+                return last_report, progress_entries
             return last_report
 
         except Exception as e:
@@ -687,9 +1333,14 @@ class DeepResearchTaskManager:
             )
             raise
 
+    @contextmanager
+    def _log_capture_scope(self, task_id: str, log_output_dir: str = ""):
+        """让工作流执行、结果记录和报告导出共享同一日志生命周期。"""
+        context = self._setup_log_capture(task_id, log_output_dir)
+        try:
+            yield
         finally:
-            # === 清理日志捕获 ===
-            self._teardown_log_capture(log_capture_context)
+            self._teardown_log_capture(context)
 
     @staticmethod
     def _setup_log_capture(
@@ -745,7 +1396,7 @@ class DeepResearchTaskManager:
         log_dir.mkdir(parents=True, exist_ok=True)
         context["log_dir"] = str(log_dir)
 
-        # 3. 处理 LogManager 单例和路径限制
+        # 3. 处理 LogManager 单例和路径限制（调用方已持有 asyncio 锁）
         # 保存原始 _SAFE_BASE 值以便恢复
         context["original_safe_base"] = LogManager._SAFE_BASE
 
@@ -835,22 +1486,26 @@ class DeepResearchTaskManager:
         )
 
     async def _execute_task(
-            self,
-            task_id: str,
-            query: str,
-            file_name: str,
+        self,
+        task_id: str,
+        query: str,
+        file_name: str,
     ) -> None:
         """执行 DeepResearch 任务（后台协程）."""
         task = self._tasks[task_id]
         task.started_at = time.time()
         task.status = TaskStatus.RUNNING
+        runtime_tokens = self._bind_task_runtime(task)
 
         logger.debug(
-            "[DeepResearchTaskManager] 任务路由信息 task_id=%s channel_id=%s session_id=%s request_id=%s",
+            "[DeepResearchTaskManager] 任务路由信息 task_id=%s channel_id=%s session_id=%s request_id=%s "
+            "tenant=(%s,%s)",
             task_id,
             task.channel_id,
             task.session_id,
             task.request_id,
+            task.service_id,
+            task.agent_id,
         )
 
         logger.info(
@@ -862,18 +1517,12 @@ class DeepResearchTaskManager:
 
         try:
             # 1. 加载配置
-            config = DeepResearchTaskManager._load_config()
+            config = self._load_config()
 
             # 2. 验证配置
-            config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
+            config_valid, config_msg = self._validate_config(config)
             if not config_valid:
                 raise ValueError(config_msg)
-
-            # 3. 设置 SSL 配置
-            os.environ["LLM_SSL_VERIFY"] = "false"
-            os.environ["LLM_SSL_CERT"] = ""
-            os.environ["TOOL_SSL_VERIFY"] = "false"
-            os.environ["TOOL_SSL_CERT"] = ""
 
             config_extension = {
                 "extra_body": {
@@ -885,14 +1534,11 @@ class DeepResearchTaskManager:
 
             # 4. 解析 LLM 配置
             current_agent_config = Config().agent_config.model_dump()
-            current_agent_config["llm_config"]["general"] = {}
-            current_agent_config["llm_config"]["general"]["model_name"] = config["LLM_MODEL_NAME"]
-            current_agent_config["llm_config"]["general"]["model_type"] = config["LLM_MODEL_TYPE"]
-            current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
-            current_agent_config["llm_config"]["general"]["extension"] = config_extension
-            current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
-                                                                                 encoding="utf-8")
-            current_agent_config["llm_config"]["general"]["verify_ssl"] = False
+            workflow_llm_config, report_style_llm_config = self._build_general_llm_configs(
+                config,
+                config_extension,
+            )
+            current_agent_config["llm_config"]["general"] = workflow_llm_config
 
             # 5. 解析搜索引擎配置
             current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
@@ -917,47 +1563,41 @@ class DeepResearchTaskManager:
 
             # 6. 执行工作流（带日志捕获）
             # 报告目录：用于保存报告文件
-            report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
-            # 日志目录：使用项目日志目录下的 DeepResearch 子文件夹（默认行为）
-            data = await self._run_jiuwen_workflow(
-                query,
-                current_agent_config,
-                "",
-                task_id=task_id,
-                log_output_dir="",  # 使用默认日志目录 get_logs_dir() / "DeepResearch"
+            workspace = task.workspace_dir or get_effective_request_workspace_dir() or ""
+            report_dir = os.path.join(workspace, "reports") if workspace else os.path.join(
+                get_effective_request_workspace_dir() or ".", "reports"
             )
+            # 日志目录：使用项目日志目录下的 DeepResearch 子文件夹（默认行为）
+            # 进程合一：LogManager 全局状态需串行化整段 capture 生命周期
+            async with self._get_log_capture_lock():
+                with self._log_capture_scope(task_id):
+                    data = await self._run_jiuwen_workflow(
+                        query,
+                        current_agent_config,
+                        "",
+                    )
 
-            if data:
-                report_paths = await asyncio.to_thread(
-                    self._write_report_artifacts,
-                    data,
-                    file_name,
-                    report_dir,
-                    task_id=task_id,
-                    cancel_event=task.cancel_event,
-                )
-                result = self._format_report_result(report_paths)
+                    if data:
+                        report_paths = await self._write_report_artifacts(
+                            data,
+                            file_name,
+                            report_dir,
+                            task_id=task_id,
+                            cancel_event=task.cancel_event,
+                            llm_config=report_style_llm_config,
+                        )
+                        result = self._format_report_result(report_paths)
 
-                """
-                    result = (
-                    f"markdown报告已保存到{report_paths['md']}; "
-                    f"html报告已保存到{report_paths['html']}; "
-                    f"docx报告已保存到{report_paths['docx']}"
-                )
-                    if report_paths["infer_dir"]:
-                    result += f"; 溯源推理图已保存到{report_paths['infer_dir']}"
-
-                """
-                task.status = TaskStatus.COMPLETED
-                task.result = result
-                logger.info(
-                    "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
-                    task_id,
-                    result,
-                    extra={'user_visible': 'critical'}
-                )
-            else:
-                raise ValueError("DeepResearch 返回空结果")
+                        task.status = TaskStatus.COMPLETED
+                        task.result = result
+                        logger.info(
+                            "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
+                            task_id,
+                            result,
+                            extra={'user_visible': 'critical'}
+                        )
+                    else:
+                        raise ValueError("DeepResearch 返回空结果")
 
         except asyncio.CancelledError:
             task.status = TaskStatus.CANCELLED
@@ -979,12 +1619,140 @@ class DeepResearchTaskManager:
             )
 
         finally:
+            self._reset_task_runtime(runtime_tokens)
             task.completed_at = time.time()
             self._task_handles.pop(task_id, None)
 
             # 发送 WebSocket 通知
 
             await self._notify_completion(task)
+
+    async def _send_progress_push(
+        self,
+        session_id: str,
+        channel_id: str,
+        request_id: str,
+        node_name: str,
+        node_status: str,
+        section_idx: str = "0",
+        content_preview: str = "",
+        section_titles: dict[str, str] | None = None,
+    ) -> None:
+        """发送节点进度推送消息到前端.
+
+        使用 NODE_DISPLAY_INFO 映射将英文节点名转换为中文显示名，
+        并附带功能描述，让用户了解每个步骤的具体进展。
+
+        Args:
+            session_id: 会话 ID
+            channel_id: 渠道 ID
+            request_id: 请求 ID
+            node_name: 节点名称（agent 原值，如 "outline", "plan_reasoning"）
+            node_status: 节点状态（"start", "done"）
+            section_idx: Section 编号（默认 "0"）
+            content_preview: 内容预览（可选）
+            section_titles: 章节标题映射（可选，用于 payload 中的 section_title 字段）
+        """
+        if not session_id or not channel_id:
+            logger.debug(
+                "[DeepResearchTaskManager] 跳过进度推送: 无路由信息 node=%s",
+                node_name,
+            )
+            return
+
+        # 过滤低价值节点：与 _build_progress_entry 保持一致
+        _SKIP_PROGRESS_NODES = {"start", "end", "framework", "entry", "outline_interaction"}
+        if node_name in _SKIP_PROGRESS_NODES:
+            return
+
+        # 查找节点显示信息
+        display_info = self.NODE_DISPLAY_INFO.get(node_name)
+        display_name = display_info[0] if display_info else node_name
+        description = display_info[1] if display_info else ""
+
+        # 构建章节编号上下文
+        section_context = ""
+        if section_idx != "0":
+            section_context = f"第{section_idx}章节"
+
+        # 构建任务内容（中文显示名 + 功能描述）
+        if node_status == "start":
+            # 开始状态：显示节点名称和功能描述
+            task_content = f"{display_name}"
+            if description:
+                task_content += f" - {description}"
+            # 根据节点类型添加内容信息
+            if node_name == "outline" and content_preview:
+                # description 是 "基于研究主题规划报告章节结构"
+                # 替换 "研究主题" 为实际的 content_preview（截断后的 query）
+                enhanced_desc = description.replace("研究主题", f"「{content_preview}」")
+                task_content = f"{display_name} - {enhanced_desc}"
+            elif section_context:
+                # 所有章节级节点（plan_reasoning, sub_reporter, info_collector 等）
+                # content_preview 来自 _build_push_preview：优先 section_titles，其次原始 preview
+                if content_preview:
+                    task_content += f"（{section_context}：{content_preview}）"
+                else:
+                    task_content += f"（{section_context}）"
+            elif node_name in ("editor_team", "reporter") and content_preview:
+                # 主图节点：editor_team 和 reporter 注入章节概要
+                task_content += f"（{content_preview[:60]}）"
+            elif node_name in ("source_tracer", "source_tracer_infer") and content_preview:
+                # 溯源节点：注入校验范围
+                task_content += f"（{content_preview[:40]}）"
+        elif node_status == "done":
+            # 完成状态：简要显示完成信息
+            task_content = f"{display_name} 完成"
+            if section_context:
+                task_content += f"（{section_context}）"
+            if content_preview:
+                task_content += f": {content_preview[:30]}..."
+        else:
+            logger.debug(
+                "[DeepResearchTaskManager] 跳过进度推送: 未知状态 node=%s status=%s",
+                node_name,
+                node_status,
+            )
+            return
+
+        # 使用 task.start/task.complete 事件类型
+        event_type = "task.start" if node_status == "start" else "task.complete"
+        task_id = f"dr_{section_idx}_{node_name}" if section_idx != "0" else f"dr_{node_name}"
+
+        payload = {
+            "event_type": event_type,
+            "task_id": task_id,
+            "task_content": task_content,
+            # 保留原始节点名和中文显示名，供前端灵活渲染
+            "node_name": node_name,
+            "section_idx": section_idx,
+            "display_name": display_name,
+            "description": description,
+            # 章节标题：即使 task_content 未嵌入标题，前端也可直接使用
+            "section_title": (section_titles or {}).get(section_idx, "") if section_idx != "0" else "",
+        }
+
+        msg = {
+            "request_id": request_id or "",
+            "channel_id": channel_id,
+            "session_id": session_id,
+            "payload": payload,
+            "is_complete": False,
+        }
+
+        try:
+            await self._gateway_push.send_push(msg)
+            logger.info(
+                "[DeepResearchTaskManager] 进度推送: %s",
+                task_content,
+                extra={'user_visible': 'progress'}
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DeepResearchTaskManager] 进度推送失败 node=%s error=%s",
+                node_name,
+                exc,
+            )
 
     async def _notify_completion(self, task: DeepResearchTask) -> None:
         """通过 WebSocket 发送任务完成通知."""
@@ -1032,22 +1800,11 @@ class DeepResearchTaskManager:
                 exc,
             )
 
-    async def create_task(
-            self,
-            query: str,
-            file_name: str,
-            session_id: str = "",
-            channel_id: str = "",
-            request_id: str = "",
-    ) -> str:
+    async def create_task(self, request: DeepResearchTaskRequest) -> str:
         """创建并启动 DeepResearch 任务.
 
         Args:
-            query: 研究查询
-            file_name: 报告文件名，不带后缀
-            session_id: 会话 ID（用于通知）
-            channel_id: 渠道 ID（用于通知）
-            request_id: 请求 ID（用于通知）
+            request: 任务查询、文件名、路由与租户参数
 
         Returns:
             任务 ID
@@ -1055,6 +1812,14 @@ class DeepResearchTaskManager:
         Raises:
             RuntimeError: 当达到任务数量上限时
         """
+        query = request.query
+        file_name = request.file_name
+        session_id = request.session_id
+        channel_id = request.channel_id
+        request_id = request.request_id
+        service_id = request.service_id
+        agent_id = request.agent_id
+
         # 检查全局任务数量上限
         running_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
         if running_count >= DeepResearchTaskManager.MAX_ACTIVE_TASKS:
@@ -1088,6 +1853,14 @@ class DeepResearchTaskManager:
             )
 
         task_id = f"dr_{time.monotonic_ns()}_{secrets.token_hex(4)}"
+        sid = (
+            service_id or getattr(self, "service_id", "default") or "default"
+        ).strip() or "default"
+        aid = (
+            agent_id or getattr(self, "agent_id", "default") or "default"
+        ).strip() or "default"
+        env_snapshot = self._capture_env_snapshot(sid, aid)
+        workspace_dir = get_effective_request_workspace_dir() or ""
 
         task = DeepResearchTask(
             task_id=task_id,
@@ -1098,6 +1871,10 @@ class DeepResearchTaskManager:
             session_id=session_id,
             channel_id=channel_id,
             request_id=request_id,
+            service_id=sid,
+            agent_id=aid,
+            env_snapshot=env_snapshot,
+            workspace_dir=workspace_dir,
         )
 
         self._tasks[task_id] = task
@@ -1113,12 +1890,14 @@ class DeepResearchTaskManager:
 
         logger.info(
             "[DeepResearchTaskManager] 创建深度研究任务：%s task_id=%s query=%s channel_id=%s session_id=%s "
-            "running_count=%d/%d",
+            "tenant=(%s,%s) running_count=%d/%d",
             file_name,
             task_id,
             query[:80] + "..." if len(query) > 80 else query,
             channel_id,
             session_id,
+            sid,
+            aid,
             running_count + 1,
             DeepResearchTaskManager.MAX_ACTIVE_TASKS,
             extra={'user_visible': 'critical'}
@@ -1127,10 +1906,10 @@ class DeepResearchTaskManager:
         return task_id
 
     async def get_task_status(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> Dict[str, Any] | None:
         """获取任务状态.
 
@@ -1215,10 +1994,10 @@ class DeepResearchTaskManager:
         return False
 
     async def list_tasks(
-            self,
-            status_filter: str | None = None,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        status_filter: str | None = None,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> List[Dict[str, Any]]:
         """列出任务（仅返回调用者拥有的任务）.
 
@@ -1256,10 +2035,10 @@ class DeepResearchTaskManager:
         return tasks
 
     async def cancel_task(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> bool:
         """取消任务（仅允许任务所有者取消）.
 
@@ -1319,11 +2098,33 @@ class DeepResearchTaskManager:
         )
         return True
 
+    async def shutdown(self) -> None:
+        """Cancel all in-flight tasks and drop tenant manager state (tenant eviction)."""
+        handles = list(self._task_handles.items())
+        for task_id, task_handle in handles:
+            task = self._tasks.get(task_id)
+            if task is not None and task.cancel_event is not None:
+                task.cancel_event.set()
+            if task_handle is not None and not task_handle.done():
+                task_handle.cancel()
+        if handles:
+            await asyncio.gather(
+                *(h for _, h in handles if h is not None),
+                return_exceptions=True,
+            )
+        self._task_handles.clear()
+        self._tasks.clear()
+        logger.info(
+            "[DeepResearchTaskManager] shutdown complete tenant=(%s, %s)",
+            self.service_id,
+            self.agent_id,
+        )
+
     async def get_task_result(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> str | None:
         """获取任务结果（仅允许任务所有者获取）.
 
@@ -1348,22 +2149,9 @@ class DeepResearchTaskManager:
 
         return task.result
 
-    async def run_task_and_wait(
-            self,
-            query: str,
-            file_name: str,
-            session_id: str = "",
-            channel_id: str = "",
-            request_id: str = "",
-    ) -> Dict[str, Any]:
+    async def run_task_and_wait(self, request: DeepResearchTaskRequest) -> Dict[str, Any]:
         """创建任务并等待执行结束，适合 CLI 或脚本入口直接调用."""
-        task_id = await self.create_task(
-            query=query,
-            file_name=file_name,
-            session_id=session_id,
-            channel_id=channel_id,
-            request_id=request_id,
-        )
+        task_id = await self.create_task(request)
 
         task_handle = self._task_handles.get(task_id)
         if task_handle is not None:
@@ -1375,12 +2163,9 @@ class DeepResearchTaskManager:
         return task_info
 
     async def run_task_direct(
-            self,
-            query: str,
-            file_name: str,
-            session_id: str = "",
-            channel_id: str = "",
-            request_id: str = "",
+        self,
+        request: DeepResearchTaskRequest | str,
+        file_name: str | None = None,
     ) -> str:
         """直接执行深度研究任务并阻塞等待完成，不提交到任务池.
 
@@ -1396,11 +2181,8 @@ class DeepResearchTaskManager:
         - 不需要异步后台执行的场景
 
         Args:
-            query: 研究查询
-            file_name: 报告文件名，不带后缀
-            session_id: 会话 ID（仅用于日志关联）
-            channel_id: 渠道 ID（仅用于日志关联）
-            request_id: 请求 ID（仅用于日志关联）
+            request: 任务查询、文件名、路由与租户参数；也兼容旧版 query 字符串
+            file_name: 旧版调用方式中的报告文件名
 
         Returns:
             报告保存路径信息字符串
@@ -1409,121 +2191,231 @@ class DeepResearchTaskManager:
             ValueError: 配置验证失败或执行结果为空
             Exception: 工作流执行过程中的其他异常
         """
+        if isinstance(request, str):
+            if file_name is None:
+                raise TypeError("file_name is required when request is a query string")
+            request = DeepResearchTaskRequest(query=request, file_name=file_name)
+
+        query = request.query
+        file_name = request.file_name
+        session_id = request.session_id
+        channel_id = request.channel_id
+        request_id = request.request_id
+        service_id = request.service_id
+        agent_id = request.agent_id
+
         # 生成临时任务 ID（仅用于日志和报告文件命名）
         temp_task_id = f"dr_blocking_{time.monotonic_ns()}_{secrets.token_hex(4)}"
+        sid = (
+            service_id or getattr(self, "service_id", "default") or "default"
+        ).strip() or "default"
+        aid = (
+            agent_id or getattr(self, "agent_id", "default") or "default"
+        ).strip() or "default"
+        ephemeral = DeepResearchTask(
+            task_id=temp_task_id,
+            query=query,
+            file_name=file_name,
+            status=TaskStatus.RUNNING,
+            created_at=time.time(),
+            session_id=session_id,
+            channel_id=channel_id,
+            request_id=request_id,
+            service_id=sid,
+            agent_id=aid,
+            env_snapshot=self._capture_env_snapshot(sid, aid),
+            workspace_dir=get_effective_request_workspace_dir() or "",
+        )
+        runtime_tokens = self._bind_task_runtime(ephemeral)
 
         logger.info(
             "[DeepResearchTaskManager] 开始阻塞执行深度研究任务 temp_task_id=%s query=%s "
-            "session_id=%s channel_id=%s",
+            "session_id=%s channel_id=%s tenant=(%s,%s)",
             temp_task_id,
             query[:80] + "..." if len(query) > 80 else query,
             session_id,
             channel_id,
+            sid,
+            aid,
             extra={'user_visible': 'critical'}
         )
 
-        # 1. 加载配置
-        config = DeepResearchTaskManager._load_config()
+        try:
+            # 1. 加载配置
+            config = self._load_config()
 
-        # 2. 验证配置
-        config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
-        if not config_valid:
-            raise ValueError(config_msg)
+            # 2. 验证配置
+            config_valid, config_msg = self._validate_config(config)
+            if not config_valid:
+                raise ValueError(config_msg)
 
-        # 3. 设置 SSL 配置
-        os.environ["LLM_SSL_VERIFY"] = "false"
-        os.environ["LLM_SSL_CERT"] = ""
-        os.environ["TOOL_SSL_VERIFY"] = "false"
-        os.environ["TOOL_SSL_CERT"] = ""
-
-        config_extension = {
-            "extra_body": {
-                "thinking": {
-                    "type": "disabled"
+            config_extension = {
+                "extra_body": {
+                    "thinking": {
+                        "type": "disabled"
+                    }
                 }
             }
-        }
 
-        # 4. 解析 LLM 配置
-        current_agent_config = Config().agent_config.model_dump()
-        current_agent_config["llm_config"]["general"] = {}
-        current_agent_config["llm_config"]["general"]["model_name"] = config["LLM_MODEL_NAME"]
-        current_agent_config["llm_config"]["general"]["model_type"] = config["LLM_MODEL_TYPE"]
-        current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
-        current_agent_config["llm_config"]["general"]["extension"] = config_extension
-        current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
-                                                                             encoding="utf-8")
-        current_agent_config["llm_config"]["general"]["verify_ssl"] = False
+            # 4. 解析 LLM 配置
+            current_agent_config = Config().agent_config.model_dump()
+            workflow_llm_config, report_style_llm_config = self._build_general_llm_configs(
+                config,
+                config_extension,
+            )
+            current_agent_config["llm_config"]["general"] = workflow_llm_config
 
-        # 5. 解析搜索引擎配置
-        current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
-        current_agent_config["web_search_engine_config"]["search_api_key"] = bytearray(
-            config["WEB_SEARCH_API_KEY"], encoding="utf-8"
+            # 5. 解析搜索引擎配置
+            current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
+            current_agent_config["web_search_engine_config"]["search_api_key"] = bytearray(
+                config["WEB_SEARCH_API_KEY"], encoding="utf-8"
+            )
+            current_agent_config["web_search_engine_config"]["search_url"] = config["WEB_SEARCH_URL"]
+            current_agent_config["web_search_engine_config"]["max_web_search_results"] = (
+                config["MAX_WEB_SEARCH_RESULTS"]
+            )
+            current_agent_config["outliner_max_section_num"] = int(config["OUTLINER_MAX_SECTION_NUM"])
+
+            current_agent_config["workflow_human_in_the_loop"] = config["WORKFLOW_HUMAN_IN_THE_LOOP"]
+            current_agent_config["outline_interaction_enabled"] = config["OUTLINE_INTERACTION_ENABLED"]
+            current_agent_config["source_tracer_infer_switch"] = config["SOURCE_TRACER_INFER_SWITCHES"]
+            current_agent_config["vlm_chart_generator_enable"] = config["VLM_CHART_GENERATOR_ENABLE"]
+            current_agent_config["vlm_chart_generator_max_iterations"] = config["VLM_CHART_GENERATOR_MAX_ITERATIONS"]
+
+            # 配置 VLM 图表生成器相关参数
+            if config["VLM_CHART_GENERATOR_ENABLE"] == "True":
+                current_agent_config["llm_config"]["vlm_chart_generating"] = {}
+                current_agent_config["llm_config"]["vlm_chart_generating"]["model_name"] = config["VISION_MODEL_NAME"]
+                current_agent_config["llm_config"]["vlm_chart_generating"]["model_type"] = config["VISION_PROVIDER"]
+                current_agent_config["llm_config"]["vlm_chart_generating"]["base_url"] = config["VISION_API_URL"]
+                current_agent_config["llm_config"]["vlm_chart_generating"]["api_key"] = bytearray(
+                    config["VISION_API_KEY"], encoding="utf-8"
+                )
+                current_agent_config["llm_config"]["vlm_chart_generating"]["verify_ssl"] = False
+            if config["EXECUTION_METHOD"] == ExecutionMethod.DEPENDENCY_DRIVING.value:
+                current_agent_config["execution_method"] = ExecutionMethod.DEPENDENCY_DRIVING.value
+            else:
+                current_agent_config["execution_method"] = ExecutionMethod.PARALLEL.value
+
+            # 6. 直接执行工作流（阻塞等待，同时收集进度信息）
+            workspace = ephemeral.workspace_dir or get_effective_request_workspace_dir() or "."
+            report_dir = os.path.join(workspace, "reports")
+            async with self._get_log_capture_lock():
+                with self._log_capture_scope(temp_task_id):
+                    data, progress_entries = await self._run_jiuwen_workflow(
+                        query,
+                        current_agent_config,
+                        "",
+                        # 传递路由参数用于进度推送
+                        session_id=session_id,
+                        channel_id=channel_id,
+                        request_id=request_id,
+                        collect_progress=True,
+                    )
+
+                    if not data:
+                        raise ValueError("DeepResearch 返回空结果")
+
+                    # 7. 写出报告文件
+                    report_paths = await self._write_report_artifacts(
+                        data,
+                        file_name,
+                        report_dir,
+                        task_id=temp_task_id,
+                        cancel_event=None,  # 阻塞执行不支持取消
+                        llm_config=report_style_llm_config,
+                    )
+
+                    result = self._format_progress_result(progress_entries, report_paths)
+
+                    logger.info(
+                        "[DeepResearchTaskManager] 阻塞执行任务完成 temp_task_id=%s result=%s",
+                        temp_task_id,
+                        result,
+                        extra={'user_visible': 'critical'}
+                    )
+
+            return result
+        finally:
+            self._reset_task_runtime(runtime_tokens)
+
+
+class DeepResearchTaskManagerPool:
+    """Process-level pool of per-tenant DeepResearchTaskManager instances."""
+
+    _lock = asyncio.Lock()
+    _managers: dict[tuple[str, str], DeepResearchTaskManager] = {}
+
+    @classmethod
+    async def get_or_create(cls, tenant: tuple[str, str]) -> DeepResearchTaskManager:
+        key = (
+            (tenant[0] or "default").strip() or "default",
+            (tenant[1] or "default").strip() or "default",
         )
-        current_agent_config["web_search_engine_config"]["search_url"] = config["WEB_SEARCH_URL"]
-        current_agent_config["web_search_engine_config"]["max_web_search_results"] = (
-            config["MAX_WEB_SEARCH_RESULTS"]
+        async with cls._lock:
+            mgr = cls._managers.get(key)
+            if mgr is None:
+                mgr = DeepResearchTaskManager(service_id=key[0], agent_id=key[1])
+                cls._managers[key] = mgr
+            return mgr
+
+    @classmethod
+    async def remove(cls, service_id: str, agent_id: str) -> bool:
+        """Evict one tenant DeepResearch manager and shut down its tasks."""
+        key = (
+            (str(service_id or "default").strip() or "default"),
+            (str(agent_id or "default").strip() or "default"),
         )
-        current_agent_config["outliner_max_section_num"] = int(config["OUTLINER_MAX_SECTION_NUM"])
+        async with cls._lock:
+            mgr = cls._managers.pop(key, None)
+        if mgr is None:
+            return False
+        try:
+            await mgr.shutdown()
+        except Exception:
+            logger.warning(
+                "[DeepResearchTaskManagerPool] shutdown failed tenant=(%s, %s)",
+                key[0],
+                key[1],
+                exc_info=True,
+            )
+        return True
 
-        current_agent_config["workflow_human_in_the_loop"] = config["WORKFLOW_HUMAN_IN_THE_LOOP"]
-        current_agent_config["outline_interaction_enabled"] = config["OUTLINE_INTERACTION_ENABLED"]
-        current_agent_config["source_tracer_infer_switch"] = config["SOURCE_TRACER_INFER_SWITCHES"]
-        current_agent_config["vlm_chart_generator_enable"] = config["VLM_CHART_GENERATOR_ENABLE"]
-        current_agent_config["vlm_chart_generator_max_iterations"] = config["VLM_CHART_GENERATOR_MAX_ITERATIONS"]
+    @classmethod
+    def reset_for_tests(cls) -> None:
+        cls._managers.clear()
 
-        # 配置 VLM 图表生成器相关参数
-        if config["VLM_CHART_GENERATOR_ENABLE"] == "True":
-            current_agent_config["llm_config"]["vlm_chart_generating"] = {}
-            current_agent_config["llm_config"]["vlm_chart_generating"]["model_name"] = config["VISION_MODEL_NAME"]
-            current_agent_config["llm_config"]["vlm_chart_generating"]["model_type"] = config["VISION_PROVIDER"]
-            current_agent_config["llm_config"]["vlm_chart_generating"]["base_url"] = config["VISION_API_URL"]
-            current_agent_config["llm_config"]["vlm_chart_generating"]["api_key"] = bytearray(config["VISION_API_KEY"],
-                                                                                              encoding="utf-8")
-            current_agent_config["llm_config"]["vlm_chart_generating"]["verify_ssl"] = False
 
-        if config["EXECUTION_METHOD"] == ExecutionMethod.DEPENDENCY_DRIVING.value:
-            current_agent_config["execution_method"] = ExecutionMethod.DEPENDENCY_DRIVING.value
-        else:
-            current_agent_config["execution_method"] = ExecutionMethod.PARALLEL.value
+async def get_deepresearch_manager(scope: RuntimeScopeKey) -> DeepResearchTaskManager:
+    """Return the DeepResearch manager for ``scope.tenant()``.
 
-        # 6. 直接执行工作流（阻塞等待）
-        report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
-        data = await self._run_jiuwen_workflow(
-            query,
-            current_agent_config,
-            "",
-            task_id=temp_task_id,
-            log_output_dir="",  # 使用默认日志目录
+    ``scope`` is required. For the default tenant pass
+    ``RuntimeScopeKey.from_ids("default", "default")`` (or ``RuntimeScopeKey()``).
+    """
+    if scope is None:
+        raise TypeError(
+            "get_deepresearch_manager(scope) requires a non-None scope; "
+            "for default tenant pass RuntimeScopeKey.from_ids('default', 'default')"
         )
+    return await DeepResearchTaskManagerPool.get_or_create(scope.tenant())
 
-        if not data:
-            raise ValueError("DeepResearch 返回空结果")
 
-        # 7. 写出报告文件
-        report_paths = await asyncio.to_thread(
-            self._write_report_artifacts,
-            data,
-            file_name,
-            report_dir,
-            task_id=temp_task_id,
-            cancel_event=None,  # 阻塞执行不支持取消
-        )
+def load_deepresearch_config(env: Mapping[str, str] | None = None) -> Dict[str, str]:
+    """Return DeepResearch configuration using the manager's resolution rules."""
+    return DeepResearchTaskManager.load_config(env)
 
-        result = self._format_report_result(report_paths)
 
-        logger.info(
-            "[DeepResearchTaskManager] 阻塞执行任务完成 temp_task_id=%s result=%s",
-            temp_task_id,
-            result,
-            extra={'user_visible': 'critical'}
-        )
-
-        return result
+def extract_deepresearch_section_titles(text: str) -> Dict[str, str]:
+    """Return section title metadata using the manager's outline parser."""
+    return DeepResearchTaskManager.extract_section_titles(text)
 
 
 __all__ = [
     "DeepResearchTaskManager",
+    "DeepResearchTaskManagerPool",
+    "extract_deepresearch_section_titles",
+    "get_deepresearch_manager",
+    "load_deepresearch_config",
     "TaskStatus",
     "DeepResearchTask",
 ]

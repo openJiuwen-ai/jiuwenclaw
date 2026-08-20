@@ -49,10 +49,12 @@ def test_evaluate_search_quality_paid_long_answer_without_skip_snippet():
 
 
 def test_normalize_search_mode_aliases():
-    assert normalize_search_mode("") == "default"
-    assert normalize_search_mode("paid") == "paid"
-    assert normalize_search_mode("mcp_petal_search") == "paid"
-    assert normalize_search_mode("free_search") == "free"
+    assert normalize_search_mode("") == ("default", None)
+    assert normalize_search_mode("paid") == ("paid", None)
+    assert normalize_search_mode("mcp_petal_search") == ("paid", None)
+    assert normalize_search_mode("free_search") == ("free", None)
+    assert normalize_search_mode("paid:bocha") == ("paid", "bocha")
+    assert normalize_search_mode("paid:petal") == ("paid", "petal")
 
 
 def test_format_web_search_response_header():
@@ -128,8 +130,8 @@ def test_run_web_search_free_does_not_call_paid(monkeypatch):
 
 
 def test_run_web_search_default_paid_then_free(monkeypatch):
-    async def fake_paid(query, settings):
-        return None, ["paid:petal(skipped)"]
+    async def fake_paid(query, settings, preferred_provider=None):
+        return None, []
 
     async def fake_free(query, settings):
         return ProviderRun(
@@ -159,7 +161,7 @@ def test_web_search_entry_delegates_to_orchestrator(monkeypatch):
 
     calls = 0
 
-    async def fake_run(query, *, search_mode="default", max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
         nonlocal calls
         calls += 1
         assert query == "hello"
@@ -184,7 +186,7 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_run(query, *, search_mode="default", max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
         calls.append(search_mode)
         return "ok"
 
@@ -200,3 +202,331 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
     )
     assert result == "ok"
     assert calls == ["default"]
+
+
+def test_web_search_env_reads_tip_not_bare_keys(monkeypatch):
+    """Track B: free/paid availability must follow tip/ns, not bare os.environ."""
+    import os
+
+    from jiuwenclaw.agentserver.tools.web_search.free import _env_flag, _free_search_engines
+    from jiuwenclaw.agentserver.tools.web_search.log_util import paid_provider_skip_reason
+    from jiuwenclaw.agentserver.tools.web_search.providers import paid_provider_available
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        os.environ["FREE_SEARCH_DDG_ENABLED"] = "1"
+        os.environ["SERPER_API_KEY"] = "bare-serper"
+        apply_env_overrides_to_active(
+            {
+                "FREE_SEARCH_DDG_ENABLED": "0",
+                "FREE_SEARCH_BING_ENABLED": "0",
+            },
+            service_id="default",
+            agent_id="office",
+        )
+        token = bind_agent_env_ns("default", "office")
+        try:
+            assert _env_flag("FREE_SEARCH_DDG_ENABLED") is False
+            assert _free_search_engines() == []
+            assert paid_provider_available("serper") is False
+            assert paid_provider_skip_reason("serper") == "missing_SERPER_API_KEY"
+        finally:
+            reset_agent_env_ns(token)
+
+        apply_env_overrides_to_active(
+            {"SERPER_API_KEY": "office-serper"},
+            service_id="default",
+            agent_id="office",
+        )
+        token = bind_agent_env_ns("default", "office")
+        try:
+            assert paid_provider_available("serper") is True
+            assert paid_provider_skip_reason("serper") == "available"
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_resolve_petal_search_url_reads_dedicated_env_var(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        apply_env_overrides_to_active(
+            {"PETAL_SEARCH_URL": "https://petal.example.com/web-search"},
+            service_id="default",
+            agent_id="test",
+        )
+        token = bind_agent_env_ns("default", "test")
+        try:
+            from jiuwenclaw.agentserver.tools.web_search.paid import _resolve_petal_search_url
+
+            assert _resolve_petal_search_url() == "https://petal.example.com/web-search"
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_resolve_petal_search_url_raises_when_not_set(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import reset_local_env_state_for_tests
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        os.environ.pop("PETAL_SEARCH_URL", None)
+        os.environ.pop("API_BASE", None)
+        os.environ.pop("OPENAI_BASE_URL", None)
+        os.environ.pop("OPENAI_API_BASE", None)
+
+        from jiuwenclaw.agentserver.tools.web_search.paid import _resolve_petal_search_url
+
+        import pytest
+
+        with pytest.raises(ValueError, match="PETAL_SEARCH_URL is not set"):
+            _resolve_petal_search_url()
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_resolve_petal_search_url_does_not_fallback_to_api_base(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        os.environ.pop("PETAL_SEARCH_URL", None)
+        apply_env_overrides_to_active(
+            {"API_BASE": "https://llm-api.com/v2"},
+            service_id="default",
+            agent_id="test",
+        )
+        token = bind_agent_env_ns("default", "test")
+        try:
+            from jiuwenclaw.agentserver.tools.web_search.paid import _resolve_petal_search_url
+
+            import pytest
+
+            with pytest.raises(ValueError, match="PETAL_SEARCH_URL is not set"):
+                _resolve_petal_search_url()
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_load_llm_default_headers_reads_dedicated_env_var(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        headers_json = '{"Authorization": "Bearer test-token"}'
+        apply_env_overrides_to_active(
+            {"PETAL_SEARCH_HEADERS": headers_json},
+            service_id="default",
+            agent_id="test",
+        )
+        token = bind_agent_env_ns("default", "test")
+        try:
+            from jiuwenclaw.agentserver.tools.web_search.paid import _load_llm_default_headers
+
+            result = _load_llm_default_headers()
+            assert result == {"Authorization": "Bearer test-token"}
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_load_llm_default_headers_raises_when_not_set(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import reset_local_env_state_for_tests
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        os.environ.pop("PETAL_SEARCH_HEADERS", None)
+        os.environ.pop("default_headers", None)
+
+        from jiuwenclaw.agentserver.tools.web_search.paid import _load_llm_default_headers
+
+        import pytest
+
+        with pytest.raises(ValueError, match="PETAL_SEARCH_HEADERS is not set"):
+            _load_llm_default_headers()
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_configured_providers_summary_returns_configured_order(monkeypatch):
+    def fake_load_settings():
+        from jiuwenclaw.agentserver.tools.web_search.types import WebSearchSettings
+
+        return WebSearchSettings(
+            timeout_seconds=30,
+            max_results=8,
+            paid_provider_order=("petal", "bocha"),
+        )
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.settings.load_web_search_settings",
+        fake_load_settings,
+    )
+
+    from jiuwenclaw.agentserver.tools.web_search.tool import _configured_providers_summary
+
+    assert _configured_providers_summary() == "petal, bocha"
+
+
+def test_env_flag_defaults_to_false(monkeypatch):
+    monkeypatch.delenv("FREE_SEARCH_DDG_ENABLED", raising=False)
+
+    from jiuwenclaw.agentserver.tools.web_search.free import _env_flag
+
+    assert _env_flag("FREE_SEARCH_DDG_ENABLED") is False
+
+
+def test_env_flag_can_be_enabled(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        apply_env_overrides_to_active(
+            {"FREE_SEARCH_DDG_ENABLED": "true"},
+            service_id="default",
+            agent_id="test",
+        )
+        token = bind_agent_env_ns("default", "test")
+        try:
+            from jiuwenclaw.agentserver.tools.web_search.free import _env_flag
+
+            assert _env_flag("FREE_SEARCH_DDG_ENABLED") is True
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_free_search_engines_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("FREE_SEARCH_DDG_ENABLED", raising=False)
+    monkeypatch.delenv("FREE_SEARCH_BING_ENABLED", raising=False)
+
+    from jiuwenclaw.agentserver.tools.web_search.free import _free_search_engines
+
+    assert _free_search_engines() == []
+
+
+def test_build_web_search_description_contains_configured_providers(monkeypatch):
+    def fake_load_settings():
+        from jiuwenclaw.agentserver.tools.web_search.types import WebSearchSettings
+
+        return WebSearchSettings(
+            timeout_seconds=30,
+            max_results=8,
+            paid_provider_order=("petal", "bocha"),
+        )
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.web_search.settings.load_web_search_settings",
+        fake_load_settings,
+    )
+
+    from jiuwenclaw.agentserver.tools.web_search.tool import _build_web_search_description
+
+    desc = _build_web_search_description()
+    assert "petal, bocha" in desc
+    assert "tavily" not in desc
+    assert "serper" not in desc
+    assert "jina" not in desc
+    assert "perplexity" not in desc
+
+
+def test_build_web_search_description_hides_free_mode_when_no_free_engines(monkeypatch):
+    monkeypatch.delenv("FREE_SEARCH_DDG_ENABLED", raising=False)
+    monkeypatch.delenv("FREE_SEARCH_BING_ENABLED", raising=False)
+
+    from jiuwenclaw.agentserver.tools.web_search.tool import _build_web_search_description
+
+    desc = _build_web_search_description()
+    assert "search_mode=free" not in desc
+
+
+def test_build_web_search_description_shows_free_mode_when_free_engines_enabled(monkeypatch):
+    import os
+    from jiuwenclaw.local_env_config import (
+        apply_env_overrides_to_active,
+        bind_agent_env_ns,
+        reset_agent_env_ns,
+        reset_local_env_state_for_tests,
+    )
+
+    saved = dict(os.environ)
+    reset_local_env_state_for_tests()
+    try:
+        apply_env_overrides_to_active(
+            {"FREE_SEARCH_DDG_ENABLED": "true"},
+            service_id="default",
+            agent_id="test",
+        )
+        token = bind_agent_env_ns("default", "test")
+        try:
+            from jiuwenclaw.agentserver.tools.web_search.tool import _build_web_search_description
+
+            desc = _build_web_search_description()
+            assert "search_mode=free" in desc
+        finally:
+            reset_agent_env_ns(token)
+    finally:
+        reset_local_env_state_for_tests()
+        os.environ.clear()
+        os.environ.update(saved)
