@@ -10,6 +10,7 @@ from jiuwenswarm.common.reverse_rpc.codec import build_request_wire, request_fro
 from jiuwenswarm.common.reverse_rpc.constants import REVERSE_RPC_VERSION
 from jiuwenswarm.common.reverse_rpc.errors import (
     ReverseRpcOverloadedError,
+    ReverseRpcPayloadTooLargeError,
     ReverseRpcRemoteError,
     ReverseRpcTimeoutError,
     ReverseRpcTransportDisconnected,
@@ -27,6 +28,7 @@ from jiuwenswarm.server.reverse_rpc.pending_registry import (
     PendingReverseRpc,
     ReverseRpcPendingRegistry,
 )
+from jiuwenswarm.server.reverse_rpc.transport import SingleGatewayReverseRpcTransport
 
 
 class FakeTransport:
@@ -64,6 +66,18 @@ def test_reverse_rpc_models_and_wire_round_trip() -> None:
         error=ReverseRpcErrorPayload(code="TEST_ERROR", message="failed"),
     )
     assert ReverseRpcResponse.from_dict(response.to_dict()) == response
+
+
+def test_reverse_rpc_response_to_dict_does_not_deepcopy_result() -> None:
+    result = object()
+    response = ReverseRpcResponse(
+        version=REVERSE_RPC_VERSION,
+        rpc_id="rpc-result-identity",
+        ok=True,
+        result=result,
+    )
+
+    assert response.to_dict()["result"] is result
 
 
 @pytest.mark.parametrize(
@@ -167,6 +181,53 @@ async def test_reverse_rpc_client_timeout_cancel_and_cleanup() -> None:
         "reverse_rpc.cancel",
     ]
     assert client.registry.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_reverse_rpc_client_cancel_send_is_bounded(monkeypatch) -> None:
+    from jiuwenswarm.server.reverse_rpc import client as client_module
+
+    transport = FakeTransport()
+
+    async def block_cancel(message: dict, route: ReverseRpcRoute) -> None:
+        del route
+        if message["response_kind"] == "reverse_rpc.cancel":
+            await asyncio.Event().wait()
+
+    transport.on_send = block_cancel
+    monkeypatch.setattr(client_module, "_CANCEL_SEND_TIMEOUT_SECONDS", 0.01)
+    client = ReverseRpcClient(transport=transport)
+
+    with pytest.raises(ReverseRpcTimeoutError):
+        await asyncio.wait_for(
+            client.call(
+                method="test.slow",
+                payload={},
+                origin=ReverseRpcOrigin(),
+                route=ReverseRpcRoute(channel_id="test"),
+                timeout=0.01,
+            ),
+            timeout=0.2,
+        )
+    assert client.registry.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_single_gateway_transport_rejects_gateway_id() -> None:
+    sent = False
+
+    async def send_push(message: dict) -> None:
+        nonlocal sent
+        del message
+        sent = True
+
+    transport = SingleGatewayReverseRpcTransport(send_push)
+    with pytest.raises(ReverseRpcValidationError, match="gateway_id"):
+        await transport.send(
+            build_request_wire(_request("rpc-gateway-route")),
+            ReverseRpcRoute(gateway_id="gateway-a", channel_id="test"),
+        )
+    assert sent is False
 
 
 @pytest.mark.asyncio
@@ -278,6 +339,56 @@ async def test_agent_ws_reverse_rpc_response_completes_and_acks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_ws_invalid_reverse_rpc_response_fails_pending_immediately() -> None:
+    from jiuwenswarm.common.schema.agent import AgentRequest
+    from jiuwenswarm.common.schema.message import ReqMethod
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.reverse_rpc.runtime import get_reverse_rpc_client
+
+    class FakeWs:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, value: str) -> None:
+            self.sent.append(value)
+
+    client = get_reverse_rpc_client()
+    request_model = _request("rpc-invalid-response")
+    future = asyncio.get_running_loop().create_future()
+    client.registry.register(
+        PendingReverseRpc(request_model, future, asyncio.get_running_loop().time())
+    )
+    request = AgentRequest(
+        request_id="reverse-response-invalid",
+        channel_id="test",
+        req_method=ReqMethod.REVERSE_RPC_RESPONSE,
+        params={
+            "version": REVERSE_RPC_VERSION + 1,
+            "rpc_id": request_model.rpc_id,
+            "ok": True,
+            "result": {},
+            "error": None,
+        },
+    )
+    ws = FakeWs()
+    try:
+        await AgentWebSocketServer._handle_reverse_rpc_response(
+            object.__new__(AgentWebSocketServer),
+            ws,
+            request,
+            asyncio.Lock(),
+        )
+        error = future.exception()
+        assert isinstance(error, ReverseRpcRemoteError)
+        assert error.code == "UNSUPPORTED_VERSION"
+        ack = json.loads(ws.sent[0])
+        assert ack["status"] == "failed"
+        assert ack["body"]["details"]["error"]["code"] == "UNSUPPORTED_VERSION"
+    finally:
+        client.registry.remove(request_model.rpc_id)
+
+
+@pytest.mark.asyncio
 async def test_agent_ws_keeps_send_push_best_effort_but_reverse_rpc_is_strict() -> None:
     from jiuwenswarm.common.reverse_rpc.errors import (
         ReverseRpcTransportDisconnected,
@@ -320,3 +431,40 @@ async def test_agent_ws_reverse_rpc_rejects_oversized_fallback(monkeypatch) -> N
         await server._send_reverse_rpc_push(
             build_request_wire(_request("rpc-oversized"))
         )
+
+
+@pytest.mark.asyncio
+async def test_agent_ws_reverse_rpc_prechecks_oversized_request(monkeypatch) -> None:
+    from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+    class FakeWs:
+        pass
+
+    send_called = False
+
+    async def record_send(ws, wire):
+        nonlocal send_called
+        del ws, wire
+        send_called = True
+        return True
+
+    server = object.__new__(AgentWebSocketServer)
+    server._current_ws = FakeWs()
+    server._current_send_lock = asyncio.Lock()
+    monkeypatch.setattr(agent_ws_server_module, "AGENT_WS_SEND_BUDGET_BYTES", 256)
+    monkeypatch.setattr(agent_ws_server_module, "send_wire_payload", record_send)
+    request = _request("rpc-precheck-oversized")
+    oversized = ReverseRpcRequest(
+        version=request.version,
+        rpc_id=request.rpc_id,
+        method=request.method,
+        payload={"content": "x" * 1024},
+        timeout_ms=request.timeout_ms,
+        origin=request.origin,
+        route=request.route,
+    )
+
+    with pytest.raises(ReverseRpcPayloadTooLargeError):
+        await server._send_reverse_rpc_push(build_request_wire(oversized))
+    assert send_called is False

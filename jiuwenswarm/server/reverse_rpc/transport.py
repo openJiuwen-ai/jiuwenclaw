@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from jiuwenswarm.common.reverse_rpc.errors import ReverseRpcValidationError
 from jiuwenswarm.common.reverse_rpc.models import ReverseRpcRoute
 
 
@@ -34,7 +35,11 @@ class SingleGatewayReverseRpcTransport:
         # V1 intentionally uses the sole active Gateway connection.  The route
         # is preserved in the protocol so a connection-registry transport can
         # replace this implementation without changing callers.
-        del route
+        if route.gateway_id is not None:
+            raise ReverseRpcValidationError(
+                "Reverse RPC V1 cannot route by gateway_id; "
+                "only the sole active Gateway connection is supported"
+            )
         result = self._send_push(message)
         if inspect.isawaitable(result):
             await result

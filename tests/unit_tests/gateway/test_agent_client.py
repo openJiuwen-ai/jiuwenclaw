@@ -6,6 +6,7 @@ from websockets.exceptions import ConnectionClosedError
 
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.e2a.models import E2AEnvelope
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
@@ -89,6 +90,54 @@ class ReconnectingAgentClientHarness(AgentClientHarness):
 def test_agent_client_uses_shared_websocket_limit():
     assert not hasattr(agent_client, "_WS_MAX_SIZE")
     assert agent_client.AGENT_WS_MAX_MESSAGE_BYTES == AGENT_WS_MAX_MESSAGE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_reverse_rpc_response_info_log_redacts_result(caplog):
+    target_logger = logging.getLogger("jiuwenswarm.gateway.routing.agent_client")
+    target_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.INFO, logger=target_logger.name)
+    client = AgentClientHarness()
+    ws = FakeWebSocket()
+    client.set_ws_for_test(ws)
+    envelope = E2AEnvelope(
+        request_id="reverse-rpc-log-1",
+        method="reverse_rpc.response",
+        channel="test",
+        params={
+            "version": 1,
+            "rpc_id": "rpc-log-1",
+            "ok": True,
+            "result": {"secret": "must-not-appear-in-log"},
+            "error": None,
+        },
+        is_stream=False,
+    )
+
+    try:
+        task = asyncio.create_task(client.send_request(envelope))
+        for _ in range(100):
+            if ws.sent_payloads:
+                break
+            await asyncio.sleep(0.001)
+        queue = client.get_message_queue_for_test("reverse-rpc-log-1")
+        await queue.put(
+            encode_agent_response_for_wire(
+                AgentResponse(
+                    request_id="reverse-rpc-log-1",
+                    channel_id="test",
+                    ok=True,
+                    payload={"accepted": True},
+                ),
+                response_id="reverse-rpc-log-1",
+            )
+        )
+        await task
+    finally:
+        target_logger.removeHandler(caplog.handler)
+
+    assert "rpc-log-1" in caplog.text
+    assert "must-not-appear-in-log" not in caplog.text
 
 
 @pytest.mark.asyncio

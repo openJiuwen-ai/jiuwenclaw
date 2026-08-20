@@ -9,6 +9,7 @@ from jiuwenswarm.common.reverse_rpc.constants import (
 from jiuwenswarm.common.reverse_rpc.errors import (
     ReverseRpcError,
     ReverseRpcOverloadedError,
+    ReverseRpcPayloadTooLargeError,
     ReverseRpcRemoteError,
     ReverseRpcTimeoutError,
     ReverseRpcTransportDisconnected,
@@ -33,6 +34,7 @@ __all__ = [
     "ReverseRpcErrorPayload",
     "ReverseRpcOrigin",
     "ReverseRpcOverloadedError",
+    "ReverseRpcPayloadTooLargeError",
     "ReverseRpcRemoteError",
     "ReverseRpcRequest",
     "ReverseRpcResponse",

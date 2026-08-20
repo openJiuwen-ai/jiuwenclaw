@@ -29,6 +29,7 @@ from jiuwenswarm.server.reverse_rpc.pending_registry import (
 from jiuwenswarm.server.reverse_rpc.transport import ReverseRpcTransport
 
 logger = logging.getLogger(__name__)
+_CANCEL_SEND_TIMEOUT_SECONDS = 1.0
 
 
 class ReverseRpcClient:
@@ -144,7 +145,7 @@ class ReverseRpcClient:
             self._registry.remove(rpc_id)
             if not future.done():
                 future.cancel()
-            logger.info(
+            logger.debug(
                 "[REVERSE_RPC] phase=CLIENT_CLEANUP rpc_id=%s method=%s",
                 rpc_id,
                 method,
@@ -164,7 +165,24 @@ class ReverseRpcClient:
             reason=reason,
         )
         try:
-            await transport.send(build_cancel_wire(cancel, request), request.route)
+            await asyncio.wait_for(
+                transport.send(build_cancel_wire(cancel, request), request.route),
+                timeout=_CANCEL_SEND_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[REVERSE_RPC] phase=CLIENT_CANCEL_SEND_TIMEOUT rpc_id=%s "
+                "method=%s timeout=%ss",
+                request.rpc_id,
+                request.method,
+                _CANCEL_SEND_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            logger.warning(
+                "[REVERSE_RPC] phase=CLIENT_CANCEL_SEND_INTERRUPTED rpc_id=%s method=%s",
+                request.rpc_id,
+                request.method,
+            )
         except Exception:
             logger.warning(
                 "[REVERSE_RPC] phase=CLIENT_CANCEL_SEND_FAILED rpc_id=%s method=%s",
@@ -175,6 +193,9 @@ class ReverseRpcClient:
 
     def complete(self, response: ReverseRpcResponse) -> bool:
         return self._registry.complete(response)
+
+    def fail(self, rpc_id: str, exc: BaseException) -> bool:
+        return self._registry.fail(rpc_id, exc)
 
     def fail_all(self, exc: BaseException) -> None:
         self._registry.fail_all(exc)

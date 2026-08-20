@@ -9,7 +9,6 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -21,6 +20,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
 )
+from jiuwenswarm.common.reverse_rpc.constants import REVERSE_RPC_RESPONSE_METHOD
 from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
 from jiuwenswarm.common.ws_diagnostics import (
@@ -421,10 +421,24 @@ class WebSocketAgentServerClient(AgentServerClient):
             envelope.method,
             envelope.is_stream,
         )
-        logger.debug(
-            "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(envelope.to_dict()),
-        )
+        is_reverse_rpc_response = envelope.method == REVERSE_RPC_RESPONSE_METHOD
+        if is_reverse_rpc_response:
+            params = envelope.params if isinstance(envelope.params, dict) else {}
+            error = params.get("error")
+            error_code = error.get("code") if isinstance(error, dict) else None
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送 Reverse RPC response: "
+                "request_id=%s rpc_id=%s ok=%s error_code=%s",
+                rid,
+                params.get("rpc_id"),
+                params.get("ok"),
+                error_code,
+            )
+        else:
+            logger.debug(
+                "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
+                _to_json(envelope.to_dict()),
+            )
 
         if rid in self._message_queues:
             raise RuntimeError(
@@ -440,7 +454,20 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                if is_reverse_rpc_response:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送 Reverse RPC response: "
+                        "request_id=%s rpc_id=%s ok=%s error_code=%s",
+                        rid,
+                        params.get("rpc_id"),
+                        params.get("ok"),
+                        error_code,
+                    )
+                else:
+                    logger.info(
+                        "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
+                        _to_json(payload),
+                    )
                 await self._send_wire_payload(payload)
 
             try:

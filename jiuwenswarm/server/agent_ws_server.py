@@ -51,7 +51,10 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
-from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.common.ws_limits import (
+    AGENT_WS_MAX_MESSAGE_BYTES,
+    AGENT_WS_SEND_BUDGET_BYTES,
+)
 from jiuwenswarm.extensions.hook_event import AgentServerHookEvents
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
@@ -129,7 +132,17 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.common.reverse_rpc.errors import ReverseRpcTransportDisconnected
+from jiuwenswarm.common.reverse_rpc.constants import (
+    ERROR_INVALID_RESPONSE,
+    ERROR_UNSUPPORTED_VERSION,
+    REVERSE_RPC_VERSION,
+)
+from jiuwenswarm.common.reverse_rpc.errors import (
+    ReverseRpcPayloadTooLargeError,
+    ReverseRpcRemoteError,
+    ReverseRpcTransportDisconnected,
+    ReverseRpcValidationError,
+)
 from jiuwenswarm.common.reverse_rpc.models import ReverseRpcResponse
 from jiuwenswarm.server.personal_context import PersonalContextHostAPI
 from jiuwenswarm.server.personal_context.ws_handler import (
@@ -9008,6 +9021,18 @@ class AgentWebSocketServer:
 
         wire = build_server_push_wire(msg)
         try:
+            serialized = json.dumps(wire, ensure_ascii=False)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ReverseRpcValidationError(
+                "Reverse RPC request is not JSON serializable"
+            ) from exc
+        actual_bytes = len(serialized.encode("utf-8"))
+        if actual_bytes > AGENT_WS_SEND_BUDGET_BYTES:
+            raise ReverseRpcPayloadTooLargeError(
+                "Reverse RPC request exceeds the AgentServer WebSocket send budget: "
+                f"actual_bytes={actual_bytes} max_bytes={AGENT_WS_SEND_BUDGET_BYTES}"
+            )
+        try:
             async with send_lock:
                 if self._current_ws is not ws or self._current_send_lock is not send_lock:
                     raise ReverseRpcTransportDisconnected(
@@ -9022,7 +9047,7 @@ class AgentWebSocketServer:
             ) from exc
 
         if not sent_original:
-            raise RuntimeError(
+            raise ReverseRpcPayloadTooLargeError(
                 "Reverse RPC frame exceeded the AgentServer WebSocket send budget"
             )
 
@@ -9723,14 +9748,42 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         response: ReverseRpcResponse | None = None
         accepted = False
+        ack_ok = True
+        error_payload: dict[str, Any] | None = None
+        raw_rpc_id = params.get("rpc_id")
+        rpc_id = raw_rpc_id.strip() if isinstance(raw_rpc_id, str) else ""
         try:
             response = ReverseRpcResponse.from_dict(params)
             accepted = get_reverse_rpc_client().complete(response)
-        except ValueError:
+        except ReverseRpcValidationError as exc:
+            ack_ok = False
+            version = params.get("version")
+            code = (
+                ERROR_UNSUPPORTED_VERSION
+                if isinstance(version, int)
+                and not isinstance(version, bool)
+                and version != REVERSE_RPC_VERSION
+                else ERROR_INVALID_RESPONSE
+            )
+            failed_pending = False
+            if rpc_id:
+                failed_pending = get_reverse_rpc_client().fail(
+                    rpc_id,
+                    ReverseRpcRemoteError(code, str(exc)),
+                )
+            error_payload = {
+                "code": code,
+                "message": "Invalid Reverse RPC response",
+                "pending_failed": failed_pending,
+            }
             logger.warning(
-                "[REVERSE_RPC] phase=CLIENT_RESPONSE_INVALID source_request_id=%s",
+                "[REVERSE_RPC] phase=CLIENT_RESPONSE_INVALID source_request_id=%s "
+                "rpc_id=%s code=%s pending_failed=%s",
                 request.request_id,
-                exc_info=True,
+                rpc_id,
+                code,
+                failed_pending,
+                exc_info=exc,
             )
 
         if response is not None and not accepted:
@@ -9749,11 +9802,12 @@ class AgentWebSocketServer:
         resp = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
-            ok=True,
+            ok=ack_ok,
             payload={
                 "accepted": accepted,
-                "rpc_id": response.rpc_id if response is not None else "",
+                "rpc_id": response.rpc_id if response is not None else rpc_id,
                 "ignored": not accepted,
+                **({"error": error_payload} if error_payload is not None else {}),
             },
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)

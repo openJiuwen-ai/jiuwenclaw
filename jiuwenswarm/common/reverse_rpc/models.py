@@ -181,7 +181,13 @@ class ReverseRpcResponse:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "version": self.version,
+            "rpc_id": self.rpc_id,
+            "ok": self.ok,
+            "result": self.result,
+            "error": self.error.to_dict() if self.error is not None else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)

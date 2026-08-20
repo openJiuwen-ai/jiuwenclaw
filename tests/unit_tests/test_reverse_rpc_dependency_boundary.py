@@ -4,11 +4,13 @@ import ast
 from pathlib import Path
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 GENERIC_ROOTS = (
-    Path("jiuwenswarm/common/reverse_rpc"),
-    Path("jiuwenswarm/server/reverse_rpc"),
-    Path("jiuwenswarm/gateway/reverse_rpc"),
+    REPOSITORY_ROOT / "jiuwenswarm/common/reverse_rpc",
+    REPOSITORY_ROOT / "jiuwenswarm/server/reverse_rpc",
+    REPOSITORY_ROOT / "jiuwenswarm/gateway/reverse_rpc",
 )
+PRODUCTION_CAPABILITY_ALLOWLIST: frozenset[str] = frozenset()
 
 FORBIDDEN_IMPORT_PARTS = (
     "common.schema.agent",
@@ -55,16 +57,33 @@ def test_reverse_rpc_core_contains_no_business_method_names() -> None:
     assert violations == []
 
 
-def test_no_production_reverse_rpc_capability_is_registered() -> None:
+def test_production_reverse_rpc_capabilities_are_explicitly_allowlisted() -> None:
     violations: list[str] = []
-    for path in Path("jiuwenswarm").rglob("*.py"):
+    production_root = REPOSITORY_ROOT / "jiuwenswarm"
+    for path in production_root.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if isinstance(func, ast.Name) and func.id == "CapabilitySpec":
-                violations.append(f"{path}:{node.lineno}")
-            elif isinstance(func, ast.Attribute) and func.attr == "CapabilitySpec":
-                violations.append(f"{path}:{node.lineno}")
+            is_capability_spec = (
+                isinstance(func, ast.Name) and func.id == "CapabilitySpec"
+            ) or (
+                isinstance(func, ast.Attribute) and func.attr == "CapabilitySpec"
+            )
+            if not is_capability_spec:
+                continue
+            method_node = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "method"),
+                None,
+            )
+            if not isinstance(method_node, ast.Constant) or not isinstance(
+                method_node.value, str
+            ):
+                violations.append(
+                    f"{path}:{node.lineno}:CapabilitySpec method must be a string literal"
+                )
+                continue
+            if method_node.value not in PRODUCTION_CAPABILITY_ALLOWLIST:
+                violations.append(f"{path}:{node.lineno}:{method_node.value}")
     assert violations == []

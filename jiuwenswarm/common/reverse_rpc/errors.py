@@ -6,6 +6,7 @@ from typing import Any
 
 from jiuwenswarm.common.reverse_rpc.constants import (
     ERROR_OVERLOADED,
+    ERROR_RESULT_TOO_LARGE,
     ERROR_TIMEOUT,
     ERROR_TRANSPORT_DISCONNECTED,
 )
@@ -29,6 +30,10 @@ class ReverseRpcTransportDisconnected(ReverseRpcError):
 
 class ReverseRpcOverloadedError(ReverseRpcError):
     code = ERROR_OVERLOADED
+
+
+class ReverseRpcPayloadTooLargeError(ReverseRpcError):
+    code = ERROR_RESULT_TOO_LARGE
 
 
 class ReverseRpcRemoteError(ReverseRpcError):

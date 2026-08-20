@@ -15,6 +15,7 @@ from jiuwenswarm.common.reverse_rpc.constants import (
     ERROR_INTERNAL,
     ERROR_INVALID_REQUEST,
     ERROR_METHOD_NOT_FOUND,
+    ERROR_OVERLOADED,
     ERROR_ROUTE_NOT_FOUND,
     ERROR_TIMEOUT,
     ERROR_UNSUPPORTED_VERSION,
@@ -47,6 +48,7 @@ class ReverseRpcExecution:
     spec: CapabilitySpec
     task: asyncio.Task[None]
     connection_generation: int
+    response_started: bool = False
 
 
 class ReverseRpcDispatcher:
@@ -59,12 +61,16 @@ class ReverseRpcDispatcher:
             Awaitable[None] | None,
         ]
         | None = None,
+        max_in_flight: int = 1024,
     ) -> None:
+        if max_in_flight <= 0:
+            raise ValueError("max_in_flight must be positive")
         self._registry = registry
         self._response_transport = response_transport
         self._executions: dict[str, ReverseRpcExecution] = {}
         self._connection_generation = 0
         self._before_execute = before_execute
+        self._max_in_flight = max_in_flight
 
     @property
     def execution_count(self) -> int:
@@ -98,6 +104,13 @@ class ReverseRpcDispatcher:
                 request,
                 ERROR_INVALID_REQUEST,
                 "duplicate in-flight rpc_id",
+            )
+            return
+        if len(self._executions) >= self._max_in_flight:
+            await self._send_error(
+                request,
+                ERROR_OVERLOADED,
+                f"Gateway Reverse RPC in-flight limit reached: {self._max_in_flight}",
             )
             return
 
@@ -155,64 +168,87 @@ class ReverseRpcDispatcher:
             connection_generation=generation,
         )
         try:
-            result = await asyncio.wait_for(
-                self._execute_handler(context, request, spec),
-                timeout=timeout_seconds,
-            )
-            response = ReverseRpcResponse(
-                version=REVERSE_RPC_VERSION,
-                rpc_id=request.rpc_id,
-                ok=True,
-                result=result,
-            )
-        except CapabilityError as exc:
-            response = self._error_response(
-                request,
-                exc.code,
-                exc.message,
-                retryable=exc.retryable,
-                details=exc.details,
-            )
-        except asyncio.TimeoutError:
-            response = self._error_response(
-                request,
-                ERROR_TIMEOUT,
-                "Gateway capability execution timed out",
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_handler(context, request, spec),
+                    timeout=timeout_seconds,
+                )
+                response = ReverseRpcResponse(
+                    version=REVERSE_RPC_VERSION,
+                    rpc_id=request.rpc_id,
+                    ok=True,
+                    result=result,
+                )
+            except CapabilityError as exc:
+                response = self._error_response(
+                    request,
+                    exc.code,
+                    exc.message,
+                    retryable=exc.retryable,
+                    details=exc.details,
+                )
+            except asyncio.TimeoutError:
+                response = self._error_response(
+                    request,
+                    ERROR_TIMEOUT,
+                    "Gateway capability execution timed out",
+                )
+            except asyncio.CancelledError:
+                response = self._error_response(
+                    request,
+                    ERROR_CANCELLED,
+                    "Gateway capability execution was cancelled",
+                )
+            except Exception:
+                logger.exception(
+                    "[REVERSE_RPC] phase=GATEWAY_EXECUTION_FAILED rpc_id=%s method=%s",
+                    request.rpc_id,
+                    request.method,
+                )
+                response = self._error_response(
+                    request,
+                    ERROR_INTERNAL,
+                    "Gateway capability execution failed",
+                )
+
+            if generation != self._connection_generation:
+                logger.info(
+                    "[REVERSE_RPC] phase=GATEWAY_RESPONSE_DROPPED rpc_id=%s "
+                    "reason=stale_connection_generation",
+                    request.rpc_id,
+                )
+                return
+            execution = self._executions.get(request.rpc_id)
+            if execution is not None:
+                execution.response_started = True
+            await self._response_transport.send(response, request)
+            logger.info(
+                "[REVERSE_RPC] phase=GATEWAY_RESPONSE_SENT rpc_id=%s method=%s "
+                "status=%s",
+                request.rpc_id,
+                request.method,
+                (
+                    "ok"
+                    if response.ok
+                    else response.error.code
+                    if response.error
+                    else "error"
+                ),
             )
         except asyncio.CancelledError:
-            response = self._error_response(
-                request,
-                ERROR_CANCELLED,
-                "Gateway capability execution was cancelled",
-            )
-        except Exception:
-            logger.exception(
-                "[REVERSE_RPC] phase=GATEWAY_EXECUTION_FAILED rpc_id=%s method=%s",
+            logger.info(
+                "[REVERSE_RPC] phase=GATEWAY_RESPONSE_CANCELLED rpc_id=%s method=%s",
                 request.rpc_id,
                 request.method,
             )
-            response = self._error_response(
-                request,
-                ERROR_INTERNAL,
-                "Gateway capability execution failed",
+        except Exception:
+            logger.exception(
+                "[REVERSE_RPC] phase=GATEWAY_RESPONSE_SEND_FAILED rpc_id=%s method=%s",
+                request.rpc_id,
+                request.method,
             )
         finally:
             self._executions.pop(request.rpc_id, None)
-
-        if generation != self._connection_generation:
-            logger.info(
-                "[REVERSE_RPC] phase=GATEWAY_RESPONSE_DROPPED rpc_id=%s "
-                "reason=stale_connection_generation",
-                request.rpc_id,
-            )
-            return
-        await self._response_transport.send(response, request)
-        logger.info(
-            "[REVERSE_RPC] phase=GATEWAY_RESPONSE_SENT rpc_id=%s method=%s status=%s",
-            request.rpc_id,
-            request.method,
-            "ok" if response.ok else response.error.code if response.error else "error",
-        )
 
     async def _execute_handler(
         self,
@@ -261,7 +297,10 @@ class ReverseRpcDispatcher:
         tasks = [
             execution.task
             for execution in self._executions.values()
-            if execution.spec.cancel_on_disconnect and not execution.task.done()
+            if (
+                execution.response_started or execution.spec.cancel_on_disconnect
+            )
+            and not execution.task.done()
         ]
         for task in tasks:
             task.cancel()
@@ -274,10 +313,25 @@ class ReverseRpcDispatcher:
         code: str,
         message: str,
     ) -> None:
-        await self._response_transport.send(
-            self._error_response(request, code, message),
-            request,
-        )
+        try:
+            await self._response_transport.send(
+                self._error_response(request, code, message),
+                request,
+            )
+        except asyncio.CancelledError:
+            logger.info(
+                "[REVERSE_RPC] phase=GATEWAY_ERROR_RESPONSE_CANCELLED rpc_id=%s "
+                "code=%s",
+                request.rpc_id,
+                code,
+            )
+        except Exception:
+            logger.exception(
+                "[REVERSE_RPC] phase=GATEWAY_ERROR_RESPONSE_SEND_FAILED rpc_id=%s "
+                "code=%s",
+                request.rpc_id,
+                code,
+            )
 
     async def _try_send_invalid_request_error(
         self,
