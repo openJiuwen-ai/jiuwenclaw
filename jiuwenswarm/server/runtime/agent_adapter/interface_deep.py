@@ -11172,14 +11172,9 @@ class JiuWenSwarmDeepAdapter:
         )
         skill_path = params.get("skill_path") or params.get("path")
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                self._resolve_skill_dirs(),
-                str(skill_path),
-            )
             evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=skill_name,
-                allowed_roots=allowed,
             )
             skills_base = evolution_version_ctl.skills_root_from_skill_md_path(str(skill_path))
             store = evolution_version_ctl.get_disk_evolution_store(
@@ -11244,16 +11239,10 @@ class JiuWenSwarmDeepAdapter:
             store_dirs = [str(skills_dirs_param).strip()]
         else:
             store_dirs = None
-        resolve_dirs = store_dirs if store_dirs is not None else self._resolve_skill_dirs()
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                resolve_dirs,
-                str(skill_path),
-            )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=name,
-                allowed_roots=allowed,
             )
 
         logger.info(
