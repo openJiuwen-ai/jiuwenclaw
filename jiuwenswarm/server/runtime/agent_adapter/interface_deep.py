@@ -98,6 +98,32 @@ if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
 
+# SDK chunk types that close one interaction round's output. ``answer`` carries
+# every round result (normal answer, empty answer, goal attempt boundary); HITL
+# interrupt frames replace it when a round stops for a human decision.
+_ROUND_TERMINAL_CHUNK_TYPES = frozenset(
+    {
+        "answer",
+        "chat.ask_user_question",
+        "__interaction__",
+    }
+)
+
+# Upper bound for the per-round streamed-text memo used to de-duplicate a
+# demoted goal attempt final. Long enough for a full answer, bounded so a
+# many-step round cannot grow it without limit.
+_ROUND_VISIBLE_TEXT_MAX_CHARS = 256 * 1024
+
+
+def _strip_whitespace(text: str) -> str:
+    """Whitespace-free form used to compare two renderings of the same text.
+
+    Collapsing to a single space (the frontend's ``collapseWs``) is not enough
+    here: a round's answer re-wraps the streamed tokens, and CJK text has no
+    space at the point where a newline was inserted.
+    """
+    return re.sub(r"\s+", "", text or "")
+
 try:
     from openjiuwen.harness.tools import is_paid_search_enabled
 except ImportError:  # Compatibility with older agent-core versions.
@@ -185,6 +211,10 @@ from jiuwenswarm.agents.harness.common.channel_runtime_context import (
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
 from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+
+# Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
+# 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
+_pending_goal_objective_history: dict[str, dict[str, Any]] = {}
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
@@ -996,6 +1026,13 @@ class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
+    # Goal stream bookkeeping (see __init__ for what each one tracks). Declared
+    # on the class as well so the goal helpers stay safe to call on an instance
+    # that has not run through __init__.
+    _stream_content_run_kind: str | None = None
+    _stream_round_kind_latch: str | None = None
+    _stream_round_output_ended: bool = False
+    _stream_round_visible_text: str = ""
 
     """Deep SDK 适配器，实现 AgentAdapter 协议.
 
@@ -1057,6 +1094,15 @@ class JiuWenSwarmDeepAdapter:
         # interaction stream. A late user-round chat.final must not be demoted
         # just because a goal round already became active.
         self._stream_content_run_kind: str | None = None
+        # Run kind of the round that produced the chunks being consumed right
+        # now, sampled once per round instead of per chunk (see
+        # ``_track_round_output_boundary``).
+        self._stream_round_kind_latch: str | None = None
+        self._stream_round_output_ended: bool = False
+        # Visible assistant text already streamed for the round being consumed.
+        # Lets a demoted goal attempt final drop text the bubble already shows
+        # (see ``_goal_intermediate_final_repeats_streamed_text``).
+        self._stream_round_visible_text: str = ""
         # In-flight asyncio tasks per session (stream/non-stream agent runs).
         self._session_agent_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._task_planning_rail: TaskPlanningRail | None = None
@@ -6843,15 +6889,16 @@ class JiuWenSwarmDeepAdapter:
         Demote only when GoalRecord is still ACTIVE **and** the text being
         closed belonged to a **goal** round.
 
-        Prefer ``_stream_content_run_kind`` (stamped while forwarding deltas)
-        over the live ``active_round``: a user-round final can still be in the
-        queue after the scheduler has already started the next goal round.
+        Prefer the round latch (provenance of the chunk being forwarded), then
+        ``_stream_content_run_kind`` (stamped while forwarding deltas), over the
+        live ``active_round``: a user-round final can still be in the queue
+        after the scheduler has already started the next goal round.
         Falling back to ``_has_active_goal_round()`` covers goal attempts that
         emit a final with no prior delta on this consumer.
         """
         if not self._goal_record_is_active():
             return False
-        content_kind = self._stream_content_run_kind
+        content_kind = self._stream_round_kind_latch or self._stream_content_run_kind
         if content_kind is not None:
             return content_kind == "goal"
         return self._has_active_goal_round()
@@ -6867,8 +6914,84 @@ class JiuWenSwarmDeepAdapter:
             return None
         return str(getattr(kind, "value", kind))
 
+    def _consumed_round_run_kind(self) -> str | None:
+        """Run kind of the round that produced the chunk being forwarded.
+
+        Falls back to the live ``active_round`` only when no round has been
+        latched yet on this stream (see ``_track_round_output_boundary``).
+        """
+        latched = self._stream_round_kind_latch
+        if latched is not None:
+            return latched
+        return self._current_interaction_run_kind()
+
+    def _reset_round_kind_latch(self) -> None:
+        """Forget the previous consumer's round; the next chunk re-samples."""
+        self._stream_round_kind_latch = None
+        self._stream_round_output_ended = False
+        self._stream_round_visible_text = ""
+
+    def _note_round_visible_text(self, content: str) -> None:
+        """Remember visible text already streamed for the current round."""
+        if not content:
+            return
+        text = self._stream_round_visible_text + content
+        if len(text) > _ROUND_VISIBLE_TEXT_MAX_CHARS:
+            text = text[-_ROUND_VISIBLE_TEXT_MAX_CHARS:]
+        self._stream_round_visible_text = text
+
+    def _goal_intermediate_final_repeats_streamed_text(self, content: str) -> bool:
+        """Whether a demoted goal final only repeats text the bubble already shows.
+
+        A round's ``answer`` carries the whole answer, which normally arrives
+        token by token first: a real ``chat.final`` *replaces* the bubble text,
+        so nothing is duplicated. Demoted to ``chat.delta`` it is *appended*
+        instead, printing the answer twice — and history (which mirrors the
+        delta stream) would keep both copies.
+        """
+        answer = _strip_whitespace(content)
+        if not answer:
+            return True
+        streamed = _strip_whitespace(self._stream_round_visible_text)
+        return bool(streamed) and answer in streamed
+
+    def _track_round_output_boundary(self, chunk: Any) -> None:
+        """Latch which round owns the chunks currently being consumed.
+
+        Output is drained from a queue, so ``active_round`` can already point at
+        the next (goal) round while this round's tail is still queued. Sampling
+        it per chunk mislabels that tail as goal output, which demotes the user
+        round's terminal ``chat.final`` and merges the ordinary answer and the
+        goal answer into a single bubble. Sample once per round instead, on the
+        first chunk after the previous round's terminal chunk, and keep that
+        value for the whole round.
+        """
+        if self._stream_round_output_ended:
+            self._reset_round_kind_latch()
+        if self._stream_round_kind_latch is None:
+            self._stream_round_kind_latch = self._current_interaction_run_kind()
+        if self._is_round_terminal_chunk(chunk):
+            self._stream_round_output_ended = True
+
+    @staticmethod
+    def _is_round_terminal_chunk(chunk: Any) -> bool:
+        """Whether this chunk is the last output of one interaction round.
+
+        ``answer`` is written once per round (including empty answers and goal
+        attempt boundaries); HITL interrupt frames end a round without one.
+        """
+        chunk_type = getattr(chunk, "type", None)
+        if chunk_type is None and isinstance(chunk, dict):
+            chunk_type = chunk.get("type")
+        if chunk_type is None:
+            return False
+        return str(getattr(chunk_type, "value", chunk_type)) in _ROUND_TERMINAL_CHUNK_TYPES
+
     def _begin_visible_chat_content(
-        self, stream_is_user_originated: bool = False
+        self,
+        stream_is_user_originated: bool = False,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Stamp content provenance; inject a bubble-split final on user→goal.
 
@@ -6884,14 +7007,24 @@ class JiuWenSwarmDeepAdapter:
         goal answer opens its own bubble instead of merging into the (empty) user
         bubble. Non-user-originated streams keep the strict ``prev == "user"``
         rule so a pure goal stream never gets a spurious final at its head.
+
+        Provenance comes from the per-round latch, not from the live
+        ``active_round``: the tail of a user round is still forwarded after the
+        scheduler started the goal round, and stamping it as goal output splits
+        the bubble in the wrong place and demotes the user round's own final.
+
+        First visible goal token also flushes a deferred Goal-objective history
+        row so reload order matches live (after the interrupted user turn).
         """
-        kind = self._current_interaction_run_kind()
+        kind = self._consumed_round_run_kind()
         prev = self._stream_content_run_kind
         boundary: dict[str, Any] | None = None
         switched_from_user = prev == "user" and kind == "goal"
         hijacked_before_user_token = (
             stream_is_user_originated and kind == "goal" and prev is None
         )
+        if kind == "goal" and session_id:
+            self._flush_pending_goal_objective_history(session_id)
         if switched_from_user or hijacked_before_user_token:
             boundary = {"event_type": "chat.final", "content": ""}
             self._stream_content_run_kind = None
@@ -6906,6 +7039,13 @@ class JiuWenSwarmDeepAdapter:
             return parsed
         if not self._should_demote_goal_intermediate_final():
             return parsed
+        if self._goal_intermediate_final_repeats_streamed_text(
+            str(parsed.get("content") or "")
+        ):
+            # Drop it: the bubble (and therefore history) already holds this
+            # text. Emitting it as a delta would append a second copy, because
+            # only a real chat.final replaces the bubble content.
+            return None
         adapted = dict(parsed)
         adapted["event_type"] = "chat.delta"
         adapted["goal_intermediate"] = True
@@ -8201,15 +8341,54 @@ class JiuWenSwarmDeepAdapter:
             return "Goal resumed." if goal is not None else "No goal in this session."
         return "Goal set." if goal is not None else "Goal was not set."
 
-    @staticmethod
+    def _session_has_other_running_agent_tasks(self, session_id: str) -> bool:
+        """同 session 是否还有「不是当前 task」的未完成 agent 流。"""
+        sid = self._resolve_interrupt_session_id(session_id or "default")
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        tasks = getattr(self, "_session_agent_tasks", {}).get(sid) or set()
+        if not tasks:
+            return False
+        return any((task is not current) and (not task.done()) for task in tasks)
+
+    def _should_defer_goal_objective_history(self, session_id: str) -> bool:
+        """忙碌插队：上一轮 user 仍在，或同 session 另有并发任务（如 chat.send）。"""
+        if self._current_interaction_run_kind() == "user":
+            return True
+        if self._stream_content_run_kind == "user" or self._stream_round_kind_latch == "user":
+            return True
+        sid = self._resolve_interrupt_session_id(session_id)
+        # 本 stream 已 _mark_session_active，count>1 表示还有别的请求在跑
+        if self._active_session_ids.get(sid, 0) > 1:
+            return True
+        # chat 持有 output lease 时 goal set 仍会 mark；再看其它未完成 task
+        return self._session_has_other_running_agent_tasks(sid)
+
+    def _flush_pending_goal_objective_history(
+        self, session_id: str, *, timestamp: float | None = None
+    ) -> None:
+        """把挂起的 Goal 用户历史落到磁盘；无挂起则 noop。"""
+        sid = self._resolve_interrupt_session_id(session_id or "default")
+        pending = _pending_goal_objective_history.pop(sid, None)
+        if not pending:
+            return
+        append_history_record(
+            timestamp=float(timestamp if timestamp is not None else time.time()),
+            **pending,
+        )
+
     def _record_goal_set_history_if_needed(
+        self,
         request: AgentRequest,
         *,
         action: str | None,
         result_type: str | None,
         goal_payload: dict[str, Any] | None,
+        defer: bool | None = None,
     ) -> None:
-        """Write objective as a user history turn only after a successful set."""
+        """成功 set 后写入 objective 用户历史；忙碌时推迟到上一轮收尾后再写。"""
         if str(action or "").strip().lower() != "set":
             return
         if result_type in {"goal_error", "goal_confirm_required", None}:
@@ -8221,20 +8400,29 @@ class JiuWenSwarmDeepAdapter:
             return
         params = request.params if isinstance(request.params, dict) else {}
         goal_id = str(goal_payload.get("goal_id") or "").strip() or None
-        append_history_record(
-            session_id=request.session_id or "default",
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            role="user",
-            content=objective,
-            timestamp=time.time(),
-            channel_metadata=request.metadata,
-            mode=params.get("mode", "unknown"),
-            extra={
+        sid = request.session_id or "default"
+        record_kwargs: dict[str, Any] = {
+            "session_id": sid,
+            "request_id": request.request_id,
+            "channel_id": request.channel_id,
+            "role": "user",
+            "content": objective,
+            "channel_metadata": request.metadata,
+            "mode": params.get("mode", "unknown"),
+            "extra": {
                 "goal_id": goal_id,
                 "is_goal_objective_message": True,
             },
+        }
+        should_defer = (
+            defer if defer is not None else self._should_defer_goal_objective_history(sid)
         )
+        resolved = self._resolve_interrupt_session_id(sid)
+        if should_defer:
+            _pending_goal_objective_history[resolved] = record_kwargs
+            return
+        _pending_goal_objective_history.pop(resolved, None)
+        append_history_record(timestamp=time.time(), **record_kwargs)
 
     @staticmethod
     def _goal_completed_history_exists(session_id: str, goal_id: str) -> bool:
@@ -9252,6 +9440,10 @@ class JiuWenSwarmDeepAdapter:
             event_type = payload.get("event_type")
             if event_type in ("chat.delta", "chat.reasoning", "chat.final"):
                 had_assistant_output = True
+            if event_type == "chat.delta":
+                # Single choke point for forwarded text: memo it so a demoted
+                # goal attempt final can skip text the bubble already shows.
+                self._note_round_visible_text(str(payload.get("content") or ""))
             if event_type == "chat.final":
                 emitted_terminal_chat_final = True
             # Persist goal-completed cards at the stream yield choke point so
@@ -9444,6 +9636,8 @@ class JiuWenSwarmDeepAdapter:
                 )
 
             if pending_goal_op is not None:
+                # dispatch 前采样：之后 active_round 可能已切到 goal
+                defer_goal_history = self._should_defer_goal_objective_history(session_id)
                 interaction_stream = await self._instance.attach_output()
                 control = await self._dispatch_goal_control(
                     action=str(pending_goal_op.get("action") or "get"),
@@ -9507,9 +9701,12 @@ class JiuWenSwarmDeepAdapter:
                     action=goal_action if isinstance(goal_action, str) else None,
                     result_type=result_type if isinstance(result_type, str) else None,
                     goal_payload=goal_snapshot if isinstance(goal_snapshot, dict) else None,
+                    defer=defer_goal_history,
                 )
                 # Only keep the lease when set/resume left an ACTIVE goal to run.
-                if result_type != "goal_stream" or interaction_stream is None:
+                if result_type != "goal_stream":
+                    # 控制类结果（未进入 goal 执行）：挂起历史立刻落盘
+                    self._flush_pending_goal_objective_history(session_id)
                     if interaction_stream is not None:
                         await interaction_stream.close(abort_active_round=False)
                         interaction_stream = None
@@ -9517,7 +9714,19 @@ class JiuWenSwarmDeepAdapter:
                         yield chunk
                     interaction_stream_abort = False
                     return
+                if interaction_stream is None:
+                    # chat.send 仍持有 output lease 时 attach_output 会返回 None；
+                    # goal 正文会从那条流继续吐。若此处 flush，用户目标历史时间戳
+                    # 仍停在 set 瞬间，重载顺序必错（见 web_19fd08* 会话）。
+                    # 忙碌推迟时留给持有 lease 的流在 user→goal 边界再落盘。
+                    if not defer_goal_history:
+                        self._flush_pending_goal_objective_history(session_id)
+                    async for chunk in _yield_runtime_accepted():
+                        yield chunk
+                    interaction_stream_abort = False
+                    return
             elif goal_stream_request or attach_goal_request:
+                defer_goal_history = self._should_defer_goal_objective_history(session_id)
                 if goal_snapshot is not None:
                     yield AgentResponseChunk(
                         request_id=rid,
@@ -9534,6 +9743,7 @@ class JiuWenSwarmDeepAdapter:
                     action=goal_action if isinstance(goal_action, str) else None,
                     result_type="goal_stream" if goal_stream_request else "goal_control",
                     goal_payload=goal_snapshot if isinstance(goal_snapshot, dict) else None,
+                    defer=defer_goal_history,
                 )
                 if attach_goal_request:
                     gm = self._get_goal_manager()
@@ -9638,7 +9848,11 @@ class JiuWenSwarmDeepAdapter:
                 and not attach_goal_request
                 and not goal_stream_request
             )
+            # A previous consumer may have stopped mid-round; this stream must
+            # sample the run kind again on its own first chunk.
+            self._reset_round_kind_latch()
             async for chunk in interaction_stream:
+                self._track_round_output_boundary(chunk)
                 # First chunk handed back by the runner: records the time to
                 # first token for this round.
                 if not first_chunk_seen:
@@ -9665,7 +9879,9 @@ class JiuWenSwarmDeepAdapter:
                     # Only stamp provenance / inject split on new visible deltas.
                     # A late user-round chat.final must keep the prior content kind.
                     if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
-                        boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                        boundary = self._begin_visible_chat_content(
+                            stream_is_user_originated, session_id=session_id
+                        )
                         if boundary is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -9750,7 +9966,9 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
-                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                    boundary = self._begin_visible_chat_content(
+                        stream_is_user_originated, session_id=session_id
+                    )
                     if boundary is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -9788,7 +10006,9 @@ class JiuWenSwarmDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    boundary = self._begin_visible_chat_content(stream_is_user_originated)
+                    boundary = self._begin_visible_chat_content(
+                        stream_is_user_originated, session_id=session_id
+                    )
                     if boundary is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -9990,6 +10210,10 @@ class JiuWenSwarmDeepAdapter:
                 is_complete=False,
             )
         finally:
+            # 兜底落盘：仅当没有其它并发流可接管时才 flush。
+            # goal set 因 lease 被占而早退时，chat 流还在，不能在这里落盘。
+            if not self._session_has_other_running_agent_tasks(session_id):
+                self._flush_pending_goal_objective_history(session_id)
             close_agent_run_span(_run_span, session_id=session_id)
             if _debug_logger is not None:
                 _debug_logger.flush()
