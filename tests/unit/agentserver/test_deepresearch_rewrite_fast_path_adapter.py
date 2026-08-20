@@ -144,6 +144,27 @@ async def test_adapter_fast_path_ignores_plain_query_without_dependencies():
     commit.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_adapter_fast_path_ignores_missing_optional_rewrite_runtime():
+    adapter = object.__new__(JiuWenClawDeepAdapter)
+    adapter._model = SimpleNamespace(invoke=AsyncMock())
+    adapter._build_deepresearch_rewrite_model = Mock()
+
+    real_import = __import__
+
+    def import_without_rewrite_tools(name, *args, **kwargs):
+        if name == "jiuwenclaw.agentserver.tools.deepresearch":
+            raise ImportError("optional DeepResearch runtime is unavailable")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=import_without_rewrite_tools):
+        result = await adapter._try_deepresearch_rewrite_fast_path("普通消息")
+
+    assert result is None
+    adapter._build_deepresearch_rewrite_model.assert_not_called()
+    adapter._model.invoke.assert_not_awaited()
+
+
 def test_rewrite_model_uses_each_request_overlay_over_reloaded_config():
     adapter = object.__new__(JiuWenClawDeepAdapter)
     reloaded_config = {

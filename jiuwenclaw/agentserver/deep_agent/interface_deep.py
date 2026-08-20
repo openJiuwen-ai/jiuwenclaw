@@ -8873,7 +8873,15 @@ class JiuWenClawDeepAdapter:
             self,
             query: object,
     ) -> RewriteFastPathResult | None:
-        from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
+        try:
+            from jiuwenclaw.agentserver.tools.deepresearch import rewrite_tools
+        except ImportError as error:
+            logger.info(
+                "[DeepResearchRewriteFastPath] disabled because optional "
+                "runtime is unavailable: %s",
+                error,
+            )
+            return None
 
         rewrite_model: Model | None = None
 
