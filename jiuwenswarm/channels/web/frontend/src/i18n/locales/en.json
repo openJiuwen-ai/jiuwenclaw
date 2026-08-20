@@ -309,7 +309,8 @@
       "configured": "Configured Models",
       "free": "Free Models",
       "addModel": "Add Custom Model",
-      "placeholder": "Select Model"
+      "placeholder": "Select Model",
+      "backup": "AgentOS"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
     "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
@@ -1086,31 +1087,101 @@
       "referencedByTeams": "Referenced by {{count}} Team(s)"
     },
     "groups": {
-      "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },
-      "modelVideo": { "label": "Video Model", "hint": "Video understanding/generation model (optional)" },
-      "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
-      "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
-      "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
-      "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
-      "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
-      "freeSearch": { "label": "Free Search Engines", "hint": "Enable free search engines" },
-      "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
-      "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only, Team required" },
-      "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
-      "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
-      "kvCacheAffinity": { "label": "Compute Affinity", "hint": "Control Ascend KV Cache affinity" },
-      "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
-      "a2ui": { "label": "A2UI", "hint": "Enable or disable generated UI rendering and A2UI runtime prompts." },
-      "swarmflow": { "label": "SwarmFlow", "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode." },
-      "externalCliAgents": { "label": "Third-Party Agents", "hint": "Configure third-party agents available in Team mode." },
-      "symphony": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "skillRetrieval": { "label": "Skill Symphony", "hint": "Control Skill Symphony" },
-      "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
-      "email": { "label": "Email Settings", "hint": "Email account and token settings" },
-      "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
+      "modelDefault": {
+        "label": "Default Model (Main Chat)",
+        "hint": "Primary chat model service and auth"
+      },
+      "modelVideo": {
+        "label": "Video Model",
+        "hint": "Video understanding/generation model (optional)"
+      },
+      "modelAudio": {
+        "label": "Audio Model",
+        "hint": "Speech recognition/synthesis model (optional)"
+      },
+      "modelVision": {
+        "label": "Vision Model",
+        "hint": "Image understanding model (optional)"
+      },
+      "model": {
+        "label": "Model Configuration",
+        "hint": "Model service and authentication settings"
+      },
+      "embed": {
+        "label": "Embed Configuration",
+        "hint": "Embed service and authentication settings"
+      },
+      "thirdParty": {
+        "label": "Third-Party Services",
+        "hint": "API key settings"
+      },
+      "freeSearch": {
+        "label": "Free Search Engines",
+        "hint": "Enable free search engines"
+      },
+      "evolution": {
+        "label": "Evolution Settings",
+        "hint": "Online skill evolution settings"
+      },
+      "agents": {
+        "label": "Multi-Agent Configuration",
+        "hint": "For cluster mode only, Team required"
+      },
+      "team": {
+        "label": "Team Configuration",
+        "hint": "Multi-agent team settings"
+      },
+      "contextEngine": {
+        "label": "Context Compression",
+        "hint": "Enable or disable dialogue context compression"
+      },
+      "kvCacheAffinity": {
+        "label": "Compute Affinity",
+        "hint": "Control Ascend KV Cache affinity"
+      },
+      "permissions": {
+        "label": "Tool Safety Guardrail",
+        "hint": "Enable or disable permission checks for tool calls"
+      },
+      "a2ui": {
+        "label": "A2UI",
+        "hint": "Enable or disable generated UI rendering and A2UI runtime prompts."
+      },
+      "swarmflow": {
+        "label": "SwarmFlow",
+        "hint": "Enable or disable the SwarmFlow process view and monitoring in Team mode."
+      },
+      "externalCliAgents": {
+        "label": "Third-Party Agents",
+        "hint": "Configure third-party agents available in Team mode."
+      },
+      "symphony": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "skillRetrieval": {
+        "label": "Skill Symphony",
+        "hint": "Control Skill Symphony"
+      },
+      "memory": {
+        "label": "Memory Sensitive Info Filter",
+        "hint": "Configure sensitive content types forbidden from memory"
+      },
+      "email": {
+        "label": "Email Settings",
+        "hint": "Email account and token settings"
+      },
+      "other": {
+        "label": "Other Settings",
+        "hint": "Unclassified extended parameters"
+      },
       "proactive": {
         "label": "Proactive Recommendation",
         "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      },
+      "agentos": {
+        "label": "AgentOS Models",
+        "hint": "Manually added AgentOS models; read-only and switchable, does not override the startup default"
       }
     },
     "booleanLabels": {
@@ -1121,41 +1192,41 @@
       "dynamicGraph": "Enable dynamic graph",
       "kvCacheRelease": "Legacy path (KV release)",
       "kvCacheAffinity": "New path (Ascend affinity)",
-        "externalCliClaude": "Enable Claude",
-        "externalCliCodex": "Enable Codex",
-        "externalCliUseBuiltin": "Use built-in"
-      },
-      "externalCli": {
-        "claude": "Claude",
-        "codex": "Codex",
-        "claudeHint": "Use Claude from PATH or specify an executable path.",
-        "codexHint": "Use Codex from PATH or specify an executable path.",
-        "useBuiltin": "Use built-in",
-        "detect": "Detect",
-        "selectFile": "Choose file",
-        "selectFileTitle": "Choose {{agent}} command",
-        "selectFileFailed": "Failed to choose file",
-        "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
-        "statusUnknown": "Not checked",
-        "statusOk": "Available",
-        "statusWarning": "May be incompatible",
-        "statusMissing": "Not found",
-        "statusUnsupported": "Unsupported path",
-        "statusUnavailable": "Unavailable",
-        "version": "Version {{version}}",
-        "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
-        "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
-        "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
-        "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
-        "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
-        "dependencyInstallFailed": "{{agent}} dependency installation failed. Check the installation log and try again.",
-        "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
-        "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
-        "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
-        "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
-        "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
-        "dependencyInstallRecentOutput": "Installation log"
-      },
+      "externalCliClaude": "Enable Claude",
+      "externalCliCodex": "Enable Codex",
+      "externalCliUseBuiltin": "Use built-in"
+    },
+    "externalCli": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "claudeHint": "Use Claude from PATH or specify an executable path.",
+      "codexHint": "Use Codex from PATH or specify an executable path.",
+      "useBuiltin": "Use built-in",
+      "detect": "Detect",
+      "selectFile": "Choose file",
+      "selectFileTitle": "Choose {{agent}} command",
+      "selectFileFailed": "Failed to choose file",
+      "cliPathPlaceholder": "Auto-detect {{agent}}, or enter an executable path",
+      "statusUnknown": "Not checked",
+      "statusOk": "Available",
+      "statusWarning": "May be incompatible",
+      "statusMissing": "Not found",
+      "statusUnsupported": "Unsupported path",
+      "statusUnavailable": "Unavailable",
+      "version": "Version {{version}}",
+      "compatibilityWarning": "The detected version may be incompatible. You can change the executable path, upgrade the version, or select \"Use built-in\" to use the default startup mode.",
+      "compatibilityWarningWithVersion": "The detected version may be incompatible. You can change the executable path, upgrade to {{version}} or later, or select \"Use built-in\" to use the default startup mode.",
+      "windowsScriptPath": "The selected file is a Windows script. Choose a real executable, or select \"Use built-in\".",
+      "dependencyInstalling": "{{agents}} dependencies are being installed in the background. The agent is not enabled during installation; after installation finishes, enable it again and save the configuration.",
+      "dependencyInstalled": "Enable {{agent}} again and save the configuration.",
+      "dependencyInstallFailed": "{{agent}} dependency installation failed. Check the installation log and try again.",
+      "dependencyInstallPhasePreparing": "Preparing {{agent}} dependency installation",
+      "dependencyInstallPhaseInstalling": "Installing {{agent}} dependencies",
+      "dependencyInstallPhaseVerifying": "Verifying {{agent}} dependencies",
+      "dependencyInstallPhaseSucceeded": "{{agent}} dependencies installed",
+      "dependencyInstallPhaseFailed": "{{agent}} dependency installation failed",
+      "dependencyInstallRecentOutput": "Installation log"
+    },
     "permissionsTools": {
       "title": "Tool Guardrail (permissions.tools)",
       "subtitle": "Set allow / ask / deny per tool name; writes config and hot-reloads. Pattern-based rules are not managed here.",
@@ -1223,6 +1294,11 @@
       "proactiveIntEmpty": "{{field}} cannot be empty; must be a positive integer ({{lo}}-{{hi}})",
       "proactiveIntNotInteger": "{{field}} must be a positive integer ({{lo}}-{{hi}}); invalid value: {{value}}",
       "proactiveIntOutOfRange": "{{field}} must be a positive integer in {{lo}}-{{hi}}; current: {{value}}"
+    },
+    "agentos": {
+      "backupBadge": "AgentOS",
+      "switchToThis": "Use this model",
+      "readonly": "Read-only (config.yaml-defined)"
     }
   },
   "cron": {
@@ -1238,7 +1314,11 @@
     "enable": "Enable",
     "disable": "Disable",
     "loading": "Loading scheduled tasks...",
-    "empty": "No scheduled tasks",
+    "empty": {
+      "createButton": "Create scheduled task",
+      "templateSectionTitle": "Templates",
+      "templateMore": "More"
+    },
     "deleteConfirm": "Are you sure you want to delete this task?",
     "autoManaged": "Auto-managed",
     "autoManagedHint": "This task is auto-created/deleted by the proactive recommendation toggle (Settings → Proactive Recommendation). Only the cron expression and timezone can be edited here; other fields (name/status/description/offset/channel) are read-only. To remove it, turn off the toggle in Settings.",
@@ -1292,11 +1372,6 @@
       "history": "Run history",
       "triggeredSessions": "Run history",
       "noTriggeredSessions": "No trigger records"
-    },
-    "empty": {
-      "createButton": "Create scheduled task",
-      "templateSectionTitle": "Templates",
-      "templateMore": "More"
     },
     "history": {
       "comingSoon": "Coming soon"
@@ -2461,10 +2536,22 @@
       "cancel": "Cancel",
       "confirm": "Confirm"
     },
-    "runtime": { "processing": "Processing" },
-    "deleteDialog": { "title": "Delete", "description": "Delete “<name>{{title}}</name>”? This action cannot be undone." },
-    "notFound": { "title": "Conversation not found or deleted", "newConversation": "New conversation" },
-    "errors": { "delete": "Failed to delete conversation", "create": "Failed to create conversation", "send": "Failed to send message" }
+    "runtime": {
+      "processing": "Processing"
+    },
+    "deleteDialog": {
+      "title": "Delete",
+      "description": "Delete “<name>{{title}}</name>”? This action cannot be undone."
+    },
+    "notFound": {
+      "title": "Conversation not found or deleted",
+      "newConversation": "New conversation"
+    },
+    "errors": {
+      "delete": "Failed to delete conversation",
+      "create": "Failed to create conversation",
+      "send": "Failed to send message"
+    }
   },
   "mermaid": {
     "rendering": "Drawing…",

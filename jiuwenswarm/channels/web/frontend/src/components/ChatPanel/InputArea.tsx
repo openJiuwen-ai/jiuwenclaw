@@ -25,6 +25,8 @@ import {
   useSessionStore,
   useWorkspaceStore,
   resolveEffectiveModel,
+  modelSelectKey,
+  modelDisplayName,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -3016,7 +3018,7 @@ function ModelSelector({
             <ModelProviderIcon model={selectedModel} />
           </span>
           <span className="chat-mode-select__label">
-            {selectedModel.alias || selectedModel.model_name}
+            {modelDisplayName(selectedModel)}
           </span>
         </span>
         {!disabled && (
@@ -3046,8 +3048,12 @@ function ModelSelector({
                 <>
                   <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
                   {models.map((m, idx) => {
-                    const key = m.alias || m.model_name;
-                    const isActive = key === (selectedModel.alias || selectedModel.model_name);
+                    // 用 modelSelectKey（含 #origin_index）作区分 key，同名 defaults/agentos
+                    // 才能各自独立选中、对勾只落在真正选中那一条（issue）。
+                    const key = modelSelectKey(m);
+                    const activeKey = modelSelectKey(selectedModel);
+                    const isActive = key === activeKey;
+                    const display = modelDisplayName(m);
                     return (
                       <button
                         type="button"
@@ -3066,7 +3072,12 @@ function ModelSelector({
                           <span className="chat-mode-select__icon" aria-hidden="true">
                             <ModelProviderIcon model={m} />
                           </span>
-                          <span className="chat-mode-select__label">{key}</span>
+                          <span className="chat-mode-select__label">{display}</span>
+                          {m.is_agentos === true && (
+                            <span className="text-[9px] px-1 py-0.5 rounded bg-secondary/40 text-text-muted border border-border ml-1">
+                              {t('chat.modelSelector.backup')}
+                            </span>
+                          )}
                         </span>
                         {isActive && (
                           <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">

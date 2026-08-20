@@ -58,6 +58,10 @@ export interface ModelEntry {
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
+  /** AgentOS 备份模型标记：由 config.yaml 手动配置，与 defaults 并列、同等可选可切换，
+   * 但 is_default 恒为 false 不抢启动默认。前端据此区分置灰只读展示、并让 agentos
+   * 进 ModelSelector 下拉（is_default!==false || is_agentos）。 */
+  is_agentos?: boolean;
   /** 可选别名，用于快捷切换模型（如 "gpt" → "gpt-4o"） */
   alias?: string;
   /** 用于原子性重命名操作，指定原模型名 */

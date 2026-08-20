@@ -72,7 +72,31 @@ function normalizeSession(session: Session): Session {
 }
 
 /**
- * 按 `alias || model_name` 在可选模型列表里解析出"实际生效"的模型条目。
+ * 生成模型在"选择上下文"里的区分 key。
+ *
+ * 同名模型（如 defaults 和 agentos 都配了 GLM-5.2）仅靠 `alias || model_name`
+ * 无法区分，前端 ModelSelector 会给两条都打√、选中永远命中数组靠前的 defaults。
+ * 用 `model_name#origin_index` 作 key 后：origin_index 由后端 models.list 透传，
+ * 等于该条在 get_default_models() 返回列表里的序号，也与 AgentServer 侧
+ * interface_deep._build_model_cache 的 `{model_name}#{idx}` cache key 一致——
+ * 前端把这个 key 作为 model_name 发给后端，_resolve_model_for_request 即可
+ * 精确命中指定条目（含 agentos）。alias 条目仍用 alias（alias 本就要求唯一）。
+ *
+ * 显示给用户的文本仍用 `alias || model_name`（见 modelDisplayName），区分 key
+ * 只用于内部选中态比对与发给后端的请求参数。
+ */
+export function modelSelectKey(m: ModelEntry): string {
+  if (m.alias) return m.alias;
+  return `${m.model_name}#${m.origin_index ?? 0}`;
+}
+
+/** 模型的用户可见显示名（不含 #index 区分后缀）。 */
+export function modelDisplayName(m: ModelEntry): string {
+  return m.alias || m.model_name;
+}
+
+/**
+ * 按 `modelSelectKey`（含 origin_index 区分）在可选模型列表里解析出"实际生效"的模型条目。
  *
  * 背景（bug003）：会话记录的 `selectedModelName` 只是一个名字字符串，模型改名/改别名后
  * 这个字符串可能不再对应任何可选模型。之前 UI 显示（`InputArea.tsx` 的 `ModelSelector`）
@@ -80,9 +104,14 @@ function normalizeSession(session: Session): Session {
  * 和"实际请求的 model_name"可能不一致，且旧字符串失配后无法感知。抽成共享函数后两边统一
  * 走同一次解析，谁都不会再吐出陈旧、未经校验的名字字符串。
  *
- * @param chatAvailableModels 当前可选的模型列表（is_default!==false 的模型）
- * @param selectedModelName 该会话记录的模型名字字符串（可能是改名前的陈旧值）
- * @param defaultModelName 后端配置的默认模型名字字符串
+ * 同名区分（issue）：先按 `modelSelectKey` 精确匹配（含 #origin_index），可区分同名
+ * defaults/agentos；命中不到再回退到 alias 或 model_name 的同名匹配（兼容 Zen 免费模型
+ * 后端回传纯 model_name、以及老版纯 name 值），仍找不到则取列表首项兜底。
+ * 回退分支命中同名首个恒为 defaults，语义安全，不会误选 agentos 抢占启动默认。
+ *
+ * @param chatAvailableModels 当前可选的模型列表（is_default!==false 或 is_agentos 的模型）
+ * @param selectedModelName 该会话记录的模型 key 字符串（可能是改名前的陈旧值，或老版纯 name）
+ * @param defaultModelName 后端配置的默认模型 key 字符串
  * @returns 解析命中的模型条目；`chatAvailableModels` 为空（模型列表尚未加载）时返回 null
  */
 export function resolveEffectiveModel(
@@ -92,19 +121,25 @@ export function resolveEffectiveModel(
 ): ModelEntry | null {
   if (chatAvailableModels.length === 0) return null;
   const displayed = selectedModelName || defaultModelName;
-  // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
-  // 也可能存的是真实 API id（后端 session.metadata.model 回传恢复时是
-  // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
-  // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
-  // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
-  // 完成后下拉框自动切回配置的模型"。
-  return (
-    chatAvailableModels.find(
+  if (displayed) {
+    // 精确匹配（含 #origin_index，可区分同名 defaults/agentos）
+    const exact = chatAvailableModels.find((m) => modelSelectKey(m) === displayed);
+    if (exact) return exact;
+    // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
+    // 也可能存的是真实 API id（后端 session.metadata.model 回传时是
+    // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
+    // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
+    // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
+    // 完成后下拉框自动切回配置的模型"。
+    const byAliasOrName = chatAvailableModels.find(
       (m) => m.alias === displayed || m.model_name === displayed,
-    ) ??
-    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
-    chatAvailableModels[0]
-  );
+    );
+    if (byAliasOrName) return byAliasOrName;
+    // 兼容老版纯 name 值：按 alias || model_name 找同名首个（恒 defaults）
+    const byDisplayName = chatAvailableModels.find((m) => modelDisplayName(m) === displayed);
+    if (byDisplayName) return byDisplayName;
+  }
+  return chatAvailableModels[0];
 }
 
 const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
@@ -464,15 +499,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
     // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
     //
-    // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
-    // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
-    // "Laguna S 2.1"），后端无法据此解析，会回退到默认模型。
+    // 返回 modelSelectKey（含 #origin_index），与 interface_deep 的
+    // {model_name}#{idx} cache key 对齐，后端 _resolve_model_for_request
+    // 据此精确命中同名 defaults/agentos 中的指定条目（issue）。
+    // 对单名模型（如 Zen 免费模型）：有 alias 时返回 alias（后端 cache 同样注册了
+    // alias→model 映射，可命中）；无 alias 时返回 model_name#origin_index，
+    // 后端 cache 同时持有该 #index key 与纯 model_name key，均可命中，行为不变。
+    // 失配兜底仍用 runtime.selectedModelName（兼容老值）。
     const resolved = resolveEffectiveModel(
       state.chatAvailableModels,
       runtime.selectedModelName,
       state.defaultModelName,
     );
-    return resolved ? resolved.model_name : runtime.selectedModelName;
+    return resolved ? modelSelectKey(resolved) : runtime.selectedModelName;
   },
 
   removeRuntime: (sessionId) => {
@@ -1229,17 +1268,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setAvailableModels: (models, activeModel) => {
     set(() => {
-      const defaultModels = models.filter((m) => m.is_default !== false);
+      // defaults 主对话模型（is_default!==false）+ agentos 备份模型（is_agentos===true）
+      // 均进 chatAvailableModels，使 ModelSelector 下拉两者并列可选可切换。
+      // 主干判定 is_default!==false 保持不动，仅追加 || is_agentos===true 让 agentos 进下拉。
+      const defaultOrAgentos = models.filter((m) => m.is_default !== false || m.is_agentos === true);
       // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
       // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
-      const chatModels = defaultModels.length > 0 ? defaultModels : models;
-      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
+      const chatModels = defaultOrAgentos.length > 0 ? defaultOrAgentos : models;
+      // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名。
+      // active_model 恒为 defaults 首位（agentos is_default=false 不抢），故不会误选 agentos 为默认。
+      // 注意 active_model 是纯 model_name，无法区分同名，故 matchedModel 必命中
+      // is_default!==false 的 defaults 条目（chatModels 中 agentos 的 model_name 同名但
+      // is_default=false，is_default!==false 过滤后顺序在前），符合"agentos 不抢启动默认"。
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
-      const selected = matchedModel
-        ? (matchedModel.alias || matchedModel.model_name)
-        : (chatModels[0] ? (chatModels[0].alias || chatModels[0].model_name) : null);
-      if (selected) {
-        try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
+      const baseModel = matchedModel ?? chatModels[0] ?? null;
+      // defaultModelName 存 modelSelectKey（含 #origin_index）以同名区分，
+      // 也写回 MODEL_STORAGE_KEY（仍存别名或纯名以兼容旧版读 localStorage 的逻辑）。
+      const selected = baseModel ? modelSelectKey(baseModel) : null;
+      const persisted = baseModel ? (baseModel.alias || baseModel.model_name) : null;
+      if (persisted) {
+        try { localStorage.setItem(MODEL_STORAGE_KEY, persisted); } catch { /* noop */ }
       }
       return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected };
     });
@@ -1249,6 +1297,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // 注意：这里只更新当次会话的内存态，不再写 MODEL_STORAGE_KEY——
     // 该 key 专门保存后端配置的默认模型（见 setAvailableModels），
     // 用户手动切模型不应污染"默认模型"这个标记，否则新建会话会继承到"最后用过的模型"。
+    // name 形参为 modelSelectKey（含 #origin_index），由 ModelSelector 传入，
+    // getEffectiveModelName 据此精确路由到指定同名条目（issue）。
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;

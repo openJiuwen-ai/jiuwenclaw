@@ -149,6 +149,10 @@ export interface AppSnapshot {
   contextWindowLimit: number | null;
   contextUsedPercentage: number | null;
   modelInfo: { provider: string; model: string; version: string };
+  /** 全局选中的 agentos 备份模型名（请求级注入）；null 表示使用启动默认 */
+  selectedAgentosModel: string | null;
+  /** 全局选中的 agentos 备份模型 provider（仅展示用，头部 Provider 行）；空表示未取到 */
+  selectedAgentosProvider: string;
   preferredLanguage: PreferredLanguage;
   sessionTitle: string;
   statusLineText: string | null;
@@ -376,6 +380,14 @@ export class CliPiAppState {
     model: "",
     version: "",
   };
+  /**
+   * 全局选中的 agentos 备份模型名（请求级注入）。
+   * 非空时 sendMessage 在 params 注入 model_name，由 AgentServer
+   * _resolve_model_for_request 命中 agentos 缓存条目。切回 defaults 模型
+   * 时由 setModel 清空（恢复启动默认模型路由）。
+   */
+  private selectedAgentosModel: string | null = null;
+  private selectedAgentosProvider: string = "";
   private preferredLanguage: PreferredLanguage = "zh";
   private memoryWarnings: {
     path: string;
@@ -1108,6 +1120,8 @@ export class CliPiAppState {
       contextWindowLimit: this.contextWindowLimit,
       contextUsedPercentage: this.contextUsedPercentage,
       modelInfo: this.modelInfo,
+      selectedAgentosModel: this.selectedAgentosModel,
+      selectedAgentosProvider: this.selectedAgentosProvider,
       preferredLanguage: this.preferredLanguage,
       sessionTitle: this.sessionTitle,
       statusLineText: this.statusLineText,
@@ -1204,6 +1218,7 @@ export class CliPiAppState {
       setMode: this.setMode,
       markPlanEntryFromSlashCommand: this.markPlanEntryFromSlashCommand,
       setModel: this.setModel,
+      setSelectedAgentosModel: this.setSelectedAgentosModel,
       setPreferredLanguage: this.setPreferredLanguage,
       setThemeName: this.setThemeName,
       setAccentColor: this.setAccentColor,
@@ -1948,6 +1963,27 @@ export class CliPiAppState {
       this.modelInfo = { ...this.modelInfo, model: trimmed };
       this.emitChange();
     }
+    // 切回 defaults 模型 → 放弃 agentos 请求级注入，恢复启动默认模型路由
+    if (this.selectedAgentosModel !== null) {
+      this.selectedAgentosModel = null;
+      this.selectedAgentosProvider = "";
+      this.emitChange();
+    }
+  };
+
+  /**
+   * 全局选中 agentos 备份模型（请求级注入）。与 setModel 互斥：
+   * 选 agentos 不改 modelInfo（启动默认不变），仅记录注入名；
+   * setModel 会清空本字段。
+   */
+  readonly setSelectedAgentosModel = (name: string | null, provider?: string): void => {
+    const trimmed = name ? name.trim() : "";
+    const next = trimmed || null;
+    if (this.selectedAgentosModel !== next || this.selectedAgentosProvider !== (provider ?? "")) {
+      this.selectedAgentosModel = next;
+      this.selectedAgentosProvider = next ? (provider ?? "") : "";
+      this.emitChange();
+    }
   };
 
   readonly setPreferredLanguage = (language: PreferredLanguage): void => {
@@ -2047,6 +2083,9 @@ export class CliPiAppState {
       ...(attachments?.length ? { attachments } : {}),
       ...(planEntrySource ? { plan_entry_source: planEntrySource } : {}),
       ...(skills?.length ? { skills } : {}),
+      // agentos 备份模型：请求级注入 model_name，AgentServer 据此路由到 agentos 缓存条目。
+      // 为空时省略，沿用启动默认模型。
+      ...(this.selectedAgentosModel ? { model_name: this.selectedAgentosModel } : {}),
     };
     // Pre-check: reject messages whose serialized frame exceeds 7 MB (gateway
     // server max_size is 8 MB; leave 1 MB margin for JSON overhead).

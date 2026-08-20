@@ -54,6 +54,7 @@ import {
   usePlanStore,
   useWorkspaceStore,
   useCronStore,
+  modelSelectKey,
 } from './stores';
 import { useChatRoute } from './multi-session/routing/useChatRoute';
 import { ConversationSidebar, type NewConversationOptions } from './multi-session/sidebar/ConversationSidebar';
@@ -384,7 +385,7 @@ function AppContent() {
       const runtime = useSessionStore.getState().getRuntime(sessionId);
       if (defaultModel && !runtime?.selectedModelName) {
         useSessionStore.getState().ensureRuntime(sessionId);
-        setSelectedModelName(sessionId, defaultModel.alias || defaultModel.model_name);
+        setSelectedModelName(sessionId, modelSelectKey(defaultModel));
       }
     }
   }, [activeNav, sessionId]);
