@@ -344,6 +344,7 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
+    probe_mcp_live_connection,
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.task_loop_config import (
@@ -1253,6 +1254,8 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode: str | None = None
         # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
         self._memory_reindex_task: asyncio.Task | None = None
+        # 后台预热：web 重启后对 connected MCP 建进程级连接缓存，首轮对话不重 spawn。
+        self._mcp_prewarm_task: asyncio.Task | None = None
         self._model_anomaly_detection_rail: ModelAnomalyDetectionRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -3356,6 +3359,60 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] refresh_skill_rails after "
                     "reconcile failed: %s", exc,
                 )
+
+    def _start_mcp_prewarm(self) -> None:
+        """后台预热 connected MCP 的进程级连接缓存（仅 web root adapter）。
+
+        只建 Runner.resource_mgr 缓存，不挂任何会话（不碰
+        _session_selected_mcp / _registered_mcp_servers），保持 default-False 契约。
+        首轮对话 reconcile 命中 existing-entry 不重 spawn。失败隔离：单个 MCP
+        预热失败不阻断其余、不降级 state。
+        """
+        if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
+            return
+        self._mcp_prewarm_task = asyncio.create_task(
+            self._do_mcp_prewarm(),
+            name=f"mcp-prewarm-{self._agent_name}",
+        )
+
+    async def _do_mcp_prewarm(self) -> None:
+        """对 state=connected 的 MCP 跑 probe_mcp_live_connection 建进程级缓存。
+
+        预热失败不降级 state（保持 connected，让首轮对话 reconcile 重试）——web
+        用户可能重启后还没发消息，不应自动摘掉连接态，与 TUI 的 one-shot
+        disconnected 降级不同。
+        """
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_truly_connected_mcps,
+            )
+            names = [
+                str(r.get("name", "")).strip()
+                for r in list_truly_connected_mcps()
+                if r.get("name")
+            ]
+            if not names:
+                return
+            logger.info(
+                "[mcp-prewarm] prewarming %d connected MCP(s): %s",
+                len(names), names,
+            )
+            for name in names:
+                try:
+                    ok, reason = await probe_mcp_live_connection(name)
+                    if ok:
+                        logger.info("[mcp-prewarm] '%s' prewarmed", name)
+                    else:
+                        logger.warning(
+                            "[mcp-prewarm] '%s' prewarm failed: %s "
+                            "(will lazy-connect on first chat)", name, reason,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[mcp-prewarm] '%s' prewarm error: %s", name, exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[mcp-prewarm] background prewarm failed: %s", exc)
 
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
@@ -6677,6 +6734,15 @@ class JiuWenSwarmDeepAdapter:
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
         if self._skip_own_instance_build():
+            # Root adapter 只做 router/template holder，不建 DeepAgent instance。
+            # web channel 在此后台预热 connected MCP 的进程级连接缓存——首轮对话
+            # reconcile 在 session child 注册时命中缓存不重 spawn。不阻塞 create
+            # instance（fire-and-forget），不挂任何会话（不碰 _session_selected_mcp）。
+            if (
+                getattr(self, "_channel_id", "") == "web"
+                and not self._is_session_scoped_adapter
+            ):
+                self._start_mcp_prewarm()
             return
 
         model = self._create_model(config_base)
@@ -7883,6 +7949,10 @@ class JiuWenSwarmDeepAdapter:
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
+        # 取消 MCP 预热后台 task，避免 cleanup 后孤儿 task 触发 probe。
+        if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
+            self._mcp_prewarm_task.cancel()
+        self._mcp_prewarm_task = None
         await self._close_a2x_client()
 
     async def _cleanup_evolution_background_tasks(self) -> None:

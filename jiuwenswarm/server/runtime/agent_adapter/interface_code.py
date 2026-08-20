@@ -524,6 +524,14 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         self._dreaming_mode = "code"
 
         if self._skip_own_instance_build():
+            # Root adapter 不建 instance（DeepAdapter 同款逻辑）。web channel 在此
+            # 后台预热 connected MCP 的进程级缓存，首轮对话 reconcile 命中缓存不重
+            # spawn。fire-and-forget，不挂会话。
+            if (
+                getattr(self, "_channel_id", "") == "web"
+                and not self._is_session_scoped_adapter
+            ):
+                self._start_mcp_prewarm()
             return
 
         model = self._create_model(config_base)
