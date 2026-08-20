@@ -671,3 +671,71 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+
+class TestBooleanEnvOverride:
+    """A boolean env override must not silently beat configuration.
+
+    ``_get_bool_env`` returning False is an *override*; returning None is what
+    lets config.yaml remain authoritative. Reading an unset, blank or padded
+    variable as False turned "not overridden" into "off" with no diagnostic.
+    """
+
+    @pytest.mark.parametrize(
+        "env_value",
+        ["", " ", "\t", "\n"],
+    )
+    def test_blank_env_defers_to_config(
+        self, monkeypatch: pytest.MonkeyPatch, env_value
+    ):
+        # `docker run -e SKILL_CREATE`, compose interpolating an unset
+        # ${SKILL_CREATE}, and a CI env: block with a blank value all land here.
+        monkeypatch.setenv("SKILL_CREATE", env_value)
+        assert get_skill_create_enabled({"evolution": {"skill_create": True}}) is True
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            (" true", True),
+            ("true ", True),
+            ("  TRUE  ", True),
+            (" false", False),
+            ("false ", False),
+        ],
+    )
+    def test_surrounding_whitespace_is_stripped(
+        self, monkeypatch: pytest.MonkeyPatch, env_value, expected
+    ):
+        # .env files and YAML env blocks routinely carry padding.
+        monkeypatch.setenv("SKILL_CREATE", env_value)
+        assert get_skill_create_enabled({}) is expected
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            ("on", True), ("off", False),
+            ("yes", True), ("no", False),
+            ("y", True), ("n", False),
+            ("1", True), ("0", False),
+            ("t", True), ("f", False),
+        ],
+    )
+    def test_opposite_spellings_give_opposite_answers(
+        self, monkeypatch: pytest.MonkeyPatch, env_value, expected
+    ):
+        # The dangerous case was `on` and `off` both meaning off: `off` then
+        # works by accident while `on` fails silently.
+        monkeypatch.setenv("SKILL_CREATE", env_value)
+        assert get_skill_create_enabled({}) is expected
+
+    def test_unrecognised_value_falls_back_rather_than_disabling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SKILL_CREATE", "ture")  # a typo, not an instruction
+        assert get_skill_create_enabled({"evolution": {"skill_create": True}}) is True
+
+    def test_explicit_false_still_overrides_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("SKILL_CREATE", "false")
+        assert get_skill_create_enabled({"evolution": {"skill_create": True}}) is False

@@ -151,10 +151,48 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
+_TRUE_WORDS = frozenset({"true", "1", "yes", "y", "on", "t"})
+_FALSE_WORDS = frozenset({"false", "0", "no", "n", "off", "f"})
+
+
 def _get_bool_env(value: str | None) -> bool | None:
+    """Parse a boolean environment override, or None to defer to config.
+
+    Returning None matters as much as returning a bool: None is what lets
+    config.yaml stay authoritative. Anything this function turns into False is
+    an *override*, silently beating whatever the operator configured.
+
+    Three inputs used to be read as an explicit False:
+
+    * The empty string. ``docker run -e SKILL_CREATE``, a compose file
+      interpolating an unset ``${SKILL_CREATE}``, and a CI ``env:`` block with a
+      blank value all produce it. An unset variable must mean "not overridden",
+      not "off".
+    * A value with surrounding whitespace, routine in ``.env`` files and YAML
+      env blocks, where ``" true"`` meant False.
+    * Any truthy spelling outside {true, 1, yes} -- notably ``on``, which meant
+      the same as ``off``. Two opposite words producing one answer is worse than
+      rejecting both, because ``off`` then happens to work and ``on`` fails
+      silently.
+
+    Unrecognised values now return None rather than False, so a typo falls back
+    to configuration instead of quietly disabling a feature.
+    """
     if value is None:
         return None
-    return value.lower() in ("true", "1", "yes")
+    token = value.strip().lower()
+    if not token:
+        return None
+    if token in _TRUE_WORDS:
+        return True
+    if token in _FALSE_WORDS:
+        return False
+    logger.warning(
+        "[Config] ignoring unrecognised boolean environment value %r; "
+        "falling back to configuration",
+        value,
+    )
+    return None
 
 
 def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
