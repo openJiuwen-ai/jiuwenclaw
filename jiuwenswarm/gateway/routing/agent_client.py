@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
+# 流式响应空闲上限（无任何 chunk 的最长等待）：与一元请求同级 600s，
+# 防止 AgentServer 无产出时 gateway 转发循环被裸 queue.get() 永久堵住
+_STREAM_IDLE_TIMEOUT_SECONDS: float = 600.0
 
 
 class _ReceiverFailure:
@@ -574,7 +577,26 @@ class WebSocketAgentServerClient(AgentServerClient):
                     except asyncio.TimeoutError:
                         break
                 else:
-                    data = await queue.get()
+                    # 首包/流中空闲必须有界：queue.get() 裸等时，一旦 AgentServer 侧
+                    # 无产出（请求丢失/模型调用挂起），gateway 串行转发循环被永久
+                    # 堵住——后续所有渠道消息只入队无回复（ws/link 无响应事故）。
+                    try:
+                        data = await asyncio.wait_for(
+                            queue.get(),
+                            timeout=_STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as idle_exc:
+                        logger.warning(
+                            "[WebSocketAgentServerClient] 流式响应空闲超时: request_id=%s "
+                            "chunks=%d idle_timeout=%ss",
+                            rid,
+                            chunk_count,
+                            _STREAM_IDLE_TIMEOUT_SECONDS,
+                        )
+                        raise RuntimeError(
+                            f"AgentServer 流式响应空闲超时 (request_id={rid}, "
+                            f"idle_timeout={_STREAM_IDLE_TIMEOUT_SECONDS}s)"
+                        ) from idle_exc
                 if isinstance(data, _ReceiverFailure):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
                 chunk = parse_agent_server_wire_chunk(data)

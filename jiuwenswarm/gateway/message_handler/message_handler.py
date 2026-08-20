@@ -718,6 +718,11 @@ class MessageHandler(ABC):
             async with self._external_session_alias_lock:
                 resolved = self._external_session_aliases.get(key)
                 if resolved is None:
+                    logger.info(
+                        "[MessageHandler] 分配通道会话(session.create): channel=%s external=%s",
+                        channel_id,
+                        external_id,
+                    )
                     raw_mode = str((msg.params or {}).get("mode") or "agent")
                     try:
                         mode = ChannelMode(raw_mode)
@@ -727,6 +732,12 @@ class MessageHandler(ABC):
                         msg, ChannelControlState(mode=mode)
                     )
                     self._external_session_aliases[key] = resolved
+                    logger.info(
+                        "[MessageHandler] 通道会话分配完成: channel=%s external=%s -> %s",
+                        channel_id,
+                        external_id,
+                        resolved,
+                    )
         metadata = dict(msg.metadata or {})
         metadata.setdefault("external_session_id", external_id)
         msg.metadata = metadata
@@ -3526,8 +3537,18 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-                
-         
+
+                # 分段排障日志：消息从入队到派发的每一跳都要可观测
+                # （曾出现入队后无派发、无任何回复的事故，靠日志定位卡点）
+                logger.info(
+                    "[MessageHandler] 出队处理: id=%s method=%s channel_id=%s session_id=%s queue_depth=%d",
+                    msg.id,
+                    getattr(msg, "req_method", ""),
+                    msg.channel_id,
+                    msg.session_id,
+                    self._user_messages.qsize(),
+                )
+
                 # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
                 if await self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
