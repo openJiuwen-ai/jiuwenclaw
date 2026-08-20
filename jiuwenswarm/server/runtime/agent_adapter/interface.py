@@ -1547,6 +1547,16 @@ class JiuWenSwarm:
             if _reload_after_skills:
                 await self.create_instance()
                 self._refresh_team_shared_skill_links(request.session_id)
+                if handler_name == "handle_skills_toggle":
+                    # 启停即时生效：root 重建不级联 session adapter，存量会话的
+                    # SkillUseRail 仍持旧 disabled_skills（每轮构建提示词时过滤），
+                    # 这里把最新状态扇出到全部存活 session adapter。
+                    fan_out = getattr(self._adapter, "refresh_skill_rails_for_all_sessions", None)
+                    if callable(fan_out):
+                        try:
+                            await fan_out()
+                        except Exception as exc:
+                            logger.warning("[JiuWenSwarm] skills.toggle 扇出刷新失败: %s", exc)
             elif handler_name == "handle_skills_uninstall" and payload.get("success"):
                 # 卸载只需轻量刷新 skill rail，不需要全量重建 agent 实例。
                 # SkillUseRail 会通过文件系统签名检测到目录删除并自动刷新，

@@ -4623,6 +4623,23 @@ class JiuWenSwarmDeepAdapter:
                 except (AttributeError, TypeError):
                     pass
 
+    async def refresh_skill_rails_for_all_sessions(self) -> None:
+        """skills.toggle 后调用（root adapter）：把最新 disabled_skills 扇出到全部存活
+        session adapter，使启停在存量会话的下一轮模型调用即生效（SkillUseRail 每轮
+        构建提示词时按 disabled_skills 过滤；此前 root 重建不级联，要等 reload/新会话）。
+        """
+        if self._is_session_scoped_adapter:
+            return
+        for sid, adapter in list(getattr(self, "_session_adapters", {}).items()):
+            try:
+                await adapter.refresh_skill_rails()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] skill rail fan-out failed: session_id=%s error=%s",
+                    sid,
+                    exc,
+                )
+
     def _build_symphony_orchestration_rail(
         self,
     ) -> SymphonyOrchestrationRail | None:
