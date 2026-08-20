@@ -800,7 +800,7 @@ function RunNode({
           </span>
         )}
         <ProgressBar completed={completedCount} total={totalCount} />
-        {run.budget && run.budget.total != null && (
+        {run.budget && (
           <span
             className={`text-xs shrink-0 tabular-nums px-1.5 py-0.5 rounded-full ${
               run.budget.exhausted
@@ -810,9 +810,10 @@ function RunNode({
             title={t('swarmflow.sessionBudget')}
           >
             {t('swarmflow.sessionBudgetShort')} {formatBudgetK(run.budget)}
+            {run.budget.total == null && ` · ${t('swarmflow.budgetUnlimited')}`}
           </span>
         )}
-        {run.workflow_budget && run.workflow_budget.total != null && (
+        {run.workflow_budget && (
           <span
             className={`text-xs shrink-0 tabular-nums px-1.5 py-0.5 rounded-full ${
               run.workflow_budget.exhausted
@@ -822,6 +823,7 @@ function RunNode({
             title={t('swarmflow.runBudget')}
           >
             {t('swarmflow.runBudgetShort')} {formatBudgetK(run.workflow_budget)}
+            {run.workflow_budget.total == null && ` · ${t('swarmflow.budgetUnlimited')}`}
           </span>
         )}
         {budgetExhaustedScope && (
