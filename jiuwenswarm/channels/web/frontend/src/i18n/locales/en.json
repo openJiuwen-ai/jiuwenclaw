@@ -3168,7 +3168,7 @@
     "stopHint": "Stop",
     "sessionBudget": "Session budget (team-wide, never resets)",
     "runBudget": "Run budget (META.workflow_token_limit)",
-    "sessionBudgetShort": "Sess",
+    "sessionBudgetShort": "Session",
     "runBudgetShort": "Run",
     "budgetUnlimited": "unbounded",
     "budgetExhaustedSession": "Session budget exhausted",
