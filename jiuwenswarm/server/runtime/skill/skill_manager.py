@@ -459,7 +459,9 @@ class SkillManager:
     # -----------------------------------------------------------------------
 
     async def handle_skills_list(self, params: dict) -> dict:
-        """返回所有可用 skill（本地 + marketplace 中未安装的）.
+        """返回所有可用 skill（本地已安装 + marketplace 中未安装的）.
+
+        注意：不再返回内置技能目录中未安装的技能，前端技能栏只展示实际已安装的技能。
 
         params:
             refresh_marketplaces: bool (可选, 默认 False)
@@ -475,9 +477,8 @@ class SkillManager:
         # 使其无需重启 server、刷新"我的技能"即可显示（与导入本地技能一致）。
         self._register_unmanaged_local_skills()
         local = self._scan_local_skills()
-        builtin = self._scan_builtin_skills()
         marketplace = self._scan_marketplace_skills()
-        out: dict[str, Any] = {"skills": local + builtin + marketplace}
+        out: dict[str, Any] = {"skills": local + marketplace}
         if bool(params.get("with_installed", False)):
             installed = await self.handle_skills_installed(params)
             out["plugins"] = installed.get("plugins") or []

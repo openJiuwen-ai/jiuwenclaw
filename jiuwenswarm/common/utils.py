@@ -630,7 +630,7 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    default_skills = ["xiaoyi-web-search"]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -674,6 +674,51 @@ def _install_default_builtin_skills(
     if installed_skills:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 
+def ensure_builtin_skills_installed() -> None:
+    """每次启动时检查并补装缺失的内置技能（幂等）。
+
+    与 prepare_workspace 不同，此函数不依赖 config.yaml 是否存在，
+    专门用于解决升级后内置技能不补装的问题。
+
+    只补装 default_skills 中指定的技能，不扫描全部内置技能。
+    """
+    # 默认预装的技能列表
+    default_skills = ["xiaoyi-web-search"]
+
+    builtin_dir = get_builtin_skills_dir()
+    if not builtin_dir.exists() or not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过补装: {builtin_dir}")
+        return
+
+    user_skills_dir = get_agent_skills_dir()
+    user_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # 只扫描 default_skills 中指定的内置技能
+    builtin_skills = [
+        item for item in builtin_dir.iterdir()
+        if item.is_dir()
+        and (item / "SKILL.md").exists()
+        and item.name in default_skills
+    ]
+
+    installed_skills = []
+    for skill_path in builtin_skills:
+        skill_name = skill_path.name
+        user_skill_path = user_skills_dir / skill_name
+
+        # 已存在则跳过（不覆盖用户可能修改过的技能）
+        if user_skill_path.exists():
+            continue
+
+        try:
+            shutil.copytree(skill_path, user_skill_path)
+            logger.info(f"已补装内置技能: {skill_name}")
+            installed_skills.append(skill_name)
+        except Exception as e:
+            logger.error(f"补装内置技能失败 {skill_name}: {e}")
+
+    if installed_skills:
+        _update_skills_state_for_builtin(user_skills_dir, installed_skills)
 
 def _migrate_from_jiuwenclaw_root() -> bool:
     """Migrate from legacy ~/.jiuwenclaw/ to ~/.jiuwenswarm/.
