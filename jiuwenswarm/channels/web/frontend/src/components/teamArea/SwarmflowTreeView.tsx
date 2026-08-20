@@ -760,6 +760,15 @@ function RunNode({
     return detectPhaseLoops(topLevel);
   }, [run.phases]);
 
+  // Exhaustion hint source: explicit failure scope first, then any ledger that
+  // has overrun its ceiling. A completed run can still finish over budget —
+  // its in-flight calls were settled after the limit was crossed — so the
+  // pill must not be gated on status === 'failed'.
+  const budgetExhaustedScope =
+    run.budget_exhausted_scope ??
+    (run.budget?.exhausted ? 'session' : null) ??
+    (run.workflow_budget?.exhausted ? 'workflow' : null);
+
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-card/50">
       <div
@@ -793,7 +802,9 @@ function RunNode({
         <ProgressBar completed={completedCount} total={totalCount} />
         {run.budget && run.budget.total != null && (
           <span
-            className="text-xs text-text-muted shrink-0 tabular-nums"
+            className={`text-xs shrink-0 tabular-nums ${
+              run.budget.exhausted ? 'text-red-500' : 'text-text-muted'
+            }`}
             title={t('swarmflow.sessionBudget')}
           >
             {formatBudgetK(run.budget)}
@@ -802,16 +813,16 @@ function RunNode({
         {run.workflow_budget && run.workflow_budget.total != null && (
           <span
             className={`text-xs shrink-0 tabular-nums ${
-              run.workflow_budget.exhausted ? 'text-red-500' : 'text-violet-500'
+              run.workflow_budget.exhausted ? 'text-red-500' : 'text-green-500'
             }`}
             title={t('swarmflow.runBudget')}
           >
             {formatBudgetK(run.workflow_budget)}
           </span>
         )}
-        {run.status === 'failed' && run.budget_exhausted_scope && (
+        {budgetExhaustedScope && (
           <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-500 shrink-0">
-            {run.budget_exhausted_scope === 'workflow'
+            {budgetExhaustedScope === 'workflow'
               ? t('swarmflow.budgetExhaustedWorkflow')
               : t('swarmflow.budgetExhaustedSession')}
           </span>
