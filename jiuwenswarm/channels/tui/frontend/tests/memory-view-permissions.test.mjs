@@ -76,6 +76,27 @@ controller.state = {
 };
 
 try {
+  const [projectMemoryItem] = controller.buildEditItems(
+    [
+      {
+        path: join(tempRoot, "JIUWENSWARM.md"),
+        relative_path: "JIUWENSWARM.md",
+        kind: "project",
+        exists: false,
+        size: 0,
+        mtime: 0,
+        lines: 0,
+      },
+    ],
+    tempRoot,
+    null,
+  );
+  assert.match(
+    projectMemoryItem.description,
+    /^Saved in /,
+    "project memory in a non-Git directory must be described as saved",
+  );
+
   chmodSync(memoryDir, 0o444);
 
   // Windows does not enforce chmod write bits on directories. In that case,
