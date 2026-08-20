@@ -2738,8 +2738,8 @@
     "stopHint": "停止",
     "sessionBudget": "会话预算（团队共享，不随运行重置）",
     "runBudget": "本次运行预算（META.workflow_token_limit）",
-    "sessionBudgetShort": "会话",
-    "runBudgetShort": "运行",
+    "sessionBudgetShort": "会话累计",
+    "runBudgetShort": "本次运行",
     "budgetUnlimited": "无限制",
     "budgetExhaustedSession": "会话预算耗尽",
     "budgetExhaustedWorkflow": "运行预算耗尽"
