@@ -64,6 +64,10 @@ export interface WorkflowAgent {
   activity_parts?: WorkflowAgentPart[];
   /** True on get_phase summaries — full body fetched on demand via get_agent. */
   detail_pending?: boolean;
+  /** ~200-char outcome stub carried on get_phase summaries (full text via get_agent). */
+  outcome_preview?: string;
+  /** ~200-char error stub carried on get_phase summaries (full text via get_agent). */
+  error_preview?: string;
 }
 
 export interface WorkflowPhase {
@@ -291,13 +295,20 @@ function mergeWorkflowAgent(
     reassembled.error !== undefined ||
     reassembled.activity !== undefined;
   const detailPending = incomingHasHeavy ? false : reassembled.detail_pending ?? false;
-  return {
+  // Full body arrived — drop the now-stale summary previews.
+  const clearPreviews = incomingHasHeavy;
+  const result: WorkflowAgent = {
     ...existing,
     ...reassembled,
     activity: reassembled.activity ?? existing?.activity,
     human_prompt: preferHumanPrompt(existing?.human_prompt, reassembled.human_prompt),
     detail_pending: detailPending,
   };
+  if (clearPreviews) {
+    delete result.outcome_preview;
+    delete result.error_preview;
+  }
+  return result;
 }
 
 function mergeWorkflowPhase(

@@ -166,6 +166,28 @@ class TestGetPhasePaging:
         assert "prompt" not in agents[0]
         assert "outcome" not in agents[0]
         assert "human_prompt" not in agents[0]
+        # A short outcome_preview is carried for the row stub.
+        assert agents[0]["outcome_preview"] == "outcome-0-0"
+
+    def test_get_phase_outcome_preview_truncates_long_text(self) -> None:
+        long_outcome = "x" * 500  # exceeds 200-char preview cap
+        agent = {
+            "id": "a_long", "name": "n", "status": "completed", "kind": "agent",
+            "outcome": long_outcome,
+        }
+        summary = wire_truncate._workflow_agent_summary(agent)
+        assert "outcome" not in summary
+        assert summary["outcome_preview"] == "x" * 200
+        assert summary["detail_pending"] is True
+
+    def test_get_phase_error_preview_when_agent_failed(self) -> None:
+        agent = {
+            "id": "a_err", "name": "n", "status": "failed", "kind": "agent",
+            "error": "boom",
+        }
+        summary = wire_truncate._workflow_agent_summary(agent)
+        assert "error" not in summary
+        assert summary["error_preview"] == "boom"
 
     def test_get_phase_second_agent_page(self) -> None:
         wf = _make_workflow("wf_1", phase_count=2, agents_per_phase=80)

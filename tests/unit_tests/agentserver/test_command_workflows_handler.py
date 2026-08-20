@@ -250,6 +250,8 @@ class TestHandleCommandWorkflows:
         # Heavy text fields are omitted from the summary — fetched via get_agent.
         assert "prompt" not in agent
         assert "outcome" not in agent
+        # A short preview of outcome is carried for the tree row stub.
+        assert agent["outcome_preview"] == "done"
         assert payload["agent_total"] == 1
         assert payload["has_more"] is False
 
