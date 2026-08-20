@@ -23,6 +23,11 @@ import pytest
 
 from jiuwenbox.supervisor import sandbox_daemon as sd
 
+# 豁免 G.CLS.11 protected-access：本文件为 FastPath 默认开关语义的白盒单测，
+# 需直接调用 sd._fastpath_enabled() 验证 env 解析后的启用判定；将其改名为
+# public 会破坏封装语义，故仅在本测试侧豁免（不改产品符号可见性）。
+# pylint: disable=protected-access
+
 pytestmark = pytest.mark.unit
 
 

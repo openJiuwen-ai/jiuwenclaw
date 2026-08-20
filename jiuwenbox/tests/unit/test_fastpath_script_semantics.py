@@ -34,12 +34,10 @@ from dataclasses import dataclass
 
 import pytest
 
-# ``tests/unit`` is a package (``__init__.py`` present), so pytest does not put
-# the test directory on ``sys.path`` and a bare sibling import would fail. Add
-# this module's directory explicitly -- a local, per-module shim with no global
+# ``tests/unit`` is a package (``__init__.py`` present), so the sibling helper
+# is imported as a relative module -- no ``sys.path`` mutation and no global
 # conftest side effects.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _fastpath_worker_session import WorkerSession  # noqa: E402
+from ._fastpath_worker_session import WorkerSession  # noqa: E402
 
 
 pytestmark = pytest.mark.unit

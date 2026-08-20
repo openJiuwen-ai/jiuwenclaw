@@ -292,7 +292,10 @@ def test_pre_dispatch_failure_still_safe_unavailable(monkeypatch):
     monkeypatch.setattr(pool, "_drop", lambda _p: None)
     monkeypatch.setattr(pool, "_bump_failure_locked", lambda: None)
     # settimeout raises before _send_frame -> pre-dispatch.
-    sock.settimeout = lambda _t: (_ for _ in ()).throw(OSError("settimeout failed"))
+    def _failing_settimeout(_timeout):
+        raise OSError("settimeout failed")
+
+    sock.settimeout = _failing_settimeout
 
     with pytest.raises(FastPathUnavailable) as ei:
         pool.submit(_FastPathRequest(code="pass", stdin_bytes=b"", workdir=None,

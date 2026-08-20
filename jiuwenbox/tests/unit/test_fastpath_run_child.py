@@ -26,16 +26,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 
 import pytest
 
-# ``tests/unit`` is a package (``__init__.py`` present), so pytest does not put
-# the test directory on ``sys.path`` and a bare sibling import would fail. Add
-# this module's directory explicitly -- a local, per-module shim with no global
+# ``tests/unit`` is a package (``__init__.py`` present), so the sibling helper
+# is imported as a relative module -- no ``sys.path`` mutation and no global
 # conftest side effects.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _fastpath_worker_session import WorkerSession  # noqa: E402
+from ._fastpath_worker_session import WorkerSession  # noqa: E402
 
 
 pytestmark = pytest.mark.unit
@@ -119,7 +116,7 @@ def test_stdin_forwarded_and_json_stdout():
 
 
 @_SKIP_NON_POSIX
-def test_long_lived_grandchild_marker_written_once():
+def test_long_lived_grandchild_marker_written_once(tmp_path):
     """A long-lived grandchild must not cause double execution.
 
     The child writes a side-effect marker, forks a grandchild that holds the
@@ -135,7 +132,9 @@ def test_long_lived_grandchild_marker_written_once():
     grandchild then exits, the pipes reach EOF, and ``_run_child`` returns 124
     (timeout) -- no hang, no ECHILD leak, marker == 1.
     """
-    marker = tempfile.mktemp(prefix="p8a2_marker_")
+    # ``tmp_path`` (pytest-managed) yields a unique dir cleaned up after the
+    # test, so the marker file is always removed (no leftover temp files).
+    marker = str(tmp_path / "p8a2_marker")
     code = (
         "import os, sys, time\n"
         "open(%r, 'w').write('1\\n')\n"  # side effect, exactly once
