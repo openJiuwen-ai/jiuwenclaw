@@ -215,15 +215,19 @@ _ALLOWED_HARNESS_CONFIG_FIELDS = frozenset({
     "prompt_sections",
     "metadata",
     "extension_name",
+    "resources",
+})
+
+_ALLOWED_RESOURCES_SUBFIELDS = frozenset({
+    "tools", "rails", "skills", "prompt_sections",
 })
 
 
 def validate_harness_config_fields(config_path: Path) -> None:
     """Reject harness_config.yaml fields outside the allow-list.
 
-    Subsumes a per-field mcps reject: the allow-list refuses ``mcps`` (and
-    any future dangerous field) by default. A YAML parse failure is non-fatal
-    — openjiuwen's own loader surfaces a clearer error downstream.
+    Refuses ``mcps`` (and any future dangerous field) by default — at the
+    top level and inside a v0.1 ``resources:`` block.
 
     Raises:
         ValueError: If the config declares a field outside the allow-list.
@@ -240,9 +244,17 @@ def validate_harness_config_fields(config_path: Path) -> None:
         raise ValueError(
             f"harness_config.yaml 含不允许的字段: {sorted(extra)}。"
             f"热加载仅允许字段: {sorted(_ALLOWED_HARNESS_CONFIG_FIELDS)}。"
-            f"（mcps 会声明本地 MCP server 子进程，构成 RCE，已被禁用。）"
             f"已拒绝导入该包。"
         )
+
+    resources = config_data.get("resources")
+    if isinstance(resources, dict):
+        sub_extra = set(resources) - _ALLOWED_RESOURCES_SUBFIELDS
+        if sub_extra:
+            raise ValueError(
+                f"harness_config.yaml 含不允许的字段: {sorted(sub_extra)}。"
+                f"已拒绝导入该包。"
+            )
 
 
 def _extract_resource_file_path(item: Any) -> str | None:
@@ -293,6 +305,12 @@ def validate_harness_config_paths(config_path: Path, package_dir: Path) -> None:
 
     package_root = package_dir.resolve()
 
+    # v0.1 wraps tools/rails/skills under a ``resources:`` block; v1 declares
+    # them flat. Check both locations so a v0.1 package is bounded too.
+    resources = config_data.get("resources") if isinstance(config_data.get("resources"), dict) else {}
+    def _items(kind: str) -> list[Any]:
+        return _as_list(config_data.get(kind)) or _as_list(resources.get(kind))
+
     def _check_path(raw_path: str, *, kind: str) -> None:
         candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
@@ -311,12 +329,12 @@ def validate_harness_config_paths(config_path: Path, package_dir: Path) -> None:
             ) from error
 
     for kind in ("tools", "rails"):
-        for item in _as_list(config_data.get(kind)):
+        for item in _items(kind):
             file_path = _extract_resource_file_path(item)
             if file_path:
                 _check_path(file_path, kind=kind)
 
-    for item in _as_list(config_data.get("skills")):
+    for item in _items("skills"):
         if isinstance(item, dict):
             skill_dir = item.get("dir")
             if skill_dir:
