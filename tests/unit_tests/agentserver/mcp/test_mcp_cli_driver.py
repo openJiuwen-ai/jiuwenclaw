@@ -217,8 +217,8 @@ class TestCliDriverStatus:
         assert r.authenticated is False
 
     def test_status_match_regex_authenticated(self) -> None:
-        """dingtalk/wecom's statusMatch is a regex (e.g. "authenticated"\s*:\s*true),
-        not a literal substring. A literal `in` check never matched because \s*
+        """dingtalk/wecom's statusMatch is a regex (e.g. "authenticated"\\s*:\\s*true),
+        not a literal substring. A literal `in` check never matched because \\s*
         was treated as literal text — authenticated stayed False forever.
         re.search matches the pattern against the status output."""
         m = CliManifest(
@@ -252,7 +252,7 @@ class TestCliDriverStatus:
         assert r.authenticated is False
 
     def test_status_match_regex_wecom_id(self) -> None:
-        """wecom's statusMatch is "id"\s*:\s*" — matches when the status JSON
+        """wecom's statusMatch is "id"\\s*:\\s*" — matches when the status JSON
         has an id field (present only when authenticated)."""
         m = CliManifest(
             status_cmd="wecom-cli.cmd auth show",
