@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from jiuwenclaw.telemetry.audit.detectors.base import BaseDetector
+from jiuwenswarm.telemetry.audit.detectors.base import BaseDetector
 
 _HIGH_RISK_TOOLS = frozenset({
     "shell_command", "bash", "sh", "execute_command",

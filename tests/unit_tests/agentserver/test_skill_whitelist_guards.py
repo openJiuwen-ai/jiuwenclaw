@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from jiuwenclaw.agentserver.skill_whitelist import is_skill_whitelist_tenant
-from jiuwenclaw.utils import (
+from jiuwenswarm.server.runtime.skill.skill_whitelist import is_skill_whitelist_tenant
+from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_multi_tenant_skill_dirs,
     get_tenant_agent_jiuwenclaw_workspace_dir,
@@ -41,7 +41,7 @@ def test_multi_tenant_skill_dirs_single_tenant_fallback() -> None:
 
 
 def test_parse_agent_skill_whitelist_id_version_source() -> None:
-    from jiuwenclaw.agentserver.skill_whitelist import parse_agent_skill_whitelist
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import parse_agent_skill_whitelist
 
     config = parse_agent_skill_whitelist(
         "bot-1",
@@ -62,7 +62,7 @@ def test_parse_agent_skill_whitelist_id_version_source() -> None:
 
 
 def test_parse_agent_skill_whitelist_skips_invalid_items() -> None:
-    from jiuwenclaw.agentserver.skill_whitelist import parse_agent_skill_whitelist
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import parse_agent_skill_whitelist
 
     assert parse_agent_skill_whitelist("bot-1", "my-svc", []).skills == []
     assert (
@@ -107,7 +107,7 @@ class _FakeSkillDb:
 
 
 def _patch_skill_db(monkeypatch: pytest.MonkeyPatch, db: _FakeSkillDb) -> None:
-    mod = "jiuwenclaw.agentserver.skill_whitelist"
+    mod = "jiuwenswarm.server.runtime.skill.skill_whitelist"
     monkeypatch.setattr(f"{mod}.list_installed_skills", db.list_installed_skills)
     monkeypatch.setattr(f"{mod}.upsert_installed_skill", db.upsert_installed_skill)
     monkeypatch.setattr(f"{mod}.delete_installed_skill", db.delete_installed_skill)
@@ -116,7 +116,7 @@ def _patch_skill_db(monkeypatch: pytest.MonkeyPatch, db: _FakeSkillDb) -> None:
 def test_multi_id_same_source_version_skips_second_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
         SkillWhitelistSynchronizer,
@@ -141,7 +141,7 @@ def test_multi_id_same_source_version_skips_second_download(
         return {"ok": True, "skill_name": "shared-skill"}
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
         lambda **kwargs: type(
             "FakeSkillManager",
             (),
@@ -170,7 +170,7 @@ def test_multi_id_same_source_version_skips_second_download(
 def test_db_skips_redownload_on_second_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
         SkillWhitelistSynchronizer,
@@ -199,7 +199,7 @@ def test_db_skips_redownload_on_second_sync(
         return {"ok": True, "skill_name": "cached-skill"}
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
         lambda **kwargs: type(
             "FakeSkillManager",
             (),
@@ -219,8 +219,8 @@ def test_db_same_version_with_disk_missing_redownloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """库有同版本但盘缺失时仍会重下补盘（不做库有盘无的成功兜底）。"""
-    from jiuwenclaw.agentserver.installed_skill import SOURCE_PREBUILT
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
         SkillWhitelistSynchronizer,
@@ -256,7 +256,7 @@ def test_db_same_version_with_disk_missing_redownloads(
         return {"ok": True, "skill_name": "cached-skill"}
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
         lambda **kwargs: type(
             "FakeSkillManager",
             (),
@@ -276,8 +276,8 @@ def test_prebuilt_download_failure_purges_ghost_db_without_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """库有盘无且下载失败时清掉预制幽灵行，不进入启用集。"""
-    from jiuwenclaw.agentserver.installed_skill import SOURCE_PREBUILT
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
         SkillWhitelistSynchronizer,
@@ -308,7 +308,7 @@ def test_prebuilt_download_failure_purges_ghost_db_without_disk(
         return {"ok": False, "detail": "403 Client Error: Forbidden"}
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
         lambda **kwargs: type(
             "FakeSkillManager",
             (),
@@ -329,8 +329,8 @@ def test_prebuilt_download_failure_keeps_db_when_disk_still_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """版本 bump 下载失败但旧目录仍在时保留预制行。"""
-    from jiuwenclaw.agentserver.installed_skill import SOURCE_PREBUILT
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistItem,
         SkillWhitelistSynchronizer,
@@ -362,7 +362,7 @@ def test_prebuilt_download_failure_keeps_db_when_disk_still_ready(
         return {"ok": False, "detail": "network timeout"}
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.skill_whitelist.SkillManager",
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
         lambda **kwargs: type(
             "FakeSkillManager",
             (),
@@ -383,8 +383,8 @@ def test_user_skill_db_without_disk_removed_on_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """用户自装库有盘无：sync 时清 DB 幽灵行，仅保留磁盘就绪 skill。"""
-    from jiuwenclaw.agentserver.installed_skill import SOURCE_USER
-    from jiuwenclaw.agentserver.skill_whitelist import (
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_USER
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
         AgentSkillWhitelistConfig,
         SkillWhitelistSynchronizer,
     )

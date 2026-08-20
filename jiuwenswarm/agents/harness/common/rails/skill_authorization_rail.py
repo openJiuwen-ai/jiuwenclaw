@@ -14,7 +14,7 @@ from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 
-from jiuwenclaw.agentserver.deep_agent.skill_lifecycle_events import (
+from jiuwenswarm.agentserver.deep_agent.skill_lifecycle_events import (
     ROOT_SKILL_FILE,
     SKILL_AUTHORIZATION_GATE_HANDLED_KEY,
     SKILL_TOOL_NAME,
@@ -23,8 +23,8 @@ from jiuwenclaw.agentserver.deep_agent.skill_lifecycle_events import (
     is_skill_complete,
     parse_tool_call_arguments,
 )
-from jiuwenclaw.agentserver.permissions.models import PermissionLevel
-from jiuwenclaw.agentserver.permissions.skill_authorization import (
+from jiuwenswarm.agentserver.permissions.models import PermissionLevel
+from jiuwenswarm.agentserver.permissions.skill_authorization import (
     SKILL_APPROVAL_CARD_EXTENSION_KEY,
     SKILL_APPROVAL_PAYLOAD_SCHEMA,
     SKILL_PERMISSION_FILENAME,
@@ -139,7 +139,7 @@ def build_skill_registry_resolver(
 def _default_trust_resolver(skill_dir: Path) -> SkillTrustLevel:
     """默认可信判定：skill 目录位于包内置 skills 目录下视为 ``builtin``。"""
     try:
-        from jiuwenclaw.utils import get_builtin_skills_dir
+        from jiuwenswarm.utils import get_builtin_skills_dir
 
         builtin_root = get_builtin_skills_dir().resolve()
         resolved = Path(skill_dir).resolve()
@@ -154,7 +154,7 @@ def _default_trust_resolver(skill_dir: Path) -> SkillTrustLevel:
 
 
 def _default_config_provider() -> dict[str, Any]:
-    from jiuwenclaw.agentserver.permissions.config_loader import (
+    from jiuwenswarm.agentserver.permissions.config_loader import (
         get_effective_permissions_config,
     )
 
@@ -260,7 +260,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     ) -> None:
         super().__init__(tool_names=[SKILL_TOOL_NAME, "skill_complete"])
         if engine is None:
-            from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+            from jiuwenswarm.agentserver.permissions.core import get_permission_engine
 
             engine = get_permission_engine()
         self._engine = engine
@@ -295,7 +295,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     def _preserve_legacy_scene() -> bool:
         """数字分身使用既有专用裁决，动态授权不得接管。"""
         try:
-            from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
+            from jiuwenswarm.agentserver.deep_agent.permissions.owner_scopes import (
                 TOOL_PERMISSION_CONTEXT,
             )
 
@@ -485,7 +485,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         同路径条目口径。
         """
         try:
-            from jiuwenclaw.agentserver.permissions.file_guard import (
+            from jiuwenswarm.agentserver.permissions.file_guard import (
                 FileGuardChecker,
                 merged_file_guard_config,
             )
@@ -688,7 +688,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     ) -> str | None | object:
         """按原权限流程裁决 skill_tool；DENY 返回原因，否则返回 ``None``。"""
         try:
-            from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
+            from jiuwenswarm.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 
             channel_id = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
         except Exception:  # noqa: BLE001
@@ -1009,7 +1009,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     def _base_effective_config(self, session_id: str | None) -> dict[str, Any]:
         """差分基线：全局 + 会话 overlay（不含 Skill overlay）。"""
         try:
-            from jiuwenclaw.agentserver.permissions.config_loader import (
+            from jiuwenswarm.agentserver.permissions.config_loader import (
                 merge_session_permissions_overlay,
             )
 
@@ -1195,7 +1195,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             )
             return
         expected_md_hash = manifest.skill_md_hash
-        from jiuwenclaw.agentserver.permissions.skill_authorization import compute_skill_md_hash
+        from jiuwenswarm.agentserver.permissions.skill_authorization import compute_skill_md_hash
 
         body = _read_loaded_skill_body(ctx, event)
         if expected_md_hash and (body is None or compute_skill_md_hash(body) != expected_md_hash):

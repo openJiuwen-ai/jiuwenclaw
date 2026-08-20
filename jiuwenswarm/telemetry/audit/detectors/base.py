@@ -6,7 +6,7 @@ import re
 import threading
 from typing import Any
 
-from jiuwenclaw.telemetry.audit.rule_loader import get_last_updated, get_rules_for_detector
+from jiuwenswarm.telemetry.audit.rule_loader import get_last_updated, get_rules_for_detector
 
 
 class BaseDetector:

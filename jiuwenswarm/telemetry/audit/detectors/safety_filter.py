@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from jiuwenclaw.telemetry.audit.detectors.base import BaseDetector
+from jiuwenswarm.telemetry.audit.detectors.base import BaseDetector
 
 _INJECTION_KEYWORDS = ("injection", "jailbreak")
 

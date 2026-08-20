@@ -160,7 +160,7 @@ def default_history_sqlite_path() -> Path:
     override = _env("WEB_HISTORY_SQLITE_PATH")
     if override:
         return Path(override).expanduser().resolve()
-    from jiuwenclaw.utils import get_multi_tenant_user_workspace_dir
+    from jiuwenswarm.common.utils import get_multi_tenant_user_workspace_dir
 
     return get_multi_tenant_user_workspace_dir(workspace_key="default") / _DEFAULT_SQLITE_NAME
 
@@ -828,3 +828,33 @@ def get_session_detail_sync(
     if not st.available:
         return None
     return st.get_session_detail_blocking(session_id, user=user)
+
+
+class HistoryFrameRunner:
+    """Run async history callbacks from sync WS proxy threads."""
+
+    def __init__(self, store: ChatHistoryStore) -> None:
+        self._callback = make_history_callback(store)
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop, name="web-history", daemon=True)
+        self._started = False
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._thread.start()
+        self._started = True
+
+    def submit(self, direction: str, raw: str) -> None:
+        if not self._started:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._callback(direction, raw, None), self._loop)
+        except Exception:
+            logger.warning("[history] submit frame failed dir=%s", direction, exc_info=True)
+
+

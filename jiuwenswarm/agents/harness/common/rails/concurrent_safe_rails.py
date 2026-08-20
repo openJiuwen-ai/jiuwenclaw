@@ -20,9 +20,8 @@ import logging
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
-from openjiuwen.harness.schema.task import TaskItem, TaskPlan, TaskStatus
+from openjiuwen.harness.schema.task import TaskPlan, TodoStatus
 from openjiuwen.harness.tools import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
@@ -255,7 +254,7 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         )
 
     async def _refresh_task_plan_from_todos(self, ctx: AgentCallbackContext) -> None:
-        """Overwrite TaskPlan from persisted todos (TodoItem → TaskItem)."""
+        """Overwrite TaskPlan from persisted todos."""
         if ctx.session is None:
             return
 
@@ -280,9 +279,8 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         if not todos:
             return
 
-        plan_tasks = [self._todo_to_task_item(todo) for todo in todos]
         in_progress = next(
-            (task for task in plan_tasks if task.status == TaskStatus.IN_PROGRESS),
+            (todo for todo in todos if todo.status == TodoStatus.IN_PROGRESS),
             None,
         )
 
@@ -290,11 +288,11 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         if state.task_plan is None:
             state.task_plan = TaskPlan(
                 goal="refreshed from todo list",
-                tasks=plan_tasks,
+                tasks=todos,
                 current_task_id=in_progress.id if in_progress else None,
             )
         else:
-            state.task_plan.tasks = plan_tasks
+            state.task_plan.tasks = todos
             state.task_plan.current_task_id = in_progress.id if in_progress else None
 
         agent.save_state(ctx.session, state)
@@ -321,23 +319,6 @@ class ConcurrentSafeTaskPlanningRail(TaskPlanningRail):
         inputs = ctx.inputs
         result = getattr(inputs, "result", None)
         return isinstance(result, dict) and result.get("result_type") == "interrupt"
-
-    @staticmethod
-    def _todo_to_task_item(todo: TodoItem) -> TaskItem:
-        """Map a persisted TodoItem into a TaskPlan TaskItem."""
-        if todo.status == TodoStatus.COMPLETED:
-            task_status = TaskStatus.COMPLETED
-        elif todo.status == TodoStatus.IN_PROGRESS:
-            task_status = TaskStatus.IN_PROGRESS
-        elif todo.status == TodoStatus.CANCELLED:
-            task_status = TaskStatus.FAILED
-        else:
-            task_status = TaskStatus.PENDING
-        return TaskItem(
-            id=todo.id,
-            title=todo.content,
-            status=task_status,
-        )
 
 
 __all__ = [

@@ -247,7 +247,7 @@ def effective_file_guard_axis_level(
     或运行环境缺依赖时返回 ``None``，调用方应回退到简化口径。
     """
     try:
-        from jiuwenclaw.agentserver.permissions.file_guard import (
+        from jiuwenswarm.agents.harness.common.rails.permissions.file_guard import (
             _action_mode,
             _longest_prefix_match,
             _posix_str,

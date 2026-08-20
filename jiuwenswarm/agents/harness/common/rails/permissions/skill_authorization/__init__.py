@@ -2,7 +2,7 @@
 
 """技能级动态授权：以 Skill 生命周期为作用域的临时权限授权。"""
 
-from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.composer import (
     SkillAuthorizationContext,
     compose_skill_permissions,
     effective_file_guard_axis_level,
@@ -10,17 +10,17 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.composer import (
     reset_skill_authorization_context,
     setup_skill_authorization_context,
 )
-from jiuwenclaw.agentserver.permissions.skill_authorization.grant_store import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.grant_store import (
     SkillGrantStore,
     get_skill_authorization_generation,
     get_skill_grant_store,
     set_skill_grant_store,
     sync_grants_on_permissions_reload,
 )
-from jiuwenclaw.agentserver.permissions.skill_authorization.manifest import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.manifest import (
     load_skill_manifest,
 )
-from jiuwenclaw.agentserver.permissions.skill_authorization.models import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.models import (
     SKILL_APPROVAL_CARD_KIND,
     SKILL_APPROVAL_CARD_VERSION,
     GrantDecision,
@@ -32,7 +32,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.models import (
     SkillPermissionDiff,
     SkillTrustLevel,
 )
-from jiuwenclaw.agentserver.permissions.skill_authorization.schema import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.schema import (
     SKILL_APPROVAL_CARD_EXTENSION_KEY,
     SKILL_APPROVAL_PAYLOAD_SCHEMA,
     SKILL_PERMISSION_FILENAME,
@@ -45,7 +45,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization.schema import (
     normalize_skill_permission,
     validate_skill_permission,
 )
-from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_registry import (
+from jiuwenswarm.agents.harness.common.rails.permissions.skill_authorization.subagent_approval_registry import (
     SubagentApprovalKind,
     SubagentApprovalRegistry,
     SubagentApprovalRequest,

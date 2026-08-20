@@ -18,9 +18,9 @@ from typing import Any, Optional
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenclaw.utils import logger
-from jiuwenclaw.telemetry.audit import AuditLogger, AuditType
-from jiuwenclaw.telemetry.audit.detectors import ToolRiskEvaluator, PIIScanner, SafetyFilter
+from jiuwenswarm.utils import logger
+from jiuwenswarm.telemetry.audit import AuditLogger, AuditType
+from jiuwenswarm.telemetry.audit.detectors import ToolRiskEvaluator, PIIScanner, SafetyFilter
 
 
 def _hook_safe(method):

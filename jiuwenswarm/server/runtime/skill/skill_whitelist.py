@@ -11,15 +11,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.agentserver.skill_manager import SkillManager, _safe_rmtree
-from jiuwenclaw.agentserver.installed_skill import (
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager, _safe_rmtree
+from jiuwenswarm.agents.harness.common.installed_skill import (
     SOURCE_PREBUILT,
     SOURCE_USER,
     delete_installed_skill,
     list_installed_skills,
     upsert_installed_skill,
 )
-from jiuwenclaw.utils import _require_tenant_ids
+from jiuwenswarm.common.utils import _require_tenant_ids
 
 logger = logging.getLogger(__name__)
 

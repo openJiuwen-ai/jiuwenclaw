@@ -18,9 +18,9 @@ from opentelemetry import trace
 from opentelemetry._logs import get_logger
 from opentelemetry.trace import SpanContext
 
-from jiuwenclaw.telemetry.audit.models import AuditType
-from jiuwenclaw.telemetry.instrumentors.telemetry_rail import _request_context
-from jiuwenclaw.utils import logger as _log
+from jiuwenswarm.telemetry.audit.models import AuditType
+from jiuwenswarm.telemetry.instrumentors.telemetry_rail import _request_context
+from jiuwenswarm.utils import logger as _log
 
 _LOGGER_NAME = "jiuwenclaw.audit"
 
@@ -30,7 +30,7 @@ class AuditLogger:
 
     Usage::
 
-        from jiuwenclaw.telemetry.audit import AuditLogger, AuditType
+        from jiuwenswarm.telemetry.audit import AuditLogger, AuditType
 
         audit = AuditLogger()
         audit.log_audit(

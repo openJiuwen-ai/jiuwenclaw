@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from jiuwenclaw.agentserver.agent_manager import AgentManager
-from jiuwenclaw.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.agent_manager import AgentManager
+from jiuwenswarm.common.schema.message import ReqMethod
 
 try:
-    from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 except ImportError:  # Python < 3.11 (typing.Self)
     JiuWenClawDeepAdapter = None  # type: ignore[misc, assignment]
 
