@@ -433,8 +433,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return urlparse(self.path).path == "/api/web-config"
 
     def _handle_web_config(self) -> None:
-        """返回 web 启动配置 JSON, 供前端探测(如一体机模式 → 显示登出按钮)。"""
-        payload = {"remote": bool(self.remote_mode)}
+        """返回 web 启动配置 JSON, 供前端探测(如一体机模式 → 显示登出按钮, IAM 是否启用)。"""
+        payload = {
+            "remote": bool(self.remote_mode),
+            "iam_enabled": bool(self.iam_target),
+        }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1684,6 +1687,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
 
 def _normalize_api_target(value: str) -> str:
+    if not value:
+        return ""
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"api target must be http/https: {value}")
@@ -1761,8 +1766,8 @@ def main() -> None:
     default_port = int(os.getenv("FRONTEND_PORT", "5173"))
     web_port = os.getenv("WEB_PORT", "19000")  # WebChannel websocket port (proxy target)
     default_proxy = os.getenv("GATEWAY_URL", f"http://127.0.0.1:{web_port}")
-    # control-panel (IAM) 默认地址; 部署脚本经 IAM_AUTH_SERVICE_URL 注入, 否则回退 127.0.0.1:8090
-    default_iam = os.getenv("IAM_AUTH_SERVICE_URL", "http://127.0.0.1:8090")
+    # control-panel (IAM) 默认地址; 部署脚本经 IAM_AUTH_SERVICE_URL 注入, 否则留空(无鉴权, 直接进入主页面)
+    default_iam = os.getenv("IAM_AUTH_SERVICE_URL", "")
 
     parser = argparse.ArgumentParser(description="Serve JiuwenSwarm frontend static files.")
     parser.add_argument("--host", default=default_host, help="Host to bind.")
