@@ -1575,6 +1575,17 @@
     "marketplaceTabs": {
       "builtin": "预置"
     },
+    "marketplaceCategories": {
+      "all": "全部",
+      "software-development": "软件开发",
+      "office-productivity": "办公效率",
+      "content-creation": "内容创作",
+      "multimodal-media": "多模态媒体",
+      "data-science-research": "数据与科研",
+      "compliance-legal": "合规与法律",
+      "lifestyle-health": "生活与健康",
+      "finance-wealth": "金融与理财"
+    },
     "swarmskills": {
       "title": "SwarmSkills在线搜索",
       "searchPlaceholder": "输入关键词搜索SwarmSkills"
@@ -1635,6 +1646,8 @@
     "searchPlaceholder": "搜索技能名称、描述或标签",
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
+    "featuredTeamSkills": "精选团队技能",
+    "featuredSkills": "精选技能",
     "noMatches": "暂无匹配的技能",
     "viewMode": {
       "list": "列表模式",

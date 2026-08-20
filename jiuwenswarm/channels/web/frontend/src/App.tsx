@@ -42,6 +42,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
+import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
 import {
@@ -373,6 +374,15 @@ function AppContent() {
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  // OAuth 回调处理：页面加载时检测 URL 中的 code，自动换 token + 获取用户信息
+  useEffect(() => {
+    processOAuthCallback()
+      .finally(() => {
+        // 无论成功或失败都派发事件，SkillPanel 根据有无 oauth_error 决定显示错误或开抽屉
+        window.dispatchEvent(new CustomEvent('oauth-callback-complete'));
+      });
+  }, []);
 
   useEffect(() => {
     if (activeNav !== 'configpanel') {
@@ -1850,6 +1860,22 @@ function AppContent() {
     setActiveNav('chat');
     requestComposerFocus();
   }, [disposeInFlightHistoryHandles, mode, navigate, requestComposerFocus, setCurrentSession, setSelectedProject, setTeamAreaExpanded]);
+
+  // 监听从 SkillPanel 发来的"新建会话并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      enterNewConversation();
+      // 延迟派发，确保 ChatPanel/InputArea 已挂载并注册了事件监听器
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('chat-input-insert-skill', {
+          detail: { skillName: detail.skillName, prefixText: detail.prefixText, suffixText: detail.suffixText, secondSkillName: detail.secondSkillName }
+        }));
+      }, 0);
+    };
+    window.addEventListener('jiuwen:new-conversation', handler);
+    return () => window.removeEventListener('jiuwen:new-conversation', handler);
+  }, [enterNewConversation]);
 
   const handleNewSession = useCallback(async (options?: NewConversationOptions) => {
     enterNewConversation(mode, options);

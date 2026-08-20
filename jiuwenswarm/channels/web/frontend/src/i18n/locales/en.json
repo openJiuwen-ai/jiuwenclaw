@@ -1577,6 +1577,17 @@
     "marketplaceTabs": {
       "builtin": "Built-in"
     },
+    "marketplaceCategories": {
+      "all": "All",
+      "software-development": "Software Development",
+      "office-productivity": "Office Productivity",
+      "content-creation": "Content Creation",
+      "multimodal-media": "Multimodal & Media",
+      "data-science-research": "Data & Research",
+      "compliance-legal": "Legal & Compliance",
+      "lifestyle-health": "Lifestyle & Health",
+      "finance-wealth": "Finance"
+    },
     "swarmskills": {
       "title": "SwarmSkills Online Search",
       "searchPlaceholder": "Enter keywords to search SwarmSkills"
@@ -1637,6 +1648,8 @@
     "searchPlaceholder": "Search skill names, descriptions, or tags",
     "totalCount": "{{count}} total",
     "listError": "Failed to load skills. Please check the backend service.",
+    "featuredTeamSkills": "Featured Team Skills",
+    "featuredSkills": "Featured Skills",
     "noMatches": "No matching skills",
     "viewMode": {
       "list": "List view",
