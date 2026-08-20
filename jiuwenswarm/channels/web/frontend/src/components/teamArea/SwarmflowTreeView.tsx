@@ -534,22 +534,23 @@ function AgentNode({
       />
 
       {/* Outcome 副文本（详情展开时隐藏） */}
-      {agent.outcome && !showDetail && (
+      {/* Outcome 副文本：完整体未就绪时用摘要预览兜底（恢复路径），展开详情时隐藏 */}
+      {((agent.outcome || agent.outcome_preview) && !showDetail) && (
         <div
           className="flex items-start gap-1.5 px-2 pb-1 text-xs text-text-muted/60"
           style={{ paddingLeft: `${depth * 20 + 28}px` }}
         >
           <span className="shrink-0 text-text-muted/40">└</span>
-          <span className="min-w-0 flex-1 truncate">{agent.outcome}</span>
+          <span className="min-w-0 flex-1 truncate">{agent.outcome ?? agent.outcome_preview}</span>
         </div>
       )}
-      {agent.error && !showDetail && (
+      {((agent.error || agent.error_preview) && !showDetail) && (
         <div
           className="flex items-start gap-1.5 px-2 pb-1 text-xs text-red-400/80"
           style={{ paddingLeft: `${depth * 20 + 28}px` }}
         >
           <span className="shrink-0 text-red-400/40">└</span>
-          <span className="min-w-0 flex-1 truncate">{agent.error}</span>
+          <span className="min-w-0 flex-1 truncate">{agent.error ?? agent.error_preview}</span>
         </div>
       )}
 

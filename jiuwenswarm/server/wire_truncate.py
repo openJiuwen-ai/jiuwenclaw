@@ -442,12 +442,27 @@ def _workflow_phase_summary(phase: dict[str, Any]) -> dict[str, Any]:
 
 # Fields carried in the agent summary (get_phase). Heavy text fields
 # (prompt/outcome/human_prompt/human_reply/activity/error) are omitted —
-# get_agent is the universal layer for full agent content.
+# get_agent is the universal layer for full agent content. A short preview
+# (~200 chars) of outcome/error is carried so the tree row can show a
+# one-line stub without a per-agent RPC; the full text is still get_agent.
 _WORKFLOW_AGENT_SUMMARY_KEEP_KEYS = (
     "id", "name", "status", "model", "kind", "node_type",
     "started_at", "completed_at", "duration_ms", "token_count",
     "correlation_id",
 )
+_WORKFLOW_AGENT_SUMMARY_PREVIEW_CHARS = 200
+
+
+def _preview_text(value: Any, *, limit: int = _WORKFLOW_AGENT_SUMMARY_PREVIEW_CHARS) -> str | None:
+    """First ~`limit` chars of a string, whitespace-normalized; None if empty."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[:limit]
 
 
 def _workflow_agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
@@ -455,7 +470,9 @@ def _workflow_agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
 
     Carries only the fields the tree/list row needs to render; the full body
     (prompt/outcome/human_prompt/human_reply/activity/error) is fetched on
-    demand via ``action=get_agent``.
+    demand via ``action=get_agent``. A short ``outcome_preview``/``error_preview``
+    (~200 chars) is included so the row can show a stub line without a per-agent
+    RPC.
     """
     out: dict[str, Any] = {}
     for key in _WORKFLOW_AGENT_SUMMARY_KEEP_KEYS:
@@ -463,6 +480,12 @@ def _workflow_agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
         if value is None:
             continue
         out[key] = value
+    outcome_preview = _preview_text(agent.get("outcome"))
+    if outcome_preview is not None:
+        out["outcome_preview"] = outcome_preview
+    error_preview = _preview_text(agent.get("error"))
+    if error_preview is not None:
+        out["error_preview"] = error_preview
     out["detail_pending"] = True
     return out
 
@@ -687,6 +710,9 @@ __all__ = [
     "_workflow_list_summary_item",
     "_workflow_phase_summary",
     "_workflow_agent_summary",
+    "_preview_text",
+    "_WORKFLOW_AGENT_SUMMARY_KEEP_KEYS",
+    "_WORKFLOW_AGENT_SUMMARY_PREVIEW_CHARS",
     "_workflow_run_meta",
     "_find_phase",
     "_find_agent",
