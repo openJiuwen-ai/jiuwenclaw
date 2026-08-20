@@ -33,6 +33,19 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 logger = logging.getLogger(__name__)
 
 
+class MemoryModeNotSupportedError(ValueError):
+    """Raised when generic Memory RPCs are used by an unsupported mode."""
+
+
+def _ensure_memory_mode_supported(mode: str) -> None:
+    """Reject the generic local-memory surface for all Team modes."""
+    if str(mode or "").strip().lower() in {"team", "team.plan", "code.team"}:
+        raise MemoryModeNotSupportedError(
+            "Memory management is not supported in Team mode. "
+            "Please switch to Agent or Code mode."
+        )
+
+
 def _is_forbidden_enabled(config: dict[str, Any] | None) -> bool:
     mem_cfg = (config or {}).get("memory", {}) if isinstance(config, dict) else {}
     forbidden = mem_cfg.get("forbidden_memory_definition", {})
@@ -251,6 +264,7 @@ async def handle_memory_list(
     mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    _ensure_memory_mode_supported(mode)
     include_project = params.get("include_project", True)
     additional_dirs = params.get("additional_directories")
     project_dir = params.get("project_dir")
@@ -293,6 +307,7 @@ async def handle_memory_edit(
     workspace: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    _ensure_memory_mode_supported(params.get("mode", ""))
     raw_path = params.get("path", "")
     project_dir = params.get("project_dir")
     is_valid, resolved = _validate_edit_path(raw_path, workspace, project_dir)
@@ -344,6 +359,7 @@ async def handle_memory_status(
     mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    _ensure_memory_mode_supported(mode)
     detailed = params.get("detailed", False)
     config = get_config()
 
@@ -451,6 +467,7 @@ async def handle_memory_toggle(
     mode: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    _ensure_memory_mode_supported(mode)
     from jiuwenswarm.common.config import update_memory_forbidden_enabled_in_config
 
     key = params.get("key", "")
@@ -595,6 +612,7 @@ async def handle_memory_open(
     workspace: str,
     params: dict[str, Any],
 ) -> dict[str, Any]:
+    _ensure_memory_mode_supported(params.get("mode", ""))
     project_dir = params.get("project_dir")
     result: dict[str, Any] = {
         "memory_dir": os.path.join(workspace, "memory"),
