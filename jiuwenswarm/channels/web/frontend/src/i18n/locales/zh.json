@@ -306,7 +306,6 @@
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型",
-      "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "free": "免费模型",
       "addModel": "添加自定义模型",

@@ -221,10 +221,13 @@ function isTeamCronModeValue(raw: string | undefined | null): boolean {
   );
 }
 
+// 提交时把抽屉里选的模型（alias 或 model_name）归一成后端需要的 canonical model_name；
+// 单 Agent 与集群（team）任务统一处理——后端 scheduler 对 team 任务同样透传
+// job.model_name 给 chat.send（见 gateway/cron/scheduler.py _run_agent）。
 function resolveSubmittedCronModelName(value: CronTaskFormValue): string | null {
-  if (value.mode !== 'team') return value.modelName;
-  const { availableModels, defaultModelName } = useSessionStore.getState();
-  return resolveConfiguredModelName(availableModels, defaultModelName);
+  if (!value.modelName) return null;
+  const { availableModels } = useSessionStore.getState();
+  return resolveConfiguredModelName(availableModels, value.modelName) ?? value.modelName;
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
