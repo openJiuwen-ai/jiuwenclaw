@@ -10071,6 +10071,62 @@ class JiuWenClawDeepAdapter:
             finalize_perf_summary_request(request.request_id, status=perf_summary_status)
             clear_perf_summary_context()
 
+        # 轮次结束时，将未完成的 todo 标记为 cancelled 并通知前端刷新。
+        # 避免 Agent 自然结束轮次后，in_progress/pending 任务仍停留在旧状态，
+        # 前端看不到 task.cancel 事件而持续转圈（stale_todo_cleanup 原本只在
+        # 下一轮用户消息进来时才触发，中间有空白期）。
+        if not hitl_pending_stream and session_id:
+            try:
+                cancelled_todos = await self._cancel_pending_todos(session_id)
+                if cancelled_todos and any(
+                    t.get("status") == "cancelled" for t in cancelled_todos
+                ):
+                    tasks = [
+                        {
+                            "task_id": t.get("id", ""),
+                            "task_content": t.get("content", ""),
+                            "task_index": i,
+                            "source": "todo",
+                            "status": t.get("status", "cancelled"),
+                        }
+                        for i, t in enumerate(cancelled_todos)
+                    ]
+                    total = len(tasks)
+                    completed = sum(
+                        1 for t in tasks if t["status"] == "completed"
+                    )
+                    in_progress = sum(
+                        1 for t in tasks if t["status"] == "in_progress"
+                    )
+                    pending = sum(
+                        1 for t in tasks if t["status"] == "pending"
+                    )
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] 轮次结束，未完成任务已标记 "
+                        "cancelled: session_id=%s request_id=%s "
+                        "total=%d completed=%d in_progress=%d pending=%d",
+                        session_id, rid, total, completed, in_progress, pending,
+                    )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload={
+                            "event_type": "task.update",
+                            "tasks": tasks,
+                            "total_tasks": total,
+                            "completed_tasks": completed,
+                            "in_progress_tasks": in_progress,
+                            "pending_tasks": pending,
+                            "timestamp": time.time(),
+                        },
+                        is_complete=False,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] 轮次结束清理未完成任务失败: %s",
+                    exc,
+                )
+
         summary = self._build_usage_summary(usage_accumulator)
 
         logger.info("[JiuWenClawDeepAdapter] llm_usage summary: request_id=%s session_id=%s usage=%s",
