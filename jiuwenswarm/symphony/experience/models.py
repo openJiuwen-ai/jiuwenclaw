@@ -55,6 +55,10 @@ class TraceRecord:
     error_type: str | None = None
     error_detail: str | None = None
     success: bool = False
+    # How much this success flag is worth. A judge sharing the generator's
+    # blind spot produces a 'pass' that is not independent evidence; the
+    # gate records that so downstream promotion can weigh it.
+    verdict_gate: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +70,7 @@ class TraceRecord:
             "error_type": self.error_type,
             "error_detail": self.error_detail,
             "success": self.success,
+            "verdict_gate": self.verdict_gate,
         }
 
     @classmethod
@@ -79,6 +84,7 @@ class TraceRecord:
             error_type=data.get("error_type"),
             error_detail=data.get("error_detail"),
             success=bool(data.get("success", False)),
+            verdict_gate=data.get("verdict_gate"),
         )
 
 

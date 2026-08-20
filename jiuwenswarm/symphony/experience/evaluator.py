@@ -215,8 +215,7 @@ class TraceEvaluator:
             LOGGER.warning("TraceEvaluator: LLM call failed for trace %s: %s", record.trace_id, exc)
             self._fallback(record)
 
-    @staticmethod
-    def _parse_judge_response(response: str, record: TraceRecord) -> None:
+    def _parse_judge_response(self, response: str, record: TraceRecord) -> None:
         raw = response.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -238,6 +237,40 @@ class TraceEvaluator:
         else:
             record.error_type = data.get("error_type") or "error"
             record.error_detail = data.get("error_detail") or ""
+
+        # A "pass" here decides whether the trace becomes an experience pattern
+        # that shapes future skill selection. When the judge is the same model
+        # that made the selection, that pass is not independent evidence -- it
+        # is the model agreeing with itself. Record how much it is worth rather
+        # than treating every success flag as equal.
+        record.verdict_gate = self._gate_verdict(record, data)
+
+    def _gate_verdict(self, record: TraceRecord, data: dict) -> dict:
+        from jiuwenswarm.agents.harness.team.rails.self_eval_gate import evaluate
+
+        decision = evaluate(
+            verdict="accept" if record.success else "reject",
+            judge_confidence=float(data.get("confidence", 0.5) or 0.5),
+            generator_model=self._llm_model,
+            judge_model=self._llm_model,
+            external_anchors=0,
+        )
+        if record.success and decision.action != "accept":
+            LOGGER.info(
+                "TraceEvaluator: trace %s graded success by the selecting model "
+                "with no independent check (%s); %d external anchor(s) would be "
+                "needed to treat it as evidence",
+                record.trace_id,
+                decision.action,
+                decision.required_external,
+            )
+        return {
+            "action": decision.action,
+            "regime": decision.regime,
+            "effective_rho": decision.effective_rho,
+            "required_external": decision.required_external,
+            "trust_adjusted_confidence": decision.trust_adjusted_confidence,
+        }
 
     @staticmethod
     def _fallback(record: TraceRecord) -> None:
