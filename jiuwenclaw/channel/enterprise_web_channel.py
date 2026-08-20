@@ -45,6 +45,7 @@ _STRUCTURED_EVENTS = frozenset({
     "context.compressed",
     "context.usage",
     "chat.ask_user_question",
+    "chat.ask_user_question_expired",
     "chat.invocation_paused",
     "chat.subtask_update",
     "history.message",

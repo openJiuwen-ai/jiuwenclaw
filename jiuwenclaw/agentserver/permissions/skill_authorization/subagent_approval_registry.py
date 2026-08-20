@@ -16,6 +16,9 @@ from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
+# 过期事件只是 UI 终态通知，不能反过来阻塞子 Agent 的超时/取消收口。
+_EXPIRY_NOTIFY_TIMEOUT_SECONDS = 1.0
+
 
 class SubagentApprovalCancelled(RuntimeError):
     """Pending delegated approval was withdrawn by lifecycle management."""
@@ -23,6 +26,10 @@ class SubagentApprovalCancelled(RuntimeError):
 
 class SubagentApprovalCapacityError(RuntimeError):
     """A scope/session already reached its delegated approval capacity."""
+
+
+class SubagentApprovalTimeout(asyncio.TimeoutError):
+    """A displayed approval card reached its response TTL."""
 
 
 class SubagentApprovalKind(str, Enum):
@@ -51,6 +58,7 @@ class _PendingApproval:
 
 
 ApprovalSender = Callable[[SubagentApprovalRequest], Awaitable[None]]
+ApprovalExpirySender = Callable[[SubagentApprovalRequest, str], Awaitable[None]]
 
 
 class SubagentApprovalRegistry:
@@ -102,6 +110,7 @@ class SubagentApprovalRegistry:
         tool_call_id: str,
         payload: dict[str, Any],
         sender: ApprovalSender,
+        expiry_sender: ApprovalExpirySender | None = None,
         timeout: float,
     ) -> Any:
         sid = str(session_id or "").strip()
@@ -155,14 +164,43 @@ class SubagentApprovalRegistry:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if future in done:
+                    sender_completed = sender_task in done
+                    sender_succeeded = False
+                    if sender_completed and not sender_task.cancelled():
+                        sender_succeeded = sender_task.exception() is None
                     if not sender_task.done():
                         sender_task.cancel()
                     await asyncio.gather(sender_task, return_exceptions=True)
-                    return await future
+                    try:
+                        return await future
+                    except SubagentApprovalCancelled:
+                        if sender_succeeded:
+                            await self._notify_expiry(
+                                expiry_sender,
+                                request,
+                                "cancelled",
+                            )
+                        raise
                 await sender_task
-                if future.done():
-                    return await future
-                return await asyncio.wait_for(future, timeout=timeout)
+                # future 已完成时 wait_for 会立即返回结果或重抛其异常，
+                # 由下方 except 分支统一收口，无需单独的 done() 快路径。
+                try:
+                    return await asyncio.wait_for(future, timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    # 先让迟到点击变为无效，再通知前端移除卡片；通知期间仍持有
+                    # 当前 session 交互锁，避免下一张卡先于过期终态展示。
+                    self._discard_pending(approval_id, future)
+                    await self._notify_expiry(expiry_sender, request, "timeout")
+                    raise SubagentApprovalTimeout(
+                        "delegated approval response timed out",
+                    ) from exc
+                except SubagentApprovalCancelled:
+                    await self._notify_expiry(expiry_sender, request, "cancelled")
+                    raise
+                except asyncio.CancelledError:
+                    self._discard_pending(approval_id, future)
+                    await self._notify_expiry(expiry_sender, request, "cancelled")
+                    raise
         finally:
             if sender_task is not None and not sender_task.done():
                 sender_task.cancel()
@@ -241,16 +279,8 @@ class SubagentApprovalRegistry:
         with self._guard:
             matches = [rid for rid, item in self._pending.items() if predicate(item)]
             pending = [self._pending.pop(rid) for rid in matches]
-            # 清理无 pending 的 session 锁，避免长跑进程 _session_locks 字典无限增长。
-            if pending:
-                active_sessions = {
-                    item.request.session_id for item in self._pending.values()
-                }
-                stale_locks = [
-                    sid for sid in self._session_locks if sid not in active_sessions
-                ]
-                for sid in stale_locks:
-                    self._session_locks.pop(sid, None)
+            # 不在这里移除 session lock：被取消的 request 可能仍持有该锁并需要
+            # 先发送终态事件。request.finally 会在协程退出后安全回收。
         for item in pending:
             item.loop.call_soon_threadsafe(
                 self._complete_future,
@@ -259,6 +289,41 @@ class SubagentApprovalRegistry:
                 SubagentApprovalCancelled("delegated approval was cancelled"),
             )
         return len(pending)
+
+    def _discard_pending(
+        self,
+        approval_id: str,
+        future: asyncio.Future[Any],
+    ) -> None:
+        """Remove a timed-out request before emitting its terminal UI event."""
+        with self._guard:
+            current = self._pending.get(approval_id)
+            if current is not None and current.future is future:
+                self._pending.pop(approval_id, None)
+
+    @staticmethod
+    async def _notify_expiry(
+        expiry_sender: ApprovalExpirySender | None,
+        request: SubagentApprovalRequest,
+        reason: str,
+    ) -> None:
+        if expiry_sender is None:
+            return
+        try:
+            await asyncio.wait_for(
+                expiry_sender(request, reason),
+                timeout=_EXPIRY_NOTIFY_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 — UI终态通知失败不能覆盖原超时/取消语义
+            logger.warning(
+                "[skill_authorization] subagent.approval_expiry_notify_failed "
+                "kind=%s session=%s scope=%s reason=%s",
+                request.kind.value,
+                request.session_id,
+                request.agent_scope_id,
+                reason,
+                exc_info=True,
+            )
 
     @staticmethod
     def _complete_future(

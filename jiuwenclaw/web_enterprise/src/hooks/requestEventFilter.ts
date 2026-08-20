@@ -1,5 +1,75 @@
 import type { WsEvent } from '../types';
 
+interface ApprovalQuestionLike {
+  request_id?: string;
+  source?: string;
+}
+
+const SUBAGENT_APPROVAL_SOURCES = new Set([
+  'subagent_skill_load',
+  'subagent_tool_permission',
+]);
+
+export function isSubagentApprovalQuestion(
+  question: ApprovalQuestionLike | null | undefined
+): boolean {
+  return Boolean(question && SUBAGENT_APPROVAL_SOURCES.has(question.source ?? ''));
+}
+
+export function isMatchingSubagentApprovalExpiry(
+  pendingQuestion: ApprovalQuestionLike | null | undefined,
+  expiryPayload: Record<string, unknown>
+): boolean {
+  if (!isSubagentApprovalQuestion(pendingQuestion)) {
+    return false;
+  }
+  const requestId =
+    typeof expiryPayload.request_id === 'string' ? expiryPayload.request_id.trim() : '';
+  const source =
+    typeof expiryPayload.source === 'string' ? expiryPayload.source.trim() : '';
+  return Boolean(
+    requestId &&
+      requestId === pendingQuestion?.request_id?.trim() &&
+      source === pendingQuestion?.source
+  );
+}
+
+export function shouldTreatInvocationPausedAsSubagentTerminal(
+  sawSubagentApproval: boolean,
+  pendingQuestion: ApprovalQuestionLike | null | undefined
+): boolean {
+  if (!sawSubagentApproval) {
+    return false;
+  }
+  return pendingQuestion == null || isSubagentApprovalQuestion(pendingQuestion);
+}
+
+interface TerminalCorrelation {
+  activeRequestId?: string | null;
+  activeSessionId?: string | null;
+  eventRequestId?: string | null;
+  eventSessionId?: string | null;
+}
+
+export function doesTerminalTargetActiveRequest({
+  activeRequestId,
+  activeSessionId,
+  eventRequestId,
+  eventSessionId,
+}: TerminalCorrelation): boolean {
+  const activeRid = activeRequestId?.trim() ?? '';
+  if (!activeRid) {
+    return false;
+  }
+  const eventRid = eventRequestId?.trim() ?? '';
+  if (eventRid) {
+    return eventRid === activeRid;
+  }
+  const activeSession = activeSessionId?.trim() ?? '';
+  const terminalSession = eventSessionId?.trim() ?? '';
+  return Boolean(activeSession && terminalSession === activeSession);
+}
+
 export interface ShouldHandleRequestEventOptions {
   activeRequestId?: string | null;
   expectedRequestId?: string;

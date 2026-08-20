@@ -34,6 +34,7 @@ from jiuwenclaw.agentserver.permissions.skill_authorization import (
     setup_skill_authorization_context,
 )
 from jiuwenclaw.agentserver.permissions.skill_authorization.subagent_approval_registry import (
+    ApprovalExpirySender,
     ApprovalSender,
     SubagentApprovalCancelled,
     SubagentApprovalCapacityError,
@@ -73,6 +74,7 @@ class SubagentSkillAuthorizationRail(SkillAuthorizationRail):
         self,
         *,
         approval_sender: ApprovalSender | None,
+        approval_expiry_sender: ApprovalExpirySender | None = None,
         approval_registry: SubagentApprovalRegistry | None = None,
         approval_timeout: float = 120.0,
         session_id: str | None = None,
@@ -80,6 +82,7 @@ class SubagentSkillAuthorizationRail(SkillAuthorizationRail):
     ) -> None:
         super().__init__(**kwargs)
         self._approval_sender = approval_sender
+        self._approval_expiry_sender = approval_expiry_sender
         self._approval_registry = approval_registry or get_subagent_approval_registry()
         self._approval_timeout = approval_timeout
         self._approval_session_id = (session_id or "").strip()
@@ -165,6 +168,7 @@ class SubagentSkillAuthorizationRail(SkillAuthorizationRail):
                     "skill_name": manifest.skill_name,
                 },
                 sender=self._approval_sender,
+                expiry_sender=self._approval_expiry_sender,
                 timeout=self._approval_timeout,
             )
         except asyncio.TimeoutError:
