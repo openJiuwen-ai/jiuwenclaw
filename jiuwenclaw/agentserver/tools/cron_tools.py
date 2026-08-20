@@ -461,7 +461,8 @@ class CronTools:
     async def list_jobs(self) -> Any:
         # 与 ensure_scheduler 对齐：仅企业就绪（jid 已绑定）走企业只读
         if self._enterprise_ready():
-            return await self._list_jobs_enterprise()
+            jobs = await self._list_jobs_enterprise()
+            return [_format_query_job(job) for job in jobs]
         jobs = await self._local_store.list_jobs()
         if jobs:
             return [_format_query_job(j.to_dict()) for j in jobs]
@@ -480,7 +481,7 @@ class CronTools:
             jobs = await self._list_jobs_enterprise()
             for item in jobs:
                 if str(item.get("id") or "") == str(job_id or "").strip():
-                    return item
+                    return _format_query_job(item)
             return None
         job = await self._local_store.get_job(job_id)
         if job is not None:
