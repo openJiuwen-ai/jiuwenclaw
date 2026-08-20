@@ -1,14 +1,25 @@
 # Prompt Optimization (RLAF-P)
 
-A runtime prompt optimizer for JiuwenSwarm. It improves a **system prompt** for a
-repeatable task through an RL-style feedback loop — **no model weights are trained**.
-A Policy (LLM) proposes candidate prompts, an Environment executes them, a Reward
-model scores the results, a Drift judge keeps the objective fixed, and a compressed
-optimization history steers the next round. It lives beside Symphony's
-`experience` subsystem because it is the same feedback-loop shape applied to prompts
-instead of skill selections.
+A runtime prompt optimizer available to JiuwenSwarm agents. It improves a **system
+prompt** for a repeatable task through an RL-style feedback loop — **no model
+weights are trained**. A Policy (LLM) proposes candidate prompts, an Environment
+executes them, a Reward model scores the results, a Drift judge keeps the objective
+fixed, and a compressed optimization history steers the next round.
 
-- Package: [`jiuwenswarm/symphony/optimization/`](../../jiuwenswarm/symphony/optimization/)
+The algorithm lives in agent-core, not jiuwenswarm: it's a `BaseOptimizer` in
+`openjiuwen.dev_tools.tune.optimizer.prompt_search`, built on the same `Case` /
+`DefaultEvaluator` / `Model` scaffolding as agent-core's other prompt-tuning
+optimizers (`InstructionOptimizer`, `ExampleOptimizer`, `JointOptimizer`), so any
+product built on agent-core can use it — not only jiuwenswarm. jiuwenswarm's own
+`jiuwenswarm/symphony/optimization/` package is the product-facing layer on top of
+it: the task shape agents actually call with (`TaskSpec`/`TaskCase`), config
+loading, wiring in jiuwenswarm's configured LLM and memory backends, and the tool /
+rails / extension RPC below. Symphony itself stays retrieval-only, consistent with
+its role everywhere else in the framework — this package sits beside it, not inside
+its skill-selection pipeline.
+
+- Algorithm: [`openjiuwen/dev_tools/tune/optimizer/prompt_search/`](https://gitcode.com/openJiuwen/agent-core) (agent-core)
+- Product layer: [`jiuwenswarm/symphony/optimization/`](../../jiuwenswarm/symphony/optimization/)
 - Extension: [`jiuwenswarm/extensions/optimization/`](../../jiuwenswarm/extensions/optimization/)
 - Tools: `optimize_prompt`, `list_pending_prompt_improvements`, `mark_prompt_improvement_applied`
 - Rails: `PromptOptimizerPromptRail` (how to start one), `PromptOptimizerReviewRail` (surfaces unreviewed results)
@@ -19,13 +30,15 @@ instead of skill selections.
 ## Architecture
 
 ```
-Task ─▶ PromptOptimizer.optimize()
+TaskSpec (jiuwenswarm) ─▶ to_prompt_task_spec() ─▶ PromptTaskSpec (agent-core)
+                                                          │
+                                             PromptSearchOptimizer.optimize()
           │
           ├─ PromptPolicy ........... generate N candidate system prompts (LLM)
           │     └─ OptimizationHistory + HistoryCompressor  (textual "policy gradient")
           ├─ PromptEnvironment ...... execute each candidate (LLM / workflow / agent / callable)
           ├─ RewardModel ............ CompositeReward = Σ wᵢ·componentᵢ → scalar + breakdown
-          │     ├─ Correctness (LLM judge)  ├─ Latency / TokenUsage / Cost
+          │     ├─ Correctness (via BaseEvaluator / DefaultEvaluator)  ├─ Latency / TokenUsage / Cost
           │     └─ Completeness / StructuredValidation / Custom
           ├─ DriftJudge ............. deviation(objective, candidate) → reward penalty
           ├─ ConvergenceDetector .... moving average / variance / no-improve-K
@@ -34,19 +47,26 @@ Task ─▶ PromptOptimizer.optimize()
      OptimizationResult (best prompt + full trace) ─▶ PromptMemory
 ```
 
-Each conceptual component is an **ABC with a swappable default**, built by
-`OptimizerRuntimeFactory` from config (the same pattern as
-`symphony.build.ScoreBuildRuntimeFactory`). The loop mirrors
-`SymphonyScoreBuilder.build` and emits a JSONL run log like Symphony's build log.
+Every collaborator is an **ABC with a swappable default**, defined in agent-core's
+`prompt_search` package. jiuwenswarm's `OptimizerRuntimeFactory`
+(`jiuwenswarm/symphony/optimization/factory.py`) builds the defaults from
+`symphony.optimization` config — it wires jiuwenswarm's LLM client and memory
+backend into agent-core's collaborator types, it doesn't reimplement them. The loop
+itself emits a JSONL run log the same way `SymphonyScoreBuilder.build` does.
 
-| Component | Interface | Default | Reuses |
+| Component | Interface (agent-core) | Default (agent-core) | jiuwenswarm supplies |
 |---|---|---|---|
-| Policy | `PromptPolicy` | `LLMPromptPolicy` | `symphony.llm` client |
-| Environment | `PromptEnvironment` | `LLMEnvironment` (+ `WorkflowEnvironment`, `CallableEnvironment`) | `symphony.llm`, token tracker |
-| Reward | `RewardModel` / `RewardComponent` | `CompositeReward` + built-ins | `TraceEvaluator` judge idiom |
-| Drift | `DriftJudge` | `LLMDriftJudge` | LLM-as-judge |
-| Memory | `PromptMemory` | `JsonlPromptMemory` / `ExperienceBankPromptMemory` | `ExperienceBank` + `EmbeddingClient` |
-| History | `HistoryCompressor` | LLM buckets | `TraceDistiller` idiom |
+| Policy | `PromptPolicy` | `LLMPromptPolicy` | a `Model` resolved from jiuwenswarm's default LLM config |
+| Environment | `PromptEnvironment` | `LLMEnvironment` (+ `WorkflowEnvironment`, `CallableEnvironment`) | same |
+| Reward | `RewardModel` / `RewardComponent` | `CompositeReward` + built-ins | a `DefaultEvaluator` for `CorrectnessReward` |
+| Drift | `DriftJudge` | `LLMDriftJudge` | same `Model` |
+| Memory | `PromptMemory` | `JsonlPromptMemory` | `ExperienceBankPromptMemory` (jiuwenswarm's own FAISS-backed implementation of the same interface, in `memory/experience_backend.py`) |
+| History | `HistoryCompressor` | LLM buckets | same `Model` |
+
+Also available directly through agent-core, independent of jiuwenswarm: a new
+`BaseOptimizer` bound to a `Trainer`/agent's `LLMCall` generates multiple candidate
+prompts per round instead of one, and `Trainer.search_prompt_candidates()` searches
+across all of them — see agent-core's own tuning docs.
 
 ---
 
@@ -175,7 +195,9 @@ or override a method on `OptimizerRuntimeFactory`.
 **Custom reward metric:**
 
 ```python
-from jiuwenswarm.symphony.optimization.reward import RewardComponent, CompositeReward, CorrectnessReward
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.reward import (
+    RewardComponent, CompositeReward, CorrectnessReward,
+)
 
 class KeywordReward(RewardComponent):
     name = "keyword"
@@ -185,7 +207,7 @@ class KeywordReward(RewardComponent):
         return sum(self._kw in r.output for r in outs) / max(1, len(outs))
 
 reward = CompositeReward(
-    [CorrectnessReward(judge_client), KeywordReward("action")],
+    [CorrectnessReward(evaluator), KeywordReward("action")],
     {"correctness": 1.0, "keyword": 0.5},
     min_correctness=0.5, drift_penalty=0.5,
 )

@@ -7,7 +7,7 @@ This rail closes the other gap: if an optimization happened without a human
 watching (the leader decided on its own, or someone ran it out-of-band), there
 was previously no way for anyone to find out a better prompt exists unless
 they knew to go ask for it. This rail surfaces any unreviewed improvements —
-:meth:`jiuwenswarm.symphony.optimization.memory.base.PromptMemory.pending` —
+:meth:`openjiuwen.dev_tools.tune.optimizer.prompt_search.memory.PromptMemory.pending` —
 directly in the leader's own context, the same way
 ``PromptOptimizerPromptRail`` injects tool guidance.
 """

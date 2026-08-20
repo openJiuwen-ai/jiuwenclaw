@@ -2,42 +2,63 @@
 
 Mirrors :class:`jiuwenswarm.symphony.build.ScoreBuildRuntimeFactory`: one place that
 constructs the default Policy / Environment / RewardModel / DriftJudge / Memory /
-compressor / convergence detector from :class:`OptimizationConfig`, so callers can
-override exactly one collaborator and inherit sensible defaults for the rest.
+compressor from :class:`OptimizationConfig`, so callers can override exactly one
+collaborator and inherit sensible defaults for the rest.
+
+Every collaborator type (``PromptPolicy``, ``PromptEnvironment``, ``RewardModel``,
+``DriftJudge``, ``PromptMemory``, ``HistoryCompressor``) comes from
+``openjiuwen.dev_tools.tune.optimizer.prompt_search`` — this factory's job is only
+to wire jiuwenswarm's configured LLM and memory backend into them.
 """
 
 from __future__ import annotations
 
 import logging
 
-from jiuwenswarm.symphony.optimization.config import OptimizationConfig
-from jiuwenswarm.symphony.optimization.convergence import ConvergenceDetector
-from jiuwenswarm.symphony.optimization.drift.base import DriftJudge, NullDriftJudge
-from jiuwenswarm.symphony.optimization.drift.llm_judge import LLMDriftJudge
-from jiuwenswarm.symphony.optimization.environment.base import PromptEnvironment
-from jiuwenswarm.symphony.optimization.environment.llm_env import LLMEnvironment
-from jiuwenswarm.symphony.optimization.llm_support import build_client
-from jiuwenswarm.symphony.optimization.memory.base import (
+from openjiuwen.core.foundation.llm import Model
+from openjiuwen.dev_tools.tune.evaluator.evaluator import DefaultEvaluator
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.drift import (
+    DriftJudge,
+    LLMDriftJudge,
+    NullDriftJudge,
+)
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.environment import (
+    LLMEnvironment,
+    PromptEnvironment,
+)
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.history import HistoryCompressor
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import (
     JsonlPromptMemory,
     NullPromptMemory,
     PromptMemory,
 )
-from jiuwenswarm.symphony.optimization.models import TaskSpec
-from jiuwenswarm.symphony.optimization.policy.base import PromptPolicy
-from jiuwenswarm.symphony.optimization.policy.history import HistoryCompressor
-from jiuwenswarm.symphony.optimization.policy.llm_policy import LLMPromptPolicy
-from jiuwenswarm.symphony.optimization.reward.base import RewardModel
-from jiuwenswarm.symphony.optimization.reward.components import (
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.policy import LLMPromptPolicy, PromptPolicy
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.reward import (
     CompletenessReward,
+    CompositeReward,
     CorrectnessReward,
-    CorrectnessRewardWithExpected,
     CostReward,
     LatencyReward,
+    RewardModel,
     TokenUsageReward,
 )
-from jiuwenswarm.symphony.optimization.reward.composite import CompositeReward
+
+from jiuwenswarm.symphony.optimization.config import OptimizationConfig
+from jiuwenswarm.symphony.optimization.llm_support import build_model, build_model_configs
+from jiuwenswarm.symphony.optimization.models import TaskSpec
 
 LOGGER = logging.getLogger(__name__)
+
+# DefaultEvaluator judges every case against a "label" text. When a case has no
+# fixed expected answer, the task objective stands in for it instead (see
+# CorrectnessReward's own docstring in agent-core) — this hint tells the judge
+# model to treat that substitution as "does the answer satisfy the objective",
+# not "does it match verbatim".
+_CORRECTNESS_METRIC_HINT = (
+    "If the expected answer text is actually the task objective (no fixed expected "
+    "value was available for this case), judge whether the model answer plausibly and "
+    "correctly fulfills that objective rather than requiring a verbatim match."
+)
 
 
 class OptimizerRuntimeFactory:
@@ -45,54 +66,49 @@ class OptimizerRuntimeFactory:
 
     def __init__(self, config: OptimizationConfig) -> None:
         self._config = config
-        self._policy_client = None
-        self._environment_client = None
-        self._judge_client = None
+        self._policy_model: Model | None = None
+        self._environment_model: Model | None = None
+        self._judge_model: Model | None = None
 
     # -- lazily-built shared clients -----------------------------------------
 
-    def policy_client(self):
-        if self._policy_client is None:
-            self._policy_client = build_client(
-                self._config.models.policy_model,
-                temperature=self._config.policy_temperature,
+    def policy_model(self) -> Model:
+        if self._policy_model is None:
+            self._policy_model = build_model(
+                self._config.models.policy_model, temperature=self._config.policy_temperature
             )
-        return self._policy_client
+        return self._policy_model
 
-    def environment_client(self):
-        if self._environment_client is None:
-            self._environment_client = build_client(self._config.models.environment_model)
-        return self._environment_client
+    def environment_model(self) -> Model:
+        if self._environment_model is None:
+            self._environment_model = build_model(self._config.models.environment_model)
+        return self._environment_model
 
-    def judge_client(self):
-        if self._judge_client is None:
-            self._judge_client = build_client(self._config.models.judge_model)
-        return self._judge_client
+    def judge_model(self) -> Model:
+        if self._judge_model is None:
+            self._judge_model = build_model(self._config.models.judge_model)
+        return self._judge_model
 
     # -- collaborators --------------------------------------------------------
 
     def policy(self) -> PromptPolicy:
-        return LLMPromptPolicy(self.policy_client())
+        return LLMPromptPolicy(self.policy_model())
 
     def environment(self) -> PromptEnvironment:
         return LLMEnvironment(
-            self.environment_client(),
+            self.environment_model(),
             parallel=self._config.parallel_execution,
             max_concurrency=self._config.candidate_prompts,
         )
 
     def reward_model(self, task: TaskSpec) -> RewardModel:
+        del task  # kept for signature stability; DefaultEvaluator judges every case uniformly
         weights = self._config.reward_weights
-        judge = self.judge_client()
+        request_config, client_config = build_model_configs(self._config.models.judge_model)
+        evaluator = DefaultEvaluator(request_config, client_config, metric=_CORRECTNESS_METRIC_HINT)
         max_concurrency = max(1, self._config.candidate_prompts)
-        has_expected = any(c.expected for c in task.cases)
-        correctness = (
-            CorrectnessRewardWithExpected(judge, task, max_concurrency=max_concurrency)
-            if has_expected
-            else CorrectnessReward(judge, max_concurrency=max_concurrency)
-        )
         components = [
-            correctness,
+            CorrectnessReward(evaluator, max_concurrency=max_concurrency),
             CompletenessReward(),
             LatencyReward(),
             TokenUsageReward(),
@@ -109,16 +125,10 @@ class OptimizerRuntimeFactory:
     def drift_judge(self) -> DriftJudge:
         if self._config.drift_penalty <= 0:
             return NullDriftJudge()
-        return LLMDriftJudge(self.judge_client())
+        return LLMDriftJudge(self.judge_model())
 
     def history_compressor(self) -> HistoryCompressor:
-        return HistoryCompressor(self.policy_client())
-
-    def convergence(self) -> ConvergenceDetector:
-        return ConvergenceDetector(
-            threshold=self._config.convergence_threshold,
-            window=self._config.convergence_window,
-        )
+        return HistoryCompressor(self.policy_model())
 
     def memory(self) -> PromptMemory:
         if not self._config.memory_enabled:

@@ -9,23 +9,22 @@ Every collaborator is overridable, so this stays a thin wiring layer.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.drift import DriftJudge
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.environment import PromptEnvironment
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.history import HistoryCompressor
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import PromptMemory
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.policy import PromptPolicy
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.reward import RewardModel
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.run_log import OptimizerRunLogger
 
 from jiuwenswarm.symphony.optimization.config import (
     OptimizationConfig,
     load_optimization_config,
 )
-from jiuwenswarm.symphony.optimization.convergence import ConvergenceDetector
-from jiuwenswarm.symphony.optimization.drift.base import DriftJudge
-from jiuwenswarm.symphony.optimization.environment.base import PromptEnvironment
 from jiuwenswarm.symphony.optimization.factory import OptimizerRuntimeFactory
-from jiuwenswarm.symphony.optimization.memory.base import PromptMemory
 from jiuwenswarm.symphony.optimization.models import OptimizationResult, TaskSpec
 from jiuwenswarm.symphony.optimization.optimizer import PromptOptimizer
-from jiuwenswarm.symphony.optimization.policy.base import PromptPolicy
-from jiuwenswarm.symphony.optimization.policy.history import HistoryCompressor
-from jiuwenswarm.symphony.optimization.reward.base import RewardModel
-from jiuwenswarm.symphony.optimization.run_log import OptimizerRunLogger
 
 
 async def optimize_prompt(
@@ -38,7 +37,6 @@ async def optimize_prompt(
     drift_judge: DriftJudge | None = None,
     memory: PromptMemory | None = None,
     history_compressor: HistoryCompressor | None = None,
-    convergence: ConvergenceDetector | None = None,
     run_log_path: str | Path | None = None,
     factory: OptimizerRuntimeFactory | None = None,
 ) -> OptimizationResult:
@@ -61,7 +59,6 @@ async def optimize_prompt(
         drift_judge=drift_judge or runtime.drift_judge(),
         memory=memory or runtime.memory(),
         history_compressor=history_compressor or runtime.history_compressor(),
-        convergence=convergence or runtime.convergence(),
         run_logger=OptimizerRunLogger(run_log_path) if run_log_path else None,
     )
     return await optimizer.optimize(task)

@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.symphony.optimization.memory.base import PromptMemory
-from jiuwenswarm.symphony.optimization.models import PromptRecord, TaskSpec
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import PromptMemory
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.models import PromptRecord, PromptTaskSpec
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class ExperienceBankPromptMemory(PromptMemory):
                     + "\n"
                 )
 
-    def search_similar(self, task: TaskSpec, top_k: int = 3) -> list[PromptRecord]:
+    def search_similar(self, task: PromptTaskSpec, top_k: int = 3) -> list[PromptRecord]:
         try:
             results = self._bank.search_by_embedding(
                 task.characteristics, top_k=top_k, threshold=self._threshold

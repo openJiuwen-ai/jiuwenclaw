@@ -1,15 +1,20 @@
 """LLM resolution helpers for the prompt optimizer.
 
-Thin wrappers over :mod:`jiuwenswarm.symphony.llm` so every optimizer role
-(policy / environment / judge) resolves an :class:`LLMConfig` the same way and
-respects per-role model overrides from ``symphony.optimization.models``.
+Resolves jiuwenswarm's configured default model into the agent-core LLM types
+the RLAF-P algorithm (``openjiuwen.dev_tools.tune.optimizer.prompt_search``)
+actually consumes — a ready ``Model`` for collaborators that take one directly
+(policy, environment, drift judge, history compressor), or a raw
+``(ModelRequestConfig, ModelClientConfig)`` pair for collaborators that build
+their own ``Model`` internally (``DefaultEvaluator``).
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 
-from jiuwenswarm.symphony.llm import LLMConfig, create_llm_client
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+
+from jiuwenswarm.symphony.llm import LLMConfig
 
 
 def resolve_llm_config(model_name: str = "", *, temperature: float | None = None) -> LLMConfig:
@@ -31,10 +36,26 @@ def resolve_llm_config(model_name: str = "", *, temperature: float | None = None
     return config
 
 
-def build_client(model_name: str = "", *, temperature: float | None = None):
-    """Convenience: resolve a config and return a ready ``JiuwenSwarmChatClient``."""
+def build_model(model_name: str = "", *, temperature: float | None = None) -> Model:
+    """Resolve config and return a ready agent-core ``Model``."""
 
-    return create_llm_client(resolve_llm_config(model_name, temperature=temperature))
+    return resolve_llm_config(model_name, temperature=temperature).create_model()
 
 
-__all__ = ["resolve_llm_config", "build_client"]
+def build_model_configs(
+    model_name: str = "", *, temperature: float | None = None
+) -> tuple[ModelRequestConfig, ModelClientConfig]:
+    """Resolve config and return raw ``(ModelRequestConfig, ModelClientConfig)``.
+
+    For collaborators like ``DefaultEvaluator`` that build their own ``Model``
+    rather than accepting one.
+    """
+
+    config = resolve_llm_config(model_name, temperature=temperature)
+    return (
+        ModelRequestConfig(**config.model_request_kwargs()),
+        ModelClientConfig(**config.model_client_kwargs()),
+    )
+
+
+__all__ = ["resolve_llm_config", "build_model", "build_model_configs"]

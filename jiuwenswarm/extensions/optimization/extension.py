@@ -15,11 +15,12 @@ import logging
 from dataclasses import replace
 from typing import Any
 
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.run_log import read_run_log
+
 from jiuwenswarm.extensions.sdk import BaseExtension
 from jiuwenswarm.symphony.optimization.config import load_optimization_config
 from jiuwenswarm.symphony.optimization.factory import OptimizerRuntimeFactory
 from jiuwenswarm.symphony.optimization.models import TaskSpec
-from jiuwenswarm.symphony.optimization.run_log import read_run_log
 from jiuwenswarm.symphony.optimization.service import (
     default_run_log_path,
     optimize_prompt,

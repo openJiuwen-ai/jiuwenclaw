@@ -17,19 +17,19 @@ import logging
 import tempfile
 from dataclasses import replace
 
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.drift import NullDriftJudge
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.environment import CallableEnvironment
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.memory import JsonlPromptMemory
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.models import PromptCandidate
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.policy import PolicyRequest, PromptPolicy
+from openjiuwen.dev_tools.tune.optimizer.prompt_search.reward import CompositeReward, CustomReward
+
 from jiuwenswarm.symphony.optimization import (
     PromptOptimizer,
     TaskCase,
     TaskSpec,
     default_optimization_config,
 )
-from jiuwenswarm.symphony.optimization.drift.base import NullDriftJudge
-from jiuwenswarm.symphony.optimization.environment.callable_env import CallableEnvironment
-from jiuwenswarm.symphony.optimization.memory.base import JsonlPromptMemory
-from jiuwenswarm.symphony.optimization.models import PromptCandidate
-from jiuwenswarm.symphony.optimization.policy.base import PolicyRequest, PromptPolicy
-from jiuwenswarm.symphony.optimization.reward.components import CustomReward
-from jiuwenswarm.symphony.optimization.reward.composite import CompositeReward
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ async def main() -> None:
         optimizer = PromptOptimizer(
             config,
             policy=StubPolicy(),
-            environment=CallableEnvironment(environment_runner, attribute_tokens=False),
+            environment=CallableEnvironment(environment_runner),
             reward_model=reward,
             drift_judge=NullDriftJudge(),
             memory=JsonlPromptMemory(tmp),
