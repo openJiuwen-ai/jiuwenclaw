@@ -42,6 +42,7 @@ from jiuwenswarm.common.security.ws_origin import get_header_value
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_builtin_skills_installed,
     get_cron_jobs_path,
     get_env_file,
     get_root_dir,
@@ -61,6 +62,9 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+
+# 无条件补装缺失的内置技能（幂等，解决升级后技能不补装问题）
+ensure_builtin_skills_installed()
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():
