@@ -115,9 +115,11 @@ class SkillTurbo:
         - 用户审批回复（``ConfirmPayload`` / dict / etc.）
         - 可选 ``task_states``：中断时任务快照，resume 复用同一套 ``task_id``
 
-        二次执行时 ``SkillTurboExecutor`` 重放到同一 tool_call_id，将 ``user_input``
-        注入 ctx.extra[RESUME_USER_INPUT_KEY]，``PermissionInterruptRail`` 据此
-        给出 approve / reject。
+        二次执行时 ``SkillTurboExecutor`` 从根节点重放；``task_states`` 中已
+        ``completed`` 的二层 Stage 短路跳过真实执行（bash/LLM），仅从
+        ``in_progress`` 节点起完整重入。重放到同一 tool_call_id 时将
+        ``user_input`` 注入 ctx.extra[RESUME_USER_INPUT_KEY]，
+        ``PermissionInterruptRail`` 据此给出 approve / reject。
         """
         self._executor.set_pending_resume(
             expected_tool_call_id=pending_tool_call_id,
