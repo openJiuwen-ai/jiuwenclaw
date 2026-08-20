@@ -90,6 +90,7 @@ import {
 import { useSubagentStore } from '../stores/subagentStore';
 import {
   normalizeSubagentActivityEvent,
+  normalizeSubagentToolStatusUpdates,
   normalizeSubagentWaitResults,
   normalizeSubagentStatusEvent,
 } from '../features/subagent/subagentNormalizer';
@@ -859,6 +860,7 @@ function stringifyCompact(value: unknown): string {
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const { t } = useTranslation();
   const {
+    activeSessionId,
     provider,
     apiKey,
     apiBase,
@@ -902,6 +904,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const teamToolCallMemberRef = useRef<Map<string, string>>(new Map());
   const shutdownMemberToolCallRef = useRef<Map<string, string>>(new Map());
+  const pendingSubagentQueryRef = useRef<Map<string, { sessionId: string; subagentId: string; query: string }>>(new Map());
+  const pendingSubagentSpawnQueriesRef = useRef<Array<{ sessionId: string; displayName: string; query: string }>>([]);
+  const pendingSubagentAssignmentRef = useRef<Map<string, { sessionId: string; query: string; taskId?: string }>>(new Map());
+  // These entries only bridge adjacent WebSocket events; a session or connection boundary invalidates them.
+  const clearPendingSubagentCorrelations = useCallback((sessionId?: string) => {
+    if (!sessionId) {
+      pendingSubagentQueryRef.current.clear();
+      pendingSubagentSpawnQueriesRef.current = [];
+      pendingSubagentAssignmentRef.current.clear();
+      return;
+    }
+    for (const [toolCallId, pending] of pendingSubagentQueryRef.current) {
+      if (pending.sessionId === sessionId) pendingSubagentQueryRef.current.delete(toolCallId);
+    }
+    pendingSubagentSpawnQueriesRef.current = pendingSubagentSpawnQueriesRef.current.filter(
+      pending => pending.sessionId !== sessionId,
+    );
+    for (const [subagentId, pending] of pendingSubagentAssignmentRef.current) {
+      if (pending.sessionId === sessionId) pendingSubagentAssignmentRef.current.delete(subagentId);
+    }
+  }, []);
+  const previousActiveSessionIdRef = useRef(activeSessionId);
   const clearedTeamPanelSessionRef = useRef<Set<string>>(new Set());
   const teamMemberOutputEventRef = useRef<Map<string, string>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
@@ -952,6 +976,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     []
   );
+
+  useEffect(() => {
+    const previousSessionId = previousActiveSessionIdRef.current;
+    if (previousSessionId && previousSessionId !== activeSessionId) {
+      clearPendingSubagentCorrelations(previousSessionId);
+    }
+    previousActiveSessionIdRef.current = activeSessionId;
+  }, [activeSessionId, clearPendingSubagentCorrelations]);
 
   const flushPendingStreamDelta = useCallback((sessionId: string) => {
     const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
@@ -3040,6 +3072,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           });
         }
         const toolCall = normalizeToolCallPayload(payload);
+        if (toolCall.name === 'subagent_send_input' || toolCall.name === 'subagent_spawn') {
+          const subagentId = typeof toolCall.arguments.subagent_id === 'string'
+            ? toolCall.arguments.subagent_id.trim()
+            : '';
+          const queryField = toolCall.name === 'subagent_spawn' ? 'task_description' : 'query';
+          const query = typeof toolCall.arguments[queryField] === 'string'
+            ? toolCall.arguments[queryField].trim()
+            : '';
+          if (toolCall.id && query && (toolCall.name === 'subagent_spawn' || subagentId)) {
+            pendingSubagentQueryRef.current.set(toolCall.id, { sessionId, subagentId, query });
+            if (toolCall.name === 'subagent_spawn') {
+              pendingSubagentSpawnQueriesRef.current.push({
+                sessionId,
+                displayName: typeof toolCall.arguments.display_name === 'string' ? toolCall.arguments.display_name.trim() : '',
+                query,
+              });
+            }
+          }
+        }
         const shutdownMemberId = getShutdownMemberFromToolCall(toolCall);
         if (shutdownMemberId) {
           shutdownMemberToolCallRef.current.set(toolCall.id, shutdownMemberId);
@@ -3103,8 +3154,45 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         const toolResult = normalizeToolResultPayload(payload);
+        const pendingSubagentQuery = toolResult.toolCallId
+          ? pendingSubagentQueryRef.current.get(toolResult.toolCallId)
+          : undefined;
+        if (toolResult.toolCallId) {
+          pendingSubagentQueryRef.current.delete(toolResult.toolCallId);
+        }
         for (const result of normalizeSubagentWaitResults(payload)) {
           useSubagentStore.getState().applyResult(sessionId, result);
+        }
+        for (const update of normalizeSubagentToolStatusUpdates(payload)) {
+          const sessionPendingQuery = pendingSubagentQuery?.sessionId === sessionId
+            ? pendingSubagentQuery
+            : undefined;
+          const query = sessionPendingQuery
+            && (!sessionPendingQuery.subagentId || sessionPendingQuery.subagentId === update.subagent_id)
+            ? sessionPendingQuery.query
+            : undefined;
+          const isSpawnQuery = Boolean(query && sessionPendingQuery && !sessionPendingQuery.subagentId);
+          const hasSubagent = Boolean(useSubagentStore.getState().getRuntime(sessionId)?.subagentsById[update.subagent_id]);
+          if (isSpawnQuery && query) {
+            const queuedIndex = pendingSubagentSpawnQueriesRef.current.findIndex(item => item.sessionId === sessionId && item.query === query);
+            if (queuedIndex >= 0) pendingSubagentSpawnQueriesRef.current.splice(queuedIndex, 1);
+            pendingSubagentAssignmentRef.current.set(update.subagent_id, {
+              sessionId,
+              query,
+              ...(update.task_id ? { taskId: update.task_id } : {}),
+            });
+          }
+          useSubagentStore.getState().applyToolStatus(
+            sessionId,
+            update.subagent_id,
+            update.status,
+            eventTimestampMs(payload),
+            query,
+            update.task_id,
+          );
+          if (isSpawnQuery && hasSubagent) {
+            pendingSubagentAssignmentRef.current.delete(update.subagent_id);
+          }
         }
         const activeSessionId = getPayloadSessionId(payload) || undefined;
         // Only trust the result text — "Member shutdown: member_name=X"
@@ -3621,12 +3709,77 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.subtask_update', ({ payload }) => {
         const event = normalizeSubagentStatusEvent(payload);
         if (!event) return;
+        let pendingAssignment = pendingSubagentAssignmentRef.current.get(event.subagent.subagent_id);
+        if (pendingAssignment?.sessionId !== event.session_id) {
+          if (pendingAssignment) pendingSubagentAssignmentRef.current.delete(event.subagent.subagent_id);
+          pendingAssignment = undefined;
+        }
+        if (!event.subagent.task_description.trim() && !pendingAssignment) {
+          const matchingIndex = pendingSubagentSpawnQueriesRef.current.findIndex(item =>
+            item.sessionId === event.session_id && item.displayName === event.subagent.display_name,
+          );
+          const fallbackIndex = matchingIndex >= 0
+            ? matchingIndex
+            : pendingSubagentSpawnQueriesRef.current.findIndex(item => item.sessionId === event.session_id);
+          if (fallbackIndex >= 0) {
+            const queued = pendingSubagentSpawnQueriesRef.current.splice(fallbackIndex, 1)[0];
+            pendingAssignment = { sessionId: event.session_id, query: queued.query };
+            pendingSubagentAssignmentRef.current.set(event.subagent.subagent_id, pendingAssignment);
+          }
+        } else if (event.subagent.task_description.trim()) {
+          const matchingIndex = pendingSubagentSpawnQueriesRef.current.findIndex(item =>
+            item.sessionId === event.session_id
+              && (item.displayName === event.subagent.display_name || item.query === event.subagent.task_description),
+          );
+          if (matchingIndex >= 0) pendingSubagentSpawnQueriesRef.current.splice(matchingIndex, 1);
+        }
         useSubagentStore.getState().applyEvent(event.session_id, event);
+        if (pendingAssignment && !event.subagent.task_description.trim()) {
+          useSubagentStore.getState().applyToolStatus(
+            event.session_id,
+            event.subagent.subagent_id,
+            event.subagent.status,
+            event.subagent.updated_at,
+            pendingAssignment.query,
+            pendingAssignment.taskId,
+          );
+        }
+        if (pendingAssignment) {
+          pendingSubagentAssignmentRef.current.delete(event.subagent.subagent_id);
+        }
       }),
       webClient.on('chat.subagent_activity', ({ payload }) => {
         const event = normalizeSubagentActivityEvent(payload);
         if (!event) return;
         useSubagentStore.getState().applyEvent(event.session_id, event);
+        const runtime = useSubagentStore.getState().getRuntime(event.session_id);
+        let pendingAssignment = pendingSubagentAssignmentRef.current.get(event.activity.subagent_id);
+        if (pendingAssignment?.sessionId !== event.session_id) {
+          if (pendingAssignment) pendingSubagentAssignmentRef.current.delete(event.activity.subagent_id);
+          pendingAssignment = undefined;
+        }
+        if (!pendingAssignment) {
+          const queuedIndex = pendingSubagentSpawnQueriesRef.current.findIndex(item => item.sessionId === event.session_id);
+          if (queuedIndex >= 0) {
+            const queued = pendingSubagentSpawnQueriesRef.current.splice(queuedIndex, 1)[0];
+            pendingAssignment = { sessionId: event.session_id, query: queued.query };
+          }
+        }
+        const taskDescription = pendingAssignment?.query
+          ?? runtime?.subagentsById[event.activity.subagent_id]?.task_description
+          ?? '';
+        if (taskDescription.trim()) {
+          useSubagentStore.getState().applyTurn(
+            event.session_id,
+            event.activity.subagent_id,
+            event.activity.task_id,
+            taskDescription,
+            event.activity.at_ms,
+          );
+        }
+        if (pendingAssignment) {
+          pendingSubagentAssignmentRef.current.delete(event.activity.subagent_id);
+        }
       }),
       webClient.on('chat.ask_user_question', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
@@ -4136,6 +4289,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       streamDeltaBatcherRef.current?.flushAll();
       lastConnectSignatureRef.current = '';
+      clearPendingSubagentCorrelations();
       webClient.disconnect();
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
@@ -4146,6 +4300,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setContextCompressionStats,
     setConnectionStats,
     setConnected,
+    clearPendingSubagentCorrelations,
   ]);
 
   useEffect(() => {
@@ -4184,6 +4339,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
         streamDeltaBatcherRef.current?.flushAll();
+        clearPendingSubagentCorrelations();
         onDisconnectRef.current?.();
       }
       // 断线恢复（false -> true 跳变）：真实环境联调方案 B.8——对"曾经查到过目标"的会话主动
@@ -4202,7 +4358,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       unsub();
     };
-  }, [setConnected, setConnectionStats]);
+  }, [clearPendingSubagentCorrelations, setConnected, setConnectionStats]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {

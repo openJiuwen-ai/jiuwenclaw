@@ -196,6 +196,96 @@ export function normalizeSubagentActivityEvent(value: unknown): SubagentActivity
   };
 }
 
+export interface SubagentToolStatusUpdate {
+  subagent_id: string;
+  status: SubagentStatus;
+  task_id?: string;
+}
+
+const STATUS_TOOL_NAMES = new Set(['subagent_list', 'subagent_resume', 'subagent_send_input', 'subagent_spawn']);
+
+function normalizeToolStatus(value: unknown): SubagentStatus | null {
+  const status = asString(value)?.toLowerCase();
+  if (!status) return null;
+  if (status === 'running' || status === 'starting' || status === 'pending' || status === 'pending_init') return 'running';
+  if (status === 'idle' || status === 'completed' || status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled' || status === 'interrupted') return 'idle';
+  if (status === 'closed') return 'closed';
+  return null;
+}
+
+function extractToolResultText(value: RecordValue): string {
+  const nested = asRecord(value.tool_result) ?? value;
+  const rawOutput = asRecord(nested.raw_output ?? nested.rawOutput);
+  const candidates = [
+    nested.result,
+    rawOutput?.result,
+    nested.data,
+    rawOutput?.data,
+  ];
+  return candidates.find((candidate): candidate is string => typeof candidate === 'string') ?? '';
+}
+
+function toolResultSucceeded(value: RecordValue, resultText: string): boolean {
+  const nested = asRecord(value.tool_result) ?? value;
+  if (typeof value.success === 'boolean') return value.success;
+  if (typeof nested.success === 'boolean') return nested.success;
+  const rawSuccess = /\bsuccess\s*=\s*(True|False)\b/i.exec(resultText)?.[1];
+  if (rawSuccess) return rawSuccess.toLowerCase() === 'true';
+  const jsonSuccess = /["']success["']\s*:\s*(true|false)\b/i.exec(resultText)?.[1];
+  return jsonSuccess?.toLowerCase() === 'true';
+}
+
+function collectStructuredToolStatuses(value: unknown, updates: Map<string, SubagentToolStatusUpdate>): void {
+  if (Array.isArray(value)) {
+    value.forEach(item => collectStructuredToolStatuses(item, updates));
+    return;
+  }
+  const record = asRecord(value);
+  if (!record) return;
+
+  const subagentId = asString(record.subagent_id ?? record.subagentId);
+  const status = normalizeToolStatus(record.status);
+  if (subagentId && status) {
+    const taskId = asString(record.task_id ?? record.taskId);
+    updates.set(subagentId, { subagent_id: subagentId, status, ...(taskId ? { task_id: taskId } : {}) });
+  }
+  Object.values(record).forEach(item => collectStructuredToolStatuses(item, updates));
+}
+
+function collectTextToolStatuses(resultText: string, updates: Map<string, SubagentToolStatusUpdate>): void {
+  const idPattern = /["'](?:subagent_id|subagentId)["']\s*:\s*(["'])([^"']+)\1/g;
+  const matches = [...resultText.matchAll(idPattern)];
+  matches.forEach((match, index) => {
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? resultText.length;
+    const statusMatch = /["']status["']\s*:\s*(["'])([^"']+)\1/.exec(resultText.slice(start, end));
+    const taskIdMatch = /["']task_id["']\s*:\s*(["'])([^"']+)\1/.exec(resultText.slice(start, end));
+    const subagentId = match[2]?.trim();
+    const status = normalizeToolStatus(statusMatch?.[2]);
+    if (subagentId && status) {
+      const taskId = taskIdMatch?.[2]?.trim();
+      updates.set(subagentId, { subagent_id: subagentId, status, ...(taskId ? { task_id: taskId } : {}) });
+    }
+  });
+}
+
+/** Read explicit successful subagent control/list tool results for live roster convergence. */
+export function normalizeSubagentToolStatusUpdates(value: unknown): SubagentToolStatusUpdate[] {
+  const raw = asRecord(value);
+  if (!raw) return [];
+  const nested = asRecord(raw.tool_result) ?? raw;
+  const toolName = asString(nested.tool_name ?? nested.toolName ?? nested.name ?? raw.tool_name ?? raw.toolName ?? raw.name)?.toLowerCase();
+  if (!toolName || !STATUS_TOOL_NAMES.has(toolName)) return [];
+
+  const resultText = extractToolResultText(raw);
+  if (!toolResultSucceeded(raw, resultText)) return [];
+
+  const updates = new Map<string, SubagentToolStatusUpdate>();
+  collectStructuredToolStatuses(nested, updates);
+  collectTextToolStatuses(resultText, updates);
+  return [...updates.values()];
+}
+
 export function normalizeSubagentWaitResults(value: unknown): SubagentResult[] {
   const raw = asRecord(value);
   const toolResult = asRecord(raw?.tool_result) ?? raw;

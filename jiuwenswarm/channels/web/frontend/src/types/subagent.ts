@@ -64,9 +64,18 @@ export interface SubagentActivityEvent {
 export interface SubagentResult {
   subagent_id: string;
   parent_session_id?: string;
+  task_id?: string;
+  at_ms?: number;
   content: string;
   output_file?: string;
   source?: 'wait' | 'transcript';
+}
+
+export interface SubagentTurn {
+  task_id: string;
+  task_description: string;
+  started_at: number;
+  result?: SubagentResult;
 }
 
 export type SubagentEvent = SubagentUpdatedEvent | SubagentActivityEvent;

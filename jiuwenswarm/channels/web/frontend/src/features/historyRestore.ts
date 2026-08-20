@@ -54,6 +54,7 @@ export interface HistoryToolReplayItem {
 
 export interface HistorySubagentRecovery {
   subagent: Record<string, unknown>;
+  turns?: Array<{ task_id: string; task_description: string; started_at: number }>;
   result?: {
     subagent_id: string;
     content: string;
@@ -194,7 +195,10 @@ export function recoverSubagentToolHistory(
   type MutableRecovery = {
     id: string;
     subagentType: string;
+    displayName: string;
+    role: string;
     taskDescription: string;
+    turns: Map<string, { task_id: string; task_description: string; started_at: number }>;
     status: NonNullable<ReturnType<typeof normalizeRecoveredSubagentStatus>>;
     createdAt: number;
     updatedAt: number;
@@ -203,24 +207,44 @@ export function recoverSubagentToolHistory(
   };
 
   const records = new Map<string, MutableRecovery>();
-  const pendingSpawns: Array<{ subagentType: string; taskDescription: string; at: number }> = [];
+  const pendingSpawns: Array<{ subagentType: string; displayName: string; role: string; taskDescription: string; at: number }> = [];
+  const pendingFollowUps = new Map<string, Array<{ taskDescription: string; at: number }>>();
   const ordered = [...items].sort((left, right) => parseTimestampToMs(left.at) - parseTimestampToMs(right.at));
-  const ensure = (id: string, at: number, metadata?: { subagentType?: string; taskDescription?: string }): MutableRecovery => {
+  const ensure = (id: string, at: number, metadata?: { subagentType?: string; displayName?: string; role?: string; taskDescription?: string; taskId?: string }): MutableRecovery => {
     const existing = records.get(id);
     if (existing) {
       if (metadata?.subagentType) existing.subagentType = metadata.subagentType;
+      if (metadata?.displayName) existing.displayName = metadata.displayName;
+      if (metadata?.role) existing.role = metadata.role;
       if (metadata?.taskDescription) existing.taskDescription = metadata.taskDescription;
+      if (metadata?.taskId && metadata.taskDescription) {
+        existing.turns.set(metadata.taskId, {
+          task_id: metadata.taskId,
+          task_description: metadata.taskDescription,
+          started_at: at,
+        });
+      }
       return existing;
     }
     const created = {
       id,
       subagentType: metadata?.subagentType || 'general-purpose',
+      displayName: metadata?.displayName || metadata?.subagentType || 'general-purpose',
+      role: metadata?.role || '',
       taskDescription: metadata?.taskDescription || '',
+      turns: new Map<string, { task_id: string; task_description: string; started_at: number }>(),
       status: normalizeRecoveredSubagentStatus('running')!,
       createdAt: Number.isFinite(at) ? at : 0,
       updatedAt: Number.isFinite(at) ? at : 0,
       revision: 0,
     };
+    if (metadata?.taskId && metadata.taskDescription) {
+      created.turns.set(metadata.taskId, {
+        task_id: metadata.taskId,
+        task_description: metadata.taskDescription,
+        started_at: at,
+      });
+    }
     records.set(id, created);
     return created;
   };
@@ -257,10 +281,22 @@ export function recoverSubagentToolHistory(
       if (call.name === 'subagent_spawn') {
         pendingSpawns.push({
           subagentType: typeof args.subagent_type === 'string' ? args.subagent_type : 'general-purpose',
+          displayName: typeof args.display_name === 'string' ? args.display_name.trim() : '',
+          role: typeof args.role === 'string' ? args.role.trim() : '',
           taskDescription: typeof args.task_description === 'string' ? args.task_description : '',
           at,
         });
         continue;
+      }
+      if (call.name === 'subagent_send_input') {
+        const subagentId = typeof args.subagent_id === 'string' ? args.subagent_id.trim() : '';
+        const taskDescription = typeof args.query === 'string' ? args.query.trim() : '';
+        if (subagentId && taskDescription) {
+          pendingFollowUps.set(subagentId, [
+            ...(pendingFollowUps.get(subagentId) ?? []),
+            { taskDescription, at },
+          ]);
+        }
       }
       // Do not optimistically change a roster from a tool call. The bfb runtime
       // rejects close on a running subagent; only its successful tool result is
@@ -276,7 +312,8 @@ export function recoverSubagentToolHistory(
       const id = findQuotedField(rawResult, 'subagent_id');
       if (!id) continue;
       const metadata = pendingSpawns.shift();
-      ensure(id, at, metadata);
+      const taskId = findQuotedField(rawResult, 'task_id') ?? undefined;
+      ensure(id, at, metadata ? { ...metadata, taskId } : { taskId });
       continue;
     }
     if (toolName === 'subagent_wait') {
@@ -302,7 +339,28 @@ export function recoverSubagentToolHistory(
     if (toolName === 'subagent_send_input' || toolName === 'subagent_resume') {
       const id = findQuotedField(rawResult, 'subagent_id') ?? extractHistorySubagentIds(item.payload)[0];
       const status = findQuotedField(rawResult, 'status');
-      if (id && status) update(ensure(id, at), status, at);
+      if (id && status) {
+        const record = ensure(id, at);
+        update(record, status, at);
+        if (toolName === 'subagent_send_input') {
+          const followUps = pendingFollowUps.get(id) ?? [];
+          const followUp = followUps.shift();
+          if (followUps.length > 0) pendingFollowUps.set(id, followUps);
+          else pendingFollowUps.delete(id);
+          if (followUp) {
+            record.taskDescription = followUp.taskDescription;
+            record.updatedAt = Math.max(record.updatedAt, followUp.at);
+            const taskId = findQuotedField(rawResult, 'task_id');
+            if (taskId) {
+              record.turns.set(taskId, {
+                task_id: taskId,
+                task_description: followUp.taskDescription,
+                started_at: followUp.at,
+              });
+            }
+          }
+        }
+      }
     }
   }
 
@@ -311,8 +369,8 @@ export function recoverSubagentToolHistory(
       subagent_id: record.id,
       parent_session_id: sessionId,
       subagent_type: record.subagentType,
-      display_name: record.subagentType,
-      role: '',
+      display_name: record.displayName || record.subagentType,
+      role: record.role,
       task_description: record.taskDescription,
       ...record.status,
       closed_at: record.status.status === 'closed' ? record.updatedAt : null,
@@ -321,6 +379,7 @@ export function recoverSubagentToolHistory(
       updated_at: record.updatedAt,
       revision: record.revision,
     },
+    turns: [...record.turns.values()].sort((left, right) => left.started_at - right.started_at),
     ...(record.result ? { result: { subagent_id: record.id, ...record.result } } : {}),
   }));
 }
@@ -623,13 +682,15 @@ export function parseSubagentHistoryReplay(
   sessionId: string,
   subagentId: string,
 ): HistorySubagentReplayItem | null {
-  if (normalizeHistoryRole(record.role) !== 'assistant') return null;
-
   if (hasMismatchedHistoryBoundary(record, sessionId)) return null;
 
   const eventType = typeof record.event_type === 'string' ? record.event_type.trim() : '';
+  if (normalizeHistoryRole(record.role) !== 'assistant' && eventType !== 'chat.subtask_update') return null;
   const at = recordTimestampIso(record) ?? '';
   const payload = buildEventPayloadForRecord(record);
+  if (eventType === 'chat.subtask_update' && typeof record.role === 'string' && payload.role == null) {
+    payload.role = record.role;
+  }
   if (hasMismatchedHistoryBoundary(payload, sessionId)) return null;
 
   if (eventType === 'chat.final') {
@@ -1521,7 +1582,7 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
  * 仅处理属于当前 `history.get` 会话的帧，避免多标签/乱序下的串台。
  * 无 `session_id` 时：丢弃数据行；仍接受明确的结束帧（兼容未注入 id 的旧链路）。
  */
-function shouldProcessHistoryPayload(
+export function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
   expectedPageIdx?: number,
@@ -1535,7 +1596,7 @@ function shouldProcessHistoryPayload(
   }
   const subagentId = pickFirstString(payload, ['subagent_id', 'subagentId']) ?? '';
   if (expectedSubagentId) {
-    if (subagentId && subagentId !== expectedSubagentId) {
+    if (subagentId !== expectedSubagentId) {
       return false;
     }
   } else if (subagentId) {

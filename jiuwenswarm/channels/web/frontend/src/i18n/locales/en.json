@@ -2603,6 +2603,7 @@
     "tasksEmpty": "No tasks",
     "activityTitle": "Activity",
     "activityEmpty": "No activity yet",
+    "historyLoading": "Restoring history…",
     "empty": "No subagents",
     "activity": {
       "thinking": "Thinking",

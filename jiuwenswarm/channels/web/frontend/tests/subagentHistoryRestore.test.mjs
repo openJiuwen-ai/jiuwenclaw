@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   parseSubagentHistoryReplay,
   recoverSubagentToolHistory,
+  shouldProcessHistoryPayload,
 } from '../node_modules/.cache/subagent-history/historyRestore.mjs';
 
 const sessionId = 'web_session';
@@ -65,6 +66,24 @@ test('subagent history replays persisted roster status updates', () => {
   assert.equal(replay?.kind, 'updated');
   assert.equal(replay?.payload.status, 'idle');
   assert.equal(replay?.payload.revision, 5);
+});
+
+test('subagent roster updates keep the persisted display role', () => {
+  const replay = parseSubagentHistoryReplay({
+    role: '查询汕头今日天气',
+    event_type: 'chat.subtask_update',
+    timestamp: 1787019579.059,
+    subagent_id: subagentId,
+    parent_session_id: sessionId,
+    display_name: '汕头天气查询员',
+    task_description: '查询汕头今日天气',
+    status: 'running',
+    revision: 1,
+  }, sessionId, subagentId);
+
+  assert.equal(replay?.kind, 'updated');
+  assert.equal(replay?.payload.display_name, '汕头天气查询员');
+  assert.equal(replay?.payload.role, '查询汕头今日天气');
 });
 
 test('subagent history rejects activity whose nested parent session differs', () => {
@@ -132,6 +151,23 @@ test('subagent history rejects nested payload boundary aliases', () => {
   assert.equal(activityReplay, null);
 });
 
+test('subagent history rejects parent frames without its exact subagent id', () => {
+  assert.equal(shouldProcessHistoryPayload({
+    session_id: sessionId,
+    subagent_id: '',
+    page_idx: 1,
+  }, sessionId, 1, false, subagentId), false);
+  assert.equal(shouldProcessHistoryPayload({
+    session_id: sessionId,
+    page_idx: 1,
+  }, sessionId, 1, false, subagentId), false);
+  assert.equal(shouldProcessHistoryPayload({
+    session_id: sessionId,
+    subagent_id: subagentId,
+    page_idx: 1,
+  }, sessionId, 1, false, subagentId), true);
+});
+
 test('parent tool history recovers roster and structured wait result without tool-result transcript text', () => {
   const recovered = recoverSubagentToolHistory([
     {
@@ -143,6 +179,8 @@ test('parent tool history recovers roster and structured wait result without too
           arguments: JSON.stringify({
             subagent_type: 'general-purpose',
             task_description: 'Return the unique phrase',
+            display_name: 'Agent A',
+            role: 'Researcher',
           }),
         },
       },
@@ -152,7 +190,28 @@ test('parent tool history recovers roster and structured wait result without too
       at: '2026-08-17T12:00:01.000Z',
       payload: {
         tool_name: 'subagent_spawn',
-        result: `success=True data={'subagent_id': '${subagentId}', 'status': 'running'} error=None`,
+        result: `success=True data={'subagent_id': '${subagentId}', 'task_id': 'turn-1', 'status': 'running'} error=None`,
+      },
+    },
+    {
+      kind: 'tool_call',
+      at: '2026-08-17T12:00:01.500Z',
+      payload: {
+        tool_call: {
+          name: 'subagent_send_input',
+          arguments: JSON.stringify({
+            subagent_id: subagentId,
+            query: 'Follow-up query',
+          }),
+        },
+      },
+    },
+    {
+      kind: 'tool_result',
+      at: '2026-08-17T12:00:01.750Z',
+      payload: {
+        tool_name: 'subagent_send_input',
+        result: `success=True data={'subagent_id': '${subagentId}', 'task_id': 'follow-up-task', 'status': 'running'} error=None`,
       },
     },
     {
@@ -185,9 +244,15 @@ test('parent tool history recovers roster and structured wait result without too
 
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0].subagent.subagent_id, subagentId);
+  assert.equal(recovered[0].subagent.display_name, 'Agent A');
+  assert.equal(recovered[0].subagent.role, 'Researcher');
   assert.equal(recovered[0].subagent.status, 'closed');
   assert.equal(recovered[0].subagent.closed_reason, 'manual');
-  assert.equal(recovered[0].subagent.task_description, 'Return the unique phrase');
+  assert.equal(recovered[0].subagent.task_description, 'Follow-up query');
+  assert.deepEqual(recovered[0].turns, [
+    { task_id: 'turn-1', task_description: 'Return the unique phrase', started_at: 1786968001000 },
+    { task_id: 'follow-up-task', task_description: 'Follow-up query', started_at: 1786968001500 },
+  ]);
   assert.deepEqual(recovered[0].result, {
     subagent_id: subagentId,
     content: 'RESTORED_RESULT',

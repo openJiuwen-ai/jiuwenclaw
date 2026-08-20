@@ -4,8 +4,8 @@ import { useTranslation } from 'react-i18next';
 import ProcessingIcon from '../../assets/subagent/processing.svg?react';
 import { getSubagentStatusLabelKey } from '../../features/subagent/subagentStatusPresentation';
 import { extractSubagentTasks, finalizeSubagentTasks, getSubagentActivityPreview, groupSubagentActivities, type SubagentActivityGroup } from '../../features/subagent/subagentActivityPresentation';
-import { selectSubagentActivities, selectSubagentResult, selectSubagents, useSubagentStore } from '../../stores/subagentStore';
-import type { SubagentActivity, SubagentActivityKind } from '../../types/subagent';
+import { selectSubagentActivities, selectSubagentHistoryRestoring, selectSubagentResult, selectSubagentTurns, selectSubagents, useSubagentStore } from '../../stores/subagentStore';
+import type { SubagentActivity, SubagentActivityKind, SubagentTurn } from '../../types/subagent';
 import { MemberTaskListBar, MemberTaskListItems, type MemberTaskListItem } from '../teamArea/MemberTaskList';
 import { formatTime } from '../teamArea/shared';
 import { MarkdownRenderer } from '../MarkdownRenderer';
@@ -160,8 +160,9 @@ function SubagentDetail({ sessionId, subagentId }: { sessionId: string; subagent
   const [tasksExpanded, setTasksExpanded] = useState(false);
   const runtime = useSubagentStore(state => state.runtimes[sessionId]);
   const activities = selectSubagentActivities(runtime, subagentId);
-  const activityGroups = groupSubagentActivities(activities);
+  const historyRestoring = selectSubagentHistoryRestoring(runtime, subagentId);
   const result = selectSubagentResult(runtime, subagentId);
+  const turns = selectSubagentTurns(runtime, subagentId);
   const subagent = runtime?.subagentsById[subagentId];
 
   if (!subagent) {
@@ -171,9 +172,20 @@ function SubagentDetail({ sessionId, subagentId }: { sessionId: string; subagent
   const taskDescription = subagent.task_description?.trim() || subagent.display_name;
   const hasFailed = subagent.closed_reason === 'failed' || subagent.turn_outcome === 'failed';
   const taskSectionId = `subagent-tasks-${subagentId}`;
+  const visibleTurns: SubagentTurn[] = turns.length > 0
+    ? turns
+    : [{
+      task_id: '__legacy__',
+      task_description: taskDescription,
+      started_at: subagent.created_at,
+      ...(result ? { result } : {}),
+    }];
+  const hasTurnResult = visibleTurns.some(turn => Boolean(turn.result?.content?.trim()));
+  const legacyFallbackResult = !historyRestoring && !hasTurnResult ? result : undefined;
+  const latestTurnId = visibleTurns[visibleTurns.length - 1]?.task_id;
   const tasks = finalizeSubagentTasks(
     extractSubagentTasks(activities),
-    subagent.turn_outcome === 'completed' && Boolean(result?.content?.trim()),
+    subagent.turn_outcome === 'completed' && visibleTurns.some(turn => Boolean(turn.result?.content?.trim())),
     subagent.updated_at,
   );
   const taskListItems: MemberTaskListItem[] = tasks.map(task => ({
@@ -199,37 +211,70 @@ function SubagentDetail({ sessionId, subagentId }: { sessionId: string; subagent
           ) : null}
         </div>
 
-        <div className="subagent-assignment">
-          <MarkdownRenderer content={taskDescription} className="chat-text chat-markdown subagent-markdown" />
-        </div>
-
         {hasFailed && subagent.error ? (
           <div className="subagent-error-note" role="alert">
             {subagent.error.message}
           </div>
         ) : null}
 
-        <div className="subagent-activity-section">
-          {activities.length > 0 ? (
-            <ol className="subagent-activity-list" aria-label={t('subagent.activityTitle')} aria-live="polite">
-              {activityGroups.map((group, index) => (
-                <ActivityRow key={group.activity.activity_id} group={group} isLast={index === activityGroups.length - 1} isSubagentRunning={subagent.status === 'running'} />
-              ))}
-            </ol>
-          ) : (
-            <div className="subagent-detail__state">{t('subagent.activityEmpty')}</div>
-          )}
-        </div>
+        <div className="subagent-conversation" aria-live="polite">
+          {visibleTurns.map(turn => {
+            const turnActivities = turn.task_id === '__legacy__'
+              ? activities
+              : activities.filter(activity => activity.task_id === turn.task_id);
+            const activityGroups = groupSubagentActivities(turnActivities);
+            const turnResult = (historyRestoring && turn.result?.source === 'wait' ? undefined : turn.result)
+              ?? (!historyRestoring && visibleTurns.length === 1 ? result : undefined)
+              ?? (turn.task_id === latestTurnId ? legacyFallbackResult : undefined);
+            const waitingForHistory = historyRestoring && turnResult == null;
+            return (
+              <section className="subagent-turn" key={turn.task_id}>
+                {turn.task_description.trim() ? (
+                  <div className="subagent-assignment">
+                    <MarkdownRenderer content={turn.task_description} className="chat-text chat-markdown subagent-markdown" />
+                  </div>
+                ) : null}
 
-        {result?.content?.trim() ? (
-          <div className="subagent-message" aria-live="polite">
-            <TeamMemberAvatar member={subagent.subagent_id} alt={subagent.display_name} className="h-8 w-8 rounded-xl" imageClassName="rounded-xl" />
-            <div className="subagent-message__body">
-              <div className="subagent-message__name">{subagent.display_name}</div>
-              <MarkdownRenderer content={result.content} className="chat-text chat-markdown subagent-markdown subagent-message__content" />
-            </div>
-          </div>
-        ) : null}
+                <div className="subagent-identity">
+                  <TeamMemberAvatar member={subagent.subagent_id} alt={subagent.display_name} className="h-8 w-8 rounded-xl" imageClassName="rounded-xl" />
+                  <div className="subagent-message__name">{subagent.display_name}</div>
+                </div>
+
+                <div className="subagent-activity-section">
+                  {turnActivities.length > 0 ? (
+                    <ol className="subagent-activity-list" aria-label={t('subagent.activityTitle')}>
+                      {activityGroups.map((group, index) => (
+                        <ActivityRow
+                          key={group.activity.activity_id}
+                          group={group}
+                          isLast={index === activityGroups.length - 1}
+                          isSubagentRunning={subagent.status === 'running' && turn.task_id === latestTurnId}
+                        />
+                      ))}
+                    </ol>
+                  ) : null}
+                </div>
+
+                {waitingForHistory ? (
+                  <div className="subagent-history-loading" role="status" aria-live="polite">
+                    {t('subagent.historyLoading')}
+                  </div>
+                ) : null}
+
+                {turnResult?.content?.trim() ? (
+                  <div className="subagent-message">
+                    <div className="subagent-message__body">
+                      <MarkdownRenderer content={turnResult.content} className="chat-text chat-markdown subagent-markdown subagent-message__content" />
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })}
+          {activities.length === 0 && !visibleTurns.some(turn => turn.result?.content?.trim()) ? (
+            <div className="subagent-detail__state">{t('subagent.activityEmpty')}</div>
+          ) : null}
+        </div>
 
       </div>
 

@@ -1,11 +1,14 @@
 import { create } from 'zustand';
-import type { Subagent, SubagentActivity, SubagentEvent, SubagentResult, SubagentUpdatedEvent } from '../types/subagent';
+import type { Subagent, SubagentActivity, SubagentEvent, SubagentResult, SubagentTurn, SubagentUpdatedEvent } from '../types/subagent';
 
 export interface SubagentRuntime {
   sessionId: string;
   revision: number;
   subagentsById: Record<string, Subagent>;
   activitiesBySubagentId: Record<string, Record<string, SubagentActivity>>;
+  turnsBySubagentId: Record<string, Record<string, SubagentTurn>>;
+  transcriptMessagesBySubagentId: Record<string, SubagentResult[]>;
+  historyRestoringBySubagentId: Record<string, true>;
   resultsBySubagentId: Record<string, SubagentResult>;
   cacheOnlySubagentIds: Record<string, true>;
   selectedSubagentId: string | null;
@@ -30,6 +33,10 @@ interface SubagentState {
   dropCachedSubagent: (sessionId: string, subagentId: string, revision: number, updatedAt: number) => void;
   applyEvent: (sessionId: string, event: SubagentEvent) => void;
   applyHistoryEvent: (sessionId: string, event: SubagentEvent) => void;
+  applyToolStatus: (sessionId: string, subagentId: string, status: Subagent['status'], updatedAt: number, taskDescription?: string, taskId?: string) => void;
+  beginHistoryRestore: (sessionId: string, subagentId: string) => void;
+  finishHistoryRestore: (sessionId: string, subagentId: string) => void;
+  applyTurn: (sessionId: string, subagentId: string, taskId: string, taskDescription: string, startedAt: number) => void;
   markRunningSubagentsCancelled: (sessionId: string) => void;
   applyResult: (sessionId: string, result: SubagentResult) => void;
   applyTranscript: (sessionId: string, result: SubagentResult) => void;
@@ -42,6 +49,9 @@ export function createEmptySubagentRuntime(sessionId: string): SubagentRuntime {
     revision: 0,
     subagentsById: {},
     activitiesBySubagentId: {},
+    turnsBySubagentId: {},
+    transcriptMessagesBySubagentId: {},
+    historyRestoringBySubagentId: {},
     resultsBySubagentId: {},
     cacheOnlySubagentIds: {},
     selectedSubagentId: null,
@@ -115,6 +125,7 @@ function mergePersistedRuntime(runtime: SubagentRuntime, persisted: PersistedSub
     }
   }
   const activitiesBySubagentId = { ...runtime.activitiesBySubagentId };
+  const turnsBySubagentId = { ...runtime.turnsBySubagentId };
   for (const activity of persisted.activities) {
     if (activity.parent_session_id && activity.parent_session_id !== runtime.sessionId) continue;
     const scopedActivity = activity.parent_session_id
@@ -124,6 +135,17 @@ function mergePersistedRuntime(runtime: SubagentRuntime, persisted: PersistedSub
     activitiesBySubagentId[scopedActivity.subagent_id] = {
       ...existing,
       [scopedActivity.activity_id]: scopedActivity,
+    };
+    const turns = turnsBySubagentId[scopedActivity.subagent_id] ?? {};
+    const currentTurn = turns[scopedActivity.task_id];
+    turnsBySubagentId[scopedActivity.subagent_id] = {
+      ...turns,
+      [scopedActivity.task_id]: {
+        task_id: scopedActivity.task_id,
+        task_description: currentTurn?.task_description ?? '',
+        started_at: Math.min(currentTurn?.started_at ?? scopedActivity.at_ms, scopedActivity.at_ms),
+        ...(currentTurn?.result ? { result: currentTurn.result } : {}),
+      },
     };
   }
   const resultsBySubagentId = { ...runtime.resultsBySubagentId };
@@ -140,6 +162,7 @@ function mergePersistedRuntime(runtime: SubagentRuntime, persisted: PersistedSub
     revision: Math.max(runtime.revision, ...Object.values(subagentsById).map((item) => item.revision)),
     subagentsById,
     activitiesBySubagentId,
+    turnsBySubagentId,
     resultsBySubagentId,
     cacheOnlySubagentIds,
     selectedSubagentId: runtime.selectedSubagentId ?? persisted.selectedSubagentId ?? chooseDefaultSubagentId(subagentsById, null),
@@ -148,6 +171,119 @@ function mergePersistedRuntime(runtime: SubagentRuntime, persisted: PersistedSub
 
 function compareBySequence(left: SubagentActivity, right: SubagentActivity): number {
   return left.sequence - right.sequence || left.at_ms - right.at_ms || left.activity_id.localeCompare(right.activity_id);
+}
+
+function upsertSubagentTurn(
+  runtime: SubagentRuntime,
+  subagentId: string,
+  taskId: string,
+  taskDescription = '',
+  startedAt = Date.now(),
+): SubagentRuntime {
+  const normalizedTaskId = taskId.trim();
+  if (!normalizedTaskId) return runtime;
+  const turns = runtime.turnsBySubagentId[subagentId] ?? {};
+  const current = turns[normalizedTaskId];
+  const next: SubagentTurn = {
+    task_id: normalizedTaskId,
+    task_description: taskDescription.trim() || current?.task_description || '',
+    started_at: Math.min(current?.started_at ?? startedAt, startedAt),
+    ...(current?.result ? { result: current.result } : {}),
+  };
+  if (current
+    && current.task_description === next.task_description
+    && current.started_at === next.started_at
+    && current.result === next.result) return runtime;
+  return {
+    ...runtime,
+    turnsBySubagentId: {
+      ...runtime.turnsBySubagentId,
+      [subagentId]: { ...turns, [normalizedTaskId]: next },
+    },
+  };
+}
+
+function updateLatestSubagentTurnDescription(
+  runtime: SubagentRuntime,
+  subagentId: string,
+  taskDescription: string,
+): SubagentRuntime {
+  if (!taskDescription.trim()) return runtime;
+  const turns = runtime.turnsBySubagentId[subagentId] ?? {};
+  const ordered = Object.values(turns).sort((left, right) => left.started_at - right.started_at);
+  const latest = ordered[ordered.length - 1];
+  if (!latest || latest.task_description.trim()) return runtime;
+  return {
+    ...runtime,
+    turnsBySubagentId: {
+      ...runtime.turnsBySubagentId,
+      [subagentId]: {
+        ...turns,
+        [latest.task_id]: { ...latest, task_description: taskDescription.trim() },
+      },
+    },
+  };
+}
+
+function selectTurnForResult(runtime: SubagentRuntime, subagentId: string, result: SubagentResult): string | null {
+  if (result.task_id?.trim()) return result.task_id.trim();
+  const turns = Object.values(runtime.turnsBySubagentId[subagentId] ?? {}).sort((left, right) => left.started_at - right.started_at);
+  if (turns.length === 0) return null;
+  if (typeof result.at_ms === 'number' && Number.isFinite(result.at_ms)) {
+    const eligible = turns.filter(turn => turn.started_at <= result.at_ms!);
+    return (eligible[eligible.length - 1] ?? turns[turns.length - 1]).task_id;
+  }
+  return turns[turns.length - 1].task_id;
+}
+
+function attachTurnResult(runtime: SubagentRuntime, result: SubagentResult): SubagentRuntime {
+  const taskId = selectTurnForResult(runtime, result.subagent_id, result);
+  if (!taskId) return runtime;
+  const turns = runtime.turnsBySubagentId[result.subagent_id] ?? {};
+  const current = turns[taskId];
+  if (current?.result?.source === 'wait') return runtime;
+  const nextResult = {
+    ...result,
+    task_id: taskId,
+  };
+  return {
+    ...runtime,
+    turnsBySubagentId: {
+      ...runtime.turnsBySubagentId,
+      [result.subagent_id]: {
+        ...turns,
+        [taskId]: {
+          task_id: taskId,
+          task_description: current?.task_description ?? '',
+          started_at: current?.started_at ?? result.at_ms ?? Date.now(),
+          result: nextResult,
+        },
+      },
+    },
+  };
+}
+
+function attachPendingTranscripts(runtime: SubagentRuntime, subagentId: string): SubagentRuntime {
+  const pending = runtime.transcriptMessagesBySubagentId[subagentId] ?? [];
+  if (pending.length === 0) return runtime;
+  let next = runtime;
+  const remaining: SubagentResult[] = [];
+  for (const result of pending) {
+    if (selectTurnForResult(next, subagentId, result)) {
+      const attached = attachTurnResult(next, result);
+      if (attached === next) remaining.push(result);
+      else next = attached;
+    } else {
+      remaining.push(result);
+    }
+  }
+  return {
+    ...next,
+    transcriptMessagesBySubagentId: {
+      ...next.transcriptMessagesBySubagentId,
+      [subagentId]: remaining,
+    },
+  };
 }
 
 function compareByUpdatedAt(left: Subagent, right: Subagent): number {
@@ -170,16 +306,35 @@ function chooseDefaultSubagentId(subagentsById: Record<string, Subagent>, prefer
     ?? null;
 }
 
-function replaceSubagent(runtime: SubagentRuntime, incoming: Subagent, allowSameRevisionNewerHistory = false): SubagentRuntime {
+function replaceSubagent(runtime: SubagentRuntime, incoming: Subagent, allowSameRevisionNewerSource = false): SubagentRuntime {
   const current = runtime.subagentsById[incoming.subagent_id];
   if (current) {
-    if (current.status === 'closed' && incoming.status !== 'closed' && !allowSameRevisionNewerHistory) return runtime;
+    const isNewerFollowUpTurn = incoming.task_description.trim() !== ''
+      && incoming.task_description !== current.task_description
+      && incoming.updated_at > current.updated_at;
+    if (current.status === 'closed' && incoming.status !== 'closed' && !allowSameRevisionNewerSource && !isNewerFollowUpTurn) return runtime;
     const incomingIsOlder = incoming.revision < current.revision
       || (
         incoming.revision === current.revision
-        && (!allowSameRevisionNewerHistory || incoming.updated_at <= current.updated_at)
+        && ((!allowSameRevisionNewerSource && !isNewerFollowUpTurn) || incoming.updated_at <= current.updated_at)
       );
-    if (incomingIsOlder) return runtime;
+    if (incomingIsOlder) {
+      const hasUsefulDisplayName = current.display_name.trim() === 'general-purpose'
+        && incoming.display_name.trim() !== ''
+        && incoming.display_name.trim() !== 'general-purpose';
+      if (!hasUsefulDisplayName) return runtime;
+      return {
+        ...runtime,
+        subagentsById: {
+          ...runtime.subagentsById,
+          [incoming.subagent_id]: {
+            ...current,
+            display_name: incoming.display_name,
+            role: incoming.role.trim() ? incoming.role : current.role,
+          },
+        },
+      };
+    }
   }
 
   // Some recovery sources only carry the status transition. Keep the canonical
@@ -252,6 +407,79 @@ export function applySubagentHistoryUpdated(runtime: SubagentRuntime, event: Sub
   return replaceSubagent(runtime, event.subagent, true);
 }
 
+export function applySubagentToolStatus(
+  runtime: SubagentRuntime,
+  subagentId: string,
+  status: Subagent['status'],
+  turnStartedAt: number,
+  taskDescription?: string,
+  taskId?: string,
+): SubagentRuntime {
+  const current = runtime.subagentsById[subagentId];
+  if (!current) return runtime;
+  const nextTaskDescription = taskDescription?.trim() || current.task_description;
+  if (current.status === status && nextTaskDescription === current.task_description) return runtime;
+
+  const next: Subagent = {
+    ...current,
+    status,
+    task_description: nextTaskDescription,
+    // The tool result only bridges the missing status event. Keep the last
+    // authoritative timestamp so the subsequent canonical roster event can
+    // still carry the follow-up assignment at the same revision.
+    updated_at: current.updated_at,
+    revision: current.revision,
+    ...(status === 'running'
+      ? {
+        turn_outcome: null,
+        lifecycle: 'live' as const,
+        can_send_input: false,
+        needs_resume: false,
+        closed_at: null,
+        closed_reason: null,
+        error: null,
+      }
+      : status === 'idle'
+        ? {
+          lifecycle: 'live' as const,
+          can_send_input: true,
+          needs_resume: false,
+          closed_at: null,
+          closed_reason: null,
+          error: null,
+        }
+      : {
+          lifecycle: 'closed' as const,
+          can_send_input: false,
+          needs_resume: true,
+          closed_at: current.closed_at,
+          closed_reason: current.closed_reason,
+        }),
+  };
+  const nextRuntime = {
+    ...runtime,
+    subagentsById: {
+      ...runtime.subagentsById,
+      [subagentId]: next,
+    },
+    selectedSubagentId: chooseDefaultSubagentId(runtime.subagentsById, runtime.selectedSubagentId),
+  };
+  const withTurnDescription = taskId
+    ? upsertSubagentTurn(nextRuntime, subagentId, taskId, nextTaskDescription, turnStartedAt)
+    : updateLatestSubagentTurnDescription(nextRuntime, subagentId, nextTaskDescription);
+  return attachPendingTranscripts(withTurnDescription, subagentId);
+}
+
+export function applySubagentTurn(
+  runtime: SubagentRuntime,
+  subagentId: string,
+  taskId: string,
+  taskDescription: string,
+  startedAt: number,
+): SubagentRuntime {
+  return attachPendingTranscripts(upsertSubagentTurn(runtime, subagentId, taskId, taskDescription, startedAt), subagentId);
+}
+
 export function applySubagentActivity(
   runtime: SubagentRuntime,
   event: Extract<SubagentEvent, { event_type: 'chat.subagent_activity' }>,
@@ -260,17 +488,42 @@ export function applySubagentActivity(
   const activity = event.activity.parent_session_id
     ? event.activity
     : { ...event.activity, parent_session_id: runtime.sessionId };
-  return replaceActivity(runtime, activity);
+  const next = replaceActivity(runtime, activity);
+  return next === runtime
+    ? runtime
+    : attachPendingTranscripts(
+      upsertSubagentTurn(
+        next,
+        activity.subagent_id,
+        activity.task_id,
+        next.subagentsById[activity.subagent_id]?.task_description ?? '',
+        activity.at_ms,
+      ),
+      activity.subagent_id,
+    );
 }
 
 export function applySubagentResult(runtime: SubagentRuntime, result: SubagentResult): SubagentRuntime {
   if (!result.subagent_id) return runtime;
   if (result.parent_session_id && result.parent_session_id !== runtime.sessionId) return runtime;
-  return replaceResult(runtime, {
+  const normalized = {
     ...result,
     parent_session_id: result.parent_session_id ?? runtime.sessionId,
     source: 'wait',
-  });
+  } satisfies SubagentResult;
+  const next = replaceResult(runtime, normalized);
+  if (next === runtime) return runtime;
+  const pending = next.transcriptMessagesBySubagentId[result.subagent_id] ?? [];
+  const withPending = selectTurnForResult(next, result.subagent_id, normalized)
+    ? attachTurnResult(next, normalized)
+    : {
+      ...next,
+      transcriptMessagesBySubagentId: {
+        ...next.transcriptMessagesBySubagentId,
+        [result.subagent_id]: [...pending, normalized],
+      },
+    };
+  return attachPendingTranscripts(withPending, result.subagent_id);
 }
 
 export function dropCachedSubagent(
@@ -289,13 +542,22 @@ export function dropCachedSubagent(
   const cacheOnlySubagentIds = { ...runtime.cacheOnlySubagentIds };
   delete subagentsById[subagentId];
   delete activitiesBySubagentId[subagentId];
+  const turnsBySubagentId = { ...runtime.turnsBySubagentId };
+  const transcriptMessagesBySubagentId = { ...runtime.transcriptMessagesBySubagentId };
+  const historyRestoringBySubagentId = { ...runtime.historyRestoringBySubagentId };
   delete resultsBySubagentId[subagentId];
+  delete turnsBySubagentId[subagentId];
+  delete transcriptMessagesBySubagentId[subagentId];
+  delete historyRestoringBySubagentId[subagentId];
   delete cacheOnlySubagentIds[subagentId];
 
   return {
     ...runtime,
     subagentsById,
     activitiesBySubagentId,
+    turnsBySubagentId,
+    transcriptMessagesBySubagentId,
+    historyRestoringBySubagentId,
     resultsBySubagentId,
     cacheOnlySubagentIds,
     selectedSubagentId: chooseDefaultSubagentId(subagentsById, runtime.selectedSubagentId),
@@ -334,18 +596,39 @@ export function markRunningSubagentsCancelled(runtime: SubagentRuntime, updatedA
 export function applySubagentTranscript(runtime: SubagentRuntime, result: SubagentResult): SubagentRuntime {
   if (!result.subagent_id || !result.content.trim()) return runtime;
   if (result.parent_session_id && result.parent_session_id !== runtime.sessionId) return runtime;
+  const turnResult = {
+    ...result,
+    parent_session_id: result.parent_session_id ?? runtime.sessionId,
+    source: 'transcript' as const,
+  } satisfies SubagentResult;
+  const pending = runtime.transcriptMessagesBySubagentId[result.subagent_id] ?? [];
+  const pendingMessages = pending.some(item => item.content === turnResult.content && item.task_id === turnResult.task_id && item.at_ms === turnResult.at_ms)
+    ? pending
+    : [...pending, turnResult];
+  const withPending = {
+    ...runtime,
+    transcriptMessagesBySubagentId: {
+      ...runtime.transcriptMessagesBySubagentId,
+      [result.subagent_id]: pendingMessages,
+    },
+  };
   const current = runtime.resultsBySubagentId[result.subagent_id];
-  if (current?.source === 'wait') return runtime;
-  if (current?.source === 'transcript' && current.content.split('\n\n').includes(result.content)) return runtime;
+  if (current?.source === 'wait') {
+    return attachPendingTranscripts(withPending, result.subagent_id);
+  }
+  if (current?.source === 'transcript' && current.content.split('\n\n').includes(result.content)) {
+    return attachPendingTranscripts(withPending, result.subagent_id);
+  }
   const content = current?.source === 'transcript' && current.content.trim()
     ? `${current.content}\n\n${result.content}`
     : result.content;
-  return replaceResult(runtime, {
+  const normalized = {
     ...result,
     parent_session_id: result.parent_session_id ?? runtime.sessionId,
     content,
     source: 'transcript',
-  });
+  } satisfies SubagentResult;
+  return attachPendingTranscripts(replaceResult(withPending, normalized), result.subagent_id);
 }
 
 export function selectSubagents(runtime: SubagentRuntime | undefined): Subagent[] {
@@ -359,6 +642,15 @@ export function selectSubagents(runtime: SubagentRuntime | undefined): Subagent[
 export function selectSubagentActivities(runtime: SubagentRuntime | undefined, subagentId: string | null | undefined): SubagentActivity[] {
   if (!runtime || !subagentId) return [];
   return Object.values(runtime.activitiesBySubagentId[subagentId] ?? {}).sort(compareBySequence);
+}
+
+export function selectSubagentTurns(runtime: SubagentRuntime | undefined, subagentId: string | null | undefined): SubagentTurn[] {
+  if (!runtime || !subagentId) return [];
+  return Object.values(runtime.turnsBySubagentId[subagentId] ?? {}).sort((left, right) => left.started_at - right.started_at);
+}
+
+export function selectSubagentHistoryRestoring(runtime: SubagentRuntime | undefined, subagentId: string | null | undefined): boolean {
+  return Boolean(runtime && subagentId && runtime.historyRestoringBySubagentId[subagentId]);
 }
 
 export function selectSubagentResult(runtime: SubagentRuntime | undefined, subagentId: string | null | undefined): SubagentResult | undefined {
@@ -426,6 +718,62 @@ export const useSubagentStore = create<SubagentState>((set, get) => ({
       const next = event.event_type === 'chat.subtask_update'
         ? applySubagentHistoryUpdated(runtime, event)
         : applySubagentActivity(runtime, event);
+      if (next === runtime) return state;
+      persistRuntime(next);
+      return { runtimes: { ...state.runtimes, [sessionId]: next } };
+    });
+  },
+
+  applyToolStatus: (sessionId, subagentId, status, updatedAt, taskDescription, taskId) => {
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const next = applySubagentToolStatus(runtime, subagentId, status, updatedAt, taskDescription, taskId);
+      if (next === runtime) return state;
+      persistRuntime(next);
+      return { runtimes: { ...state.runtimes, [sessionId]: next } };
+    });
+  },
+
+  beginHistoryRestore: (sessionId, subagentId) => {
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.historyRestoringBySubagentId[subagentId]) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            historyRestoringBySubagentId: {
+              ...runtime.historyRestoringBySubagentId,
+              [subagentId]: true,
+            },
+          },
+        },
+      };
+    });
+  },
+
+  finishHistoryRestore: (sessionId, subagentId) => {
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || !runtime.historyRestoringBySubagentId[subagentId]) return state;
+      const historyRestoringBySubagentId = { ...runtime.historyRestoringBySubagentId };
+      delete historyRestoringBySubagentId[subagentId];
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, historyRestoringBySubagentId },
+        },
+      };
+    });
+  },
+
+  applyTurn: (sessionId, subagentId, taskId, taskDescription, startedAt) => {
+    set(state => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const next = applySubagentTurn(runtime, subagentId, taskId, taskDescription, startedAt);
       if (next === runtime) return state;
       persistRuntime(next);
       return { runtimes: { ...state.runtimes, [sessionId]: next } };

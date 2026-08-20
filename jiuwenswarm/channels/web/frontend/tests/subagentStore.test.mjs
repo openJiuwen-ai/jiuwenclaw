@@ -6,18 +6,23 @@ import {
   applySubagentHistoryUpdated,
   applySubagentResult,
   applySubagentTranscript,
+  applySubagentTurn,
+  applySubagentToolStatus,
   applySubagentUpdated,
   createEmptySubagentRuntime,
   dropCachedSubagent,
   markRunningSubagentsCancelled,
   selectSubagentActivities,
+  selectSubagentHistoryRestoring,
   selectSubagentResult,
   selectSubagents,
+  selectSubagentTurns,
   useSubagentStore,
 } from '../node_modules/.cache/subagent-store/subagentStore.mjs';
 import {
   normalizeSubagentActivityEvent,
   normalizeSubagentStatusEvent,
+  normalizeSubagentToolStatusUpdates,
   normalizeSubagentWaitResults,
 } from '../node_modules/.cache/subagent-store/subagentNormalizer.mjs';
 
@@ -166,6 +171,34 @@ test('same revision cannot overwrite a state even with a later timestamp', () =>
   assert.equal(runtime.subagentsById['agent-a'].status, 'idle');
 });
 
+test('a newer same-revision follow-up turn updates the assignment and status', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(2, subagent({
+    status: 'idle',
+    turn_outcome: 'completed',
+    lifecycle: 'live',
+    can_send_input: true,
+    needs_resume: false,
+    task_description: 'Query today',
+    updated_at: 2000,
+    revision: 2,
+  })));
+
+  const followUp = applySubagentUpdated(runtime, event(2, subagent({
+    status: 'running',
+    turn_outcome: null,
+    lifecycle: 'live',
+    can_send_input: false,
+    needs_resume: false,
+    task_description: 'Query tomorrow',
+    updated_at: 3000,
+    revision: 2,
+  })));
+  assert.equal(followUp.subagentsById['agent-a'].status, 'running');
+  assert.equal(followUp.subagentsById['agent-a'].task_description, 'Query tomorrow');
+  assert.equal(followUp.subagentsById['agent-a'].revision, 2);
+});
+
 test('history status with the same revision but newer timestamp supersedes stale cache', () => {
   let runtime = createEmptySubagentRuntime(sessionId);
   runtime = applySubagentUpdated(runtime, event(5, subagent({
@@ -212,6 +245,43 @@ test('history status snapshots do not erase the recovered assignment', () => {
   assert.equal(restored.subagentsById['agent-a'].role, 'Researcher');
 });
 
+test('history status snapshots enrich a generic cached display name', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(4, subagent({
+    display_name: 'general-purpose',
+    role: '',
+    revision: 4,
+    updated_at: 4000,
+  })));
+  const enriched = applySubagentHistoryUpdated(runtime, event(1, subagent({
+    display_name: '汕头天气查询员',
+    role: '查询汕头今日天气',
+    revision: 1,
+    updated_at: 1000,
+  })));
+  assert.equal(enriched.subagentsById['agent-a'].display_name, '汕头天气查询员');
+  assert.equal(enriched.subagentsById['agent-a'].role, '查询汕头今日天气');
+  assert.equal(enriched.subagentsById['agent-a'].revision, 4);
+});
+
+test('history restore exposes an explicit pending state until replay finishes', () => {
+  const restoreSessionId = 'history-restore-session';
+  useSubagentStore.getState().removeRuntime(restoreSessionId);
+  useSubagentStore.getState().ensureRuntime(restoreSessionId);
+  useSubagentStore.getState().beginHistoryRestore(restoreSessionId, 'agent-a');
+  assert.equal(
+    selectSubagentHistoryRestoring(useSubagentStore.getState().getRuntime(restoreSessionId), 'agent-a'),
+    true,
+  );
+  useSubagentStore.getState().finishHistoryRestore(restoreSessionId, 'agent-a');
+  assert.equal(
+    selectSubagentHistoryRestoring(useSubagentStore.getState().getRuntime(restoreSessionId), 'agent-a'),
+    false,
+  );
+  useSubagentStore.getState().removeRuntime(restoreSessionId);
+});
+
+
 test('history can replace a stale cached closure with a newer idle revision', () => {
   let runtime = createEmptySubagentRuntime(sessionId);
   runtime = applySubagentUpdated(runtime, event(0, subagent({
@@ -237,6 +307,119 @@ test('history can replace a stale cached closure with a newer idle revision', ()
   assert.equal(restored.subagentsById['agent-a'].status, 'idle');
   assert.equal(restored.subagentsById['agent-a'].revision, 5);
   assert.equal(restored.subagentsById['agent-a'].task_description, 'Research the topic');
+});
+
+test('successful subagent tool results recover a running roster state without changing its revision', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(4, subagent({
+    status: 'idle',
+    turn_outcome: 'completed',
+    lifecycle: 'live',
+    can_send_input: true,
+    needs_resume: false,
+    updated_at: 5000,
+    revision: 4,
+  })));
+
+  const updates = normalizeSubagentToolStatusUpdates({
+    event_type: 'chat.tool_result',
+    session_id: sessionId,
+    tool_result: {
+      tool_name: 'subagent_resume',
+      result: "success=True data={'subagent_id': 'agent-a', 'status': 'running'} error=None",
+    },
+  });
+  assert.deepEqual(updates, [{ subagent_id: 'agent-a', status: 'running' }]);
+
+  const recovered = applySubagentToolStatus(runtime, updates[0].subagent_id, updates[0].status, 6000);
+  assert.equal(recovered.subagentsById['agent-a'].status, 'running');
+  assert.equal(recovered.subagentsById['agent-a'].revision, 4);
+  assert.equal(recovered.subagentsById['agent-a'].task_description, 'Research the topic');
+
+  const withFollowUp = applySubagentToolStatus(runtime, 'agent-a', 'running', 6000, 'Query tomorrow');
+  assert.equal(withFollowUp.subagentsById['agent-a'].task_description, 'Query tomorrow');
+
+  const completed = applySubagentUpdated(recovered, event(5, subagent({
+    status: 'idle',
+    turn_outcome: 'completed',
+    lifecycle: 'live',
+    can_send_input: true,
+    needs_resume: false,
+    updated_at: 7000,
+    revision: 5,
+  })));
+  assert.equal(completed.subagentsById['agent-a'].status, 'idle');
+});
+
+test('successful subagent spawn results restore the live assignment and turn', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(1, subagent({
+    task_description: '',
+    updated_at: 1000,
+    revision: 1,
+  })));
+
+  const updates = normalizeSubagentToolStatusUpdates({
+    event_type: 'chat.tool_result',
+    session_id: sessionId,
+    tool_result: {
+      tool_name: 'subagent_spawn',
+      result: "success=True data={'subagent_id': 'agent-a', 'task_id': 'turn-a', 'status': 'running'} error=None",
+    },
+  });
+  assert.deepEqual(updates, [{ subagent_id: 'agent-a', status: 'running', task_id: 'turn-a' }]);
+
+  const recovered = applySubagentToolStatus(runtime, updates[0].subagent_id, updates[0].status, 1100, 'Query from spawn', updates[0].task_id);
+  assert.equal(recovered.subagentsById['agent-a'].task_description, 'Query from spawn');
+  assert.deepEqual(selectSubagentTurns(recovered, 'agent-a'), [{
+    task_id: 'turn-a',
+    task_description: 'Query from spawn',
+    started_at: 1100,
+  }]);
+});
+
+test('live spawn assignment fills an activity turn when the tool result has no task id', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(1, subagent({
+    task_description: '',
+    updated_at: 1000,
+    revision: 1,
+  })));
+  runtime = applySubagentActivity(runtime, {
+    event_type: 'chat.subagent_activity',
+    session_id: sessionId,
+    activity: activity('spawn-activity', 1, { task_id: 'turn-a', at_ms: 1100 }),
+  });
+
+  const recovered = applySubagentToolStatus(runtime, 'agent-a', 'running', 1200, 'Query from spawn');
+  assert.equal(recovered.subagentsById['agent-a'].task_description, 'Query from spawn');
+  assert.equal(selectSubagentTurns(recovered, 'agent-a')[0].task_description, 'Query from spawn');
+});
+
+test('failed subagent tool results do not change roster state', () => {
+  assert.deepEqual(normalizeSubagentToolStatusUpdates({
+    event_type: 'chat.tool_result',
+    session_id: sessionId,
+    tool_result: {
+      tool_name: 'subagent_resume',
+      result: "success=False data=None error={'message': 'not found'}",
+    },
+  }), []);
+});
+
+test('subagent_list success results recover each explicit running status', () => {
+  const updates = normalizeSubagentToolStatusUpdates({
+    event_type: 'chat.tool_result',
+    session_id: sessionId,
+    tool_result: {
+      tool_name: 'subagent_list',
+      result: "success=True data={'subagents': [{'subagent_id': 'agent-a', 'status': 'running'}, {'subagent_id': 'agent-b', 'status': 'idle'}]} error=None",
+    },
+  });
+  assert.deepEqual(updates, [
+    { subagent_id: 'agent-a', status: 'running' },
+    { subagent_id: 'agent-b', status: 'idle' },
+  ]);
 });
 
 test('a successful parent cancel settles only still-running subagents locally', () => {
@@ -605,6 +788,73 @@ test('history transcripts are deduplicated and structured wait results remain au
   runtime = applySubagentResult(runtime, { subagent_id: 'agent-a', content: 'final wait result' });
   runtime = applySubagentTranscript(runtime, { subagent_id: 'agent-a', content: 'late transcript' });
   assert.equal(selectSubagentResult(runtime, 'agent-a')?.content, 'final wait result');
+});
+
+test('follow-up turns keep queries, activities, and final results separate', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-1', 'Query today', 1000);
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-2', 'Query tomorrow', 2000);
+  runtime = applySubagentActivity(runtime, {
+    event_type: 'chat.subagent_activity',
+    session_id: sessionId,
+    activity: activity('turn-1-activity', 1, { task_id: 'turn-1', at_ms: 1100 }),
+  });
+  runtime = applySubagentActivity(runtime, {
+    event_type: 'chat.subagent_activity',
+    session_id: sessionId,
+    activity: activity('turn-2-activity', 2, { task_id: 'turn-2', at_ms: 2100 }),
+  });
+  runtime = applySubagentTranscript(runtime, {
+    subagent_id: 'agent-a',
+    task_id: 'turn-1',
+    at_ms: 1200,
+    content: 'Today result',
+  });
+  runtime = applySubagentTranscript(runtime, {
+    subagent_id: 'agent-a',
+    task_id: 'turn-2',
+    at_ms: 2200,
+    content: 'Tomorrow result',
+  });
+
+  const turns = selectSubagentTurns(runtime, 'agent-a');
+  assert.deepEqual(turns.map(turn => ({
+    task_id: turn.task_id,
+    task_description: turn.task_description,
+    activities: selectSubagentActivities(runtime, 'agent-a').filter(item => item.task_id === turn.task_id).length,
+    result: turn.result?.content,
+  })), [
+    { task_id: 'turn-1', task_description: 'Query today', activities: 1, result: 'Today result' },
+    { task_id: 'turn-2', task_description: 'Query tomorrow', activities: 1, result: 'Tomorrow result' },
+  ]);
+});
+
+test('a wait result received before turn metadata is attached after turns are restored', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentResult(runtime, {
+    subagent_id: 'agent-a',
+    content: 'Restored final',
+    source: 'wait',
+  });
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-1', 'Query today', 1000);
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-2', 'Query tomorrow', 2000);
+  assert.equal(selectSubagentTurns(runtime, 'agent-a')[0].result?.content, 'Restored final');
+});
+
+test('transcript finals survive a wait result and attach to later restored turns', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentResult(runtime, {
+    subagent_id: 'agent-a',
+    content: 'Latest wait result',
+    source: 'wait',
+  });
+  runtime = applySubagentTranscript(runtime, { subagent_id: 'agent-a', content: 'First final', at_ms: 1100 });
+  runtime = applySubagentTranscript(runtime, { subagent_id: 'agent-a', content: 'Second final', at_ms: 2100 });
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-1', 'Query one', 1000);
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-2', 'Query two', 2000);
+  const turns = selectSubagentTurns(runtime, 'agent-a');
+  assert.equal(turns[0].result?.content, 'Latest wait result');
+  assert.equal(turns[1].result?.content, 'Second final');
 });
 
 test('actual live runtime snapshots rehydrate after a page refresh', () => {

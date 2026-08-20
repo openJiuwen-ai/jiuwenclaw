@@ -2604,6 +2604,7 @@
     "tasksEmpty": "暂无任务",
     "activityTitle": "活动",
     "activityEmpty": "暂无活动",
+    "historyLoading": "正在恢复历史…",
     "empty": "暂无 Subagent",
     "activity": {
       "thinking": "思考",

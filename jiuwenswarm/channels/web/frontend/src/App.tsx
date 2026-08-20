@@ -861,10 +861,14 @@ function AppContent() {
         const parentSessionId = typeof item.payload.parent_session_id === 'string'
           ? item.payload.parent_session_id
           : undefined;
+        const taskId = typeof item.payload.task_id === 'string' ? item.payload.task_id : undefined;
+        const atMs = Date.parse(item.at);
         subagentStore.applyTranscript(sid, {
           subagent_id: subagentId,
           content,
           ...(parentSessionId ? { parent_session_id: parentSessionId } : {}),
+          ...(taskId ? { task_id: taskId } : {}),
+          ...(Number.isFinite(atMs) ? { at_ms: atMs } : {}),
         });
       }
     }
@@ -882,8 +886,8 @@ function AppContent() {
       const expectedUpdatedAt = subagent.updated_at;
       const revisionMarker = `${subagent.status}:${subagent.turn_outcome ?? ''}:${subagent.closed_reason ?? ''}:${subagent.revision}:${subagent.updated_at}`;
       if (subagentHistoryRestoreRevisionRef.current.get(key) === revisionMarker) continue;
+      if (subagentHistoryRestoreHandlesRef.current.has(key)) continue;
       subagentHistoryRestoreRevisionRef.current.set(key, revisionMarker);
-      subagentHistoryRestoreHandlesRef.current.get(key)?.dispose();
       const pageHandles = new Set<HistoryRestoreHandle>();
       const pageSettlers = new Set<(page: LoadedHistoryPage | null) => void>();
       let disposed = false;
@@ -892,6 +896,7 @@ function AppContent() {
         dispose: () => {
           if (disposed) return;
           disposed = true;
+          useSubagentStore.getState().finishHistoryRestore(sid, subagentId);
           for (const settlePending of pageSettlers) {
             settlePending(null);
           }
@@ -903,6 +908,7 @@ function AppContent() {
         },
       };
       subagentHistoryRestoreHandlesRef.current.set(key, handle);
+      useSubagentStore.getState().beginHistoryRestore(sid, subagentId);
 
       const fetchSubagentHistoryPage = (
         pageIdx: number,
@@ -928,11 +934,13 @@ function AppContent() {
           sessionId: sid,
           subagentId,
           pageIdx,
-          onReady: (result: FetchHistoryPageResult) => settle({
-            pageIdx,
-            totalPages: result.totalPages ?? fallbackTotalPages,
-            result,
-          }),
+          onReady: (result: FetchHistoryPageResult) => {
+            settle({
+              pageIdx,
+              totalPages: result.totalPages ?? fallbackTotalPages,
+              result,
+            });
+          },
           onEmpty: (totalPages) => {
             if (pageIdx > 1) {
               settle(null);
@@ -944,7 +952,9 @@ function AppContent() {
               result: null,
             });
           },
-          onTimeout: () => settle(null),
+          onTimeout: () => {
+            settle(null);
+          },
           onError: (message) => console.warn('[subagent.history]', message),
         });
         pageHandles.add(pageHandle);
@@ -974,6 +984,11 @@ function AppContent() {
             applySubagentHistoryReplay(sid, items);
           }
         };
+        const hasSubagentFinal = () => {
+          const currentRuntime = useSubagentStore.getState().getRuntime(sid);
+          return Object.values(currentRuntime?.turnsBySubagentId[subagentId] ?? {})
+            .some(turn => turn.result?.source === 'transcript');
+        };
 
         const firstPage = await fetchSubagentHistoryPage(1, 1);
         if (disposed || !firstPage) {
@@ -990,6 +1005,20 @@ function AppContent() {
           applyPage,
           waitForNextPaint: async () => {},
         });
+        if (prefetchOutcome === 'completed' && firstPage.totalPages === 1 && !hasSubagentFinal()) {
+          const fallbackPage = await fetchSubagentHistoryPage(2, 2);
+          if (fallbackPage) {
+            applyPage(fallbackPage);
+            await prefetchHistoryPages({
+              initialLoadedPages: 2,
+              initialTotalPages: fallbackPage.totalPages,
+              isCurrent: () => !disposed,
+              fetchPage: (pageIdx, totalPages) => fetchSubagentHistoryPage(pageIdx, totalPages),
+              applyPage,
+              waitForNextPaint: async () => {},
+            });
+          }
+        }
         if (disposed || prefetchOutcome !== 'completed') {
           cleanup();
           return;
@@ -1022,6 +1051,19 @@ function AppContent() {
       const event = normalizeSubagentStatusEvent({ ...recovered.subagent, session_id: sid });
       if (event && event.subagent.parent_session_id === sid) {
         subagentStore.applyHistoryEvent(sid, event);
+      }
+      const recoveredSubagentId = typeof recovered.subagent.subagent_id === 'string'
+        ? recovered.subagent.subagent_id.trim()
+        : '';
+      if (!recoveredSubagentId) continue;
+      for (const turn of recovered.turns ?? []) {
+        subagentStore.applyTurn(
+          sid,
+          recoveredSubagentId,
+          turn.task_id,
+          turn.task_description,
+          turn.started_at,
+        );
       }
       if (recovered.result) {
         subagentStore.applyResult(sid, recovered.result);
@@ -1825,14 +1867,20 @@ function AppContent() {
     // 当前页面新建的会话已在上方复用实时内存数据；对于其他会话，
     // historyPagerMeta 表示已完成 history 首屏恢复，可直接复用并继续补齐剩余分页。
     const existingRuntime = useChatStore.getState().getRuntime(sessionId);
+    const subagentRuntime = useSubagentStore.getState().getRuntime(sessionId);
+    const hasStorageOnlySubagentCache = Object.keys(subagentRuntime?.cacheOnlySubagentIds ?? {}).length > 0;
     if (existingRuntime && existingRuntime.historyPagerMeta) {
-      setLoadingHistory(sessionId, false);
-      startBackgroundHistoryPrefetch(
-        sessionId,
-        existingRuntime.historyPagerMeta.loadedPages,
-        existingRuntime.historyPagerMeta.totalPages
-      );
-      return;
+      if (hasStorageOnlySubagentCache) {
+        useSubagentStore.getState().removeRuntime(sessionId);
+      } else {
+        setLoadingHistory(sessionId, false);
+        startBackgroundHistoryPrefetch(
+          sessionId,
+          existingRuntime.historyPagerMeta.loadedPages,
+          existingRuntime.historyPagerMeta.totalPages
+        );
+        return;
+      }
     }
 
     // 清理之前的历史加载句柄
