@@ -6979,6 +6979,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         *,
         had_assistant_output: bool,
         emitted_terminal_chat_final: bool,
+        emitted_ask_user_question: bool = False,
     ) -> bool:
         """Whether the host must synthesize a terminal ``chat.final``.
 
@@ -6993,7 +6994,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         ``had_assistant_output`` is retained for call-site/tests but ignored.
         """
         del had_assistant_output  # intentionally unused; see docstring
-        if emitted_terminal_chat_final:
+        if emitted_terminal_chat_final or emitted_ask_user_question:
             return False
         return not self._goal_record_is_active()
 
@@ -10009,6 +10010,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             if self._should_emit_stream_end_chat_final(
                 had_assistant_output=had_assistant_output,
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
+                emitted_ask_user_question=bool(emitted_ask_user_request_ids),
             ):
                 self._stream_content_run_kind = None
                 yield AgentResponseChunk(

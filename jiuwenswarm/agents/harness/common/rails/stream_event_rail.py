@@ -134,8 +134,31 @@ def _ask_user_question_payload_from_interrupt(
         if str(tool_name or "").strip() != "ask_user" or not args:
             return None
         value_obj = {"tool_name": "ask_user", "tool_args": args, "questions": args.get("questions", [])}
-    elif args and str(tool_name or "").strip() == "ask_user":
-        value_obj = _normalize_ask_user_interrupt_value(value_obj, args)
+    elif str(tool_name or "").strip() == "ask_user":
+        interrupt_args = getattr(value_obj, "tool_args", None)
+        normalized_interrupt_args = (
+            interrupt_args if isinstance(interrupt_args, dict) else {}
+        )
+        value_obj = _normalize_ask_user_interrupt_value(
+            value_obj,
+            args or normalized_interrupt_args,
+        )
+    elif str(tool_name or "").strip():
+        # openjiuwen's real InterruptRequest contains the prompt/schema but not
+        # the intercepted tool metadata.  Preserve every request/subclass field
+        # (metadata, ui_options, payload_schema, etc.) and overlay only the
+        # concrete tool context needed by the frontend.
+        if isinstance(value_obj, dict):
+            enriched_value = dict(value_obj)
+        else:
+            model_dump = getattr(value_obj, "model_dump", None)
+            if callable(model_dump):
+                enriched_value = model_dump()
+            else:
+                enriched_value = dict(getattr(value_obj, "__dict__", {}) or {})
+        enriched_value["tool_name"] = str(tool_name).strip()
+        enriched_value["tool_args"] = args
+        value_obj = enriched_value
 
     return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
 
@@ -765,13 +788,20 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tc,
             ctx.inputs.tool_result,
         )
-        await self._emit_ask_user_question_if_interrupted(
-            session,
-            tc,
-            ctx.inputs.tool_name,
-            ctx.inputs.tool_result,
-            ctx.exception,
+        emitted_interrupt_ids = ctx.extra.get("_jiuwenswarm_interrupt_events_emitted")
+        already_emitted = (
+            isinstance(emitted_interrupt_ids, set) and tc_id in emitted_interrupt_ids
         )
+        if not already_emitted:
+            await self._emit_ask_user_question_if_interrupted(
+                session,
+                tc,
+                ctx.inputs.tool_name,
+                ctx.inputs.tool_result,
+                ctx.exception,
+            )
+        if isinstance(emitted_interrupt_ids, set) and tc_id:
+            emitted_interrupt_ids.discard(tc_id)
 
         tool_name = ctx.inputs.tool_name
         sid = self._resolve_sid(ctx, session)
@@ -793,6 +823,35 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx)
+
+    async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
+        """Publish tool interrupts before the AFTER_TOOL_CALL callback phase.
+
+        PermissionInterruptRail raises from BEFORE_TOOL_CALL.  The framework
+        reports that through ON_TOOL_EXCEPTION before running AFTER_TOOL_CALL,
+        so this is the first reliable boundary where the HITL event can be
+        delivered to clients.
+        """
+        session = ctx.session
+        if session is None or not isinstance(ctx.inputs, ToolCallInputs):
+            return
+
+        tc = ctx.inputs.tool_call
+        emitted = await self._emit_ask_user_question_if_interrupted(
+            session,
+            tc,
+            ctx.inputs.tool_name,
+            ctx.inputs.tool_result,
+            ctx.exception,
+        )
+        tc_id = str(getattr(tc, "id", "") or "")
+        if emitted and tc_id:
+            emitted_ids = ctx.extra.setdefault(
+                "_jiuwenswarm_interrupt_events_emitted",
+                set(),
+            )
+            if isinstance(emitted_ids, set):
+                emitted_ids.add(tc_id)
 
     # ------------------------------------------------------------------
     # Private helpers (migrated from JiuSwarmReActAgent)
@@ -874,14 +933,14 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_name: str,
         result: Any,
         exception: Any = None,
-    ) -> None:
+    ) -> bool:
         interrupt = _extract_tool_interrupt(result) or _extract_tool_interrupt(exception)
         if interrupt is None:
-            return
+            return False
         payload = _ask_user_question_payload_from_interrupt(tool_call, interrupt, tool_name)
         if not payload:
             logger.debug("[StreamEventRail] ask_user interrupt payload unavailable")
-            return
+            return False
         try:
             await session.write_stream(
                 OutputSchema(
@@ -890,8 +949,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     payload=payload,
                 )
             )
+            return True
         except Exception:
             logger.debug("ask_user question emit failed", exc_info=True)
+            return False
 
     @staticmethod
     async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
