@@ -86,7 +86,20 @@ from jiuwenclaw.agentserver.team.exceptions import (
     TeamDissolveNameMismatchError,
     TeamDissolveUnsupportedError,
 )
-from jiuwenclaw.agentserver.team.team_manager import get_team_manager
+try:
+    from jiuwenclaw.agentserver.team.team_manager import get_team_manager
+except ModuleNotFoundError as exc:
+    # The standard agent path does not require Team runtime. Some agent-core
+    # revisions used by HarmonyOS deployments predate its optional APIs.
+    if not exc.name or not exc.name.startswith("openjiuwen.agent_teams"):
+        raise
+    _TEAM_RUNTIME_IMPORT_ERROR = exc
+
+    def get_team_manager(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            "Team runtime is unavailable because the installed openjiuwen "
+            "does not provide the required agent_teams API"
+        ) from _TEAM_RUNTIME_IMPORT_ERROR
 
 
 logger = logging.getLogger(__name__)
