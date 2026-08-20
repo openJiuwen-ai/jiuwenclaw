@@ -50,11 +50,12 @@ The system identifies evolution signals and generates candidate experience autom
 
 For a scheduled team, when Task review fails and `react.evolution.skill_evolution` is enabled, the system attributes the Reviewer Feedback:
 
-- Skill issue: update the assignee's Skill experience first; after all Tasks finish, aggregate by Skill and create a global evolution approval.
+- Each failed Task Feedback is independently translated into a structured observation by the attribution model.
+- Skill issue: retain the observation; after all Tasks finish, aggregate observations by Skill and feed them into the existing Team Skill evolution and approval flow.
 - Executor error or unattributed failure: record the failure without changing a Skill.
-- Repeated pattern with no attributable Skill: create a new-Skill approval after the same reusable pattern is observed across Tasks.
+- Repeated pattern with no attributable Skill: create a new Team Skill approval after the same reusable pattern is observed across Tasks.
 
-The unified self-evolution switch is off by default. Global updates and new Skills require approval by default.
+Reviewer Feedback does not create or update member-private Skill copies. The unified self-evolution switch is off by default. Team Skill updates and new Skills require approval by default.
 
 ### 2.4 Manual Evolution Triggering
 

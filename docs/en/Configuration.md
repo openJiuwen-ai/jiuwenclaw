@@ -231,7 +231,7 @@ Common self-evolution settings are listed below:
 | **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
 | **Minimum Reviewer Feedback confidence** | `react.evolution.review_feedback_min_confidence` | `0.7` | Process only Reviewer Feedback attributions that meet this confidence threshold |
 
-> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. With `auto_save=false`, global Reviewer Feedback updates require approval. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
+> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. With `auto_save=false`, Reviewer Feedback-driven Team Skill updates require approval. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 

@@ -50,11 +50,12 @@ react:
 
 在 scheduled 团队中，当 Task 验收失败且开启 `react.evolution.skill_evolution` 时，系统会对 Reviewer Feedback 进行归因：
 
-- Skill 缺陷：先更新任务成员的 Skill 经验；全部 Task 结束后，按 Skill 汇总并生成全局演进审批。
+- 每个验收失败的 Task Feedback 都会先由归因模型独立转译为结构化 observation。
+- Skill 缺陷：保留 observation；全部 Task 结束后按 Skill 汇总，再交给原有 Team Skill 演进与审批流程。
 - 执行者失误或无法归因：记录失败，不修改 Skill。
-- 无可归因 Skill 且跨 Task 重复出现相同可复用模式：生成新 Skill 审批。
+- 无可归因 Skill 且跨 Task 重复出现相同可复用模式：生成新 Team Skill 审批。
 
-统一自演进开关默认关闭，全局更新和新建 Skill 默认均需审批。
+Reviewer Feedback 链路不会创建或更新成员私有 Skill 副本。统一自演进开关默认关闭，Team Skill 更新和新建 Skill 默认均需审批。
 
 ### 2.4 手动触发演进
 

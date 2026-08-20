@@ -53,6 +53,7 @@ TEAM_SKILL_CREATE = "swarm.team_skill_create"
 MEMBER_SKILL_EVOLUTION = "swarm.member_skill_evolution"
 EVOLUTION_INTERRUPT = "swarm.evolution_interrupt"
 
+
 def _skill_library_dir(ctx: SwarmBuildContext) -> str:
     """Return the one physical Skill library evolution writes into.
 
@@ -213,6 +214,9 @@ class SwarmTeamSkillEvolutionRail(TeamSkillEvolutionRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_rail(self._swarm_session_id, self)
+            self.bind_review_feedback_skill_create_rail(
+                team_manager.get_team_skill_create_rail(self._swarm_session_id)
+            )
             if team_manager.consume_team_evolution_watcher_deferred(self._swarm_session_id):
                 from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
                     ensure_team_evolution_watcher,
@@ -288,6 +292,14 @@ class SwarmTeamSkillCreateRail(TeamSkillCreateRail):
             team_manager = get_team_manager(self._swarm_channel)
             team_manager.register_team_live_rail(self._swarm_session_id, agent, self)
             team_manager.register_team_skill_create_rail(self._swarm_session_id, self)
+            team_rail = team_manager.get_team_skill_rail(self._swarm_session_id)
+            bind_create_rail = getattr(
+                team_rail,
+                "bind_review_feedback_skill_create_rail",
+                None,
+            )
+            if callable(bind_create_rail):
+                bind_create_rail(self)
             _register_team_rail_context(
                 self._swarm_channel,
                 self._swarm_session_id,
@@ -333,7 +345,7 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
             skills_dir: The single Skill library.
             team_id: Team name.
             config: The resolved ``config.yaml`` mapping.
-            trajectory_registry: Per-team in-memory trajectory registry.
+            trajectory_span_processor: Process-level Team trajectory processor.
             language: Resolved member language code.
         """
         self._swarm_channel = channel
@@ -391,9 +403,8 @@ class SwarmMemberSkillEvolutionRail(SkillEvolutionRail):
                 )
             logger.info(
                 "[swarm.member_skill_evolution] registered member evolution rail "
-                "(session=%s, member=%s)",
+                "(session=%s)",
                 self._swarm_session_id,
-                self._swarm_member_name,
             )
         except Exception as exc:
             logger.warning(
@@ -714,9 +725,6 @@ class MemberSkillEvolutionInput(ConstructionInput):
     )
     session_id: str | None = context_field(
         attr="session_id", description="Active session id."
-    )
-    member_name: str | None = context_field(
-        attr="member_name", description="Current team member name."
     )
 
 
