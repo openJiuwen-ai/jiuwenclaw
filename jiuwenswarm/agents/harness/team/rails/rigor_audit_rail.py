@@ -28,6 +28,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+from jiuwenswarm.agents.harness.team.rails.response_text import response_text
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -264,17 +266,11 @@ Before writing any numeric result, verify each of the following:
         if not self._log_findings:
             return
 
-        response_text = ""
-        if ctx and getattr(ctx, "response", None):
-            response = ctx.response
-            if isinstance(getattr(response, "content", None), str):
-                response_text = response.content
-            elif hasattr(response, "text"):
-                response_text = str(response.text or "")
-        if not response_text:
+        text = response_text(ctx)
+        if not text:
             return
 
-        for finding in audit_text(response_text):
+        for finding in audit_text(text):
             self._findings.append(finding)
             logger.warning(
                 "[RigorAuditRail] RIGOR FINDING agent_id=%s %s",

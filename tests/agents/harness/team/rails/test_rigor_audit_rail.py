@@ -147,5 +147,61 @@ class TestRailContract:
         assert get_rigor_audit_enabled({"rigor_audit": {"enabled": True}}) is True
 
 
+
+class TestResponseIsActuallyRead:
+    """The rail must read the response from where the framework puts it.
+
+    AFTER_MODEL_CALL carries a ModelCallInputs on ctx.inputs, and the assistant
+    text is ctx.inputs.response. A rail reading ctx.response gets None, audits
+    an empty string, reports nothing -- and looks identical in the log to a rail
+    that examined a clean draft. That silence is why this is tested directly.
+    """
+
+    @staticmethod
+    def _ctx(response):
+        from openjiuwen.core.single_agent.rail.base import (
+            AgentCallbackContext,
+            ModelCallInputs,
+        )
+
+        return AgentCallbackContext(agent=None, inputs=ModelCallInputs(response=response))
+
+    def test_reads_text_from_inputs_response(self):
+        from jiuwenswarm.agents.harness.team.rails.response_text import response_text
+
+        class Resp:
+            content = "mean 3.47 with n=10"
+
+        assert response_text(self._ctx(Resp())) == "mean 3.47 with n=10"
+
+    def test_reads_multimodal_content_blocks(self):
+        from jiuwenswarm.agents.harness.team.rails.response_text import response_text
+
+        class Resp:
+            content = [{"type": "text", "text": "p = 0.000"},
+                       {"type": "image", "source": "..."}]
+
+        assert response_text(self._ctx(Resp())) == "p = 0.000"
+
+    def test_missing_response_yields_empty_string(self):
+        from jiuwenswarm.agents.harness.team.rails.response_text import response_text
+
+        assert response_text(self._ctx(None)) == ""
+        assert response_text(None) == ""
+
+    @pytest.mark.asyncio
+    async def test_rail_records_a_finding_from_a_real_context(self):
+        """End to end: a flawed draft on ctx.inputs.response must produce a finding."""
+        rail = RigorAuditRail()
+        rail._agent_id = "test"
+
+        class Resp:
+            content = "We observed 130% improvement (p = 0.000)."
+
+        await rail.after_model_call(self._ctx(Resp()))
+        codes = {f.code for f in rail.findings}
+        assert "D9_percent_out_of_range" in codes
+        assert "D11_pvalue_exact_zero" in codes
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

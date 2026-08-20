@@ -19,6 +19,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
+from jiuwenswarm.agents.harness.team.rails.response_text import response_text
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -142,30 +144,26 @@ class GovernanceReviewRail(DeepAgentRail):
         if not self._log_violations:
             return
 
-        response_text = ""
-        if ctx and hasattr(ctx, "response") and ctx.response:
-            r = ctx.response
-            if hasattr(r, "content") and isinstance(r.content, str):
-                response_text = r.content
-            elif hasattr(r, "text"):
-                response_text = str(r.text or "")
-
-        if not response_text:
+        # The model response is on ctx.inputs.response (the ModelCallInputs for
+        # this event), not on ctx itself; reading ctx.response scanned an empty
+        # string on every call, which is indistinguishable from a clean draft.
+        text = response_text(ctx)
+        if not text:
             return
 
         violations: list[str] = []
 
         # Check for novelty/superiority claims without citations
-        novelty_hits = _UNSUPPORTED_SIGNAL_RE.findall(response_text)
-        citation_hits = _CITATION_RE.findall(response_text)
+        novelty_hits = _UNSUPPORTED_SIGNAL_RE.findall(text)
+        citation_hits = _CITATION_RE.findall(text)
         if novelty_hits and not citation_hits:
             violations.append(
                 f"novelty/superiority claim(s) {novelty_hits[:3]} detected without citation support"
             )
 
         # Check for stale-evidence signals
-        stale_hits = _STALE_SIGNAL_RE.findall(response_text)
-        if stale_hits and "stale" not in response_text.lower() and "freshen" not in response_text.lower():
+        stale_hits = _STALE_SIGNAL_RE.findall(text)
+        if stale_hits and "stale" not in text.lower() and "freshen" not in text.lower():
             violations.append(
                 f"possible stale-reference signal(s) ({stale_hits[:2]}) without explicit freshness check"
             )
