@@ -373,29 +373,43 @@ function AgentNode({
   );
   const hasSessionTree = isSession && sessionMembers.length >= 1;
 
+  // detail_pending=true 表示该 agent 仅含摘要（get_phase 下发），prompt/outcome 等
+  // 大文本字段尚未拉取——展开详情或弹窗时按需调 get_agent 补全完整体（通用，不限 human）。
+  const agentDetailPending = agent.detail_pending === true;
+  const ensureAgentDetail = useCallback(async () => {
+    if (!agentDetailPending) return;
+    const store = useSessionStore.getState();
+    const lookup = findWorkflowAgent(
+      store.runtimes[sessionId]?.workflowRuns ?? [],
+      runId,
+      agent.id,
+    );
+    if (lookup) {
+      await store
+        .loadAgentDetail(sessionId, runId, lookup.phase.id, agent.id)
+        .catch(() => undefined);
+    }
+  }, [agentDetailPending, agent.id, runId, sessionId]);
+
+  // 详情展开时懒拉完整 agent 主体（get_agent）。
+  useEffect(() => {
+    if (!showDetail || !agentDetailPending) return;
+    void ensureAgentDetail();
+  }, [showDetail, agentDetailPending, ensureAgentDetail]);
+
   const handleAgentClick = useCallback(() => {
     if (agent.status !== 'waiting_for_human') return;
     void (async () => {
       let question = agent.human_prompt?.trim();
       if (!question) {
         // Phase summary 可能未携带 prompt——按需拉单个 agent 完整体（get_agent）。
-        const store = useSessionStore.getState();
-        const lookup = findWorkflowAgent(
-          store.runtimes[sessionId]?.workflowRuns ?? [],
+        await ensureAgentDetail();
+        const refreshed = findWorkflowAgent(
+          useSessionStore.getState().runtimes[sessionId]?.workflowRuns ?? [],
           runId,
           agent.id,
         );
-        if (lookup) {
-          await store
-            .loadAgentDetail(sessionId, runId, lookup.phase.id, agent.id)
-            .catch(() => undefined);
-          const refreshed = findWorkflowAgent(
-            useSessionStore.getState().runtimes[sessionId]?.workflowRuns ?? [],
-            runId,
-            agent.id,
-          );
-          question = refreshed?.agent.human_prompt?.trim();
-        }
+        question = refreshed?.agent.human_prompt?.trim();
       }
       const corr = agent.correlation_id ?? agent.id;
       const payload: AskUserQuestionPayload = {
@@ -418,7 +432,7 @@ function AgentNode({
       };
       useChatStore.getState().setPendingQuestion(sessionId, payload);
     })();
-  }, [agent, runId, sessionId]);
+  }, [agent, runId, sessionId, ensureAgentDetail]);
 
   return (
     <div>
@@ -451,8 +465,8 @@ function AgentNode({
         {agent.model && (
           <span className="text-xs text-text-muted shrink-0">{agent.model}</span>
         )}
-        {/* 展开 input/output 详情 */}
-        {(agent.prompt || agent.outcome || agent.error) && (
+        {/* 展开 input/output 详情：完整体已就绪（有 prompt/outcome/error）或仅为摘要待拉取时均显示 */}
+        {(agent.prompt || agent.outcome || agent.error || agentDetailPending) && (
           <button
             type="button"
             className="shrink-0 p-0.5 rounded hover:bg-secondary"

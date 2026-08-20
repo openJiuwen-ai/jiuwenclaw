@@ -146,7 +146,7 @@ class TestGetWorkflowPaging:
 
 
 # ---------------------------------------------------------------------------
-# get_phase paging (full agents)
+# get_phase paging (agent summaries — no heavy text fields)
 # ---------------------------------------------------------------------------
 
 class TestGetPhasePaging:
@@ -160,8 +160,12 @@ class TestGetPhasePaging:
         assert payload["has_more"] is True
         agents = payload["phase"]["agents"]
         assert len(agents) == 50
-        assert agents[0]["prompt"] == "prompt-0-0"
-        assert agents[0]["outcome"] == "outcome-0-0"
+        # Summaries carry id/name/status and detail_pending, but NOT heavy text.
+        assert agents[0]["id"] == "agent_0_0"
+        assert agents[0]["detail_pending"] is True
+        assert "prompt" not in agents[0]
+        assert "outcome" not in agents[0]
+        assert "human_prompt" not in agents[0]
 
     def test_get_phase_second_agent_page(self) -> None:
         wf = _make_workflow("wf_1", phase_count=2, agents_per_phase=80)

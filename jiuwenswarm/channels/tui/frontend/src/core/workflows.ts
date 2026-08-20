@@ -57,6 +57,8 @@ export interface WorkflowAgent {
   human_reply?: string;
   human_reply_parts?: WorkflowAgentPart[];
   activity_parts?: WorkflowAgentPart[];
+  /** True on get_phase summaries — full body fetched on demand via get_agent. */
+  detail_pending?: boolean;
 }
 
 export interface WorkflowPhase {
@@ -453,11 +455,23 @@ function mergeWorkflowAgent(
   incoming: WorkflowAgent,
 ): WorkflowAgent {
   const reassembled = reassembleAgentFieldParts(incoming);
+  // get_agent returns the full body (heavy text fields present) — clear
+  // detail_pending so views know no further fetch is needed. get_phase returns
+  // a summary (no heavy fields) — keep detail_pending:true.
+  const incomingHasHeavy =
+    reassembled.prompt !== undefined ||
+    reassembled.outcome !== undefined ||
+    reassembled.human_prompt !== undefined ||
+    reassembled.human_reply !== undefined ||
+    reassembled.error !== undefined ||
+    reassembled.activity !== undefined;
+  const detailPending = incomingHasHeavy ? false : reassembled.detail_pending ?? false;
   return {
     ...existing,
     ...reassembled,
     activity: reassembled.activity ?? existing?.activity,
     human_prompt: preferHumanPrompt(existing?.human_prompt, reassembled.human_prompt),
+    detail_pending: detailPending,
   };
 }
 

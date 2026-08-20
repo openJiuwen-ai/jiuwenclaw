@@ -442,6 +442,33 @@ def _workflow_phase_summary(phase: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Fields carried in the agent summary (get_phase). Heavy text fields
+# (prompt/outcome/human_prompt/human_reply/activity/error) are omitted —
+# get_agent is the universal layer for full agent content.
+_WORKFLOW_AGENT_SUMMARY_KEEP_KEYS = (
+    "id", "name", "status", "model", "kind", "node_type",
+    "started_at", "completed_at", "duration_ms", "token_count",
+    "correlation_id",
+)
+
+
+def _workflow_agent_summary(agent: dict[str, Any]) -> dict[str, Any]:
+    """Agent summary for ``action=get_phase`` — no heavy text fields, detail_pending.
+
+    Carries only the fields the tree/list row needs to render; the full body
+    (prompt/outcome/human_prompt/human_reply/activity/error) is fetched on
+    demand via ``action=get_agent``.
+    """
+    out: dict[str, Any] = {}
+    for key in _WORKFLOW_AGENT_SUMMARY_KEEP_KEYS:
+        value = agent.get(key)
+        if value is None:
+            continue
+        out[key] = value
+    out["detail_pending"] = True
+    return out
+
+
 def _workflow_run_meta(workflow: dict[str, Any]) -> dict[str, Any]:
     """Run-level meta for ``action=get_workflow`` — run fields, no phases.
 
@@ -547,7 +574,12 @@ def _build_phase_detail_paginated(
     agent_offset: int = 0,
     agent_limit: int = _WORKFLOW_AGENT_DEFAULT_LIMIT,
 ) -> dict[str, Any]:
-    """``action=get_phase`` — phase meta + paged full agents (field parts applied)."""
+    """``action=get_phase`` — phase meta + paged agent summaries, no heavy text.
+
+    Each agent is returned as a lightweight summary (id/name/status/model/...),
+    marked ``detail_pending:true``; the full body (prompt/outcome/human_prompt/
+    human_reply/activity/error) is fetched on demand via ``action=get_agent``.
+    """
     phase = _find_phase(workflow, phase_id)
     if phase is None:
         return {
@@ -565,7 +597,7 @@ def _build_phase_detail_paginated(
     page = agents[agent_offset:agent_offset + clamped_limit]
     phase_meta = _workflow_phase_summary(phase)
     phase_meta.pop("detail_pending", None)
-    phase_meta["agents"] = [_split_oversized_agent_fields(a) for a in page if isinstance(a, dict)]
+    phase_meta["agents"] = [_workflow_agent_summary(a) for a in page if isinstance(a, dict)]
     return {
         "type": "workflow_phase_detail",
         "action": "get_phase",
@@ -656,6 +688,7 @@ __all__ = [
     "_split_oversized_agent_fields",
     "_workflow_list_summary_item",
     "_workflow_phase_summary",
+    "_workflow_agent_summary",
     "_workflow_run_meta",
     "_find_phase",
     "_find_agent",
