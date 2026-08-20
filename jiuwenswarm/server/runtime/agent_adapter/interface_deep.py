@@ -3779,30 +3779,38 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         副作用: 在 ``self._sys_operation_card`` 保存生成或复用的 SysOperationCard。
         """
         try:
-            from openjiuwen.harness.security import resolve_sandbox
-            from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
-                get_sandbox_intent,
-            )
-
             endpoint = get_sandbox_endpoint()
             sandbox_url = endpoint.get("url") or None
             sandbox_type = endpoint.get("type") or None
             runtime = get_sandbox_runtime()
-            intent = get_sandbox_intent()
-            user_enabled = bool(runtime.get("enabled"))
-            available = bool(sandbox_url and sandbox_type)
-            resolve, warning = resolve_sandbox(
-                intent,  # type: ignore[arg-type]
-                enabled=user_enabled,
-                available=available,
-            )
-            if warning:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
-                    "Fail-Open to HOST (sandbox.url/type missing or incomplete)"
+            use_sandbox: bool
+            try:
+                # develop: 结合产品权限 sandbox_intent 决策。beta3 锁定的
+                # openjiuwen（0.1.16.post2）没有 resolve_sandbox，此时回退到
+                # beta3 原行为：sandbox.enabled 且 url/type 齐备才进沙箱。
+                from openjiuwen.harness.security import resolve_sandbox
+                from jiuwenswarm.agents.harness.common.rails.permissions.permissions_layers import (
+                    get_sandbox_intent,
                 )
+
+                intent = get_sandbox_intent()
+                user_enabled = bool(runtime.get("enabled"))
+                available = bool(sandbox_url and sandbox_type)
+                resolve, warning = resolve_sandbox(
+                    intent,  # type: ignore[arg-type]
+                    enabled=user_enabled,
+                    available=available,
+                )
+                if warning:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] sandbox_intent=required but jiuwenbox unavailable; "
+                        "Fail-Open to HOST (sandbox.url/type missing or incomplete)"
+                    )
+                use_sandbox = resolve == "sandbox"
+            except ImportError:
+                use_sandbox = bool(runtime.get("enabled") and sandbox_url and sandbox_type)
             sysop_card: SysOperationCard | None
-            if resolve == "sandbox":
+            if use_sandbox:
                 sysop_card = self._create_sandbox_sys_operation(
                     sandbox_url,
                     sandbox_type,
