@@ -3107,6 +3107,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             "last_user_message_at": lum if isinstance(lum, (int, float)) and not isinstance(lum, bool) else None,
             "model": str(meta.get("model", "")),
             "work_mode": str(meta.get("work_mode") or DEFAULT_WEB_WORK_MODE),
+            "expert_id": str(meta.get("expert_id", "")),
         }
 
     async def _project_get_sessions(ws, req_id, params, session_id):

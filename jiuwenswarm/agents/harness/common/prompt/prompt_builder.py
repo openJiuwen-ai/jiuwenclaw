@@ -26,6 +26,7 @@ class PromptPriority(IntEnum):
     """Named prompt section priorities for general agent builder."""
 
     IDENTITY = 10
+    CONVENTIONS = 15
     SKILLS = 40
     MEMORY = 55
     RESPONSE = 60
@@ -143,6 +144,34 @@ After completing a system task, notify the user via a reply.
 def _identity_prompt(
     language: str,
 ) -> PromptSection:
+    """纯身份与口吻——专家模板（agent-core AgentTemplate persona）可覆盖本 section。
+
+    规则/约定类内容在 _conventions_prompt（jiuwenswarm.conventions，priority=15），
+    专家加载时只替换本 section，不动规则。
+    """
+    if language == "cn":
+        content = """你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
+
+> 注：JiuwenSwarm 中的 “Jiuwen” 中文名为“九问”。"""
+    else:
+        content = (
+            "You are a private intelligent agent created by JiuwenSwarm. "
+            "Interact with the user like a warm and thoughtful human assistant."
+            """
+
+> Note: "Jiuwen" in JiuwenSwarm is "九问" in Chinese."""
+        )
+    return PromptSection(
+        name="identity",
+        content={language: content},
+        priority=PromptPriority.IDENTITY,
+    )
+
+
+def _conventions_prompt(
+    language: str,
+) -> PromptSection:
+    """JiuwenSwarm 规则与约定（内部数据目录/运行环境/任务准则/文件放置/工具约定），永远保留。"""
     config_dir = _get_config_dir()
     agent_workspace_dir = get_agent_workspace_dir()
     memory_dir = get_agent_memory_dir()
@@ -183,11 +212,7 @@ def _identity_prompt(
         )
 
     if language == "cn":
-        content = f"""你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
-
-> 注：JiuwenSwarm 中的 “Jiuwen” 中文名为“九问”。
-
----
+        content = f"""---
 
 # JiuwenSwarm 内部数据
 
@@ -315,14 +340,7 @@ JiuwenSwarm 使用独立的内部数据目录保存启动配置、Agent 身份�
 - 始终以当前环境的真实工具能力为准，不要假设技能里 exec 所描述的机制存在。
 """
     else:
-        content = (
-            "You are a private intelligent agent created by JiuwenSwarm. "
-            "Interact with the user like a warm and thoughtful human assistant."
-            f"""
-
-> Note: "Jiuwen" in JiuwenSwarm is "九问" in Chinese.
-
----
+        content = f"""---
 
 # JiuwenSwarm Internal Data
 
@@ -475,11 +493,10 @@ Some skills are ported from other platforms (e.g. OpenClaw); their docs or scrip
 - **Do not copy exec's parameters or invocation logic wholesale**: `bash`'s `timeout` means "the subprocess is killed after at most N seconds", which is the **opposite** of exec's `yieldMs` (returns control while the process keeps running in the background); exec's yield/background/session mechanisms do not exist in bash. Redesign the call based on the real semantics of `bash`/`code` — put long tasks in the background with `nohup ... &` and return immediately, poll with short commands that read status files, and never run a long task in the foreground with `timeout`.
 - Always trust the real tool capabilities of the current environment; do not assume the mechanisms described for `exec` in the skill exist.
 """
-        )
     return PromptSection(
-        name="identity",
+        name="jiuwenswarm.conventions",
         content={language: content},
-        priority=PromptPriority.IDENTITY,
+        priority=PromptPriority.CONVENTIONS,
     )
 
 
@@ -491,15 +508,43 @@ def build_agent_identity_prompt(
 ) -> str:
     """Build the system prompt for the general (non-code) agent.
 
-    Contains only the identity section. Code mode uses its own
-    build_code_system_prompt() from code_prompt_builder.py.
+    Contains the identity section (pure persona, replaceable by expert
+    templates) and the jiuwenswarm.conventions section (rules that always
+    stay). Code mode uses its own build_code_system_prompt() from
+    code_prompt_builder.py.
+
+    注意：返回值是两段**渲染合并**后的完整字符串。喂给
+    ``create_deep_agent(system_prompt=...)`` 时整段会被塞进 identity 一个
+    section——需要分层语义的调用方应改用 ``build_agent_persona_text`` +
+    ``build_agent_conventions_section``（见 interface_deep.create_instance）。
     """
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
 
     builder.add_section(_identity_prompt(resolved_language))
+    builder.add_section(_conventions_prompt(resolved_language))
 
     return builder.build()
+
+
+def build_agent_persona_text(language: str) -> str:
+    """纯人设文本（identity section 专用）。
+
+    用于 ``create_deep_agent(system_prompt=...)``：core 会把该字符串整段塞进
+    identity section（priority=10），专家模板替换 identity 时只覆盖人设。
+    """
+    resolved_language = resolve_language(language)
+    return _identity_prompt(resolved_language).content[resolved_language]
+
+
+def build_agent_conventions_section(language: str) -> PromptSection:
+    """规则约定 section（jiuwenswarm.conventions，priority=15）。
+
+    create_deep_agent / DeepAgent.configure 只会从 system_prompt 字符串重建
+    identity + prompt_attachments 两个 section——本 section 必须由调用方在
+    实例创建/热重配后补挂（interface_deep 的 _restore_dynamic_prompt_sections）。
+    """
+    return _conventions_prompt(resolve_language(language))
 
 
 # ─── utility ────────────────────────────────────
