@@ -34,12 +34,29 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
 )
-from openjiuwen.core.session.recent_tool_results import (
-    get_recent_results,
-    record_tool_result,
-)
+
+try:
+    from openjiuwen.core.session.recent_tool_results import (
+        get_recent_results,
+        record_tool_result,
+    )
+except ModuleNotFoundError as exc:
+    # Jiuwen enterprise-dev currently permits an agent-core revision which
+    # predates this optional session helper. Do not prevent AgentServer from
+    # starting when only the recent-results enhancement is unavailable.
+    if exc.name != "openjiuwen.core.session.recent_tool_results":
+        raise
+    _RECENT_TOOL_RESULTS_AVAILABLE = False
+else:
+    _RECENT_TOOL_RESULTS_AVAILABLE = True
 
 logger = logging.getLogger(__name__)
+
+if not _RECENT_TOOL_RESULTS_AVAILABLE:
+    logger.warning(
+        "[RecentToolResultsRail] disabled: installed openjiuwen does not "
+        "provide core.session.recent_tool_results"
+    )
 
 DEFAULT_WHITELIST: frozenset[str] = frozenset({
     "bash",
@@ -86,8 +103,12 @@ class RecentToolResultsRail(DeepAgentRail):
         Child agent (parent_session is not None): no-op, does not record.
         Parent agent: records whitelisted tool calls to own session.
         """
-        # Child agent does not record own calls
-        if self._parent_session is not None:
+        # Child agent does not record own calls. Older agent-core revisions do
+        # not provide the session helper used by this optional enhancement.
+        if (
+            not _RECENT_TOOL_RESULTS_AVAILABLE
+            or self._parent_session is not None
+        ):
             return
 
         if not isinstance(ctx.inputs, ToolCallInputs):
@@ -118,8 +139,12 @@ class RecentToolResultsRail(DeepAgentRail):
         The framework pops ``environment_context`` after each model call,
         so injection is per-round and never accumulates.
         """
-        # Parent agent does not inject into own prompt
-        if self._parent_session is None:
+        # Parent agent does not inject into own prompt. On older agent-core
+        # revisions this rail is intentionally a no-op.
+        if (
+            not _RECENT_TOOL_RESULTS_AVAILABLE
+            or self._parent_session is None
+        ):
             return
 
         # Child agent: read parent's latest 3 results only

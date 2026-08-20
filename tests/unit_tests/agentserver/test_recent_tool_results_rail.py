@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.core.session.recent_tool_results import (
@@ -224,6 +225,38 @@ class TestBeforeModelCallInject(unittest.IsolatedAsyncioTestCase):
         content = ctx.extra["environment_context"][0]["content"]
         self.assertIn("✓", content)
         self.assertIn("bash", content)
+
+
+class TestMissingAgentCoreSupport(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_recent_results_helper_is_a_noop(self):
+        """An older agent-core must not prevent the AgentServer from starting."""
+        parent_sess = MockSession()
+        child_sess = MockSession()
+        parent_rail = RecentToolResultsRail()
+        parent_ctx = _make_ctx(
+            parent_sess,
+            tool_name="bash",
+            tool_args={"command": "ls"},
+            tool_result="output",
+        )
+        child_rail = RecentToolResultsRail(parent_session=parent_sess)
+        child_ctx = _make_ctx(child_sess, tool_name="")
+
+        record_tool_result(parent_sess, {
+            "tool": "bash", "args": {}, "result": "existing result",
+            "status": "success", "error": None, "timestamp": "t",
+        })
+
+        with patch(
+            "jiuwenclaw.agentserver.deep_agent.rails.recent_tool_results_rail."
+            "_RECENT_TOOL_RESULTS_AVAILABLE",
+            False,
+        ):
+            await parent_rail.after_tool_call(parent_ctx)
+            await child_rail.before_model_call(child_ctx)
+
+        self.assertEqual(len(get_recent_results(parent_sess)), 1)
+        self.assertNotIn("environment_context", child_ctx.extra)
 
 
 class TestParentChildUnidirectional(unittest.IsolatedAsyncioTestCase):
