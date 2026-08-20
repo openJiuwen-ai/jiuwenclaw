@@ -5566,6 +5566,10 @@ class AgentWebSocketServer:
             if agent is None:
                 raise ValueError("Failed to get agent")
 
+            # /compact 同 /btw：非 chat 通道 RPC 需先 ensure_instance 懒构建根 DeepAgent，
+            # 否则 self._instance 为 None 时 compress_context 会直接 noop（误报"无需压缩"）。
+            await agent.ensure_instance()
+
             result_data = await agent.compress_context(session_id=session_id, return_state=True)
 
             result = result_data.get("result")
@@ -5829,6 +5833,11 @@ class AgentWebSocketServer:
 
             if agent is None:
                 raise ValueError("Failed to get agent")
+
+            # /btw 是非 chat 通道 RPC：根适配器默认只作路由/模板，模型在 create_instance
+            # 时被 _skip_own_instance_build 跳过、self._model 为 None。先 ensure_instance 懒构建
+            # 根 DeepAgent（含模型），否则 _call_model_for_recap 报 "[oneshot] no model instance available"。
+            await agent.ensure_instance()
 
             result_data = await agent.generate_btw_answer(
                 session_id=session_id,

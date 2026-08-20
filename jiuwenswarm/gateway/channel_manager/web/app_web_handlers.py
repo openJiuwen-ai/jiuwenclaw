@@ -625,6 +625,8 @@ _FORWARD_REQ_METHODS = frozenset({
     "acp.tool_response",
     "team.delete",
     "command.goal",
+    "command.btw",
+    "command.compact",
     "chat.send",
     "chat.interrupt",
     "chat.resume",
@@ -761,6 +763,8 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "team.session.bind",
     "team.delete",
     "command.goal",
+    "command.btw",
+    "command.compact",
     "team.snapshot",
     "team.history.get",
     "team.mq.publish",
@@ -5871,6 +5875,17 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                                     payload={"rss_mb": rss_mb, "total_mb": total_mb,
                                              "available_mb": available_mb})
 
+    async def _commands_list(ws, req_id, params, session_id):
+        """下发快捷面板命令清单（静态元数据，本地直接返回，不转发 AgentServer）。"""
+        try:
+            from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
+                list_builtin_commands,
+            )
+            payload = list_builtin_commands(params if isinstance(params, dict) else {})
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except Exception as e:
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     async def _chat_send(ws, req_id, params, session_id):
         await channel.send_response(
             ws,
@@ -7043,6 +7058,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("memory.compute", _memory_compute)
     channel.register_method("hooks.list", _hooks_list)
+    # 注意：commands.list 是本地 handler，刻意不加入 _FORWARD_REQ_METHODS（否则会被
+    # 转发到 AgentServer 与本地 handler 冲突）。静态元数据本地返回最快、依赖最少。
+    channel.register_method("commands.list", _commands_list)
 
     channel.register_method("chat.send", _chat_send)
     channel.register_method("media.persist", _media_persist)

@@ -73,6 +73,7 @@ class ReqMethod(Enum):
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
     COMMAND_GOAL = "command.goal"
+    COMMANDS_LIST = "commands.list"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
