@@ -1,12 +1,14 @@
 import { addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 import type { AccentColorName } from "../../../ui/theme.js";
+import { isClientMode, isTeamMode } from "../../modes.js";
 
 export interface SessionMeta {
   session_id: string;
   title?: string;
   accent_color?: AccentColorName;
   channel_id?: string;
+  mode?: string;
   created_at?: number;
   last_message_at?: number;
   message_count?: number;
@@ -76,20 +78,63 @@ async function doResume(
     );
     return;
   }
+  // 保存旧会话状态：restoreHistory 在 SESSION_IN_USE / TOCTOU 等场景下会失败，此时本地
+  // sessionId 已切换、entries 已清空，需在 catch 中回滚，避免停留在一个未成功恢复但
+  // sessionId 已切过去的半成品状态（后续消息会继续命中占用冲突）。
+  const previousSessionId = ctx.sessionId;
+  const previousAccent = ctx.accentColor;
+  const previousTitle = ctx.sessionTitle;
+  const targetMode = session.mode && isClientMode(session.mode) ? session.mode : ctx.mode;
+  try {
+    await ctx.request("session.switch", {
+      session_id: session.session_id,
+      previous_session_id: previousSessionId,
+      previous_mode: ctx.mode,
+      mode: targetMode,
+    });
+  } catch (error) {
+    if (isTeamMode(targetMode)) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.addItem(addError(ctx.sessionId, `team session switch failed: ${message}`));
+      return;
+    }
+  }
+  ctx.setMode(targetMode);
   ctx.updateSession(session.session_id);
   ctx.clearEntries();
   ctx.setAccentColor(session.accent_color || "default");
   ctx.addItem(addInfo(session.session_id, `Resumed session ${session.session_id}`, "r"));
-  void ctx.restoreHistory(session.session_id);
   void (async () => {
     try {
-      const meta = await ctx.request<{ session_id: string; title: string }>(
-        "session.rename",
-        { session_id: session.session_id },
+      await ctx.restoreHistory(session.session_id);
+      // 成功后才拉取并设置目标会话标题，避免失败回滚后被并行的 title 请求覆盖
+      void (async () => {
+        try {
+          const meta = await ctx.request<{ session_id: string; title: string }>("session.rename", {
+            session_id: session.session_id,
+          });
+          ctx.setSessionTitle(meta.title || "");
+        } catch {
+          ctx.setSessionTitle("");
+        }
+      })();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 回滚到恢复前的会话状态：sessionId/accentColor/sessionTitle
+      ctx.updateSession(previousSessionId);
+      ctx.setAccentColor(previousAccent);
+      ctx.setSessionTitle(previousTitle);
+      // 重新拉取旧会话历史以还原 entries（best-effort，失败则保留空 transcript + 错误条）
+      void (async () => {
+        try {
+          await ctx.restoreHistory(previousSessionId);
+        } catch {
+          /* best-effort：旧会话历史拉取失败时保留已有 entries */
+        }
+      })();
+      ctx.addItem(
+        addError(previousSessionId, `Failed to resume ${session.session_id}: ${message}`),
       );
-      ctx.setSessionTitle(meta.title || "");
-    } catch {
-      ctx.setSessionTitle("");
     }
   })();
 }
@@ -168,9 +213,7 @@ export function createResumeCommand(): SlashCommand {
 
         // 1. Session ID exact/prefix match
         const sessionIdMatch = allSessions.find(
-          (s) =>
-            s.session_id === value ||
-            (s.session_id.startsWith(value) && value.length >= 8),
+          (s) => s.session_id === value || (s.session_id.startsWith(value) && value.length >= 8),
         );
         if (sessionIdMatch) {
           await doResume(ctx, sessionIdMatch);

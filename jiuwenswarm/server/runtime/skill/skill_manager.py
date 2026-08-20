@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """SkillManager - 管理 skills 的加载、安装、卸载与 marketplace 操作."""
 
@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import sys
 import shutil
 import ssl
 import tarfile
@@ -40,10 +41,21 @@ from jiuwenswarm.common.utils import (
     is_package_installation,
 )
 
+
+def _get_ssl_verify() -> bool:
+    """延迟导入以规避循环依赖：ssl_config 所在的 tools 包 __init__ 会回引本模块。"""
+    from jiuwenswarm.agents.harness.common.tools.ssl_config import get_ssl_verify
+
+    return get_ssl_verify()
+
 logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+# SkillNet 异步安装 job 必须跨 SkillManager 实例共享：skills.* 无状态 RPC 在
+# AgentManager 缓存未命中时会临时 new JiuWenSwarm()，install 与 install_status
+# 可能落到不同实例；若 job 仅存实例内存会误报「安装会话已过期」。
+_SKILLNET_INSTALL_JOBS: dict[str, dict[str, Any]] = {}
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _SKILLNET_PROXY_ENV_KEYS = (
@@ -67,12 +79,31 @@ _TEAM_SKILLS_HUB_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = (
 )
 _IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
 _IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
+# 本地导入源的基础黑名单追加入口（逗号分隔绝对路径，只收紧不放宽）。
+_IMPORT_LOCAL_FORBIDDEN_DIRS_ENV = "IMPORT_LOCAL_FORBIDDEN_DIRS"
+# 本地导入结构校验：SKILL.md 开头（仅允许前置空行）必须是 --- frontmatter。
+_SKILL_FRONTMATTER_RE = re.compile(r"^(?:\s*\n)*---\s*\n(.*?)\n---\s*\n?(.*)", re.DOTALL)
+_ONLINE_SEARCH_RRF_K = 60
+_ONLINE_SEARCH_SOURCE_ORDER = {"skillnet": 0, "clawhub": 1}
 
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def _maybe_disable_insecure_warning() -> None:
+    """关闭证书校验时同步静默 urllib3 的 InsecureRequestWarning。
+
+    历史实现为模块导入即全局 disable_warnings，导致即便开启证书校验也仍静默
+    警告；改为按开关条件触发，开启校验时保留警告输出。
+    """
+    if not _get_ssl_verify():
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class _ImportLocalTLSAdapter(HTTPAdapter):
+    """仅在 ssl_verify=false 时挂载，跳过证书/主机名校验。
+
+    开启证书校验（get_ssl_verify() 为 True）时不应 mount 本 Adapter，
+    而是走 requests 默认校验逻辑——调用方负责条件判断。
+    """
+
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context(ssl_version=ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -250,6 +281,156 @@ def _safe_path_name(value: Any, label: str) -> str:
     return raw
 
 
+# A skill name is also its directory name inside the single global library, so a
+# name that could never be such a directory can never match a real skill. These
+# are the characters no filesystem this runtime targets accepts in a name:
+# Windows rejects them outright, and ``:`` additionally spells a drive or an NTFS
+# alternate data stream.
+_INVALID_SKILL_NAME_CHARS = frozenset('<>:"|?*')
+
+# Windows device names, reserved whatever the extension is.
+_RESERVED_SKILL_NAME_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
+
+# Generous upper bound: real names are dashes-and-words slugs, while most
+# filesystems stop accepting a single component well before this.
+_MAX_SKILL_NAME_LENGTH = 128
+
+
+def _validate_skill_name(name: str) -> str:
+    """Validate one skill name before it is persisted into visibility metadata.
+
+    Visibility names are compared against library directory names and are never
+    joined onto a path, so an odd name is not a traversal today. It would still
+    be written to disk forever, and a later reader that does resolve it as a
+    directory would inherit the problem; reject it at the door instead.
+
+    The rule stays deliberately permissive — letters of any script, digits,
+    dots, dashes, underscores and spaces all pass, because a skill name is
+    simply the name of its library directory — so that a legitimately named
+    skill is never silently dropped.
+
+    Args:
+        name: Stripped, non-empty candidate name.
+
+    Returns:
+        The accepted name.
+
+    Raises:
+        ValueError: The name is not usable as a skill name.
+    """
+    safe = _safe_path_name(name, "skill")
+    if len(safe) > _MAX_SKILL_NAME_LENGTH:
+        raise ValueError(f"invalid skill name: longer than {_MAX_SKILL_NAME_LENGTH} characters")
+    # "..." and friends: relative-path lookalikes that no installer produces.
+    if set(safe) <= {"."}:
+        raise ValueError(f"invalid skill name: {safe}")
+    # A leading dot marks sidecar state (the ".<name>.lock" files the visibility
+    # writer creates, ".git", ...), not a skill a user meant to authorize.
+    if safe.startswith("."):
+        raise ValueError(f"invalid skill name: {safe}")
+    # Windows silently drops a trailing dot from a filename, so such a name
+    # could never round-trip to the directory it claims to address.
+    if safe.endswith("."):
+        raise ValueError(f"invalid skill name: {safe}")
+    if _INVALID_SKILL_NAME_CHARS.intersection(safe):
+        raise ValueError(f"invalid skill name: {safe}")
+    # Control characters only. A plain space is legal: a skill name is whatever
+    # its library directory is called, and directories may contain spaces.
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in safe):
+        raise ValueError("invalid skill name: contains a control character")
+    if safe.split(".", 1)[0].upper() in _RESERVED_SKILL_NAME_STEMS:
+        raise ValueError(f"invalid skill name: {safe}")
+    return safe
+
+
+def _coerce_skill_name_list(raw: Any, field_label: str) -> list[str]:
+    """Normalize an RPC-supplied skill-name list.
+
+    Accepts a list/tuple/set of names or a single name, drops blanks,
+    non-string entries and names :func:`_validate_skill_name` rejects, and
+    preserves nothing else: the visibility writer sorts and de-duplicates what
+    it receives. A rejected name is logged and skipped rather than raised, so
+    one bad entry never aborts an otherwise valid authorization change.
+
+    Args:
+        raw: Raw ``allow`` / ``deny`` value from the request params.
+        field_label: Parameter name reported in the rejection warning.
+
+    Returns:
+        Cleaned list of skill names; empty when nothing usable was supplied.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        candidates: list[Any] = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = list(raw)
+    else:
+        return []
+    names: list[str] = []
+    for item in candidates:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name:
+            continue
+        try:
+            names.append(_validate_skill_name(name))
+        except ValueError as exc:
+            _log_rejected_name(f"skills.visibility.{field_label}", "skill", item, exc)
+    return names
+
+
+def _compose_workspace_skill_visibility(
+    member_path: Path | None,
+    member_id: str,
+    team_path: Path | None,
+    team_id: str,
+) -> tuple[set[str], set[str]]:
+    """Compose the effective skill allow / deny sets of one team workspace.
+
+    The composition rule is owned by openJiuWen's team skill layer:
+    ``enabled = member.allow UNION team.allow`` and
+    ``disabled = member.deny UNION team.deny UNION globally disabled skills``.
+
+    An empty enabled set means "inherit the whole library", never "deny
+    everything" — substituting the full name set would freeze the view against
+    Skills installed later.
+
+    Args:
+        member_path: Member ``skills-visibility.json`` path; None when the
+            request addresses a team document only.
+        member_id: Member name recorded as the document id.
+        team_path: Team ``skills-visibility.json`` path, or None.
+        team_id: Team name recorded as the team document id.
+
+    Returns:
+        Tuple of (enabled skill names, disabled skill names).
+    """
+    from openjiuwen.agent_teams.skill.visibility import (
+        SCOPE_MEMBER,
+        SCOPE_TEAM,
+        SkillVisibility,
+        compose_skill_visibility,
+        read_skill_visibility,
+    )
+
+    from jiuwenswarm.server.runtime.skill.skilldev.state_utils import load_execution_disabled_skills
+
+    if member_path is None:
+        member = SkillVisibility(scope=SCOPE_MEMBER, id=member_id)
+    else:
+        member = read_skill_visibility(member_path, scope=SCOPE_MEMBER, entity_id=member_id)
+    team = None
+    if team_path is not None:
+        team = read_skill_visibility(team_path, scope=SCOPE_TEAM, entity_id=team_id)
+    return compose_skill_visibility(member, team, load_execution_disabled_skills())
+
+
 def _safe_child_path(base: Path, name: Any, label: str) -> Path:
     safe_name = _safe_path_name(name, label)
     base_resolved = base.resolve()
@@ -417,8 +598,12 @@ class SkillManager:
         # local_skills，使其与"导入本地技能"完全等价（可展示/卸载/查看详情/禁用）。
         self._register_unmanaged_local_skills()
         # SkillNet 异步安装：install 立即返回 install_id，后台下载；完成后调用 hook 重载 Agent
-        self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
+
+    @property
+    def _skillnet_install_jobs(self) -> dict[str, dict[str, Any]]:
+        """进程级共享的 SkillNet 安装任务表（见模块常量 ``_SKILLNET_INSTALL_JOBS``）."""
+        return _SKILLNET_INSTALL_JOBS
 
     def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
         """安装成功落盘后回调（通常为重载 Agent 实例）."""
@@ -506,6 +691,7 @@ class SkillManager:
                 meta["content"] = meta.pop("body", "")
                 meta["file_path"] = meta.pop("path", "")
                 meta["source"] = self._resolve_skill_source(meta.get("name", ""))
+                meta["display_name"] = self._resolve_skill_display_name(meta.get("name", ""))
                 meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
                 builtin_dir = get_builtin_skills_dir()
                 if builtin_dir.exists():
@@ -571,6 +757,245 @@ class SkillManager:
             "detail": "配置已更新；下次 reload / rebuild / 新会话后执行面生效。",
         }
 
+    @staticmethod
+    def _resolve_skill_visibility_target(params: dict) -> tuple[str, str, Path] | dict:
+        """Resolve the visibility document addressed by an RPC request.
+
+        Args:
+            params: RPC parameters carrying ``scope``, ``team_name`` and, for the
+                member scope, ``member_name``.
+
+        Returns:
+            Tuple of (scope, entity id, metadata path), or an error payload dict
+            when the request is malformed.
+        """
+        from openjiuwen.agent_teams.paths import (
+            member_skill_visibility_path,
+            team_skill_visibility_path,
+        )
+        from openjiuwen.agent_teams.skill.visibility import SCOPE_MEMBER, SCOPE_TEAM
+
+        scope = str(params.get("scope") or SCOPE_MEMBER).strip()
+        if scope not in (SCOPE_MEMBER, SCOPE_TEAM):
+            return {"success": False, "detail": f"无效参数: scope={scope}（应为 member 或 team）"}
+        try:
+            team_name = _safe_path_name(params.get("team_name"), "team")
+        except ValueError as exc:
+            _log_rejected_name("skills.visibility", "team", params.get("team_name"), exc)
+            return {"success": False, "detail": str(exc)}
+
+        if scope == SCOPE_TEAM:
+            return SCOPE_TEAM, team_name, team_skill_visibility_path(team_name)
+
+        try:
+            member_name = _safe_path_name(params.get("member_name"), "member")
+        except ValueError as exc:
+            _log_rejected_name("skills.visibility", "member", params.get("member_name"), exc)
+            return {"success": False, "detail": str(exc)}
+        return SCOPE_MEMBER, member_name, member_skill_visibility_path(team_name, member_name)
+
+    @staticmethod
+    def _compose_skill_visibility_for_params(params: dict, scope: str) -> tuple[set[str], set[str]]:
+        """Compose the effective allow / deny sets addressed by an RPC request.
+
+        Args:
+            params: RPC parameters already validated by
+                :meth:`_resolve_skill_visibility_target`.
+            scope: Resolved scope, ``member`` or ``team``.
+
+        Returns:
+            Tuple of (enabled skill names, disabled skill names).
+        """
+        from openjiuwen.agent_teams.paths import (
+            member_skill_visibility_path,
+            team_skill_visibility_path,
+        )
+        from openjiuwen.agent_teams.skill.visibility import SCOPE_MEMBER
+
+        team_name = str(params.get("team_name") or "").strip()
+        team_path = team_skill_visibility_path(team_name)
+        if scope != SCOPE_MEMBER:
+            # A team document has no member half; compose it against itself so
+            # the team's own deny list and the global disabled set still apply.
+            return _compose_workspace_skill_visibility(
+                member_path=None,
+                member_id="",
+                team_path=team_path,
+                team_id=team_name,
+            )
+        member_name = str(params.get("member_name") or "").strip()
+        return _compose_workspace_skill_visibility(
+            member_path=member_skill_visibility_path(team_name, member_name),
+            member_id=member_name,
+            team_path=team_path,
+            team_id=team_name,
+        )
+
+    async def handle_skills_visibility_get(self, params: dict) -> dict:
+        """读取某个 member/team 的 skill 可见性 metadata.
+
+        params:
+            scope: "member" 或 "team"
+            team_name: 团队名
+            member_name: 成员名（scope=member 时必填）
+
+        Returns:
+            allow / deny 名单，以及合成后的 enabled / disabled 生效集合。
+            metadata 不存在时返回一份空文档（空 allow 表示继承全库）。
+        """
+        from openjiuwen.agent_teams.skill.visibility import read_skill_visibility
+
+        target = await asyncio.to_thread(self._resolve_skill_visibility_target, params)
+        if isinstance(target, dict):
+            return target
+        scope, entity_id, path = target
+
+        visibility = await asyncio.to_thread(
+            read_skill_visibility,
+            path,
+            scope=scope,
+            entity_id=entity_id,
+        )
+        enabled, disabled = await asyncio.to_thread(
+            self._compose_skill_visibility_for_params,
+            params,
+            scope,
+        )
+        return {
+            "success": True,
+            "scope": scope,
+            "id": entity_id,
+            "path": str(path),
+            "allow": visibility.allow,
+            "deny": visibility.deny,
+            "bootstrapped_from": visibility.bootstrapped_from,
+            "enabled_skills": sorted(enabled),
+            "disabled_skills": sorted(disabled),
+        }
+
+    async def handle_skills_visibility_set(self, params: dict) -> dict:
+        """设置某个 member/team 的 skill 可见性 metadata.
+
+        全量替换 allow 与 deny 两份名单。空 allow 表示继承全库而非全禁；
+        deny 无条件优先于 allow。写入经跨进程文件锁 + 原子替换落盘。
+
+        params:
+            scope: "member" 或 "team"
+            team_name: 团队名
+            member_name: 成员名（scope=member 时必填）
+            allow: skill 名列表，缺省或空表示继承全库
+            deny: skill 名列表，缺省或空表示不禁用
+
+        Returns:
+            落盘后的 allow / deny 名单与合成后的生效集合。
+        """
+        from openjiuwen.agent_teams.skill.file_lock import FileLockTimeout
+        from openjiuwen.agent_teams.skill.visibility import set_skill_visibility
+
+        target = await asyncio.to_thread(self._resolve_skill_visibility_target, params)
+        if isinstance(target, dict):
+            return target
+        scope, entity_id, path = target
+
+        allow = _coerce_skill_name_list(params.get("allow"), "allow")
+        deny = _coerce_skill_name_list(params.get("deny"), "deny")
+        try:
+            visibility = await asyncio.to_thread(
+                set_skill_visibility,
+                path,
+                scope=scope,
+                entity_id=entity_id,
+                allow=allow,
+                deny=deny,
+            )
+        except FileLockTimeout as exc:
+            logger.warning("[SkillVisibility] lock timeout: path=%s error=%s", path, exc)
+            return {"success": False, "detail": "可见性文件被占用，请稍后重试。"}
+        except OSError as exc:
+            logger.warning("[SkillVisibility] write failed: path=%s error=%s", path, exc)
+            return {"success": False, "detail": f"写入可见性配置失败: {exc}"}
+
+        enabled, disabled = await asyncio.to_thread(
+            self._compose_skill_visibility_for_params,
+            params,
+            scope,
+        )
+        return {
+            "success": True,
+            "scope": scope,
+            "id": entity_id,
+            "path": str(path),
+            "allow": visibility.allow,
+            "deny": visibility.deny,
+            "enabled_skills": sorted(enabled),
+            "disabled_skills": sorted(disabled),
+        }
+
+    async def handle_skills_visibility_update(self, params: dict) -> dict:
+        """增量修改某个 member/team 的 skill 可见性 metadata.
+
+        与全量 set 的区别在于「读-改-写」发生在**同一次持锁内**：两个客户端
+        并发授权时互不覆盖，各自的增删都会保留。语义仍为空 allow 表示继承全库，
+        deny 无条件优先于 allow。
+
+        params:
+            scope: "member" 或 "team"
+            team_name: 团队名
+            member_name: 成员名（scope=member 时必填）
+            add_allow: 追加到 allow 名单的 skill 名列表
+            remove_allow: 从 allow 名单移除的 skill 名列表
+            add_deny: 追加到 deny 名单的 skill 名列表
+            remove_deny: 从 deny 名单移除的 skill 名列表
+
+        Returns:
+            落盘后的 allow / deny 名单与合成后的生效集合。
+        """
+        from openjiuwen.agent_teams.skill.file_lock import FileLockTimeout
+        from openjiuwen.agent_teams.skill.visibility import update_skill_visibility
+
+        target = await asyncio.to_thread(self._resolve_skill_visibility_target, params)
+        if isinstance(target, dict):
+            return target
+        scope, entity_id, path = target
+
+        add_allow = _coerce_skill_name_list(params.get("add_allow"), "add_allow")
+        remove_allow = _coerce_skill_name_list(params.get("remove_allow"), "remove_allow")
+        add_deny = _coerce_skill_name_list(params.get("add_deny"), "add_deny")
+        remove_deny = _coerce_skill_name_list(params.get("remove_deny"), "remove_deny")
+        try:
+            visibility = await asyncio.to_thread(
+                update_skill_visibility,
+                path,
+                scope=scope,
+                entity_id=entity_id,
+                add_allow=add_allow,
+                remove_allow=remove_allow,
+                add_deny=add_deny,
+                remove_deny=remove_deny,
+            )
+        except FileLockTimeout as exc:
+            logger.warning("[SkillVisibility] lock timeout: path=%s error=%s", path, exc)
+            return {"success": False, "detail": "可见性文件被占用，请稍后重试。"}
+        except OSError as exc:
+            logger.warning("[SkillVisibility] update failed: path=%s error=%s", path, exc)
+            return {"success": False, "detail": f"写入可见性配置失败: {exc}"}
+
+        enabled, disabled = await asyncio.to_thread(
+            self._compose_skill_visibility_for_params,
+            params,
+            scope,
+        )
+        return {
+            "success": True,
+            "scope": scope,
+            "id": entity_id,
+            "path": str(path),
+            "allow": visibility.allow,
+            "deny": visibility.deny,
+            "enabled_skills": sorted(enabled),
+            "disabled_skills": sorted(disabled),
+        }
+
     async def handle_skills_retrieval_status(self, params: dict) -> dict:
         """返回本地 skill retrieval 索引状态."""
         from jiuwenswarm.symphony.skill_retrieval import get_skill_retrieval_status
@@ -605,6 +1030,39 @@ class SkillManager:
 
         language = str((params or {}).get("language") or "cn").strip() or "cn"
         return await asyncio.to_thread(get_skill_retrieval_tree, self, language=language)
+
+    async def handle_skills_graph_build(self, params: dict) -> dict:
+        """Start a background Skill Graph build."""
+        from jiuwenswarm.symphony.service import get_swarm_symphony_service
+
+        value = (params or {}).get("force", False)
+        force = (
+            value.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(value, str)
+            else bool(value)
+        )
+        return await get_swarm_symphony_service().start_refresh_graph(force=force)
+
+    async def handle_skills_graph_status(self, params: dict) -> dict:
+        """Return Skill Graph build and freshness status."""
+        from jiuwenswarm.symphony.service import get_swarm_symphony_service
+
+        del params
+        return await get_swarm_symphony_service().graph_status()
+
+    async def handle_skills_graph_get(self, params: dict) -> dict:
+        """Return the current published Skill Graph."""
+        from jiuwenswarm.symphony.service import get_swarm_symphony_service
+
+        del params
+        return await get_swarm_symphony_service().graph()
+
+    async def handle_skills_graph_cancel(self, params: dict) -> dict:
+        """Cancel the active Skill Graph build while retaining checkpoints."""
+        from jiuwenswarm.symphony.service import get_swarm_symphony_service
+
+        del params
+        return await get_swarm_symphony_service().cancel_build()
 
     async def handle_skills_evolution_status(self, params: dict) -> dict:
         """检查某个 skill 是否存在 evolutions.json."""
@@ -893,6 +1351,205 @@ class SkillManager:
 
         return {"success": True}
 
+    @staticmethod
+    def _normalize_online_search_identifier(source: str, identifier: str) -> str:
+        """Build a conservative identity key for safe result merging."""
+        value = str(identifier or "").strip()
+        if not value:
+            return f"{source}:"
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            scheme = "https" if parsed.hostname and parsed.hostname.lower() == "github.com" else parsed.scheme.lower()
+            host = parsed.netloc.lower()
+            path = parsed.path.rstrip("/") or "/"
+            return f"url:{scheme}://{host}{path}"
+        return f"{source}:{value.casefold()}"
+
+    @staticmethod
+    def _normalize_online_search_item(source: str, item: dict[str, Any], rank: int) -> dict[str, Any]:
+        if source == "skillnet":
+            name = str(item.get("skill_name") or item.get("name") or "").strip()
+            description = str(item.get("skill_description") or item.get("description") or "").strip()
+            identifier = str(item.get("skill_url") or item.get("url") or "").strip()
+            version = ""
+            author = str(item.get("author") or "").strip()
+            native_score = item.get("score")
+            if native_score is None:
+                native_score = item.get("stars")
+            category = str(item.get("category") or "").strip()
+            updated_at = 0
+        elif source == "clawhub":
+            name = str(item.get("display_name") or item.get("slug") or "").strip()
+            description = str(item.get("summary") or "").strip()
+            identifier = str(item.get("slug") or "").strip()
+            version = str(item.get("version") or "").strip()
+            owner_handle = str(item.get("owner_handle") or "").strip()
+            # ClawHub download needs ownerHandle when the same slug has multiple publishers.
+            author = owner_handle
+            native_score = item.get("score")
+            category = ""
+            updated_at = item.get("updated_at") or 0
+        else:
+            raise ValueError(f"unsupported online search source: {source}")
+
+        normalized: dict[str, Any] = {
+            "source": source,
+            "name": name,
+            "description": description,
+            "identifier": identifier,
+            "version": version,
+            "author": author,
+            "native_score": native_score,
+            "category": category,
+            "updated_at": updated_at,
+            "source_rank": rank,
+            "fusion_score": 1.0 / (_ONLINE_SEARCH_RRF_K + rank),
+            "matched_sources": [
+                {
+                    "source": source,
+                    "identifier": identifier,
+                    "source_rank": rank,
+                }
+            ],
+        }
+        if source == "clawhub":
+            normalized["owner_handle"] = owner_handle
+            if owner_handle:
+                normalized["matched_sources"][0]["owner_handle"] = owner_handle
+        return normalized
+
+    @classmethod
+    def _aggregate_online_search_results(
+        cls,
+        query: str,
+        source_results: dict[str, list[dict[str, Any]]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for source in sorted(source_results, key=lambda value: _ONLINE_SEARCH_SOURCE_ORDER.get(value, 99)):
+            for rank, raw_item in enumerate(source_results[source], start=1):
+                if not isinstance(raw_item, dict):
+                    continue
+                item = cls._normalize_online_search_item(source, raw_item, rank)
+                if not item["identifier"] and not item["name"]:
+                    continue
+                identity_value = item["identifier"] or item["name"]
+                if source == "clawhub":
+                    owner_handle = str(item.get("owner_handle") or "").strip()
+                    if owner_handle and identity_value:
+                        # Keep ambiguous slugs from different publishers as distinct results.
+                        identity_value = f"{owner_handle}/{identity_value}"
+                identity = cls._normalize_online_search_identifier(source, identity_value)
+                existing = merged.get(identity)
+                if existing is None:
+                    merged[identity] = item
+                    continue
+                existing["fusion_score"] += item["fusion_score"]
+                existing["matched_sources"].extend(item["matched_sources"])
+                existing["source_rank"] = min(existing["source_rank"], item["source_rank"])
+
+        normalized_query = query.strip().casefold()
+        items = list(merged.values())
+        for item in items:
+            item["exact_match"] = normalized_query in {
+                str(item.get("name") or "").strip().casefold(),
+                str(item.get("identifier") or "").strip().casefold(),
+            }
+            item["matched_source_count"] = len(
+                {entry.get("source") for entry in item.get("matched_sources", []) if entry.get("source")}
+            )
+
+        items.sort(
+            key=lambda item: (
+                not bool(item.get("exact_match")),
+                -float(item.get("fusion_score") or 0.0),
+                -int(item.get("matched_source_count") or 0),
+                int(item.get("source_rank") or 0),
+                _ONLINE_SEARCH_SOURCE_ORDER.get(str(item.get("source") or ""), 99),
+                str(item.get("identifier") or ""),
+            )
+        )
+        return items[:limit]
+
+    async def handle_skills_online_search(self, params: dict) -> dict:
+        """Search the fixed online sources used by the Skills Online Search surface."""
+        query = str(params.get("q", "")).strip()
+        if not query:
+            return {"success": False, "partial": False, "items": [], "sources": [], "detail": "缺少参数: q"}
+        try:
+            limit = int(params.get("limit", 20))
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "partial": False,
+                "items": [],
+                "sources": [],
+                "detail": "参数 limit 必须是整数",
+            }
+        limit = min(max(limit, 1), 50)
+        calls: list[tuple[str, Awaitable[dict[str, Any]]]] = [
+            (
+                "skillnet",
+                self.handle_skills_skillnet_search(
+                    {"q": query, "limit": limit, "mode": "keyword"}
+                ),
+            )
+        ]
+        source_statuses: list[dict[str, Any]] = []
+        if self._get_clawhub_token():
+            calls.append(
+                (
+                    "clawhub",
+                    self.handle_skills_clawhub_search({"q": query, "limit": limit}),
+                )
+            )
+        else:
+            source_statuses.append(
+                {
+                    "source": "clawhub",
+                    "status": "skipped",
+                    "count": 0,
+                    "detail_key": "skills.clawhub.errors.tokenNotConfigured",
+                }
+            )
+
+        payloads = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+        source_results: dict[str, list[dict[str, Any]]] = {}
+        for (source, _), payload in zip(calls, payloads):
+            if isinstance(payload, asyncio.CancelledError):
+                raise payload
+            if isinstance(payload, Exception):
+                logger.error("在线技能聚合搜索失败: source=%s error=%s", source, payload)
+                source_statuses.append(
+                    {"source": source, "status": "error", "count": 0, "detail": str(payload)[:500]}
+                )
+                continue
+            if not payload.get("success"):
+                source_statuses.append(
+                    {
+                        "source": source,
+                        "status": "error",
+                        "count": 0,
+                        "detail": str(payload.get("detail") or "")[:500],
+                        "detail_key": payload.get("detail_key"),
+                    }
+                )
+                continue
+            skills = [item for item in payload.get("skills", []) if isinstance(item, dict)]
+            source_results[source] = skills
+            source_statuses.append({"source": source, "status": "success", "count": len(skills)})
+
+        source_statuses.sort(key=lambda item: _ONLINE_SEARCH_SOURCE_ORDER.get(str(item.get("source") or ""), 99))
+        any_success = any(item.get("status") == "success" for item in source_statuses)
+        any_error = any(item.get("status") == "error" for item in source_statuses)
+        return {
+            "success": any_success,
+            "partial": any_success and any_error,
+            "query": query,
+            "items": self._aggregate_online_search_results(query, source_results, limit),
+            "sources": source_statuses,
+        }
+
     async def handle_skills_skillnet_search(self, params: dict) -> dict:
         """在线搜索 SkillNet 技能."""
         query = str(params.get("q", "")).strip()
@@ -1144,6 +1801,7 @@ class SkillManager:
                             "summary": item.get("summary", ""),
                             "version": item.get("version", ""),
                             "updated_at": item.get("updatedAt", 0),
+                            "owner_handle": item.get("ownerHandle", ""),
                         }
                     )
 
@@ -1174,6 +1832,8 @@ class SkillManager:
 
         params:
             slug: skill slug (必需)
+            owner_handle: 发布者标识 (可选，slug 有多个发布者时必需)
+            display_name: 目录展示名 (可选；用于保留 ClawHub 大小写，避免安装后 Weather→weather)
             version: 版本号 (可选，默认 latest)
             tag: 标签 (可选，如 latest)
             force: 强制覆盖 (可选，默认 False)
@@ -1195,6 +1855,8 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.tokenNotConfigured",
             }
 
+        owner_handle = str(params.get("owner_handle") or "").strip()
+        display_name = str(params.get("display_name") or "").strip()
         version = params.get("version")
         tag = params.get("tag")
         force = bool(params.get("force", False))
@@ -1217,6 +1879,8 @@ class SkillManager:
                 headers["Authorization"] = f"Bearer {token}"
 
             download_params = {"slug": slug}
+            if owner_handle:
+                download_params["ownerHandle"] = owner_handle
             if version:
                 download_params["version"] = version
             if tag:
@@ -1276,14 +1940,27 @@ class SkillManager:
                         mirror_root.mkdir(parents=True, exist_ok=True)
                         shutil.copytree(skill_dir, mirror_dest)
 
-                    # 记录安装信息
-                    parsed_name = meta.get("name", "")
-                    skill_name = parsed_name if (parsed_name and parsed_name != (md.stem if md else "")) else slug
+                    # skill_name 必须与磁盘扫描出的规范名（_resolve_skill_name）保持一致，
+                    # 否则会被 _register_unmanaged_local_skills 当作"未登记的本地技能"
+                    # 重复注册一条 source=local 的幽灵记录（表现为大小写不一致 + 重复条目）。
+                    # 展示层面的大小写差异（如 Weather vs weather）改为通过 display_name 单独承载。
+                    parsed_name = str(meta.get("name") or "").strip()
+                    stem = md.stem if md else ""
+                    if parsed_name and parsed_name != stem:
+                        skill_name = parsed_name
+                    else:
+                        skill_name = slug
+                    resolved_display_name = display_name if display_name else skill_name
 
                     self._add_local_skill(
                         {
                             "name": skill_name,
-                            "origin": f"clawhub:{slug}",
+                            "display_name": resolved_display_name,
+                            "origin": (
+                                f"clawhub:{owner_handle}/{slug}"
+                                if owner_handle
+                                else f"clawhub:{slug}"
+                            ),
                             "source": "clawhub",
                             "installed_at": datetime.now(timezone.utc).isoformat(),
                         }
@@ -1291,6 +1968,7 @@ class SkillManager:
                     self._add_installed_plugin(
                         {
                             "name": skill_name,
+                            "display_name": resolved_display_name,
                             "marketplace": "clawhub",
                             "version": meta.get("version", ""),
                             "commit": "",
@@ -1302,7 +1980,11 @@ class SkillManager:
                     _safe_rmtree(skill_dir)
                     return {
                         "success": True,
-                        "skill": {"name": skill_name, "source": "clawhub"},
+                        "skill": {
+                            "name": skill_name,
+                            "display_name": resolved_display_name,
+                            "source": "clawhub",
+                        },
                     }
 
         except httpx.HTTPStatusError as exc:
@@ -1426,9 +2108,19 @@ class SkillManager:
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
+        try:
+            self._assert_import_local_source_safe(path_raw)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_root = Path(path_raw).expanduser().resolve()
         if not skill_root.exists() or not skill_root.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {skill_root}"}
+        try:
+            self._validate_local_skill_source(skill_root)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_md = self._try_find_skill_file(skill_root)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
@@ -1491,9 +2183,19 @@ class SkillManager:
         path_raw = str(params.get("path") or "").strip()
         if not path_raw:
             return {"success": False, "detail": "缺少参数: path"}
+        try:
+            self._assert_import_local_source_safe(path_raw)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_root = Path(path_raw).expanduser().resolve()
         if not skill_root.exists() or not skill_root.is_dir():
             return {"success": False, "detail": f"path 不是有效目录: {skill_root}"}
+        try:
+            self._validate_local_skill_source(skill_root)
+        except ValueError as exc:
+            return {"success": False, "detail": str(exc)}
+
         skill_md = self._try_find_skill_file(skill_root)
         if skill_md is None:
             return {"success": False, "detail": f"目录中未找到 SKILL.md: {skill_root}"}
@@ -2080,7 +2782,7 @@ class SkillManager:
 
     async def handle_skills_import_local(self, params: dict) -> dict:
         """从本地路径或远程归档 URL 导入 skill."""
-        raw_path = params.get("path", "")
+        raw_path = str(params.get("path") or "").strip()
         force = bool(params.get("force", False))
         checksum_sha256 = str(params.get("checksum_sha256", "") or "").strip()
         logger.info(
@@ -2104,28 +2806,67 @@ class SkillManager:
                 logger.error("remote archive import failed: %s", exc)
                 return {"success": False, "detail": str(exc)[:500]}
 
-        return self._import_local_from_path(Path(raw_path), force=force, origin=str(raw_path))
+        return self._import_local_from_path(
+            Path(remote_url).expanduser(), force=force, origin=raw_path
+        )
 
-    def _import_local_from_path(self, src: Path, *, force: bool, origin: str) -> dict[str, Any]:
+    def _import_local_from_path(
+        self,
+        src: Path,
+        *,
+        force: bool,
+        origin: str,
+        source_trusted: bool = False,
+    ) -> dict[str, Any]:
         logger.info(
-            "[SkillManager] import_local_from_path start: src=%s origin=%s force=%s",
+            "[SkillManager] import_local_from_path start: src=%s origin=%s force=%s trusted=%s",
             src,
             origin,
             force,
+            source_trusted,
         )
+        if not source_trusted:
+            try:
+                self._assert_import_local_source_safe(str(src))
+            except ValueError as exc:
+                logger.warning(
+                    "[SkillManager] import_local_from_path rejected source: src=%s origin=%s error=%s",
+                    src,
+                    origin,
+                    exc,
+                )
+                return {"success": False, "detail": str(exc)}
+
         if not src.exists():
             return {"success": False, "detail": f"路径不存在: {origin}"}
 
-        if src.is_file():
-            meta = self._parse_skill_md(src)
-            if meta is None:
-                return {"success": False, "detail": "无法解析 skill 文件"}
-            raw_skill_name = meta.get("name", src.stem)
+        if source_trusted:
+            # 远端归档导入：源已过 host 白名单 + 防 slip 解压（含拒符号链接），
+            # 直接复用本流程，name 沿用下方原宽松解析。
+            skill_name = None
+        else:
             try:
-                skill_name = _safe_path_name(raw_skill_name, "skill")
+                skill_name = self._validate_local_skill_source(src)
             except ValueError as exc:
-                _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
+                logger.warning(
+                    "[SkillManager] import_local_from_path rejected skill: src=%s origin=%s error=%s",
+                    src,
+                    origin,
+                    exc,
+                )
                 return {"success": False, "detail": str(exc)}
+
+        if src.is_file():
+            if source_trusted:
+                meta = self._parse_skill_md(src)
+                if meta is None:
+                    return {"success": False, "detail": "无法解析 skill 文件"}
+                raw_skill_name = meta.get("name", src.stem)
+                try:
+                    skill_name = _safe_path_name(raw_skill_name, "skill")
+                except ValueError as exc:
+                    _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
+                    return {"success": False, "detail": str(exc)}
             dest = _safe_child_path(self._skills_dir, skill_name, "skill")
             if dest.exists():
                 if not force:
@@ -2137,16 +2878,17 @@ class SkillManager:
             except OSError as exc:
                 return _handle_copy_error(exc, dest, "local import file", src)
         elif src.is_dir():
-            md = self._try_find_skill_file(src)
-            if md is None:
-                return {"success": False, "detail": f"目录中未找到 SKILL.md: {origin}"}
-            meta = self._parse_skill_md(md) or {}
-            raw_skill_name = meta.get("name", src.name)
-            try:
-                skill_name = _safe_path_name(raw_skill_name, "skill")
-            except ValueError as exc:
-                _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
-                return {"success": False, "detail": str(exc)}
+            if source_trusted:
+                md = self._try_find_skill_file(src)
+                if md is None:
+                    return {"success": False, "detail": f"目录中未找到 SKILL.md: {origin}"}
+                meta = self._parse_skill_md(md) or {}
+                raw_skill_name = meta.get("name", src.name)
+                try:
+                    skill_name = _safe_path_name(raw_skill_name, "skill")
+                except ValueError as exc:
+                    _log_rejected_name("skills.import_local", "skill", raw_skill_name, exc)
+                    return {"success": False, "detail": str(exc)}
             dest = _safe_child_path(self._skills_dir, skill_name, "skill")
             if dest.exists():
                 if not force:
@@ -2187,15 +2929,23 @@ class SkillManager:
         )
 
         def _download_with_requests() -> bytes:
+            ssl_verify = _get_ssl_verify()
+            _maybe_disable_insecure_warning()
             with requests.Session() as session:
-                session.mount("https://", _ImportLocalTLSAdapter())
-                logger.info("[SkillManager] remote import downloading: url=%s", download_url)
+                # 仅在关闭证书校验时挂载跳过校验的 Adapter；开启时走 requests 默认校验。
+                if not ssl_verify:
+                    session.mount("https://", _ImportLocalTLSAdapter())
+                logger.info(
+                    "[SkillManager] remote import downloading: url=%s ssl_verify=%s",
+                    download_url,
+                    ssl_verify,
+                )
                 with session.get(
                     download_url.strip(),
                     timeout=timeout,
                     stream=True,
                     allow_redirects=False,
-                    verify=False,
+                    verify=ssl_verify,
                 ) as response:
                     response.raise_for_status()
                     chunks: list[bytes] = []
@@ -2228,7 +2978,12 @@ class SkillManager:
             if skill_dir is None:
                 return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
             logger.info("[SkillManager] remote import extracted: url=%s skill_dir=%s", download_url, skill_dir)
-            return self._import_local_from_path(skill_dir, force=force, origin=download_url)
+            return self._import_local_from_path(
+                skill_dir,
+                force=force,
+                origin=download_url,
+                source_trusted=True,
+            )
 
 
     async def handle_skills_marketplace_add(self, params: dict) -> dict:
@@ -2519,60 +3274,92 @@ class SkillManager:
     # -----------------------------------------------------------------------
 
     def _scan_local_skills(self) -> list[dict]:
-        """扫描 agent/skills/ 下的本地 skill（跳过 _marketplace）."""
+        """扫描 agent/skills/ 下的本地 skill（跳过 _marketplace）.
+
+        Also scans connected MCPs' bundled skills (under
+        <workspace>/mcp/skills/<name>/). An MCP's skills surface only while
+        it is connected — toggling it on/off controls whether its skills load.
+        """
         results: list[dict] = []
-        if not self._skills_dir.exists():
-            return results
 
-        for child in self._skills_dir.iterdir():
-            if not child.is_dir() or child.name.startswith("_"):
+        # 1) user skills under <workspace>/skills/
+        if self._skills_dir.exists():
+            for child in self._skills_dir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                meta = self._scan_one_skill_dir(child)
+                if meta is not None:
+                    results.append(meta)
+
+        # 2) connected MCP skill dirs (only connected MCPs). skill_installer
+        # normalizes all MCP skills to the nested shape mcp/skills/<name>/<skill>/,
+        # so each child dir here is one skill (no flat-layout special case).
+        for entry in self._mcp_skills_dirs():
+            cdir = Path(str(entry.get("dir", "")))
+            if not cdir.is_dir():
                 continue
-            md = self._try_find_skill_file(child)
-            if md is None:
-                continue
-            meta = self._parse_skill_md(md)
-            if meta is None:
-                continue
-
-            if meta.get("name") == md.stem:
-                meta["name"] = child.name
-
-            # 判断 source 类型
-            installed = self._get_installed_plugins()
-            source = "project"
-            for p in installed:
-                if p.get("name") == meta.get("name"):
-                    source = p.get("source", "project")
-                    if source == "project" and p.get("marketplace"):
-                        source = p.get("marketplace", "project")
-                    break
-            # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
-            for ls in self._state.get("local_skills", []):
-                if ls.get("name") == meta.get("name"):
-                    source = ls.get("source", "local") if isinstance(ls, dict) else "local"
-                    if isinstance(ls, dict):
-                        origin = ls.get("origin")
-                        if isinstance(origin, str) and origin.strip():
-                            meta["origin"] = origin.strip()
-                    break
-
-            meta["source"] = source
-            meta["installed"] = True
-            meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
-            # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
-            meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
-            builtin_dir = get_builtin_skills_dir()
-            if builtin_dir.exists():
-                builtin_skill_path = builtin_dir / child.name
-                meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
-            else:
-                meta["is_builtin_source"] = False
-            meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
-            # 不在列表中返回 body
-            meta.pop("body", None)
-            results.append(meta)
+            for child in cdir.iterdir():
+                if not child.is_dir() or child.name.startswith("_"):
+                    continue
+                meta = self._scan_one_skill_dir(child, source_default="mcp")
+                if meta is not None:
+                    results.append(meta)
 
         return results
+
+    def _scan_one_skill_dir(
+        self, child: Path, *, source_default: str = "project"
+    ) -> dict[str, Any] | None:
+        """Scan a single skill directory -> meta dict, or None if not a skill."""
+        md = self._try_find_skill_file(child)
+        if md is None:
+            return None
+        meta = self._parse_skill_md(md)
+        if meta is None:
+            return None
+
+        if meta.get("name") == md.stem:
+            meta["name"] = child.name
+
+        # 判断 source 类型
+        installed = self._get_installed_plugins()
+        source = source_default
+        for p in installed:
+            if p.get("name") == meta.get("name"):
+                source = p.get("source", source_default)
+                if source == source_default and p.get("marketplace"):
+                    source = p.get("marketplace", source_default)
+                break
+        # 检查是否通过 import_local / SkillNet 等写入 local_skills（含 origin 供前端对照 skill_url）
+        for ls in self._state.get("local_skills", []):
+            if ls.get("name") == meta.get("name"):
+                source = ls.get("source", source_default) if isinstance(ls, dict) else source_default
+                if isinstance(ls, dict):
+                    origin = ls.get("origin")
+                    if isinstance(origin, str) and origin.strip():
+                        meta["origin"] = origin.strip()
+                    display_name = ls.get("display_name")
+                    if isinstance(display_name, str) and display_name.strip():
+                        meta["display_name"] = display_name.strip()
+                break
+
+        meta["source"] = source
+        if not str(meta.get("display_name") or "").strip():
+            meta["display_name"] = meta.get("name", "")
+        meta["installed"] = True
+        meta["enabled"] = self.get_skill_enabled(meta.get("name", ""))
+        # 判断是否为内置技能（传入 child 路径，通过实际路径判断）
+        meta["is_builtin"] = self._is_builtin_skill(meta.get("name", ""), self._get_installed_plugins(), child)
+        builtin_dir = get_builtin_skills_dir()
+        if builtin_dir.exists():
+            builtin_skill_path = builtin_dir / child.name
+            meta["is_builtin_source"] = builtin_skill_path.exists() and builtin_skill_path.is_dir()
+        else:
+            meta["is_builtin_source"] = False
+        meta["has_evolutions"] = (child / _EVOLUTION_FILENAME).is_file()
+        # 不在列表中返回 body
+        meta.pop("body", None)
+        return meta
 
     def _scan_builtin_skills(self) -> list[dict]:
         """扫描内置技能目录中尚未安装到用户目录的技能.
@@ -2603,6 +3390,7 @@ class SkillManager:
                 continue
 
             # 设置内置技能的标记
+            meta["name"] = self._resolve_skill_name(child, md, meta)
             meta["source"] = "builtin"
             meta["is_builtin"] = True
             meta["is_builtin_source"] = True
@@ -2637,6 +3425,24 @@ class SkillManager:
                 return "local"
 
         return "project"
+
+    def _resolve_skill_display_name(self, skill_name: str) -> str:
+        """解析 skill 展示名（优先 local_skills/installed_plugins 记录的 display_name）."""
+        if not skill_name:
+            return skill_name
+        for local_skill in self._state.get("local_skills", []):
+            if local_skill.get("name") == skill_name:
+                display_name = str(local_skill.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        for plugin in self._get_installed_plugins():
+            if plugin.get("name") == skill_name:
+                display_name = str(plugin.get("display_name") or "").strip()
+                if display_name:
+                    return display_name
+                break
+        return skill_name
 
     def _resolve_local_skill_dir(self, skill_name: str) -> Path | None:
         """根据 skill name 定位本地技能目录（仅 agent/skills 下）."""
@@ -3088,6 +3894,197 @@ class SkillManager:
             if SkillManager._team_skills_hub_host_matches_rule(host, rule):
                 return
         raise RuntimeError(f"远程导入 URL host 不在白名单: {host}")
+
+    @staticmethod
+    def _get_import_local_forbidden_roots() -> list[Path]:
+        """本地导入源的基础黑名单（高危根目录）。
+
+        黑名单只作兜底，主防线是 :meth:`_validate_local_skill_source` 的结构校验，
+        符号链接拒绝（:meth:`_assert_import_local_source_safe`）是黑名单的主要补强。
+        按运行平台计算：Unix-like 系统根、Windows 系统根、家目录敏感子目录。
+        运维可通过 ``IMPORT_LOCAL_FORBIDDEN_DIRS`` env 追加（只收紧不放宽）。
+        """
+        roots: list[Path] = []
+        if os.name == "nt":
+            # Windows：不黑名单整盘根或 Users 根，避免锁死用户目录下的本地导入；
+            # 单独禁止系统目录与 Users 下的 Default / Public 公共配置。
+            system_drive = Path(os.environ.get("SystemDrive", "C:") + os.sep)
+            for name in ("Windows", "Program Files", "Program Files (x86)", "ProgramData"):
+                roots.append(system_drive / name)
+            users_root = system_drive / "Users"
+            roots.extend((users_root / "Default", users_root / "Public"))
+        else:
+            for p in (
+                "/etc",
+                "/proc",
+                "/sys",
+                "/dev",
+                "/boot",
+                "/root",
+                "/usr",
+                "/bin",
+                "/sbin",
+                "/lib",
+                "/var",
+                "/run",
+                "/srv",
+            ):
+                roots.append(Path(p))
+            if sys.platform == "darwin":
+                roots.extend(Path(p) for p in ("/System", "/Library"))
+        home = Path.home()
+        for name in (
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".config",
+            ".git",
+            ".gradle",
+            ".m2",
+            ".cache",
+            ".local",
+            ".pki",
+            ".kube",
+            ".docker",
+        ):
+            roots.append(home / name)
+        raw = (os.getenv(_IMPORT_LOCAL_FORBIDDEN_DIRS_ENV) or "").strip()
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                extra = Path(token).expanduser()
+                if extra.is_absolute():
+                    roots.append(extra)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning(
+                    "[SkillManager] %s 忽略无效项 %r: %s",
+                    _IMPORT_LOCAL_FORBIDDEN_DIRS_ENV,
+                    token,
+                    exc,
+                )
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for root in roots:
+            key = os.path.normcase(str(root))
+            if key not in seen:
+                seen.add(key)
+                unique.append(root)
+        return unique
+
+    @staticmethod
+    def _path_is_link_or_junction(path: Path) -> bool:
+        """判断路径是否为符号链接；Windows 上再补 junction/reparse point 判断。
+
+        ``Path.is_junction`` 自 Python 3.12 才存在，3.11 兼容下回退为仅符号链接判断。
+        """
+        if path.is_symlink():
+            return True
+        if os.name == "nt":
+            is_junction = getattr(path, "is_junction", None)
+            if is_junction is not None:
+                return bool(is_junction())
+        return False
+
+    @staticmethod
+    def _path_is_within_root(path: Path, root: Path) -> bool:
+        """按文件系统对象身份判断 path 是否位于已存在的 root 下。"""
+        try:
+            resolved_root = root.resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
+            return False
+        for candidate in (path, *path.parents):
+            try:
+                if candidate.samefile(resolved_root):
+                    return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def _assert_import_local_source_safe(self, raw_path: str) -> None:
+        """拒绝符号链接、URL 协议与落在基础黑名单根下的本地导入源。
+
+        必须在任何 ``exists()`` / 读取之前调用，否则读取本身即构成任意文件读取。
+        ``~/...`` 按 JiuwenClaw 服务进程用户的 home 展开后再校验。
+        绝对路径判定按服务端平台进行：Unix-like 拒绝非绝对与 Windows 风格路径；
+        Windows 拒绝非绝对、drive-relative（``C:foo``）与无盘符 root-relative
+        （``\\Windows\\...``），接受 ``C:\\...``、``D:\\...`` 与 UNC。
+        """
+        raw = str(raw_path or "").strip()
+        if not raw:
+            raise ValueError("缺少参数: path")
+        if "://" in raw.lower():
+            raise ValueError("仅支持本地文件路径，不支持 URL 协议")
+        if "\0" in raw:
+            raise ValueError("path 包含非法字符")
+        expanded = Path(raw).expanduser()
+        if os.name == "nt":
+            if not expanded.is_absolute():
+                raise ValueError("path 仅支持绝对路径")
+            if not PureWindowsPath(raw).drive:
+                raise ValueError("path 必须包含盘符或 UNC 根")
+        else:
+            if not expanded.is_absolute():
+                raise ValueError("path 仅支持绝对路径")
+            if PureWindowsPath(raw).is_absolute() or re.match(r"^[A-Za-z]:", raw):
+                raise ValueError("path 不支持 Windows 风格路径")
+        if self._path_is_link_or_junction(expanded):
+            raise ValueError(f"path 不支持符号链接: {raw}")
+        try:
+            resolved = expanded.resolve()
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ValueError(f"path 无效: {exc}") from exc
+        for root in self._get_import_local_forbidden_roots():
+            if self._path_is_within_root(resolved, root):
+                raise ValueError(f"path 位于禁止导入的目录: {raw}")
+        if resolved.is_dir():
+            for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+                for name in dirnames + filenames:
+                    if self._path_is_link_or_junction(Path(dirpath) / name):
+                        raise ValueError(f"path 目录内不允许包含符号链接: {raw}")
+
+    @staticmethod
+    def _validate_local_skill_source(src: Path) -> str:
+        """对本地导入源做结构校验，返回校验通过的技能名。
+
+        主防线：目录必须含精确 ``SKILL.md``（单文件则文件本身必须是合法
+        ``SKILL.md``），且文件开头（仅允许前置空行）必须是含 ``name`` 与
+        ``description`` 的 YAML frontmatter；``name`` 再通过
+        :func:`_validate_skill_name` 校验。失败抛 ``ValueError``。
+        """
+        if src.is_dir():
+            skill_file = src / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(f"目录中未找到 SKILL.md: {src}")
+        elif src.is_file():
+            skill_file = src
+        else:
+            raise ValueError(f"不支持的路径类型: {src}")
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"无法读取 SKILL.md: {skill_file}") from exc
+        match = _SKILL_FRONTMATTER_RE.match(text)
+        if not match:
+            raise ValueError(f"SKILL.md 开头必须是 --- frontmatter（仅允许前置空行）: {skill_file}")
+        try:
+            loaded = yaml.safe_load(match.group(1))
+        except (yaml.YAMLError, RecursionError) as exc:
+            raise ValueError(f"SKILL.md frontmatter YAML 无效: {skill_file}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"SKILL.md frontmatter 必须是 YAML 对象: {skill_file}")
+        raw_name = loaded.get("name")
+        if not raw_name:
+            raise ValueError(f"SKILL.md frontmatter 缺少 name: {skill_file}")
+        description = loaded.get("description")
+        if not description or not str(description).strip():
+            raise ValueError(f"SKILL.md frontmatter 缺少 description: {skill_file}")
+        try:
+            skill_name = _validate_skill_name(str(raw_name))
+        except ValueError as exc:
+            raise ValueError(f"invalid skill name: {exc}") from exc
+        return skill_name
 
     @staticmethod
     def _team_skills_hub_host_matches_rule(host: str, rule: str) -> bool:
@@ -3868,6 +4865,26 @@ class SkillManager:
     def _get_installed_plugins(self) -> list[dict]:
         return self._state.get("installed_plugins", [])
 
+    # MCP-bundled skills live under <workspace>/mcp/skills/<name>/<skill>/,
+    # physically isolated from user skills. The scan list is derived from
+    # state.json's connected records (see state_store.connected_mcp_skill_dirs)
+    # — an MCP's skills surface only while it is connected.
+
+    @staticmethod
+    def _mcp_skills_dirs() -> list[dict[str, str]]:
+        """MCP skills dirs to scan: derived from state.json's connected records.
+
+        Returns ``[{"name", "dir"}]`` for each connected MCP whose
+        ``mcp/skills/<name>/`` dir exists on disk.
+        """
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                connected_mcp_skill_dirs,
+            )
+            return connected_mcp_skill_dirs()
+        except Exception:  # noqa: BLE001
+            return []
+
     # -----------------------------------------------------------------------
     # 供 AgentServer 内部其它组件复用的轻量公开查询接口
     # -----------------------------------------------------------------------
@@ -3983,6 +5000,17 @@ class SkillManager:
     def remove_skill_config(self, skill_name: str) -> None:
         if remove_skill_config(self._state, skill_name):
             self._save_state()
+
+    def reload_state(self) -> None:
+        """重新从 skills_state.json 加载状态。
+
+        SkillManager 在 __init__ 时加载一次 _state，之后内存缓存。外部流程
+        （如 MCP 连接器经独立 SkillManager 实例写 skill_configs）落盘后，本实例
+        的 _state 仍是旧值——list_disabled_skills 看不到新 disabled 的 skill。
+        refresh_skill_rails 调用本方法先重载再算 disabled_skills，确保磁盘最新值
+        生效。
+        """
+        self._state = self._load_state()
 
     def list_disabled_skills(self) -> list[str]:
         return list_disabled_skills(self._state)

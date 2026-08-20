@@ -15,7 +15,10 @@ import {
   a2uiWarn,
   dualWriteA2UIValue,
   isMultiSelectChoice,
+  isSingleSelectChoice,
   literalArrayValues,
+  nextChoiceSelections,
+  selectionCollectionValues,
   visibleChoiceDefault as visibleChoiceDefaultValue,
 } from './formDefaults';
 
@@ -38,13 +41,9 @@ function nonEmptyChoiceValue(value: unknown): string | null {
 }
 
 function selectedValuesFromData(value: DataValue | null): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .map(nonEmptyChoiceValue)
-      .filter((item): item is string => item !== null);
-  }
-  const singleValue = nonEmptyChoiceValue(value);
-  return singleValue ? [singleValue] : [];
+  return selectionCollectionValues(value)
+    .map(nonEmptyChoiceValue)
+    .filter((item): item is string => item !== null);
 }
 
 export function visibleMultipleChoiceDefault(
@@ -89,7 +88,7 @@ export function MultipleChoiceWithDefaults({
   const variant = rawProps.variant as string | undefined;
   const type = variant ?? rawProps.type as string | undefined;
 
-  const isSingleSelect = !isMultiSelect;
+  const isSingleSelect = isSingleSelectChoice(rawProps);
 
   // Filterable search support
   const filterable = rawProps.filterable as boolean | undefined;
@@ -126,34 +125,15 @@ export function MultipleChoiceWithDefaults({
         return;
       }
 
-      // Single-select mode (maxAllowedSelections === 1): always replace
-      if (isSingleSelect) {
-        const nextValue = [optionValue];
-        dualWriteA2UIValue(setValue, selectionsPath, nextValue);
-        return;
-      }
-
-      // Multi-select mode: add/remove from array
-      const currentValues = [...effectiveSelectedValues];
-      if (checked) {
-        if (!currentValues.includes(optionValue)) {
-          currentValues.push(optionValue);
-        }
-      } else {
-        const index = currentValues.indexOf(optionValue);
-        if (index !== -1) {
-          currentValues.splice(index, 1);
-        }
-      }
-
-      // Respect maxAllowedSelections for multi-select
-      if (maxAllowedSelections !== undefined && currentValues.length > maxAllowedSelections) {
-        return;
-      }
-
-      dualWriteA2UIValue(setValue, selectionsPath, currentValues);
+      const nextValues = nextChoiceSelections(
+        effectiveSelectedValues,
+        optionValue,
+        checked,
+        maxAllowedSelections,
+      );
+      dualWriteA2UIValue(setValue, selectionsPath, nextValues);
     },
-    [selectionsPath, effectiveSelectedValues, maxAllowedSelections, isSingleSelect, setValue],
+    [selectionsPath, effectiveSelectedValues, maxAllowedSelections, setValue],
   );
 
   const hostStyle = (
@@ -169,10 +149,11 @@ export function MultipleChoiceWithDefaults({
   // Render chips UI
   if (type === 'chips') {
     return (
-      <div className="a2ui-multiplechoice" style={hostStyle}>
+      <div className="a2ui-multiplechoice" data-testid="a2ui-multiplechoice" data-variant="chips" style={hostStyle}>
         <section className={classMapToString(theme.components.MultipleChoice.container)}>
           <label
             className={classMapToString(theme.components.MultipleChoice.label)}
+            data-testid="a2ui-multiplechoice-label"
           >
             {labelText}
           </label>
@@ -183,9 +164,10 @@ export function MultipleChoiceWithDefaults({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="mb-2 px-3 py-1 border border-gray-300 rounded text-sm w-full"
+              data-testid="a2ui-multiplechoice-search"
             />
           )}
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2" data-testid="a2ui-multiplechoice-options">
             {filteredOptions.map((option, index) => {
               const optionValue = choiceValueToString(option.value);
               const optionLabel = resolveString(option.label) ?? optionValue;
@@ -200,6 +182,8 @@ export function MultipleChoiceWithDefaults({
                       : 'bg-white text-gray-700 border-gray-300 hover:border-blue-300'
                   }`}
                   aria-pressed={isSelected}
+                  data-testid="a2ui-multiplechoice-option"
+                  data-variant={optionValue}
                   onClick={() => {
                     try {
                       handleMultiChange(optionValue, !isSelected);
@@ -221,10 +205,11 @@ export function MultipleChoiceWithDefaults({
   // Render checkboxes UI
   if (isMultiSelect) {
     return (
-      <div className="a2ui-multiplechoice" style={hostStyle}>
+      <div className="a2ui-multiplechoice" data-testid="a2ui-multiplechoice" data-variant="checkboxes" style={hostStyle}>
         <section className={classMapToString(theme.components.MultipleChoice.container)}>
           <label
             className={classMapToString(theme.components.MultipleChoice.label)}
+            data-testid="a2ui-multiplechoice-label"
           >
             {labelText}
           </label>
@@ -235,9 +220,10 @@ export function MultipleChoiceWithDefaults({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="mb-2 px-3 py-1 border border-gray-300 rounded text-sm w-full"
+              data-testid="a2ui-multiplechoice-search"
             />
           )}
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col gap-1" data-testid="a2ui-multiplechoice-options">
             {filteredOptions.map((option, index) => {
               const optionValue = choiceValueToString(option.value);
               const optionLabel = resolveString(option.label) ?? optionValue;
@@ -246,6 +232,8 @@ export function MultipleChoiceWithDefaults({
                 <label
                   key={optionValue || `option-${index}`}
                   className="flex items-center gap-2 cursor-pointer"
+                  data-testid="a2ui-multiplechoice-option"
+                  data-variant={optionValue}
                 >
                   <input
                     type="checkbox"
@@ -266,11 +254,12 @@ export function MultipleChoiceWithDefaults({
   // Render single-select dropdown
   const selectedValue = selectedValues[0] ?? defaultValue ?? '';
   return (
-    <div className="a2ui-multiplechoice" style={hostStyle}>
+    <div className="a2ui-multiplechoice" data-testid="a2ui-multiplechoice" data-variant="single" style={hostStyle}>
       <section className={classMapToString(theme.components.MultipleChoice.container)}>
         <label
           htmlFor={id}
           className={classMapToString(theme.components.MultipleChoice.label)}
+          data-testid="a2ui-multiplechoice-label"
         >
           {labelText}
         </label>
@@ -281,12 +270,13 @@ export function MultipleChoiceWithDefaults({
           className={classMapToString(theme.components.MultipleChoice.element)}
           style={stylesToObject(theme.additionalStyles?.MultipleChoice)}
           onChange={handleSingleChange}
+          data-testid="a2ui-multiplechoice-select"
         >
           {(props.options ?? []).map((option, index) => {
             const optionValue = choiceValueToString(option.value);
             const optionLabel = resolveString(option.label) ?? optionValue;
             return (
-              <option key={optionValue || `option-${index}`} value={optionValue}>
+              <option key={optionValue || `option-${index}`} value={optionValue} data-testid="a2ui-multiplechoice-select-option" data-variant={optionValue}>
                 {optionLabel}
               </option>
             );

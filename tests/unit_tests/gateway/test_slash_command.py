@@ -44,6 +44,9 @@ parse_channel_control_text = _MOD.parse_channel_control_text
         ("/mode code.plan", ParsedControlAction.MODE_OK, ("code.plan", None), None, None),
         ("/mode code.normal", ParsedControlAction.MODE_OK, ("code.normal", None), None, None),
         ("/mode code.team", ParsedControlAction.MODE_OK, ("code.team", None), None, None),
+        ("/mode team.plan", ParsedControlAction.MODE_OK, ("team.plan", None), None, None),
+        ("/mode team.plan.normal", ParsedControlAction.MODE_OK, ("team.plan.normal", None), None, None),
+        ("/mode team.plan.code", ParsedControlAction.MODE_OK, ("team.plan.code", None), None, None),
         ("/mode plan", ParsedControlAction.MODE_BAD, (None, None), None, None),
         ("/mode", ParsedControlAction.MODE_BAD, (None, None), None, None),
         ("/switch plan", ParsedControlAction.SWITCH_OK, (None, "plan"), None, None),
@@ -155,6 +158,9 @@ def test_control_message_texts_contains_mode_variants_and_skills() -> None:
     assert "/mode agent.plan" in CONTROL_MESSAGE_TEXTS
     assert "/mode code.normal" in CONTROL_MESSAGE_TEXTS
     assert "/mode code.team" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan.normal" in CONTROL_MESSAGE_TEXTS
+    assert "/mode team.plan.code" in CONTROL_MESSAGE_TEXTS
     assert "/switch normal" in CONTROL_MESSAGE_TEXTS
     assert "/switch team" in CONTROL_MESSAGE_TEXTS
     assert "/branch" in CONTROL_MESSAGE_TEXTS
@@ -334,6 +340,7 @@ def test_first_batch_registry_ids() -> None:
     expected = {
         "new_session", "mode", "switch", "skills", "resume",
         "workspace_dir", "branch", "rewind", "recap", "agents", "review", "security-review",
+        "goal",
     }
     assert ids == expected
 
@@ -371,3 +378,17 @@ def test_exit_parse_rejects_short_form_requires_full_team_session_ref() -> None:
     assert pj.action is ParsedControlAction.JOIN_OK
     assert pj.session_ref == "team_jiuwen_sess_19f4b147e5a_session_sess_19f4b147e5a"
     assert pj.member_name == "auditor"
+
+    # 中文 team name：完整格式应放行
+    p = parse_channel_control_text(
+        "/exit team_我的团队_sess_abc123_session_sess_abc123"
+    )
+    assert p.action is ParsedControlAction.EXIT_OK
+    assert p.session_ref == "team_我的团队_sess_abc123_session_sess_abc123"
+
+    pj = parse_channel_control_text(
+        "/join team_我的团队_sess_abc123_session_sess_abc123 as 审核员"
+    )
+    assert pj.action is ParsedControlAction.JOIN_OK
+    assert pj.session_ref == "team_我的团队_sess_abc123_session_sess_abc123"
+    assert pj.member_name == "审核员"

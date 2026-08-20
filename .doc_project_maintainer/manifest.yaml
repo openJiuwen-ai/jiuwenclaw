@@ -1,6 +1,6 @@
 version: 0.0.1
 artifact_root: .doc_project_maintainer
-last_updated: '2026-07-15'
+last_updated: '2026-08-16'
 sync:
   status: partial
   last_scanned_commit: 10afedf222bcd6db98b24347a28f75e4613b3c87
@@ -31,6 +31,8 @@ sync:
     flows: []
     code_symbols:
     - jiuwenswarm/server/agent_ws_server.py
+    - jiuwenswarm/server/runtime/agent_warm_pool.py
+    - jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
     created: '2026-07-07'
 project:
   name: JiuwenSwarm
@@ -73,6 +75,8 @@ modules:
   - agentserver-plan-mode-exit
   - agentserver-schedule-auto-harness
   - agentserver-history-stream
+  - session-prewarm-allocation
+  - eternal-conversation-memory
   coverage:
     status: partial
     last_scanned: '2026-07-13'
@@ -93,6 +97,7 @@ modules:
   - agentserver-plan-mode-exit
   - agentserver-schedule-auto-harness
   - agentserver-history-stream
+  - session-prewarm-allocation
   coverage:
     status: planned
     last_scanned: '2026-07-07'
@@ -110,6 +115,8 @@ modules:
   - agentserver-sandbox-runtime
   - agentserver-plan-mode-exit
   - agentserver-schedule-auto-harness
+  - session-prewarm-allocation
+  - eternal-conversation-memory
   coverage:
     status: planned
     last_scanned: '2026-07-07'
@@ -168,6 +175,11 @@ directories:
     status: partial
     last_scanned: '2026-07-07'
 flows:
+- id: eternal-conversation-memory
+  name: Eternal Conversation Memory
+  summary: Explicit Web/TUI request flag mounts a common Work/Code Rail; Session-owned Extractor and Builder publish audited Snapshot and Pending/Built UT state without losing foreground context.
+  confidence: confirmed
+  doc: project/flows/eternal-conversation-memory.md
 - id: gateway-agentserver-e2a-chat
   name: Gateway AgentServer E2A Chat
   summary: Gateway sends E2A envelopes over WebSocket; AgentServer dispatches to agents and returns unary or streaming E2A
@@ -285,7 +297,41 @@ flows:
   code_symbols:
   - AgentWebSocketServer.get_conversation_history
   - AgentWebSocketServer._handle_history_get_stream
+- id: session-prewarm-allocation
+  name: Session Prewarm And Allocation
+  summary: Gateway syncs live channels; AgentServer prepares, claims, and replenishes session-bound single-Agent runtimes. Prewarming itself is on unless JIUWENSWARM_AGENT_PREWARM opts out.
+  confidence: confirmed
+  doc: project/flows/session-prewarm-allocation.md
+  modules:
+  - agentserver-runtime
+  - gateway-and-channels
+  - agent-harness
+  directories:
+  - jiuwenswarm/server
+  - jiuwenswarm/gateway
+  - jiuwenswarm/channels
+  code_symbols:
+  - AgentWarmPool
+  - AgentWarmPool.sync
+  - AgentWarmPool.claim
+  - AgentWarmPool.begin_foreground
+  - AgentWarmPool.end_foreground
+  - AgentWebSocketServer._handle_session_create
+  - AgentWebSocketServer._handle_stream
+  - AgentWebSocketServer._handle_unary
+  - resolve_agent_request_mode
+  - JiuWenSwarmDeepAdapter.prepare_session
+  - JiuWenSwarmDeepAdapter.configure_session_runtime
+  - JiuWenSwarmDeepAdapter._schedule_runtime_state_write
 code_symbols:
+- symbol: AgentWebSocketServer._handle_session_create
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_session_create.md
+- symbol: resolve_agent_request_mode
+  kind: function
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/resolve_agent_request_mode.md
 - symbol: _run
   kind: function
   source: jiuwenswarm/server/app_agentserver.py
@@ -314,6 +360,82 @@ code_symbols:
   kind: method
   source: jiuwenswarm/server/agent_ws_server.py
   doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_sandbox_enable.md
+- symbol: AgentWarmPool
+  kind: class
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/Class AgentWarmPool.md
+- symbol: AgentWarmPool.sync
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.sync.md
+- symbol: AgentWarmPool.claim
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.claim.md
+- symbol: AgentWarmPool.begin_foreground
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.begin_foreground.md
+- symbol: AgentWarmPool.end_foreground
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_warm_pool.py
+  doc: code/jiuwenswarm/server/runtime/agent_warm_pool.py/Class AgentWarmPool/AgentWarmPool.end_foreground.md
+- symbol: JiuWenSwarmDeepAdapter.prepare_session
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter.prepare_session.md
+- symbol: JiuWenSwarmDeepAdapter.configure_session_runtime
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter.configure_session_runtime.md
+- symbol: JiuWenSwarmDeepAdapter._schedule_runtime_state_write
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._schedule_runtime_state_write.md
+- symbol: JiuWenSwarmDeepAdapter._schedule_memory_reindex
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._schedule_memory_reindex.md
+- symbol: JiuWenSwarmDeepAdapter._handle_memory_rail_by_config
+  kind: method
+  source: jiuwenswarm/server/runtime/agent_adapter/interface_deep.py
+  doc: code/jiuwenswarm/server/runtime/agent_adapter/interface_deep.py/JiuWenSwarmDeepAdapter._handle_memory_rail_by_config.md
+- symbol: AgentWebSocketServer._handle_stream_impl
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_stream_impl.md
+- symbol: AgentWebSocketServer._handle_unary_impl
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_unary_impl.md
+- symbol: AgentWebSocketServer._handle_stream
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_stream.md
+- symbol: AgentWebSocketServer._handle_unary
+  kind: method
+  source: jiuwenswarm/server/agent_ws_server.py
+  doc: code/jiuwenswarm/server/agent_ws_server.py/Class AgentWebSocketServer/AgentWebSocketServer._handle_unary.md
+decisions:
+- id: ADR-0001
+  title: AgentServer Owns Prewarmed Session Identity
+  doc: decisions/ADR-0001-agentserver-owned-prewarmed-sessions.md
+changes:
+- id: CHG-20260731-001
+  title: Add AgentServer-owned session allocation and DeepAgent prewarming
+  doc: changes/records/CHG-20260731-001-session-prewarm-allocation.md
+- id: CHG-20260801-001
+  title: Prioritize foreground chat over background prewarming
+  doc: changes/records/CHG-20260801-001-prewarm-foreground-priority.md
+- id: CHG-20260801-005
+  title: Switch background session prewarming off by default
+  doc: changes/records/CHG-20260801-005-disable-session-prewarm.md
+- id: CHG-20260803-001
+  title: Switch background session prewarming back on by default
+  doc: changes/records/CHG-20260803-001-enable-session-prewarm-by-default.md
+- id: CHG-20260803-002
+  title: Route TUI startup session creation through AgentServer
+  doc: changes/records/CHG-20260803-002-tui-external-session-create.md
 code_symbol_inventory:
   generated_by: scripts/inventory_symbols.py
   source_symbol_inventory: project/source-symbol-inventory.json

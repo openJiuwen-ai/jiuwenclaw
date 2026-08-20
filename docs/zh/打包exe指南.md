@@ -167,3 +167,9 @@ chmod +x scripts/build-macos.sh
 PyInstaller 生成的 exe 可能被误报，可尝试：
 - 添加排除规则
 - 使用代码签名（若有证书）
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

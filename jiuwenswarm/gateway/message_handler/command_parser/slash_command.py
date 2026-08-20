@@ -46,6 +46,9 @@ class ModeSubcommand(str, Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
+    TEAM_PLAN = "team.plan"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
 
 
 _VALID_MODE_LINES: frozenset[str] = frozenset(
@@ -78,6 +81,9 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
         GatewaySlashCommand.EXIT.value,
     }
 )
+
+# /join、/exit 的 session_ref 格式：team_<name>_session_<id>
+_SESSION_REF_RE: re.Pattern[str] = re.compile(r'^team_[\w-]+_session_[\w-]+$')
 
 
 class ParsedControlAction(str, Enum):
@@ -257,7 +263,7 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         ):
             session_ref = parts[1]
             member_name = parts[3]
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref):
+            if _SESSION_REF_RE.match(session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.JOIN_OK,
                     session_ref=session_ref,
@@ -277,7 +283,7 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
             return ParsedChannelControl(ParsedControlAction.EXIT_OK)
         if len(parts) == 2 and parts[0] == GatewaySlashCommand.EXIT.value:
             session_ref = parts[1]
-            if re.match(r'^team_[A-Za-z0-9_-]+_session_[A-Za-z0-9_-]+$', session_ref):
+            if _SESSION_REF_RE.match(session_ref):
                 return ParsedChannelControl(
                     ParsedControlAction.EXIT_OK,
                     session_ref=session_ref,
@@ -351,18 +357,18 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
     SlashCommandEntry(
         id="mode",
         canonical_text=f"{GatewaySlashCommand.MODE.value} agent|code|team|agent.plan|agent.fast|code.plan|"
-                       f"code.normal|code.team|team.plan",
+                       f"code.normal|code.team|team.plan|team.plan.normal|team.plan.code",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）或直达 agent.plan/agent.fast/code.plan/code.normal；"
-              "写入 params.mode。",
+        notes="受控通道切换模式：一级模式 agent/code/team（映射到默认子模式）；"
+              "agent 的 plan/fast 已合并为单一 agent（agent.plan/agent.fast 作为历史别名仍可接受）；写入 params.mode。",
     ),
     SlashCommandEntry(
         id="switch",
         canonical_text=f"{GatewaySlashCommand.SWITCH.value} plan|fast|normal|team",
         scope="gateway",
         req_method=None,
-        notes="受控通道切换二级模式：agent 下 plan/fast，code 下 plan/normal。",
+        notes="受控通道切换二级模式：agent 下 plan/fast 已合并；code 下 plan/normal。",
     ),
     SlashCommandEntry(
         id="skills",
@@ -428,6 +434,15 @@ FIRST_BATCH_REGISTRY: tuple[SlashCommandEntry, ...] = (
         req_method=None,
         notes="受控通道安全审查：args 透传注入 prompt，"
               "由 Agent 执行 git status/diff/log 并做安全分析；无 git 预检。",
+    ),
+    SlashCommandEntry(
+        id="goal",
+        canonical_text="/goal [set <objective>|pause|resume|clear]",
+        scope="client",
+        req_method="command.goal",
+        notes="TUI session-level persistent goal management. "
+              "SET/RESUME triggers a streaming goal round; "
+              "GET/PAUSE/CLEAR returns status immediately.",
     ),
 )
 

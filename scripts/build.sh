@@ -8,6 +8,10 @@ PROJECT_ROOT="$(cd "$(dirname "$(dirname "$0")")" && pwd)"
 
 echo "[build] 项目根目录: $PROJECT_ROOT"
 
+# 版本 PR 只修改根 pyproject.toml；构建入口自动同步 TUI 与 Python 运行时元数据。
+uv run --no-project --python 3.11 python "$PROJECT_ROOT/scripts/build_config.py" --sync
+uv sync
+
 # 1. 编译前端
 WEB_DIR="$PROJECT_ROOT/jiuwenswarm/channels/web/frontend"
 if [[ ! -d "$WEB_DIR" ]]; then

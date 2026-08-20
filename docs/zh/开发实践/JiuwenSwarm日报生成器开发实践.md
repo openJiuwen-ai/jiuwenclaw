@@ -48,16 +48,15 @@
 | **Git 仓库** | `D:\Download\jiuwenswarm` (当前项目) |
 | **邮箱** | `zxworkem@163.com` (网易163邮箱) |
 | **推送渠道** | 飞书 (`cli_a92035b1823a9cd2`) |
-| **心跳时间** | 每天 18:00-18:30 |
+| **定时任务时间** | 每天 18:00-18:30 |
 
 
 ### 核心文件位置
 ```plain
 D:\Download\jiuwenswarm\
 ├── .env                              # 环境变量配置
-├── config/config.yaml                # 应用配置（心跳、飞书频道）
+├── config/config.yaml                # 应用配置（定时任务、飞书频道）
 ├── workspace/
-│   ├── HEARTBEAT.md                  # 心跳任务配置
 │   └── agent/skills/daily-report/    # 技能模块
 │       ├── SKILL.md                  # 技能定义 v2.0.0
 │       ├── collectors/               # 数据采集模块
@@ -114,7 +113,7 @@ JiuwenSwarm 是一个开源的 Agent 开发框架，其技能系统支持：
 | --- | --- |
 | **模块化技能** | 每个 Skill 可以包含多个 Python 模块 |
 | **工具集成** | 可声明 `allowed_tools` 获取系统工具权限 |
-| **心跳触发** | 支持定时任务自动执行技能 |
+| **定时任务触发** | 支持定时任务自动执行技能 |
 | **多频道推送** | 支持飞书、Web 等多种渠道 |
 
 
@@ -164,7 +163,7 @@ JiuwenSwarm 是分层架构的，我们的进阶版日报生成器在 Applicatio
 | 邮件采集方式 | IMAP 协议 | 网易邮箱支持，可获取邮件统计 |
 | 分词工具 | jieba（可选） | 中文效果好，无依赖也可降级 |
 | 报告格式 | Markdown | 兼容性好，飞书可渲染 |
-| 触发方式 | 心跳 + 手动 | 定时自动 + 按需执行 |
+| 触发方式 | 定时任务 + 手动 | 定时自动 + 按需执行 |
 
 
 ## 第三章｜Skills 技能系统工程化设计
@@ -324,14 +323,13 @@ cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_rep
 
 ### 定时触发
 
-通过 `HEARTBEAT.md` 配置定时执行：
+通过定时任务（Cron）配置定时执行：
 
-```markdown
-## 活跃的任务项
-- 生成今日工作日报  # 每天执行
-- 每周五生成周报    # 周报
-- 每月末生成月报    # 月报
-```
+| 任务 | Cron 表达式 | 说明 |
+|------|-------------|------|
+| 生成今日工作日报 | `0 18 * * *` | 每天 18:00 执行 |
+| 生成周报 | `0 18 * * 5` | 每周五 18:00 执行 |
+| 生成月报 | `0 18 L * *` | 每月末 18:00 执行 |
 
 ## 日报模板
 
@@ -351,7 +349,7 @@ cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_rep
 ## ✅ 已完成任务
 - 完成日报生成器技能开发
 - 配置飞书频道推送
-- 测试心跳触发功能
+- 测试定时任务触发功能
 
 ## 🔄 进行中任务
 - 编写开发文档
@@ -409,16 +407,9 @@ EMAIL_PROVIDER=163
 **注意**：`EMAIL_TOKEN` 是邮箱授权码，不是登录密码。
 获取方式：登录163邮箱 → 设置 → POP3/SMTP/IMAP → 开启IMAP服务 → 获取授权码
 
-### 心跳配置
+### 定时任务配置
 
-```yaml
-heartbeat:
-  every: 3600
-  target: feishu
-  active_hours:
-    start: 18:00
-    end: 18:30
-```
+通过定时任务（Cron）配置每日 18:00 自动触发日报生成，推送目标为飞书。
 
 ## API 参考
 
@@ -478,7 +469,7 @@ monthly = generator.generate_monthly(2026, 3)
 
 1. **Git 仓库**: 确保仓库路径正确且有访问权限
 2. **邮箱授权**: 使用授权码而非登录密码
-3. **心跳时间**: 修改后需重启服务
+3. **定时任务时间**: 修改后需重启服务
 4. **数据存储**: 报告保存到 `workspace/agent/reports/`
 
 ## 更新日志
@@ -2307,69 +2298,31 @@ PERPLEXITY_API_KEY=
 + `EMAIL_TOKEN`：邮箱授权码（非登录密码），需要在邮箱设置中开启 IMAP 服务后获取
 + `EMAIL_PROVIDER`：邮箱提供商，目前支持 `163`、`126`、`yeah` 三个网易邮箱
 
-### 6.2 心跳配置 (HEARTBEAT.md)
-```markdown
-# 心跳任务
+### 6.2 定时任务配置
 
-在此文件中配置需要 JiuwenSwarm 周期性执行的任务。
+通过 Web 界面创建定时任务，配置 Cron 表达式自动触发日报生成：
 
----
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| **任务名称** | `daily_report` | 日报生成任务 |
+| **cron 表达式** | `0 18 * * *` | 每天 18:00 触发 |
+| **推送频道** | `feishu` | 飞书推送 |
+| **执行模式** | `agent.plan` | Agent 规划执行 |
 
-## 活跃的任务项
-
-<!-- 在此行之后添加待执行任务，每行一条，以 "- " 开头 -->
-
-- 生成今日工作日报
-
-<!-- 周报任务（每周五触发） -->
-<!-- - 生成本周工作周报 -->
-
-<!-- 月报任务（每月末触发） -->
-<!-- - 生成本月工作月报 -->
-
----
-
-## 已完成的任务项
-
-<!-- 将已完成的任务移动到此段或删除 -->
-
----
-
-## 任务说明
-
-### 日报任务
-- **触发时间**: 每天 18:00 - 18:30（根据 config.yaml 配置）
+#### 日报任务
+- **触发时间**: 每天 18:00（根据 Cron 表达式配置）
 - **推送目标**: 飞书
 - **内容**: 今日 Git 提交、任务完成情况、邮件统计、工作效率分析
 
-### 周报任务
-- **触发时间**: 每周五 18:00 - 18:30
+#### 周报任务
+- **触发时间**: 每周五 18:00（`0 18 * * 5`）
 - **推送目标**: 飞书
 - **内容**: 本周数据聚合、趋势分析、下周计划
 
-### 月报任务
-- **触发时间**: 每月最后一天 18:00 - 18:30
+#### 月报任务
+- **触发时间**: 每月最后一天 18:00
 - **推送目标**: 飞书
 - **内容**: 本月数据聚合、成果总结、下月计划
-
----
-
-## 配置方式
-
-修改 `config/config.yaml` 中的 `heartbeat` 配置：
-
-```yaml
-heartbeat:
-  every: 3600              # 心跳间隔（秒）
-  target: feishu           # 推送目标
-  active_hours:
-    start: 18:00           # 生效开始时间
-    end: 18:30             # 生效结束时间
-```
-
-**修改后重启服务生效。**
-
-```
 
 ### 6.3 Git 仓库配置
 本项目监控的 Git 仓库（脚本会自动读取）：
@@ -2409,17 +2362,6 @@ git_repos:
 本项目实际使用的 `config.yaml` 飞书配置：
 
 ```yaml
-heartbeat:
-  # 心跳间隔（秒），默认 3600 (1小时)
-  every: 3600
-  # 心跳结果回传的 channel
-  target: feishu
-  # 心跳生效时间段（本地时间）
-  # 18:00-18:30 期间会触发日报生成
-  active_hours:
-    start: 18:00
-    end: 18:30
-
 channels:
   feishu:
     # 飞书应用配置
@@ -2469,11 +2411,11 @@ python workspace/agent/skills/daily-report/run_report.py daily --save
 2. 实现Git提交数据采集模块
 3. 实现邮箱统计数据采集模块
 4. 配置飞书频道推送
-5. 测试心跳触发功能
+5. 测试定时任务触发功能
 6. 编写开发文档
 ```
 
-<!-- 这是一张图片，ocr 内容为：帮我创建一个待办清单: 1.完成日报生成器技能开发 2.实现GIT提交数据采集模块 3.实现邮箱统计数据采集模块 4.配置飞书频道推送 5.测试心跳触发功能 6.编写开发文档 JIUWENCLAW日报发送 已成功将用户请求的6项新任务添加至待办清单,并记录到今日记忆文件中.当前待办列 表已更新,包含: 1.完成日报生成器技能开发 2.实现GIT提交数据采集模块 3.实现邮箱统计数据采集模块 4.配置飞书频道推送 5.测试心跳触发功能 6.编写开发文档 原已完成任务保留在列表底部作为历史记录.新的任务列表现已就绪,可开始执行. -->
+<!-- 这是一张图片，ocr 内容为：帮我创建一个待办清单: 1.完成日报生成器技能开发 2.实现GIT提交数据采集模块 3.实现邮箱统计数据采集模块 4.配置飞书频道推送 5.测试定时任务触发功能 6.编写开发文档 JIUWENCLAW日报发送 已成功将用户请求的6项新任务添加至待办清单,并记录到今日记忆文件中.当前待办列 表已更新,包含: 1.完成日报生成器技能开发 2.实现GIT提交数据采集模块 3.实现邮箱统计数据采集模块 4.配置飞书频道推送 5.测试定时任务触发功能 6.编写开发文档 原已完成任务保留在列表底部作为历史记录.新的任务列表现已就绪,可开始执行. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862423989-5bdc4508-5cfe-4465-86c1-ba696f0246f8.png)
 
 #### 步骤2：模拟工作记录（测试记忆数据采集）
@@ -2486,11 +2428,11 @@ python workspace/agent/skills/daily-report/run_report.py daily --save
 - 创建了待办事项采集器 todo_collector.py
 - 下午完成了工作分析引擎 work_analyzer.py
 - 实现了报告生成器 report_generator.py
-- 配置了心跳和飞书推送
+- 配置了定时任务和飞书推送
 - 进行了功能测试和调试
 ```
 
-<!-- 这是一张图片，ocr 内容为：帮我记录今天的工作: 上午完成了SKILL.MD 技能定义文件编写 创建了GIT 提交采集器GIT_COLLECTOR.PY 创建了邮箱统计采集器EMAIL_COLLECTOR.PY 创建了记忆数据采集器MEMORY_COLLECTOR.PY 创建了待办事项采集器TODO_COLLECTOR.PY 下午完成了工作分析引擎WORK_ANALYZER.PY -实现了报告生成器 REPORT_GENERATOR.PY 配置了心跳和飞书推送 进行了功能测试和调试 JIUWENCLAW日报发送 已成功将今日工作内容记录至"MEMORY/2026-03-07.MD',包括上午完成的SKILL.MD编 写及多个采集器(GIT,COLLECTOR.PY,EMAIL_COLLECTOR.PY,MEMORY_COLLECTOR.PY, TODO_COLLECTOR.PY)的创建,以及下午完成的工作分析引擎,报告生成器开发, 书配置和功能测试.记录已完成. -->
+<!-- 这是一张图片，ocr 内容为：帮我记录今天的工作: 上午完成了SKILL.MD 技能定义文件编写 创建了GIT 提交采集器GIT_COLLECTOR.PY 创建了邮箱统计采集器EMAIL_COLLECTOR.PY 创建了记忆数据采集器MEMORY_COLLECTOR.PY 创建了待办事项采集器TODO_COLLECTOR.PY 下午完成了工作分析引擎WORK_ANALYZER.PY -实现了报告生成器 REPORT_GENERATOR.PY 配置了定时任务和飞书推送 进行了功能测试和调试 JIUWENCLAW日报发送 已成功将今日工作内容记录至"MEMORY/2026-03-07.MD',包括上午完成的SKILL.MD编 写及多个采集器(GIT,COLLECTOR.PY,EMAIL_COLLECTOR.PY,MEMORY_COLLECTOR.PY, TODO_COLLECTOR.PY)的创建,以及下午完成的工作分析引擎,报告生成器开发, 书配置和功能测试.记录已完成. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862487637-8206f051-3e56-42b9-acc5-fa6a9d2ae819.png)
 
 <!-- 这是一张图片，ocr 内容为：中口口口 终谈() 编码(日) 转到(G) 远泽(S) 文件() 运行() 直谷(M) 12026-03-07MD U X 发行说明:1.110.0 WORKSPACE>AGENL>MEMORY>因26-03-07MD>-07M 当施行办状态 两户请农创连设为适息,包容区项目标任务:1,充效白招生成员以期开发,2.配置飞手原油铁道, Q 上午完成了SKTLLIND滨与 创建了辅助原本 配出了心跳和飞书 .下午进行了功能测试开差执行 DAILY-REPORT 技能生成今日日报,2826-03-07 节#操作记录 用户请求创建新的消办清单,包含6项任务: REPORTS WORKSPACE ,实现GIT提交数据采集模块 实现邮箱统计数据采集模块 MEMORY 配置飞书频道推送 测试心既触发功能 2026-03-07MD 6.缩与开发文档新增任务 用户创建新的待办清单,包含以下6项任务: 完成日报生威器技能开发 MEMORY.OB SHM 实现GIT提交数据采集楼块 MEMORY.DB-WAL 实现由难统计数据采集模块 CA MEMORYMD 配置飞书须道推送 测试心跳触发功能 编写开发文档 当前待办状态 口 KILLS 插入新任务列表,原任务保留历史记录:工作日志 DAILY-REPORT 上午完成了 SKILL,MD 技能定义文件编与 ANALYZERS 创建了 GIT 提交采集器 GIT COLLECTOR.PY 理了邮件统计采货器EMAIL_COLLECTOR.PY 创建了记亿数据采集器 MENORY COLLECTOR.PY 创建了待办,事项采集器TODO COLLECTOR.PY REPERT_HELPER PY 下午完成了工作分析引引草WORK ANALYZER.PY RUN REPORT.PY 实现了报告生成器 REPORT.GENERATOR.PY SKILL.MD 配置了心跳和飞书推送 LINANCAL-DOCUMENI-PARSER 进行了功能测试和调试 INBNOAL PARSEC.OW SOULMD GIBGNORE BUILDPS1 >大男 行2.列10 空标2 UIF8 CRIF () MSTDOWN BFNITH >* GA MAIN' & ( 0 LICK TO UPDATE IS READY,CLICK TO REST 0乡 FINISH SETUP -->
@@ -2505,10 +2447,10 @@ git commit -m "feat: 添加日报生成器完整功能
 - 实现多数据源采集（Git/邮箱/记忆/待办）
 - 添加工作分析引擎
 - 支持日报/周报/月报生成
-- 配置飞书推送和心跳触发"
+- 配置飞书推送和定时任务触发"
 ```
 
-<!-- 这是一张图片，ocr 内容为：JIUWENCLAW日报发送 JIUWENCLAW日报发送 机器人 #在项目中提交一些代码,用于测试 GIT 采集 GIT ADD. GIT COMMIT -M "FEAT:添加日报生成器完整功能 实现多数据源采集(GIT/邮箱/记忆/待办) 添加工作分析引擎 支持日报/周报/月报生成 配置飞书推送和心跳触发" JIUWENCLAW日报发送 已成功执行GIT 提交操作: 1.已禁用忽略文件的提示信息 2.使用,F 参数强制添加被`GITIGNORE"忽略的文件 3.成功提交代码,提交信息为: 1 FEAT:添加日报生成器完整功能 2 3 -实现多数据源采集(GIT/邮箱/记忆/待办) 4-添加工作分析引擎 5 支持日报/周报/月报生成 6-配置飞书推送和心跳触发 代码提交已完成. -->
+<!-- 这是一张图片，ocr 内容为：JIUWENCLAW日报发送 JIUWENCLAW日报发送 机器人 #在项目中提交一些代码,用于测试 GIT 采集 GIT ADD. GIT COMMIT -M "FEAT:添加日报生成器完整功能 实现多数据源采集(GIT/邮箱/记忆/待办) 添加工作分析引擎 支持日报/周报/月报生成 配置飞书推送和定时任务触发" JIUWENCLAW日报发送 已成功执行GIT 提交操作: 1.已禁用忽略文件的提示信息 2.使用,F 参数强制添加被`GITIGNORE"忽略的文件 3.成功提交代码,提交信息为: 1 FEAT:添加日报生成器完整功能 2 3 -实现多数据源采集(GIT/邮箱/记忆/待办) 4-添加工作分析引擎 5 支持日报/周报/月报生成 6-配置飞书推送和定时任务触发 代码提交已完成. -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772862545512-3cf0d5fd-ab1e-4d4a-bea2-520a843302f4.png)
 
 <!-- 这是一张图片，ocr 内容为：历史记录: 当前项目的GIT历 提交哈希 日期 提交信息 FEAT:添加日报生成器完整功能 60ED98E 2026-03-07 FEAT:优化飞书CHANNEL 8DBELCF 2026-03-06 FIX HEARTBEAT C1FE22D 2026-03-05 1D7CBDA 2026-03-05 SOME BUG FIX F21649A 2026-03-03 UPDATE:更新文件 README.MD 6C0F844 UPDATE:更新文件 README.MD 2026-03-03 INITIAL COMMIT 2026-03-03 C08E67E 共7次提交,项目从3月3日开始,今天(3月7日)最新提交是日报生成器完整功能. -->

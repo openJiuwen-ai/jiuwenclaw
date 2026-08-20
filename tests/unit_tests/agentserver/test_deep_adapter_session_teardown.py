@@ -45,6 +45,19 @@ class _BlockingCleanupChildAdapter(_IdleChildAdapter):
         await super().cleanup()
 
 
+class _EvolutionRail:
+    def __init__(self) -> None:
+        self.cleaned = False
+
+    async def cleanup_background_tasks(self) -> None:
+        self.cleaned = True
+
+
+class _FailingEvolutionRail:
+    async def cleanup_background_tasks(self) -> None:
+        raise RuntimeError("background evolution remains active")
+
+
 def test_other_active_sessions_treats_subagent_as_related() -> None:
     adapter = _make_adapter(
         _active_session_ids={
@@ -55,6 +68,24 @@ def test_other_active_sessions_treats_subagent_as_related() -> None:
 
     assert getattr(adapter, "_other_active_sessions")("tui_main") == 0
     assert getattr(adapter, "_other_active_sessions")("tui_main_sub_explore") == 0
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_drains_detached_evolution_tasks() -> None:
+    rail = _EvolutionRail()
+    adapter = _make_adapter(_skill_evolution_rail=rail)
+
+    await getattr(adapter, "_cleanup_evolution_background_tasks")()
+
+    assert rail.cleaned is True
+
+
+@pytest.mark.asyncio
+async def test_adapter_cleanup_propagates_evolution_cleanup_failure() -> None:
+    adapter = _make_adapter(_skill_evolution_rail=_FailingEvolutionRail())
+
+    with pytest.raises(RuntimeError, match="background evolution remains active"):
+        await getattr(adapter, "_cleanup_evolution_background_tasks")()
 
 
 def test_other_active_sessions_counts_unrelated_sessions() -> None:
@@ -221,7 +252,7 @@ async def test_cleanup_session_adapter_defers_locked_cached_child_adapter() -> N
 
 
 @pytest.mark.asyncio
-async def test_cleanup_session_adapter_keeps_lock_after_failed_inflight_creation() -> None:
+async def test_cleanup_session_adapter_prunes_lock_after_failed_inflight_creation() -> None:
     lock = asyncio.Lock()
     await lock.acquire()
     parent = _make_adapter(
@@ -243,7 +274,45 @@ async def test_cleanup_session_adapter_keeps_lock_after_failed_inflight_creation
     removed = await asyncio.wait_for(cleanup_task, timeout=2)
 
     assert removed is False
-    assert getattr(parent, "_session_adapter_locks")["sess_failed_create"] is lock
+    assert getattr(parent, "_session_adapter_locks") == {}
+    assert getattr(parent, "_session_adapter_last_used") == {}
+    assert getattr(parent, "_session_adapter_versions") == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cleanup_prunes_empty_session_lock() -> None:
+    lock = asyncio.Lock()
+    child = _BlockingCleanupChildAdapter()
+    parent = _make_adapter(
+        _is_session_scoped_adapter=False,
+        _session_adapters={"sess_concurrent_cleanup": child},
+        _session_adapter_locks={"sess_concurrent_cleanup": lock},
+        _session_adapter_last_used={"sess_concurrent_cleanup": 1.0},
+        _session_adapter_versions={"sess_concurrent_cleanup": 1},
+        _session_adapter_reload_failures={
+            "sess_concurrent_cleanup": (1, 1.0),
+        },
+    )
+
+    first = asyncio.create_task(
+        getattr(parent, "cleanup_session_adapter")("sess_concurrent_cleanup")
+    )
+    await asyncio.wait_for(child.cleanup_started.wait(), timeout=2)
+    second = asyncio.create_task(
+        getattr(parent, "cleanup_session_adapter")("sess_concurrent_cleanup")
+    )
+    await asyncio.sleep(0)
+
+    child.cleanup_can_finish.set()
+    assert await asyncio.wait_for(first, timeout=2) is True
+    assert await asyncio.wait_for(second, timeout=2) is False
+
+    assert child.cleaned is True
+    assert getattr(parent, "_session_adapters") == {}
+    assert getattr(parent, "_session_adapter_locks") == {}
+    assert getattr(parent, "_session_adapter_last_used") == {}
+    assert getattr(parent, "_session_adapter_versions") == {}
+    assert getattr(parent, "_session_adapter_reload_failures") == {}
 
 
 @pytest.mark.asyncio

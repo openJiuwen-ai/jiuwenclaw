@@ -139,8 +139,49 @@ def _mock_create_model(self, config: dict) -> MagicMock:
     return fake_model
 
 
-async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
-    created_agent = SimpleNamespace(card=SimpleNamespace(id="jiuwenswarm", name="main_agent"), ensure_initialized=AsyncMock())
+class _FakeAbilityManager:
+    """Minimal stand-in for the DeepAgent ability manager the adapter registers into."""
+
+    def __init__(self) -> None:
+        self.cards: list = []
+
+    def list(self) -> list:
+        return list(self.cards)
+
+    def add(self, card) -> None:
+        self.cards.append(card)
+
+    def remove(self, name: str) -> None:
+        self.cards = [card for card in self.cards if getattr(card, "name", "") != name]
+
+
+async def _create_adapter_and_run_chat(config_base: dict) -> SimpleNamespace:
+    """Create adapter, run one chat turn via interaction attach/send_input path.
+
+    Returns the fake DeepAgent so callers can assert on ``send_input``.
+    """
+
+    class _FakeInteractionStream:
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            yield SimpleNamespace(type="llm_output", payload={"content": "PONG"})
+
+        async def close(self, *, abort_active_round: bool = False) -> None:
+            return None
+
+    created_agent = SimpleNamespace(
+        card=SimpleNamespace(id="jiuwenswarm", name="main_agent"),
+        ensure_initialized=AsyncMock(),
+        start=AsyncMock(),
+        attach_output=AsyncMock(return_value=_FakeInteractionStream()),
+        send_input=AsyncMock(),
+        goal_manager=None,
+        # A real DeepAgent always carries one, and the adapter registers its
+        # session-stable tools through it while preparing the turn.
+        ability_manager=_FakeAbilityManager(),
+    )
     request, inputs = _make_request()
 
     with (
@@ -157,18 +198,15 @@ async def _create_adapter_and_run_chat(config_base: dict) -> AsyncMock:
         patch.object(interface_module, "init_permission_engine", return_value=None),
         patch.object(interface_module, "create_deep_agent", return_value=created_agent),
         patch.dict("os.environ", {"API_KEY": "system-test-key"}),
-        patch.object(
-            interface_module.Runner,
-            "run_agent",
-            AsyncMock(return_value={"output": "PONG"}),
-        ) as run_agent_mock,
     ):
         adapter = JiuWenSwarmDeepAdapter()
         await adapter.create_instance()
         response = await adapter.process_message_impl(request, inputs)
 
     assert response.ok is True
-    return run_agent_mock
+    assert response.payload.get("content") == "PONG"
+    created_agent.send_input.assert_awaited()
+    return created_agent
 
 
 @pytest.mark.asyncio
@@ -180,7 +218,7 @@ async def test_a2x_teammate_registers_blank_agent_during_runtime(
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock = await _create_adapter_and_run_chat(
+    await _create_adapter_and_run_chat(
         _make_config(
             "teammate",
             dataset="system_test_dataset",
@@ -188,7 +226,6 @@ async def test_a2x_teammate_registers_blank_agent_during_runtime(
         )
     )
 
-    run_agent_mock.assert_called_once()
     assert len(_FakeAsyncA2XRegistryClient.instances) == 1
     assert _FakeAsyncA2XRegistryClient.instances[0].blank_registrations == [
         {
@@ -209,9 +246,8 @@ async def test_a2x_teamleader_skips_blank_agent_registration(
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock = await _create_adapter_and_run_chat(_make_config("teamleader"))
+    await _create_adapter_and_run_chat(_make_config("teamleader"))
 
-    run_agent_mock.assert_called_once()
     assert len(_FakeAsyncA2XRegistryClient.instances) == 1
     assert _FakeAsyncA2XRegistryClient.instances[0].blank_registrations == []
 
@@ -224,6 +260,4 @@ async def test_a2x_init_failure_does_not_block_runtime(
     fake_module.AsyncA2XRegistryClient = _FailingAsyncA2XRegistryClient
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
 
-    run_agent_mock = await _create_adapter_and_run_chat(_make_config("teammate"))
-
-    run_agent_mock.assert_called_once()
+    await _create_adapter_and_run_chat(_make_config("teammate"))

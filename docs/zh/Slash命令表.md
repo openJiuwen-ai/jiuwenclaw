@@ -38,6 +38,8 @@
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
 | `/btw` | 旁路快速提问，不中断主对话（见下文） |
+| `/swarmflow` | SwarmFlow 开关、状态查询与 token 预算（`on` / `off` / `--budget`，见 [TUI SwarmFlow 指南](TUI使用SwarmFlow指南.md)） |
+| `/swarmflows` | 全屏 SwarmFlow 运行树查看器（别名 `/swarmworkflows`，同上） |
 
 > 说明：本页的 `/mode` 与 `/switch` 以 Gateway 受控通道行为为主。TUI 本地命令另支持 `/mode plan`、`/mode team.normal`，详见 [TUI 使用指南](TUI使用指南.md)。
 
@@ -53,7 +55,7 @@
 | `/mode` | 模式切换（支持一级入口与直达写法） |
 | `/switch` | 在当前模式族内切换二级模式 |
 | `/skills` | 技能管理（列表、安装、卸载、市场源、ClawHub、SkillNet） |
-| `/model` | 模型查看、新增、切换（见下文） |
+| `/model` | 模型查看、新增、编辑、删除、切换（见下文） |
 | `/mcp` | MCP 服务管理（见下文） |
 | `/diff` | 交互式改动回顾：按轮次 diff + 未提交工作树改动（见下文） |
 | `/compact` | 压缩当前上下文（见下文） |
@@ -69,6 +71,19 @@
 
 ## 重点命令说明
 
+### `/swarmflow` 与 `/swarmflows`（TUI 本地）
+
+SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使用SwarmFlow指南.md)**。
+
+| 命令 | 说明 |
+|------|------|
+| `/swarmflow` | 查询状态，如 `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | 写入 `enable_swarmflow=true`；非 team 时一并切到 team；可选 `--budget <tokens\|none>` |
+| `/swarmflow off` | 写入 `enable_swarmflow=false`；不自动离开 team |
+| `/swarmflows` | 打开全屏运行树（工作流 → 阶段 → 节点）；别名 `/swarmworkflows` |
+
+配置变更后当前 session **不热更新**，提示 `Use /new to apply.`；主界面 **`h`** 用于 pending 人工回复（非本命令）。
+
 ### `/workspace`（TUI 可信目录管理）
 
 管理 AI 可访问的目录范围，用于文件读取、编辑、执行等操作。
@@ -79,14 +94,15 @@
 |---|---|
 | `/workspace` 或 `/workspace get` | 查看系统默认工作空间与当前可信目录列表 |
 | `/workspace add [path]` | 添加可信目录（默认为当前目录，路径不存在时提示错误） |
-| `/workspace set <path>` | 重置可信目录为单个路径（已有可信目录时需确认） |
+| `/workspace set <path>` | 切换当前项目作用域，并把该路径加入对应项目的可信目录 |
 | `/workspace remove <path>` | 移除指定可信目录 |
 | `/workspace clear` | 清空所有可信目录（仅使用默认工作空间） |
 
 #### 概念说明
 
-- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/jiuwenswarm_workspace`，始终可用
+- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/workspace`，始终可用
 - **可信目录（trusted_dirs）**：用户授权的可访问目录，由 TUI 管理，传递给后端 Agent
+- **项目作用域（project scope）**：用于选择对应的可信目录集合，并填充请求中的 `project_dir` / `cwd`
 
 #### 控制逻辑
 
@@ -94,9 +110,9 @@
    - 选择「信任」：将当前目录添加为可信目录
    - 选择「不信任」：仅使用默认工作空间
 
-2. **会话级管理**：可信目录会持久化到./jiuwenswarm-tui/config.json文件里
+2. **按项目持久化**：可信目录以规范化后的项目路径为键，保存到 `~/.jiuwenswarm-tui/config.json`。`/workspace set` 对项目作用域的切换仅在当前 TUI 进程中有效；重启后重新以启动目录作为项目作用域。
 
-3. **后端传递**：TUI 通过请求参数 `trusted_dirs` 传递可信目录列表，Agent 据此限制文件操作范围
+3. **后端传递**：TUI 通过请求参数传递 `trusted_dirs`、`project_dir` 和 `cwd`，Agent 据此限制文件操作范围并解析项目上下文
 
 4. **路径限制**：Agent 收到可信目录后，文件操作需限制在可信目录范围内；超出范围需向用户确认
 
@@ -155,17 +171,36 @@
 
 > 完整快捷键与行为详见 [TUI 使用指南](TUI使用指南.md#resume-与-continue-在-tui-中的特殊行为)；自定义快捷键见 [快捷键](TUI使用指南.md#快捷键)。
 
-### `/model`（查看 / 新增 / 切换模型）
+### `/model`（查看 / 新增 / 编辑 / 删除 / 切换模型）
 
-- 用法：
-  - `/model` 或 `/model list`：列出可切换模型（含当前模型标记）；
-  - `/model <name>`：切换到指定模型；
-  - `/model add <name> key=value ...`：新增模型配置（如 `model=...`、`provider=...`、`api_base=...`、`api_key=...`）。
-- 限制：`video` / `audio` / `vision` 不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`。
-- 配置写入行为：
-  - 新增模型会写入 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
+管理 `config.yaml` 中 `models.defaults` 下定义的模型配置。支持文本子命令与**交互式列表**两种操作方式，删除/编辑主要通过交互列表完成。
+
+- **文本用法**：
+  - `/model` 或 `/model list`：打开**交互式模型列表**（含当前模型标记），可在列表内完成切换、新增、编辑、删除；
+  - `/model <name>`：按名称直接切换到指定模型；
+  - `/model add <name> key=value ...`：以文本表单新增模型配置（如 `model_name=...`、`provider=...`、`api_base=...`、`api_key=...`、`reasoning_level=...`）。
+- **交互列表快捷键**（`/model` 或 `/model list` 打开列表后）：
+
+  | 按键 | 作用 |
+  | --- | --- |
+  | `↑` / `↓` | 上下选择模型 |
+  | `Enter` | 切换到当前选中的模型 |
+  | `a` | 打开表单**新增**模型 |
+  | `e` | 打开表单**编辑**当前选中的模型 |
+  | `d` | 对当前选中的模型进入**删除确认** |
+  | `Esc` | 关闭列表 / 取消当前操作 |
+
+- **删除流程**（`d` → 确认）：进入 `Delete model: <名称>` 确认页后——
+  - `Enter`：确认删除；后端按模型在 `models.defaults` 中的**原始下标**（`index`，即未过滤 video/audio/vision 等多模态条目前的下标）定位并移除该条目，回写 `config.yaml`，随后触发 Agent 配置重载（`AGENT_RELOAD_CONFIG`）。成功响应为 `{type: "model_deleted", name, current}`。
+  - `Esc`：取消，返回列表。
+- **编辑流程**（`e`）：复用新增表单，但 `api_key` 留空表示**保持原密钥不变**；只提交发生变化的字段。
+- **限制与校验**：
+  - `video` / `audio` / `vision` 为多模态专用键，不能通过 `/model <name>` 设置为默认聊天模型，需改用 `/config edit` 或 `/config set`；
+  - 删除会拒绝移除**最后一个**模型（返回 `Cannot delete the last model`），索引越界返回 `model index not found`；
+- **配置写入行为**：
+  - 新增 / 编辑 / 删除会改写 `config.yaml` 的 `models.defaults`（兼容旧结构），并触发 Agent 配置重载；
   - 切换模型会校验配置与环境变量占位符，更新 `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`，并回写 `.env`。
-- 安全展示：涉及 `api_key`、`token` 等敏感字段会掩码显示。
+- **安全展示**：列表中 `api_key`、`token` 等敏感字段掩码显示；仅当存在**同名且 provider+api_base 完全相同**的模型（真正无法区分）时，才会附带显示密钥末 4 位 `[…xxxx]`。
 
 ### `/diff`（交互式改动回顾）
 
@@ -196,7 +231,7 @@
 
 按轮次 diff 基于 `.agent_history/file_ops_jiuwenswarm*.json` 日志计算，而非 git。服务从多个位置读取并合并文件操作日志：
 
-1. Agent 工作区（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`）
+1. Agent 工作区（`~/.jiuwenswarm/agent/workspace/.agent_history/`）
 2. 用户工作区 `.agent_history/`
 3. 项目目录 `.agent_history/`（含 session 专属文件和全局文件）
 
@@ -353,7 +388,7 @@
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 当前会话无对话记录时拒绝执行。
 - 行为：
-  1. 生成新 `session_id`，向后端发送 `session.fork` RPC（携带 `source_session_id`、`target_session_id` 与可选标题）。
+  1. 向后端发送 `session.fork` RPC，只携带 `source_session_id` 与可选标题；AgentServer 分配目标 `session_id` 并在响应中返回。
   2. TUI 自动切换到新分支会话，清空当前 transcript 并恢复分支的历史记录。
   3. 提示用户已在新分支，并告知可用 `/resume <原会话ID>` 返回原会话。
 - 示例：
@@ -364,7 +399,7 @@
 
 - 用法：`/rewind [turn_number]`。
 - 别名：`/checkpoint`。
-- 功能：将当前会话回退到指定轮次之前，支持仅回退对话、仅恢复文件、或两者同时恢复。
+- 功能：围绕指定轮次回退或压缩当前会话，支持仅回退对话、仅恢复文件、两者同时恢复，或摘要部分历史。
 - 约束：
   - 当前会话正在处理中（`session is busy`）时拒绝执行；
   - 无对话轮次时拒绝执行。
@@ -374,12 +409,17 @@
      - **Restore conversation and code** — 截断对话并恢复文件到该轮次之前的状态；
      - **Restore conversation only** — 仅截断对话，文件保持不变；
      - **Restore code only** — 仅恢复文件，对话保持不变（仅当目标轮次有文件变更时显示）；
+     - **Summarize from here** — 保留更早的消息，把所选轮次及之后的内容替换为压缩摘要；
+     - **Summarize up to here** — 摘要所选轮次之前的消息，保留所选轮次及之后的内容；
      - **Cancel** — 取消操作。
   3. 根据选择调用对应后端 RPC：
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
+     - `summarize` → `command.rewind_compact`，`direction=from`
+     - `summarize_up_to` → `command.rewind_compact`，`direction=up_to`
 - 回退后：TUI 清空 transcript 并重新加载历史；若回退内容包含用户输入，会自动填入输入框。
+- 仅恢复文件时，如果没有需要还原的文件，会明确显示 `No file changes to restore`；若部分文件恢复失败，会逐项列出失败文件并保持这些文件不变，不再统一报告为成功。
 - 局限：回退不影响通过 bash 命令或手动编辑的文件。
 - 示例：
   - `/rewind` — 交互式选择轮次并确认恢复方式
@@ -400,6 +440,11 @@
 | `/memory toggle` | 打开页签控制台并选中 toggle 页签 |
 | `/memory toggle <key>` | 直接切换指定记忆系统开关 |
 | `/memory open` | 打开页签控制台并选中 open 页签 |
+
+- 编辑安全边界：
+  - 目标文件必须已经存在并位于允许的记忆目录中；`/memory edit` 不负责新建文件。
+  - 运行时 auto/coding memory 文件为只读，禁止手动编辑。
+  - 项目目录或其祖先目录中的 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` 只有在文件已存在且通过路径校验时才能打开。
 
 - 页签控制台：无参数或仅指定子命令（不带操作对象）时打开，包含 edit / status / toggle / open 四个页签。
   - ←/→ 切换页签；
@@ -463,11 +508,11 @@
 | `name` | 是 | 任务名称 |
 | `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
 | `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
-| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#5-推送到-tui-频道) |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
-| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#6-team-模式与-swarmflow多智能体定时任务) |
+| `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#team-模式与-swarmflow多智能体定时任务) |
 | `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
-| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
+| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 
 - `add` 示例：
@@ -513,7 +558,7 @@
 - **市场源（Marketplace source）**：托管可用技能的远程 Git 仓库，每个源包含名称、URL 和启用/禁用状态。
 - **规格标识（Spec）**：安装时使用的标识格式，支持以下几种：`<技能名>@builtin`（内置）、`<slug>@clawhub`（ClawHub）、`<技能名>@<市场源名>`（Git 市场源）；裸名不带 `@` 时系统会自动检测是否为内置技能。
 - **本地安装（Local install）**：通过 `/skills install <path>` 将本地目录（需包含 `SKILL.md`）或远程归档 URL 安装为自定义技能；路径/URL 会自动识别并走本地导入流程。
-- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`）。
+- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/workspace/skills/`）。
 - **来源标签（Source tag）**：列表中每项技能标注来源，`[builtin]` 表示内置、`[local]` 表示本地导入、`[clawhub]` 表示从 ClawHub 安装、`[project]` 或市场源名表示其他来源。
 
 #### 列表分组展示
@@ -538,7 +583,7 @@
 
 - **超时**：`install`、`uninstall`、`marketplace toggle` 请求在 TUI 侧有 120 秒超时；其余子命令无显式超时设置。
 - **内置技能自动识别**：使用 `/skills install <skill>` 安装时，若技能名称不带 `@`，系统会自动检查是否为内置技能并重定向到内置安装流程；若不是内置技能则返回格式提示。
-- **路径/URL 自动识别**：使用 `/skills install <path_or_url>` 安装时，若参数为本地路径（如 `/path/to/skill`、`C:\skill`）或远程 URL（如 `https://...`），系统自动走本地导入流程（`skills.import_local`）。所有 URL 统一走 import_local，不自动路由 SkillNet。
+- **路径/URL 自动识别**：使用 `/skills install <path_or_url>` 安装时，若参数为本地路径（如 `/path/to/skill`、`~/skill`、`C:\skill`）或远程 URL（如 `https://...`），系统自动走本地导入流程（`skills.import_local`）。所有 URL 统一走 import_local，不自动路由 SkillNet。本地路径须为**绝对路径**或 `~/...` 路径；`~` 表示服务端 JiuwenClaw 进程用户的 home 目录。其他相对路径、位于系统/敏感目录（如 `/etc`、`~/.ssh`）的源、符号链接，以及不含合法 `name`/`description` frontmatter 的 `SKILL.md` 会被拒绝。
 - **`@skillnet` 搜索安装**：使用 `/skills install <name>@skillnet` 时，前端先调用 `skills.skillnet.search` 搜索。**只有精确匹配 skill_name 时才自动安装**；无精确匹配时只展示搜索结果列表（含 URL 和名称），不自动安装第一个结果，用户需从中选择后用 `/skills skillnet install <url>` 或 `/skills install <精确名称>@skillnet` 安装。这是因为 SkillNet 搜索是语义匹配，搜索 "code" 可能返回 "taskflow"、"coding-agent" 等名称不含 "code" 的技能。
 - **ClawHub token 必需**：从 ClawHub 安装技能前必须先配置 CLI token（通过 `/skills marketplace clawhub token <value>`）。未配置 token 时，`@clawhub` 安装会失败并提示配置方法。Token 可在 [clawhub.ai](https://clawhub.ai) 注册获取。
 - **ClawHub slug 与展示名**：ClawHub 技能的唯一标识是 **slug**（如 `code-review-security`），而非展示名（如 "Code Review Assistant"）。当直接使用 slug 安装失败时，系统会自动搜索 ClawHub 并列出匹配结果（含真实 slug 和简介），帮助用户找到正确的技能。
@@ -689,7 +734,7 @@
 - **嵌套路径**：支持「父 allow + 子 deny」（例如 allow `/tmp`、deny `/tmp/secret`）；不支持「子 allow + 父 deny」（父 deny 会覆盖子 allow），服务端会拒绝此类配置。
 - **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图，每条路径显示 `(rw)` 或 `(ro)`。
 - **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
-- **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
+- **excluded_commands**：按 simple-command 叶子做 fnmatch（可匹配完整叶子文本或命令名）。全命中则整条本地；全未命中则整条沙箱；混合命中时由本地 bash 编排，远端段走 `jiuwenbox sandbox exec`（需宿主 CLI）。
 - **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
 - **enable / disable**：会触发 agent 重建，响应里会列出 `rebuilt_modes`（典型 `agent.*` / `code.*`）和 jiuwenbox 端点。
 
@@ -979,18 +1024,22 @@ hooks:
 
 | 命令 | 说明 |
 |---|---|
-| `/statusline` 或 `/statusline get` | 查看当前状态栏配置 |
+| `/statusline` | 启动内置 setup 子 agent，创建、检查、修改或删除状态栏 |
+| `/statusline get` | 始终只查看当前状态栏配置，不触发 setup agent |
 | `/statusline set <shell-command>` | 设置状态栏命令（命令输出将显示在 TUI 底部） |
+| `/statusline padding <number>` | 设置左右 padding；参数必须为非负整数，且需要先配置状态栏命令 |
 | `/statusline clear` | 清除状态栏配置（底部栏将不再显示） |
 | `/statusline help` | 显示使用指南（含写法模式、实用示例、字段列表） |
 | `/statusline json` | 显示当前实际的 JSON 数据值（方便调试 jq 表达式） |
+| `/statusline <prompt>` | 根据自然语言描述让 Agent 自动生成并配置状态栏脚本 |
 
 #### 概念说明
 
 - **状态栏（StatusLine）**：TUI 底部的文字区域，实时显示用户自定义的动态信息，支持多行输出。配置了自定义状态栏后，内置状态栏会自动隐藏，避免信息冗余。
 - **Shell 命令**：用户配置的 shell 命令每 2 秒自动执行一次，其 stdout 输出渲染为状态栏文字。
-- **JSON 输入**：每次执行时，系统将当前会话信息以 JSON 格式传入命令，用户可在命令中用 `jq` 等工具解析。POSIX（Linux/macOS）通过 stdin 管道传入；Windows 上因 MSYS2 管道继承限制，系统自动将 JSON 写入临时文件，并将命令中的 `$(cat)` 替换为 `$(cat "文件路径")`，用户无需修改命令格式。
-- **前置依赖**：需要 `jq`（https://stedolan.github.io/jq/）用于解析 JSON；Windows 用户还需将 Git Bash 的 `usr\bin` 目录加入系统 PATH（如 `E:\Git\usr\bin`）。
+- **Agent 自动生成模式**：无论是否附带自然语言描述，`/statusline` 都会交给内置 `statusline-setup` 子 agent。未配置时，它会引导创建并自动应用配置；已配置时，它会检查当前设置，并可说明、修改或删除状态栏。若只想查看原始配置，请使用 `/statusline get`。
+- **JSON 输入**：每次执行时，系统通过 stdin 将当前会话信息以 JSON 格式传入命令，可用 `jq`、PowerShell `ConvertFrom-Json` 或其他可用工具解析。
+- **Shell 选择**：Windows 优先使用已安装的 Git Bash，否则回退到 PowerShell；macOS/Linux 使用 `sh`。setup 子 agent 会生成适合当前平台的持久化脚本，Windows 不强制依赖 `jq`。
 
 #### JSON 输入字段
 
@@ -1071,7 +1120,8 @@ hooks:
 
 #### 更多示例
 
-- `/statusline` — 查看当前配置
+- `/statusline` — 启动内置 setup 子 agent，创建、检查、修改或删除状态栏
+- `/statusline get` — 查看当前配置，不触发 setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — 只显示模型名
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — 显示是否在处理和模型名
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — 显示上下文窗口占用百分比
@@ -1090,7 +1140,7 @@ hooks:
 - **故障静默**：命令执行失败时不显示错误，保持上一次成功输出或隐藏状态栏。
 - **持久化**：配置保存在 `~/.jiuwenswarm-tui/config.json` 的 `statusLine` 字段，重启 TUI 后自动恢复。
 - **别名**：`/sl`
-- **Windows 适配**：系统自动将 `$(cat)` 替换为读取临时文件，用户命令格式不变；需确保 Git Bash 的 `usr\bin` 在系统 PATH 中。
+- **Windows 适配**：运行器通过 stdin 传入 JSON，已安装 Git Bash 时使用 Git Bash，否则回退到 PowerShell；未安装 Git Bash 或 `jq` 时，建议使用持久化 PowerShell 脚本。
 
 #### 配置文件结构
 
@@ -1349,3 +1399,9 @@ Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户�
 ## 待开发
 
 （暂无）
+---
+
+## 返回导航
+
+- [返回文档首页](../README.md)
+- [返回项目首页](../../README_CN.md)

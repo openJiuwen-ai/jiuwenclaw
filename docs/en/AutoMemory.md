@@ -133,6 +133,8 @@ code mode:
 
 The switches in the toggle tab adapt to the current mode (agent mode / code mode). Toggle the corresponding switch to enable/disable the respective memory feature.
 
+The edit tab and `/memory edit <path>` only open existing files that pass the allowed-memory-path checks. The command does not create missing files, and runtime auto/coding-memory files remain read-only.
+
 ---
 
 ## Notes

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import time
 
 import pytest

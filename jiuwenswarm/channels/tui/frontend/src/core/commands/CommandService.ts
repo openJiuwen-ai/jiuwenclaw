@@ -51,35 +51,13 @@ export interface InstalledSkillEntry {
   description: string;
 }
 
-/**
- * 被完全屏蔽的命令名单（单一事实源）。
- *
- * 列在这里的命令：不进注册表 → /help 不显示、Tab 补全无、手动输入落到命令分发器
- * 显示 "Unknown command: /<name>"。包含其别名与子命令（注册时整体跳过）。
- *
- * 恢复某个命令：把它的名字从下面集合里删掉即可，无需改命令定义、import 或 app-screen
- * 入口块——入口块调用 isCommandDisabled(...) 查询本名单，会自动放行。
- *
- * 注意：/mcp、/memory 在 app-screen.ts 的 handleSubmit 里有"绕过分发器直接开界面"的
- * 入口块，那两块同样调用 isCommandDisabled(...) 查询本名单，故增删本名单即同步生效。
- */
-const DISABLED_COMMANDS = new Set<string>([
-  "diff",
-  "mcp",
-  "sandbox",
-  "memory",
-]);
-
-/** 查询某命令是否被屏蔽（供 app-screen 入口块等处查询，保持单一事实源）。 */
-export function isCommandDisabled(name: string): boolean {
-  return DISABLED_COMMANDS.has(name.toLowerCase());
-}
-
 export class CommandService {
   private commands = new Map<string, SlashCommand>();
   private aliases = new Map<string, string>();
   private topLevelCommands: SlashCommand[] = [];
   private installedSkills: InstalledSkillEntry[] = [];
+  /** 配置未成功读取前保持关闭，避免演进命令意外暴露。 */
+  private skillEvolutionEnabled = false;
 
   /**
    * Optional callback invoked whenever the installed-skills cache is successfully
@@ -89,11 +67,38 @@ export class CommandService {
   onInstalledSkillsChange?: (skills: readonly InstalledSkillEntry[]) => void;
 
   register(commands: readonly SlashCommand[]): void {
-    // 屏蔽命令在注册阶段整体跳过：topLevelCommands、commands map、aliases 三者一致地不收录。
-    this.topLevelCommands = [...commands].filter((command) => !isCommandDisabled(command.name));
-    for (const command of this.topLevelCommands) {
+    this.topLevelCommands = [...commands];
+    for (const command of commands) {
       this.registerCommand(command);
     }
+    this.applySkillEvolutionVisibility();
+  }
+
+  /**
+   * 更新技能自演进命令的展示状态。
+   * 返回值用于让 UI 仅在状态变化时重建补全 provider。
+   */
+  setSkillEvolutionEnabled(enabled: boolean): boolean {
+    if (this.skillEvolutionEnabled === enabled) {
+      return false;
+    }
+    this.skillEvolutionEnabled = enabled;
+    this.applySkillEvolutionVisibility();
+    return true;
+  }
+
+  private applySkillEvolutionVisibility(): void {
+    const visit = (commands: readonly SlashCommand[]): void => {
+      for (const command of commands) {
+        if (command.requiresSkillEvolution) {
+          command.hidden = !this.skillEvolutionEnabled;
+        }
+        if (command.subCommands) {
+          visit(command.subCommands);
+        }
+      }
+    };
+    visit(this.topLevelCommands);
   }
 
   private registerCommand(command: SlashCommand): void {
@@ -158,33 +163,15 @@ export class CommandService {
     const parsed = parseSlashCommand(raw.trim(), this.getAll(true));
     const command = parsed.command;
     if (!command) {
-      // /<skill> <query> shorthand: check if the unknown name matches an installed skill.
-      const skillName = parsed.name;
-      if (skillName && this.installedSkills.some((s) => s.name.toLowerCase() === skillName.toLowerCase())) {
-        const skillsCommand = this.resolve("skills");
-        const useSubCommand = skillsCommand?.subCommands?.find((s) => s.name === "use");
-        if (useSubCommand) {
-          // parsed.args contains the full remainder starting with the skill name token
-          // (e.g. for `/pdf foo bar`, parsed.args = "pdf foo bar").  Strip the leading
-          // skill-name word so the "use" action receives only the user's query.
-          const query = parsed.args
-            .replace(new RegExp(`^${skillName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "i"), "")
-            .trim();
-          if (!query) {
-            const message = "Usage: /<skill-name> <query>"
-            ctx.addItem(makeItem(ctx.sessionId, "error", message));
-            return;
-          }
-          try {
-            await useSubCommand.action(ctx, `${skillName}, ${query}`);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            ctx.addItem(makeItem(ctx.sessionId, "error", message));
-          }
-          return;
-        }
-      }
-      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: /${parsed.name || ""}`));
+      // 注：/<skill> 已在 app-screen.handleSubmit 的行首分流里落到普通消息分支
+      //（content 原样发送 + 提取 skills_to_use），不再改写成 /skills use。
+      // 能走到这里的说明第一个 token 既非注册命令也非已装 skill → 未知命令。
+      // 展示时保留用户原样的「/」与首 token（含斜杠后空格），避免 `/ skill-creator`
+      // 被显示成 `/skill-creator` 而误读成「技能不存在」。
+      const trimmedRaw = raw.trim();
+      const display =
+        trimmedRaw.match(/^\/\s*\S+/)?.[0] ?? `/${parsed.name || ""}`;
+      ctx.addItem(makeItem(ctx.sessionId, "error", `Unknown command: ${display}`));
       return;
     }
     try {

@@ -88,6 +88,22 @@ export function literalArrayValues(value: unknown): unknown[] {
     : [];
 }
 
+export function selectionCollectionValues(value: unknown): unknown[] {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(selectionCollectionValues);
+  }
+  if (value instanceof Map) {
+    return Array.from(value.values()).flatMap(selectionCollectionValues);
+  }
+  if (isRecord(value) && Object.keys(value).length === 0) {
+    return [];
+  }
+  return [value];
+}
+
 export function optionDefaultValue(options: unknown): unknown {
   if (!Array.isArray(options)) {
     return null;
@@ -107,6 +123,37 @@ export function isMultiSelectChoice(props: UnknownRecord): boolean {
     typeof props.maxAllowedSelections === 'number' ? props.maxAllowedSelections : undefined;
   return variant === 'chips' || variant === 'checkbox' || type === 'chips' ||
     type === 'checkbox' || (maxAllowedSelections !== undefined && maxAllowedSelections > 1);
+}
+
+export function isSingleSelectChoice(props: UnknownRecord): boolean {
+  return props.maxAllowedSelections === 1;
+}
+
+export function nextChoiceSelections(
+  currentValues: string[],
+  optionValue: string,
+  checked: boolean,
+  maxAllowedSelections?: number,
+): string[] {
+  if (maxAllowedSelections === 1) {
+    return [optionValue];
+  }
+
+  const nextValues = [...currentValues];
+  const existingIndex = nextValues.indexOf(optionValue);
+  if (checked && existingIndex === -1) {
+    nextValues.push(optionValue);
+  } else if (!checked && existingIndex !== -1) {
+    nextValues.splice(existingIndex, 1);
+  }
+
+  if (
+    maxAllowedSelections !== undefined &&
+    nextValues.length > maxAllowedSelections
+  ) {
+    return currentValues;
+  }
+  return nextValues;
 }
 
 export function visibleChoiceDefault(props: UnknownRecord): unknown {

@@ -26,6 +26,40 @@ class TestReqMethod:
         assert ReqMethod.CONFIG_SET.value == "config.set"
 
     @staticmethod
+    def test_personal_context_methods():
+        """Test PersonalContext request methods exposed through the WebSocket gateway."""
+        methods = {
+            item.value
+            for item in ReqMethod
+            if item.value.startswith("personal_context.")
+        }
+        assert methods == {
+            "personal_context.runtime.status",
+            "personal_context.runtime.start",
+            "personal_context.runtime.stop",
+            "personal_context.runtime.get_config",
+            "personal_context.runtime.patch_config",
+            "personal_context.runtime.select_model",
+            "personal_context.fetch.list_services",
+            "personal_context.fetch.create_service",
+            "personal_context.fetch.delete_service",
+            "personal_context.fetch.patch_service",
+            "personal_context.fetch.start_service",
+            "personal_context.fetch.stop_service",
+            "personal_context.fetch.start_scheduler",
+            "personal_context.fetch.stop_scheduler",
+            "personal_context.fetch.run_all",
+            "personal_context.fetch.run_one",
+            "personal_context.fetch.get_run_status",
+            "personal_context.fetch.get_authorization_status",
+            "personal_context.fetch.authorize_provider",
+            "personal_context.context.stream_graph",
+            "personal_context.context.search_pages",
+            "personal_context.context.get_node",
+        }
+        assert len(methods) == 22
+
+    @staticmethod
     def test_session_methods():
         """Test session-related request methods."""
         assert ReqMethod.SESSION_LIST.value == "session.list"
@@ -66,33 +100,45 @@ class TestMode:
     @staticmethod
     def test_mode_values():
         """Test mode enum values."""
+        assert Mode.AGENT.value == "agent"
         assert Mode.AGENT_PLAN.value == "agent.plan"
         assert Mode.AGENT_FAST.value == "agent.fast"
         assert Mode.CODE_PLAN.value == "code.plan"
         assert Mode.CODE_NORMAL.value == "code.normal"
         assert Mode.CODE_TEAM.value == "code.team"
         assert Mode.TEAM.value == "team"
+        assert Mode.TEAM_PLAN_NORMAL.value == "team.plan.normal"
+        assert Mode.TEAM_PLAN_CODE.value == "team.plan.code"
 
     @staticmethod
     def test_mode_from_raw_legacy_compatibility():
-        """Test only new mode strings are accepted directly."""
-        assert Mode.from_raw("agent.plan") == Mode.AGENT_PLAN
-        assert Mode.from_raw("agent.fast") == Mode.AGENT_FAST
+        """Test legacy agent mode strings normalize to merged agent mode."""
+        assert Mode.from_raw("agent") == Mode.AGENT
+        assert Mode.from_raw("agent.plan") == Mode.AGENT
+        assert Mode.from_raw("agent.fast") == Mode.AGENT
+        assert Mode.from_raw("plan") == Mode.AGENT
+        assert Mode.from_raw("fast") == Mode.AGENT
         assert Mode.from_raw("code.plan") == Mode.CODE_PLAN
         assert Mode.from_raw("code.normal") == Mode.CODE_NORMAL
         assert Mode.from_raw("code.team") == Mode.CODE_TEAM
         assert Mode.from_raw("team") == Mode.TEAM
-        assert Mode.from_raw("invalid") == Mode.AGENT_PLAN
+        assert Mode.from_raw("team.plan") == Mode.TEAM_PLAN_NORMAL
+        assert Mode.from_raw("team.plan.normal") == Mode.TEAM_PLAN_NORMAL
+        assert Mode.from_raw("team.plan.code") == Mode.TEAM_PLAN_CODE
+        assert Mode.from_raw("invalid") == Mode.AGENT
 
     @staticmethod
     def test_mode_to_runtime_mode():
-        """Test runtime mode mapping returns new mode values."""
-        assert Mode.AGENT_PLAN.to_runtime_mode() == "agent.plan"
-        assert Mode.AGENT_FAST.to_runtime_mode() == "agent.fast"
+        """Test runtime mode mapping returns canonical mode values."""
+        assert Mode.AGENT.to_runtime_mode() == "agent"
+        assert Mode.AGENT_PLAN.to_runtime_mode() == "agent"
+        assert Mode.AGENT_FAST.to_runtime_mode() == "agent"
         assert Mode.CODE_PLAN.to_runtime_mode() == "code.plan"
         assert Mode.CODE_NORMAL.to_runtime_mode() == "code.normal"
         assert Mode.CODE_TEAM.to_runtime_mode() == "code.team"
         assert Mode.TEAM.to_runtime_mode() == "team"
+        assert Mode.TEAM_PLAN_NORMAL.to_runtime_mode() == "team.plan.normal"
+        assert Mode.TEAM_PLAN_CODE.to_runtime_mode() == "team.plan.code"
 
 
 class TestAgentRequest:

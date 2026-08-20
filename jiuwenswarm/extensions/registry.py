@@ -6,8 +6,10 @@ from jiuwenswarm.extensions.callback_compat import unregister_callback_sync
 from jiuwenswarm.gateway import AgentServerClient
 from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenswarm.extensions.sdk.crypto_utility import CryptoUtility
+from jiuwenswarm.extensions.sdk.third_agent import ThirdAgentExtension
 from jiuwenswarm.extensions.types import ExtensionConfig
 from jiuwenswarm.common.security.base_crypto import CryptoProvider
+from jiuwenswarm.gateway.routing.third_agent import ThirdAgent
 
 
 class ExtensionRegistry:
@@ -21,7 +23,7 @@ class ExtensionRegistry:
     ):
         self._agent_server_client: AgentServerClientExtension | None = None
         self._crypto_tool: CryptoUtility | None = None
-        self._rpc_handlers: dict[str, Callable] = {}
+        self._third_agent: ThirdAgentExtension | None = None
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
 
@@ -57,19 +59,8 @@ class ExtensionRegistry:
     def register_crypto_utility(self, extension: CryptoUtility) -> None:
         self._crypto_tool = extension
 
-    def register_rpc_handler(self, method: str, handler: Callable) -> None:
-        method_name = str(method or "").strip()
-        if not method_name:
-            raise ValueError("rpc method is required")
-        if not callable(handler):
-            raise ValueError(f"rpc handler for {method_name} must be callable")
-        self._rpc_handlers[method_name] = handler
-
-    def get_rpc_handler(self, method: str) -> Callable | None:
-        return self._rpc_handlers.get(str(method or "").strip())
-
-    def list_rpc_methods(self) -> list[str]:
-        return sorted(self._rpc_handlers)
+    def register_third_agent(self, extension: ThirdAgentExtension) -> None:
+        self._third_agent = extension
 
     def get_agent_server_client_extension(self) -> AgentServerClientExtension | None:
         return self._agent_server_client
@@ -84,6 +75,14 @@ class ExtensionRegistry:
     def get_crypto_provider(self) -> CryptoProvider | None:
         ext = self._crypto_tool
         return ext.get_crypto() if ext is not None else None
+
+    def get_third_agent_extension(self) -> ThirdAgentExtension | None:
+        return self._third_agent
+
+    def get_third_agent(self) -> ThirdAgent | None:
+        """Return registered ThirdAgent, or None when no extension registered."""
+        ext = self._third_agent
+        return ext.get_third_agent() if ext is not None else None
 
     def register(
         self,

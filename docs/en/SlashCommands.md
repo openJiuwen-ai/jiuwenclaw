@@ -38,6 +38,8 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/agents` | Manage Agent configs (list, get, create, update, enable, disable, delete, see below) |
 | `/auto-harness` | Auto-Harness task management (`run`/`schedule`/`issue`, see below) |
 | `/btw` | Ask a quick side question without interrupting the main conversation (see below) |
+| `/swarmflow` | SwarmFlow toggle, status, and token budget (`on` / `off` / `--budget`, see [TUI SwarmFlow Guide](TUISwarmFlowGuide.md)) |
+| `/swarmflows` | Full-screen SwarmFlow run tree viewer (alias `/swarmworkflows`, same guide) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below. The TUI local command additionally supports `/mode plan` and `/mode team.normal`; see the TUI guide for details.
 
@@ -53,7 +55,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/mode` | Mode switching (supports first-level entry and direct syntax) |
 | `/switch` | Switch second-level mode within current mode family |
 | `/skills` | Skills management (list, install, uninstall, marketplace, ClawHub, SkillNet) (see below) |
-| `/model` | Model view, add, switch (see below) |
+| `/model` | Model view, add, edit, delete, switch (see below) |
 | `/mcp` | MCP server management (see below) |
 | `/diff` | Interactive change review: per-turn diffs + uncommitted working tree changes (see below) |
 | `/compact` | Compress current context (see below) |
@@ -69,6 +71,19 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 
 ## Key Command Details
 
+### `/swarmflow` and `/swarmflows` (TUI local)
+
+SwarmFlow-specific commands. Full walkthrough: **[TUI SwarmFlow Guide](TUISwarmFlowGuide.md)**.
+
+| Command | Description |
+|---------|-------------|
+| `/swarmflow` | Query status, e.g. `swarmflow: on · mode: team · budget: unbounded` |
+| `/swarmflow on` | Set `enable_swarmflow=true`; switches to team if needed; optional `--budget <tokens\|none>` |
+| `/swarmflow off` | Set `enable_swarmflow=false`; does not leave team automatically |
+| `/swarmflows` | Open the full-screen run tree (workflow → phase → node); alias `/swarmworkflows` |
+
+Config changes are **not hot-applied** in the current session (`Use /new to apply.`). Use **`h`** on the main view for pending human replies (not this command).
+
 ### `/workspace` (TUI Trusted Directory Management)
 
 Manages directories AI can access for file read, edit, and execute operations.
@@ -79,14 +94,15 @@ Manages directories AI can access for file read, edit, and execute operations.
 |---|---|
 | `/workspace` or `/workspace get` | Show system default workspace and current trusted directories list |
 | `/workspace add [path]` | Add trusted directory (defaults to cwd; error if path doesn't exist) |
-| `/workspace set <path>` | Reset trusted dirs to single path (confirmation required if dirs exist) |
+| `/workspace set <path>` | Switch the current project scope to this path and add it to that project's trusted directories |
 | `/workspace remove <path>` | Remove specified trusted directory |
 | `/workspace clear` | Clear all trusted directories (use default workspace only) |
 
 #### Concepts
 
-- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/jiuwenswarm_workspace`, always available
+- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/workspace`, always available
 - **Trusted directories (`trusted_dirs`)**: User-authorized accessible directories, managed by TUI, passed to backend Agent
+- **Project scope**: The project identity used to select the corresponding trusted-directory set and populate `project_dir` / `cwd` in requests
 
 #### Control Logic
 
@@ -94,9 +110,9 @@ Manages directories AI can access for file read, edit, and execute operations.
    - "Trust" → add current directory as trusted
    - "Don't trust" → use default workspace only
 
-2. **Session-level management**: Trusted directories are effective for current CLI session, not persisted to file
+2. **Project-scoped persistence**: Trusted directories are stored by normalized project path in `~/.jiuwenswarm-tui/config.json`. `/workspace set` changes the active project scope only for the current TUI process; after restart, the launch directory becomes the scope again.
 
-3. **Backend passing**: TUI passes `trusted_dirs` via request params; Agent restricts file operations accordingly
+3. **Backend passing**: TUI passes `trusted_dirs`, `project_dir`, and `cwd` via request params; Agent restricts file operations and resolves project context accordingly
 
 4. **Path restriction**: Agent limits file operations within trusted directories; operations outside require user confirmation
 
@@ -153,17 +169,36 @@ Behavior:
 - **Branch recording & filtering (`Ctrl+B`)**: a session's git branch is recorded (per its `project_dir`) on the first message (`HEAD` for non-git/detached). When the filter is on, sessions are matched by branch **name** strictly; legacy sessions without a recorded branch and `HEAD` sessions are filtered out. Note the match is by name only and not repo-aware — with "all projects + branch filter" enabled, same-named branches in different directories are shown together.
 - **Restore scope**: resume only restores the **conversation context** (history, session ID, accent color, workflow snapshot, window title); it does **not** switch the workspace / current working directory.
 
-### `/model` (View / Add / Switch Model)
+### `/model` (View / Add / Edit / Delete / Switch Model)
 
-- Usage:
-  - `/model` or `/model list`: List switchable models (with current model marker);
-  - `/model <name>`: Switch to specified model;
-  - `/model add <name> key=value ...`: Add model config (e.g., `model=...`, `provider=...`, `api_base=...`, `api_key=...`).
-- Limitation: `video` / `audio` / `vision` cannot be set as default chat model via `/model <name>`, use `/config edit` or `/config set` instead.
-- Config write behavior:
-  - Adding model writes to `config.yaml` `models.defaults` (compatible with old structure), triggers Agent config reload;
+Manages model configs defined under `models.defaults` in `config.yaml`. Supports both text subcommands and an **interactive list**; delete/edit are done primarily through the interactive list.
+
+- **Text usage**:
+  - `/model` or `/model list`: Open the **interactive model list** (with current model marker); switch / add / edit / delete can all be done inside the list;
+  - `/model <name>`: Switch directly to the model by name;
+  - `/model add <name> key=value ...`: Add a model config via text form (e.g., `model_name=...`, `provider=...`, `api_base=...`, `api_key=...`, `reasoning_level=...`).
+- **Interactive list hotkeys** (after opening the list via `/model` or `/model list`):
+
+  | Key | Action |
+  | --- | --- |
+  | `↑` / `↓` | Select model up/down |
+  | `Enter` | Switch to the selected model |
+  | `a` | Open the form to **add** a model |
+  | `e` | Open the form to **edit** the selected model |
+  | `d` | Enter **delete confirmation** for the selected model |
+  | `Esc` | Close list / cancel current action |
+
+- **Delete flow** (`d` → confirm): After entering the `Delete model: <name>` confirmation page—
+  - `Enter`: confirm deletion; the backend locates the entry by its **original index** (`index`, i.e. the position in `models.defaults` before filtering out multimodal keys like video/audio/vision), removes it, writes back to `config.yaml`, then triggers an Agent config reload (`AGENT_RELOAD_CONFIG`). Success response: `{type: "model_deleted", name, current}`.
+  - `Esc`: cancel, return to the list.
+- **Edit flow** (`e`): reuses the add form, but leaving `api_key` empty means **keep the original key unchanged**; only changed fields are submitted.
+- **Limitations & validation**:
+  - `video` / `audio` / `vision` are multimodal-only keys and cannot be set as the default chat model via `/model <name>`; use `/config edit` or `/config set` instead;
+  - Deleting the **last** remaining model is rejected (`Cannot delete the last model`); an out-of-range index returns `model index not found`;
+- **Config write behavior**:
+  - Add / edit / delete mutate `models.defaults` in `config.yaml` (compatible with the old structure) and trigger an Agent config reload;
   - Switching model validates config and environment variable placeholders, updates `MODEL_NAME` / `MODEL_PROVIDER` / `API_BASE` / `API_KEY`, writes back to `.env`.
-- Secure display: Sensitive fields like `api_key`, `token` are masked.
+- **Secure display**: sensitive fields like `api_key`, `token` are masked in the list; only when models share **the same name AND identical provider+api_base** (genuinely indistinguishable) does the list append the key's last 4 characters `[…xxxx]`.
 
 ### `/diff` (Interactive Change Review)
 
@@ -194,7 +229,7 @@ Behavior:
 
 Per-turn diffs are computed from `.agent_history/file_ops_jiuwenswarm*.json` logs, not from git. The service reads and merges file operation logs from multiple locations:
 
-1. Agent workspace (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/.agent_history/`)
+1. Agent workspace (`~/.jiuwenswarm/agent/workspace/.agent_history/`)
 2. User workspace `.agent_history/`
 3. Project directory `.agent_history/` (session-specific and global files)
 
@@ -329,7 +364,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
   - Rejected when the session is busy (`session is busy`);
   - Rejected when the current session has no conversation records.
 - Behavior:
-  1. Generate a new `session_id` and send `session.fork` RPC to the backend (carrying `source_session_id`, `target_session_id`, and optional title).
+  1. Send `session.fork` with `source_session_id` and an optional title. AgentServer allocates the target `session_id` and returns it in the response.
   2. TUI automatically switches to the new branch session, clears the current transcript, and restores the branch history.
   3. Prompts the user that they are now in the new branch, and informs them they can use `/resume <original_session_id>` to return to the original session.
 - Examples:
@@ -340,7 +375,7 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 
 - Usage: `/rewind [turn_number]`.
 - Alias: `/checkpoint`.
-- Function: Rewind the current session to before a specified turn, supporting conversation-only, code-only, or both.
+- Function: Rewind or compact the current session around a specified turn, supporting conversation-only, code-only, both, or partial-history summarization.
 - Constraints:
   - Rejected when the session is busy (`session is busy`);
   - Rejected when there are no conversation turns.
@@ -350,12 +385,17 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
      - **Restore conversation and code** — Truncate conversation and restore files to their prior state;
      - **Restore conversation only** — Only truncate conversation, files remain unchanged;
      - **Restore code only** — Only restore files, conversation remains unchanged (shown only when the target turn has file changes);
+     - **Summarize from here** — Keep earlier messages and replace the selected turn and everything after it with a compact summary;
+     - **Summarize up to here** — Summarize messages before the selected turn and keep the selected turn and everything after it unchanged;
      - **Cancel** — Abort the operation.
   3. Calls the corresponding backend RPC based on selection:
      - `both` → `session.rewind_and_restore`
      - `conversation` → `session.rewind`
      - `code` → `session.restore_files`
-- After rewind: TUI clears the transcript and reloads history; if the rewinded content contains user input, it is automatically filled into the input box.
+     - `summarize` → `command.rewind_compact` with `direction=from`
+     - `summarize_up_to` → `command.rewind_compact` with `direction=up_to`
+- After rewind: TUI clears the transcript and reloads history; if the rewound content contains user input, it is automatically filled into the input box.
+- Code-only restore reports `No file changes to restore` when there is nothing to change. Partial failures list every failed file and leave those files unchanged instead of reporting an unconditional success.
 - Limitation: Rewinding does not affect files edited manually or via bash commands.
 - Examples:
   - `/rewind` — Interactive turn selection and restore mode confirmation
@@ -375,6 +415,11 @@ These commands are registered and parsed by the TUI, then forwarded as slash tex
 | `/memory toggle` | Open the tabbed console and select the toggle tab |
 | `/memory toggle <key>` | Directly toggle the specified memory system switch |
 | `/memory open` | Open the tabbed console and select the open tab |
+
+- Edit safety:
+  - The target must already exist and be inside an allowed memory location; `/memory edit` does not create a new file.
+  - Runtime auto/coding-memory files are read-only and cannot be edited manually.
+  - Project or ancestor `JIUWENSWARM.md` / `JIUWENSWARM.local.md` files may be opened only when they already exist and pass the allowed-path checks.
 
 - Tabbed console: The console has 4 tabs — edit / status / toggle / open. Interaction keys:
   - `←`/`→` — Switch tabs;
@@ -446,11 +491,11 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `name` | Yes | Job name |
 | `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
 | `description` | Yes | Job description — the input prompt the Agent receives when executing |
-| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#5-push-to-the-tui-channel) |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#push-to-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
-| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#6-team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
+| `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
 | `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
-| `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
+| `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 
 - `add` examples:
@@ -496,7 +541,7 @@ Manage skills lifecycle: listing, installing, uninstalling, marketplace source m
 - **Marketplace source**: A remote Git repository that hosts available skills. Each source has a name, URL, and enabled/disabled state.
 - **Spec**: The install identifier format supporting: `<skill>@builtin` (builtin), `<slug>@clawhub` (ClawHub), `<skill>@<marketplace>` (Git marketplace); bare names without `@` are auto-detected as builtin if applicable.
 - **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
-- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`).
+- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/workspace/skills/`).
 - **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[clawhub]` = ClawHub, `[skillnet]` = SkillNet, `[project]` or marketplace name = other.
 
 #### Grouped List Display
@@ -521,7 +566,7 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
 - **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
-- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs.
+- **Path/URL auto-detection**: When installing with `/skills install <path_or_url>` (local path like `/path/to/skill`, `~/skill`, or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow (`skills.import_local`). All URLs go through import_local; SkillNet is not auto-routed from URLs. Local paths must be **absolute** or use `~/...`; `~` means the JiuwenClaw service process user's home directory on the server. Other relative paths, sources under system/sensitive directories (e.g. `/etc`, `~/.ssh`), symbolic links, and `SKILL.md` files without valid `name`/`description` frontmatter are rejected.
 - **`@skillnet` search-install**: When using `/skills install <name>@skillnet`, the frontend first calls `skills.skillnet.search`. **Only auto-installs if an exact match by skill_name is found**; with no exact match, it only displays search results (with URLs and names) without auto-installing the first result — the user must choose one and install via `/skills skillnet install <url>` or `/skills install <exact_name>@skillnet`. This is because SkillNet search is semantic: searching "code" may return "taskflow", "coding-agent" etc. whose names don't contain "code".
 - **ClawHub token required**: A ClawHub CLI token must be configured before installing from ClawHub (via `/skills marketplace clawhub token <value>`). Without a token, `@clawhub` installs will fail with a message explaining how to set the token. Obtain your token at [clawhub.ai](https://clawhub.ai).
 - **ClawHub slug vs. display name**: ClawHub skills are identified by their unique **slug** (e.g., `code-review-security`), not their display name (e.g., "Code Review Assistant"). When a direct slug install fails, the system automatically searches ClawHub and displays matching results (with real slugs and summaries) to help you find the correct skill.
@@ -677,7 +722,7 @@ Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command
 - **Nested paths**: Supported: parent allow + child deny (e.g. allow `/tmp`, deny `/tmp/secret`). Not supported: child allow + parent deny (parent deny wins); the server rejects such configs.
 - **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries, each labeled `(rw)` or `(ro)`.
 - **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
-- **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
+- **excluded_commands**: `fnmatch` per simple-command leaf (full leaf text or command name). All matches → whole command on host; none → whole command in sandbox; mixed leaves → local bash orchestrates and wraps remote leaves with `jiuwenbox sandbox exec` (CLI required).
 - **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
 - **enable / disable**: Triggers an agent rebuild. The response lists `rebuilt_modes` (typically `agent.*` / `code.*`) and the jiuwenbox endpoint.
 
@@ -977,18 +1022,22 @@ Configure the TUI footer status bar with a custom shell command that dynamically
 
 | Command | Description |
 |---|---|
-| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline` | Launch the built-in setup subagent to create, review, modify, or remove the status line |
+| `/statusline get` | Always view the current status line configuration without launching the setup agent |
 | `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
+| `/statusline padding <number>` | Set left and right padding; the value must be zero or a positive integer and a status line must already be configured |
 | `/statusline clear` | Remove the status line configuration (footer bar will hide) |
 | `/statusline help` | Show usage guide (writing patterns, practical examples, field list) |
 | `/statusline json` | Show the actual current JSON data values (useful for debugging jq expressions) |
+| `/statusline <prompt>` | Ask the Agent to generate and configure a status-line script from a natural-language description |
 
 #### Concepts
 
 - **StatusLine**: A text area at the bottom of the TUI that displays user-defined dynamic information, supporting multi-line output. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
 - **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
-- **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
-- **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+- **Agent-generated mode**: `/statusline`, with or without a natural-language description, delegates to the built-in `statusline-setup` subagent. When unconfigured, it guides creation and applies the configuration. When configured, it inspects the current setup and can explain, modify, or remove it. Use `/statusline get` to display the raw configuration without launching the subagent.
+- **JSON input**: Each execution receives current session info as JSON through stdin, which the configured command can parse with `jq`, PowerShell `ConvertFrom-Json`, or another available tool.
+- **Shell selection**: On Windows, the runner uses Git Bash when it is installed and otherwise falls back to PowerShell. On macOS/Linux, it uses `sh`. The setup subagent creates a platform-appropriate persistent script and does not require `jq` on Windows.
 
 #### JSON Input Fields
 
@@ -1069,7 +1118,8 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 #### More Examples
 
-- `/statusline` — View current configuration
+- `/statusline` — Launch the built-in setup subagent to create, review, modify, or remove the status line
+- `/statusline get` — View current configuration without launching the setup agent
 - `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
 - `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
 - `/statusline set 'input=$(cat); pct=$(echo "$input" | jq -r .context_window.used_percentage); rem=$(echo "$input" | jq -r .context_window.remaining_percentage); cw=$(echo "$input" | jq -r ".context_window.context_window_size / 1000"); echo "ctx:${pct}% used (${rem}% left, ${cw}K window)"'` — Show context window occupancy with percentage bar
@@ -1088,7 +1138,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
 - **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
-- **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
+- **Windows adaptation**: The runner pipes JSON through stdin, uses Git Bash when installed, and falls back to PowerShell. Prefer a persistent PowerShell script when Git Bash or `jq` is unavailable.
 
 #### Config File Structure
 

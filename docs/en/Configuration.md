@@ -8,22 +8,15 @@ This document details each configuration option in the JiuwenSwarm frontend pane
 
 ## 1. Configuration Entry
 
-Open **Configuration** from the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
+Click **More** → **Configuration** in the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
 
-![Configuration Panel](../assets/images/config.png)
+![Configuration Panel](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
-The configuration panel contains the following main sections:
+The configuration panel is organized into three tabs:
 
-- **Model Configuration**: Default chat model, video/audio/vision models (see [2. Model Configuration](#2-model-configuration))
-- **Embedding Configuration**: Vector embedding service (see [3. Embedding Configuration](#3-embedding-configuration))
-- **Third-Party Services**: Jina, Bocha, Serper, Perplexity, GitHub, etc. (see [4. Third-Party Service Configuration](#4-third-party-service-configuration))
-- **Self-Evolution Configuration**: Automatic skill improvement (see [5. Self-Evolution Configuration](#5-self-evolution-configuration))
-- **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
-- **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
-- **Memory Sensitive-Info Filtering**: Memory system privacy protection settings (see [8. Memory Sensitive-Info Filtering](#8-memory-sensitive-info-filtering))
-- **Skill Symphony and Skill Retrieval**: Skill-tree retrieval, skill score, and skill orchestration settings (see [9. Skill Symphony and Skill Retrieval Configuration](#9-skill-symphony-and-skill-retrieval-configuration))
-
-The panel also includes **Free Search Engine Configuration**, **Multi-Agent / Team Configuration**, **A2UI**, and **Email Configuration** sections. Configure them as needed.
+- **Model**: Default chat model, video/audio/vision models, Embedding configuration (see [2. Model Configuration](#2-model-configuration))
+- **Security**: Tool security guardrails, sensitive-info filtering (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
+- **Other**: Third-party services, self-evolution, context compression, skill symphony, etc.
 
 > 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
@@ -51,16 +44,18 @@ JiuwenSwarm supports multiple model types to meet diverse scenario requirements:
 
 Each model type supports the following parameters:
 
-| Field              | Description                  | Remarks                                                                                      |
-| ------------------ | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `api_base`         | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
-| `api_key`          | Model API key                | Obtained from the model provider; keep confidential                                           |
-| `model`            | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
-| `model_provider`   | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
+| Field (frontend) | Backend field (config.yaml) | Description                  | Remarks                                                                                      |
+| ---------------- | --------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------- |
+| `api_base`       | `api_base`                  | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
+| `api_key`        | `api_key`                   | Model API key                | Obtained from the model provider; keep confidential                                           |
+| `model`          | `model_name`                | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
+| `model_provider` | `client_provider`           | Model provider type          | Supports `OpenAI`, `DeepSeek`, `DashScope`, `SiliconFlow`, `InferenceAffinity`, `OpenRouter` for API format adaptation; video/audio/vision models currently support `OpenAI` only |
+
+> 💡 **Field Mapping**: The frontend panel uses `model` / `model_provider` as display field names; when saved to `config.yaml` they are mapped to backend fields `model_name` / `client_provider`. Both refer to the same thing, only the naming in the config file differs.
 
 > 💡 **Test Function**: The configuration panel provides a **Test button**. After filling in the model configuration, you can click "Test" to verify the API connection. The system will send a simple test request and display "Test Successful" if successful, or show error information otherwise.
 
-![Model Test Configuration Example](../assets/images/config_model_connect_test.png)
+![Model Configuration Tab](../assets/images/current-ui-en/07-Configuration-Model-Tab.png)
 
 #### Configuration Examples
 
@@ -73,6 +68,24 @@ model: gpt-4o
 model_provider: OpenAI
 ```
 
+**DeepSeek**
+
+```
+api_base: https://api.deepseek.com/v1
+api_key: sk-your-deepseek-api-key
+model: deepseek-chat
+model_provider: DeepSeek
+```
+
+**SiliconFlow**
+
+```
+api_base: https://api.siliconflow.cn/v1
+api_key: sk-your-siliconflow-api-key
+model: Qwen/Qwen2.5-72B-Instruct
+model_provider: SiliconFlow
+```
+
 > 💡 **Tip**: Most model providers offer OpenAI-compatible APIs. You can adjust `api_base` and `model` parameters based on your actual provider.
 
 ### 2.3 Multi-Model Management and Aliases
@@ -81,14 +94,14 @@ The **Model List** section in the configuration panel supports maintaining multi
 
 Each model entry contains the following fields:
 
-| Field | Required | Description |
-|------|---------|------|
-| `model_name` | Yes | Model name at the API layer (e.g., `gpt-4o`, `deepseek-chat`) |
-| `api_base` | Yes | API endpoint for this model |
-| `api_key` | Yes | API key for this model |
-| `model_provider` | Yes | Provider (e.g., `OpenAI`, `DeepSeek`) |
-| `reasoning_level` | No | Reasoning intensity; optional `off` / `low` / `medium` / `high`; leave empty to unset |
-| `temperature` | No | Sampling temperature, default `0.95` |
+| Field (frontend) | Backend field (config.yaml) | Required | Description |
+|------|---------|---------|------|
+| `model_name` | `model_name` | Yes | Model name at the API layer (e.g., `gpt-4o`, `deepseek-chat`) |
+| `api_base` | `api_base` | Yes | API endpoint for this model |
+| `api_key` | `api_key` | Yes | API key for this model |
+| `model_provider` | `client_provider` | Yes | Provider (e.g., `OpenAI`, `DeepSeek`) |
+| `reasoning_level` | `reasoning_level` | No | Reasoning intensity; optional `off` / `low` / `medium` / `high`; leave empty to unset |
+| `temperature` | `temperature` | No | Sampling temperature, default `0.95` |
 
 **`alias` Rules**:
 - If empty, it automatically defaults to `model_name` when saved;
@@ -169,13 +182,15 @@ Embedding models convert text into vector representations and form the core of J
 
 > 💡 **Tip**: Embedding configuration is optional. If not set, the system uses a mock provider for basic retrieval. Configuring an embedding model improves semantic search precision. See the [Memory](Memory.md) documentation for details.
 
+> 💡 **Frontend Fields and Environment Variables**: The frontend fields below are saved to the `embed` section of `config.yaml`; if not set via the frontend, they can also be injected via environment variables, which take precedence over the config file. Mapping: `embed_api_key` ↔ `EMBED_API_KEY`, `embed_api_base` ↔ `EMBED_API_BASE` (field name in config.yaml is `embed_base_url`), `embed_model` ↔ `EMBED_MODEL`.
+
 ### 3.2 Configuration Fields
 
-| Field              | Description                     | Reference Format                        | Remarks                                   |
-| ------------------ | ------------------------------- | --------------------------------------- | ----------------------------------------- |
-| `embed_api_base`   | Base URL for embedding API      | `https://api.siliconflow.cn/v1`         | Embedding service API endpoint            |
-| `embed_api_key`    | Embedding service API key       | `sk-xxxxxxxxxxxxxxxx`                   | Obtained from the service provider        |
-| `embed_model`      | Embedding model name            | `BAAI/xxx`                              | Chinese-optimized embedding recommended   |
+| Field (frontend) | Backend field (config.yaml) | Description                     | Reference Format                        | Remarks                                   |
+| ---------------- | --------------------------- | ------------------------------- | --------------------------------------- | ----------------------------------------- |
+| `embed_api_base` | `embed_base_url`            | Base URL for embedding API      | `https://api.siliconflow.cn/v1`         | Embedding service API endpoint            |
+| `embed_api_key`  | `embed_api_key`             | Embedding service API key       | `sk-xxxxxxxxxxxxxxxx`                   | Obtained from the service provider        |
+| `embed_model`    | `embed_model`               | Embedding model name            | `BAAI/xxx`                              | Chinese-optimized embedding recommended   |
 
 ---
 
@@ -209,10 +224,13 @@ Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
 
 ### Toggles
 
-The frontend shows two options under **Self-Evolution Configuration**:
+The frontend shows the following options under **Self-Evolution Configuration**:
 
-- **Auto-detect evolution signals**: disabled by default. When enabled, the system scans failures, corrections, and other evolution signals after chat and tool execution. This maps to `react.evolution.auto_scan`; env `EVOLUTION_AUTO_SCAN` takes precedence.
-- **Auto-suggest new skill creation**: disabled by default. When enabled, the system can propose creating a new Skill when no suitable Skill exists. This maps to `react.evolution.skill_create`; env `SKILL_CREATE` takes precedence.
+| Switch | Config key | Default | Purpose |
+| --- | --- | --- | --- |
+| **Enable Skills Self-Evolution** | `react.evolution.skill_evolution` | `false` | Controls automatic Skill creation and evolution together. When off, the related Rails, tools, prompts, watchers, and `/evolve` commands are unavailable |
+
+> 💡 **Note**: `react.evolution.auto_save` remains an advanced YAML-only approval setting and is not shown in the frontend. Explicit use of the general `skill-creator` or `swarmskill-creator` capability is independent from this automatic self-evolution switch.
 
 > 📖 For details on the self-evolution mechanism, see [Skill Self-Evolution](SkillSelfEvolution.md).
 
@@ -242,7 +260,7 @@ When enabled, the system will:
 
 **Compute Affinity (KV Release)** is an advanced optimization feature of context compression for managing GPU memory usage.
 
-- **Field**: `context_engine.kv_release_enabled`
+- **Field**: `react.context_engine_config.enable_kv_cache_release`
 - **Default**: `false` (disabled)
 - **Purpose**: When enabled, the system dynamically releases KV Cache (key-value cache) that is no longer needed during conversations, saving GPU memory and allowing longer dialogue contexts.
 
@@ -310,9 +328,11 @@ Memory sensitive-info filtering protects user privacy by preventing sensitive in
 
 ### Toggle
 
-- **Field**: `memory.filter_enabled`
-- **Default**: `true` (enabled)
-- **Purpose**: When enabled, the system automatically detects and filters sensitive information before writing to memory.
+- **Field**: `memory.forbidden_memory_definition.enabled`
+- **Default**: `false` (disabled)
+- **Purpose**: When enabled, the system automatically detects and filters sensitive information before writing to memory, matching against `memory.forbidden_memory_definition.patterns`.
+
+> 💡 **Note**: This switch is off by default and must be enabled manually. When enabled, the system matches sensitive information according to `forbidden_memory_definition.patterns`; the `description` field records the filter policy description text (Chinese/English).
 
 ### Filtered Content Types
 
@@ -332,7 +352,7 @@ The system automatically identifies and filters the following types of sensitive
 
 ## 9. Skill Symphony and Skill Retrieval Configuration
 
-Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill score to organize candidates into a confirmable, executable skill chain.
+Symphony settings control two related capabilities: **Skill Retrieval** finds candidate skills from installed skills, and **Skill Orchestration** uses the skill graph to organize candidates into a confirmable, executable skill chain.
 
 ### 9.1 Frontend switches
 
@@ -341,11 +361,11 @@ The configuration panel exposes two related switches:
 | Switch | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | **Enable Skill Retrieval** | `symphony.skill_retrieval.enabled` | `false` | Registers skill-tree retrieval tools such as `skill_branch_explore`, `skill_branch_peek`, and `skill_index_build` |
-| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill score and orchestration tools such as `symphony_read_score`, `symphony_refresh_score`, and `symphony_compose_score` |
+| **Enable Skill Symphony** | `symphony.enabled` | `false` | Registers skill graph and orchestration tools such as `symphony_read_graph`, `symphony_refresh_graph`, and `symphony_compose_graph` |
 
-The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill score, but candidate skills do not automatically come from Skill Retrieval.
+The two switches are independent. Skill Retrieval answers "how to find candidate skills"; Skill Symphony answers "how to orchestrate candidate skills into a route". If only Skill Retrieval is enabled, the system only gets skill-tree retrieval. If only Skill Symphony is enabled, the system can read and refresh the skill graph, but candidate skills do not automatically come from Skill Retrieval.
 
-### 9.2 Skill index and skill score
+### 9.2 Skill index and skill graph
 
 Related pages are under **Skills** in the left sidebar:
 
@@ -366,26 +386,25 @@ Advanced build, retrieval, and orchestration parameters are configured in the us
 
 Common settings:
 
+The retained `symphony.fingerprint.scan` and `symphony.fingerprint.extraction`
+settings are mapped by the JiuwenSwarm Adapter to agent-core's
+`SkillFolderScanner` and `FingerprintService` configuration.
+
 | Setting | Default | Description |
 | --- | --- | --- |
 | `symphony.paths.skills_root` | Empty string | Skill source directory; empty means the runtime default is used |
-| `symphony.paths.score_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
-| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth; empty means the runtime default is used |
-| `symphony.fingerprint.extraction.workers` | `4` | Skill fingerprint extraction concurrency |
-| `symphony.fingerprint.extraction.batch_size` | `2` | Skill fingerprint extraction batch size |
-| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit for fingerprint extraction; empty means the runtime default is used |
-| `symphony.fingerprint.normalization.workers` | `4` | Skill fingerprint normalization concurrency |
-| `symphony.fingerprint.normalization.batch_size` | `2` | Skill fingerprint normalization batch size |
-| `symphony.fingerprint.normalization.duplicate_name_similarity_threshold` | `0.8` | Similarity threshold for detecting near-duplicate skill names |
-| `symphony.fingerprint.normalization.max_vocab_size` | Empty | Maximum dynamic vocabulary size; empty means the runtime default is used |
-| `symphony.build.workers` | `4` | Skill score build concurrency |
-| `symphony.build.batch_size` | `16` | Skill score build batch size |
+| `symphony.paths.graph_dir` | Empty string | Skill score artifact directory; empty means the runtime default is used |
+| `symphony.fingerprint.scan.max_depth` | Empty | Maximum skill-file scan depth mapped to agent-core `SkillFolderScanner`; empty means the runtime default is used |
+| `symphony.fingerprint.extraction.workers` | `4` | Fingerprint extraction concurrency mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.batch_size` | `2` | Fingerprint extraction batch size mapped to agent-core `FingerprintService` |
+| `symphony.fingerprint.extraction.body_limit` | Empty | Body length limit mapped to agent-core `FingerprintService`; empty means the runtime default is used |
+| `symphony.build.workers` | `4` | Skill graph build concurrency |
+| `symphony.build.batch_size` | `16` | Skill graph build batch size |
 | `symphony.build.require_consensus` | `false` | Whether multiple judgments must agree before accepting a relationship |
-| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill score |
+| `symphony.build.min_edge_confidence` | `0.1` | Minimum edge confidence written into the skill graph |
 | `symphony.orchestration.mode` | `fast` | Orchestration mode. The current runtime uses the fast orchestration path |
-| `symphony.orchestration.top_k` | `3` | Maximum number of candidate routes retained during orchestration |
 | `symphony.orchestration.max_depth` | `4` | Maximum skill-chain search depth |
-| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-score edge confidence preferred by orchestration |
+| `symphony.orchestration.min_edge_confidence` | `0.3` | Minimum skill-graph edge confidence preferred by orchestration |
 | `symphony.skill_retrieval.artifact_root` | Empty string | Skill index artifact directory; empty means the default workspace is used; can be supplied by `SYMPHONY_SKILL_RETRIEVAL_ROOT` |
 | `symphony.skill_retrieval.build.branching_factor` | `128` | Skill-tree split-threshold base; controls how coarse or fine the tree is |
 | `symphony.skill_retrieval.build.max_depth` | `6` | Maximum skill-tree depth |
@@ -403,13 +422,17 @@ Common settings:
 | `symphony.skill_retrieval.retrieve.flatten_tree` | `false` | Whether retrieval flattens the skill tree |
 | `symphony.skill_retrieval.retrieve.max_exposure_depth` | `1` | Maximum tree depth exposed by one `skill_branch_explore` call |
 
-> 📖 For details about Skill Retrieval, the skill score, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
+> 📖 For details about Skill Retrieval, the skill graph, and Skill Orchestration, see [Symphony: Skill Retrieval, Orchestration, and Dispatch](symphony.md).
 
 ---
 
 ## 10. Advanced Configuration
 
-Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. **This document does not state where those files live on disk**; for offline edits or bulk rollout, contact your administrator.
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. The main config file is typically located at:
+
+```text
+~/.jiuwenswarm/config/config.yaml
+```
 
 ### 10.1 Common logical keys (conceptual paths)
 
@@ -421,7 +444,6 @@ These are **conceptual** paths in the main configuration for cross-reference wit
 | `models.*.model_client_config.timeout` | Model request timeout (seconds) | `1800` |
 | `models.*.model_client_config.verify_ssl` | Verify SSL | `false` |
 | `models.*.model_config_obj.temperature` | Temperature | `0.95` |
-| `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
 | `react.context_engine_config.dialogue_compressor_config.tokens_threshold` | Dialogue compression token threshold | `100000` |
 | `react.context_engine_config.round_level_compressor_config.trigger_context_ratio` | Round-level compression trigger ratio of the effective context budget | `0.9` |
 
@@ -452,5 +474,25 @@ A: Model information is displayed on the configuration panel. You may also check
 ### Q: Are multimodal models required?
 
 A: No. Video, audio, and vision models are optional and only required for their respective multimodal functions.
+
+### Q: Does `api_base` need the `/chat/completions` suffix?
+
+A: No. `api_base` only needs to go up to the version level (e.g., `https://api.openai.com/v1`); the system appends `/chat/completions` automatically. Adding the suffix manually may cause duplicate request paths and errors. Use the "Test" button to verify connectivity after configuration.
+
+### Q: What to do when `alias` conflicts in the model list?
+
+A: `alias` must be globally unique across all configured models and cannot duplicate another model's `alias` or `model_name`. When left empty, the system auto-assigns it as `model_name`. On conflict, manually assign a different `alias`; when switching models (Web dropdown or `/model <name>`), either `alias` or `model_name` can be used as the identifier.
+
+### Q: What happens if Embed configuration is not filled in?
+
+A: No critical impact. Embed is optional; when unset, the system uses a Mock Provider for basic retrieval. Configuring it provides more precise semantic search and better memory recall. Chinese-optimized embedding models are recommended.
+
+### Q: Is Tool Security Guardrails enabled by default?
+
+A: No. Tool Security Guardrails corresponds to `permissions.enabled`, which defaults to `false` (disabled). When enabled, the system checks permission rules before sensitive tool operations (such as `bash`, `write_file`) and resolves to `allow`/`ask`/`deny`, prompting a confirmation dialog for `ask`.
+
+### Q: How to apply changes after directly editing `~/.jiuwenswarm/config/config.yaml`?
+
+A: The system automatically detects and hot-reloads the file after saving (most settings take effect immediately; a few require a process restart). If changes do not apply after a long time, check the YAML format or re-save via the Web configuration panel to trigger a refresh.
 
 ---

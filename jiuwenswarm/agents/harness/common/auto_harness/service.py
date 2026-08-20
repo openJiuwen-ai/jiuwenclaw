@@ -32,27 +32,27 @@ import uuid
 import zipfile
 import yaml
 
-from openjiuwen.auto_harness import (
+from openjiuwen.rsi.auto_harness import (
     AutoHarnessConfig,
     AutoHarnessOrchestrator,
     create_auto_harness_orchestrator,
 )
-from openjiuwen.auto_harness.infra.git_auth import (
+from openjiuwen.rsi.auto_harness.infra.git_auth import (
     build_git_auth_env,
 )
-from openjiuwen.auto_harness.schema import (
+from openjiuwen.rsi.auto_harness.schema import (
     ExtensionDesign,
     OptimizationTask,
     RuntimeExtensionArtifact,
     StageResult,
     load_auto_harness_config,
 )
-from openjiuwen.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
-from openjiuwen.auto_harness.pipelines.extended_evolve_pipeline import (
+from openjiuwen.rsi.auto_harness.contexts import TaskContext, TaskRuntime
+from openjiuwen.rsi.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.auto_harness.stages.activate import ExtendActivateStage
+from openjiuwen.rsi.auto_harness.stages.activate import ExtendActivateStage
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -191,6 +191,165 @@ def _is_safe_zip_path(base_dir: Path, member_path: str) -> bool:
         return False
 
 
+# Allow-list of top-level fields a hot-loaded harness_config.yaml may
+# declare. Fail-closed: anything not listed here is refused at import /
+# activate / cold-reload time. ``mcps`` is intentionally absent — it
+# declares a local stdio subprocess (command/args/cwd) the server spawns on
+# activation, i.e. RCE under the server identity. A field allow-list is
+# strictly stronger than a per-field reject: any future dangerous field
+# openjiuwen adds is refused by default instead of needing a new rule.
+#
+# Kept in sync with openjiuwen's ``_CANONICAL_PLUGIN_YAML_FIELDS`` minus the
+# dangerous entries (mcps). Re-audit on openjiuwen upgrades: a newly allowed
+# field here only after confirming it carries no code-exec / subprocess
+# surface.
+_ALLOWED_HARNESS_CONFIG_FIELDS = frozenset({
+    "schema_version",
+    "id",
+    "source",
+    "name",
+    "description",
+    "tools",
+    "rails",
+    "skills",
+    "prompt_sections",
+    "metadata",
+    "extension_name",
+})
+
+
+def validate_harness_config_fields(config_path: Path) -> None:
+    """Reject harness_config.yaml fields outside the allow-list.
+
+    Subsumes a per-field mcps reject: the allow-list refuses ``mcps`` (and
+    any future dangerous field) by default. A YAML parse failure is non-fatal
+    — openjiuwen's own loader surfaces a clearer error downstream.
+
+    Raises:
+        ValueError: If the config declares a field outside the allow-list.
+    """
+    try:
+        with config_path.open('r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return
+    if not isinstance(config_data, dict):
+        return
+    extra = set(config_data) - _ALLOWED_HARNESS_CONFIG_FIELDS
+    if extra:
+        raise ValueError(
+            f"harness_config.yaml 含不允许的字段: {sorted(extra)}。"
+            f"热加载仅允许字段: {sorted(_ALLOWED_HARNESS_CONFIG_FIELDS)}。"
+            f"（mcps 会声明本地 MCP server 子进程，构成 RCE，已被禁用。）"
+            f"已拒绝导入该包。"
+        )
+
+
+def _extract_resource_file_path(item: Any) -> str | None:
+    """Return the raw file path a legacy YAML tool/rail entry loads, or None.
+
+    Mirrors the package-bearing branches of openjiuwen's
+    ``_normalize_resource_item``: ``builtin`` / ``entry_point`` / ``core.*``
+    carry no package-relative file path; a ``module``+``class`` shape resolves
+    to an in-package file (safe) or an importlib dotted path (unboundable),
+    so it is skipped too. Only an explicit ``file:`` key is returned.
+    """
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type in ("builtin", "entry_point"):
+        return None
+    if isinstance(item_type, str) and item_type.startswith("core."):
+        return None
+    if isinstance(item.get("module"), str):
+        return None
+    file_name = item.get("file")
+    if file_name is not None:
+        return str(file_name)
+    return None
+
+
+def validate_harness_config_paths(config_path: Path, package_dir: Path) -> None:
+    """Reject tools/rails/skills entries whose path escapes the package.
+
+    The legacy YAML loader's ``_resolve_legacy_path`` accepts absolute paths
+    and ``..`` traversal, so a ``harness.{kind}.file`` entry can load an
+    arbitrary package-outside Python file (``exec``'d on activation). This
+    bounds every declared resource path to ``package_dir`` — in-package code
+    loading is allowed (harness extensions ship their own code), only escapes
+    are rejected. YAML parse failures and missing files are left to the
+    downstream loader.
+
+    Raises:
+        ValueError: If a tools/rails/skills entry resolves outside the package.
+    """
+    try:
+        with config_path.open('r', encoding='utf-8') as f:
+            config_data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return
+    if not isinstance(config_data, dict):
+        return
+
+    package_root = package_dir.resolve()
+
+    def _check_path(raw_path: str, *, kind: str) -> None:
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = package_root / candidate
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, ValueError):
+            return
+        try:
+            resolved.relative_to(package_root)
+        except ValueError as error:
+            raise ValueError(
+                f"harness_config.yaml {kind} 项解析到包目录外：{resolved}"
+                f"（包根 {package_root}）。热加载只允许加载包内资源，"
+                f"禁止通过绝对路径或 .. 越界加载包外文件。已拒绝导入该包。"
+            ) from error
+
+    for kind in ("tools", "rails"):
+        for item in _as_list(config_data.get(kind)):
+            file_path = _extract_resource_file_path(item)
+            if file_path:
+                _check_path(file_path, kind=kind)
+
+    for item in _as_list(config_data.get("skills")):
+        if isinstance(item, dict):
+            skill_dir = item.get("dir")
+            if skill_dir:
+                _check_path(str(skill_dir), kind="skills")
+        elif isinstance(item, str):
+            _check_path(item, kind="skills")
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Normalize a YAML scalar / single mapping into a list for iteration."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def validate_harness_config(config_path: Path, package_dir: Path | None = None) -> None:
+    """Run all harness_config.yaml hot-load guards (fields + paths).
+
+    Single entry point for the import / activate / reload paths.
+    ``package_dir`` defaults to ``config_path.parent``.
+
+    Raises:
+        ValueError: If the config declares a disallowed field (e.g. ``mcps``)
+            or a path escaping the package.
+    """
+    validate_harness_config_fields(config_path)
+    if package_dir is None:
+        package_dir = config_path.parent
+    validate_harness_config_paths(config_path, package_dir)
+
+
 @dataclass
 class ActiveAutoHarnessRun:
     """Active auto_harness run metadata (per §5.2)."""
@@ -261,8 +420,17 @@ class AutoHarnessService:
         # Initialize scheduler components
         self._init_scheduler()
 
-    def update_agent_instance(self, agent: Any):
-        self._agent = agent.get_instance()
+    async def update_agent_instance(self, agent: Any):
+        """Bind the DeepAgent this service executes scheduled runs on.
+
+        Awaits ``ensure_instance`` rather than reading ``get_instance``: the
+        root adapter builds its DeepAgent lazily, so a plain accessor would hand
+        back None on any path that has not run a chat turn yet.
+
+        Args:
+            agent: The JiuWenSwarm agent wrapper owning the adapter.
+        """
+        self._agent = await agent.ensure_instance()
         try:
             stream_event_rail = JiuSwarmStreamEventRail()
             logger.info("[AutoHarnessService] JiuSwarmStreamEventRail create success")
@@ -2286,7 +2454,7 @@ class AutoHarnessService:
         Stacked activation flow:
         1. Load the new package config (stack on any existing active packages)
         2. Update metadata: add package_id to active_package_ids list
-        3. Broadcast to all agent.fast/agent.plan instances in the channel
+        3. Broadcast to all agent-mode instances in the channel
 
         Args:
             package_id: The package ID to activate
@@ -2328,6 +2496,12 @@ class AutoHarnessService:
         if not Path(config_path).exists():
             raise ValueError(f"Config file not found: {config_path}")
 
+        # Defense-in-depth: re-run all guards at activation too, in case a
+        # package was imported before the import-time guard existed, was
+        # placed directly under runtime_extensions, or its config was
+        # edited on disk after import.
+        validate_harness_config(Path(config_path))
+
         if self._agent is None:
             logger.warning("[AutoHarnessService] No agent available for activation")
             self.update_active_status(package_id, "add")
@@ -2343,7 +2517,7 @@ class AutoHarnessService:
             loaded_resources = await self._agent.load_harness_config(config_path)
             self.update_active_status(package_id, "add")
 
-            # Broadcast to all agent.fast/agent.plan instances (skip current, already loaded)
+            # Broadcast to all agent-mode instances (skip current, already loaded)
             if self._agent_manager:
                 await self._agent_manager.broadcast_package_change_to_single_agents(
                     package_id,
@@ -2364,7 +2538,7 @@ class AutoHarnessService:
                 "runtime_path": package.get("runtime_path", ""),
                 "config_path": config_path,
                 "loaded_resources": loaded_resources,
-                "message": f"扩展已热生效（规划与性能模式），加载资源: {len(loaded_resources)} 项",
+                "message": f"扩展已热生效（agent 模式），加载资源: {len(loaded_resources)} 项",
             }
         except FileNotFoundError as exc:
             raise ValueError(f"配置文件不存在: {exc}") from exc
@@ -2383,7 +2557,7 @@ class AutoHarnessService:
 
         Deactivation flow:
         1. Unload from current agent instance
-        2. Broadcast to all agent.fast/agent.plan instances in the channel
+        2. Broadcast to all agent-mode instances in the channel
         3. Update metadata: remove package_id from active_package_ids list
 
         Args:
@@ -2440,7 +2614,7 @@ class AutoHarnessService:
                     exc,
                 )
 
-        # Broadcast to all agent.fast/agent.plan instances before updating status
+        # Broadcast to all agent-mode instances before updating status
         if self._agent_manager and config_path and Path(config_path).exists():
             await self._agent_manager.broadcast_package_change_to_single_agents(
                 package_id,
@@ -2513,7 +2687,7 @@ class AutoHarnessService:
                         exc,
                     )
 
-            # Broadcast to all agent.fast/agent.plan instances
+            # Broadcast to all agent-mode instances
             if self._agent_manager and config_path and Path(config_path).exists():
                 await self._agent_manager.broadcast_package_change_to_single_agents(
                     package_id,
@@ -2695,6 +2869,16 @@ class AutoHarnessService:
             # Cleanup
             shutil.rmtree(extract_target, ignore_errors=True)
             raise ValueError("Zip must contain harness_config.yaml at root or one level deep")
+
+        # Reject packages that declare mcps / out-of-package paths before they
+        # land in runtime_extensions. See validate_harness_config: mcps spawns
+        # an arbitrary subprocess; an escaped tool/rail/skill path loads an
+        # arbitrary package-outside .py.
+        try:
+            validate_harness_config(config_path, package_dir=extracted_ext_dir)
+        except ValueError:
+            shutil.rmtree(extract_target, ignore_errors=True)
+            raise
 
         # Get extension_name from directory name (prefer config if readable)
         extension_name = extracted_ext_dir.name

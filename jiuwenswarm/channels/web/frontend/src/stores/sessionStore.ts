@@ -1,5 +1,7 @@
 /**
- * 会话状态管理
+ * 会话状态管理（多 session 版本）
+ *
+ * 全局字段保持不变，session 级字段按 session 隔离存储在 runtimes 中。
  */
 
 import { create } from 'zustand';
@@ -13,32 +15,19 @@ import {
   ContextCompressionSummary,
   TeamMemberContextCompressionState,
 } from '../types';
+import {
+  createTaskProgressBaseline,
+  mergeTaskProgressBaseline,
+  registerConfirmedTaskCreation,
+  type TaskProgressBaseline,
+} from '../features/teamTaskProgressBaseline';
+import { stripPlanSuffix } from '../features/planMode/wireMode';
 
-const STORAGE_KEY = 'jiuwenclaw_context_compression';
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
 
-function loadFromStorage() {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
-  } catch (error) {
-    console.error('Error loading context compression from storage:', error);
-  }
-  return null;
-}
-
-function saveToStorage(data: any) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch (error) {
-    console.error('Error saving context compression to storage:', error);
-  }
-}
-
 function loadModeFromStorage(): AgentMode {
+  if (typeof localStorage === 'undefined') return DEFAULT_MODE;
   try {
     const stored = localStorage.getItem(MODE_STORAGE_KEY);
     if (stored) {
@@ -51,6 +40,7 @@ function loadModeFromStorage(): AgentMode {
 }
 
 function saveModeToStorage(mode: AgentMode) {
+  if (typeof localStorage === 'undefined') return;
   try {
     localStorage.setItem(MODE_STORAGE_KEY, mode);
   } catch (error) {
@@ -58,15 +48,20 @@ function saveModeToStorage(mode: AgentMode) {
   }
 }
 
-const DEFAULT_MODE: AgentMode = 'agent.plan';
+const DEFAULT_MODE: AgentMode = 'agent';
 
 function normalizeAgentMode(mode: unknown): AgentMode {
   if (typeof mode !== 'string') return DEFAULT_MODE;
-  const normalized = mode.trim().toLowerCase();
-  if (normalized === 'agent.fast') return 'agent.fast';
-  if (normalized === 'team') return 'team';
+  // 后端 session.mode 可能带 `.plan` 后缀（`agent.plan` / `team.plan.normal` /
+  // `team.plan.code`），先剥掉再归一化。否则 `team.plan.*` 会落进下面的兜底分支
+  // 被误判成单 agent，把团队会话的 runtime mode 覆盖成 agent（setCurrentSession 等
+  // 路径会把归一化结果写回 runtime）。
+  const normalized = stripPlanSuffix(mode.trim().toLowerCase());
+  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
+    return 'team';
+  }
   if (normalized === 'auto_harness') return 'auto_harness';
-  return 'agent.plan';
+  return 'agent';
 }
 
 function normalizeSession(session: Session): Session {
@@ -74,6 +69,42 @@ function normalizeSession(session: Session): Session {
     ...session,
     mode: normalizeAgentMode(session.mode),
   };
+}
+
+/**
+ * 按 `alias || model_name` 在可选模型列表里解析出"实际生效"的模型条目。
+ *
+ * 背景（bug003）：会话记录的 `selectedModelName` 只是一个名字字符串，模型改名/改别名后
+ * 这个字符串可能不再对应任何可选模型。之前 UI 显示（`InputArea.tsx` 的 `ModelSelector`）
+ * 会做兜底匹配，但实际发给后端的 `getEffectiveModelName` 没有做同样的兜底，导致"显示值"
+ * 和"实际请求的 model_name"可能不一致，且旧字符串失配后无法感知。抽成共享函数后两边统一
+ * 走同一次解析，谁都不会再吐出陈旧、未经校验的名字字符串。
+ *
+ * @param chatAvailableModels 当前可选的模型列表（is_default!==false 的模型）
+ * @param selectedModelName 该会话记录的模型名字字符串（可能是改名前的陈旧值）
+ * @param defaultModelName 后端配置的默认模型名字字符串
+ * @returns 解析命中的模型条目；`chatAvailableModels` 为空（模型列表尚未加载）时返回 null
+ */
+export function resolveEffectiveModel(
+  chatAvailableModels: ModelEntry[],
+  selectedModelName: string | null,
+  defaultModelName: string | null,
+): ModelEntry | null {
+  if (chatAvailableModels.length === 0) return null;
+  const displayed = selectedModelName || defaultModelName;
+  // selectedModelName 可能存的是展示名（用户从下拉框选择时存的是 alias），
+  // 也可能存的是真实 API id（后端 session.metadata.model 回传恢复时是
+  // model_name，例如 Zen 免费模型的 "deepseek-v4-flash-free"）。两者都要能
+  // 命中同一个 entry，否则后端回传 model_name 后无法匹配有 alias 的免费
+  // 模型，会回退到 chatAvailableModels[0]（首个配置模型），表现为"对话
+  // 完成后下拉框自动切回配置的模型"。
+  return (
+    chatAvailableModels.find(
+      (m) => m.alias === displayed || m.model_name === displayed,
+    ) ??
+    chatAvailableModels.find((m) => (m.alias || m.model_name) === displayed) ??
+    chatAvailableModels[0]
+  );
 }
 
 const FINAL_EVENT_DUPLICATE_WINDOW_MS = 60_000;
@@ -127,14 +158,6 @@ interface ConnectionStats {
   lastError: string | null;
 }
 
-type HeartbeatState = 'unknown' | 'ok' | 'alert';
-
-interface HeartbeatHistoryItem {
-  message: string;
-  updatedAt: string;
-  status: HeartbeatState;
-}
-
 interface MemoryUsage {
   rssMb: number | null;
   usedPercent: number | null;
@@ -158,14 +181,23 @@ export interface TeamTaskEvent {
   team_name?: string;
   title?: string;
   content?: string;
+  // Truncation observability flags — backend may set these on team.task.created/
+  // updated events when the title/content exceeded the wire limit. Purely
+  // passthrough: the store does not render a badge; the inline marker
+  // `…(truncated, total N chars)` already surfaces truncation to the user.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
   updated_at?: number | string | null;
 }
 
 export type TeamTaskStatus =
   | 'pending'
   | 'blocked'
-  | 'claimed'
-  | 'plan_approved'
+  | 'planning'
+  | 'in_progress'
+  | 'in_review'
   | 'completed'
   | 'cancelled';
 
@@ -179,7 +211,20 @@ export interface TeamTask {
   timestamp?: number;
   skills?: string[];
   files?: string[];
+  // Truncation observability flags — set by the backend on team.task.created/
+  // updated events when title/content exceeded the wire limit. Carried through
+  // the normalize/upsert pipeline; a status-only event MUST NOT reset these
+  // (upsertTeamTask uses `?? existing`). Not rendered as a badge — the inline
+  // marker `…(truncated, total N chars)` already shows truncation.
+  title_truncated?: boolean;
+  title_original_size?: number;
+  content_truncated?: boolean;
+  content_original_size?: number;
 }
+
+// Upsert input: a task event may omit status (e.g. a content-only update).
+// The store then preserves the task's existing status instead of resetting it.
+export type TeamTaskUpsert = Omit<TeamTask, 'status'> & { status?: TeamTaskStatus };
 
 interface TeamMember {
   id: string;
@@ -189,6 +234,19 @@ interface TeamMember {
   name?: string;
   execution_status?: string | null;
   mode?: string;
+  /** TeamRole 值：leader / teammate / human_agent / bridge_agent / worker */
+  role?: string;
+  /** 外部 CLI 后端名（claude / codex / ...），普通成员为空 */
+  cli_agent?: string | null;
+}
+
+/** 增量成员事件里的空字段不得覆盖已知值：返回 next，空则回退 prev。 */
+function keepKnownMemberField(
+  next: string | null | undefined,
+  prev: string | null | undefined
+): string | undefined {
+  if (typeof next === 'string' && next.trim() !== '') return next;
+  return typeof prev === 'string' && prev.trim() !== '' ? prev : undefined;
 }
 
 export type HumanShareStatus = 'pending' | 'joined' | 'left';
@@ -227,90 +285,144 @@ export interface TeamMemberExecutionEvent {
     size?: number;
     mime_type?: string;
     download_url?: string;
+    path?: string;
   }>;
 }
 
-interface SessionState {
-  currentSession: Session | null;
-  sessions: Session[];
+/**
+ * 单个 session 的运行态。
+ * 原 B 类全局字段全部迁移到这里，按 session 隔离。
+ */
+export interface SessionRuntime {
   mode: AgentMode;
-  isConnected: boolean;
-  availableTools: string[];
-  connectionStats: ConnectionStats;
+  selectedModelName: string | null;
+  projectDirectory: string | null;
+  /** 新会话草稿值；真实 Session 创建后由后端 metadata 的权威值覆盖。 */
+  persistSession: boolean;
   contextCompressionRate: number;
   contextCompressionBefore: number | null;
   contextCompressionAfter: number | null;
-  memoryUsage: MemoryUsage;
-  heartbeatState: HeartbeatState;
-  heartbeatMessage: string | null;
-  heartbeatUpdatedAt: string | null;
-  heartbeatHistory: HeartbeatHistoryItem[];
   teamTaskEvents: TeamTaskEvent[];
   teamTasks: TeamTask[];
+  teamTaskProgressBaseline: TaskProgressBaseline;
   teamMembers: TeamMember[];
   teamLeaderMemberIds: string[];
   teamHumanShareCommands: HumanShareCommand[];
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
+  /** 当前会话输入栏已选中的技能名（用于随消息发送） */
+  selectedSkills: string[];
+}
+
+function createEmptyRuntime(): SessionRuntime {
+  return {
+    mode: loadModeFromStorage(),
+    selectedModelName: (() => {
+      if (typeof localStorage === 'undefined') return null;
+      try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
+    })(),
+    projectDirectory: null,
+    persistSession: false,
+    contextCompressionRate: 0,
+    contextCompressionBefore: null,
+    contextCompressionAfter: null,
+    teamTaskEvents: [],
+    teamTasks: [],
+    teamTaskProgressBaseline: createTaskProgressBaseline(),
+    teamMembers: [],
+    teamLeaderMemberIds: [],
+    teamHumanShareCommands: [],
+    teamMemberExecutionEvents: [],
+    teamMemberContextCompression: {},
+    teamHistoryMessages: [],
+    selectedSkills: [],
+  };
+}
+
+interface SessionState {
+  // A 类全局字段
+  currentSession: Session | null;
+  sessions: Session[];
+  isConnected: boolean;
+  availableTools: string[];
+  connectionStats: ConnectionStats;
+  memoryUsage: MemoryUsage;
   availableModels: ModelEntry[];
-  selectedModelName: string | null;
   /** 过滤 is_default=true 的模型，供聊天窗口 ModelSelector 使用 */
   chatAvailableModels: ModelEntry[];
+  /** 后端配置的默认模型（alias 优先），供新建会话取用，不受任何会话手动切换模型影响 */
+  defaultModelName: string | null;
 
-  // Actions
+  // B 类 session 级字段
+  runtimes: Record<string, SessionRuntime>;
+
+  // Runtime 管理方法
+  ensureRuntime: (sessionId: string) => SessionRuntime;
+  getRuntime: (sessionId: string | null) => SessionRuntime | undefined;
+  getEffectiveModelName: (sessionId: string | null) => string | null;
+  removeRuntime: (sessionId: string) => void;
+
+  // A 类 actions（不加 sessionId）
   setCurrentSession: (session: Session | null) => void;
   setSessions: (sessions: Session[]) => void;
   addSession: (session: Session) => void;
   updateSession: (sessionId: string, updates: Partial<Session>) => void;
   removeSession: (sessionId: string) => void;
-  setMode: (mode: AgentMode) => void;
   setConnected: (connected: boolean) => void;
   setAvailableTools: (tools: string[]) => void;
   setConnectionStats: (stats: Partial<ConnectionStats>) => void;
-  setContextCompressionRate: (rate: number) => void;
-  setContextCompressionStats: (stats: Partial<ContextCompressionStats> | null) => void;
+  setContextCompressionStats: (sessionId: string, stats: Partial<ContextCompressionStats> | null) => void;
   setMemoryUsage: (memoryUsage: Partial<MemoryUsage> | null) => void;
-  setHeartbeatStatus: (
-    status: HeartbeatState,
-    message?: string | null,
-    updatedAt?: string | null
-  ) => void;
-  setTeamTaskEvents: (events: TeamTaskEvent[]) => void;
-  addTeamTaskEvent: (event: TeamTaskEvent) => void;
-  setTeamTasks: (tasks: TeamTask[]) => void;
-  upsertTeamTask: (task: TeamTask) => void;
-  updateTeamTask: (taskId: string, patch: Partial<TeamTask>) => void;
-  setTeamMembers: (members: TeamMember[]) => void;
-  setTeamLeaderMemberIds: (memberIds: string[]) => void;
-  addTeamLeaderMemberId: (memberId: string) => void;
-  addTeamMember: (member: TeamMember) => void;
-  updateTeamMemberStatus: (memberId: string, newStatus: string, timestamp?: number) => void;
-  setTeamHumanShareCommands: (commands: HumanShareCommand[]) => void;
-  upsertTeamHumanShareCommand: (command: HumanShareCommand) => void;
+  setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
+  setSelectedModelName: (sessionId: string, name: string) => void;
+
+  // B 类 actions（加 sessionId）
+  setMode: (sessionId: string, mode: AgentMode) => void;
+  setProjectDirectory: (sessionId: string, directory: string | null) => void;
+  setPersistSession: (sessionId: string, enabled: boolean) => void;
+  setTeamTaskEvents: (sessionId: string, events: TeamTaskEvent[]) => void;
+  addTeamTaskEvent: (sessionId: string, event: TeamTaskEvent) => void;
+  setTeamTasks: (sessionId: string, tasks: TeamTask[]) => void;
+  registerConfirmedTeamTaskCreation: (sessionId: string, taskId: string) => void;
+  mergeTeamTaskProgressBaseline: (sessionId: string, baseline: TaskProgressBaseline) => void;
+  upsertTeamTask: (sessionId: string, task: TeamTaskUpsert) => void;
+  updateTeamTask: (sessionId: string, taskId: string, patch: Partial<TeamTask>) => void;
+  setTeamMembers: (sessionId: string, members: TeamMember[]) => void;
+  setTeamLeaderMemberIds: (sessionId: string, memberIds: string[]) => void;
+  addTeamLeaderMemberId: (sessionId: string, memberId: string) => void;
+  /** 输入栏已选技能：追加（去重） */
+  addSelectedSkill: (sessionId: string, skill: string) => void;
+  /** 输入栏已选技能：移除指定项 */
+  removeSelectedSkill: (sessionId: string, skill: string) => void;
+  /** 输入栏已选技能：清空 */
+  clearSelectedSkills: (sessionId: string) => void;
+  addTeamMember: (sessionId: string, member: TeamMember) => void;
+  updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
+  setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
+  upsertTeamHumanShareCommand: (sessionId: string, command: HumanShareCommand) => void;
   updateTeamHumanShareStatus: (
+    sessionId: string,
     memberName: string,
     status: HumanShareStatus,
     patch?: Partial<HumanShareCommand>
   ) => void;
-  setTeamMemberExecutionEvents: (events: TeamMemberExecutionEvent[]) => void;
-  addTeamMemberExecutionEvent: (event: TeamMemberExecutionEvent) => void;
+  setTeamMemberExecutionEvents: (sessionId: string, events: TeamMemberExecutionEvent[]) => void;
+  addTeamMemberExecutionEvent: (sessionId: string, event: TeamMemberExecutionEvent) => void;
   setTeamMemberContextCompressionStatus: (
+    sessionId: string,
     memberId: string,
     runtime?: ContextCompressionRuntime,
     summary?: ContextCompressionSummary
   ) => void;
-  clearTeamMemberContextCompressionStatus: (memberId: string) => void;
-  clearAllTeamMemberContextCompressionStatus: () => void;
-  setTeamHistoryMessages: (messages: Message[]) => void;
-  setAvailableModels: (models: ModelEntry[], activeModel?: string) => void;
-  setSelectedModelName: (name: string) => void;
+  clearTeamMemberContextCompressionStatus: (sessionId: string, memberId: string) => void;
+  clearAllTeamMemberContextCompressionStatus: (sessionId: string) => void;
+  setTeamHistoryMessages: (sessionId: string, messages: Message[]) => void;
 }
 
-export const useSessionStore = create<SessionState>((set) => ({
+export const useSessionStore = create<SessionState>((set, get) => ({
   currentSession: null,
   sessions: [],
-  mode: loadModeFromStorage(),
   isConnected: false,
   availableTools: [],
   connectionStats: {
@@ -318,41 +430,79 @@ export const useSessionStore = create<SessionState>((set) => ({
     inflight: 0,
     lastError: null,
   },
-  contextCompressionRate: loadFromStorage()?.rate || 0,
-  contextCompressionBefore: loadFromStorage()?.beforeCompressed || null,
-  contextCompressionAfter: loadFromStorage()?.afterCompressed || null,
   memoryUsage: {
     rssMb: null,
     usedPercent: null,
   },
-  heartbeatState: 'unknown',
-  heartbeatMessage: null,
-  heartbeatUpdatedAt: null,
-  heartbeatHistory: [],
-  teamTaskEvents: [],
-  teamTasks: [],
-  teamMembers: [],
-  teamLeaderMemberIds: [],
-  teamHumanShareCommands: [],
-  teamMemberExecutionEvents: [],
-  teamMemberContextCompression: {},
-  teamHistoryMessages: [],
   availableModels: [],
   chatAvailableModels: [],
-  selectedModelName: (() => {
-    try { return localStorage.getItem(MODEL_STORAGE_KEY); } catch { return null; }
-  })(),
+  defaultModelName: null,
+  runtimes: {},
+
+  ensureRuntime: (sessionId) => {
+    const existing = get().runtimes[sessionId];
+    if (existing) return existing;
+    const runtime = createEmptyRuntime();
+    set((state) => ({
+      runtimes: { ...state.runtimes, [sessionId]: runtime },
+    }));
+    return runtime;
+  },
+
+  getRuntime: (sessionId) => {
+    if (!sessionId) return undefined;
+    return get().runtimes[sessionId];
+  },
+
+  getEffectiveModelName: (sessionId) => {
+    if (!sessionId) return null;
+    const state = get();
+    const runtime = state.runtimes[sessionId];
+    if (!runtime) return null;
+    if (runtime.mode === 'team') return state.defaultModelName;
+    // 不再原样吐出 runtime.selectedModelName（可能是模型改名后失配的陈旧字符串），
+    // 而是走与 UI 显示（ModelSelector）相同的解析逻辑，确保发给后端的 model_name
+    // 参数与界面上显示的模型永远指向同一个 entry（bug003）。
+    //
+    // 注意：这里返回的是 model_name 而非 alias。后端 _model_cache 以 model_name 为
+    // key 查找（包括 Zen 免费模型如 "laguna-s-2.1-free"）；alias 只是展示名（如
+    // "Laguna S 2.1"），后端无法据此解析，会回退到默认模型。
+    const resolved = resolveEffectiveModel(
+      state.chatAvailableModels,
+      runtime.selectedModelName,
+      state.defaultModelName,
+    );
+    return resolved ? resolved.model_name : runtime.selectedModelName;
+  },
+
+  removeRuntime: (sessionId) => {
+    set((state) => {
+      const next = { ...state.runtimes };
+      delete next[sessionId];
+      return { runtimes: next };
+    });
+  },
 
   setCurrentSession: (session) => {
     const normalizedSession = session ? normalizeSession(session) : null;
-    set((state) => ({
-      currentSession: normalizedSession,
-      mode: normalizedSession?.mode || state.mode,
-      teamHistoryMessages:
-        normalizedSession && normalizedSession.session_id === state.currentSession?.session_id
-          ? state.teamHistoryMessages
-          : [],
-    }));
+    set((state) => {
+      if (!normalizedSession) {
+        return { currentSession: null };
+      }
+      const sessionId = normalizedSession.session_id;
+      const existingRuntime = state.runtimes[sessionId];
+      const baseRuntime = existingRuntime || createEmptyRuntime();
+      const nextRuntime: SessionRuntime = {
+        ...baseRuntime,
+        mode: normalizedSession.mode || baseRuntime.mode,
+        persistSession: normalizedSession.persist_session === true,
+        teamHistoryMessages: baseRuntime.teamHistoryMessages,
+      };
+      return {
+        currentSession: normalizedSession,
+        runtimes: { ...state.runtimes, [sessionId]: nextRuntime },
+      };
+    });
   },
 
   setSessions: (sessions) => {
@@ -391,10 +541,45 @@ export const useSessionStore = create<SessionState>((set) => ({
     }));
   },
 
-  setMode: (mode) => {
+  setMode: (sessionId, mode) => {
     const normalizedMode = normalizeAgentMode(mode);
     saveModeToStorage(normalizedMode);
-    set({ mode: normalizedMode });
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, mode: normalizedMode },
+        },
+      };
+    });
+  },
+
+  setProjectDirectory: (sessionId, directory) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, projectDirectory: directory },
+        },
+      };
+    });
+  },
+
+  setPersistSession: (sessionId, enabled) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, persistSession: Boolean(enabled) },
+        },
+      };
+    });
   },
 
   setConnected: (connected) => {
@@ -414,19 +599,15 @@ export const useSessionStore = create<SessionState>((set) => ({
     }));
   },
 
-  setContextCompressionRate: (rate) => {
-    const normalizedRate = Number.isFinite(rate) ? Math.min(Math.max(rate, 0), 100) : 0;
-    set({ contextCompressionRate: Number(normalizedRate.toFixed(1)) });
-  },
-
-  setContextCompressionStats: (stats) => {
+  setContextCompressionStats: (sessionId, stats) => {
     if (!stats) {
-      set({
-        contextCompressionRate: 0,
-        contextCompressionBefore: null,
-        contextCompressionAfter: null,
+      set((state) => {
+        const runtime = state.runtimes[sessionId];
+        if (!runtime) return state;
+        return { runtimes: { ...state.runtimes, [sessionId]: {
+          ...runtime, contextCompressionRate: 0, contextCompressionBefore: null, contextCompressionAfter: null,
+        } } };
       });
-      saveToStorage(null);
       return;
     }
 
@@ -443,19 +624,16 @@ export const useSessionStore = create<SessionState>((set) => ({
         ? Math.max(Math.round(stats.afterCompressed), 0)
         : null;
 
-    const contextCompressionData = {
-      rate: normalizedRate,
-      beforeCompressed: normalizedBefore,
-      afterCompressed: normalizedAfter
-    };
-
-    set({
-      contextCompressionRate: normalizedRate,
-      contextCompressionBefore: normalizedBefore,
-      contextCompressionAfter: normalizedAfter,
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: {
+        ...runtime,
+        contextCompressionRate: normalizedRate,
+        contextCompressionBefore: normalizedBefore,
+        contextCompressionAfter: normalizedAfter,
+      } } };
     });
-
-    saveToStorage(contextCompressionData);
   },
 
   setMemoryUsage: (memoryUsage) => {
@@ -486,78 +664,171 @@ export const useSessionStore = create<SessionState>((set) => ({
     });
   },
 
-  setHeartbeatStatus: (status, message = null, updatedAt) => {
+  setTeamTaskEvents: (sessionId, events) => {
     set((state) => {
-      const resolvedUpdatedAt = updatedAt === undefined ? new Date().toISOString() : updatedAt;
-      const shouldClearHistory = message == null && updatedAt === null;
-      const nextHistory = shouldClearHistory
-        ? []
-        : (message
-          ? [{ message, updatedAt: resolvedUpdatedAt ?? new Date().toISOString(), status }, ...state.heartbeatHistory]
-              .slice(0, 20)
-          : state.heartbeatHistory);
-
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       return {
-        heartbeatState: status,
-        heartbeatMessage: message,
-        heartbeatUpdatedAt: resolvedUpdatedAt,
-        heartbeatHistory: nextHistory,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskEvents: events },
+        },
       };
     });
   },
-  setTeamTaskEvents: (events) => {
-    set({ teamTaskEvents: events });
-  },
-  addTeamTaskEvent: (event) => {
+
+  addTeamTaskEvent: (sessionId, event) => {
     set((state) => {
-      const existingIndex = state.teamTaskEvents.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTaskEvents.findIndex(
         (e) => e.task_id === event.task_id
       );
       if (existingIndex >= 0) {
-        const updatedEvents = [...state.teamTaskEvents];
+        const updatedEvents = [...runtime.teamTaskEvents];
         updatedEvents[existingIndex] = {
           ...updatedEvents[existingIndex],
           ...event,
         };
-        return { teamTaskEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamTaskEvents: updatedEvents },
+          },
+        };
       }
-      return { teamTaskEvents: [event, ...state.teamTaskEvents] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskEvents: [event, ...runtime.teamTaskEvents] },
+        },
+      };
     });
   },
-  setTeamTasks: (tasks) => {
-    set({ teamTasks: tasks });
-  },
-  upsertTeamTask: (task) => {
+
+  setTeamTasks: (sessionId, tasks) => {
     set((state) => {
-      const existingIndex = state.teamTasks.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamTasks: tasks,
+            teamTaskProgressBaseline: tasks.length === 0
+              ? createTaskProgressBaseline()
+              : runtime.teamTaskProgressBaseline,
+          },
+        },
+      };
+    });
+  },
+
+  registerConfirmedTeamTaskCreation: (sessionId, taskId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const baseline = registerConfirmedTaskCreation(
+        runtime.teamTasks,
+        runtime.teamTaskProgressBaseline,
+        taskId
+      );
+      if (baseline === runtime.teamTaskProgressBaseline) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTaskProgressBaseline: baseline },
+        },
+      };
+    });
+  },
+
+  mergeTeamTaskProgressBaseline: (sessionId, restoredBaseline) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamTaskProgressBaseline: mergeTaskProgressBaseline(
+              runtime.teamTaskProgressBaseline,
+              restoredBaseline
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  upsertTeamTask: (sessionId, task) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTasks.findIndex(
         (item) => item.task_id === task.task_id
       );
       if (existingIndex >= 0) {
-        const updatedTasks = [...state.teamTasks];
+        const existing = runtime.teamTasks[existingIndex];
+        const updatedTasks = [...runtime.teamTasks];
         updatedTasks[existingIndex] = {
-          ...updatedTasks[existingIndex],
+          ...existing,
           ...task,
-          title: task.title ?? updatedTasks[existingIndex].title,
-          content: task.content ?? updatedTasks[existingIndex].content,
-          assignee: task.assignee ?? updatedTasks[existingIndex].assignee,
-          team_id: task.team_id ?? updatedTasks[existingIndex].team_id,
-          skills: task.skills ?? updatedTasks[existingIndex].skills,
-          files: task.files ?? updatedTasks[existingIndex].files,
+          // An event without an explicit status (e.g. a content-only update)
+          // must not reset the task; keep the existing status.
+          status: task.status ?? existing.status,
+          title: task.title ?? existing.title,
+          content: task.content ?? existing.content,
+          assignee: task.assignee ?? existing.assignee,
+          team_id: task.team_id ?? existing.team_id,
+          skills: task.skills ?? existing.skills,
+          files: task.files ?? existing.files,
+          // Truncation flags: a status-only event carries none, so `?? existing`
+          // preserves whatever a prior created/updated event set. NEVER reset
+          // these to false/undefined on a status-only upsert.
+          title_truncated: task.title_truncated ?? existing.title_truncated,
+          title_original_size: task.title_original_size ?? existing.title_original_size,
+          content_truncated: task.content_truncated ?? existing.content_truncated,
+          content_original_size: task.content_original_size ?? existing.content_original_size,
         };
-        return { teamTasks: updatedTasks };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamTasks: updatedTasks },
+          },
+        };
       }
-      return { teamTasks: [task, ...state.teamTasks] };
+      // New card: a status-only event may arrive before the created event,
+      // leaving an empty title. Fall back to a placeholder built from the
+      // task_id tail so the card is not rendered with a bare empty title
+      // (matches the precedent in features/teamHistoryPanelRestore.ts upsertTask).
+      return {
+       runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTasks: [{
+            ...task,
+            status: task.status ?? 'pending',
+            title: task.title ?? `任务 ${String(task.task_id || '').slice(-6)}`,
+          }, ...runtime.teamTasks],
+      },
+        },
+      };
     });
   },
-  updateTeamTask: (taskId, patch) => {
+
+  updateTeamTask: (sessionId, taskId, patch) => {
     set((state) => {
-      const existingIndex = state.teamTasks.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamTasks.findIndex(
         (task) => task.task_id === taskId
       );
       if (existingIndex < 0) {
         return state;
       }
-      const updatedTasks = [...state.teamTasks];
+      const updatedTasks = [...runtime.teamTasks];
       updatedTasks[existingIndex] = {
         ...updatedTasks[existingIndex],
         ...patch,
@@ -568,85 +839,204 @@ export const useSessionStore = create<SessionState>((set) => ({
         skills: patch.skills ?? updatedTasks[existingIndex].skills,
         files: patch.files ?? updatedTasks[existingIndex].files,
       };
-      return { teamTasks: updatedTasks };
-    });
-  },
-  setTeamMembers: (members) => {
-    set((state) => {
-      const memberIds = new Set(members.map((member) => member.member_id));
-      const nextCompression = Object.fromEntries(
-        Object.entries(state.teamMemberContextCompression).filter(([memberId]) => memberIds.has(memberId))
-      );
       return {
-        teamMembers: members,
-        teamMemberContextCompression: nextCompression,
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamTasks: updatedTasks },
+        },
       };
     });
   },
-  setTeamLeaderMemberIds: (memberIds) => {
+
+  setTeamMembers: (sessionId, members) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const memberIds = new Set(members.map((member) => member.member_id));
+      const nextCompression = Object.fromEntries(
+        Object.entries(runtime.teamMemberContextCompression).filter(([memberId]) => memberIds.has(memberId))
+      );
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamMembers: members,
+            teamMemberContextCompression: nextCompression,
+          },
+        },
+      };
+    });
+  },
+
+  setTeamLeaderMemberIds: (sessionId, memberIds) => {
     const normalized = Array.from(
       new Set(memberIds.map((memberId) => memberId.trim()).filter(Boolean))
     );
-    set({ teamLeaderMemberIds: normalized });
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamLeaderMemberIds: normalized },
+        },
+      };
+    });
   },
-  addTeamLeaderMemberId: (memberId) => {
+
+  addTeamLeaderMemberId: (sessionId, memberId) => {
     const normalized = memberId.trim();
     if (!normalized) return;
     set((state) => {
-      if (state.teamLeaderMemberIds.includes(normalized)) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.teamLeaderMemberIds.includes(normalized)) {
         return state;
       }
-      return { teamLeaderMemberIds: [...state.teamLeaderMemberIds, normalized] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamLeaderMemberIds: [...runtime.teamLeaderMemberIds, normalized] },
+        },
+      };
     });
   },
-  addTeamMember: (member) => {
+
+  addSelectedSkill: (sessionId, skill) => {
+    const normalized = skill.trim();
+    if (!normalized) return;
     set((state) => {
-      const existingIndex = state.teamMembers.findIndex(
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.selectedSkills.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: [...runtime.selectedSkills, normalized] },
+        },
+      };
+    });
+  },
+
+  removeSelectedSkill: (sessionId, skill) => {
+    const normalized = skill.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.selectedSkills.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: runtime.selectedSkills.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearSelectedSkills: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.selectedSkills.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, selectedSkills: [] },
+        },
+      };
+    });
+  },
+
+  addTeamMember: (sessionId, member) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamMembers.findIndex(
         (m) => m.member_id === member.member_id
       );
       if (existingIndex >= 0) {
-        const updatedMembers = [...state.teamMembers];
+        const updatedMembers = [...runtime.teamMembers];
         const existingMember = updatedMembers[existingIndex];
+        // 每类成员事件只带自己关心的字段（如 team.member.spawned 不带 name），
+        // 直接展开覆盖会把已知的展示名/模式抹成 undefined，界面就退回显示
+        // member_id。空值一律不覆盖已有值，规则同 ToolPanel 的 mergeById。
         updatedMembers[existingIndex] = {
           ...existingMember,
           ...member,
-          status:
-            typeof member.status === 'string' && member.status.trim() !== ''
-              ? member.status
-              : existingMember.status,
+          name: keepKnownMemberField(member.name, existingMember.name),
+          status: keepKnownMemberField(member.status, existingMember.status) ?? '',
+          execution_status: keepKnownMemberField(
+            member.execution_status,
+            existingMember.execution_status
+          ),
+          mode: keepKnownMemberField(member.mode, existingMember.mode),
+          role: keepKnownMemberField(member.role, existingMember.role),
+          cli_agent: keepKnownMemberField(member.cli_agent, existingMember.cli_agent),
         };
-        return { teamMembers: updatedMembers };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMembers: updatedMembers },
+          },
+        };
       }
-      return { teamMembers: [member, ...state.teamMembers] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMembers: [member, ...runtime.teamMembers] },
+        },
+      };
     });
   },
-  updateTeamMemberStatus: (memberId, newStatus, timestamp) => {
+
+  updateTeamMemberStatus: (sessionId, memberId, newStatus, timestamp) => {
     set((state) => {
-      const existingIndex = state.teamMembers.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamMembers.findIndex(
         (m) => m.member_id === memberId
       );
       if (existingIndex >= 0) {
-        const updatedMembers = [...state.teamMembers];
+        const updatedMembers = [...runtime.teamMembers];
         updatedMembers[existingIndex] = {
           ...updatedMembers[existingIndex],
           status: newStatus,
           timestamp: timestamp || Date.now(),
         };
-        return { teamMembers: updatedMembers };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMembers: updatedMembers },
+          },
+        };
       }
       return state;
     });
   },
-  setTeamHumanShareCommands: (commands) => {
-    set({ teamHumanShareCommands: commands });
-  },
-  upsertTeamHumanShareCommand: (command) => {
+
+  setTeamHumanShareCommands: (sessionId, commands) => {
     set((state) => {
-      const existingIndex = state.teamHumanShareCommands.findIndex(
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamHumanShareCommands: commands },
+        },
+      };
+    });
+  },
+
+  upsertTeamHumanShareCommand: (sessionId, command) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const existingIndex = runtime.teamHumanShareCommands.findIndex(
         (item) => item.memberName === command.memberName && item.sessionId === command.sessionId
       );
       if (existingIndex >= 0) {
-        const updated = [...state.teamHumanShareCommands];
+        const updated = [...runtime.teamHumanShareCommands];
         const existing = updated[existingIndex];
         updated[existingIndex] = {
           ...existing,
@@ -661,99 +1051,188 @@ export const useSessionStore = create<SessionState>((set) => ({
               ? existing.status
               : command.status,
         };
-        return { teamHumanShareCommands: updated };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamHumanShareCommands: updated },
+          },
+        };
       }
-      return { teamHumanShareCommands: [...state.teamHumanShareCommands, command] };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: [...runtime.teamHumanShareCommands, command],
+          },
+        },
+      };
     });
   },
-  updateTeamHumanShareStatus: (memberName, status, patch = {}) => {
+
+  updateTeamHumanShareStatus: (sessionId, memberName, status, patch = {}) => {
     const normalizedMemberName = memberName.trim();
     if (!normalizedMemberName) return;
-    set((state) => ({
-      teamHumanShareCommands: state.teamHumanShareCommands.map((command) =>
-        command.memberName === normalizedMemberName
-          ? {
-              ...command,
-              ...patch,
-              status,
-              updatedAt: Date.now(),
-            }
-          : command
-      ),
-    }));
-  },
-  setTeamMemberExecutionEvents: (events) => {
-    set({ teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) });
-  },
-  addTeamMemberExecutionEvent: (event) => {
     set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            teamHumanShareCommands: runtime.teamHumanShareCommands.map((command) =>
+              command.memberName === normalizedMemberName
+                ? {
+                    ...command,
+                    ...patch,
+                    status,
+                    updatedAt: Date.now(),
+                  }
+                : command
+            ),
+          },
+        },
+      };
+    });
+  },
+
+  setTeamMemberExecutionEvents: (sessionId, events) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberExecutionEvents: dedupeTeamMemberExecutionEvents(events).slice(0, 300) },
+        },
+      };
+    });
+  },
+
+  addTeamMemberExecutionEvent: (sessionId, event) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
       const eventPatch = Object.fromEntries(
         Object.entries(event).filter(([, value]) => value !== undefined)
       ) as TeamMemberExecutionEvent;
-      const duplicateIndex = state.teamMemberExecutionEvents.findIndex(
+      const duplicateIndex = runtime.teamMemberExecutionEvents.findIndex(
         (item) => isDuplicateFinalExecutionEvent(item, eventPatch)
       );
       if (duplicateIndex >= 0) {
-        const updatedEvents = [...state.teamMemberExecutionEvents];
+        const updatedEvents = [...runtime.teamMemberExecutionEvents];
         updatedEvents[duplicateIndex] = {
           ...updatedEvents[duplicateIndex],
           ...eventPatch,
           id: updatedEvents[duplicateIndex].id,
           timestamp: Math.min(updatedEvents[duplicateIndex].timestamp || eventPatch.timestamp, eventPatch.timestamp),
         };
-        return { teamMemberExecutionEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMemberExecutionEvents: updatedEvents },
+          },
+        };
       }
-      const existingIndex = state.teamMemberExecutionEvents.findIndex(
+      const existingIndex = runtime.teamMemberExecutionEvents.findIndex(
         (item) => item.id === event.id
       );
       if (existingIndex >= 0) {
-        const updatedEvents = [...state.teamMemberExecutionEvents];
+        const updatedEvents = [...runtime.teamMemberExecutionEvents];
         updatedEvents[existingIndex] = {
           ...updatedEvents[existingIndex],
           ...eventPatch,
         };
-        return { teamMemberExecutionEvents: updatedEvents };
+        return {
+          runtimes: {
+            ...state.runtimes,
+            [sessionId]: { ...runtime, teamMemberExecutionEvents: updatedEvents },
+          },
+        };
       }
       return {
-        teamMemberExecutionEvents: [eventPatch, ...state.teamMemberExecutionEvents].slice(0, 300),
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberExecutionEvents: [eventPatch, ...runtime.teamMemberExecutionEvents].slice(0, 300) },
+        },
       };
     });
   },
-  setTeamMemberContextCompressionStatus: (memberId, runtime, summary) => {
+
+  setTeamMemberContextCompressionStatus: (sessionId, memberId, runtimeState, summary) => {
     const normalizedMemberId = memberId.trim();
     if (!normalizedMemberId) return;
     set((state) => {
-      const next = { ...state.teamMemberContextCompression };
-      if (!runtime && !summary) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      const next = { ...runtime.teamMemberContextCompression };
+      if (!runtimeState && !summary) {
         delete next[normalizedMemberId];
       } else {
         const existing = next[normalizedMemberId];
-        next[normalizedMemberId] = { runtime, summary: summary ?? existing?.summary };
+        next[normalizedMemberId] = { runtime: runtimeState, summary: summary ?? existing?.summary };
       }
-      return { teamMemberContextCompression: next };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: next },
+        },
+      };
     });
   },
-  clearTeamMemberContextCompressionStatus: (memberId) => {
+
+  clearTeamMemberContextCompressionStatus: (sessionId, memberId) => {
     const normalizedMemberId = memberId.trim();
     if (!normalizedMemberId) return;
     set((state) => {
-      if (!state.teamMemberContextCompression[normalizedMemberId]) {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime?.teamMemberContextCompression[normalizedMemberId]) {
         return state;
       }
-      const next = { ...state.teamMemberContextCompression };
+      const next = { ...runtime.teamMemberContextCompression };
       delete next[normalizedMemberId];
-      return { teamMemberContextCompression: next };
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: next },
+        },
+      };
     });
   },
-  clearAllTeamMemberContextCompressionStatus: () => {
-    set({ teamMemberContextCompression: {} });
+
+  clearAllTeamMemberContextCompressionStatus: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamMemberContextCompression: {} },
+        },
+      };
+    });
   },
-  setTeamHistoryMessages: (messages) => {
-    set({ teamHistoryMessages: messages });
+
+  setTeamHistoryMessages: (sessionId, messages) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, teamHistoryMessages: messages },
+        },
+      };
+    });
   },
+
   setAvailableModels: (models, activeModel) => {
     set(() => {
-      const chatModels = models.filter((m) => m.is_default !== false);
+      const defaultModels = models.filter((m) => m.is_default !== false);
+      // 过滤为空时回退到全量列表，保证聊天下拉框始终有可选项（例如用户自配模型
+      // 均未设为 is_default、且关闭了 Opencode Zen 免费模型时，不至于无模型可选）。
+      const chatModels = defaultModels.length > 0 ? defaultModels : models;
       // 优先使用后端返回的 activeModel（默认模型），其次取第一个；有别名时存别名
       const matchedModel = activeModel ? chatModels.find((m) => m.model_name === activeModel) : null;
       const selected = matchedModel
@@ -762,11 +1241,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (selected) {
         try { localStorage.setItem(MODEL_STORAGE_KEY, selected); } catch { /* noop */ }
       }
-      return { availableModels: models, chatAvailableModels: chatModels, selectedModelName: selected };
+      return { availableModels: models, chatAvailableModels: chatModels, defaultModelName: selected };
     });
   },
-  setSelectedModelName: (name) => {
-    try { localStorage.setItem(MODEL_STORAGE_KEY, name); } catch { /* noop */ }
-    set({ selectedModelName: name });
+
+  setSelectedModelName: (sessionId, name) => {
+    // 注意：这里只更新当次会话的内存态，不再写 MODEL_STORAGE_KEY——
+    // 该 key 专门保存后端配置的默认模型（见 setAvailableModels），
+    // 用户手动切模型不应污染"默认模型"这个标记，否则新建会话会继承到"最后用过的模型"。
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return { runtimes: { ...state.runtimes, [sessionId]: { ...runtime, selectedModelName: name } } };
+    });
   },
 }));

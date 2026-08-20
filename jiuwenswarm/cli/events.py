@@ -7,22 +7,23 @@ from __future__ import annotations
 from typing import Any
 
 
+def is_content_final(payload: dict[str, Any]) -> bool:
+    """Return whether a chat.final envelope carries the assistant answer."""
+    inner = payload.get("event_type", "")
+    return not inner or inner == "chat.final"
+
+
 def is_terminal_event(event_type: str, payload: dict[str, Any]) -> bool:
     if event_type == "chat.error":
         return True
     if event_type == "chat.final":
         inner = payload.get("event_type", "")
-        if inner == "keepalive":
-            return False
-        # Team control events (team.runtime_ready, team.completed) are
-        # broadcast through the chat.final envelope because they lack an
-        # EventType enum mapping on the gateway side. They are NOT terminal —
-        # the real round-complete signal is
-        # chat.processing_status(is_processing=False). team.error is the
-        # exception: it indicates a failed team stream and should terminate.
-        if isinstance(inner, str) and inner.startswith("team."):
-            return inner == "team.error"
-        return True
+        if inner == "team.error":
+            return True
+        # Gateway uses chat.final as a compatibility envelope for event types
+        # without an EventType mapping (team.runtime_ready, chat.llm_usage,
+        # keepalive, etc.). Those control events do not end the response.
+        return is_content_final(payload)
     if event_type == "chat.processing_status":
         if not payload.get("is_processing", True):
             return True

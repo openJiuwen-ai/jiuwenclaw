@@ -1,11 +1,10 @@
 import type { AppSnapshot } from "../app-state.js";
-import { isTeamMode } from "../core/modes.js";
-import { renderMiniTeamTree, renderTeamPanel } from "./components/team-panel.js";
+import { formatModeForDisplay, isTeamMode } from "../core/modes.js";
+import { renderTeamPanel } from "./components/team-panel.js";
 import { isTeamWorking } from "./components/team-shared.js";
-import { renderTeamStatusPill } from "./components/team-status-pill.js";
 import { renderTodoList } from "./components/todo-list.js";
 import { APP_SCREEN_KEY_BINDINGS } from "./keymap.js";
-import { padToWidth, renderWrappedText } from "./rendering/text.js";
+import { padToWidth, renderStyledMarkdownLines, renderWrappedText } from "./rendering/text.js";
 import { palette } from "./theme.js";
 import { buildTranscriptLines } from "./transcript-renderer.js";
 import { loadTuiConfig } from "../core/tui-config-store.js";
@@ -36,6 +35,8 @@ export interface ScreenLayoutOptions {
   btwOverlayIndex?: number;
   /** btw 历史总数 */
   btwOverlayTotal?: number;
+  /** 替换 transcript 区域的 overlay 内容（如 chat 内 H 打开的 pending 面板） */
+  overlayTranscriptLines?: string[];
 }
 
 function formatSubtaskStatus(status: string): string {
@@ -131,7 +132,11 @@ function connectionStatusLabel(status: AppSnapshot["connectionStatus"]): string 
 }
 
 function isPlanMode(mode: AppSnapshot["mode"]): boolean {
-  return mode === "agent.plan" || mode === "code.plan" || mode === "team.plan";
+  return (
+    mode === "agent.plan" ||
+    mode === "code.plan" ||
+    mode.startsWith("team.plan")
+  );
 }
 
 function buildStatusLines(
@@ -151,7 +156,7 @@ function buildStatusLines(
     const displayTitle = raw.length > 30 ? raw.slice(0, 30) + "..." : raw;
     left.push(displayTitle);
   }
-  left.push(`mode:${snapshot.mode}`);
+  left.push(`mode:${formatModeForDisplay(snapshot.mode)}`);
   if (isPlanMode(snapshot.mode)) left.push("使用 /mode 退出plan模式");
   if (snapshot.transcriptFoldMode !== "none") left.push(`fold:${snapshot.transcriptFoldMode}`);
   const teamWorking =
@@ -254,9 +259,9 @@ function renderBtwOverlay(
     };
   }
 
-  const answerLines = overlay.answer
-    .split("\n")
-    .flatMap((line) => renderWrappedText(safeWidth, line, palette.text.secondary));
+  const answerLines = renderStyledMarkdownLines(safeWidth, overlay.answer, {
+    color: palette.text.secondary,
+  });
   const maxOffset = Math.max(0, answerLines.length - bodyHeight);
   const offset = Math.min(maxOffset, Math.max(0, Math.floor(scrollOffset)));
   const visibleAnswerLines = answerLines.slice(offset, offset + bodyHeight);
@@ -269,12 +274,12 @@ function renderBtwOverlay(
   const showHistory = total > 1;
   const posLabel = showHistory ? `${(overlayIndex ?? 0) + 1}/${total}` : "";
   // 用数组拼接避免尾部多余管道符（不可滚动分支末尾不再出现 " | "）
-  const hintParts = ["Esc dismiss"];
+  const hintParts = ["Esc/Enter/Space/ctrl+c dismiss"];
   if (showHistory) hintParts.push(`←/→ history ${posLabel}`);
   hintParts.push("c copy");
   hintParts.push("x delete");
   if (answerLines.length > bodyHeight) {
-    hintParts.push("↑/↓ scroll", "PgUp/PgDn page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
+    hintParts.push("↑/↓ scroll", "PgUp/PgDn·ctrl+p/n page", `${rangeStart}-${rangeEnd}/${answerLines.length}`);
   }
   const scrollHint = hintParts.join(" | ");
 
@@ -295,6 +300,19 @@ function buildShortcutLines(width: number): string[] {
     " ".repeat(width),
   ];
   return lines;
+}
+
+function renderBtwLoading(width: number, question: string, animationPhase: number): string[] {
+  const pulseTone = [
+    palette.text.dim,
+    palette.text.secondary,
+    palette.text.accent,
+    palette.text.secondary,
+  ][animationPhase % 4]!;
+  return renderWrappedText(
+    width,
+    `${pulseTone("●")} ${palette.text.dim(`Answering: ${question} (Esc to cancel)`)}`,
+  );
 }
 
 export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayoutOptions): string[] {
@@ -319,30 +337,26 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
   // "Working" animation always stays at the screen bottom for visual prominence.
   const effectiveStatusLines = statusLines;
 
-  const transcriptLines = buildTranscriptLines(
-    snapshot,
-    options.width,
-    options.showFullThinking,
-    options.showToolDetails,
-    options.animationPhase,
-    options.pendingInput,
-    options.pendingInputBaseline,
-  );
+  const transcriptLines =
+    options.overlayTranscriptLines ??
+    buildTranscriptLines(
+      snapshot,
+      options.width,
+      options.showFullThinking,
+      options.showToolDetails,
+      options.animationPhase,
+      options.pendingInput,
+      options.pendingInputBaseline,
+    );
   const todoLines = renderTodoList(snapshot.todos, options.width, options.todosCollapsed, options.animationPhase);
   const hasTeamActivity =
     isTeamMode(snapshot.mode) ||
     snapshot.teamMemberEvents.length > 0 ||
     snapshot.teamTaskEvents.length > 0 ||
     snapshot.teamMessageEvents.length > 0;
-  const teamStatusLines =
-    hasTeamActivity
-      ? renderTeamStatusPill(
-          snapshot.teamMemberEvents,
-          snapshot.teamTaskEvents,
-          snapshot.teamMessageEvents,
-          options.width,
-        )
-      : [];
+  // Team events remain in the session after a task or mode switch. Keep them
+  // out of the main composer area and render details only when the user opens
+  // the Team panel explicitly with Ctrl+G.
   const teamPanelLines =
     options.showTeamPanel && hasTeamActivity
       ? renderTeamPanel(
@@ -354,25 +368,15 @@ export function buildAppScreenLines(snapshot: AppSnapshot, options: ScreenLayout
           options.viewedTeamMemberId,
         )
       : [];
-  const miniTeamTreeLines =
-    !options.showTeamPanel && hasTeamActivity
-      ? renderMiniTeamTree(
-          snapshot.teamMemberEvents,
-          snapshot.teamTaskEvents,
-          snapshot.teamMessageEvents,
-          options.width,
-        )
-      : [];
+  const btwLoadingLines = snapshot.btwPendingQuestion
+    ? renderBtwLoading(options.width, snapshot.btwPendingQuestion, options.animationPhase)
+    : [];
   const fixedLinesBeforeBtw = [
     ...todoLines,
-    ...(todoLines.length > 0 &&
-    (teamStatusLines.length > 0 || miniTeamTreeLines.length > 0 || teamPanelLines.length > 0)
-      ? [" ".repeat(options.width)]
-      : []),
-    ...teamStatusLines,
-    ...miniTeamTreeLines,
+    ...(todoLines.length > 0 && teamPanelLines.length > 0 ? [" ".repeat(options.width)] : []),
     ...teamPanelLines,
     ...options.questionLines,
+    ...btwLoadingLines,
   ];
   const fixedLinesAfterBtw = [
     ...options.editorLines,

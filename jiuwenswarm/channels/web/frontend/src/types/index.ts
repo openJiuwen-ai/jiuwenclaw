@@ -2,16 +2,30 @@
  * 类型导出
  */
 
+export * from './goal';
 export * from './message';
 export * from './skillTree';
+export * from './beamSearch';
 export * from './todo';
 export * from './websocket';
+export * from '../features/workspace/projectTypes';
 
 // 会话类型
 export interface Session {
   session_id: string;
   title: string;
-  project_path: string;
+  project_id: string;
+  project_dir: string;
+  /** Session 创建时锁定；true 表示启用 Persist Session，创建后不可修改。 */
+  persist_session?: boolean;
+  work_mode?: import('../features/workspace/projectTypes').WorkMode;
+  pinned?: boolean;
+  pin_order?: number;
+  renamed_at?: string | null;
+  display_title?: string | null;
+  is_custom_title?: boolean;
+  title_source?: 'auto' | 'user';
+  model?: string;
   mode: AgentMode;
   status: SessionStatus;
   message_count: number;
@@ -26,10 +40,12 @@ export interface Session {
   channel_id?: string;         // 渠道ID
   user_id?: string;            // 创建人ID
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
+  last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
 }
 
-export type AgentMode = 'agent.fast' | 'agent.plan' | 'team' | 'auto_harness';
+export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
+export type Permission = 'default' | 'full_access';
 
 export interface ModelEntry {
   model_name: string;
@@ -42,7 +58,7 @@ export interface ModelEntry {
   context_window_tokens?: number;
   /** 同 model_name 组内的默认勾选标识 */
   is_default?: boolean;
-  /** 可选别名，用于快捷切换模型（如 "mimo" → "xiaomi/mimo-v2-omni"） */
+  /** 可选别名，用于快捷切换模型（如 "gpt" → "gpt-4o"） */
   alias?: string;
   /** 用于原子性重命名操作，指定原模型名 */
   original_model_name?: string;
@@ -52,6 +68,8 @@ export interface ModelEntry {
    * 新增条目不带此字段。
    */
   origin_index?: number;
+  /** 免费模型标识（如 Opencode Zen 免费模型）。前端据此归入"免费模型"分组；非免费模型不带此字段。 */
+  is_free?: boolean;
 }
 
 export interface OffloadFileListResponse {

@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.common.schema.message import ReqMethod
+
+
+def test_personal_context_api_inventory_and_legacy_removal() -> None:
+    methods = {
+        item.value for item in ReqMethod if item.value.startswith("personal_context.")
+    }
+    legacy_prefix = "p" + "cs."
+
+    assert len(methods) == 22
+    assert not any(item.value.startswith(legacy_prefix) for item in ReqMethod)
+
+
+def test_personal_context_host_contract() -> None:
+    from jiuwenswarm.server.personal_context import PersonalContextHostAPI
+
+    legacy_module = ".".join(("jiuwenswarm", "server", "proactive" + "_" + "context"))
+
+    assert PersonalContextHostAPI.__name__ == "PersonalContextHostAPI"
+    assert importlib.util.find_spec(legacy_module) is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_config_file_is_not_read(tmp_path: Path) -> None:
+    from jiuwenswarm.server.personal_context import PersonalContextHostAPI
+
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy_config = home / ("p" + "cs.yaml")
+    legacy_config.write_text("enabled: false\n", encoding="utf-8")
+    host = PersonalContextHostAPI(home=home)
+
+    await host.start()
+    status = await host.get_status()
+
+    assert status.configured is False
+    assert status.state == "CREATED"
+    assert host._config_path == home / "personal_context.yaml"
+    assert not host._config_path.exists()

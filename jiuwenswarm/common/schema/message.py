@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """统一消息模型."""
 
@@ -15,6 +15,8 @@ class ReqMethod(Enum):
     CHAT_RESUME = "chat.resume"
     CHAT_CANCEL = "chat.interrupt"
     CHAT_ANSWER = "chat.user_answer"
+    CHAT_SWARMFLOW_REPLY = "chat.swarmflow_reply"
+    SSH_RELAY = "ssh.relay"
     HISTORY_GET = "history.get"
     COMMAND_BTW = "command.btw"
     COMMAND_ADD_DIR = "command.add_dir"
@@ -41,28 +43,36 @@ class ReqMethod(Enum):
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"
     SESSION_DELETE = "session.delete"
+    SESSION_KVC_PREPARE = "session.kvc.prepare"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
+    SESSION_REBIND_PROJECT = "session.rebind_project"
     SESSION_REWIND = "session.rewind"
     SESSION_REWIND_AND_RESTORE = "session.rewind_and_restore"
     SESSION_REWIND_CONTEXT = "session.rewind_context"
     SESSION_REWIND_COMPACT = "session.rewind_compact"
     SESSION_RESTORE_FILES = "session.restore_files"
     HISTORY_LIST_TURNS = "history.list_turns"
+    TEAM_TEMPLATES_LIST = "team.templates.list"
+    TEAM_BINDINGS_LIST = "team.bindings.list"
+    TEAM_BINDING_CREATE = "team.binding.create"
+    TEAM_BINDING_GENERATE = "team.binding.generate"
+    TEAM_SESSION_BIND = "team.session.bind"
     TEAM_DELETE = "team.delete"
 
     PATH_GET = "path.get"
     PATH_SET = "path.set"
 
-    BROWSER_START = "browser.start"
     BROWSER_RUNTIME_RESTART = "browser.runtime_restart"
 
     CONFIG_CACHE_CLEAR = "config.cache_clear"
     AGENT_RELOAD_CONFIG = "agent.reload_config"
+    AGENT_PREWARM_SYNC = "agent.prewarm.sync"
 
     MEMORY_COMPUTE = "memory.compute"
 
     PROACTIVE_TICK = "proactive.tick"  # Trigger proactive recommendation tick (from Cron)
+    COMMAND_GOAL = "command.goal"
 
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
@@ -76,18 +86,37 @@ class ReqMethod(Enum):
     AGENTS_ENABLE = "agents.enable"
     AGENTS_DISABLE = "agents.disable"
     AGENTS_TOOLS_LIST = "agents.tools_list"
+    AGENT_SWITCH = "3rdagent.switch"
+    AGENT_LIST = "3rdagent.list"
+
+    # mcp management.
+    MCP_LIST = "mcp.list"
+    MCP_SHOW = "mcp.show"
+    MCP_CONNECT = "mcp.connect"
+    MCP_WAIT_AUTH = "mcp.wait_auth"
+    MCP_DISCONNECT = "mcp.disconnect"
+    MCP_REGISTER_CUSTOM = "mcp.register_custom"
+    MCP_DELETE_CUSTOM = "mcp.delete_custom"
+    MCP_SAVE_CREDENTIALS = "mcp.save_credentials"
 
     SKILLS_MARKETPLACE_LIST = "skills.marketplace.list"
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
     SKILLS_TOGGLE = "skills.toggle"
+    # Per-workspace Skill visibility (team mode): the Skill entities themselves
+    # live in exactly one global library, so who may see which Skill is metadata
+    # stored next to a member / team workspace rather than a directory layout.
+    SKILLS_VISIBILITY_GET = "skills.visibility.get"
+    SKILLS_VISIBILITY_SET = "skills.visibility.set"
+    SKILLS_VISIBILITY_UPDATE = "skills.visibility.update"
     SKILLS_INSTALL = "skills.install"
     SKILLS_IMPORT_LOCAL = "skills.import_local"
     SKILLS_MARKETPLACE_ADD = "skills.marketplace.add"
     SKILLS_MARKETPLACE_REMOVE = "skills.marketplace.remove"
     SKILLS_MARKETPLACE_TOGGLE = "skills.marketplace.toggle"
     SKILLS_UNINSTALL = "skills.uninstall"
+    SKILLS_ONLINE_SEARCH = "skills.online_search.search"
     SKILLS_SKILLNET_SEARCH = "skills.skillnet.search"
     SKILLS_SKILLNET_INSTALL = "skills.skillnet.install"
     SKILLS_SKILLNET_INSTALL_STATUS = "skills.skillnet.install_status"
@@ -113,11 +142,39 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
 
-    SYMPHONY_BUILD_SCORE = "symphony.build_score"
-    SYMPHONY_PAUSE_BUILD = "symphony.pause_build"
-    SYMPHONY_SCORE_STATUS = "symphony.score_status"
-    SYMPHONY_GRAPH = "symphony.graph"
-    SYMPHONY_PLAN = "symphony.plan"
+    # Skill Graph Web panel transport. The implementation is provided by
+    # agent-core Symphony, while the public transport remains skill-domain API.
+    SKILLS_GRAPH_BUILD = "skills.graph.build"
+    SKILLS_GRAPH_STATUS = "skills.graph.status"
+    SKILLS_GRAPH_GET = "skills.graph.get"
+    SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
+
+    PERSONAL_CONTEXT_RUNTIME_STATUS = "personal_context.runtime.status"
+    PERSONAL_CONTEXT_RUNTIME_START = "personal_context.runtime.start"
+    PERSONAL_CONTEXT_RUNTIME_STOP = "personal_context.runtime.stop"
+    PERSONAL_CONTEXT_RUNTIME_GET_CONFIG = "personal_context.runtime.get_config"
+    PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG = "personal_context.runtime.patch_config"
+    PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL = "personal_context.runtime.select_model"
+    PERSONAL_CONTEXT_FETCH_LIST_SERVICES = "personal_context.fetch.list_services"
+    PERSONAL_CONTEXT_FETCH_CREATE_SERVICE = "personal_context.fetch.create_service"
+    PERSONAL_CONTEXT_FETCH_DELETE_SERVICE = "personal_context.fetch.delete_service"
+    PERSONAL_CONTEXT_FETCH_PATCH_SERVICE = "personal_context.fetch.patch_service"
+    PERSONAL_CONTEXT_FETCH_START_SERVICE = "personal_context.fetch.start_service"
+    PERSONAL_CONTEXT_FETCH_STOP_SERVICE = "personal_context.fetch.stop_service"
+    PERSONAL_CONTEXT_FETCH_START_SCHEDULER = "personal_context.fetch.start_scheduler"
+    PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER = "personal_context.fetch.stop_scheduler"
+    PERSONAL_CONTEXT_FETCH_RUN_ALL = "personal_context.fetch.run_all"
+    PERSONAL_CONTEXT_FETCH_RUN_ONE = "personal_context.fetch.run_one"
+    PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS = "personal_context.fetch.get_run_status"
+    PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS = (
+        "personal_context.fetch.get_authorization_status"
+    )
+    PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER = (
+        "personal_context.fetch.authorize_provider"
+    )
+    PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH = "personal_context.context.stream_graph"
+    PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES = "personal_context.context.search_pages"
+    PERSONAL_CONTEXT_CONTEXT_GET_NODE = "personal_context.context.get_node"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -131,6 +188,20 @@ class ReqMethod(Enum):
     EXTENSIONS_IMPORT = "extensions.import"
     EXTENSIONS_DELETE = "extensions.delete"
     EXTENSIONS_TOGGLE = "extensions.toggle"
+
+    # agent_template / plugin package catalog + lifecycle RPCs.
+    AGENT_TEMPLATES_LIST = "agent_templates.list"
+    AGENT_TEMPLATES_SHOW = "agent_templates.show"
+    AGENT_TEMPLATES_FILE_LIST = "agent_templates.file.list"
+    AGENT_TEMPLATES_FILE_READ = "agent_templates.file.read"
+    AGENT_TEMPLATES_CREATE = "agent_templates.create"
+    AGENT_TEMPLATES_INSTALL = "agent_templates.install"
+    AGENT_TEMPLATES_UNINSTALL = "agent_templates.uninstall"
+    PLUGIN_PACKAGES_LIST = "plugin_packages.list"
+    PLUGIN_PACKAGES_SHOW = "plugin_packages.show"
+    PLUGIN_PACKAGES_CREATE = "plugin_packages.create"
+    PLUGIN_PACKAGES_INSTALL = "plugin_packages.install"
+    PLUGIN_PACKAGES_UNINSTALL = "plugin_packages.uninstall"
 
     HOOKS_LIST = "hooks.list"
 
@@ -157,6 +228,8 @@ class ReqMethod(Enum):
 
     CHANNEL_TELEGRAM_GET_CONF = "channel.telegram.get_conf"
     CHANNEL_TELEGRAM_SET_CONF = "channel.telegram.set_conf"
+    CHANNEL_SLACK_GET_CONF = "channel.slack.get_conf"
+    CHANNEL_SLACK_SET_CONF = "channel.slack.set_conf"
     CHANNEL_DINGTALK_GET_CONF = "channel.dingtalk.get_conf"
     CHANNEL_DINGTALK_SET_CONF = "channel.dingtalk.set_conf"
 
@@ -176,6 +249,7 @@ class ReqMethod(Enum):
     TEAM_SNAPSHOT = "team.snapshot"
     TEAM_HISTORY_GET = "team.history.get"
     TEAM_MEMBERS_GET = "team.members.get"
+    TEAM_MQ_PUBLISH = "team.mq.publish"
 
     # Harness package management
     HARNESS_PACKAGES_GET = "harness.packages.get"
@@ -227,6 +301,10 @@ class EventType(Enum):
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"
     CHAT_SESSION_RESULT = "chat.session_result"
+    GOAL_SNAPSHOT = "goal.snapshot"
+    GOAL_UPDATED = "goal.updated"
+    RUNTIME_ACCEPTED = "runtime.accepted"
+    EXECUTION_ERROR = "execution.error"
     TEAM_MEMBER = "team.member"
     TEAM_TASK = "team.task"
     TEAM_MESSAGE = "team.message"
@@ -237,31 +315,49 @@ class EventType(Enum):
 
 
 class Mode(Enum):
+    AGENT = "agent"
+    # 历史值：plan / fast 已合并为 agent，保留以兼容旧序列化数据的反解析。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     CODE_TEAM = "code.team"
     TEAM = "team"
+    TEAM_PLAN_NORMAL = "team.plan.normal"
+    TEAM_PLAN_CODE = "team.plan.code"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
-        """解析 mode，仅接受新值(agent.plan/agent.fast/code.plan/code.normal/team)。"""
-        fallback = default or cls.AGENT_PLAN
+        """解析 mode。plan / fast 已合并：agent.plan / agent.fast 归一为 agent。"""
+        fallback = default or cls.AGENT
         if isinstance(raw_mode, Mode):
+            # 历史枚举成员归一到合并后的 AGENT。
+            if raw_mode in (cls.AGENT_PLAN, cls.AGENT_FAST):
+                return cls.AGENT
             return raw_mode
         if not isinstance(raw_mode, str):
             return fallback
         normalized = raw_mode.strip().lower()
         if not normalized:
             return fallback
+        # 任何 agent* 请求（agent / agent.plan / agent.fast）归一到 AGENT。
+        if normalized.split(".", 1)[0] == "agent":
+            return cls.AGENT
+        # 历史裸 plan / fast（同 CLI MODE_ALIASES）显式归一到 AGENT，
+        # 不依赖 fallback 默认值恰好等于 AGENT。
+        if normalized in ("plan", "fast"):
+            return cls.AGENT
+        if normalized == "team.plan":
+            return cls.TEAM_PLAN_NORMAL
         try:
             return cls(normalized)
         except ValueError:
             return fallback
 
     def to_runtime_mode(self) -> str:
-        """输出新 mode 值本身。"""
+        """输出 runtime mode 值；历史 agent.plan / agent.fast 归一为 agent。"""
+        if self in (Mode.AGENT_PLAN, Mode.AGENT_FAST):
+            return Mode.AGENT.value
         return self.value
 
 
@@ -284,7 +380,7 @@ class Message:
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None
-    mode: Mode = Mode.AGENT_PLAN
+    mode: Mode = Mode.AGENT
     is_stream: bool = False
     stream_seq: int | None = None
     stream_id: str | None = None

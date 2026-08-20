@@ -15,7 +15,6 @@ import asyncio
 import logging
 import secrets
 import time
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
@@ -32,6 +31,9 @@ if TYPE_CHECKING:
     from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
+
+# Team seat ownership is implemented only for these IM channels.
+_TEAM_SEAT_SUPPORTED_CHANNELS: frozenset[str] = frozenset({"feishu", "xiaoyi"})
 
 
 # 已 /join 认领 team 席位后仍允许执行的控制指令白名单。
@@ -58,24 +60,12 @@ _ALLOWED_WHEN_JOINED: frozenset[ParsedControlAction] = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class TeamMemberLookup:
-    """/join 成员校验查询结果。
-
-    - member_names: team 当前 role==human_agent 的席位名
-    - team_name:    server 回传的 team_name；入参缺失时为 None
-    - expected_team_name: 用户输入 session_ref 里解析出的 team_name；与 team_name 比对
-    """
-
-    member_names: list[str] = field(default_factory=list)
-    team_name: str | None = None
-    expected_team_name: str = ""
-
-    @property
-    def team_name_matches(self) -> bool:
-        if not self.expected_team_name or self.team_name is None:
-            return False
-        return self.team_name == self.expected_team_name
+def _join_err_team_not_exist(team_name: str) -> str:
+    """/join 后缀匹配通过但 DB 查不到 member 的对外文案（统一"不存在"）。"""
+    return (
+        f"team **{team_name or '未知'}** 不存在。"
+        f"请核对 /join 指令中的 session_ref。"
+    )
 
 
 class JoinExitHandlers:
@@ -126,6 +116,16 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /join 指令：注册到 SessionSharingRegistry 并发送确认."""
+        # Reject unsupported channels before any lookup or registration can
+        # create partial state.
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /join，仅飞书和小艺支持加入团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid or not parsed.member_name:
             await self._h.send_channel_notice(
@@ -169,37 +169,12 @@ class JoinExitHandlers:
                         f"请先执行 **/exit** 再加入。",
                     )
                     return
-        # ── 成员名校验 + team_name 一致性校验 ──
-        # 实时从 AgentServer 查询 monitor 的成员列表（不读配置），严格模式下
-        # 取不到列表（runtime 未起 / monitor 未就绪 / 接口报错）直接拒绝 /join。
-        # 同一次响应顺带回真实 team_name（后端由 session_id 反查），与用户输入
-        # session_ref 里解析出的 team_name 比对，防 session_id 与 team_name 错配。
+        # ── team/session 一致性校验 + 成员名校验 ──
+        # team_name 与 session_id 同源于 session_ref，真伪交由下游 fetch_team_human_members 的 RPC 仲裁：
+        # 按 team_name 直查 team.db，输错 team → 查不到席位 → 走"不存在"文案。
         _join_team_name = self._h.extract_team_name_from_ref(parsed.session_ref)
-        lookup = await self.fetch_team_human_members(
-            msg.channel_id, sid, expected_team_name=_join_team_name,
-        )
-        if lookup is None:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ 团队尚未就绪，无法校验成员 **{parsed.member_name}**。请先发起一轮团队对话后再 **/join**。",
-            )
-            return
-        # team_name 一致性校验
-        if not lookup.team_name_matches:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ team_name **{_join_team_name}** 与 session **{sid}** 不匹配，无法加入。"
-                f"请核对 /join 指令中的 session_ref。",
-            )
-            return
-        human_member_names = lookup.member_names
-        if parsed.member_name not in human_member_names:
-            await self._h.send_channel_notice(
-                user_infos, channel_id, msg.session_id,
-                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
-            )
-            return
         # 检查席位占用状态（V2 §8.1）
+        # 优先内存判断,同时发多条join将"无需重复加入"提示挤到后面
         joining_user_id = msg.user_id or msg.metadata.get("im_sender_user_id", "")
         existing_subs = self._h.get_session_sharing_registry().lookup_member(sid, parsed.member_name)
         for sub in existing_subs:
@@ -214,6 +189,21 @@ class JoinExitHandlers:
             await self._h.send_channel_notice(
                 user_infos, channel_id, msg.session_id,
                 f"⚠️ 你已是 **{sid}** 的 **{parsed.member_name}**，无需重复加入。",
+            )
+            return
+        human_member_names = await self.fetch_team_human_members(
+            msg.channel_id, sid, _join_team_name,
+        )
+        if human_member_names is None:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ {_join_err_team_not_exist(_join_team_name)}",
+            )
+            return
+        if parsed.member_name not in human_member_names:
+            await self._h.send_channel_notice(
+                user_infos, channel_id, msg.session_id,
+                f"⚠️ 成员 **{parsed.member_name}** 不存在。可用席位：{', '.join(human_member_names)}",
             )
             return
         try:
@@ -403,7 +393,18 @@ class JoinExitHandlers:
             if anchor_ts:
                 before_anchor = []
                 for r in records:
-                    if isinstance(r, dict) and float(r.get("timestamp") or 0) < anchor_ts:
+                    if not isinstance(r, dict):
+                        continue
+                    # chat.final 可能用首包时刻作 timestamp、收尾另存 completed_at；
+                    # 水位按「真正结束」判断，避免 join 前开写、join 后收尾的消息被历史+实时双推。
+                    try:
+                        completed = r.get("completed_at")
+                        record_ts = float(
+                            completed if completed is not None else (r.get("timestamp") or 0)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if record_ts < anchor_ts:
                         before_anchor.append(r)
                 records = before_anchor
                 if not records:
@@ -435,11 +436,13 @@ class JoinExitHandlers:
         self,
         channel_id: str,
         session_id: str,
-        expected_team_name: str = "",
-    ) -> TeamMemberLookup | None:
-        """向 AgentServer 查询 team human_agent 成员列表，校验 session_id ↔ team_name。
+        team_name: str,
+    ) -> list[str] | None:
+        """向 AgentServer 查询 team human_agent 成员名列表。
 
-        返回 None 表示成员列表为空（session 不存在 / team_name 错配 / 接口报错）。
+        team↔session 一致性真伪的唯一仲裁：按 team_name 直查 team.db 取 human_agent 席位。
+        查到返回席位名列表，查不到（server ok=False / members 空 / RPC 异常）返回 None，
+        由调用方统一拼"team 不存在"文案。channel_id 不参与业务查询，仅回填 E2A envelope。
         """
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod
@@ -450,42 +453,28 @@ class JoinExitHandlers:
                 channel_id=channel_id,
                 session_id=session_id,
                 req_method=ReqMethod.TEAM_MEMBERS_GET,
-                params={"session_id": session_id, "team_name": expected_team_name},
+                params={"session_id": session_id, "team_name": team_name},
             )
             resp = await self._h.agent_client.send_request(env)
-            if not resp.ok:
-                logger.warning(
-                    "[MessageHandler] _fetch_team_human_members: agent_server returned error "
-                    "session=%s error=%s",
-                    session_id,
-                    resp.payload.get("error", "") if isinstance(resp.payload, dict) else resp.payload,
-                )
-                return None
-            payload = resp.payload if isinstance(resp.payload, dict) else {}
-            members = payload.get("members")
-            if not isinstance(members, list) or not members:
-                return None
-            names: list[str] = []
-            for m in members:
-                if (isinstance(m, dict)
-                        and m.get("role") == "human_agent"
-                        and m.get("member_id")):
-                    names.append(str(m.get("member_id")))
-            if not names:
-                return None
-            team_name = payload.get("team_name")
-            team_name = str(team_name) if team_name is not None else None
-            return TeamMemberLookup(
-                member_names=names,
-                team_name=team_name,
-                expected_team_name=expected_team_name,
-            )
         except Exception as exc:
             logger.warning(
-                "[MessageHandler] _fetch_team_human_members failed: session=%s error=%s",
+                "[MessageHandler] fetch_team_human_members rpc failed: session=%s error=%s",
                 session_id, exc,
             )
             return None
+        if not resp.ok:
+            logger.warning(
+                "[MessageHandler] fetch_team_human_members: agent_server returned not-ok "
+                "session=%s team=%s", session_id, team_name,
+            )
+            return None
+        payload = resp.payload if isinstance(resp.payload, dict) else {}
+        names = [
+            str(m.get("member_id"))
+            for m in (payload.get("members") or [])
+            if isinstance(m, dict) and m.get("role") == "human_agent" and m.get("member_id")
+        ]
+        return names or None
 
     @staticmethod
     def format_join_history_lines(
@@ -567,6 +556,14 @@ class JoinExitHandlers:
         parsed: "ParsedChannelControl",
     ) -> None:
         """处理 /exit 指令：从 SessionSharingRegistry 注销并发送确认."""
+        if str(msg.channel_id).lower() not in _TEAM_SEAT_SUPPORTED_CHANNELS:
+            await self._h.send_channel_notice(
+                user_infos,
+                channel_id,
+                msg.session_id,
+                "当前通道暂不支持 /exit，仅飞书和小艺支持退出团队。",
+            )
+            return
         sid = self._h.extract_session_id_from_ref(parsed.session_ref)
         if not sid:
             # 不带 session_ref：直接用 msg.session_id。handle_message 入队前已对已 /join

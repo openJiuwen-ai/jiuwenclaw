@@ -94,8 +94,8 @@ def test_prompt_channel_resolver_keeps_tui_prefix_non_web():
 
 
 @pytest.mark.asyncio
-async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch):
-    """Inner ReAct model-call rails need the adapter-resolved channel."""
+async def test_runtime_config_syncs_channel_and_task_workspace(monkeypatch):
+    """Runtime config must sync the channel and task paths into inner rails."""
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._instance = object()
     adapter._is_session_scoped_adapter = True
@@ -104,6 +104,7 @@ async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch)
     adapter._workspace_dir = "/tmp"
     adapter._runtime_prompt_rail = None
     adapter._circuit_breaker_rail = None
+    adapter._subagent_rail = None
 
     captured = {}
 
@@ -120,11 +121,15 @@ async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch)
     monkeypatch.setattr(
         JiuWenSwarmDeepAdapter,
         "_seed_runtime_cwd",
-        lambda self, cwd=None, workspace=None: None,
+        lambda self, cwd=None, workspace=None: captured.update(
+            cwd=cwd,
+            workspace=workspace,
+        ),
     )
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_resolve_runtime_language", lambda self: "cn")
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_write_runtime_state", lambda self, **kwargs: None)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_rails_for_mode", async_noop)
+    monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_set_user_interaction_enabled", async_noop)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_tools_for_mode", async_noop)
     monkeypatch.setattr(JiuWenSwarmDeepAdapter, "_update_session_tools", async_noop)
     monkeypatch.setattr(
@@ -143,7 +148,29 @@ async def test_runtime_config_syncs_channel_to_response_prompt_rail(monkeypatch)
             session_id="sess_123",
             mode="agent.fast",
             channel_id="web",
+            cwd="/task/project/backend",
+            workspace="/task/project",
+            project_dir="/different/project",
         )
     )
 
-    assert captured == {"channel": "web"}
+    assert captured == {
+        "channel": "web",
+        "cwd": "/task/project/backend",
+        "workspace": "/task/project",
+    }
+
+    await adapter._update_runtime_config(
+        JiuWenSwarmDeepAdapter._RuntimeConfig(
+            session_id="sess_123",
+            mode="agent.fast",
+            channel_id="web",
+            project_dir="/task/second-project",
+        )
+    )
+
+    assert captured == {
+        "channel": "web",
+        "cwd": "/task/second-project",
+        "workspace": "/task/second-project",
+    }

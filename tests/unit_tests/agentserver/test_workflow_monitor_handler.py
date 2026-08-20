@@ -420,3 +420,68 @@ class TestWorkflowMonitorHandlerRunIdRegistry:
         assert len(runs) == 1
         assert run_id in runs
         assert runs[run_id].id == run_id
+
+
+# ---------------------------------------------------------------------------
+# New-field passthrough (agent_id / node_type / correlation_id / answer)
+# ---------------------------------------------------------------------------
+
+class TestExtractProgressPassthrough:
+    """_extract_progress passes the new fields through the dict payload path.
+
+    Agent-core EventMessage / WorkflowProgressTeamEvent shapes vary by package
+    version; those paths are not pinned here.
+    """
+
+    @staticmethod
+    def test_dict_payload_passes_new_fields() -> None:
+        """dict path: WorkflowProgress(**payload) covers the new fields."""
+        handler = WorkflowMonitorHandler(monitor=_FakeTeamMonitor(), session_id="s")
+        payload = {
+            "kind": "agent_started",
+            "phase": "review",
+            "label": "host",
+            "agent_id": "main/call:1",
+            "node_type": "human_session",
+            "correlation_id": "review:host:0",
+            "answer": "yes, approved",
+        }
+        progress = handler._extract_progress(SimpleNamespace(payload=payload))
+        assert progress is not None
+        assert progress.agent_id == "main/call:1"
+        assert progress.node_type == "human_session"
+        assert progress.correlation_id == "review:host:0"
+        assert progress.answer == "yes, approved"
+
+    @staticmethod
+    def test_object_fallback_copies_new_fields() -> None:
+        """object fallback path copies tokens/budget/nested_* onto WorkflowProgress.
+
+        A raw payload that is neither a dict nor a pydantic model (no
+        ``model_dump``) must still surface the SDD-0010 fields via
+        ``getattr`` so the fallback branch does not silently drop them.
+        """
+        h = WorkflowMonitorHandler.__new__(WorkflowMonitorHandler)
+        h._session_id = "s"
+
+        class _Payload:
+            kind = "agent_completed"
+            run_id = "wf_1"; workflow_name = "w"; description = None; phase = "review"
+            label = "analyst"; prompt = None; model = None; outcome = "ok"; text = None
+            phases = None; correlation_id = None; node_type = "agent"; agent_id = "k1"; answer = None
+            tokens = 12700
+            budget = {"total": 5, "spent": 5, "remaining": 0, "scope": "leader", "exhausted": True}
+            phase_type = "child"
+            nested_phase = "▸ intro #0"
+            parent_phase = "review"
+
+        class _Ev:
+            def get_payload(self):  # noqa: ANN202
+                return _Payload()
+
+        p = h._extract_progress(_Ev())
+        assert p.tokens == 12700
+        assert p.budget["exhausted"] is True
+        assert p.phase_type == "child"
+        assert p.nested_phase == "▸ intro #0"
+        assert p.parent_phase == "review"

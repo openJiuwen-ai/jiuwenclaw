@@ -32,6 +32,18 @@ Status: partial. A 2026-07-15 semantic-hash scan at `10afedf2` found 0 expired a
 - [AgentServer Plan Mode Exit](project/flows/agentserver-plan-mode-exit.md)
 - [AgentServer Scheduled Auto-Harness](project/flows/agentserver-schedule-auto-harness.md)
 - [AgentServer History Stream](project/flows/agentserver-history-stream.md)
+- [Session Prewarm And Allocation](project/flows/session-prewarm-allocation.md)
+- [Eternal Conversation Memory](project/flows/eternal-conversation-memory.md)
+
+## Decisions And Recent Changes
+
+- [ADR-0001](decisions/ADR-0001-agentserver-owned-prewarmed-sessions.md): AgentServer owns prewarmed session identity.
+- [CHG-20260731-001](changes/records/CHG-20260731-001-session-prewarm-allocation.md): session allocation and DeepAgent prewarming.
+- [CHG-20260801-001](changes/records/CHG-20260801-001-prewarm-foreground-priority.md): foreground chat priority, lazy background warming, and non-blocking runtime probes.
+- [CHG-20260801-005](changes/records/CHG-20260801-005-disable-session-prewarm.md): prewarming off by default behind `JIUWENSWARM_AGENT_PREWARM`.
+- [CHG-20260803-001](changes/records/CHG-20260803-001-enable-session-prewarm-by-default.md): prewarming on by default; `JIUWENSWARM_AGENT_PREWARM` becomes an opt-out.
+- [CHG-20260803-002](changes/records/CHG-20260803-002-tui-external-session-create.md): unified TUI startup `session.create` barrier, normal AgentServer allocation, and explicit-ID prewarm bypass.
+- [CHG-20260818-001](changes/records/CHG-20260818-001-persist-session-creation-contract.md): immutable Persist Session creation contract, UI state, and prewarm-safe activation.
 
 ## Priority Code Symbols
 

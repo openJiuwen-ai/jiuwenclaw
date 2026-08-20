@@ -15,7 +15,7 @@
 本文档汇总了 JiuwenSwarm 的常用使用说明、功能文档与开发实践，内容按照使用流程和功能类型划分为 **安装**、**基础使用**、**高阶操作**、**附录** 和 **开发实践** 五个部分。
 
 * **安装**：面向首次使用 JiuwenSwarm 的用户，包含基础安装、环境准备、TUI 模式安装以及快速启动相关说明。
-* **基础使用**：介绍日常使用中常见的功能入口，包括页面概览、对话、智能体、会话、心跳、定时任务、技能、频道、配置信息、浏览器服务、日志和 MCP 服务设置等内容。
+* **基础使用**：介绍日常使用中常见的功能入口，包括页面概览、对话、智能体、会话、定时任务、技能、频道、配置信息、浏览器服务、日志和 MCP 服务设置等内容。
 * **高阶操作**：介绍系统的进阶能力与扩展机制，包括上下文压缩、Skill 自演进、工具权限与安全防护、E2A / A2A 协议、多智能体协作、记忆系统和 TUI 模式等内容。
 * **附录**：提供与项目使用和维护相关的补充资料，包括打包 EXE、Windows 自动更新设计和开发者文档。
 * **开发实践**：整理基于 JiuwenSwarm 构建的实际 Agent 应用案例，帮助开发者参考已有实践进行二次开发和能力扩展。
@@ -62,8 +62,13 @@
     </tr>
     <tr>
       <td width="22%"><strong>对话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/对话.md">对话</a></td>
       <td width="50%">Web 对话入口，支持消息发送、新建会话以及规划 / 性能 / 集群模式切换。</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>任务规划</strong></td>
+      <td width="28%"><a href="zh/任务规划.md">任务规划</a></td>
+      <td width="50%">任务拆解、规划与执行管理，支持 TodoToolkit 工具进行任务跟踪。</td>
     </tr>
     <tr>
       <td width="22%"><strong>智能体</strong></td>
@@ -72,13 +77,13 @@
     </tr>
     <tr>
       <td width="22%"><strong>会话</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/会话.md">会话</a></td>
       <td width="50%">Session 信息管理、历史聊天记录查看与恢复、会话历史删除。</td>
     </tr>
     <tr>
-      <td width="22%"><strong>心跳</strong></td>
-      <td width="28%"><a href="zh/心跳.md">心跳</a></td>
-      <td width="50%">后台服务保活、运行状态检测与监控机制。</td>
+      <td width="22%"><strong>命令行指令</strong></td>
+      <td width="28%"><a href="zh/命令行指令.md">命令行指令</a></td>
+      <td width="50%">受控通道指令与命令行操作指南。</td>
     </tr>
     <tr>
       <td width="22%"><strong>定时任务</strong></td>
@@ -97,7 +102,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>频道</strong></td>
-      <td width="28%"><a href="zh/频道.md">频道</a> / <a href="zh/ACP插件使用.md">ACP 插件使用</a> / <a href="zh/TUI使用指南.md">TUI 使用指南</a></td>
+      <td width="28%"><a href="zh/频道.md">频道</a></td>
       <td width="50%">JiuwenSwarm 的多渠道接入与交互。</td>
     </tr>
     <tr>
@@ -112,7 +117,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>日志</strong></td>
-      <td width="28%"> </td>
+      <td width="28%"><a href="zh/日志.md">日志</a></td>
       <td width="50%">系统日志路径、运行记录与常见排错入口。</td>
     </tr>
     <tr>
@@ -130,8 +135,18 @@
     </tr>
     <tr>
       <td width="22%"><strong>上下文压缩</strong></td>
-      <td width="28%"><a href="zh/上下文压缩卸载.md">上下文压缩卸载</a></td>
+      <td width="28%"><a href="zh/上下文压缩.md">上下文压缩</a></td>
       <td width="50%">超长上下文处理、会话压缩与上下文卸载机制。</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>单机多实例运行</strong></td>
+      <td width="28%"><a href="zh/单机多实例运行.md">单机多实例运行</a></td>
+      <td width="50%">在同一台机器上运行多个 JiuwenSwarm 实例的部署场景与配置。</td>
+    </tr>
+    <tr>
+      <td width="22%"><strong>A2UI</strong></td>
+      <td width="28%"><a href="zh/A2UI.md">A2UI</a></td>
+      <td width="50%">Agent to UI 生成式界面协议，支持动态界面生成与交互。</td>
     </tr>
     <tr>
       <td width="22%"><strong>Skill 自演进</strong></td>
@@ -155,7 +170,7 @@
     </tr>
     <tr>
       <td width="22%"><strong>Agent Team</strong></td>
-      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / Team Skills / <a href="zh/分布式Team.md">分布式 Team</a></td>
+      <td width="28%"><a href="zh/AgentTeam.md">Agent Teams</a> / <a href="zh/SwarmSkills.md">Swarm Skills</a> / <a href="zh/分布式Team.md">分布式 Team</a></td>
       <td width="50%">支持多智能体团队协作、团队级技能编排与复用，以及多进程分布式 Team 的运行模式。</td>
     </tr>
     <tr>
@@ -165,8 +180,8 @@
     </tr>
     <tr>
       <td width="22%"><strong>TUI 模式</strong></td>
-      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a></td>
-      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查，以及 PLAN / AGENT / CODE / TEAM 等运行模式的切换与配置。</td>
+      <td width="28%"><a href="zh/SLASH_COMMAND_ARCHITECTURE.md">Slash 命令架构</a> / <a href="zh/Slash命令表.md">Slash 命令速查</a> / <a href="zh/模式系统.md">模式系统</a> / <a href="zh/TUI使用SwarmFlow指南.md">SwarmFlow（TUI）</a></td>
+      <td width="50%">支持 TUI 终端中的 Slash 命令体系、常用命令速查、PLAN / AGENT / CODE / TEAM 模式切换，以及 SwarmFlow 开关、运行树查看与 HITL 回复。</td>
     </tr>
     <tr>
       <th colspan="3" align="left" bgcolor="#f3f4f6"><h3>📄 附录</h3></th>

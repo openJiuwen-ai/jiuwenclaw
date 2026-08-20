@@ -9,6 +9,7 @@ from typing import Any, Callable
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.rails import SkillUseRail
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenswarm.symphony.agent import (
@@ -24,10 +25,13 @@ _LEGACY_LIST_SKILL_TOOL_NAMES = frozenset({"list_skill", "list_skills"})
 class SkillRetrievalPromptRail(DeepAgentRail):
     """Inject lightweight skill-tree retrieval guidance into the system prompt."""
 
-    # openjiuwen's callback framework executes higher priorities first. Keep this
-    # below SkillUseRail(100) so the native skills section can be hidden after it
-    # is refreshed for the current model call.
-    priority = 99
+    # openjiuwen's callback framework executes higher priorities first, and
+    # SkillUseRail rebuilds the native skills section on every model call. This
+    # rail must therefore run after it, or the section it hides is immediately
+    # re-added and the model sees both prompts. Derive the value instead of
+    # hardcoding it: openjiuwen has already moved SkillUseRail once (100 -> 95),
+    # and a stale constant silently reverses the order rather than failing.
+    priority = SkillUseRail.priority - 1
     SECTION_NAME = "skill_retrieval"
     SECTION_PRIORITY = 41
 

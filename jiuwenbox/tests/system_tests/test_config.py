@@ -6,7 +6,6 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -16,7 +15,11 @@ class TestConfig:
     """Test configuration parameters."""
 
     # API Endpoint
-    SERVER_ENDPOINT = os.environ.get("JIUWENBOX_SERVER", "http://localhost:8080")
+    SERVER_ENDPOINT = os.environ.get("JIUWENBOX_SERVER", "https://localhost:8080")
+
+    # Provisioning error test subnet (configurable via env var to avoid hardcoding)
+    # Default uses a non-routable link-local subnet that will cause provisioning to fail
+    PROVISIONING_ERROR_SUBNET = os.environ.get("PROVISIONING_ERROR_SUBNET", "invalid-subnet-for-testing")
 
     # Timeouts (seconds)
     DEFAULT_TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "120"))
@@ -101,12 +104,13 @@ class EnvironmentDetector:
     def has_docker() -> bool:
         """Check if Docker is available."""
         docker = shutil.which("docker")
-        if docker is None:
+        if not docker:
             return False
         try:
+            import subprocess
             result = subprocess.run([docker, "ps"], capture_output=True, text=True)
             return result.returncode == 0
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             logger.debug("docker check failed: %s", exc)
             return False
 

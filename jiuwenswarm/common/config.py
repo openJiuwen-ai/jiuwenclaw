@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import json
 import logging
@@ -13,18 +13,35 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ruamel.yaml import YAML
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+from ruamel.yaml.scalarstring import DoubleQuotedScalarString, PlainScalarString
 import yaml
 import portalocker
 
-from jiuwenswarm.common.utils import get_config_dir, get_config_file
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    get_default_model_provider as resolve_default_model_provider,
+    set_default_model_provider_in_entries,
+    validate_affinity_invariant,
+)
+from jiuwenswarm.common.utils import (
+    get_config_dir,
+    get_config_file,
+)
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 CONFIG_YAML_PATH = get_config_file()
 SWARMFLOW_ENABLED_CONFIG_PATH = ("modes", "team", "jiuwen_team", "enable_swarmflow")
+SWARMFLOW_BUDGET_CONFIG_PATH = ("modes", "team", "jiuwen_team", "swarmflow_budget")
 DEFAULT_SWARMFLOW_ENABLED = False
+EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY = "external_cli_publish_url"
+EXTERNAL_CLI_AGENTS_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_cli_agents")
+EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_transport")
+_ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
+# Keep progressive tool search enabled by default for existing user workspaces
+# whose config.yaml predates this switch.
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -78,6 +95,26 @@ def resolve_env_vars(value: Any) -> Any:
 
         return re.sub(pattern, replace_env, value)
     elif isinstance(value, dict):
+        # mcp.servers entries hold ${VAR} placeholders in headers/env that
+        # are meant for the CredentialStore (resolved at McpServerConfig build
+        # time), NOT for the process env. If resolve_env_vars touches them
+        # here, an unset env var collapses ${GITHUB_TOKEN} to "" and the
+        # adapter receives ``Authorization: "Bearer "`` — an empty token that
+        # httpx rejects as ``Illegal header value b'Bearer '``. Preserve these
+        # credential subtrees verbatim on mcp server entries (identified by
+        # the transport + name + url/command shape, or the server_id_scope
+        # stamp the mcp registry adds).
+        mcp_credential_keys = ("headers", "env", "staticHeaders", "static_headers")
+        is_mcp_server_entry = (
+            "transport" in value
+            and "name" in value
+            and ("url" in value or "command" in value)
+        ) or "server_id_scope" in value
+        if is_mcp_server_entry:
+            return {
+                k: (v if k in mcp_credential_keys else resolve_env_vars(v))
+                for k, v in value.items()
+            }
         return {k: resolve_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
         return [resolve_env_vars(item) for item in value]
@@ -106,6 +143,18 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
         mcc = react.get("model_client_config")
         if isinstance(mcc, dict) and "custom_headers" in mcc:
             mcc["custom_headers"] = _parse_custom_headers(mcc["custom_headers"])
+        kv_cfg = react.get("kv_cache_affinity_config")
+        if isinstance(kv_cfg, dict) and kv_cfg.get("enable_kv_cache_affinity", False):
+            provider = get_default_model_provider(config)
+            if provider != ASCEND_AFFINITY_PROVIDER:
+                logger.warning(
+                    "KV cache affinity configuration failed closed: default provider=%s requires=%s",
+                    provider or "<empty>",
+                    ASCEND_AFFINITY_PROVIDER,
+                )
+                # Runtime-only normalization: preserve the user's file for
+                # diagnosis, but never activate an inconsistent configuration.
+                kv_cfg["enable_kv_cache_affinity"] = False
     # send_file 工具默认开关：web/feishu/xiaoyi 顶层缺 send_file_allowed 时兜底 True。
     channels = config.get("channels", {})
     for _ch in ("web", "feishu", "xiaoyi"):
@@ -117,12 +166,64 @@ def _normalize_config(config: dict[str, Any] | None) -> None:
             _ch_conf["send_file_allowed"] = True
 
 
+# Parsed YAML per file path, keyed on the file's identity so an edit — by this
+# process or any other — invalidates it. Only the parse is cached: reading and
+# parsing config.yaml costs ~11 ms while everything downstream of it (env
+# resolution, normalization) costs ~0.3 ms, and ``get_config`` sits on every
+# request path. Deliberately not caching past the parse keeps env var changes
+# (``load_dotenv_runtime`` runs with override=True before some reads) taking
+# effect immediately, so this needs no explicit invalidation hook.
+_YAML_PARSE_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+_YAML_PARSE_CACHE_LOCK = threading.Lock()
+
+
+def _yaml_file_stamp(filepath: Path) -> tuple[int, int] | None:
+    """Return the identity a cached parse of this file is keyed on.
+
+    Args:
+        filepath: YAML file to stamp.
+
+    Returns:
+        ``(mtime_ns, size)``, or None when the file cannot be stat'd — in which
+        case the caller must not use or populate the cache.
+    """
+    try:
+        stat_result = filepath.stat()
+    except OSError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
-    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。"""
+    """读取 YAML，遇解析错误重试（应对跨进程写竞态）。
+
+    解析结果按文件身份（mtime + size）缓存；调用方会就地修改返回值
+    （``_normalize_config`` 即是），故命中与写入缓存时都做深拷贝，
+    保证各调用方拿到互不影响的副本。
+
+    Args:
+        filepath: 待读取的 YAML 文件路径。
+        max_attempts: 解析失败时的最大尝试次数。
+
+    Returns:
+        解析后的字典；文件为空时返回空字典。
+    """
+    stamp = _yaml_file_stamp(filepath)
+    cache_key = str(filepath)
+    if stamp is not None:
+        with _YAML_PARSE_CACHE_LOCK:
+            cached = _YAML_PARSE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return deepcopy(cached[1])
+
     for attempt in range(max_attempts):
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                parsed = yaml.safe_load(f) or {}
+            if stamp is not None:
+                with _YAML_PARSE_CACHE_LOCK:
+                    _YAML_PARSE_CACHE[cache_key] = (stamp, deepcopy(parsed))
+            return parsed
         except yaml.YAMLError:
             if attempt < max_attempts - 1:
                 time.sleep(0.05 * (attempt + 1))
@@ -141,9 +242,34 @@ def get_config():
     return config_base
 
 
+def get_configured_read_image_multimodal(
+    config: dict[str, Any] | None = None,
+) -> bool | None:
+    """Return the explicit native-image policy, or ``None`` for auto mode."""
+
+    resolved = config if isinstance(config, dict) else get_config()
+    react = resolved.get("react")
+    value = (
+        react.get("enable_read_image_multimodal")
+        if isinstance(react, dict)
+        else None
+    )
+    return value if isinstance(value, bool) else None
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)
+
+
+def get_default_model_provider(config: dict[str, Any] | None) -> str:
+    return resolve_default_model_provider(config)
+
+
+def validate_persisted_kv_cache_affinity() -> tuple[bool, list[str]]:
+    """Validate the persisted KVC invariant after a config write."""
+    raw = get_config_raw()
+    return validate_affinity_invariant(resolve_env_vars(raw))
 
 
 def set_config(config):
@@ -151,51 +277,67 @@ def set_config(config):
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
-def _get_bool_env(value: str | None) -> bool | None:
-    if value is None:
-        return None
-    return value.lower() in ("true", "1", "yes")
-
-
 def _get_evolution_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the canonical ``react.evolution`` mapping.
+
+    Evolution settings deliberately have one source of truth.  In particular,
+    the historical top-level ``evolution`` mapping and the old environment
+    overrides are not consulted here; this keeps a stale deployment variable
+    from changing a running agent's capability set.
+    """
     if not isinstance(config, dict):
         return {}
     react_config = config.get("react")
-    if isinstance(react_config, dict) and isinstance(react_config.get("evolution"), dict):
-        return react_config["evolution"]
-    evolution_config = config.get("evolution")
-    if isinstance(evolution_config, dict):
-        return evolution_config
-    return {}
+    if not isinstance(react_config, dict):
+        return {}
+    evolution_config = react_config.get("evolution")
+    return evolution_config if isinstance(evolution_config, dict) else {}
 
 
-def get_evolution_auto_scan_enabled(config: dict[str, Any] | None) -> bool:
-    env_auto_scan = _get_bool_env(os.getenv("EVOLUTION_AUTO_SCAN"))
-    if env_auto_scan is not None:
-        return env_auto_scan
-    return _get_evolution_config(config).get("auto_scan", False)
+def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
+    """Return the canonical ``react.evolution.skill_evolution`` switch."""
+    return _get_evolution_config(config).get("skill_evolution") is True
 
 
-def get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
-    env_skill_create = _get_bool_env(os.getenv("SKILL_CREATE"))
-    if env_skill_create is not None:
-        return env_skill_create
-    return _get_evolution_config(config).get("skill_create", False)
+def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether the ProgressiveToolRail is enabled for an agent.
+
+    The switch is the top-level ``progressive_tool_enabled`` key in
+    ``config.yaml``.  A missing key keeps the historical enabled-by-default
+    behavior for workspaces initialized before this setting was introduced.
+    """
+    if not isinstance(config, dict):
+        return DEFAULT_PROGRESSIVE_TOOL_ENABLED
+
+    value = config.get("progressive_tool_enabled", DEFAULT_PROGRESSIVE_TOOL_ENABLED)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:
-    """Return whether evolution approvals may auto-save without user action."""
-    try:
-        env_auto_save = _get_bool_env(os.getenv("EVOLUTION_AUTO_SAVE"))
-        if env_auto_save is not None:
-            return env_auto_save
-        if config is None:
-            config = get_config()
-        if not isinstance(config, dict):
-            return False
-        return _get_evolution_config(config).get("auto_save") is True
-    except Exception:
-        return False
+    """Return canonical ``react.evolution.auto_save`` without disk/env reads."""
+    return _get_evolution_config(config).get("auto_save") is True
+
+
+def update_skill_evolution_enabled_in_config(enabled: bool) -> None:
+    """Atomically update the canonical evolution capability switch."""
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        react = data.get("react")
+        if not isinstance(react, dict):
+            react = {}
+            data["react"] = react
+        evolution = react.get("evolution")
+        if not isinstance(evolution, dict):
+            evolution = {}
+            react["evolution"] = evolution
+        evolution["skill_evolution"] = bool(enabled)
+        return data
+
+    update_config(mutator)
 
 
 def set_auto_memory_enabled(enabled: bool) -> None:
@@ -322,6 +464,67 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     section = channels[channel_id]
     for k, v in conf.items():
         section[k] = v
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def _as_plain_yaml_str(value: Any) -> Any:
+    """字符串写成无引号 plain scalar，避免顶层/apps 因旧值风格（如 ``''``）不一致。"""
+    if isinstance(value, str):
+        return PlainScalarString(value)
+    return value
+
+
+def update_xiaoyi_runtime_in_config(
+    conf: dict[str, Any],
+    *,
+    api_id: str = "",
+    agent_id: str = "",
+) -> None:
+    """更新 ``channels.xiaoyi`` 运行时身份，并在存在 ``push_id`` 时同步写入 ``apps[]``。
+
+    顶层字段（``last_session_id`` / ``last_task_id`` / ``push_id`` 等）供 cron 等读；
+    ``apps[].push_id`` 供频道重启后 ``XiaoyiChannelConfig`` 加载。一次 IO 写完，避免不一致。
+
+    ``apps`` 匹配优先级：``api_id`` → ``agent_id`` → ``is_default`` → 唯一 app。
+    """
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    if "xiaoyi" not in channels or not isinstance(channels["xiaoyi"], dict):
+        channels["xiaoyi"] = {}
+    section = channels["xiaoyi"]
+    for k, v in conf.items():
+        section[k] = _as_plain_yaml_str(v)
+
+    push_id = conf.get("push_id")
+    if push_id:
+        plain_push_id = _as_plain_yaml_str(str(push_id))
+        apps = section.get("apps")
+        if isinstance(apps, list) and apps:
+            target: dict[str, Any] | None = None
+            api_id = str(api_id or "").strip()
+            agent_id = str(agent_id or "").strip()
+            if api_id:
+                for app in apps:
+                    if isinstance(app, dict) and str(app.get("api_id") or "").strip() == api_id:
+                        target = app
+                        break
+            if target is None and agent_id:
+                for app in apps:
+                    if isinstance(app, dict) and str(app.get("agent_id") or "").strip() == agent_id:
+                        target = app
+                        break
+            if target is None:
+                for app in apps:
+                    if isinstance(app, dict) and app.get("is_default", False):
+                        target = app
+                        break
+            if target is None and len(apps) == 1 and isinstance(apps[0], dict):
+                target = apps[0]
+            if target is not None:
+                target["push_id"] = plain_push_id
+
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -462,14 +665,30 @@ def update_context_engine_enabled_in_config(value: bool) -> None:
 
 
 def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
-    """更新 react.context_engine_config.enable_kv_cache_release（算力/KV 亲和释放）并写回。"""
+    """更新 react.kv_cache_affinity_config.enable_kv_cache_affinity 并写回。"""
     data = load_yaml_round_trip(CONFIG_YAML_PATH)
     if "react" not in data:
         data["react"] = {}
     react = data["react"]
-    if "context_engine_config" not in react:
-        react["context_engine_config"] = {}
-    react["context_engine_config"]["enable_kv_cache_release"] = value
+    if "kv_cache_affinity_config" not in react:
+        react["kv_cache_affinity_config"] = {}
+    react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = value
+    if value:
+        react["kv_cache_affinity_config"]["enable_kv_cache_release"] = False
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_kv_cache_release_enabled_in_config(value: bool) -> None:
+    """更新 react.kv_cache_affinity_config.enable_kv_cache_release 并写回。"""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    if "react" not in data:
+        data["react"] = {}
+    react = data["react"]
+    if "kv_cache_affinity_config" not in react:
+        react["kv_cache_affinity_config"] = {}
+    react["kv_cache_affinity_config"]["enable_kv_cache_release"] = value
+    if value:
+        react["kv_cache_affinity_config"]["enable_kv_cache_affinity"] = False
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
@@ -524,6 +743,32 @@ def update_auto_recap_enabled_in_config(value: bool) -> None:
         data["auto_recap"] = {}
     data["auto_recap"]["enabled"] = value
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_setup_guide_enabled_in_config(value: bool) -> None:
+    """原子更新 setup_guide.enabled（Web 首次配置引导开关）。"""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("setup_guide")
+        if not isinstance(section, dict):
+            section = {}
+            data["setup_guide"] = section
+        section["enabled"] = value
+        return data
+
+    update_config(mutator)
+
+
+def update_enable_free_models_in_config(value: bool) -> None:
+    """原子更新 models.enable_free_models（Opencode Zen 免费模型开关）。"""
+    def mutator(data: dict[str, Any]) -> dict[str, Any]:
+        section = data.get("models")
+        if not isinstance(section, dict):
+            section = {}
+            data["models"] = section
+        section["enable_free_models"] = value
+        return data
+
+    update_config(mutator)
 
 
 def update_proactive_recommendation_in_config(updates: dict[str, Any]) -> None:
@@ -988,7 +1233,34 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
 
     # 新格式：已有 defaults 列表
     if "defaults" in models and isinstance(models["defaults"], list) and models["defaults"]:
-        return _decrypt_model_entries(models["defaults"])
+        entries = _decrypt_model_entries(models["defaults"])
+        # AgentOS 备份模型：作为额外条目进入缓存（可在 models.list 中按名切换），
+        # 但绝不抢主对话——故显式置 is_default=False（覆盖 _infer_is_default 的"组内唯一=默认"推断）。
+        # 仅在 model_name 非空（即用户已在 YAML 填入凭证）时追加，并打 _source 标记供下游识别。
+        # 列表语义：models.agentos 是列表，可配多个备份模型（同名/异名皆可，填写约束为
+        # (model_name, api_base, api_key) 三元组唯一）。非 list 视为未配置。
+        agentos_raw = models.get("agentos")
+        agentos_list = agentos_raw if isinstance(agentos_raw, list) else []
+        for agentos_block in agentos_list:
+            if not isinstance(agentos_block, dict):
+                continue
+            mcc = agentos_block.get("model_client_config")
+            if not (isinstance(mcc, dict) and mcc.get("model_name")):
+                continue
+            agentos_entry = deepcopy(agentos_block)
+            agentos_entry["is_default"] = False
+            # _source 注入到 model_config_obj 内部，使其经
+            # build_reasoning_model_request_kwargs -> _model_config_to_dict
+            # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos，
+            # 进而把其 max_tokens（输入侧别名）从 ModelRequestConfig 的输出侧
+            # kwargs 里挪到 extra 键 _agentos_ctx_window（随选中 Model 带入缓存，
+            # 供 _deep_agent_context_engine_config 从选中条目精确取值），绝不作为
+            # 输出上限发往厂商。
+            agentos_mco = agentos_entry.setdefault("model_config_obj", {})
+            if isinstance(agentos_mco, dict):
+                agentos_mco["_source"] = "agentos"
+            entries.append(agentos_entry)
+        return entries
 
     # 旧格式：单个 default 对象 → 包装为列表
     if "default" in models and isinstance(models["default"], dict):
@@ -1025,6 +1297,48 @@ def update_default_models_in_config(models_list: list[dict[str, Any]]) -> None:
             del data["models"]["default"]
         return data
     update_config(_mutate)
+
+
+def update_default_model_provider_in_config(provider: str) -> bool:
+    """Update only the default model provider in config.yaml.
+
+    Returns True when a persisted model entry was changed. The default entry is
+    the first entry with ``is_default: true``; if none is marked, the first
+    ``models.defaults`` entry is used. This intentionally does not rewrite
+    non-default models or agent-specific model bindings.
+    """
+    normalized_provider = str(provider or "").strip()
+    if not normalized_provider:
+        return False
+
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    models = data.get("models")
+    if not isinstance(models, dict):
+        return False
+
+    defaults = models.get("defaults")
+    if isinstance(defaults, list) and defaults:
+        changed = set_default_model_provider_in_entries(
+            defaults,
+            normalized_provider,
+        )
+        if changed:
+            dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return changed
+
+    default_entry = models.get("default")
+    if isinstance(default_entry, dict):
+        mcc = default_entry.setdefault("model_client_config", {})
+        if not isinstance(mcc, dict):
+            mcc = {}
+            default_entry["model_client_config"] = mcc
+        if mcc.get("client_provider") == normalized_provider:
+            return False
+        mcc["client_provider"] = normalized_provider
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return True
+
+    return False
 
 
 def ensure_defaults_list_in_config() -> list[dict[str, Any]]:
@@ -1180,10 +1494,15 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
 
         transformed_team: dict[str, Any] = {}
         for key, value in team_raw.items():
-            if key in {"leader", "teammate", "predefined_members"}:
+            if key in {"leader", "teammate", "predefined_members", EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY}:
                 continue
             transformed_team[key] = value
         transformed_team["team_name"] = team_name
+        _normalize_external_cli_team_config(
+            transformed_team,
+            publish_url=team_raw.get(EXTERNAL_CLI_PUBLISH_URL_FRONT_KEY),
+            field_name=f"team[{team_index}].external_cli_agents",
+        )
 
         leader_raw = _require_dict(team_raw.get("leader"), f"team[{team_index}].leader")
         transformed_team["leader"] = {
@@ -1258,6 +1577,79 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
         team_mapping[team_name] = transformed_team
 
     return team_mapping
+
+
+def _normalize_external_cli_team_config(
+    transformed_team: dict[str, Any],
+    *,
+    publish_url: Any,
+    field_name: str,
+) -> None:
+    external_cli_agents = transformed_team.get("external_cli_agents")
+    normalized_cli_agents = _normalize_external_cli_agents(external_cli_agents, field_name)
+    if normalized_cli_agents:
+        transformed_team["external_cli_agents"] = normalized_cli_agents
+    else:
+        transformed_team.pop("external_cli_agents", None)
+
+    has_codex = any(item["cli_agent"] == "codex" for item in normalized_cli_agents)
+    if not has_codex:
+        transformed_team.pop("external_transport", None)
+        return
+
+    if isinstance(transformed_team.get("external_transport"), dict):
+        external_transport = transformed_team["external_transport"]
+    else:
+        external_transport = {}
+
+    transport_type = str(external_transport.get("type") or "").strip()
+    params = external_transport.get("params")
+    params = dict(params) if isinstance(params, dict) else {}
+    if transport_type and transport_type != "hybrid":
+        raise ValueError(f"{field_name} includes codex but external_transport.type must be hybrid")
+
+    if not params.get("external_publish_url"):
+        url = str(publish_url or "").strip()
+        if not url:
+            raise ValueError(f"{field_name} includes codex but external_cli_publish_url is empty")
+        params["external_publish_url"] = url
+
+    transformed_team["external_transport"] = {"type": "hybrid", "params": params}
+
+
+def _normalize_external_cli_agents(value: Any, field_name: str) -> list[dict[str, str]]:
+    if value is None or value == "":
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be an array")
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            cli_agent = item.strip()
+        elif isinstance(item, dict):
+            cli_agent = str(item.get("cli_agent") or "").strip()
+        else:
+            raise ValueError(f"{field_name}[{index}] must be an object or string")
+        if not cli_agent:
+            continue
+        if cli_agent not in _ALLOWED_EXTERNAL_CLI_AGENTS:
+            allowed = ", ".join(sorted(_ALLOWED_EXTERNAL_CLI_AGENTS))
+            raise ValueError(f"{field_name}[{index}].cli_agent must be one of: {allowed}")
+        if cli_agent in seen:
+            continue
+        seen.add(cli_agent)
+        normalized_item = {"cli_agent": cli_agent}
+        if isinstance(item, dict):
+            cli_path = str(item.get("cli_path") or "").strip()
+            legacy_codex_bin = str(item.get("codex_bin") or "").strip()
+            if cli_path:
+                normalized_item["cli_path"] = cli_path
+            elif cli_agent == "codex" and legacy_codex_bin:
+                normalized_item["cli_path"] = legacy_codex_bin
+        normalized.append(normalized_item)
+    return normalized
 
 
 def _build_front_agent_registry(front_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1343,16 +1735,126 @@ def update_swarmflow_enabled_in_config(enabled: bool) -> None:
     dump_yaml_round_trip(CONFIG_YAML_PATH, data)
 
 
+def update_external_cli_agents_in_config(agents: list[str | dict[str, Any]], publish_url: str | None = None) -> None:
+    """Update the external CLI agent switches for the default team."""
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    path_so_far: list[str] = []
+    for segment in EXTERNAL_CLI_AGENTS_CONFIG_PATH[:-1]:
+        path_so_far.append(segment)
+        current = _ensure_config_object(current, segment, ".".join(path_so_far))
+
+    normalized_agents = _normalize_external_cli_agents(agents, "external_cli_agents")
+    if normalized_agents:
+        current[EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1]] = normalized_agents
+    else:
+        current.pop(EXTERNAL_CLI_AGENTS_CONFIG_PATH[-1], None)
+
+    if any(item["cli_agent"] == "codex" for item in normalized_agents):
+        external_transport = current.get(EXTERNAL_TRANSPORT_CONFIG_PATH[-1])
+        if isinstance(external_transport, dict):
+            transport_type = str(external_transport.get("type") or "").strip()
+            params = external_transport.get("params")
+            params = dict(params) if isinstance(params, dict) else {}
+        else:
+            transport_type = ""
+            params = {}
+        if transport_type and transport_type != "hybrid":
+            raise ValueError("external_cli_agents includes codex but external_transport.type must be hybrid")
+        if not params.get("external_publish_url"):
+            url = str(publish_url or "").strip()
+            if not url:
+                raise ValueError("external_cli_agents includes codex but external_cli_publish_url is empty")
+            params["external_publish_url"] = url
+        current[EXTERNAL_TRANSPORT_CONFIG_PATH[-1]] = {"type": "hybrid", "params": params}
+    else:
+        current.pop(EXTERNAL_TRANSPORT_CONFIG_PATH[-1], None)
+
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
+def update_swarmflow_budget_in_config(budget: str) -> None:
+    """Update ``modes.team.jiuwen_team.swarmflow_budget`` in config.yaml.
+
+    Pass an empty string or ``"none"`` to remove the budget ceiling.
+    """
+    clear_budget = not budget or budget.strip().lower() in ("none", "null")
+    if clear_budget:
+        data = load_yaml_round_trip(CONFIG_YAML_PATH)
+        current = data
+        for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+            if segment not in current or not isinstance(current, dict):
+                return  # path doesn't exist, nothing to clear
+            current = current[segment]
+        current.pop(SWARMFLOW_BUDGET_CONFIG_PATH[-1], None)
+        dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+        return
+
+    try:
+        value = int(budget)
+    except (ValueError, TypeError):
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {budget!r}") from None
+    if value <= 0:
+        raise ValueError(f"swarmflow_budget must be a positive integer, got {value}")
+    data = load_yaml_round_trip(CONFIG_YAML_PATH)
+    current = data
+    for segment in SWARMFLOW_BUDGET_CONFIG_PATH[:-1]:
+        current = _ensure_config_object(current, segment, ".".join(SWARMFLOW_BUDGET_CONFIG_PATH))
+    current[SWARMFLOW_BUDGET_CONFIG_PATH[-1]] = value
+    dump_yaml_round_trip(CONFIG_YAML_PATH, data)
+
+
 def get_mcp_servers() -> list[dict[str, Any]]:
-    """读取 config.yaml 中的 mcp.servers（原始结构，不解析环境变量）。"""
+    """合并 config.yaml mcp.servers（command.mcp/TUI 手填）+ mcp/state.json（连接器）。
+
+    两套事实源永久并存（非迁移期重叠）：
+    - config.yaml mcp.servers 是 command.mcp（TUI channel）手动管理 MCP 的
+      事实源；add/remove/enable/disable 经 agent_ws_server 的 command.mcp
+      handler 直接读写 config.yaml。这条链路不动。
+    - mcp/state.json 是MCP（marketplace + custom）的事实源；
+      connect/disconnect/enable/disable 经 mcp handler 写 state.json。
+    """
+    # A. config.yaml — 手填 MCP（raw, no env resolve）.
+    data = get_config_raw()
+    mcp_cfg = data.get("mcp", {})
+    if not isinstance(mcp_cfg, dict):
+        servers_yaml: list[dict[str, Any]] = []
+    else:
+        servers_yaml = [item for item in mcp_cfg.get("servers", [])
+                        if isinstance(item, dict)]
+
+    # B. mcp/state.json — 已连接 MCP（state==connected）.
+    state_mcps: list[dict[str, Any]] = []
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            list_connected_mcps,
+            record_to_mcp_entry,
+        )
+        for rec in list_connected_mcps():
+            name = rec.get("name", "")
+            if not name:
+                continue
+            entry = record_to_mcp_entry(name, rec)
+            # skill-only MCPs return None
+            if entry is not None:
+                state_mcps.append(entry)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[config] failed to merge mcp state.json: %s", exc)
+
+    # Merge: state.json wins on name conflict (dedup by name, state first).
+    state_names = {s["name"] for s in state_mcps}
+    merged = [s for s in servers_yaml if s.get("name") not in state_names]
+    merged.extend(state_mcps)
+    return merged
+
+
+def get_config_yaml_mcp_servers() -> list[dict[str, Any]]:
+    """只读 config.yaml 的 mcp.servers（TUI/command.mcp 手配）。"""
     data = get_config_raw()
     mcp_cfg = data.get("mcp", {})
     if not isinstance(mcp_cfg, dict):
         return []
-    servers = mcp_cfg.get("servers", [])
-    if not isinstance(servers, list):
-        return []
-    return [item for item in servers if isinstance(item, dict)]
+    return [item for item in mcp_cfg.get("servers", []) if isinstance(item, dict)]
 
 
 def upsert_mcp_server_in_config(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -1439,6 +1941,103 @@ def remove_mcp_server_in_config(name: str) -> dict[str, Any]:
         dump_yaml_round_trip(CONFIG_YAML_PATH, data)
         return removed
     raise KeyError(f"MCP server '{target}' not found")
+
+
+def _mcp_name_in_state(name: str) -> bool:
+    """Whether state.json has a record for ``name`` (any state)."""
+    try:
+        from jiuwenswarm.server.runtime.mcp.state_store import get_mcp_record
+        return get_mcp_record(name) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mcp_name_in_config_yaml(name: str) -> bool:
+    """Whether config.yaml mcp.servers has an entry for ``name``."""
+    return any(str(s.get("name", "")).strip() == name
+               for s in get_config_yaml_mcp_servers())
+
+
+def upsert_mcp_server(server: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Upsert a TUI-managed MCP, routing by source: update in place if the
+    name already lives in config.yaml (legacy stock) or state.json (TUI-
+    created / web-connected); otherwise create new in state.json.
+
+    TUI ``add``/``update`` lands here. New MCPs always go to state.json
+    (``enabled`` defaults to the payload's ``enabled``, True for TUI add) —
+    config.yaml is no longer a creation target, only legacy stock edited
+    in place. Returns ``(entry, created)``. Raises ``ValueError`` if no name.
+    """
+    name = str(server.get("name", "")).strip()
+    if not name:
+        raise ValueError("MCP server name is required")
+    # Legacy stock in config.yaml: update in place (keeps its source).
+    if _mcp_name_in_config_yaml(name):
+        return upsert_mcp_server_in_config(server)
+    # Else state.json is the creation/update home for TUI MCPs.
+    from jiuwenswarm.server.runtime.mcp.state_store import upsert_mcp_record
+    prior = _mcp_name_in_state(name)
+    enabled = bool(server.get("enabled", True)) if "enabled" in server else None
+    rec = upsert_mcp_record(name, server, state="connected",
+                            integration_type=_integration_type_for(server),
+                            enabled=enabled)
+    # Shape a config-like entry for the response (carries enabled through).
+    entry = dict(rec)
+    entry["name"] = name
+    if "enabled" not in entry:
+        entry["enabled"] = bool(server.get("enabled", True))
+    return entry, (not prior)
+
+
+def set_mcp_server_enabled(name: str, enabled: bool) -> dict[str, Any]:
+    """Flip a TUI-managed MCP's ``enabled`` flag, routing by source: state.json
+    first (TUI-created / web-connected), then config.yaml (legacy stock).
+
+    Only the TUI channel reads ``enabled``; web ignores it. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import (
+            get_mcp_record, set_mcp_enabled,
+        )
+        set_mcp_enabled(target, enabled=enabled)
+        rec = get_mcp_record(target) or {}
+        entry = dict(rec)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return set_mcp_server_enabled_in_config(target, enabled)
+
+
+def remove_mcp_server(name: str) -> dict[str, Any]:
+    """Remove a TUI-managed MCP, routing by source: state.json first, then
+    config.yaml (legacy stock). Returns the removed entry. Raises
+    ``KeyError`` if the name is in neither source.
+    """
+    target = str(name or "").strip()
+    if not target:
+        raise ValueError("MCP server name is required")
+    if _mcp_name_in_state(target):
+        from jiuwenswarm.server.runtime.mcp.state_store import remove_mcp_record
+        removed = remove_mcp_record(target) or {}
+        entry = dict(removed)
+        entry["name"] = target
+        return entry
+    # Legacy stock in config.yaml.
+    return remove_mcp_server_in_config(target)
+
+
+def _integration_type_for(server: dict[str, Any]) -> str:
+    """Derive the state.json integration_type from a TUI payload's transport."""
+    t = str(server.get("transport", "")).strip().lower()
+    if t == "stdio":
+        return "stdio-mcp"
+    if t in {"sse", "http", "streamable-http", "streamable_http"}:
+        return "remote-mcp"
+    return "remote-mcp"
 
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +2184,38 @@ def _deep_merge(
     return result
 
 
+
+_LEGACY_AGENT_SUBMODE_KEYS: tuple[str, ...] = ("plan", "fast", "agent.plan", "agent.fast")
+
+
+def _migrate_legacy_agent_submode_memory(user_data: dict[str, Any]) -> None:
+    modes = user_data.get("modes")
+    if not isinstance(modes, dict):
+        return
+    agent_node = modes.get("agent")
+    if not isinstance(agent_node, dict):
+        return
+
+    legacy_enabled_values: list[bool] = []
+    for key in _LEGACY_AGENT_SUBMODE_KEYS:
+        sub_node = agent_node.get(key)
+        if isinstance(sub_node, dict):
+            sub_memory = sub_node.get("memory")
+            if isinstance(sub_memory, dict) and "enabled" in sub_memory:
+                legacy_enabled_values.append(bool(sub_memory["enabled"]))
+
+    if not legacy_enabled_values:
+        return
+
+    flat_memory = agent_node.get("memory")
+    if not isinstance(flat_memory, dict):
+        flat_memory = {}
+        agent_node["memory"] = flat_memory
+
+    if "enabled" not in flat_memory:
+        flat_memory["enabled"] = all(legacy_enabled_values)
+
+
 def migrate_config_from_template(
     template_path: Path,
     user_config_path: Path,
@@ -1622,6 +2253,10 @@ def migrate_config_from_template(
 
     if user_data is None:
         user_data = {}
+
+    # 结构性迁移：plan/fast 子模式 memory 配置 -> 合并后的 modes.agent.memory
+    # 必须在 _deep_merge 之前执行，否则旧子节点会被静默丢弃而非迁移。
+    _migrate_legacy_agent_submode_memory(user_data)
 
     # Deep merge: template provides defaults, user values preserved
     merged_data = _deep_merge(template_data, user_data)
@@ -1880,11 +2515,36 @@ _VALID_SANDBOX_STARTUP_MODES = ("internal", "external")
 _DEFAULT_SANDBOX_STARTUP_MODE = "internal"
 _DEFAULT_SANDBOX_POLICY_FILE = "code-agent-policy.yaml"
 
+# YuanRong sandbox knobs under flat ``sandbox:`` (see get_sandbox_endpoint).
+_VALID_YUANRONG_EXECUTORS = ("default", "docker")
+_DEFAULT_YUANRONG_EXECUTOR = "docker"
+_DEFAULT_YUANRONG_URL = "http://yuanrong.local"
+_YUANRONG_ENDPOINT_OPTIONAL_KEYS: tuple[str, ...] = (
+    "image",
+    "workdir",
+    "mounts",
+    "cpu",
+    "cpu_limit",
+    "memory",
+    "mem_limit",
+    "rootfs",
+)
+
 # Public re-exports for callers that need to fall back to / advertise defaults
 # (e.g. agent_ws_server 把缺省值持久化到 config.yaml, 让重启后 get_sandbox_endpoint
 # 能直接读到, 而不必每次再走一遍 fallback 逻辑)。
 DEFAULT_SANDBOX_STARTUP_MODE = _DEFAULT_SANDBOX_STARTUP_MODE
 DEFAULT_SANDBOX_POLICY_FILE = _DEFAULT_SANDBOX_POLICY_FILE
+DEFAULT_YUANRONG_SANDBOX_URL = _DEFAULT_YUANRONG_URL
+DEFAULT_YUANRONG_EXECUTOR = _DEFAULT_YUANRONG_EXECUTOR
+
+
+def _normalize_yuanrong_executor(value: Any) -> str:
+    """归一化 ``sandbox.executor``; 非法或空值回落到默认 ``docker``."""
+    text = str(value or "").strip().lower()
+    if text not in _VALID_YUANRONG_EXECUTORS:
+        return _DEFAULT_YUANRONG_EXECUTOR
+    return text
 
 
 def _normalize_sandbox_startup_mode(value: Any) -> str:
@@ -2046,11 +2706,17 @@ def update_sandbox_policy_file(value: str) -> str:
 
 def get_sandbox_endpoint() -> dict[str, Any]:
     """返回 ``sandbox.url`` / ``sandbox.type`` / ``sandbox.preserve_file_sharing_mode``
-    / ``sandbox.startup_mode`` / ``sandbox.policy_file``.
+    / ``sandbox.startup_mode`` / ``sandbox.policy_file``, 以及 yuanrong 可选 knobs。
 
     ``preserve_file_sharing_mode`` 缺省或为空时返回空串, 由调用方决定默认值
     (当前只有 ``"mount"``)。 ``startup_mode`` 未配置时回落到 ``internal``;
     ``policy_file`` 未配置时返回空串 (由调用方决定默认 policy)。
+
+    当 ``type=yuanrong`` 时额外返回:
+    - ``executor`` (缺省 ``docker``)
+    - 若 yaml 中存在: ``image`` / ``workdir`` / ``mounts`` / ``cpu`` /
+      ``cpu_limit`` / ``memory`` / ``mem_limit`` / ``rootfs``
+    - ``url`` 为空时回落占位 ``http://yuanrong.local`` (仅作 cache key)
 
     Raises:
         ValueError: yaml 里 ``preserve_file_sharing_mode`` 写了非法值时, 直接
@@ -2060,13 +2726,22 @@ def get_sandbox_endpoint() -> dict[str, Any]:
     cfg = get_config() or {}
     sandbox = cfg.get("sandbox") or {}
     mode = _normalize_preserve_file_sharing_mode(sandbox.get("preserve_file_sharing_mode"))
-    return {
-        "url": str(sandbox.get("url") or "").strip(),
-        "type": str(sandbox.get("type") or "").strip(),
+    sandbox_type = str(sandbox.get("type") or "").strip()
+    url = str(sandbox.get("url") or "").strip()
+    result: dict[str, Any] = {
+        "url": url,
+        "type": sandbox_type,
         "preserve_file_sharing_mode": mode or "",
         "startup_mode": _normalize_sandbox_startup_mode(sandbox.get("startup_mode")),
         "policy_file": str(sandbox.get("policy_file") or "").strip(),
     }
+    if sandbox_type == "yuanrong":
+        result["url"] = url or _DEFAULT_YUANRONG_URL
+        result["executor"] = _normalize_yuanrong_executor(sandbox.get("executor"))
+        for key in _YUANRONG_ENDPOINT_OPTIONAL_KEYS:
+            if key in sandbox:
+                result[key] = sandbox[key]
+    return result
 
 
 def update_sandbox_endpoint(
@@ -2076,10 +2751,20 @@ def update_sandbox_endpoint(
     preserve_file_sharing_mode: str | None = None,
     startup_mode: str | None = None,
     policy_file: str | None = None,
+    executor: str | None = None,
+    image: str | None = None,
+    workdir: str | None = None,
+    mounts: list | None = None,
+    cpu: int | None = None,
+    cpu_limit: int | None = None,
+    memory: int | None = None,
+    mem_limit: int | None = None,
+    rootfs: dict | None = None,
 ) -> dict[str, Any]:
     """写入 ``sandbox.url`` / ``sandbox.type`` 以及可选的
     ``preserve_file_sharing_mode`` / ``startup_mode`` / ``policy_file``
-    到 config.yaml; 返回实际写入的字段集合 (没有改动的字段不在返回里)。
+    / yuanrong knobs 到 config.yaml; 返回实际写入的字段集合
+    (没有改动的字段不在返回里)。
 
     所有 ``None`` 入参表示"本次不修改该字段, 保留 config.yaml 中既有值",
     以方便 ``_handle_sandbox_enable`` 在不同阶段分批落盘。
@@ -2107,6 +2792,10 @@ def update_sandbox_endpoint(
             raise ValueError("policy_file must be non-empty when provided")
         policy_value = policy_text
 
+    executor_value: str | None = None
+    if executor is not None:
+        executor_value = _normalize_yuanrong_executor(executor)
+
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "sandbox" not in data or not isinstance(data.get("sandbox"), dict):
         data["sandbox"] = {}
@@ -2118,6 +2807,33 @@ def update_sandbox_endpoint(
         data["sandbox"]["startup_mode"] = startup_value
     if policy_value is not None:
         data["sandbox"]["policy_file"] = policy_value
+    if executor_value is not None:
+        data["sandbox"]["executor"] = executor_value
+
+    optional_writes: dict[str, Any] = {}
+    if image is not None:
+        optional_writes["image"] = str(image).strip()
+    if workdir is not None:
+        optional_writes["workdir"] = str(workdir).strip()
+    if mounts is not None:
+        if not isinstance(mounts, list):
+            raise ValueError("mounts must be a list")
+        optional_writes["mounts"] = mounts
+    if cpu is not None:
+        optional_writes["cpu"] = int(cpu)
+    if cpu_limit is not None:
+        optional_writes["cpu_limit"] = int(cpu_limit)
+    if memory is not None:
+        optional_writes["memory"] = int(memory)
+    if mem_limit is not None:
+        optional_writes["mem_limit"] = int(mem_limit)
+    if rootfs is not None:
+        if not isinstance(rootfs, dict):
+            raise ValueError("rootfs must be a dict")
+        optional_writes["rootfs"] = rootfs
+    for key, value in optional_writes.items():
+        data["sandbox"][key] = value
+
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
     result: dict[str, Any] = {"url": url_value, "type": type_value}
     if mode_value is not None:
@@ -2126,6 +2842,9 @@ def update_sandbox_endpoint(
         result["startup_mode"] = startup_value
     if policy_value is not None:
         result["policy_file"] = policy_value
+    if executor_value is not None:
+        result["executor"] = executor_value
+    result.update(optional_writes)
     return result
 
 

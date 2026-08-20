@@ -5,6 +5,7 @@
 from typing import Any, Mapping
 
 from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.mode_matrix import is_team_mode
 
 
 def get_chat_id(request: AgentRequest) -> str | None:
@@ -37,5 +38,4 @@ def is_team_params(params: Mapping[str, Any] | None) -> bool:
     """Return whether params indicate team mode."""
     if not isinstance(params, Mapping):
         return False
-    mode = str(params.get("mode") or "").strip().lower()
-    return bool(params.get("team")) or mode in {"team", "team.plan", "code.team"}
+    return bool(params.get("team")) or is_team_mode(params.get("mode"))

@@ -60,6 +60,78 @@ def test_resolve_timeout_extends_known_permissions_methods_for_older_clients():
     ) == 55.0
 
 
+def test_resolve_timeout_extends_command_workflows_for_older_clients():
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="command.workflows",
+        is_stream=False,
+    ) == 55.0
+
+
+def test_resolve_timeout_keeps_most_of_client_window_for_command_workflows():
+    # 30s client → 28s gateway (2s grace); not the flat 5s cut used elsewhere.
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="command.workflows",
+        is_stream=False,
+        client_timeout_ms=30_000,
+    ) == 28.0
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="command.workflows",
+        is_stream=False,
+        client_timeout_ms=10_000,
+    ) == 8.0
+
+
+def test_resolve_timeout_exempts_swarmflow_reply_from_unary_cap():
+    """A swarmflow human reply tracks the human-turn timeout (600s default),
+    so it must not be capped by the TUI 25s/55s unary limit."""
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="chat.swarmflow_reply",
+        is_stream=False,
+    ) is None
+    # Even when a client passes a short client_timeout_ms, the exempt method
+    # stays uncapped (the reply is async and must outlive the cap).
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="chat.swarmflow_reply",
+        is_stream=False,
+        client_timeout_ms=1_000,
+    ) is None
+
+
+def test_resolve_timeout_exempts_schedule_run_from_unary_cap():
+    """schedule.run's task execution is asyncio.create_task'd (non-blocking);
+    the synchronous wait is dominated by first-time get_agent() +
+    start_scheduler() warmup, which can exceed 25s on a cold AgentServer.
+    Gateway must not cap it — the client timeout_ms is the ceiling."""
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.run",
+        is_stream=False,
+    ) is None
+    # Client passes a short timeout: still uncapped so the client (not gateway)
+    # decides when to give up.
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.run",
+        is_stream=False,
+        client_timeout_ms=5_000,
+    ) is None
+
+
+def test_resolve_timeout_exempts_schedule_check_config_from_unary_cap():
+    """schedule.check_config shares the same cold-start warmup path as
+    schedule.run (it is called right before run in the auto-harness flow)."""
+    assert resolve_agent_request_timeout_seconds(
+        channel_id="tui",
+        method="schedule.check_config",
+        is_stream=False,
+    ) is None
+
+
 def test_request_timeout_from_envelope_accepts_metadata_fallback():
     env = SimpleNamespace(
         channel="tui",

@@ -288,7 +288,7 @@ class AcpGatewayBridge:
                         timestamp=time.time(),
                         ok=True,
                         req_method=ReqMethod.CHAT_SEND,
-                        mode=Mode.AGENT_PLAN,
+                        mode=Mode.AGENT,
                         metadata={"acp": {"jsonrpc_id": rpc_id, "method": method}},
                     )
                 )

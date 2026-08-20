@@ -32,9 +32,6 @@ JiuwenSwarm session data is stored in the local workspace with the following str
         ├── sess_19ddd5cc729_09bb02/   # Another session
         │   ├── metadata.json
         │   └── history.json
-        ├── heartbeat_19de6f526fb_224694/  # Heartbeat session directory
-        │   ├── metadata.json
-        │   └── history.json
         └── ...
 ```
 
@@ -43,8 +40,13 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 | Directory Prefix | Type | Description |
 |------------------|------|-------------|
 | `sess_` | Regular Session | Conversation sessions initiated via Web, Feishu, etc. |
-| `heartbeat_` | Heartbeat Session | System heartbeat task sessions |
-| `cron_` | Cron Session | Scheduled task sessions triggered by cron jobs |
+| `cron_` | Cron Session | Scheduled task sessions (`cron_id` is non-empty in `metadata.json`) |
+
+**Session type distinction:**
+
+- **Regular sessions**: `cron_id` is empty; retrieved via `project.get_sessions`
+- **Cron sessions**: `cron_id` is non-empty (set to the `CronJob.id`); retrieved via `project.get_cron_sessions`, supports filtering by `cron_id` for all historical runs of a task
+- The two types are mutually exclusive in project view; `project.list` `session_count` only counts regular sessions
 
 **metadata.json File Content:**
 
@@ -53,13 +55,15 @@ JiuwenSwarm session data is stored in the local workspace with the following str
 | Field | Description | Example |
 |-------|-------------|---------|
 | `session_id` | Unique session identifier | `sess_19ddd41cbc0_fd1e4d` |
-| `channel_id` | Session source channel | `web`, `feishu`, `__heartbeat__` |
+| `channel_id` | Session source channel | `web`, `feishu` |
 | `user_id` | User identifier | Empty or user ID |
 | `created_at` | Session creation time (Unix timestamp) | `1716249600.732591` |
 | `last_message_at` | Last message time | `1716253200.865117` |
 | `title` | Session title (usually first message summary) | `Help me write a technical document` |
 | `message_count` | Total message count | `15` |
 | `mode` | Execution mode | `agent.plan` |
+| `project_id` | Project ID the session belongs to | `proj_abc123` (empty string = default project) |
+| `cron_id` | Source cron job ID | Empty for regular sessions; non-empty for cron-triggered sessions |
 
 **history.json File Content:**
 
@@ -120,13 +124,11 @@ The session mechanism plays an important role in JiuwenSwarm:
 
 You can view complete chat history of all sessions to understand past conversation content.
 
-![Session List Example](../assets/images/session/jiuwenclaw_session_history_preview.png)
-
 **Steps:**
 
 1. **Via Web Interface**
-   - In JiuwenSwarm Web interface, click "Sessions" in the left navigation
-   - Enter session management page to see all session list (as displayed in frontend session management)
+   - In JiuwenSwarm Web interface, click **Work** in the left navigation
+   - In the session list on the left side of the Work page, you can see all sessions under the current project
    - Click any session to view its complete chat history
 
 2. **Via Local Files**
@@ -134,20 +136,14 @@ You can view complete chat history of all sessions to understand past conversati
    - Enter the corresponding session directory (e.g., `sess_19ddd41cbc0_fd1e4d/`)
    - View conversation content in `history.json` file
 
-> **Tip**: The frontend page has a "Conversation Preview" toggle to switch between JSON text format or conversation page format, convenient for viewing raw data or conversation content.
-
 ### Restore Session
 
 Restoring a session syncs historical session content to the frontend to continue previous work.
 
-![Restore Session Example](../assets/images/session/jiuwenclaw_session_recovery_history_1.png)
-
-![Restore Session Example 2](../assets/images/session/jiuwenclaw_session_recovery_history_2.png)
-
 **Steps:**
 
-1. Find the session to restore in the session management page (recommend selecting an actual chat history session, not a heartbeat session)
-2. Click the "Restore" button or double-click the session entry
+1. In the session list on the left side of the Work page, find the session to restore
+2. Click the session entry
 3. System will load all historical messages for that session
 4. After restoration, you can see complete conversation history in the chat page
 5. Continue entering new content, AI will respond based on historical context
@@ -168,15 +164,13 @@ Restoring a session syncs historical session content to the frontend to continue
 
 ### Delete Historical Session
 
-If a session is no longer needed, you can delete it directly in session management to free storage and keep the list tidy.
-
-![Delete Session Example](../assets/images/session/jiuwenclaw_session_history_delete.png)
+If a session is no longer needed, you can delete it directly in the Work page to free storage and keep the list tidy.
 
 **Steps:**
 
-1. In JiuwenSwarm Web interface, click "Sessions" in the left navigation
-2. Select the session to delete in the session management page
-3. Click the delete icon in the right-side session detail area
+1. In JiuwenSwarm Web interface, click **Work** in the left navigation
+2. In the session list on the left side of the Work page, select the session to delete
+3. Right-click or use the session operation menu to select "Delete"
 4. In the popup confirmation dialog, click "Confirm"
 5. After successful deletion, the session will be removed from the list
 

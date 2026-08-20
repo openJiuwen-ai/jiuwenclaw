@@ -133,21 +133,40 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
+    stream_closed = False
+
     class FakeAgent:
         async def process_message_stream(self, request):
-            for index in range(2):
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload={"content": str(index)},
-                    is_complete=False,
-                )
+            nonlocal stream_closed
+            try:
+                for index in range(2):
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"content": str(index)},
+                        is_complete=False,
+                    )
+            finally:
+                stream_closed = True
 
     server = agent_ws_server.AgentWebSocketServer.__new__(
         agent_ws_server.AgentWebSocketServer
     )
     server._session_stream_tasks = {}
     server._is_stateless_method_request = lambda request: True
+
+    class ForegroundManager:
+        def __init__(self):
+            self.events = []
+
+        async def begin_foreground_chat(self):
+            self.events.append("begin")
+
+        async def end_foreground_chat(self):
+            self.events.append("end")
+
+    foreground_manager = ForegroundManager()
+    server._agent_manager = foreground_manager
 
     async def get_agent(channel_id):
         return FakeAgent()
@@ -181,6 +200,8 @@ async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     await server._handle_stream(FakeWebSocket(), request, asyncio.Lock())
 
     assert send_count == 1
+    assert stream_closed is True
+    assert foreground_manager.events == ["begin", "end"]
 
 
 def test_agent_ws_server_has_no_direct_websocket_send_calls():

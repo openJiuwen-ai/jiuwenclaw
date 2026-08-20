@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
+import { ConfigFieldHintLabel } from "./ConfigFieldHintLabel";
 
 export type PermissionsToolsEditorProps = {
   isConnected: boolean;
@@ -14,6 +15,12 @@ const LEVEL_LABELS: Record<PermLevel, string> = {
   deny: "DENY",
   allow: "ALLOW",
 };
+
+/** 仅缩写/协议类不够直观的工具名显示问号；bash / write / ask_user 等常见名不加 */
+const AMBIGUOUS_TOOL_HELP_KEYS = new Set([
+  "mcp_exec_command",
+  "acp_chat",
+]);
 
 function normalizeLevel(value: unknown): PermLevel | null {
   if (typeof value === "string") {
@@ -58,7 +65,7 @@ function groupToolsByLevel(tools: Record<string, PermLevel>): Record<PermLevel, 
 }
 
 export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [tools, setTools] = useState<Record<string, PermLevel>>({});
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -69,6 +76,15 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
 
   const grouped = useMemo(() => groupToolsByLevel(tools), [tools]);
   const normalizedToolNames = useMemo(() => new Set(Object.keys(tools).map((name) => name.trim())), [tools]);
+
+  const getToolHelp = useCallback(
+    (toolName: string): string => {
+      if (!AMBIGUOUS_TOOL_HELP_KEYS.has(toolName)) return "";
+      const key = `config.permissionsTools.toolHelp.${toolName}`;
+      return i18n.exists(key) ? t(key) : "";
+    },
+    [i18n, t],
+  );
 
   const load = useCallback(async () => {
     if (!isConnected) return;
@@ -158,14 +174,15 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
   const hasAnyTools = Object.keys(tools).length > 0;
 
   return (
-    <div className="border-t border-border px-4 py-4 bg-secondary/10 space-y-3">
+    <div data-testid="config-panel-permissions-tools" className="border-t border-border px-4 py-4 bg-secondary/10 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <p className="text-sm font-medium text-text">{t("config.permissionsTools.title")}</p>
-          <p className="text-[11px] text-text-muted mt-0.5">{t("config.permissionsTools.subtitle")}</p>
+          <p data-testid="config-panel-permissions-tools-title" className="text-sm font-medium text-text">{t("config.permissionsTools.title")}</p>
+          <p data-testid="config-panel-permissions-tools-subtitle" className="text-[11px] text-text-muted mt-0.5">{t("config.permissionsTools.subtitle")}</p>
         </div>
         <button
           type="button"
+          data-testid="config-panel-permissions-tools-refresh-btn"
           onClick={() => void load()}
           disabled={!isConnected || loading}
           className="btn !px-2.5 !py-1 text-xs disabled:opacity-50"
@@ -175,47 +192,53 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
       </div>
 
       {!isConnected ? (
-        <p className="text-xs text-amber-600 dark:text-amber-400">{t("config.permissionsTools.needConnection")}</p>
+        <p data-testid="config-panel-permissions-tools-need-connection" className="text-xs text-warn">{t("config.permissionsTools.needConnection")}</p>
       ) : null}
 
       {error ? (
-        <p className="text-xs text-danger break-words" role="alert">
+        <p data-testid="config-panel-permissions-tools-error" className="text-xs text-danger break-words" role="alert">
           {error}
         </p>
       ) : null}
 
       {loading && !hasAnyTools ? (
-        <p className="text-xs text-text-muted">{t("config.permissionsTools.loadingList")}</p>
+        <p data-testid="config-panel-permissions-tools-loading" className="text-xs text-text-muted">{t("config.permissionsTools.loadingList")}</p>
       ) : !hasAnyTools ? (
-        <p className="text-xs text-text-muted">{t("config.permissionsTools.empty")}</p>
+        <p data-testid="config-panel-permissions-tools-empty" className="text-xs text-text-muted">{t("config.permissionsTools.empty")}</p>
       ) : (
-        <div className="space-y-2">
+        <div data-testid="config-panel-permissions-tools-groups" className="space-y-2">
           {LEVEL_ORDER.map((level) => {
             const names = grouped[level];
             if (names.length === 0) return null;
 
             return (
-              <div key={level}>
-                <h4 className="text-[11px] font-semibold text-text-muted uppercase tracking-wide mb-1">
+              <div key={level} data-testid="config-panel-permissions-tools-group" data-variant={level}>
+                <h4 data-testid="config-panel-permissions-tools-group-title" data-variant={level} className="text-[11px] font-semibold text-text-muted uppercase tracking-wide mb-1">
                   ── {LEVEL_LABELS[level]} ──
                 </h4>
                 <div className="rounded-md border border-border/80 overflow-hidden">
-                  <table className="w-full text-xs">
+                  <table data-testid="config-panel-permissions-tools-group-table" data-variant={level} className="w-full text-xs">
                     <thead>
                       <tr className="bg-secondary/40 text-text-muted text-left">
-                        <th className="px-3 py-2 font-medium w-[40%]">{t("config.permissionsTools.colTool")}</th>
-                        <th className="px-3 py-2 font-medium">{t("config.permissionsTools.colLevel")}</th>
-                        <th className="px-3 py-2 font-medium w-[4rem] text-right">{t("config.permissionsTools.colActions")}</th>
+                        <th data-testid="config-panel-permissions-tools-group-col-tool" className="px-3 py-2 font-medium w-[40%]">{t("config.permissionsTools.colTool")}</th>
+                        <th data-testid="config-panel-permissions-tools-group-col-level" className="px-3 py-2 font-medium">{t("config.permissionsTools.colLevel")}</th>
+                        <th data-testid="config-panel-permissions-tools-group-col-actions" className="px-3 py-2 font-medium w-[4rem] text-right">{t("config.permissionsTools.colActions")}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {names.map((name) => (
-                        <tr key={name} className="border-t border-border even:bg-secondary/10">
+                        <tr key={name} data-testid="config-panel-permissions-tools-tool" data-variant={name} className="border-t border-border even:bg-secondary/10">
                           <td className="px-3 py-2 align-middle">
-                            <span className="mono text-[13px] text-text break-all">{name}</span>
+                            <ConfigFieldHintLabel
+                              mono
+                              label={<span className="text-[13px] text-text break-all">{name}</span>}
+                              help={getToolHelp(name)}
+                            />
                           </td>
                           <td className="px-3 py-2 align-middle">
                             <select
+                              data-testid="config-panel-permissions-tools-tool-level-select"
+                              data-variant={name}
                               className={levelSelectClass}
                               value={tools[name] ?? level}
                               disabled={!isConnected || busyKey === name}
@@ -232,6 +255,8 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
                           <td className="px-3 py-2 align-middle text-right">
                             <button
                               type="button"
+                              data-testid="config-panel-permissions-tools-tool-delete-btn"
+                              data-variant={name}
                               onClick={() => void handleDelete(name)}
                               disabled={!isConnected || busyKey === name}
                               className="text-danger hover:underline disabled:opacity-50 text-[11px]"
@@ -250,13 +275,14 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
         </div>
       )}
 
-      <div className="rounded-md border border-dashed border-border/80 px-3 py-3 space-y-2 bg-bg/40">
-        <p className="text-[11px] font-medium text-text-muted">{t("config.permissionsTools.addTitle")}</p>
+      <div data-testid="config-panel-permissions-tools-add" className="rounded-md border border-dashed border-border/80 px-3 py-3 space-y-2 bg-bg/40">
+        <p data-testid="config-panel-permissions-tools-add-title" className="text-[11px] font-medium text-text-muted">{t("config.permissionsTools.addTitle")}</p>
         <div className="flex flex-wrap items-end gap-2">
           <div className="flex-1 min-w-[8rem]">
             <label className="block text-[10px] text-text-muted mb-1">{t("config.permissionsTools.colTool")}</label>
             <input
               type="text"
+              data-testid="config-panel-permissions-tools-add-name-input"
               value={newName}
               onChange={(e) => {
                 setNewName(e.target.value);
@@ -269,7 +295,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
               }`}
             />
             {addError ? (
-              <p className="mt-1 text-[10px] text-danger break-words" role="alert">
+              <p data-testid="config-panel-permissions-tools-add-error" className="mt-1 text-[10px] text-danger break-words" role="alert">
                 {addError}
               </p>
             ) : null}
@@ -277,6 +303,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
           <div>
             <label className="block text-[10px] text-text-muted mb-1">{t("config.permissionsTools.colLevel")}</label>
             <select
+              data-testid="config-panel-permissions-tools-add-level-select"
               className={levelSelectClass}
               value={newLevel}
               onChange={(e) => setNewLevel(e.target.value as PermLevel)}
@@ -289,6 +316,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
           </div>
           <button
             type="button"
+            data-testid="config-panel-permissions-tools-add-btn"
             onClick={() => void handleAdd()}
             disabled={!isConnected || !newName.trim() || busyKey === "__add__"}
             className="btn !px-3 !py-1.5 text-xs disabled:opacity-50"

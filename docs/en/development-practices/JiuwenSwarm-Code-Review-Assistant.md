@@ -1397,9 +1397,8 @@ react:
   context_engine_config:
     enable_reload: true
   evolution:
-    enabled: true
-    auto_scan: false
-    skill_base_dir: "agent/skills"
+    skill_evolution: false
+    auto_save: false
 
 tools:
   - todo
@@ -1436,15 +1435,6 @@ mkdir -p tools
 curl -L "https://github.com/checkstyle/checkstyle/releases/download/checkstyle-10.12.5/checkstyle-10.12.5-all.jar" -o tools/checkstyle.jar
 
 pip install lark-oapi
-```
-
-### 7.4 Heartbeat
-
-In `HEARTBEAT.md`, schedule periodic scans:
-
-```markdown
-## Active tasks
-- Run code quality scan  # daily
 ```
 
 ## Chapter 8 — Testing

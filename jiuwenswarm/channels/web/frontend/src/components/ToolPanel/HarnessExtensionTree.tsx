@@ -9,7 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useHarnessStore, CachedFileTreeEntry } from '../../stores';
+import { useChatStore, useHarnessStore, CachedFileTreeEntry } from '../../stores';
 import { webRequest } from '../../services/webClient';
 import { resolveHarnessError } from '../../utils';
 import { ReadOnlyFileModal } from './ReadOnlyFileModal';
@@ -70,7 +70,6 @@ function fileInfoToCached(files: FileInfo[]): CachedFileTreeEntry[] {
 export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
   const { t } = useTranslation();
   const {
-    extensionReady,
     packages,
     getFileTreeCache,
     setFileTreeCache,
@@ -78,6 +77,8 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
     setFileTreeLoading,
     isFileTreeLoading,
   } = useHarnessStore();
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const extensionReady = useHarnessStore((s) => s.runtimes[activeSessionId ?? '']?.extensionReady ?? null);
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -271,7 +272,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
 
   if (!runtimePath) {
     return (
-      <div className="h-full flex items-center justify-center text-text-muted text-sm">
+      <div data-testid="tool-panel-harness-tree-empty" className="h-full flex items-center justify-center text-text-muted text-sm">
         {t('toolPanel.noExtension')}
       </div>
     );
@@ -279,7 +280,7 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
 
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center">
+      <div data-testid="tool-panel-harness-tree-loading" className="h-full flex items-center justify-center">
         <div className="w-8 h-8 rounded-full border-4 border-border border-t-accent animate-spin" />
       </div>
     );
@@ -294,15 +295,17 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       <div key={entry.path}>
         <button
           type="button"
+          data-testid="tool-panel-harness-tree-dir"
+          data-variant={entry.path}
           onClick={() => toggleDirectory(entry.path)}
-          className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-secondary/40 hover:text-text transition-colors"
+          className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-text-muted hover:bg-secondary/40 hover:text-text "
           style={{ paddingLeft: `${depth * 12 + 6}px` }}
           title={entry.name}
         >
           <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
             {hasChildren ? (
               <svg
-                className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+                className={`w-3 h-3  ${isExpanded ? 'rotate-90' : ''}`}
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -343,9 +346,11 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
       <button
         key={file.path}
         type="button"
-        className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors ${
+        data-testid="tool-panel-harness-tree-file"
+        data-variant={file.path}
+        className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px]  ${
           selected
-            ? 'bg-accent-subtle text-text border border-[var(--border-accent)]'
+            ? 'bg-accent-subtle text-text border border-[var(--color-border-accent)]'
             : previewable
               ? 'text-text-muted hover:bg-secondary/40 hover:text-text border border-transparent'
               : 'text-text-muted/60 border border-transparent cursor-not-allowed'
@@ -365,20 +370,21 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
   };
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
-      <div className="flex-shrink-0 px-3 py-2 border-b border-border bg-secondary/30">
+    <div data-testid="tool-panel-harness-tree" className="h-full flex flex-col overflow-hidden">
+      <div data-testid="tool-panel-harness-tree-header" className="flex-shrink-0 px-3 py-2 border-b border-border bg-secondary/30">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-medium text-text truncate min-w-0">{displayName}</h3>
+          <h3 data-testid="tool-panel-harness-tree-title" className="text-sm font-medium text-text truncate min-w-0">{displayName}</h3>
           <div className="flex items-center gap-1 flex-shrink-0">
             {exportError && (
-              <span className="text-xs text-danger max-w-[100px] truncate">{exportError}</span>
+              <span data-testid="tool-panel-harness-tree-export-error" className="text-xs text-danger max-w-[100px] truncate">{exportError}</span>
             )}
             {showExport && canExport && (
               <button
                 type="button"
+                data-testid="tool-panel-harness-tree-export"
                 onClick={handleExport}
                 disabled={exporting}
-                className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors text-xs disabled:opacity-50"
+                className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary  text-xs disabled:opacity-50"
                 title={t('harnessPackage.export')}
               >
                 {exporting ? t('harnessPackage.exporting') : t('harnessPackage.export')}
@@ -386,28 +392,29 @@ export function HarnessExtensionTree(props?: HarnessExtensionTreeProps) {
             )}
             <button
               type="button"
+              data-testid="tool-panel-harness-tree-refresh"
               onClick={handleRefresh}
               disabled={loading}
-              className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors text-xs disabled:opacity-50"
+              className="px-2 py-1 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary  text-xs disabled:opacity-50"
               title={t('toolPanel.refreshFiles')}
             >
               {loading ? t('common.refreshing') : t('common.refresh')}
             </button>
           </div>
         </div>
-        <p className="text-xs text-text-muted mono truncate mt-1" title={runtimePath}>
+        <p data-testid="tool-panel-harness-tree-path" className="text-xs text-text-muted mono truncate mt-1" title={runtimePath}>
           {runtimePath}
         </p>
       </div>
 
       {loadError ? (
-        <div className="flex-1 flex items-center justify-center text-danger text-sm px-4">
+        <div data-testid="tool-panel-harness-tree-error" className="flex-1 flex items-center justify-center text-danger text-sm px-4">
           {loadError}
         </div>
       ) : (
-        <div className="flex-1 overflow-auto p-2">
+        <div data-testid="tool-panel-harness-tree-list" className="flex-1 overflow-auto p-2">
           {files.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-text-muted text-sm">
+            <div data-testid="tool-panel-harness-tree-empty" className="h-full flex items-center justify-center text-text-muted text-sm">
               {t('toolPanel.noExtension')}
             </div>
           ) : (

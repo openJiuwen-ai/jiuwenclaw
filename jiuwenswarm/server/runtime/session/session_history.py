@@ -5,8 +5,10 @@ import logging
 import json
 import os
 import queue
+import re
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +17,92 @@ from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
-_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=20000)
+_WRITE_QUEUE: queue.Queue[
+    tuple[str, dict[str, Any], Future[None] | None]
+] = queue.Queue(maxsize=20000)
+_QUEUE_ENQUEUE_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
+_HEARTBEAT_OK = "HEARTBEAT_OK"
+SESSION_REQUEST_COMPLETED_EVENT = "chat.request_completed"
+_VALID_SESSION_ID = re.compile(
+    r"^[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,78}[A-Za-z0-9_])?$"
+)
+# Gateway may inline @path as <file-content>...</file-content> before chat.send.
+# History should keep the short @path form so jsonl rows stay one physical line
+# and refresh UI does not load megabytes of file body.
+_FILE_CONTENT_BLOCK_RE = re.compile(
+    r"\n?<file-content\s+path=\"([^\"]*)\">.*?</file-content>\n?",
+    re.DOTALL,
+)
+
+
+def collapse_file_content_blocks(content: str) -> str:
+    """Replace inlined ``<file-content>`` bodies with ``@path`` references.
+
+    Used when persisting / serving user history so the agent-facing inline
+    expansion is not stored as the user-visible transcript.
+    """
+    if not content or "<file-content" not in content:
+        return content
+
+    def _replacer(match: re.Match[str]) -> str:
+        path = match.group(1) or ""
+        if not path:
+            return "\n"
+        ref = f'@"{path}"' if any(ch.isspace() for ch in path) else f"@{path}"
+        return f"\n{ref}\n"
+
+    collapsed = _FILE_CONTENT_BLOCK_RE.sub(_replacer, content)
+    return re.sub(r"\n{3,}", "\n\n", collapsed).strip()
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    """Return whether a session id is safe to use as one path component."""
+
+    return _VALID_SESSION_ID.fullmatch(session_id) is not None
+
+
+def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
+    """Heartbeat sessions are one-shot and should not pollute history.json(l)."""
+    return (session_id or "").startswith("heartbeat")
+
+
+def _has_persistable_assistant_payload(
+    *,
+    content_text: str,
+    event_type: str | None,
+    extra: dict[str, Any] | None,
+) -> bool:
+    """Return False for blank assistant shells that would show as empty history rows."""
+    content = (content_text or "").strip()
+    if content.upper() == _HEARTBEAT_OK:
+        return False
+
+    et = str(event_type or "").strip()
+    payload = extra if isinstance(extra, dict) else {}
+    if content:
+        return True
+    if str(payload.get("reasoning_content") or "").strip():
+        return True
+    if et == "chat.file" and payload.get("files"):
+        return True
+    if et == "chat.tool_call" and (payload.get("tool_call") or payload.get("tool_calls")):
+        return True
+    if et == "chat.tool_result" and (payload.get("tool_result") or payload.get("tool_call_id")):
+        return True
+    if payload.get("error") or payload.get("files"):
+        return True
+    if payload.get("tool_call") or payload.get("tool_calls"):
+        return True
+    # Empty chat.final / chat.* status shells and other blank assistants: skip.
+    if et.startswith("chat.") or et in {"", "chat.final"}:
+        return False
+    # team.* / context.* monitor events may carry structured extras without content.
+    return bool(payload)
 
 
 def _serialize_value_with_flag(obj: Any) -> tuple[Any, bool]:
@@ -68,12 +150,52 @@ def _session_dir(session_id: str, *, create: bool = True) -> Path:
     return session_dir
 
 
-def _history_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _LEGACY_HISTORY_FILENAME
+def resolve_session_dir(
+    session_id: str, *, create: bool = False, sessions_root: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """安全解析 session 目录路径（防路径遍历）。
+
+    采用严格白名单判据：session id 只能包含 ASCII 字母、数字、点、横线和下划线，
+    长度不超过 80；首尾允许下划线，以兼容 ``__cron__`` 等内部会话 ID，
+    但点和横线仍只允许出现在中间。不合法输入直接拒绝，根本不拼路径。
+
+    再用 ``resolve()`` + ``relative_to`` 做纵深防御，兜底白名单逻辑被绕过的极端情况。
+
+    Args:
+        session_id: 待校验的 session id（调用方应先 ``.strip()``）。
+        create: 是否创建目录（delete 流程传 False）。
+        sessions_root: sessions 根目录。由调用方传入
+
+    Returns:
+        ``(resolved_path, None)`` —— 合法，返回解析后的绝对路径（确认在 sessions 目录内）。
+        ``(None, error_reason)`` —— 非法，根本未触碰磁盘路径。
+    """
+    if not session_id or not is_valid_session_id(session_id):
+        return None, "invalid session_id"
+
+    if sessions_root is None:
+        sessions_root = get_agent_sessions_dir()
+    session_dir = sessions_root / session_id
+    # 纵深防御必须在 mkdir 之前：先 resolve + relative_to 确认路径仍在 sessions
+    # 目录内，通过后才允许创建。否则白名单一旦被绕过，mkdir(parents=True) 会
+    # 先在 sessions 根目录之外越界创建目录，relative_to 才事后检测到——此时
+    # 副作用已发生，越界空目录残留在磁盘上（虽不触发 rmtree，但仍是文件系统泄漏）。
+    try:
+        resolved = session_dir.resolve(strict=False)
+        resolved.relative_to(sessions_root.resolve(strict=False))
+    except (ValueError, OSError):
+        return None, "invalid session_id"
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
+    return resolved, None
 
 
-def _history_jsonl_file(session_id: str) -> Path:
-    return _session_dir(session_id) / _JSONL_HISTORY_FILENAME
+def _history_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
+
+
+def _history_jsonl_file(session_id: str, *, create: bool = True) -> Path:
+    return _session_dir(session_id, create=create) / _JSONL_HISTORY_FILENAME
 
 
 def use_legacy_history_json() -> bool:
@@ -91,18 +213,18 @@ def get_write_history_path(session_id: str) -> Path:
 def get_read_history_path(session_id: str) -> Path:
     """Return the preferred history source, falling back to legacy json."""
     if use_legacy_history_json():
-        legacy_path = _history_file(session_id)
+        legacy_path = _history_file(session_id, create=False)
         if legacy_path.exists():
             return legacy_path
-        jsonl_path = _history_jsonl_file(session_id)
+        jsonl_path = _history_jsonl_file(session_id, create=False)
         if jsonl_path.exists():
             return jsonl_path
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
+    jsonl_path = _history_jsonl_file(session_id, create=False)
     if jsonl_path.exists():
         return jsonl_path
-    legacy_path = _history_file(session_id)
+    legacy_path = _history_file(session_id, create=False)
     if legacy_path.exists():
         return legacy_path
     return jsonl_path
@@ -141,8 +263,13 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
     try:
-        for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            line = raw_line.strip()
+        # JSONL records are delimited by "\n" only. Do NOT use str.splitlines():
+        # inlined file bodies may contain Unicode line separators (U+2028 etc.)
+        # that splitlines() treats as breaks, corrupting a single JSON object
+        # into fragments and dropping the user turn on refresh.
+        text = path.read_text(encoding="utf-8")
+        for lineno, raw_line in enumerate(text.split("\n"), start=1):
+            line = raw_line.rstrip("\r").strip()
             if not line:
                 continue
             try:
@@ -151,6 +278,14 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
                 logger.warning("读取 history.jsonl 第 %d 行失败，已跳过: %s", lineno, exc)
                 continue
             if isinstance(item, dict):
+                content = item.get("content")
+                if (
+                    item.get("role") in {"user", "human"}
+                    and isinstance(content, str)
+                    and "<file-content" in content
+                ):
+                    item = dict(item)
+                    item["content"] = collapse_file_content_blocks(content)
                 records.append(item)
             else:
                 logger.warning(
@@ -255,10 +390,16 @@ def _is_team_relevant(item: dict[str, Any]) -> bool:
     if not isinstance(et, str):
         return False
     if et in _TEAM_RELEVANT_EVENT_TYPES:
+        if et == "chat.file":
+            role = item.get("role")
+            return isinstance(role, str) and role.strip().lower() in {
+                "assistant",
+                "teammate",
+            }
         if et in ("chat.tool_call", "chat.tracer_agent"):
             mode = item.get("mode")
             return isinstance(mode, str) and mode.strip().lower() == "team"
-        if et in ("chat.final", "chat.tool_result", "chat.file"):
+        if et in ("chat.final", "chat.tool_result"):
             role = item.get("role")
             return isinstance(role, str) and role.strip().lower() == "teammate"
         return True
@@ -400,17 +541,40 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item = _WRITE_QUEUE.get()
+                sid, item, receipt = _WRITE_QUEUE.get()
                 try:
                     _write_item(sid, item)
                 except Exception as exc:  # noqa: BLE001
+                    if receipt is not None:
+                        receipt.set_exception(exc)
                     logger.warning("history 异步写入失败: %s", exc)
+                else:
+                    if receipt is not None:
+                        receipt.set_result(None)
                 finally:
                     _WRITE_QUEUE.task_done()
 
         t = threading.Thread(target=_worker, name="session-history-writer", daemon=True)
         t.start()
         _WORKER_STARTED = True
+
+
+def _enqueue_history_item(
+    session_id: str,
+    item: dict[str, Any],
+    *,
+    receipt: Future[None] | None = None,
+) -> None:
+    """Keep all history records on one FIFO path, including under pressure."""
+
+    _ensure_worker_started()
+    with _QUEUE_ENQUEUE_LOCK:
+        try:
+            _WRITE_QUEUE.put_nowait((session_id, item, receipt))
+        except queue.Full:
+            # A synchronous disk-write fallback can overtake queued records.
+            # Block only under backpressure so request boundaries remain FIFO.
+            _WRITE_QUEUE.put((session_id, item, receipt))
 
 
 def append_history_record(
@@ -428,10 +592,24 @@ def append_history_record(
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
+    if _is_ephemeral_heartbeat_session(sid):
+        logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
+        return
     rid = str(request_id or "").strip()
     cid = str(channel_id or "").strip()
     role_norm = "assistant" if role == "assistant" else "user"
     content_text = content if isinstance(content, str) else str(content)
+    if role_norm == "assistant" and not _has_persistable_assistant_payload(
+        content_text=content_text,
+        event_type=event_type,
+        extra=extra,
+    ):
+        logger.debug(
+            "skip empty assistant history: session_id=%s event_type=%s",
+            sid,
+            event_type or "",
+        )
+        return
 
     item: dict[str, Any] = {
         "id": f"{rid}:{role_norm}",
@@ -458,12 +636,7 @@ def append_history_record(
     if mode:
         item["mode"] = str(mode)
 
-    _ensure_worker_started()
-    try:
-        _WRITE_QUEUE.put_nowait((sid, item))
-    except queue.Full:
-        # 队列满时退化为同步写，避免丢历史记录。
-        _write_item(sid, item)
+    _enqueue_history_item(sid, item)
 
     # 更新会话元数据
     try:
@@ -480,6 +653,9 @@ def append_history_record(
             # 传入渠道元数据,首次写入时持久化
             channel_metadata=channel_metadata,
             mode=mode,
+            # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
+            # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
+            last_user_message_at=float(timestamp) if role_norm == "user" else None,
         )
         if role_norm == "user":
             set_session_delivery_context(
@@ -490,6 +666,38 @@ def append_history_record(
             )
     except Exception as exc:
         logger.warning("更新会话元数据失败: %s", exc)
+
+
+def enqueue_history_request_completion(
+    session_id: str,
+    request_id: str,
+    *,
+    terminal_status: str = "success",
+) -> Future[None] | None:
+    """Persist a request boundary after its previously enqueued history."""
+
+    sid = (session_id or "default").strip() or "default"
+    rid = str(request_id or "").strip()
+    if not rid or _is_ephemeral_heartbeat_session(sid):
+        return None
+    status = str(terminal_status or "success").strip().lower() or "success"
+    receipt: Future[None] = Future()
+    _enqueue_history_item(
+        sid,
+        {
+            "id": f"{rid}:request_completed",
+            "role": "assistant",
+            "request_id": rid,
+            "channel_id": "",
+            "timestamp": time.time(),
+            "content": "",
+            "event_type": SESSION_REQUEST_COMPLETED_EVENT,
+            "feedback_only": True,
+            "status": status,
+        },
+        receipt=receipt,
+    )
+    return receipt
 
 
 def append_compact_history_records(

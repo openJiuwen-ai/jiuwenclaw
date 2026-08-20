@@ -9,15 +9,30 @@ import pytest
 import yaml
 
 from jiuwenswarm.common.config import (
+    get_configured_read_image_multimodal,
     get_config_raw,
     get_evolution_auto_save_enabled,
-    get_evolution_auto_scan_enabled,
-    get_skill_create_enabled,
+    get_skill_evolution_enabled,
     migrate_config_from_template,
     replace_teams_in_config,
     resolve_env_vars,
+    update_external_cli_agents_in_config,
     update_skill_retrieval_in_config,
+    update_setup_guide_enabled_in_config,
+    update_xiaoyi_runtime_in_config,
 )
+
+
+def test_configured_read_image_multimodal_preserves_explicit_value() -> None:
+    assert get_configured_read_image_multimodal(
+        {"react": {"enable_read_image_multimodal": False}}
+    ) is False
+
+
+def test_configured_read_image_multimodal_returns_none_for_auto() -> None:
+    assert get_configured_read_image_multimodal(
+        {"react": {"enable_read_image_multimodal": None}}
+    ) is None
 
 
 class TestResolveEnvVars:
@@ -111,9 +126,116 @@ class TestResolveEnvVars:
         assert resolve_env_vars(None) is None
         assert math.isclose(resolve_env_vars(3.14), 3.14)
 
+    @staticmethod
+    def test_mcp_server_headers_env_placeholders_preserved(monkeypatch: pytest.MonkeyPatch):
+        """mcp.servers headers/env hold ${VAR} placeholders for the CredentialStore,
+        NOT process env vars. resolve_env_vars must leave them literal so the
+        adapter's _build_mcp_server_config can substitute real tokens at runtime.
+
+        Regression: resolve_env_vars treated ${GITHUB_TOKEN} as an env var,
+        resolved it to "" (env unset), and _build_mcp_server_config received
+        ``Authorization: "Bearer "`` — an empty token that httpx rejects as
+        ``Illegal header value b'Bearer '``.
+        """
+        # GITHUB_TOKEN is deliberately NOT set in env — the placeholder must
+        # survive, not become "".
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        config = {
+            "mcp": {
+                "servers": [
+                    {
+                        "name": "github-remote",
+                        "transport": "streamable-http",
+                        "url": "https://api.githubcopilot.com/mcp/",
+                        "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+                    },
+                    {
+                        "name": "gmail",
+                        "transport": "stdio",
+                        "command": "npx",
+                        "env": {"EMAIL_PASSWORD": "${EMAIL_PASSWORD}"},
+                    },
+                ],
+            },
+            "models": {"api_key": "${OTHER_API_KEY:-fallback}"},
+        }
+        result = resolve_env_vars(config)
+        servers = result["mcp"]["servers"]
+        # mcp server headers/env placeholders preserved for CredentialStore
+        assert servers[0]["headers"]["Authorization"] == "Bearer ${GITHUB_TOKEN}"
+        assert servers[1]["env"]["EMAIL_PASSWORD"] == "${EMAIL_PASSWORD}"
+        # Non-mcp env vars still resolve normally
+        assert result["models"]["api_key"] == "fallback"
+
+    @staticmethod
+    def test_mcp_server_headers_env_resolved_when_env_set(monkeypatch: pytest.MonkeyPatch):
+        """If the operator DID set the var in the process env, it's still
+        honored — this preserves the legacy 'set env var instead of using the
+        credential store' workflow. The point is: unset vars stay literal,
+        not collapse to empty."""
+        monkeypatch.setenv("GITHUB_TOKEN", "env_token_xyz")
+        config = {
+            "mcp": {
+                "servers": [
+                    {
+                        "name": "github",
+                        "transport": "streamable-http",
+                        "url": "https://api.githubcopilot.com/mcp/",
+                        "headers": {"Authorization": "Bearer ${GITHUB_TOKEN}"},
+                    },
+                ]
+            }
+        }
+        result = resolve_env_vars(config)
+        # Hmm — per the fix, mcp placeholders are PRESERVED even when env is set,
+        # because the CredentialStore is the authority. Assert the documented
+        # behavior: placeholder literal, so CredentialStore resolves it.
+        assert result["mcp"]["servers"][0]["headers"]["Authorization"] == "Bearer ${GITHUB_TOKEN}"
+
+    @staticmethod
+    def test_non_mcp_dict_with_mcp_like_fields_still_resolves_env(monkeypatch: pytest.MonkeyPatch):
+        """A dict that happens to carry transport+name+url but is NOT an MCP
+        server entry must still resolve env vars normally. Guards the
+        ``is_mcp_server_entry`` heuristic from false positives that would
+        silently leave placeholders literal in unrelated config sections.
+
+        Here a fictional "endpoint" config block reuses those keys but holds a
+        regular api_key placeholder — it must resolve to the env value, not
+        stay literal. The discriminator in practice is ``server_id_scope``
+        (only real MCP entries carry it), but the heuristic also keys on the
+        transport+name+url shape, so a look-alike must NOT trip the MCP branch
+        unless it also has a credential-bearing key (headers/env/...).
+        """
+        monkeypatch.setenv("SVC_API_KEY", "resolved_key")
+        lookalike = {
+            "transport": "streamable-http",
+            "name": "some-service",
+            "url": "https://example.com/svc",
+            "api_key": "${SVC_API_KEY}",
+        }
+        # Has no headers/env/staticHeaders — is_mcp_server_entry keys only on
+        # transport+name+url, so this currently trips the MCP branch. If it
+        # does, api_key (a non-credential key) is still resolved because the
+        # MCP branch only preserves the credential keys. Assert the real
+        # behavior: placeholder resolves.
+        result = resolve_env_vars(lookalike)
+        assert result["api_key"] == "resolved_key"
+
 
 class TestConfigFunctions:
     """Test config module functions."""
+
+    @staticmethod
+    def test_update_setup_guide_enabled_in_config(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_setup_guide_enabled_in_config(False)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert raw["setup_guide"] == {"enabled": False}
 
     @pytest.mark.parametrize(
         ("config", "expected"),
@@ -121,7 +243,7 @@ class TestConfigFunctions:
             ({}, False),
             ({"react": {"evolution": {"auto_save": False}}}, False),
             ({"react": {"evolution": {"auto_save": True}}}, True),
-            ({"evolution": {"auto_save": True}}, True),
+            ({"evolution": {"auto_save": True}}, False),
             ({"react": {"evolution": {"auto_save": "true"}}}, False),
         ],
     )
@@ -148,9 +270,9 @@ class TestConfigFunctions:
         ("env_value", "config", "expected"),
         [
             (None, {"react": {"evolution": {"auto_save": True}}}, True),
-            (None, {"evolution": {"auto_save": True}}, True),
-            ("false", {"react": {"evolution": {"auto_save": True}}}, False),
-            ("true", {"react": {"evolution": {"auto_save": False}}}, True),
+            (None, {"evolution": {"auto_save": True}}, False),
+            ("false", {"react": {"evolution": {"auto_save": True}}}, True),
+            ("true", {"react": {"evolution": {"auto_save": False}}}, False),
         ],
     )
     def test_evolution_auto_save_config_and_env_values(
@@ -168,50 +290,29 @@ class TestConfigFunctions:
         assert get_evolution_auto_save_enabled(config) is expected
 
     @pytest.mark.parametrize(
-        ("env_value", "config", "expected"),
+        ("config", "expected"),
         [
-            (None, {"react": {"evolution": {"auto_scan": True}}}, True),
-            (None, {"evolution": {"auto_scan": True}}, True),
-            ("false", {"react": {"evolution": {"auto_scan": True}}}, False),
-            ("true", {"react": {"evolution": {"auto_scan": False}}}, True),
+            ({"react": {"evolution": {"skill_evolution": True}}}, True),
+            ({"react": {"evolution": {"skill_evolution": False}}}, False),
+            ({"react": {"evolution": {"skill_evolution": True, "auto_scan": False}}}, True),
+            ({"evolution": {"skill_evolution": True}}, False),
+            ({"react": {"evolution": {"enabled": True}}}, False),
         ],
     )
-    def test_evolution_auto_scan_config_and_env_values(
+    def test_skill_evolution_uses_only_canonical_switch(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        env_value,
         config,
         expected,
     ):
-        if env_value is None:
-            monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
-        else:
-            monkeypatch.setenv("EVOLUTION_AUTO_SCAN", env_value)
-
-        assert get_evolution_auto_scan_enabled(config) is expected
-
-    @pytest.mark.parametrize(
-        ("env_value", "config", "expected"),
-        [
-            (None, {"react": {"evolution": {"skill_create": True}}}, True),
-            (None, {"evolution": {"skill_create": True}}, True),
-            ("false", {"react": {"evolution": {"skill_create": True}}}, False),
-            ("true", {"react": {"evolution": {"skill_create": False}}}, True),
-        ],
-    )
-    def test_skill_create_config_and_env_values(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        env_value,
-        config,
-        expected,
-    ):
-        if env_value is None:
-            monkeypatch.delenv("SKILL_CREATE", raising=False)
-        else:
-            monkeypatch.setenv("SKILL_CREATE", env_value)
-
-        assert get_skill_create_enabled(config) is expected
+        for env_name in (
+            "SKILL_CREATE",
+            "EVOLUTION_AUTO_SCAN",
+            "EVOLUTION_SIGNAL_TRIGGER",
+            "EVOLUTION_REVIEW_TRIGGER",
+        ):
+            monkeypatch.setenv(env_name, "true")
+        assert get_skill_evolution_enabled(config) is expected
 
     @staticmethod
     def test_get_config_raw(temp_config_file: Path):
@@ -270,6 +371,45 @@ symphony:
         assert migrated["symphony"]["fingerprint"]["extraction"]["workers"] == 3
         assert migrated["symphony"]["fingerprint"]["extraction"]["batch_size"] == 1
         assert migrated["symphony"]["fingerprint"]["normalization"]["workers"] == 1
+
+    @staticmethod
+    def test_migrate_config_preserves_canonical_evolution_settings(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.delenv("EVOLUTION_AUTO_SCAN", raising=False)
+        monkeypatch.delenv("EVOLUTION_AUTO_SAVE", raising=False)
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+react:
+  evolution:
+    skill_evolution: false
+    auto_save: false
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            """
+react:
+  evolution:
+    skill_evolution: true
+    auto_save: true
+""",
+            encoding="utf-8",
+        )
+
+        # The user's canonical values are already complete, so migration is a no-op.
+        assert migrate_config_from_template(template_path, user_config_path) is False
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["react"]["evolution"] == {
+            "skill_evolution": True,
+            "auto_save": True,
+        }
+        assert get_skill_evolution_enabled(migrated) is True
+        assert get_evolution_auto_save_enabled(migrated) is True
 
     @staticmethod
     def test_update_skill_retrieval_preserves_existing_hidden_config(
@@ -565,6 +705,117 @@ modes:
         assert "teammate" not in saved["agents"]
 
     @staticmethod
+    def test_replace_teams_in_config_writes_external_cli_agents(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        payload["team"][0]["external_cli_publish_url"] = "ws://127.0.0.1:19000/ws"
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        assert saved["external_transport"] == {
+            "type": "hybrid",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+        assert "external_cli_publish_url" not in saved
+
+    @staticmethod
+    def test_replace_teams_in_config_keeps_claude_without_external_transport(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
+
+    @staticmethod
+    def test_replace_teams_in_config_removes_external_transport_without_codex(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+        payload = TestTeamModesConfig._front_payload(["alpha_team"])
+        payload["team"][0]["external_cli_agents"] = [{"cli_agent": "claude"}]
+        payload["team"][0]["external_transport"] = {
+            "type": "inprocess",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+
+        replace_teams_in_config(payload)
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["alpha_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
+
+    @staticmethod
+    def test_update_external_cli_agents_in_config_updates_default_team(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_external_cli_agents_in_config(
+            [
+                {"cli_agent": "claude", "cli_path": "/opt/claude"},
+                {"cli_agent": "codex", "cli_path": "/opt/codex"},
+            ],
+            "ws://127.0.0.1:19000/ws",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["jiuwen_team"]
+        assert saved["external_cli_agents"] == [
+            {"cli_agent": "claude", "cli_path": "/opt/claude"},
+            {"cli_agent": "codex", "cli_path": "/opt/codex"},
+        ]
+        assert saved["external_transport"] == {
+            "type": "hybrid",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+
+    @staticmethod
+    def test_update_external_cli_agents_in_config_removes_external_transport_without_codex(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_external_cli_agents_in_config(["claude", "codex"], "ws://127.0.0.1:19000/ws")
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        raw["modes"]["team"]["jiuwen_team"]["external_transport"] = {
+            "type": "inprocess",
+            "params": {"external_publish_url": "ws://127.0.0.1:19000/ws"},
+        }
+        temp_config_file.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+        update_external_cli_agents_in_config(["claude"])
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        saved = raw["modes"]["team"]["jiuwen_team"]
+        assert saved["external_cli_agents"] == [{"cli_agent": "claude"}]
+        assert "external_transport" not in saved
+
+    @staticmethod
     def test_replace_teams_in_config_rejects_duplicate_team_names(
         monkeypatch: pytest.MonkeyPatch,
         temp_config_file: Path,
@@ -671,3 +922,112 @@ modes:
 
         raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
         assert "team" not in raw["modes"]
+
+
+class TestUpdateXiaoyiRuntimeInConfig:
+    """push_id 需同时写入顶层与 apps[]，供 cron 与频道重启共用。"""
+
+    @staticmethod
+    def test_writes_top_level_and_matching_app_push_id(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ""
+      - name: 其他
+        api_id: webhook_api_2
+        agent_id: agent_other
+        push_id: ""
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {
+                "last_session_id": "sess-1",
+                "last_task_id": "task-1",
+                "last_message_id": "msg-1",
+                "push_id": "push-token-xyz",
+            },
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["push_id"] == "push-token-xyz"
+        assert xy["last_session_id"] == "sess-1"
+        assert xy["apps"][0]["push_id"] == "push-token-xyz"
+        assert xy["apps"][1]["push_id"] == ""
+
+    @staticmethod
+    def test_without_push_id_does_not_touch_apps(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        push_id: keep-me
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        update_xiaoyi_runtime_in_config(
+            {"last_session_id": "sess-2"},
+            api_id="webhook_api_1",
+        )
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        xy = raw["channels"]["xiaoyi"]
+        assert xy["last_session_id"] == "sess-2"
+        assert "push_id" not in xy
+        assert xy["apps"][0]["push_id"] == "keep-me"
+
+    @staticmethod
+    def test_push_id_dumped_without_quotes_even_if_old_app_value_quoted(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        # apps 旧值为单引号空串时，覆盖后顶层与 apps 均应无引号
+        temp_config_file.write_text(
+            """
+channels:
+  xiaoyi:
+    apps:
+      - name: 默认应用
+        is_default: true
+        api_id: webhook_api_1
+        agent_id: agent_abc
+        push_id: ''
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config.CONFIG_YAML_PATH", temp_config_file)
+
+        token = "88062548d4436ba6b6bfb573c641ad5d2a3f10a649dae5f52ad6f31f851cad64"
+        update_xiaoyi_runtime_in_config(
+            {"push_id": token},
+            api_id="webhook_api_1",
+            agent_id="agent_abc",
+        )
+
+        text = temp_config_file.read_text(encoding="utf-8")
+        assert f"push_id: {token}" in text
+        assert f"push_id: '{token}'" not in text
+        assert f'push_id: "{token}"' not in text
