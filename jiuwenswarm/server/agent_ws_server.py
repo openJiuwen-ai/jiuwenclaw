@@ -134,6 +134,7 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
 )
 from jiuwenswarm.common.mode_matrix import (
     ResolvedMode,
+    canonicalize_mode_text,
     is_plan_mode,
     resolve_request_mode,
 )

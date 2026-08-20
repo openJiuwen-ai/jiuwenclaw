@@ -22,6 +22,7 @@ from jiuwenswarm.agents.harness.code.rails.code_plan_approval_interrupt_rail imp
     is_plan_approval_message,
     strip_inline_plan_approval_choices,
 )
+from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.utils import logger
 
 SKILL_EVOLUTION_APPROVAL_SCHEMA = "openjiuwen.skill_evolution_approval.v1"
