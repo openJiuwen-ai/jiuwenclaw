@@ -20,8 +20,9 @@ import SkillDesignIcon from '../../assets/技能.svg?react';
 import AgentDesignIcon from '../../assets/智能体.svg?react';
 import MoreDesignIcon from '../../assets/更多.svg?react';
 import { webRequest } from '../../services/webClient';
+import type { SidebarNavKey } from '../../utils/frontendPlatform';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = SidebarNavKey;
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
