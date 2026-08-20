@@ -63,7 +63,18 @@ class ReActAgentEvolve(BaseAgent):
             "Before reporting completion, you MUST use a tool call to run tests, "
             "execute the script, read the output, or otherwise confirm the result. "
             "Do not return a final answer without making at least one verification tool call."
+    def _force_verification_message(self) -> SystemMessage:
+        """Return a system message that forces the agent to verify before completing."""
+        return SystemMessage(
+            content="[SYSTEM ENFORCEMENT] You have not yet verified your work. "
+            "Before reporting completion, you MUST use a tool call to run tests, "
+            "execute the script, read the output, or otherwise confirm the result. "
+            "Do not return a final answer without making at least one verification tool call."
         )
+
+    def enable_verification(self, enabled: bool = True) -> None:
+        """Require a verification tool call before returning a final answer."""
+        self._config.require_verification = enabled
 
     def __init__(
         self,
