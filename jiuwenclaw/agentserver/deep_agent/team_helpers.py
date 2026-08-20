@@ -2010,15 +2010,19 @@ async def process_team_message_stream(request: Any,
             leader_spec = getattr(team_spec, 'leader', None)
             if leader_spec is not None and model_name:
                 leader_spec.model_name = model_name
-            leader_agent_spec = (
-                team_spec.agents.get('leader')
-                if isinstance(getattr(team_spec, 'agents', None), dict)
-                else None
-            )
-            if leader_agent_spec is not None:
-                leader_agent_spec.model = team_model
+            # 覆盖所有 role（leader + teammate + human_agent 等）的 model，
+            # 不只是 leader。_reinject_runtime_model_fields 在 RESUME_FROM_PAUSE /
+            # COLD_RECOVER 时只在 live_agent_spec.model is not None 时覆盖恢复后
+            # spec 的 agents[role].model；如果这里只设 leader，teammate role 的
+            # model 仍为 YAML 默认（None），reinject 跳过，teammate re-spawn 时
+            # resolve_member_model 未命中 pool 就走 agent_spec.model 回退到
+            # YAML 默认模型（如 glm-5.2），导致 teammate 模型不随切换变更。
+            agents = getattr(team_spec, 'agents', None)
+            if isinstance(agents, dict):
+                for agent_spec_entry in agents.values():
+                    agent_spec_entry.model = team_model
                 logger.info(
-                    '[TeamHelpers] leader model set from request: model_name=%s session_id=%s',
+                    '[TeamHelpers] agent model set from request: model_name=%s session_id=%s',
                     model_name,
                     session_id,
                 )
