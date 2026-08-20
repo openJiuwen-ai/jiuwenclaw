@@ -117,3 +117,34 @@ async def test_get_and_list_jobs_format_times_without_changing_storage(
     assert persisted is not None
     assert persisted.created_at == stored_timestamp
     assert persisted.updated_at == stored_timestamp
+
+
+@pytest.mark.asyncio
+async def test_get_and_list_jobs_format_enterprise_database_times(
+    cron_tools: CronTools,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enterprise_job = {
+        "id": "enterprise-job",
+        "timezone": "Asia/Shanghai",
+        "created_at": "2026-08-20T09:58:57+00:00",
+        "updated_at": "2026-08-20T09:58:57+00:00",
+        "group_id": "group-1",
+        "bot_id": "bot-1",
+        "user_id": "user-1",
+    }
+    monkeypatch.setattr(cron_tools, "_enterprise_ready", lambda: True)
+    monkeypatch.setattr(
+        cron_tools,
+        "_list_jobs_enterprise",
+        AsyncMock(return_value=[enterprise_job]),
+    )
+
+    listed = await cron_tools.list_jobs()
+    fetched = await cron_tools.get_job("enterprise-job")
+
+    assert listed[0]["created_at"] == "2026-08-20T17:58:57+08:00"
+    assert listed[0]["updated_at"] == "2026-08-20T17:58:57+08:00"
+    assert fetched is not None
+    assert fetched["created_at"] == "2026-08-20T17:58:57+08:00"
+    assert fetched["updated_at"] == "2026-08-20T17:58:57+08:00"
