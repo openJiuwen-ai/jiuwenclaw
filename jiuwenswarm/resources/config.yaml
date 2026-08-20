@@ -247,6 +247,13 @@ models:
         api_key: ${API_KEY}
         model_name: ${MODEL_NAME}
         client_provider: ${MODEL_PROVIDER}
+        # endpoint_profile：仅 OpenAI 协议(client_provider=OpenAI)生效的端点方言。
+        #   openai(官方/默认)、deepseek、openrouter、siliconflow、dashscope、
+        #   openai_compatible(KV释放/亲和)、ollama、lmstudio、vllm、sglang。
+        #   client_provider=Anthropic 时此字段被忽略。
+        #   若用 ${MODEL_PROVIDER}=DeepSeek/SiliconFlow/DashScope/OpenRouter 等旧别名，
+        #   core 内部会归一，但方言更稳妥的做法是这里显式填 endpoint_profile。
+        endpoint_profile: ${ENDPOINT_PROFILE:-openai}
         # HTTP 请求超时（秒）。需严格 > stream_first_chunk_timeout，确保先触发应用层流超时（可被 ModelAnomalyDetectionRail 重试）
         timeout: 360
         # 流式：等待首个分片的最大时间（秒）。放宽以兼容 reasoning/思考模型思考期的静默
@@ -264,6 +271,8 @@ models:
         api_key: ${VIDEO_API_KEY}
         model_name: ${VIDEO_MODEL_NAME}
         client_provider: ${VIDEO_PROVIDER}
+        # 端点方言；若走 DashScope 多模态口填 dashscope，否则 openai/openai_compatible。
+        endpoint_profile: ${VIDEO_ENDPOINT_PROFILE:-openai_compatible}
         timeout: 1800
         verify_ssl: true
       model_config_obj:
@@ -274,6 +283,8 @@ models:
         api_key: ${AUDIO_API_KEY}
         model_name: ${AUDIO_MODEL_NAME}
         client_provider: ${AUDIO_PROVIDER}
+        # 端点方言；若走 DashScope 多模态口填 dashscope，否则 openai/openai_compatible。
+        endpoint_profile: ${AUDIO_ENDPOINT_PROFILE:-openai_compatible}
         verify_ssl: true
         timeout: 1800
       model_config_obj:
@@ -284,6 +295,8 @@ models:
         api_key: ${VISION_API_KEY}
         model_name: ${VISION_MODEL_NAME}
         client_provider: ${VISION_PROVIDER}
+        # 端点方言；若走 DashScope 多模态口填 dashscope，否则 openai/openai_compatible。
+        endpoint_profile: ${VISION_ENDPOINT_PROFILE:-openai_compatible}
         verify_ssl: true
         timeout: 1800
       model_config_obj:
@@ -294,6 +307,9 @@ models:
         api_key: ${IMAGE_GEN_API_KEY}
         model_name: ${IMAGE_GEN_MODEL_NAME}
         client_provider: ${IMAGE_GEN_PROVIDER}
+        # 多模态生成(生图)走 DashScope SDK 必须带 endpoint_profile=dashscope，
+        # 否则 OpenAIModelClient 拒绝该操作。client_provider 仍为 OpenAI。
+        endpoint_profile: ${IMAGE_GEN_ENDPOINT_PROFILE:-dashscope}
         verify_ssl: true
         timeout: 1800
       model_config_obj:

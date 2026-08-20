@@ -576,6 +576,12 @@ def _merge_models_for_replace_all(
                 new_mcc["vendor_key"] = item["vendor_key"]
             else:
                 new_mcc.pop("vendor_key", None)
+            # endpoint_profile: OpenAI 协议端点方言(deepseek/openrouter/dashscope/...)。
+            # 前端透传则落库；不传则清掉(避免残留旧方言)。Anthropic 协议时此字段被 core 忽略。
+            if item.get("endpoint_profile"):
+                new_mcc["endpoint_profile"] = item["endpoint_profile"]
+            else:
+                new_mcc.pop("endpoint_profile", None)
             new_entry["is_default"] = item["is_default"]
             # api_key: resolved holds the decrypted plaintext shown to the frontend.
             # Unchanged → keep raw (placeholder or ciphertext); changed → encrypt new value.
@@ -598,6 +604,8 @@ def _merge_models_for_replace_all(
                     # vendor_key persisted on model_client_config so the UI can
                     # match this entry back to a registry preset (icon/re-select).
                     **({"vendor_key": item["vendor_key"]} if item.get("vendor_key") else {}),
+                    # endpoint_profile: OpenAI 协议端点方言(透传；Anthropic 时 core 忽略)。
+                    **({"endpoint_profile": item["endpoint_profile"]} if item.get("endpoint_profile") else {}),
                 },
                 "model_config_obj": {
                     "temperature": item["temperature"],
@@ -2836,6 +2844,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 # persisted so the UI can match a configured entry back to its
                 # preset for icon display / re-selection. Not required.
                 "vendor_key": str(item.get("vendor_key") or "").strip() or None,
+                # endpoint_profile: OpenAI 协议端点方言(deepseek/openrouter/dashscope/...);
+                # opaque passthrough, not validated. Anthropic 协议时 core 忽略此字段。
+                "endpoint_profile": str(item.get("endpoint_profile") or "").strip() or None,
             })
 
         # alias 与其他条目的 model_name 冲突校验
@@ -3087,6 +3098,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     "origin_index": idx,
                     "context_window_tokens": context_window_tokens,
                     "vendor_key": mcc.get("vendor_key") or entry.get("vendor_key") or "",
+                    "endpoint_profile": mcc.get("endpoint_profile") or "",
                 })
                 # active_model 为列表首位的模型（主对话默认）；首次启动时该条目
                 # 仍为 .env 占位符，则回退到 Zen 免费模型（如 DeepSeek V4 Flash）。

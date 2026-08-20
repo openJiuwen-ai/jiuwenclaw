@@ -89,6 +89,7 @@ def inject_reasoning_params(
 
     target = resolve_reasoning_target(
         client_provider=model_client_config.get("client_provider"),
+        endpoint_profile=model_client_config.get("endpoint_profile"),
         api_base=(
             model_client_config.get("api_base")
             or model_client_config.get("base_url")

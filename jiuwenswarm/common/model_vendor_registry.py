@@ -80,6 +80,9 @@ class VendorPreset:
     models_needs_key: bool = True          # whether fetch requires api_key
     # Anthropic-format base for this plan (custom_api allows switching OpenAI<->Anthropic)
     anthropic_base: str | None = None      # None = vendor has no Anthropic endpoint
+    # OpenAI 协议端点方言(deepseek/openrouter/siliconflow/dashscope/openai_compatible/...);
+    # None=不写、走默认 openai;Anthropic 协议(client_provider=Anthropic)时此字段被 core 忽略
+    endpoint_profile: str | None = None
 
 
 # core 的 ProviderType.Anthropic 枚举值。当用户在前端选 "Anthropic 格式" 时,
@@ -103,6 +106,7 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="alibaba", display_name="阿里云百炼", plan=PlanKind.TOKEN_PLAN,
         client_provider="OpenAI",
         api_base="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        endpoint_profile="dashscope",
         default_model="qwen3.7-max",
         model_options=("qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash", "qwen3.6-max-preview"),
         icon_key="qwen",
@@ -167,6 +171,7 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="alibaba", display_name="阿里云百炼", plan=PlanKind.CODING_PLAN,
         client_provider="OpenAI",
         api_base="https://coding.dashscope.aliyuncs.com/v1",  # xlsx 写 aliyun.com 是笔误,实测 aliuyuncs.com 才存在(401)
+        endpoint_profile="dashscope",
         default_model="qwen3-coder-next",
         model_options=("qwen3-coder-next", "qwen3.7-max", "qwen3.6-max-preview"),
         icon_key="qwen",
@@ -224,6 +229,7 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="alibaba", display_name="阿里云百炼", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        endpoint_profile="dashscope",
         default_model="qwen3.8-max",
         model_options=(
             "qwen3.8-max",
@@ -243,6 +249,7 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="deepseek", display_name="DeepSeek", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://api.deepseek.com",
+        endpoint_profile="deepseek",
         default_model="deepseek-v4-pro",
         model_options=(
             "deepseek-v4-pro",
@@ -271,6 +278,7 @@ _PRESETS: list[VendorPreset] = [
         vendor_key="openrouter", display_name="OpenRouter", plan=PlanKind.CUSTOM_API,
         client_provider="OpenAI",
         api_base="https://openrouter.ai/api/v1",
+        endpoint_profile="openrouter",  # 归因头由 core 按 profile 注入
         default_model="anthropic/claude-sonnet-4.5",
         model_options=(
             "anthropic/claude-sonnet-4.5",
@@ -416,9 +424,10 @@ def to_frontend_payload() -> dict[str, Any]:
                 "vendor_key": p.vendor_key,
                 "display_name": p.display_name,
                 "plan": p.plan.value,
-                # OpenAI 格式(默认): client_provider + api_base
+                # OpenAI 格式(默认): client_provider + api_base + endpoint_profile
                 "client_provider": p.client_provider,
                 "api_base": p.api_base,
+                "endpoint_profile": p.endpoint_profile,
                 "default_model": p.default_model,
                 "model_options": list(p.model_options),
                 "icon_key": p.icon_key,

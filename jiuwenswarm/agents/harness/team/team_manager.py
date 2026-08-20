@@ -665,6 +665,9 @@ class TeamManager:
                             k: v for k, v in mcc.items()
                             if k not in ("model_name", "api_key", "api_base", "client_provider") and v is not None
                         },
+                        # 新声明下方言由 endpoint_profile 表达(client_provider 多数为 OpenAI)。
+                        # 同时透传 profile 供下游需要区分 DeepSeek/DashScope 等方言时使用。
+                        "endpoint_profile": mcc.get("endpoint_profile", ""),
                         "request": request_config,
                     },
                 )

@@ -783,14 +783,33 @@ def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
 
 
 def _mcc_looks_usable(mcc: dict) -> bool:
-    """检查 model_client_config 是否包含有效的 API 凭据。"""
+    """检查 model_client_config 是否包含有效的 API 凭据。
+
+    新声明下凭据判定以 auth_mode 为准：
+    - auth_mode=openai_account_oauth 或 api_mode=responses：OAuth 路径，不要求 api_key。
+    - auth_mode=none 或 custom_headers(无 key)：按该认证模式判断(不要求 api_key)。
+    - 否则(默认 api_key 模式，含 OpenAI / Anthropic)：要求 api_base + api_key。
+    兼容旧配置：client_provider=OpenAIAccount 别名也视为 OAuth。
+    """
     api_base = str(mcc.get("api_base", "") or "").strip()
     if not api_base or is_placeholder_api_base(api_base):
         return False
 
+    auth_mode = str(mcc.get("auth_mode") or "").strip().lower()
+    api_mode = str(mcc.get("api_mode") or "").strip().lower()
+    # OAuth 路径：新式 auth_mode=openai_account_oauth 或旧式 provider 名 OpenAIAccount。
     provider = mcc.get("client_provider", "")
     provider = getattr(provider, "value", provider)
-    if is_openai_account_provider(str(provider or "")):
+    if (
+        auth_mode == "openai_account_oauth"
+        or api_mode == "responses"
+        or is_openai_account_provider(str(provider or ""))
+    ):
+        return True
+
+    # none / custom_headers 无 key 的认证模式：只要 api_base 在即可。
+    if auth_mode in ("none", "custom_headers"):
+        # custom_headers 通常仍需自定义头，但凭据层面不算 api_key 必填。
         return True
 
     api_key = str(mcc.get("api_key", "") or "").strip()
@@ -928,9 +947,13 @@ def _deep_agent_kv_cache_affinity_config(
     model: Model | None = None,
 ) -> KVCacheAffinityConfig:
     """Build the ReActAgent KV cache affinity config from jiuwenswarm config."""
+    # 取 model.model_client_config 供新式 extensions.kv_cache.mode 判别；
+    # model_provider 兼容旧 AscendAffinity 别名。
+    mcc = getattr(getattr(model, "model_client_config", None), "model_client_config", None)
     return build_kv_cache_affinity_config(
         react_cfg,
         provider=model_provider(model),
+        model_client_config=mcc,
     )
 
 

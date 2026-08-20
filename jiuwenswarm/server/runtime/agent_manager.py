@@ -1233,7 +1233,20 @@ class AgentManager:
             return
 
         def _diff_key(cfg: Any) -> tuple:
-            return (str(cfg.client_provider), cfg.api_key, cfg.api_base, cfg.verify_ssl, cfg.ssl_cert)
+            # 新声明下同一 api_base 可能对应不同 endpoint_profile / auth_mode / api_mode，
+            # 这些会影响连接身份(如 affinity 走 custom_headers 不带 Authorization)。
+            # 纳入 diff key 避免误关/漏关连接池。core 侧 connection_key 已按归一 api_base
+            # + 鉴权分桶，此处 diff 至少不比 Client 更粗。
+            return (
+                str(cfg.client_provider),
+                getattr(cfg, "endpoint_profile", None),
+                getattr(cfg, "auth_mode", None),
+                getattr(cfg, "api_mode", None),
+                cfg.api_key,
+                cfg.api_base,
+                cfg.verify_ssl,
+                cfg.ssl_cert,
+            )
 
         new_configs: dict[tuple, Any] = {}
         try:

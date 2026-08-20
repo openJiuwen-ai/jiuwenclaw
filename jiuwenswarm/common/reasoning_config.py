@@ -16,6 +16,15 @@ OPENAI_SDK_REASONING_PROVIDERS = {
     "dashscope",
 }
 
+# 新声明下 client_provider 只剩 OpenAI/Anthropic，DeepSeek/DashScope 改由
+# endpoint_profile 表达。推理注入的第一道门控改为认 endpoint_profile；
+# 下方集合与 OPENAI_SDK_REASONING_PROVIDERS 同义，保留旧名供 client_provider 兼容。
+OPENAI_SDK_REASONING_PROFILES = {
+    "openai",
+    "deepseek",
+    "dashscope",
+}
+
 SUPPORTED_DEEPSEEK_V4_MODELS = {
     "deepseek-v4-pro",
     "deepseek-v4-flash",
@@ -78,13 +87,21 @@ def normalize_reasoning_level(raw: Any) -> ReasoningLevel | None:
 
 def resolve_reasoning_target(
     *,
-    client_provider: Any,
+    client_provider: Any = None,
     api_base: str | None,
     model_name: str | None,
+    endpoint_profile: Any = None,
 ) -> tuple[ReasoningProviderKind, str] | None:
-    provider = _normalize_provider(client_provider)
-    if provider not in OPENAI_SDK_REASONING_PROVIDERS:
-        return None
+    # 新声明下优先认 endpoint_profile(deepseek/dashscope/openai)；
+    # 兼容旧 client_provider 名(DeepSeek/DashScope/OpenAI)。
+    profile = str(endpoint_profile or "").strip().lower() if endpoint_profile is not None else ""
+    if profile:
+        if profile not in OPENAI_SDK_REASONING_PROFILES:
+            return None
+    else:
+        provider = _normalize_provider(client_provider)
+        if provider not in OPENAI_SDK_REASONING_PROVIDERS:
+            return None
 
     provider_kind = resolve_reasoning_provider_kind(api_base)
     if provider_kind is None:
@@ -99,6 +116,7 @@ def resolve_reasoning_target(
 __all__ = [
     "LEVEL_MAPPING",
     "OPENAI_SDK_REASONING_PROVIDERS",
+    "OPENAI_SDK_REASONING_PROFILES",
     "SUPPORTED_DEEPSEEK_V4_MODELS",
     "ReasoningEffort",
     "ReasoningLevel",
