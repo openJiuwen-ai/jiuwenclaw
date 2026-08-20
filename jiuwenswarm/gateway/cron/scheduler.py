@@ -397,7 +397,11 @@ class CronSchedulerService:
         self._boot_time = self._now_fn()
         await self.reload()
         self._task = asyncio.create_task(self._loop(), name="cron-scheduler")
-        logger.info("[Cron] scheduler started")
+        logger.info(
+            "[Cron] scheduler started with %d job(s) from %s",
+            len(self._jobs),
+            self._store.path,
+        )
 
     async def stop(self) -> None:
         self._running = False
