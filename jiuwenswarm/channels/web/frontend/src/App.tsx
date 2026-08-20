@@ -2858,6 +2858,7 @@ function AppContent() {
         {activeNav === 'connectorMarket' && (
           <div className="app-section">
             <ConnectorMarketPanel
+              onCreateViaChat={() => requestSessionNavigation('new')}
               onUseExample={(initialInputValue, mcpName) =>
                 requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
               }

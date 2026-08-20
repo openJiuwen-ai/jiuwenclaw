@@ -208,9 +208,9 @@ export function RegisterMcpPage({ onBack, onRegistered, editName }: RegisterMcpP
       httpHeaders.filter((r) => r.key).map((r) => [r.key, r.value]),
     );
     for (const row of httpHeadersFromEnv) {
-      if (row.key && row.value) httpHeaderMap[row.key] = `\${${row.value}}`;
+      if (row.key && row.value) httpHeaderMap[row.key] = row.value;
     }
-    if (bearerEnvKey) httpHeaderMap.Authorization = `Bearer \${${bearerEnvKey}}`;
+    if (bearerEnvKey) httpHeaderMap.Authorization = `Bearer ${bearerEnvKey}`;
 
     setCreating(true);
     await registerCustom({

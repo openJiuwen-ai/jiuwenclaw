@@ -16,6 +16,11 @@ interface PickerModalProps {
   myItems: PickerItem[];
   plazaItems: PickerItem[];
   initialSelectedIds: string[];
+  /** 数据是否正在拉取——2026-08-19 新增，调用方在打开弹窗时触发一次 list 请求，这段时间用它
+   * 避免列表短暂闪一下"暂无结果"。2026-08-20 用户反馈"切 tab 也各发一次请求"太多，改成只在
+   * 打开弹窗时由调用方各自 fetch 一次（不再挂 onTabChange），之后"我的"/"广场"切换纯前端过滤
+   * 弹窗打开时已经取到的这份数据。 */
+  loading?: boolean;
   onCancel: () => void;
   onConfirm: (ids: string[]) => void;
 }
@@ -26,7 +31,7 @@ interface PickerModalProps {
 // myItems/plazaItems（技能用 source==='local' vs is_builtin_source 区分，MCP 直接复用
 // connectorStore 的 myConnectors/builtinConnectors），tab 切换真正切换渲染哪份列表，不再是两个
 // tab 共用同一份 items 的占位实现。
-export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, initialSelectedIds, onCancel, onConfirm }: PickerModalProps) {
+export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, initialSelectedIds, loading, onCancel, onConfirm }: PickerModalProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<string[]>(initialSelectedIds);
   const [query, setQuery] = useState('');
@@ -83,6 +88,12 @@ export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, i
         </div>
 
         <div className="flex-1 overflow-y-auto">
+          {/* loading 时不渲染旧数据——调用方在打开弹窗那一刻才发起 list 请求（见 CreatePluginPage
+              的按钮 onClick），请求还在路上时 visible 可能还是空数组，不加这个分支会闪一下
+              "暂无结果"再跳到真实列表，体验很怪。 */}
+          {loading ? (
+            <div className="py-10 text-center text-[13px] text-text-muted">{t('common.loading')}</div>
+          ) : (
           <div className="grid grid-cols-2 gap-2">
             {visible.map((item) => {
               const checked = selected.includes(item.id);
@@ -113,6 +124,7 @@ export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, i
             })}
             {visible.length === 0 && <div className="col-span-full py-10 text-center text-[13px] text-text-muted">{t('connectorMarket.common.noResult')}</div>}
           </div>
+          )}
         </div>
 
         <div className="mt-4 flex shrink-0 justify-end gap-2 border-t border-border pt-4">

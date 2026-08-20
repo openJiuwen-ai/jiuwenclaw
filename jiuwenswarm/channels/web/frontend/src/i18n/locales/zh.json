@@ -2704,6 +2704,13 @@
       "submitError": "创建失败，该功能仍在等待后端支持",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
     },
+    "errors": {
+      "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",
+      "runtimeMissingNamed": "该 MCP 依赖 {{runtime}} 运行环境，请先安装 {{runtime}} 后再使用",
+      "installNetwork": "依赖下载失败，请检查网络连接后重试",
+      "cliIncomplete": "CLI 安装不完整或版本过低，请重新连接以重试",
+      "cliIncompleteNamed": "CLI 安装不完整或版本过低，请手动执行以下命令安装或升级后重试：{{command}}"
+    },
     "card": {
       "use": "使用",
       "useNotWired": "该功能尚未接入，请在会话输入框的\"+\"面板里选用",
@@ -2825,8 +2832,9 @@
       "addJsonHint": "请从 MCP Servers 的介绍页面复制配置 JSON（优先使用 NPX 或 UVX 配置），并粘贴到输入框中。"
     },
     "upload": {
-      "hint": "文件夹需要至少包含 manifest.json 文件和 README.md，.json 文件需包含 packageType 声明包类型。",
+      "hint": "支持.zip和.tar文件，解压后的文件夹需要至少包含 manifest.json 文件和 README.md，.json 文件需包含 packageType 声明包类型。",
       "dropHint": "点击或拖动文件到此处",
+      "invalidType": "仅支持 .zip / .tar 文件",
       "notSupportedYet": "上传文件创建插件功能仍在等待后端支持"
     },
     "common": {

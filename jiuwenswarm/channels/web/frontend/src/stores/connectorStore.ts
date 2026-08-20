@@ -1,6 +1,8 @@
 import { create } from 'zustand';
+import i18n from '../i18n';
 import { connectorApi } from '../services/connectorApi';
 import type { ConnectorConnectResponse, ConnectorDetail, ConnectorSummary, McpBusyKind } from '../types/connector';
+import type { WebError } from '../types/websocket';
 
 // 命名/组织风格照抄 cronStore.ts：inline action、无独立 actions 对象。
 // connect/disconnect/registerCustom 悲观更新——这几个是重操作，且有 busyMap/
@@ -156,6 +158,38 @@ function invalidateDetail(detailCache: Record<string, ConnectorDetail>, name: st
   return next;
 }
 
+// 2026-08-20 MCP 连接错误提示友好化（见 MCP连接错误提示友好化-接口对接说明.md）：CLI 驱动型
+// MCP（飞书/钉钉/企微等）连接失败时，后端在 mcp.connect/mcp.wait_auth 的 ok:false payload 里新增
+// code（MCP_RUNTIME_MISSING/MCP_INSTALL_NETWORK/MCP_CLI_INCOMPLETE 三种可分类失败）+ runtime +
+// install_cmd 结构化字段，替代原来直接透传的底层报错串（如 `[WinError 2]`）。这里按 code 选 i18n
+// key 拼出用户可读文案；非这三种 code（如 MCP_BAD_REQUEST、非 CLI 路径失败）走 error.message 兜底，
+// 不受影响。只有 connect/waitAuth 两个 action 的 catch 分支会用到——文档明确只有这两个 RPC 的 CLI
+// 边界失败会下发新字段，disconnect/deleteConnector/registerCustom 等不受影响。
+const RUNTIME_LABELS: Record<string, string> = { node: 'Node.js', python: 'Python' };
+
+function friendlyCliError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as WebError).code;
+  const payload = (error as WebError).payload as
+    { runtime?: string; install_cmd?: string } | undefined;
+  const runtime = payload?.runtime ?? '';
+  const label = (runtime && RUNTIME_LABELS[runtime]) || runtime;
+  const installCmd = payload?.install_cmd ?? '';
+
+  if (code === 'MCP_RUNTIME_MISSING') {
+    return label
+      ? i18n.t('connectorMarket.errors.runtimeMissingNamed', { runtime: label })
+      : i18n.t('connectorMarket.errors.runtimeMissing');
+  }
+  if (code === 'MCP_INSTALL_NETWORK') return i18n.t('connectorMarket.errors.installNetwork');
+  if (code === 'MCP_CLI_INCOMPLETE') {
+    return installCmd
+      ? i18n.t('connectorMarket.errors.cliIncompleteNamed', { command: installCmd })
+      : i18n.t('connectorMarket.errors.cliIncomplete');
+  }
+  return error.message; // 兜底：非 CLI 边界失败，展示原文
+}
+
 // 2026-08-11：用户反馈列表页点了操作（连接/断开/启用/禁用/删除）之后，要等到下一次常规轮询
 // （ConnectorMarket/index.tsx LIST_POLL_INTERVAL_MS=10s）才能看到后端真实态，10s 等得太久。
 // 这里不是缩短常规轮询间隔本身（那会让所有用户、所有时刻都承担更高的轮询频率，没必要），而是
@@ -269,7 +303,7 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
       set((state) => ({
         ...patchConnectionAll(state, name, 'error'),
         busyMap: { ...state.busyMap, [name]: undefined },
-        error: error instanceof Error ? error.message : String(error),
+        error: friendlyCliError(error),
       }));
       scheduleQuickRefresh(get);
       return null;
@@ -347,7 +381,7 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
       set((state) => ({
         ...patchConnectionAll(state, name, 'error'),
         busyMap: { ...state.busyMap, [name]: undefined },
-        error: error instanceof Error ? error.message : String(error),
+        error: friendlyCliError(error),
       }));
       scheduleQuickRefresh(get);
       return null;

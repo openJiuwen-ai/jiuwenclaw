@@ -93,6 +93,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   const [description, setDescription] = useState('');
   const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mcpIds, setMcpIds] = useState<string[]>([]);
   const [picker, setPicker] = useState<'skill' | 'mcp' | null>(null);
@@ -102,22 +103,23 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   const connectors = useConnectorStore((s) => s.connectors);
   const myConnectors = useConnectorStore((s) => s.myConnectors);
   const builtinConnectors = useConnectorStore((s) => s.builtinConnectors);
+  const connectorLoading = useConnectorStore((s) => s.isLoading);
   const loadConnectorList = useConnectorStore((s) => s.loadList);
   const createPlugin = usePluginPackageStore((s) => s.create);
 
-  useEffect(() => {
+  // 2026-08-19 用户明确要求："选择技能"/"选择MCP"弹窗要真的向后端拉数据，不能只在
+  // CreatePluginPage 挂载时统一拉一次、之后弹窗里所有交互都是纯前端过滤旧数据。
+  // 2026-08-20 用户反馈：改成每次切"我的"/"广场" tab 都各发一次请求"有点多了"，改为只在点击
+  // "添加技能"/"添加MCP"、弹窗刚打开的那一刻各自 fetch 一次（skills.list 一次；mcp.list 按
+  // filter='local'/'builtin' 各一次，仍是两次独立请求），弹窗内切 tab 之后不再重复请求，纯前端
+  // 过滤这一份已经取到的数据——见下面两个按钮的 onClick。
+  function loadSkills() {
+    setSkillsLoading(true);
     webRequest<{ skills?: SkillItem[] }>('skills.list', { with_installed: true })
       .then((payload) => setSkills(payload.skills ?? []))
-      .catch(() => setSkills([]));
-    // "选择MCP"picker 要能选到广场+我的的全部条目，builtin/local 单独一个 fetch 都不够全
-    // （builtin 缺已连接的自定义 MCP，local 缺未连接的预置 MCP），两个都拉、合并视图 connectors
-    // 会按 name 并起来（见 connectorStore.ts 头注释）。
-    if (connectors.length === 0) {
-      loadConnectorList('builtin');
-      loadConnectorList('local');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      .catch(() => setSkills([]))
+      .finally(() => setSkillsLoading(false));
+  }
 
   useEffect(() => {
     return () => {
@@ -238,7 +240,14 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       <Section
         title={t('connectorMarket.create.skillsOptional')}
         action={
-          <button type="button" onClick={() => setPicker('skill')} className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]">
+          <button
+            type="button"
+            onClick={() => {
+              setPicker('skill');
+              loadSkills();
+            }}
+            className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]"
+          >
             <Plus size={14} />
             {t('connectorMarket.create.addSkill')}
           </button>
@@ -269,7 +278,15 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       <Section
         title={t('connectorMarket.create.mcpOptional')}
         action={
-          <button type="button" onClick={() => setPicker('mcp')} className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]">
+          <button
+            type="button"
+            onClick={() => {
+              setPicker('mcp');
+              loadConnectorList('local');
+              loadConnectorList('builtin');
+            }}
+            className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]"
+          >
             <Plus size={14} />
             {t('connectorMarket.create.addMcp')}
           </button>
@@ -314,6 +331,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
           initialSelectedIds={skillIds}
           myItems={toSkillPickerItems(myPickerSkills)}
           plazaItems={toSkillPickerItems(plazaPickerSkills)}
+          loading={skillsLoading}
           onCancel={() => setPicker(null)}
           onConfirm={(ids) => {
             setSkillIds(ids);
@@ -330,6 +348,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
           initialSelectedIds={mcpIds}
           myItems={myConnectors.map(toMcpPickerItem)}
           plazaItems={builtinConnectors.map(toMcpPickerItem)}
+          loading={connectorLoading}
           onCancel={() => setPicker(null)}
           onConfirm={(ids) => {
             setMcpIds(ids);
