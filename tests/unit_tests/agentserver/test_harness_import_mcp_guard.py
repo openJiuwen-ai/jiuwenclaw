@@ -122,6 +122,54 @@ def test_validate_fields_unparseable_is_silent(tmp_path: Path) -> None:
     validate_harness_config_fields(cfg)  # no raise
 
 
+# --- v0.1 resources wrapper (legacy format) ---
+
+def test_validate_fields_allows_v01_resources_wrapper(tmp_path: Path) -> None:
+    """A v0.1 config wrapping tools/rails/skills under ``resources`` must pass
+    (openjiuwen's _normalize_legacy_plugin_yaml unpacks it to flat fields)."""
+    cfg = tmp_path / "harness_config.yaml"
+    cfg.write_text(
+        "schema_version: harness_config.v0.1\n"
+        "name: x\n"
+        "resources:\n"
+        "  tools: []\n"
+        "  rails: []\n"
+        "  skills: []\n",
+        encoding="utf-8",
+    )
+    validate_harness_config_fields(cfg)  # no raise
+
+
+def test_validate_fields_rejects_mcps_inside_resources(tmp_path: Path) -> None:
+    """``mcps`` hidden under a v0.1 ``resources`` block is the same RCE and
+    must be refused — the sub-field allow-list closes the wrapper backdoor."""
+    cfg = tmp_path / "harness_config.yaml"
+    cfg.write_text(
+        "schema_version: harness_config.v0.1\n"
+        "name: x\n"
+        "resources:\n"
+        "  mcps:\n"
+        "    - {command: python, args: ['-c', 'x']}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="含不允许的字段"):
+        validate_harness_config_fields(cfg)
+
+
+def test_validate_fields_rejects_unknown_subfield_in_resources(tmp_path: Path) -> None:
+    """An unknown sub-field inside ``resources`` is refused (fail-closed)."""
+    cfg = tmp_path / "harness_config.yaml"
+    cfg.write_text(
+        "schema_version: harness_config.v0.1\n"
+        "name: x\n"
+        "resources:\n"
+        "  hooks: []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="含不允许的字段"):
+        validate_harness_config_fields(cfg)
+
+
 # ---------------------------------------------------------------------------
 # validate_harness_config_paths (package-bounding)
 # ---------------------------------------------------------------------------
@@ -153,6 +201,25 @@ def test_validate_paths_rejects_dotdot_rail_path(tmp_path: Path) -> None:
         "rails:\n"
         "  - file: ../evil_rail.py\n"
         "    class: EvilRail\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="包目录外"):
+        validate_harness_config_paths(cfg, pkg)
+
+
+def test_validate_paths_rejects_tool_escape_inside_resources(tmp_path: Path) -> None:
+    """A v0.1 config wrapping a tool file path under ``resources`` must still
+    bound it — the guard checks both flat and nested locations."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    cfg = pkg / "harness_config.yaml"
+    cfg.write_text(
+        "schema_version: harness_config.v0.1\n"
+        "name: x\n"
+        "resources:\n"
+        "  tools:\n"
+        "    - file: /etc/evil.py\n"
+        "      class: Evil\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="包目录外"):
