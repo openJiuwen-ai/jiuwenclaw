@@ -3625,3 +3625,25 @@ def test_parse_stream_chunk_emits_empty_final_marker_after_streamed_content(pars
     parsed = parser(chunk, _has_streamed_content=True)
 
     assert parsed == {"event_type": "chat.final", "content": ""}
+
+
+def test_parse_stream_chunk_maps_toolcall_progress_to_processing_status():
+    """llm_toolcall_progress heartbeat (agent-core) → chat.processing_status
+    business frame (relay watchdog counts it; frontend shows 'thinking' silently)."""
+    from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
+
+    class _Chunk:
+        type = "llm_toolcall_progress"
+        payload = {"elapsed_s": 15.3, "chunk_count": 42, "result_type": "answer"}
+
+    parsed = parse_stream_chunk(_Chunk())
+
+    assert parsed == {
+        "event_type": "chat.processing_status",
+        "is_processing": True,
+        "current_task": "thinking",
+    }
+    # critical: no is_complete field → relay must NOT treat as close-flow signal
+    assert "is_complete" not in parsed
+    # payload diagnostics are intentionally dropped (heartbeat is a pure signal)
+    assert "elapsed_s" not in parsed

@@ -379,7 +379,12 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         return {"event_type": "chat.error", "error": error_msg}
 
-    if chunk_type == "thinking":
+    if chunk_type in ("thinking", "llm_toolcall_progress"):
+        # `thinking`: model 处理中（既有）。
+        # `llm_toolcall_progress`: tool_call 长流式期间 react_agent 节流发的心跳
+        # （本修复新增）。两者都映射为业务帧 chat.processing_status——relay 看门狗
+        # 计为业务帧重置 300s；前端静默 setAgentStatus(streaming)。
+        # 不设 is_complete——避免触发关流启发式。
         return {
             "event_type": "chat.processing_status",
             "is_processing": True,

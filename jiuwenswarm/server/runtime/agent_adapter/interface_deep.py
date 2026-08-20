@@ -8650,6 +8650,7 @@ class JiuWenSwarmDeepAdapter:
         workspace: str | None = None
         project_dir: str | None = None
         supports_user_interaction: bool = True
+        interactive_ask: bool = False
         request_system_prompt: str | None = None
 
     @staticmethod
@@ -8663,6 +8664,19 @@ class JiuWenSwarmDeepAdapter:
             if value:
                 return value
         return None
+
+    @staticmethod
+    def _extract_request_interactive_ask(request: AgentRequest | None) -> bool:
+        """Guided mode is params.interactive_ask opt-in; never infer from HITL capability."""
+        from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
+            extract_interactive_ask,
+        )
+
+        if request is None:
+            return False
+        params = request.params if isinstance(getattr(request, "params", None), dict) else None
+        metadata = request.metadata if isinstance(getattr(request, "metadata", None), dict) else None
+        return extract_interactive_ask(params, metadata)
 
     async def configure_session_runtime(
         self,
@@ -8862,13 +8876,9 @@ class JiuWenSwarmDeepAdapter:
                 meta["effective_project_dir"] = (
                     md_epd.strip() if md_epd and md_epd.strip() else task_workspace
                 )
-                # interactive_ask：优先 metadata 的 interactive_ask/interactiveAsk，回退 supports_user_interaction。
-                raw_ia = meta.get("interactive_ask", meta.get("interactiveAsk"))
-                meta["interactive_ask"] = (
-                    bool(raw_ia)
-                    if raw_ia is not None
-                    else bool(runtime_config.supports_user_interaction)
-                )
+                # interactive_ask：引导模式显式 opt-in。不得回退 supports_user_interaction
+                # （OfficeClaw 会话 HITL 能力恒为 True，否则未点引导模式也会走大纲审阅）。
+                meta["interactive_ask"] = bool(runtime_config.interactive_ask)
                 set_current_request_metadata(meta)
                 # 同步副本到 StreamEventRail：工具在 harness 执行任务里运行，
                 # 本任务设置的 ContextVar 不跨任务传播，rail 会在 before_tool_call
@@ -13173,6 +13183,7 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=inputs.get(
                         "supports_user_interaction", True
                     ),
+                    interactive_ask=self._extract_request_interactive_ask(request),
                     request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
@@ -13688,6 +13699,7 @@ class JiuWenSwarmDeepAdapter:
                         supports_user_interaction=inputs.get(
                             "supports_user_interaction", True
                         ),
+                        interactive_ask=self._extract_request_interactive_ask(request),
                         request_system_prompt=self._extract_request_system_prompt(request),
                     )
                 )
@@ -13995,6 +14007,7 @@ class JiuWenSwarmDeepAdapter:
                     supports_user_interaction=inputs.get(
                         "supports_user_interaction", True
                     ),
+                    interactive_ask=self._extract_request_interactive_ask(request),
                     request_system_prompt=self._extract_request_system_prompt(request),
                 )
             )
@@ -14450,6 +14463,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 chunk_type = chunk.type
@@ -14585,6 +14601,9 @@ class JiuWenSwarmDeepAdapter:
                                 payload=note_chat_payload(parsed),
                                 is_complete=False,
                             )
+                            if hitl_pending_stream:
+                                suppress_stream_after_hitl = True
+                                continue
                         continue
                     parsed = self._parse_stream_chunk(chunk)
                     parsed = self._adapt_goal_intermediate_final(parsed)
@@ -14601,6 +14620,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 if accumulated_text:
@@ -14634,8 +14656,11 @@ class JiuWenSwarmDeepAdapter:
                         payload=note_chat_payload(parsed),
                         is_complete=False,
                     )
+                    if hitl_pending_stream:
+                        suppress_stream_after_hitl = True
+                        continue
 
-            if accumulated_text:
+            if accumulated_text and not hitl_pending_stream:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
                 if self._should_demote_goal_intermediate_final():
@@ -14656,7 +14681,7 @@ class JiuWenSwarmDeepAdapter:
                     payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
-            if accumulated_reasoning:
+            if accumulated_reasoning and not hitl_pending_stream:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -14667,7 +14692,9 @@ class JiuWenSwarmDeepAdapter:
             # pause→clear (and similar): round cancelled, iterator ends without
             # a model chat.final. Synthesize a real final so the frontend can
             # stopStreaming; do not demote.
-            if self._should_emit_stream_end_chat_final(
+            # HITL 暂停时跳过合成 final：由循环后的 chat.invocation_paused 终结帧
+            # 收尾，避免 relayclaw sidecar 提前关闭 FrameQueue 导致 recoverable_pause 丢失。
+            if not hitl_pending_stream and self._should_emit_stream_end_chat_final(
                 had_assistant_output=had_assistant_output,
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):

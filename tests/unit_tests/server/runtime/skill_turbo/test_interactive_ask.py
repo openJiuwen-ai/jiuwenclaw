@@ -6,8 +6,22 @@ from __future__ import annotations
 
 from jiuwenswarm.server.runtime.skill_turbo.interactive_ask import (
     apply_interactive_ask_to_inputs,
+    extract_interactive_ask,
     resolve_interactive_ask_from_inputs,
 )
+
+
+class TestExtractInteractiveAsk:
+    def test_params_opt_in(self):
+        assert extract_interactive_ask({"interactive_ask": True}) is True
+
+    def test_missing_is_off(self):
+        assert extract_interactive_ask(None, {"session_id": "x"}) is False
+
+    def test_does_not_infer_from_supports_user_interaction(self):
+        assert (
+            extract_interactive_ask({"supports_user_interaction": True}) is False
+        )
 
 
 class TestResolveInteractiveAskFromInputs:
@@ -24,9 +38,9 @@ class TestResolveInteractiveAskFromInputs:
             {"metadata": {"interactive_ask": False}}
         ) is False
 
-    def test_none_when_absent(self):
-        assert resolve_interactive_ask_from_inputs({"metadata": {"session_id": "x"}}) is None
-        assert resolve_interactive_ask_from_inputs(None) is None
+    def test_false_when_absent(self):
+        assert resolve_interactive_ask_from_inputs({"metadata": {"session_id": "x"}}) is False
+        assert resolve_interactive_ask_from_inputs(None) is False
 
 
 class TestApplyInteractiveAskToInputs:
@@ -37,10 +51,11 @@ class TestApplyInteractiveAskToInputs:
         assert merged["metadata"]["session_id"] == "s1"
         assert "interactive_ask" not in inputs["metadata"]
 
-    def test_leaves_inputs_when_param_absent(self):
-        inputs = {"metadata": {"session_id": "s1"}}
+    def test_omitted_resume_param_forces_off(self):
+        inputs = {"metadata": {"interactive_ask": True, "session_id": "s1"}}
         merged = apply_interactive_ask_to_inputs(inputs, None)
-        assert merged["metadata"] == {"session_id": "s1"}
+        assert merged["metadata"]["interactive_ask"] is False
+        assert inputs["metadata"]["interactive_ask"] is True
 
     def test_resume_overlay_keeps_saved_slots(self):
         saved = {

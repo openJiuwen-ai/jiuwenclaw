@@ -325,16 +325,6 @@ async def skill_turbo(query: str) -> dict[str, Any]:
                 "[SkillTurboTool] workspace_base 设置为 output_dir: %s",
                 output_dir.strip()
             )
-    if "workspace_base" not in inputs:
-        try:
-            from jiuwenswarm.common.utils import get_agent_workspace_dir
-
-            inputs["workspace_base"] = str(get_agent_workspace_dir())
-        except Exception:
-            logger.debug(
-                "[SkillTurboTool] fallback workspace_base 使用 agent workspace 失败",
-                exc_info=True,
-            )
 
     if isinstance(request_metadata, dict):
         inputs["metadata"] = request_metadata
