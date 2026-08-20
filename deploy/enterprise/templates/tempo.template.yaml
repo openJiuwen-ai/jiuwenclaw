@@ -1,0 +1,132 @@
+# ==========================================
+# Grafana Tempo (调用链存储后端) 配置与部署
+# ==========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: <<TEMPO_NAME>>-config
+  namespace: <<NAMESPACE>>
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3100
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: "0.0.0.0:4317"
+            http:
+              endpoint: "0.0.0.0:4318"
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/wal
+    compactor:
+      ring:
+        kvstore:
+          store: inmemory
+    querier:
+      frontend_worker:
+        frontend_address: 127.0.0.1:9095
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<TEMPO_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<TEMPO_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<TEMPO_NAME>>
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: <<TEMPO_NAME>>
+          image: <<TEMPO_IMAGE>>
+          args:
+            - "-config.file=/etc/tempo/tempo.yaml"
+          ports:
+            - containerPort: 3100
+              name: http
+            - containerPort: 4317
+              name: otlp-grpc
+          volumeMounts:
+            - name: <<TEMPO_NAME>>-config
+              mountPath: /etc/tempo
+            - name: <<TEMPO_NAME>>-storage
+              mountPath: /var/tempo
+      volumes:
+        - name: <<TEMPO_NAME>>-config
+          configMap:
+            name: <<TEMPO_NAME>>-config
+        - name: <<TEMPO_NAME>>-storage
+          persistentVolumeClaim:
+            claimName: <<TEMPO_NAME>>-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<TEMPO_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<TEMPO_NAME>>
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+  clusterIP: None
+---
+# PV 持久化存储
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: <<TEMPO_NAME>>-pv
+  labels:
+    app: <<TEMPO_NAME>>
+spec:
+  capacity:
+    storage: <<TEMPO_STORAGE_SIZE>>
+  accessModes:
+    - ReadWriteOnce                       # RWX: 多个 Pod 可同时读写
+  persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
+  storageClassName: ""                    # 不使用 StorageClass
+  nfs:
+    server: <<NFS_SERVER_ADDR>>                   # NFS 服务器地址
+    path: <<NFS_SHARE_PATH>>/<<TEMPO_NAME>>       # NFS 共享路径
+    readOnly: false
+  mountOptions:
+    - nfsvers=4
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
+    - noatime
+
+---
+# PVC 持久化存储（自动绑定 PV）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <<TEMPO_NAME>>-pvc
+  namespace: <<NAMESPACE>>
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: <<TEMPO_STORAGE_SIZE>>
+  storageClassName: ""       # 不使用 StorageClass
+  selector:
+    matchLabels:
+      app: <<TEMPO_NAME>>
