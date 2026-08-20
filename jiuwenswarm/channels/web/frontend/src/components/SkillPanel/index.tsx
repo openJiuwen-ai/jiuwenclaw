@@ -76,6 +76,7 @@ type LoadState = "idle" | "loading" | "success" | "error";
 
 type SkillRetrievalStatus = {
   enabled?: boolean;
+  build_status?: string;
   index_exists?: boolean;
   fresh?: boolean;
   installed_count?: number;
@@ -83,7 +84,6 @@ type SkillRetrievalStatus = {
   indexed_count?: number;
   built_at?: string;
   index_dir?: string;
-  build_status?: string;
   build_stage?: string;
   build_message?: string;
   build_error?: string;
@@ -94,6 +94,17 @@ type SkillRetrievalStatus = {
   build_cancel_requested?: boolean;
   build_logs?: SkillRetrievalBuildLog[];
 };
+
+function getRetrievalPollingMode(
+  activeTab: string,
+  isActive: boolean,
+  status: SkillRetrievalStatus | null,
+): "running" | "idle" | null {
+  if (!isActive || activeTab !== "index" || status?.enabled === false) {
+    return null;
+  }
+  return status?.build_status === "running" ? "running" : "idle";
+}
 
 type SkillRetrievalBuildLog = {
   time?: string;
@@ -622,6 +633,12 @@ export function SkillPanel({
   const [retrievalShowExistingIndexFailureNotice, setRetrievalShowExistingIndexFailureNotice] = useState(false);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
+  const retrievalPollingMode = getRetrievalPollingMode(
+    activeTab,
+    isActive,
+    retrievalStatus,
+  );
+
   useEffect(() => {
     return () => {
       if (messageTimerRef.current !== null) {
@@ -989,9 +1006,7 @@ export function SkillPanel({
   }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, isActive]);
 
   useEffect(() => {
-    const disabled = retrievalStatus?.enabled === false;
-    const running = retrievalStatus?.build_status === "running";
-    if (activeTab !== "index" || disabled || !running) {
+    if (retrievalPollingMode !== "running") {
       if (retrievalPollRef.current !== null) {
         window.clearInterval(retrievalPollRef.current);
         retrievalPollRef.current = null;
@@ -1008,12 +1023,10 @@ export function SkillPanel({
         retrievalPollRef.current = null;
       }
     };
-  }, [activeTab, fetchRetrievalStatus, fetchRetrievalTree, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+  }, [fetchRetrievalStatus, retrievalPollingMode]);
 
   useEffect(() => {
-    const disabled = retrievalStatus?.enabled === false;
-    const running = retrievalStatus?.build_status === "running";
-    if (activeTab !== "index" || disabled || running) {
+    if (retrievalPollingMode !== "idle") {
       if (retrievalDiscoveryPollRef.current !== null) {
         window.clearInterval(retrievalDiscoveryPollRef.current);
         retrievalDiscoveryPollRef.current = null;
@@ -1030,7 +1043,7 @@ export function SkillPanel({
         retrievalDiscoveryPollRef.current = null;
       }
     };
-  }, [activeTab, fetchRetrievalStatus, retrievalStatus?.build_status, retrievalStatus?.enabled]);
+  }, [fetchRetrievalStatus, retrievalPollingMode]);
 
   useEffect(() => {
     if (activeTab !== "index") return;
