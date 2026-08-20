@@ -2739,6 +2739,7 @@
     "runBudget": "Run budget (META.workflow_token_limit)",
     "sessionBudgetShort": "Sess",
     "runBudgetShort": "Run",
+    "budgetUnlimited": "unbounded",
     "budgetExhaustedSession": "Session budget exhausted",
     "budgetExhaustedWorkflow": "Run budget exhausted"
   }

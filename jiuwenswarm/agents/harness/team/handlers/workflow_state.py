@@ -851,6 +851,14 @@ class WorkflowRunState(BaseModel):
                     )
                 )
 
+        # Budget ledgers ride the started event too (the engine snapshots them
+        # before the first agent runs), so the badges render from run start —
+        # including the unbounded "no ceiling declared" case.
+        if progress.budget is not None:
+            self.budget = progress.budget
+        if progress.workflow_budget is not None:
+            self.workflow_budget = progress.workflow_budget
+
         return self._build_top_level_delta()
 
     def _find_child_phase_by_name(self, name: str):

@@ -122,8 +122,7 @@ const RunGraphNode = ({ data }: NodeProps) => {
   const total =
     run.agent_count ??
     (run.phases ?? []).reduce((s, p) => s + (p.agents ?? []).length, 0);
-  const showBudget =
-    (run.budget?.total ?? null) != null || (run.workflow_budget?.total ?? null) != null;
+  const showBudget = Boolean(run.budget) || Boolean(run.workflow_budget);
   // Exhaustion hint source: explicit failure scope first, then any ledger that
   // has overrun its ceiling. A completed run can still finish over budget —
   // its in-flight calls were settled after the limit was crossed — so the
@@ -148,7 +147,7 @@ const RunGraphNode = ({ data }: NodeProps) => {
       </div>
       {showBudget && (
         <div className="flex flex-wrap items-center gap-1 mt-0.5 text-[10px] tabular-nums">
-          {run.budget && run.budget.total != null && (
+          {run.budget && (
             <span
               className={`px-1.5 rounded ${
                 run.budget.exhausted ? 'bg-red-500/10 text-red-500' : 'bg-secondary text-text-muted'
@@ -156,9 +155,10 @@ const RunGraphNode = ({ data }: NodeProps) => {
               title={t('swarmflow.sessionBudget')}
             >
               {t('swarmflow.sessionBudgetShort')} {formatBudgetK(run.budget)}
+              {run.budget.total == null && ` · ${t('swarmflow.budgetUnlimited')}`}
             </span>
           )}
-          {run.workflow_budget && run.workflow_budget.total != null && (
+          {run.workflow_budget && (
             <span
               className={`px-1.5 rounded ${
                 run.workflow_budget.exhausted
@@ -168,6 +168,7 @@ const RunGraphNode = ({ data }: NodeProps) => {
               title={t('swarmflow.runBudget')}
             >
               {t('swarmflow.runBudgetShort')} {formatBudgetK(run.workflow_budget)}
+              {run.workflow_budget.total == null && ` · ${t('swarmflow.budgetUnlimited')}`}
             </span>
           )}
         </div>

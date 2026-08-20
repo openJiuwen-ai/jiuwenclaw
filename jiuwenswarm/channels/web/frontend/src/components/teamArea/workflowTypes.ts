@@ -32,9 +32,15 @@ export interface WorkflowBudget {
   exhausted: boolean;
 }
 
-/** Compact token-budget label, e.g. ``12K/50K`` (spent/total, K-rounded). */
+/**
+ * Compact token-budget label, e.g. ``12K/50K`` (spent/total, K-rounded).
+ * An unbounded ledger (``total == null``) shows spent only — the caller appends
+ * the localized "unbounded" suffix (same wording as the TUI).
+ */
 export function formatBudgetK(budget: WorkflowBudget): string {
-  return `${Math.round((budget.spent ?? 0) / 1000)}K/${Math.round((budget.total ?? 0) / 1000)}K`;
+  const spent = `${Math.round((budget.spent ?? 0) / 1000)}K`;
+  if (budget.total == null) return spent;
+  return `${spent}/${Math.round(budget.total / 1000)}K`;
 }
 
 export interface WorkflowAgentPart {
