@@ -998,7 +998,7 @@ class _RuntimeCronToolContext:
 
 
 class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
-    SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
+    SESSION_ADAPTER_IDLE_TTL_SEC = 24 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
