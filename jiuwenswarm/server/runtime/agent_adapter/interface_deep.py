@@ -133,6 +133,27 @@ _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
+# 与 skill_turbo/executor.STREAM_SOURCE_ID_FIELD 一致：并发节点用它标识 source，
+# 前端据其路由到 subagent 行。adapter 转发 llm_reasoning / llm_output 时须原样透传。
+STREAM_SOURCE_ID_FIELD = "stream_source_id"
+
+
+def _propagate_stream_source_id(
+    src_payload: Any, result: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """将上游 payload 中的 stream_source_id 透传到输出帧（原地写入，无则原样返回）。
+
+    skill_turbo 并发节点（如 p6_1_page_worker）用它标识 source，
+    前端据其路由到 subagent 行，避免并发思考/正文混流。
+    """
+    if result is None or not isinstance(src_payload, dict):
+        return result
+    source_id = src_payload.get(STREAM_SOURCE_ID_FIELD)
+    if source_id:
+        result[STREAM_SOURCE_ID_FIELD] = source_id
+    return result
+
+
 _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
 _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION = 1
 _DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES = 32
@@ -14372,6 +14393,10 @@ class JiuWenSwarmDeepAdapter:
             # chat.invocation_paused 终结帧（而非普通完成帧），避免前端把"等待用户
             # 输入"误判为"任务完成"。镜像 vendor(clowder-ai) 的 _detect_hitl_pause。
             hitl_pending_stream = False
+            # HITL 检测到 ask_user 后，跳过后续所有 chunk（chat.final / chat.delta /
+            # chat.reasoning 等），由循环后的 chat.invocation_paused 终结帧收尾。
+            # 镜像 enterprise_dev 的 suppress_stream_after_hitl 机制。
+            suppress_stream_after_hitl = False
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
@@ -14387,6 +14412,8 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                if suppress_stream_after_hitl:
+                    continue
                 # [DIAG] HITL resume 调试：对照 forwarder([DeepAgent][fwd]) 转发的 chunk，
                 # 确认主循环实际从 interaction_stream 消费到什么类型。
                 _stream_ct = getattr(chunk, "type", None) or type(chunk).__name__
@@ -14510,6 +14537,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, reasoning_payload)
                     boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
@@ -14536,6 +14564,7 @@ class JiuWenSwarmDeepAdapter:
                     delta_payload = self._stream_text_payload("chat.delta", content)
                     if delta_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, delta_payload)
                     has_streamed_content = True
                     if accumulated_reasoning:
                         yield AgentResponseChunk(
@@ -15105,9 +15134,10 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    delta_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    return _propagate_stream_source_id(payload, delta_payload)
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -15115,9 +15145,10 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    reasoning_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.reasoning", content
                     )
+                    return _propagate_stream_source_id(payload, reasoning_payload)
 
                 if chunk_type == "content_chunk":
                     content = (

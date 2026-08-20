@@ -441,6 +441,18 @@ def e2a_response_from_agent_chunk(
             _val = pl.get(_key)
             if _val is not None:
                 body_chunk[_key] = _val
+        # 并发节点（skill_turbo p6_1_page_worker 等）用它标识 source，前端据其路由到
+        # subagent 行。chat.delta 走白名单构造，须显式透传（chat.reasoning 走 delta: pl
+        # 整包所以不受影响）。
+        _stream_source_id = pl.get("stream_source_id")
+        if _stream_source_id is not None:
+            body_chunk["stream_source_id"] = _stream_source_id
+            # relayclaw e2aToLegacyFrame 对 chat.delta 仅从 body.role 提取
+            # stream_source_id（delta 是字符串时 Object.assign 不执行），故
+            # 同时设 role 作兼容回退。role 仅 team 模式用于 leader/teammate 归属，
+            # 非 team 不影响 teamExpertId 解析（teamCtx 为 None）。
+            if pl.get("role") is None:
+                body_chunk["role"] = _stream_source_id
     else:
         body_chunk = {
             "delta_kind": "custom",
