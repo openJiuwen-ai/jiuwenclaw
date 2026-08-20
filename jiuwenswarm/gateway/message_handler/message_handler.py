@@ -679,9 +679,16 @@ class MessageHandler(ABC):
             "mode": mode,
             "is_swarm": ChannelMode.is_team_mode(mode),
         }
-        for name in ("project_id", "project_dir", "work_mode", "model_name"):
+        for name in ("project_id", "work_mode", "model_name"):
             if params.get(name) is not None:
                 create_params[name] = params[name]
+        # project_dir 仅在伴随真实 project_id 时透传：AgentServer 侧绑定规则
+        #（project_store.resolve_session_project_binding 规则3）拒绝「仅 project_dir
+        # 无 project_id」的 session.create（BAD_REQUEST），曾致 xiaoyi 渠道带
+        # clientVariables.workspace 的消息全灭且无回复。工作空间改由每轮 chat.send
+        # 的 project_dir/cwd 生效（与桌面端本地对话同一机制，无需会话级绑定）。
+        if params.get("project_id") and params.get("project_dir") is not None:
+            create_params["project_dir"] = params["project_dir"]
         env = e2a_from_agent_fields(
             request_id=f"session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             channel_id=channel_type,
