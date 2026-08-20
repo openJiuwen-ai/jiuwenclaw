@@ -821,7 +821,11 @@ class XiaoyiChannel(BaseChannel):
             return
 
         # Handle chat.file event
-        if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
+        # 两种 mode（xiaoyi_channel / xiaoyi_claw）都要处理文件投递：
+        # 桌面客户端经本地 relay 接入时 mode=xiaoyi_channel，此前该分支被
+        # mode 门控跳过——send_file_to_user 的 chat.file 被静默丢弃（且工具侧
+        # 已标记已发送，重试被去重，用户永远收不到文件）。
+        if msg.event_type == EventType.CHAT_FILE:
             files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
             if files:
                 for file_info in files:
@@ -848,8 +852,8 @@ class XiaoyiChannel(BaseChannel):
                                 logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
             return
 
-        # Handle chat.html_card event (H5 card via clawH5; URL already resolved by toolkit)
-        if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_HTML_CARD:
+        # Handle chat.html_card event（与 chat.file 同理：两种 mode 都要处理）
+        if msg.event_type == EventType.CHAT_HTML_CARD:
             payload = msg.payload if isinstance(msg.payload, dict) else {}
             cards_info = payload.get("cardsInfo")
             if not isinstance(cards_info, list) or not cards_info:

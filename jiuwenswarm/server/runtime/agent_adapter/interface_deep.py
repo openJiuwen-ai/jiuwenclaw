@@ -6495,6 +6495,15 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
         task_cwd = runtime_config.cwd or task_workspace
+        # 工作空间落点取证：ws/link（xiaoyi 渠道）曾出现携带 workspace 但任务仍落在
+        # 默认工作目录的争议——每轮记录实际播种值，日志即可定论。
+        logger.info(
+            "[RuntimeCwd] session=%s channel=%s task_workspace=%s task_cwd=%s",
+            runtime_config.session_id,
+            runtime_config.channel_id,
+            task_workspace,
+            task_cwd,
+        )
         self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
