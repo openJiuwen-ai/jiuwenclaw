@@ -474,6 +474,9 @@
     "approvalNext": "Next",
     "approvalInputPlaceholder": "Add revision notes then click Next; leave empty and click Skip"
   },
+  "persistSession": {
+    "textRequired": "Enter a task after /persist"
+  },
   "goal": {
     "formSubmit": "Confirm",
     "formCancel": "Cancel",

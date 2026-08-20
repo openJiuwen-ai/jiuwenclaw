@@ -475,6 +475,9 @@
     "approvalNext": "下一步",
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
+  "persistSession": {
+    "textRequired": "请在 /persist 后输入任务内容"
+  },
   "goal": {
     "formSubmit": "确定",
     "formCancel": "取消",
