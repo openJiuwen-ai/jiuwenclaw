@@ -435,6 +435,12 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         )
 
 
+# PPT 加速流水线经常超过 AbilityManager 默认 300s 工具超时；与 deepresearch_stream 一样
+# 豁免外层 deadline。HITL 续跑走 adapter resume_stream，本来就不经过这次 tool.invoke。
+# timeout_s=None 后仍受 MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT（默认 3600s）约束。
+skill_turbo.card.properties["resilience"] = {"timeout_s": None}
+
+
 def get_skill_turbo_tools() -> list:
     """返回 SkillTurbo 工具列表，供 interface_deep.py 注册。"""
     return [skill_turbo]
