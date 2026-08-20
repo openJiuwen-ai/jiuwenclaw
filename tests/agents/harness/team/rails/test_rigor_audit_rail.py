@@ -205,3 +205,43 @@ class TestResponseIsActuallyRead:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+class TestMountedInEveryMode:
+    """One assembly point is not the assembly point.
+
+    Rails reach a running agent through two different builders: team members go
+    through build_member_rails(), while agent and code modes go through the deep
+    adapter's _build_agent_rails(). Wiring only the first leaves the single-agent
+    path — the one the CLI uses by default — with no rail at all, and the gap is
+    invisible until something actually runs.
+    """
+
+    def test_team_member_path_mounts_it(self):
+        from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
+            build_member_rails,
+        )
+
+        assert "RigorAuditRail" in [type(r).__name__ for r in build_member_rails()]
+
+    def test_single_agent_path_registers_a_builder(self):
+        import inspect
+
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            JiuWenSwarmDeepAdapter,
+        )
+
+        assert hasattr(JiuWenSwarmDeepAdapter, "_build_rigor_audit_rail")
+        src = inspect.getsource(JiuWenSwarmDeepAdapter._build_agent_rails)
+        assert "_rigor_audit_rail" in src, (
+            "the builder exists but is not in the rail list, so agent mode still "
+            "runs without the floor"
+        )
+
+    def test_single_agent_builder_returns_a_rail(self):
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            JiuWenSwarmDeepAdapter,
+        )
+
+        rail = JiuWenSwarmDeepAdapter._build_rigor_audit_rail()
+        assert rail is not None and type(rail).__name__ == "RigorAuditRail"

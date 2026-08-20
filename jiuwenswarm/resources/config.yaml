@@ -963,7 +963,32 @@ team:
 
 mcp:
   servers: []
-  # 示例：
+  # ------------------------------------------------------------------
+  # 科研工具面：72 个工具，stdio 接入（72 个工具，stdio）
+  # ------------------------------------------------------------------
+  # 覆盖 research-pipeline skill 的十二个节点：检索与入库（paper_search /
+  # paper_ingest）、理解（paper_summarize / deep_read）、证据（claim_extract /
+  # evidence_link / evidence_trace）、分析（gap_detect / baseline_identify）、
+  # 写作（section_draft / section_revise）、验证（consistency_check /
+  # advisory_check）、审计（provenance_summary / provenance_export）。
+  #
+  # 凭据不随本仓库分发：env 块注入的环境变量优先于任何
+  # 本地文件，所以把 key 放进下面的 env 块（或宿主环境）即可，配合
+  # SCHOLAR_TOOLS_AUTO_ENV=false 可完全禁用其本地凭据自动加载。
+  #
+  # servers:
+  #   - name: scholar-tools
+  #     enabled: true
+  #     transport: stdio
+  #     command: python
+  #     args: ["-m", "scholar_tools_mcp"]
+  #     env:
+  #       SCHOLAR_TOOLS_AUTO_ENV: "false"   # 只认下面注入的，不读本地凭据文件
+  #       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  #       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  #     timeout_s: 120
+  #
+  # 其它示例：
   # servers:
   #   - name: playwright
   #     enabled: true

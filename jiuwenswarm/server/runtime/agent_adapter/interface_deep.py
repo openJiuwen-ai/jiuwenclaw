@@ -3605,6 +3605,29 @@ class JiuWenSwarmDeepAdapter:
         return memory_rail
 
     @staticmethod
+    def _build_rigor_audit_rail() -> Any | None:
+        """Build RigorAuditRail for single-agent modes.
+
+        The rail was originally wired only into build_member_rails(), which
+        assembles rails for *team members*. Agent and code modes come through
+        here instead, so a rail mounted there alone never loads for the single
+        agent -- and the failure is silent, because a rail that never runs and a
+        rail that found nothing log the same thing.
+        """
+        try:
+            from jiuwenswarm.agents.harness.team.rails.rigor_audit_rail import RigorAuditRail
+            from jiuwenswarm.common.config import get_rigor_audit_enabled
+
+            if not get_rigor_audit_enabled(None):
+                return None
+            rail = RigorAuditRail()
+            logger.info("[JiuWenSwarmDeepAdapter] RigorAuditRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] RigorAuditRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_heartbeat_rail() -> HeartbeatRail | None:
         """Build HeartbeatRail."""
         try:
@@ -3772,6 +3795,7 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo("_rigor_audit_rail", self._build_rigor_audit_rail),
             _RailBuildInfo(
                 "_llm_retry_rail",
                 self._build_llm_retry_rail,
