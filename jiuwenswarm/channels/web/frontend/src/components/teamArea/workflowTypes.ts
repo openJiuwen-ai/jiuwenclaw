@@ -33,14 +33,29 @@ export interface WorkflowBudget {
 }
 
 /**
- * Compact token-budget label, e.g. ``12K/50K`` (spent/total, K-rounded).
+ * Compact token-count label, same rounding as the TUI's formatTokenCount:
+ * ``500`` stays ``500`` (no premature K-rounding — 500 must not read as 1K),
+ * ``1250`` → ``1.3K``, ``220000`` → ``220K``.
+ */
+function compactTokenLabel(value: number): string {
+  if (value < 1000) return `${Math.round(value)}`;
+  if (value < 1_000_000) {
+    const k = (value / 1000).toFixed(1);
+    return `${k.endsWith('.0') ? k.slice(0, -2) : k}K`;
+  }
+  const m = (value / 1_000_000).toFixed(1);
+  return `${m.endsWith('.0') ? m.slice(0, -2) : m}M`;
+}
+
+/**
+ * Compact token-budget label, e.g. ``12K/50K`` or ``480/500``.
  * An unbounded ledger (``total == null``) shows spent only — the caller appends
  * the localized "unbounded" suffix (same wording as the TUI).
  */
 export function formatBudgetK(budget: WorkflowBudget): string {
-  const spent = `${Math.round((budget.spent ?? 0) / 1000)}K`;
+  const spent = compactTokenLabel(budget.spent ?? 0);
   if (budget.total == null) return spent;
-  return `${spent}/${Math.round(budget.total / 1000)}K`;
+  return `${spent}/${compactTokenLabel(budget.total)}`;
 }
 
 export interface WorkflowAgentPart {
