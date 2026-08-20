@@ -29,6 +29,7 @@ parse_dotenv_early("jiuwenswarm-agentserver")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    ensure_builtin_skills_preinstalled,
     get_env_file,
     get_root_dir,
     get_user_workspace_dir,
@@ -46,6 +47,11 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+else:
+    # 桌面端 Electron 启动时会预写 config.yaml（渠道/权限配置），导致上面的
+    # 初始化条件不成立、prepare_workspace 被跳过，用户技能目录从未初始化。
+    # 检测到技能目录为空时补装内置技能（幂等，不影响已初始化的目录）。
+    ensure_builtin_skills_preinstalled(_workspace_dir)
 
 _logging_yaml = get_root_dir() / "config" / "logging.yaml"
 if _logging_yaml.exists():

@@ -619,9 +619,10 @@ def _install_default_builtin_skills(
 ) -> None:
     """安装默认的内置技能到用户技能目录.
 
-    默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
+    预装 builtin 目录下的全部技能（每个含 SKILL.md 的子目录），
+    使打包发布后用户技能目录开箱即含全部内置技能（如
+    xiaoyi-web-search 等），无需依赖 install_skill 远程安装流程。
+    已存在于用户目录的技能在非覆盖模式下跳过（增量补装）。
 
     Args:
         builtin_dir: 内置技能目录路径
@@ -629,8 +630,18 @@ def _install_default_builtin_skills(
         overwrite: 是否覆盖已存在的技能
         cumulative_diff: 累积的文件变更追踪结果
     """
-    # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator"]
+    # 预装清单 = builtin 目录下所有合法技能（跳过 _/. 前缀目录与非技能目录）。
+    # project-maintainer 与打包 spec（EXCLUDED_RESOURCE_DIRS）保持一致，不入用户环境。
+    _excluded = {"project-maintainer"}
+    default_skills = [
+        child.name
+        for child in sorted(builtin_dir.iterdir(), key=lambda p: p.name.lower())
+        if child.is_dir()
+        and not child.name.startswith("_")
+        and not child.name.startswith(".")
+        and child.name not in _excluded
+        and (child / "SKILL.md").is_file()
+    ] if builtin_dir.is_dir() else []
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
@@ -673,6 +684,52 @@ def _install_default_builtin_skills(
     # 更新 skills_state.json，记录已安装的技能
     if installed_skills:
         _update_skills_state_for_builtin(user_skills_dir, installed_skills)
+
+
+def ensure_builtin_skills_preinstalled(workspace_dir: Optional[Path] = None) -> int:
+    """确保用户技能目录已初始化内置技能，返回本次新装的技能目录数.
+
+    桌面端 Electron 启动时会预写 config.yaml（写入渠道/权限配置），
+    导致 Python 侧 prepare_workspace 的初始化条件（config.yaml 不存在）
+    永远不成立，用户技能目录从未被初始化。此函数在检测到技能目录
+    为空（不存在，或存在但没有任何内容）时补装全部内置技能。
+
+    幂等且保守：目录中已有任何内容（技能、skills_state.json 等）时
+    直接返回 0，不覆盖用户数据，也不会复活用户已卸载的技能。
+
+    Args:
+        workspace_dir: 工作区根目录（默认取当前用户工作区）
+
+    Returns:
+        本次新装的技能目录数（0 表示无需补装）
+    """
+    if workspace_dir is None:
+        workspace_dir = get_user_workspace_dir()
+    user_skills_dir = workspace_dir / "agent" / "workspace" / "skills"
+
+    if user_skills_dir.exists() and any(user_skills_dir.iterdir()):
+        return 0
+
+    builtin_dir = get_builtin_skills_dir()
+    if not builtin_dir.is_dir():
+        logger.warning(f"内置技能目录不存在，跳过技能补装: {builtin_dir}")
+        return 0
+
+    before = (
+        {p.name for p in user_skills_dir.iterdir() if p.is_dir()}
+        if user_skills_dir.exists()
+        else set()
+    )
+    _install_default_builtin_skills(
+        builtin_dir=builtin_dir,
+        user_skills_dir=user_skills_dir,
+        overwrite=False,
+        cumulative_diff=CopyDiffResult([], [], []),
+    )
+    after = {p.name for p in user_skills_dir.iterdir() if p.is_dir()}
+    installed = len(after - before)
+    logger.info(f"内置技能补装完成: 新装 {installed} 个 -> {user_skills_dir}")
+    return installed
 
 
 def _migrate_from_jiuwenclaw_root() -> bool:
