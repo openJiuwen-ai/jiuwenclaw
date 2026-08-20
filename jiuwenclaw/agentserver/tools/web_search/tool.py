@@ -15,7 +15,6 @@ from jiuwenclaw.agentserver.tools.web_search.orchestrator import (
     run_web_search,
 )
 from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
-
 logger = logging.getLogger(__name__)
 
 _WEB_SEARCH_HARNESS_METADATA_REGISTERED = False
@@ -83,15 +82,12 @@ def _build_web_search_description() -> str:
         )
 
 
-@tool(
-    name="web_search",
-    description=_build_web_search_description(),
-)
-async def web_search(
+async def web_search_impl(
     query: str,
     search_mode: str = "default",
     search_source: str | None = None,
     max_results: int | None = None,
+    cache: Any | None = None,
 ) -> str:
     query = (query or "").strip()
     if not query:
@@ -113,7 +109,15 @@ async def web_search(
         if raw in KNOWN_PAID_PROVIDERS:
             source = raw
 
-    return await run_web_search(query, search_mode=mode, search_source=source, max_results=max_results)
+    return await run_web_search(
+        query, search_mode=mode, search_source=source, max_results=max_results, cache=cache,
+    )
+
+
+web_search = tool(
+    name="web_search",
+    description=_build_web_search_description(),
+)(web_search_impl)
 
 
 def _fallback_web_search_input_params(language: str) -> dict[str, Any]:

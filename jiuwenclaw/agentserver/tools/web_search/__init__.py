@@ -3,12 +3,13 @@
 """Unified web search package: paid chain (petal first) then free fallback."""
 
 from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+    AgentCacheRegistry,
     CacheEntry,
     WebContentCache,
-    get_default_cache,
+    get_agent_cache_registry,
     normalize_url,
     parse_update_time,
-    reset_default_cache_for_tests,
+    reset_registry_for_tests,
 )
 from jiuwenclaw.agentserver.tools.web_search.orchestrator import (
     is_valid_search_mode,
@@ -34,6 +35,7 @@ from jiuwenclaw.agentserver.tools.web_search.types import (
 )
 
 __all__ = [
+    "AgentCacheRegistry",
     "CacheEntry",
     "ProviderRun",
     "WebContentCache",
@@ -44,13 +46,13 @@ __all__ = [
     "ensure_web_search_harness_metadata",
     "evaluate_search_quality",
     "format_web_search_response",
-    "get_default_cache",
+    "get_agent_cache_registry",
     "is_valid_search_mode",
     "load_web_search_settings",
     "normalize_url",
     "normalize_search_mode",
     "parse_update_time",
-    "reset_default_cache_for_tests",
+    "reset_registry_for_tests",
     "resolve_web_search_settings",
     "run_web_search",
     "web_search",

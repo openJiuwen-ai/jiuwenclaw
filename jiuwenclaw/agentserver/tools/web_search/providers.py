@@ -119,6 +119,7 @@ async def invoke_paid_provider(
     query: str,
     max_results: int,
     timeout_seconds: int,
+    cache: Any | None = None,
 ) -> ProviderRun:
     label = f"paid:{name}"
     if not paid_provider_available(name):
@@ -169,13 +170,11 @@ async def invoke_paid_provider(
 
     records, answer = records_from_paid_payload(name, payload, max_results)
 
-    if name == "petal":
+    if name == "petal" and cache is not None:
         from jiuwenclaw.agentserver.tools.web_search.content_cache import (
             CacheEntry,
-            get_default_cache,
         )
 
-        cache = get_default_cache()
         for rec in records:
             if rec.content and rec.url:
                 await cache.put(
@@ -213,6 +212,7 @@ async def run_paid_chain(
     query: str,
     settings: WebSearchSettings,
     preferred_provider: str | None = None,
+    cache: Any | None = None,
 ) -> tuple[ProviderRun | None, list[str]]:
     tried: list[str] = []
     last_run: ProviderRun | None = None
@@ -229,6 +229,7 @@ async def run_paid_chain(
             query,
             settings.max_results,
             settings.timeout_seconds,
+            cache=cache,
         )
         last_run = run
         if run.error == "skipped":

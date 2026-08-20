@@ -9,7 +9,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.prompts import resolve_language
 
-from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
+from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage_impl
 from jiuwenclaw.agentserver.tools.web_search.harness import JiuwenHarnessWebSearchTool
 from jiuwenclaw.utils import logger
 
@@ -22,6 +22,7 @@ class JiuwenHarnessFetchWebpageTool(Tool):
         language: str = "cn",
         agent_id: Optional[str] = None,
         card: Optional[ToolCard] = None,
+        cache: Any | None = None,
     ) -> None:
         lang = resolve_language(language or "cn")
         from openjiuwen.harness.prompts.sections.tools import build_tool_card
@@ -35,13 +36,18 @@ class JiuwenHarnessFetchWebpageTool(Tool):
                 agent_id=agent_id,
             )
         )
+        self._cache = cache
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> Any:
         logger.info(
             "[JiuwenHarnessWebTools] LLM tool name=fetch_webpage (card_id=%s)",
             self.card.id,
         )
-        return await mcp_fetch_webpage.invoke(inputs, **kwargs)
+        if self._cache is not None:
+            kwargs["cache"] = self._cache
+        return await mcp_fetch_webpage_impl(
+            **inputs, **{k: v for k, v in kwargs.items() if k in ("cache",)}
+        )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         yield "Stream is not supported for this tool."
@@ -52,12 +58,13 @@ def build_jiuwen_harness_named_web_tools(
     *,
     agent_id: Optional[str],
     language: str = "cn",
+    cache: Any | None = None,
 ) -> List[Tool]:
     """Build ``web_search`` + ``fetch_webpage`` for a scoped ``agent_id``."""
     lang = resolve_language(language or "cn")
     return [
-        JiuwenHarnessWebSearchTool(language=lang, agent_id=agent_id),
-        JiuwenHarnessFetchWebpageTool(language=lang, agent_id=agent_id),
+        JiuwenHarnessWebSearchTool(language=lang, agent_id=agent_id, cache=cache),
+        JiuwenHarnessFetchWebpageTool(language=lang, agent_id=agent_id, cache=cache),
     ]
 
 

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""进程内网页正文缓存：键为规范化 URL，值为正文+更新时间+抓取时刻。"""
+"""进程内网页正文缓存：按 agent 隔离，LRU 淘汰，超时清理。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
+
+_AGENT_TIMEOUT_SECONDS: int = 2 * 3600
+_MAX_AGENTS: int = 32
 
 
 @dataclass
@@ -24,7 +27,7 @@ class CacheEntry:
         content: 网页正文（markdown 或纯文本）。
         update_time: 网页更新时间 epoch 秒；未知则为 None。
         cached_at: 写入缓存的 epoch 秒。
-        source: 来源标记，如 "petal" / "fetch:direct" / "fetch:jina"。
+        source: 来源标记，如 "paid:petal"。
     """
     url: str
     content: str
@@ -35,10 +38,7 @@ class CacheEntry:
 
 
 def normalize_url(url: str) -> str:
-    """URL 规范化：去除 fragment、去除尾部斜杠、转小写 host。
-
-    用于作为缓存键，保证同一页面不同写法（带 #锚、大小写 host）能命中。
-    """
+    """URL 规范化：去除 fragment、去除尾部斜杠、转小写 host。"""
     raw = (url or "").strip()
     if not raw:
         return ""
@@ -52,22 +52,12 @@ def normalize_url(url: str) -> str:
 
 
 class WebContentCache:
-    """进程内单例缓存，并发安全。
+    """单个 agent 的网页正文缓存，并发安全，无条目上限。"""
 
-    设计要点：
-    - 读写均通过 asyncio.Lock 保护，避免并发写覆盖。
-    - 缓存命中后是否可信由调用方（模型）根据返回的元数据决策，
-      缓存层不做时效性判断。
-    - 不持久化、不压缩；上限通过 max_entries 控制，LRU 淘汰。
-    """
-
-    def __init__(
-        self, *, max_entries: int = 512
-    ) -> None:
+    def __init__(self) -> None:
         self._store: dict[str, CacheEntry] = {}
         self._order: list[str] = []
         self._lock = asyncio.Lock()
-        self._max_entries = max_entries
         self.hits = 0
         self.misses = 0
         self.bypassed = 0
@@ -96,15 +86,10 @@ class WebContentCache:
             if existing is not None:
                 if entry.update_time is None and existing.update_time is not None:
                     entry.update_time = existing.update_time
-                if not (entry.content or "").strip() and (existing.content or "").strip():
-                    return
             self._store[key] = entry
             if key in self._order:
                 self._order.remove(key)
             self._order.append(key)
-            while len(self._order) > self._max_entries:
-                oldest = self._order.pop(0)
-                self._store.pop(oldest, None)
 
     async def clear(self) -> None:
         async with self._lock:
@@ -117,8 +102,7 @@ class WebContentCache:
     def __len__(self) -> int:
         return len(self._store)
 
-    def stats(self) -> dict[str, int]:
-        """返回命中率计数器快照。"""
+    def stats(self) -> dict[str, Union[int, float, list[str]]]:
         total = self.hits + self.misses + self.bypassed
         hit_rate = (self.hits / total * 100) if total > 0 else 0.0
         return {
@@ -130,36 +114,112 @@ class WebContentCache:
             "entries": len(self._store),
         }
 
-    def _evict_locked(self, key: str) -> None:
-        self._store.pop(key, None)
-        if key in self._order:
-            self._order.remove(key)
+
+class AgentCacheRegistry:
+    """按 agent 管理缓存实例。
+
+    - 最多 _MAX_AGENTS 个 agent 并发缓存，超出时淘汰最久未活跃的 agent。
+    - agent 超时未活跃（_AGENT_TIMEOUT_SECONDS）时清理其缓存。
+    - 每个 agent 的缓存无条目上限。
+    """
+
+    def __init__(
+        self,
+        *,
+        max_agents: int = _MAX_AGENTS,
+        timeout_seconds: int = _AGENT_TIMEOUT_SECONDS,
+    ) -> None:
+        self._caches: dict[str, WebContentCache] = {}
+        self._last_active: dict[str, float] = {}
+        self._lock = asyncio.Lock()
+        self._max_agents = max_agents
+        self._timeout_seconds = timeout_seconds
+
+    async def get_cache(self, agent_id: str) -> WebContentCache:
+        aid = (agent_id or "default").strip() or "default"
+        async with self._lock:
+            now = time.time()
+            self._last_active[aid] = now
+            self._cleanup_inactive_locked(now)
+            cache = self._caches.get(aid)
+            if cache is None:
+                if len(self._caches) >= self._max_agents:
+                    lru_aid = min(self._last_active, key=lambda k: self._last_active[k])
+                    self._caches.pop(lru_aid, None)
+                    self._last_active.pop(lru_aid, None)
+                    logger.info(
+                        "[AgentCacheRegistry] evicted agent=%s (capacity=%d)",
+                        lru_aid, self._max_agents,
+                    )
+                cache = WebContentCache()
+                self._caches[aid] = cache
+            return cache
+
+    def get_cache_sync(self, agent_id: str) -> WebContentCache:
+        """同步获取缓存，用于无法 await 的场景（如 @harness_element provider）。
+
+        不加锁，并发竞争最差情况是多创建一个 WebContentCache 被覆盖，不影响正确性。
+        """
+        aid = (agent_id or "default").strip() or "default"
+        now = time.time()
+        self._last_active[aid] = now
+        self._cleanup_inactive_locked(now)
+        cache = self._caches.get(aid)
+        if cache is None:
+            if len(self._caches) >= self._max_agents:
+                lru_aid = min(self._last_active, key=lambda k: self._last_active[k])
+                self._caches.pop(lru_aid, None)
+                self._last_active.pop(lru_aid, None)
+                logger.info(
+                    "[AgentCacheRegistry] evicted agent=%s (capacity=%d)",
+                    lru_aid, self._max_agents,
+                )
+            cache = WebContentCache()
+            self._caches[aid] = cache
+        return cache
+
+    def _cleanup_inactive_locked(self, now: float) -> None:
+        inactive = [
+            aid for aid, t in self._last_active.items()
+            if now - t > self._timeout_seconds
+        ]
+        for aid in inactive:
+            self._caches.pop(aid, None)
+            self._last_active.pop(aid, None)
+            logger.info(
+                "[AgentCacheRegistry] cleaned inactive agent=%s (timeout=%ds)",
+                aid, self._timeout_seconds,
+            )
+
+    async def clear_all(self) -> None:
+        async with self._lock:
+            self._caches.clear()
+            self._last_active.clear()
+
+    def stats(self) -> dict[str, Union[int, list[str]]]:
+        return {
+            "agents": len(self._caches),
+            "agent_ids": list(self._caches.keys()),
+            "max_agents": self._max_agents,
+            "timeout_seconds": self._timeout_seconds,
+        }
 
 
-_DEFAULT_CACHE: WebContentCache | None = None
+_REGISTRY = AgentCacheRegistry()
 
 
-def get_default_cache() -> WebContentCache:
-    global _DEFAULT_CACHE
-    if _DEFAULT_CACHE is None:
-        _DEFAULT_CACHE = WebContentCache()
-    return _DEFAULT_CACHE
+def get_agent_cache_registry() -> AgentCacheRegistry:
+    return _REGISTRY
 
 
-def reset_default_cache_for_tests() -> None:
-    """仅供测试使用：重置单例。"""
-    global _DEFAULT_CACHE
-    _DEFAULT_CACHE = None
+def reset_registry_for_tests() -> None:
+    """仅供测试使用：重置全局 registry。"""
+    global _REGISTRY
+    _REGISTRY = AgentCacheRegistry()
 
 
 def parse_update_time(raw: object) -> Optional[float]:
-    """从 Petal web_pages[*].update_time 字段解析 epoch 秒。
-
-    支持多种格式：
-    - int/float：直接作为 epoch 秒
-    - str：ISO8601 或 yyyy-mm-dd HH:MM:SS 或 yyyy-mm-dd
-    - 缺失或解析失败：返回 None
-    """
+    """从 Petal web_pages[*].update_time 字段解析 epoch 秒。"""
     import datetime as _dt
 
     if raw is None:
