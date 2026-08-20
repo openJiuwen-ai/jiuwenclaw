@@ -32,6 +32,7 @@ MANIFEST_CACHE=${OHOS_MANIFEST_CACHE:-$REPO_ROOT/.cache/ohos-manifests}
 REPORT_DIR=${REPORT_DIR:-$HOME/ohos/deps-verify}
 AUTO=${AUTO:-1}
 CONTINUE_ON_FAIL=${CONTINUE_ON_FAIL:-1}
+REUSE_INSTALLED=${REUSE_INSTALLED:-1}
 WHEEL_DIR=${WHEEL_DIR:-}
 PIP_NO_BUILD_ISOLATION=${PIP_NO_BUILD_ISOLATION:-1}
 SKIP_OHOS_ENV=${SKIP_OHOS_ENV:-0}
@@ -1226,7 +1227,8 @@ if [ "$SKIP_WHEEL_PRELOAD" != "1" ]; then
   if [ -f "$_wheel_preload" ] && [ -n "${WHEEL_DIR:-}" ] && [ -d "$WHEEL_DIR" ]; then
     log "preload wheels via $_wheel_preload"
     REPORT_DIR="$REPORT_DIR" PYTHON="$PYTHON" WHEEL_DIR="$WHEEL_DIR" \
-      OHOS_REAL_PYTHON="${OHOS_REAL_PYTHON:-}" sh "$_wheel_preload" >>"$LOG" 2>&1 \
+      OHOS_REAL_PYTHON="${OHOS_REAL_PYTHON:-}" REUSE_INSTALLED="$REUSE_INSTALLED" \
+      FORCE_REINSTALL="${FORCE_REINSTALL:-0}" sh "$_wheel_preload" >>"$LOG" 2>&1 \
       || log "WARN: wheel preload failed (see log)"
   else
     preload_local_wheels
@@ -1252,11 +1254,19 @@ while IFS='	' read -r project category spec import_mod note || [ -n "${project:-
   esac
   SEEN="${SEEN}${spec}|"
   N=$((N + 1))
+  imp=
 
   log "========================================"
   log "[$N] $project | $spec"
 
-  if pip_install "$spec" >>"$LOG" 2>&1; then
+  pre_imp=$(try_import "$import_mod" 2>>"$LOG")
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$pre_imp" = "IMPORT_OK" ]; then
+    ist=SKIP_INSTALLED
+    imp=$pre_imp
+    OK=$((OK + 1))
+    fail_detail=""
+    log "SKIP installed: $import_mod"
+  elif pip_install "$spec" >>"$LOG" 2>&1; then
     ist=INSTALL_OK
     OK=$((OK + 1))
     fail_detail=""
@@ -1271,7 +1281,9 @@ while IFS='	' read -r project category spec import_mod note || [ -n "${project:-
     fi
   fi
 
-  imp=$(try_import "$import_mod" 2>>"$LOG")
+  if [ "${imp:-}" != "IMPORT_OK" ]; then
+    imp=$(try_import "$import_mod" 2>>"$LOG")
+  fi
   case $imp in
     IMPORT_OK) ;;
     *) log "import $import_mod: $imp" ;;

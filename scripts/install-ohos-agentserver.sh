@@ -28,6 +28,8 @@
 #   DEEPSEARCH_PATH     本地 deepsearch 仓库（优先于 Git；仓库根或 deepsearch/ 子项目）
 #   DEEPSEARCH_GIT_REPO / DEEPSEARCH_GIT_REF  默认 openJiuwen/deepsearch @ enterprise_dev
 #   SKIP_DEEPSEARCH=1   明确禁用 DeepSearch 安装（默认必须安装并通过 import 校验）
+#   REUSE_INSTALLED=1   import 正常时跳过已安装依赖和运行时（默认 1）
+#   FORCE_REINSTALL=1   忽略复用检查，强制重新安装
 #   CREATE_VENV=1      默认创建 $REPO_ROOT/.venv
 #   SKIP_PHASE0/1/2/3/4  跳过对应阶段（phase 0 = wheels 预装）
 #   CONTINUE_ON_FAIL=1 单包失败继续（默认 1）
@@ -67,6 +69,8 @@ DEEPSEARCH_GIT_REPO=${DEEPSEARCH_GIT_REPO:-https://gitcode.com/openJiuwen/deepse
 DEEPSEARCH_GIT_REF=${DEEPSEARCH_GIT_REF:-enterprise_dev}
 DEEPSEARCH_SRC_DIR=${DEEPSEARCH_SRC_DIR:-$REPO_ROOT/.cache/deepsearch-src}
 SKIP_DEEPSEARCH=${SKIP_DEEPSEARCH:-0}
+REUSE_INSTALLED=${REUSE_INSTALLED:-1}
+FORCE_REINSTALL=${FORCE_REINSTALL:-0}
 
 DEPS_INSTALLER=${OHOS_DEPS_INSTALLER:-$OHOS_DIR/install-ohos-all-deps.sh}
 WHEEL_PRELOADER=${OHOS_WHEEL_PRELOADER:-$OHOS_DIR/ohos-wheel-preload.sh}
@@ -134,7 +138,12 @@ run_manifest_phase() {
     SKIP_WHEEL_PRELOAD=1 \
     AUTO=1 \
     CONTINUE_ON_FAIL="$CONTINUE_ON_FAIL" \
+    REUSE_INSTALLED="$REUSE_INSTALLED" \
     sh "$DEPS_INSTALLER"
+}
+
+runtime_imports_ok() {
+  "$PYTHON" -c "$1" >/dev/null 2>&1
 }
 
 pip_in_venv() {
@@ -294,6 +303,11 @@ clone_deepsearch_repo() {
 }
 
 install_deepsearch() {
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import openjiuwen_deepsearch; from openjiuwen_deepsearch.config.config import Config"; then
+    log "SKIP installed: openjiuwen_deepsearch"
+    return 0
+  fi
   ensure_pep517_minimal
   _src=
   if _local=$(resolve_local_deepsearch_path); then
@@ -339,6 +353,11 @@ resolve_agent_core_path() {
 }
 
 install_openjiuwen() {
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import openjiuwen"; then
+    log "SKIP installed: openjiuwen"
+    return 0
+  fi
   ensure_pep517_minimal
 
   if [ "$USE_LOCAL_OPENJIUWEN" = "1" ]; then
@@ -390,6 +409,8 @@ run_wheel_preload_phase() {
     PYTHON="$PYTHON" \
     WHEEL_DIR="$WHEEL_DIR" \
     OHOS_REAL_PYTHON="$OHOS_REAL_PYTHON" \
+    REUSE_INSTALLED="$REUSE_INSTALLED" \
+    FORCE_REINSTALL="$FORCE_REINSTALL" \
     sh "$WHEEL_PRELOADER" || die "native wheel preload failed"
 }
 
@@ -470,9 +491,15 @@ fi
 
 # ---------- 4. jiuwenclaw --no-deps -e . ----------
 if [ "${SKIP_PHASE4:-0}" != "1" ]; then
-  log "======== phase 4: jiuwenclaw --no-deps $EDITABLE_FLAG . ========"
-  ensure_pep517_minimal
-  pip_in_venv --no-deps $EDITABLE_FLAG "$REPO_ROOT" || die "jiuwenclaw install failed"
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && runtime_imports_ok "import jiuwenclaw" \
+    && [ -x "$VENV_DIR/bin/jiuwenclaw-agentserver" ]; then
+    log "SKIP installed: jiuwenclaw"
+  else
+    log "======== phase 4: jiuwenclaw --no-deps $EDITABLE_FLAG . ========"
+    ensure_pep517_minimal
+    pip_in_venv --no-deps $EDITABLE_FLAG "$REPO_ROOT" || die "jiuwenclaw install failed"
+  fi
 else
   log "SKIP phase 4 (jiuwenclaw -e .)"
 fi

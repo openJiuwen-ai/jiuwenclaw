@@ -35,6 +35,8 @@ FIND_WHEEL="${OHOS_FIND_WHEEL_SCRIPT:-$SCRIPT_DIR/find-ohos-wheel.sh}"
 OHOS_WHEEL_DEFAULT_PACKAGES="cryptography pydantic_core rpds_py numpy greenlet tiktoken jiter lxml lupa"
 OHOS_WHEEL_PACKAGES=${OHOS_WHEEL_PACKAGES:-$OHOS_WHEEL_DEFAULT_PACKAGES}
 VERIFY_WHEEL_IMPORTS=${VERIFY_WHEEL_IMPORTS:-1}
+REUSE_INSTALLED=${REUSE_INSTALLED:-1}
+FORCE_REINSTALL=${FORCE_REINSTALL:-0}
 
 pip_wheel() {
   "$PYTHON" -m pip install --no-cache-dir --force-reinstall --no-deps "$@"
@@ -156,6 +158,17 @@ log "platform tag: $_plat"
 _installed=0
 _skipped=0
 for _base in $OHOS_WHEEL_PACKAGES; do
+  _import_mod=$_base
+  case $_base in
+    rpds_py) _import_mod=rpds ;;
+    lupa) _import_mod=lupa.luajit21 ;;
+  esac
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && "$PYTHON" -c "import $_import_mod" >/dev/null 2>&1; then
+    log "preload skip installed: $_base"
+    _skipped=$((_skipped + 1))
+    continue
+  fi
   _wheel=$(find_wheel_file "$_base" "$_plat") || {
     log "preload skip $_base (no wheel in $WHEEL_DIR)"
     _skipped=$((_skipped + 1))
@@ -185,8 +198,13 @@ fi
 
 # pydantic 纯 Python 层在 pydantic_core wheel 之后补装
 if find_wheel_file pydantic_core "$_plat" >/dev/null 2>&1; then
-  log "post-wheel: pydantic (after pydantic_core wheel)"
-  "$PYTHON" -m pip install --no-cache-dir "pydantic>=2.11" >/dev/null 2>&1 || true
+  if [ "$REUSE_INSTALLED" = "1" ] && [ "$FORCE_REINSTALL" != "1" ] \
+    && "$PYTHON" -c "import pydantic" >/dev/null 2>&1; then
+    log "post-wheel skip installed: pydantic"
+  else
+    log "post-wheel: pydantic (after pydantic_core wheel)"
+    "$PYTHON" -m pip install --no-cache-dir "pydantic>=2.11" >/dev/null 2>&1 || true
+  fi
 fi
 
 log "preload ohos wheels: done"
