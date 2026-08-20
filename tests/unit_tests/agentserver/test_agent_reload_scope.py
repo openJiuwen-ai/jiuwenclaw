@@ -253,6 +253,10 @@ async def test_agent_reload_config_handler_passes_explicit_scope(monkeypatch):
             "payload": resp.payload,
         },
     )
+    # model scope 会调度 Zen 免费模型缓存 warm（后台任务），patch 掉防止真实网络请求
+    from jiuwenswarm.server.runtime import opencode_zen as _opencode_zen
+
+    monkeypatch.setattr(_opencode_zen, "warm_zen_free_models", AsyncMock())
 
     request = AgentRequest(
         request_id="reload-1",
@@ -364,6 +368,57 @@ async def test_agent_reload_config_handler_applies_proactive_scope_without_agent
     reload_agents.assert_not_awaited()
     proactive_engine.reload_config.assert_called_once_with({"enabled": True})
     assert json.loads(ws.sent[-1])["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_reload_config_handler_warms_zen_cache_on_model_scope(monkeypatch):
+    """model scope（或全量 reload）须调度本进程 Zen 免费模型缓存 warm。
+
+    Gateway/AgentServer 缓存独立：AgentServer 启动时开关关闭、后台重试循环已退出，
+    之后经 web 打开开关，若 reload 不刷新本进程缓存，免费模型解析会静默回退默认
+    模型。这里只断言 warm 被调度（后台任务），不阻塞 reload 响应。
+    """
+    from jiuwenswarm.agents.harness import team as team_harness_module
+    from jiuwenswarm.server.runtime import opencode_zen
+
+    server = agent_ws_server_module.AgentWebSocketServer()
+    reload_agents = AsyncMock()
+    stop_paused = AsyncMock(return_value=0)
+    warm = AsyncMock()
+
+    monkeypatch.setattr(server._agent_manager, "reload_agents_config", reload_agents)
+    monkeypatch.setattr(
+        team_harness_module,
+        "stop_all_paused_team_session_runtimes_across_managers",
+        stop_paused,
+    )
+    monkeypatch.setattr(opencode_zen, "warm_zen_free_models", warm)
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda resp, response_id: {
+            "response_id": response_id,
+            "ok": resp.ok,
+            "payload": resp.payload,
+        },
+    )
+
+    request = AgentRequest(
+        request_id="reload-zen",
+        channel_id="web",
+        req_method=ReqMethod.AGENT_RELOAD_CONFIG,
+        params={
+            "config": {"models": {"enable_free_models": True}},
+            "env": {},
+        },
+    )
+
+    ws = FakeWebSocket()
+    await server._handle_agent_reload_config(ws, request, asyncio.Lock())
+    # create_task 调度的 warm 需要让出控制权后才会执行
+    await asyncio.sleep(0)
+
+    warm.assert_awaited_once_with(reason="agent.reload_config")
 
 
 def test_deep_adapter_reload_session_scope_selects_only_target_session():
