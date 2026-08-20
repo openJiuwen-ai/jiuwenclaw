@@ -106,6 +106,8 @@ _WORKFLOW_LIST_SUMMARY_KEEP_KEYS = (
     "token_count",
     "estimated_token_count",
     "budget",
+    "workflow_budget",
+    "budget_exhausted_scope",
 )
 
 

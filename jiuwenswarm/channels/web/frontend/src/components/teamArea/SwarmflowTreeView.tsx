@@ -34,6 +34,7 @@ import {
   type WorkflowPhase,
   type WorkflowAgent,
   type WorkflowStatus,
+  formatBudgetK,
   groupWorkflowAgentsByName,
   childPhasesOf,
   findWorkflowAgent,
@@ -791,8 +792,28 @@ function RunNode({
         )}
         <ProgressBar completed={completedCount} total={totalCount} />
         {run.budget && run.budget.total != null && (
-          <span className="text-xs text-text-muted shrink-0 tabular-nums">
-            {Math.round((run.budget.spent ?? 0) / 1000)}K/{Math.round(run.budget.total / 1000)}K
+          <span
+            className="text-xs text-text-muted shrink-0 tabular-nums"
+            title={t('swarmflow.sessionBudget')}
+          >
+            {formatBudgetK(run.budget)}
+          </span>
+        )}
+        {run.workflow_budget && run.workflow_budget.total != null && (
+          <span
+            className={`text-xs shrink-0 tabular-nums ${
+              run.workflow_budget.exhausted ? 'text-red-500' : 'text-violet-500'
+            }`}
+            title={t('swarmflow.runBudget')}
+          >
+            {formatBudgetK(run.workflow_budget)}
+          </span>
+        )}
+        {run.status === 'failed' && run.budget_exhausted_scope && (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-500 shrink-0">
+            {run.budget_exhausted_scope === 'workflow'
+              ? t('swarmflow.budgetExhaustedWorkflow')
+              : t('swarmflow.budgetExhaustedSession')}
           </span>
         )}
         {(run.status === 'running' || run.status === 'paused') && (

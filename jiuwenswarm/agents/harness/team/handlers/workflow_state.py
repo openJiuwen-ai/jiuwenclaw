@@ -81,6 +81,8 @@ class WorkflowProgress(BaseModel):
     answer: Optional[str] = None
     tokens: Optional[int] = None
     budget: Optional[dict] = None
+    workflow_budget: Optional[dict] = None
+    budget_exhausted_scope: Optional[str] = None
     phase_type: Optional[str] = None
     nested_phase: Optional[str] = None
     parent_phase: Optional[str] = None
@@ -217,6 +219,12 @@ class WorkflowRunState(BaseModel):
     duration_ms: Optional[int] = None
     estimated_token_count: Optional[int] = None
     budget: Optional[dict] = None
+    # Per-run (workflow-level) ledger snapshot from META.workflow_token_limit;
+    # None when the script declares no per-run ceiling.
+    workflow_budget: Optional[dict] = None
+    # Which ledger triggered a budget failure: 'session' | 'workflow';
+    # None on non-budget failures. Mirrors agent-core BudgetExhausted.scope.
+    budget_exhausted_scope: Optional[str] = None
 
     # Private mutable state for ID generation sequencing (not serialized)
     _phase_counter: int = 0  # Global phase counter (1-based)
@@ -752,6 +760,8 @@ class WorkflowRunState(BaseModel):
                     agent.token_count = progress.tokens
                 if progress.budget is not None:
                     self.budget = progress.budget
+                if progress.workflow_budget is not None:
+                    self.workflow_budget = progress.workflow_budget
                 self._refresh_phase_counts(phase)
                 self._refresh_run_agent_counts()
                 self.token_count = sum(a.token_count or 0 for ph in self.phases for a in ph.agents)
@@ -772,6 +782,8 @@ class WorkflowRunState(BaseModel):
             agent.token_count = progress.tokens
         if progress.budget is not None:
             self.budget = progress.budget
+        if progress.workflow_budget is not None:
+            self.workflow_budget = progress.workflow_budget
         self.token_count = sum(a.token_count or 0 for ph in self.phases for a in ph.agents)
         if progress.tokens is not None and progress.tokens > 0:
             logger.debug("[WF_DBG tok] agent=%s tokens=%s run_sum=%s",
@@ -1117,6 +1129,12 @@ class WorkflowRunState(BaseModel):
                            self.id, self.budget.get("exhausted") if self.budget else None,
                            self.budget.get("spent") if self.budget else None,
                            self.budget.get("total") if self.budget else None)
+        if progress.workflow_budget is not None:
+            self.workflow_budget = progress.workflow_budget
+        # Structured exhausted-layer flag from agent-core BudgetExhausted.scope;
+        # the frontend keys off this instead of matching error text.
+        if progress.budget_exhausted_scope is not None:
+            self.budget_exhausted_scope = progress.budget_exhausted_scope
         return self._finalize_workflow(
             status="failed",
             error=progress.text or progress.outcome or "workflow failed",
@@ -1179,6 +1197,7 @@ class WorkflowRunState(BaseModel):
             "started_at": self.started_at,
             "token_count": self.token_count,
             "budget": self.budget,
+            "workflow_budget": self.workflow_budget,
             "logs": [log_text],
         }
 
@@ -1194,6 +1213,7 @@ class WorkflowRunState(BaseModel):
             "started_at": self.started_at,
             "token_count": self.token_count,
             "budget": self.budget,
+            "workflow_budget": self.workflow_budget,
             "phases": [p.to_dict() for p in self.phases],
             "logs": list(self.logs),
         }
@@ -1213,6 +1233,7 @@ class WorkflowRunState(BaseModel):
             "started_at": self.started_at,
             "token_count": self.token_count,
             "budget": self.budget,
+            "workflow_budget": self.workflow_budget,
             "phases": [p.to_dict() for p in phases],
         }
 
@@ -1230,11 +1251,14 @@ class WorkflowRunState(BaseModel):
             "duration_ms": self.duration_ms,
             "token_count": self.token_count,
             "budget": self.budget,
+            "workflow_budget": self.workflow_budget,
         }
         if self.error:
             result["error"] = self.error
         if self.result:
             result["result"] = self.result
+        if self.budget_exhausted_scope is not None:
+            result["budget_exhausted_scope"] = self.budget_exhausted_scope
         # Terminal delta includes all phases for completeness
         result["phases"] = [p.to_dict() for p in self.phases]
         result["logs"] = list(self.logs)
@@ -1270,4 +1294,7 @@ class WorkflowRunState(BaseModel):
         result["token_count"] = self.token_count
         result["estimated_token_count"] = self.estimated_token_count
         result["budget"] = self.budget
+        result["workflow_budget"] = self.workflow_budget
+        if self.budget_exhausted_scope is not None:
+            result["budget_exhausted_scope"] = self.budget_exhausted_scope
         return result
