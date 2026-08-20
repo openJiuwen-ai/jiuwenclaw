@@ -80,7 +80,14 @@ def _add_origin_head(path: str, bare: str) -> None:
     # 先 fetch 建立 refs/remotes/origin/* ，再用显式分支名 set-head
     # （`set-head origin HEAD` 在某些 git 版本会静默不写 symref）。
     subprocess.run([_GIT, "-C", path, "fetch", "-q", "origin"], check=True)
-    subprocess.run([_GIT, "-C", path, "remote", "set-head", "origin", "master"], check=True)
+    # 分支名必须从仓库问出来，不能写死 "master"：git init 用的是 init.defaultBranch，
+    # 开发机把它设成 main 是当下的常见配置（git 自己也在推荐），此时写死 master 会让
+    # set-head 报 "not a valid ref"，整组测试在那台机器上必挂。
+    branch = subprocess.run(
+        [_GIT, "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run([_GIT, "-C", path, "remote", "set-head", "origin", branch], check=True)
 
 
 def test_run_security_review_git_succeeds_when_origin_head_set(tmp_path):
