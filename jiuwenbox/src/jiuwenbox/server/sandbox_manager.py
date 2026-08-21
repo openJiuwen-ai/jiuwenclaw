@@ -18,7 +18,6 @@ import textwrap
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Cap stdout/stderr at this many chars per audit event. Large model
@@ -70,6 +69,7 @@ from jiuwenbox.models.sandbox import (
     SandboxSpec,
     generate_job_id,
     generate_sandbox_id,
+    local_now,
     validate_custom_job_id,
     validate_custom_sandbox_id,
 )
@@ -415,7 +415,7 @@ class SandboxManager:
             except asyncio.TimeoutError:
                 pass
 
-            now = datetime.now(timezone.utc)
+            now = local_now()
             cutoff = now.timestamp() - idle_timeout
             async with self._lock:
                 expired_ids: list[str] = []
@@ -429,9 +429,9 @@ class SandboxManager:
                         continue
                     reference_ts = ref.last_active_at or ref.started_at or ref.created_at
                     if reference_ts.tzinfo is None:
-                        # SandboxRef.created_at uses datetime.now() (naive) by
-                        # default; coerce to UTC so the comparison is well-defined.
-                        reference_ts = reference_ts.replace(tzinfo=timezone.utc)
+                        # Pre-fix state files stored naive local timestamps.
+                        # Treat them as host-local, not UTC.
+                        reference_ts = reference_ts.astimezone()
                     if reference_ts.timestamp() < cutoff:
                         expired_ids.append(sid)
 
@@ -516,14 +516,14 @@ class SandboxManager:
 
     @staticmethod
     def _mark_active(ref: SandboxRef) -> None:
-        """Stamp ``ref.last_active_at`` with the current UTC time.
+        """Stamp ``ref.last_active_at`` with the current local time.
 
         Caller must already hold ``self._lock`` (typical pattern: call this
         right after the phase==READY check inside the same ``async with``
         block, so the timestamp is established before the IO call leaves the
         lock and races with the idle reaper).
         """
-        ref.last_active_at = datetime.now(timezone.utc)
+        ref.last_active_at = local_now()
 
     async def create_sandbox(
         self,
@@ -581,7 +581,7 @@ class SandboxManager:
                     ref.phase = SandboxPhase.READY
                     ref.pid = pid
                     ref.ip_address = ip_address
-                    now = datetime.now(timezone.utc)
+                    now = local_now()
                     ref.started_at = now
                     # 沙箱刚创建即视为最近一次活跃, 避免在第一次 exec 到来之前就被
                     # reaper 当成 idle 误杀 (理论上不会, 但显式初始化更直白)。
@@ -651,7 +651,7 @@ class SandboxManager:
             ref.phase = SandboxPhase.READY
             ref.pid = pid
             ref.ip_address = ip_address
-            now = datetime.now(timezone.utc)
+            now = local_now()
             ref.started_at = now
             ref.last_active_at = now
             ref.error_message = None
@@ -1570,16 +1570,46 @@ class SandboxManager:
         self,
         policy_data: Mapping[str, object] | None,
         policy_mode: PolicyMode = PolicyMode.OVERRIDE,
+        update_default_policy: bool = False,
     ) -> dict[str, object]:
         """Apply the same network update to every registered sandbox.
 
         Request-body validation failures raise before any sandbox is touched.
         Per-sandbox host-mode sandboxes are skipped; other failures are
         collected without aborting the batch.
+
+        When ``update_default_policy`` is set, the same update is also merged
+        into ``self.policy`` -- the base every future ``create_sandbox`` call
+        resolves against -- so sandboxes created after this request inherit
+        the new rules. This only mutates process state; the policy YAML on
+        disk is never rewritten (same contract as
+        :meth:`update_timeout_policy`), so a restart falls back to the file.
         """
         egress, ingress = self.validate_network_policy_update(policy_data)
 
+        default_policy: dict[str, object] | None = None
         async with self._lock:
+            if update_default_policy:
+                # Rebase the default *before* snapshotting the registry:
+                # a sandbox created while the loop below is running is absent
+                # from ``sandbox_ids``, so it must already inherit the new
+                # rules from the default or it would miss this update.
+                merged = self._merge_network_rules_update(
+                    self.policy, egress, ingress, policy_mode,
+                )
+                self.policy_engine.validate_policy(merged)
+                # Replace only ``network``: ``update_timeout_policy`` mutates
+                # ``self.policy`` without holding this lock, so writing back
+                # a wholesale copy could swallow a concurrent timeout change.
+                self.policy = self.policy.model_copy(
+                    update={"network": merged.network},
+                )
+                default_policy = self.policy.model_dump(mode="json")
+                logger.info(
+                    "default sandbox policy network rules updated (mode=%s); "
+                    "applies to sandboxes created from now on",
+                    policy_mode.value,
+                )
             sandbox_ids = list(self._sandboxes.keys())
 
         updated_ids: list[str] = []
@@ -1623,4 +1653,6 @@ class SandboxManager:
             "updated": updated_ids,
             "skipped": skipped,
             "failed": failed,
+            "default_updated": update_default_policy,
+            "default_policy": default_policy,
         }

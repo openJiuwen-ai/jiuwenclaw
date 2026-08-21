@@ -6,9 +6,20 @@ from __future__ import annotations
 import enum
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
+
+
+def local_now() -> datetime:
+    """Current host-local time with tzinfo set.
+
+    Sandbox timestamps must share one clock. Mixing naive ``datetime.now()``
+    (local wall clock) with ``datetime.now(timezone.utc)`` makes ``started_at``
+    look 8 hours earlier than ``created_at`` on CST hosts.
+    """
+    return datetime.now(timezone.utc).astimezone()
+
 
 SANDBOX_ID_MIN_LEN = 4
 SANDBOX_ID_MAX_LEN = 40
@@ -92,7 +103,7 @@ class SandboxRef(BaseModel):
     phase: SandboxPhase = SandboxPhase.PROVISIONING
     runtime: str = "process"
     pid: int | None = None
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=local_now)
     started_at: datetime | None = None
     last_active_at: datetime | None = None
     error_message: str | None = None

@@ -904,6 +904,10 @@ jiuwenbox sandbox rm "$ID" --yes
 
 # Policy
 jiuwenbox policy get "$ID"
+jiuwenbox policy get-default
+# Update network rules everywhere, and let later sandboxes inherit them too
+jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 
 # Proxies
 jiuwenbox proxy create --prefix /openai --target https://api.openai.com --api-key sk-xxx

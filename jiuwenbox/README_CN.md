@@ -869,6 +869,10 @@ jiuwenbox sandbox rm "$ID" --yes
 
 # 沙箱策略
 jiuwenbox policy get "$ID"
+jiuwenbox policy get-default
+# 批量改网络规则，并让此后新建的沙箱也复用更新过的策略
+jiuwenbox policy update-all --policy-mode append --update-default-policy \
+  --policy '{"network":{"egress":{"blocked_ips":["203.0.113.50/32"]}}}'
 
 # 代理管理
 jiuwenbox proxy create --prefix /openai --target https://api.openai.com --api-key sk-xxx

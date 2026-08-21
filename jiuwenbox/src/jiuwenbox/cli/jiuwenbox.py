@@ -483,6 +483,9 @@ class _CliClient:
     def policy_get(self, sandbox_id: str) -> dict[str, Any]:
         return dict(self._get(f"{_API_PREFIX}/policies/{sandbox_id}").json())
 
+    def policy_get_default(self) -> dict[str, Any]:
+        return dict(self._get(f"{_API_PREFIX}/policies").json())
+
     def policy_update(
         self,
         sandbox_id: str,
@@ -500,10 +503,13 @@ class _CliClient:
         *,
         policy: Any,
         policy_mode: str | None = None,
+        update_default_policy: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"policy": policy}
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
+        if update_default_policy:
+            body["update_default_policy"] = True
         return dict(self._put(f"{_API_PREFIX}/policies", json=body).json())
 
     # ── /api/v1/proxies/* ──
@@ -926,6 +932,10 @@ def cmd_policy_get(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.policy_get(args.sandbox_id)
 
 
+def cmd_policy_get_default(args: argparse.Namespace, client: _CliClient) -> Any:
+    return client.policy_get_default()
+
+
 def _resolve_policy_arg(args: argparse.Namespace) -> Any:
     if args.policy_file and args.policy:
         raise _CliError("pass only one of --policy / --policy-file")
@@ -951,6 +961,7 @@ def cmd_policy_update_all(args: argparse.Namespace, client: _CliClient) -> Any:
     return client.policy_update_all(
         policy=_resolve_policy_arg(args),
         policy_mode=args.policy_mode,
+        update_default_policy=args.update_default_policy,
     )
 
 
@@ -1293,6 +1304,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_sandbox_id(p)
     p.set_defaults(_handler=cmd_policy_get)
 
+    p = policy_subs.add_parser(
+        "get-default",
+        help="get the default policy inherited by new sandboxes",
+    )
+    p.set_defaults(_handler=cmd_policy_get_default)
+
     def _add_policy_update_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument(
             "--policy",
@@ -1322,6 +1339,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="update network ingress/egress for all sandboxes",
     )
     _add_policy_update_args(p)
+    p.add_argument(
+        "--update-default-policy",
+        action="store_true",
+        help=(
+            "also rebase the server default policy so sandboxes created "
+            "later inherit these rules (process-local, lost on restart)"
+        ),
+    )
     p.set_defaults(_handler=cmd_policy_update_all)
 
     # ── proxy group ──
