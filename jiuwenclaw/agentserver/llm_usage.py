@@ -76,24 +76,24 @@ def build_late_llm_usage_reporter(
     api_url = str(env.get("OFFICE_CLAW_API_URL") or "").strip().rstrip("/")
     invocation_id = str(env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
     callback_token = str(env.get("OFFICE_CLAW_CALLBACK_TOKEN") or "").strip()
-    if not api_url or not invocation_id or not callback_token or not session_id:
+    if not all((api_url, invocation_id, callback_token, session_id)):
         return None
 
     async def _report(usage_metadata: Any) -> None:
         serialized = _serialize_llm_usage(usage_metadata)
-        usage = {
-            key: value
-            for key, value in {
-                "inputTokens": serialized.get("input_tokens"),
-                "outputTokens": serialized.get("output_tokens"),
-                "cacheReadTokens": serialized.get(
-                    "cache_tokens",
-                    serialized.get("cache_read_input_tokens"),
-                ),
-                "costUsd": serialized.get("total_cost"),
-            }.items()
-            if isinstance(value, (int, float)) and value >= 0
+        usage_candidates = {
+            "inputTokens": serialized.get("input_tokens"),
+            "outputTokens": serialized.get("output_tokens"),
+            "cacheReadTokens": serialized.get(
+                "cache_tokens",
+                serialized.get("cache_read_input_tokens"),
+            ),
+            "costUsd": serialized.get("total_cost"),
         }
+        usage: dict[str, int | float] = {}
+        for key, value in usage_candidates.items():
+            if isinstance(value, (int, float)) and value >= 0:
+                usage[key] = value
         if not usage:
             return
         usage_event_id = uuid.uuid4().hex
@@ -160,19 +160,38 @@ class AuxiliaryUsageReportingModel:
     usage to the request-scoped accounting sink.
     """
 
-    def __init__(self, delegate: Any) -> None:
+    def __init__(
+        self,
+        delegate: Any,
+        usage_sink: AuxLlmUsageSink | None = None,
+    ) -> None:
         self._delegate = delegate
+        self._usage_sink = usage_sink
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
 
+    async def _report_usage(self, usage_metadata: Any) -> None:
+        if self._usage_sink is not None:
+            await self._usage_sink(usage_metadata)
+            return
+        await emit_llm_usage_to_session(None, usage_metadata)
+
     async def invoke(self, *args: Any, **kwargs: Any) -> Any:
         response = await self._delegate.invoke(*args, **kwargs)
-        await emit_llm_usage_to_session(
-            None,
-            getattr(response, "usage_metadata", None),
-        )
+        await self._report_usage(getattr(response, "usage_metadata", None))
         return response
+
+    async def stream(self, *args: Any, **kwargs: Any):
+        """Delegate streaming calls and forward the final usage metadata once."""
+        usage_metadata = None
+        async for chunk in self._delegate.stream(*args, **kwargs):
+            chunk_usage = getattr(chunk, "usage_metadata", None)
+            if chunk_usage is not None:
+                usage_metadata = chunk_usage
+            yield chunk
+        if usage_metadata is not None:
+            await self._report_usage(usage_metadata)
 
 
 __all__ = [
