@@ -2052,6 +2052,15 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
+        # Per-session-adapter snapshot of the current chat request's route,
+        # captured from request.* at request entry. Used by
+        # _get_deepresearch_tool_context() so deepresearch_stream progress
+        # pushes bind to the originating session/request even when concurrent
+        # requests leak module-level _CRON_TOOL_* bindings into background
+        # tool tasks. Plain attribute (not ContextVar): per-session-scoped,
+        # no propagation/reset concerns. Cron-triggered paths don't set this
+        # and fall back to _runtime_cron_tool_context.
+        self._current_request_route: dict[str, str] = {}
         # Language the currently registered cron tools were built for, or None
         # when they are not registered yet. Doubles as the rebuild condition.
         self._cron_tools_registered_language: str | None = None
@@ -6571,7 +6580,28 @@ class JiuWenSwarmDeepAdapter:
         return rail
 
     def _get_deepresearch_tool_context(self) -> dict[str, str]:
-        """Return the adapter-owned route that survives runner task boundaries."""
+        """Return the adapter-owned route that survives runner task boundaries.
+
+        Prefers the per-session-adapter ``_current_request_route`` snapshot
+        (captured from request.* at chat request entry) so deepresearch_stream
+        progress pushes bind to the originating session/request even when
+        concurrent requests leak module-level ``_CRON_TOOL_*`` bindings into
+        background tool tasks. Falls back to ``_runtime_cron_tool_context``
+        for cron-triggered paths that don't populate the snapshot.
+        """
+        route = self._current_request_route
+        if route.get("session_id"):
+            scope = RuntimeScopeKey.from_adapter(
+                self, session_id=route["session_id"]
+            )
+            return {
+                "request_id": str(route.get("request_id") or ""),
+                "channel_id": str(route.get("channel_id") or ""),
+                "session_id": scope.session_id,
+                "service_id": scope.service_id,
+                "agent_id": scope.agent_id,
+                "output_dir": self._deepresearch_artifact_output_dir(),
+            }
         context = self._runtime_cron_tool_context
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
         scope = RuntimeScopeKey.from_adapter(self, session_id=context.session_id)
@@ -13590,6 +13620,11 @@ class JiuWenSwarmDeepAdapter:
             getattr(self, "_model", None) and getattr(self._model, "model_config", None)
             and getattr(self._model.model_config, "model_name", "") or ""
         )
+        self._current_request_route = {
+            "session_id": session_id,
+            "request_id": rid or "",
+            "channel_id": cid or "",
+        }
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
