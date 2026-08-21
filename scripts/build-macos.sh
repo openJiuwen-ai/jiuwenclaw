@@ -27,9 +27,6 @@ BUILD_CONFIG_SHELL="$(uv run --no-project --python 3.11 python \
   "$PROJECT_ROOT/scripts/build_config.py" --sync --emit-shell)"
 eval "$BUILD_CONFIG_SHELL"
 
-printf '[1/9] Install Python dependencies (uv sync --extra dev --extra codex)...\n'
-uv sync --extra dev --extra codex
-
 APP_NAME="$BUILD_APP_BUNDLE_NAME"
 APP_PATH="$PROJECT_ROOT/dist/$APP_NAME"
 DMG_ROOT="$PROJECT_ROOT/dist/dmg-root"
@@ -178,8 +175,8 @@ elif ! security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
   exit 1
 fi
 
-printf '[1/9] Install Python dependencies (uv sync --extra dev --extra claude --extra codex)...\n'
-uv sync --extra dev --extra claude --extra codex
+printf '[1/9] Install Python dependencies (uv sync --extra dev)...\n'
+uv sync --extra dev
 
 printf '\n[2/9] Build frontend (jiuwenswarm/channels/web/frontend)...\n'
 rm -rf "$PROJECT_ROOT/jiuwenswarm/web/dist"
