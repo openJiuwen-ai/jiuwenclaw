@@ -234,13 +234,10 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
   // "假装成功"——后端没实现这个接口时（backend-requests.md 需求2），这里如实失败，让调用方给
   // 用户看错误提示，而不是伪造一条本地数据后刷新就消失。
   //
-  // 2026-08-21 用户反馈根因确认：create_plugin_package 落盘时固定 installed=False（见后端
-  // upsert_plugin_marketplace_entry(..., installed=False, ...)），手动创建的插件永远是"已创建
-  // 但未安装"，之前这里创建成功就直接结束，用户还得自己再点一次安装——跟 MCP 侧 registerCustom
-  // 已经改成"注册成功后紧接着真正调一次 connect()"是同一个模式（见 connectorStore.ts），这里
-  // 照抄，创建成功后紧接着调一次 install(id)。install() 自己不会抛异常（真正的半途失败会被它
-  // 内部 catch 掉记进 installPendingMap，不冒泡），所以直接 await 不需要额外 try/catch；install()
-  // 成功时会自己 set successMessage（"插件安装成功"），不用在这里重复处理。
+  // 2026-08-21：create_plugin_package 落盘时固定 installed=False，手动创建的插件永远是"已创建
+  // 但未安装"。这里一度改成创建成功后自动串联调用 install(id)（照抄 MCP 侧 registerCustom 自动
+  // connect 的模式），但用户跟同事对齐产品方案后明确要求撤回——创建这一步只管创建，不自动安装，
+  // 用户需要自己再点一次安装。
   create: async (params) => {
     try {
       await pluginPackagesApi.create(params);
@@ -248,7 +245,6 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
       // loadList() 的 filter 语义改成跟 MCP 侧对齐后，裸调 loadList()（等价于 filter='builtin'）
       // 会用只含 builtin 的结果覆盖 packages，刷不出刚创建的这条、还会短暂污染"插件广场"数据。
       await usePluginPackageStore.getState().loadList('local');
-      await usePluginPackageStore.getState().install(params.id);
       return true;
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });

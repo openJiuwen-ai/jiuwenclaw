@@ -433,7 +433,10 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
                   </span>
                   <span className="text-[14px] font-semibold leading-[22px] text-text">{skill.name}</span>
                 </div>
-                <p className="truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={skill.description}>
+                {/* min-h-5（=leading-5，20px）：desc 为空字符串时 <p> 没有任何行内内容，不会
+                    撑出一个 line box，浏览器会把它渲染成 0 高度，导致这张卡片比旁边有描述的卡片
+                    矮一截（2026-08-21 用户反馈）。固定 min-height 让描述有没有内容都占同样的高度。 */}
+                <p className="min-h-5 truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={skill.description}>
                   {skill.description}
                 </p>
               </div>
@@ -454,7 +457,7 @@ export function McpDetailPage({ name, onBack, onUse, onUseExample, onEdit }: Mcp
                   </span>
                   <span className="text-[14px] font-semibold leading-[22px] text-text">{tool.name}</span>
                 </div>
-                <p className="truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={tool.description}>
+                <p className="min-h-5 truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={tool.description}>
                   {tool.description}
                 </p>
               </div>

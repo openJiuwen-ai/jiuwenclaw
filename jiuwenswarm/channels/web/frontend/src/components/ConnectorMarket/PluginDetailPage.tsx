@@ -352,7 +352,10 @@ function CapabilityGrid({
               )}
               <span className="text-[14px] font-semibold leading-[22px] text-text">{title}</span>
             </div>
-            <p className="truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={desc}>
+            {/* min-h-5（=leading-5，20px）：desc 为空字符串时 <p> 没有任何行内内容，不会撑出
+                一个 line box，浏览器会把它渲染成 0 高度，导致这张卡片比旁边有描述的卡片矮一截
+                （2026-08-21 用户反馈，同款修法见 McpDetailPage.tsx 的技能/工具卡片）。 */}
+            <p className="min-h-5 truncate text-[13px] leading-5 text-[color:var(--color-text-placeholder)]" title={desc}>
               {desc}
             </p>
           </div>
