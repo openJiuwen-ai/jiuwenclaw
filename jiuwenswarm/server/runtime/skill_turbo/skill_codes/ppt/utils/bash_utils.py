@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,15 @@ class BashResult:
     stdout: str
     stderr: str
     raw: str
+
+
+_EXIT_CODE_PREFIX_RE = re.compile(r"^Exit code (\d+)\n?", re.IGNORECASE)
+
+
+def _parse_exit_code_from_text(text: str) -> int | None:
+    """从 ``Exit code N`` 文本前缀解析退出码。"""
+    m = _EXIT_CODE_PREFIX_RE.match(text.strip())
+    return int(m.group(1)) if m else None
 
 
 def quote_path(path: str) -> str:
@@ -77,6 +87,11 @@ def parse_bash_payload(text: str) -> BashResult:
     if stripped.startswith("[ERROR]"):
         return BashResult(exit_code=1, stdout="", stderr=stripped, raw=text)
 
+    parsed_exit = _parse_exit_code_from_text(stripped)
+    if parsed_exit is not None:
+        stdout = _EXIT_CODE_PREFIX_RE.sub("", stripped, count=1)
+        return BashResult(exit_code=parsed_exit, stdout=stdout, stderr="", raw=text)
+
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
@@ -101,18 +116,25 @@ def _extract_bash_result(raw: Any) -> BashResult | None:
     此函数兼容多种嵌套结构，提取失败时返回 None 由调用方 fallback。
     """
     data: dict[str, Any] | None = None
+    success: bool | None = None
 
     if hasattr(raw, "data") and isinstance(raw.data, dict):
         data = raw.data
+        if hasattr(raw, "success"):
+            success = raw.success
     elif isinstance(raw, dict):
         if "data" in raw and isinstance(raw["data"], dict):
             data = raw["data"]
+            success = raw.get("success")
         elif "result" in raw:
             inner = raw["result"]
             if hasattr(inner, "data") and isinstance(inner.data, dict):
                 data = inner.data
+                if hasattr(inner, "success"):
+                    success = inner.success
             elif isinstance(inner, dict) and "data" in inner and isinstance(inner["data"], dict):
                 data = inner["data"]
+                success = inner.get("success")
 
     if data is None:
         return None
@@ -128,6 +150,12 @@ def _extract_bash_result(raw: Any) -> BashResult | None:
     stderr = str(data.get("stderr") or "")
     if exit_code == 0 and "[ERROR]" in stdout:
         exit_code = 1
+    if exit_code == 0 and success is False:
+        exit_code = 1
+    if exit_code == 0 and stdout:
+        parsed_exit = _parse_exit_code_from_text(stdout)
+        if parsed_exit is not None:
+            exit_code = parsed_exit
     return BashResult(exit_code=exit_code, stdout=stdout, stderr=stderr, raw=str(raw))
 
 

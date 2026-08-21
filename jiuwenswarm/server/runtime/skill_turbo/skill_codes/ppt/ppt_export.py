@@ -4,6 +4,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
@@ -50,6 +51,24 @@ class ExportPaths:
     pptx_path: str
     pptx_filename: str
     pptx_root: str
+
+
+def _pptx_exists_status(pptx_path: str) -> str:
+    """node stat 失败时的 pathlib 回退：存在且 ≥10KB→ok，>0→partial，否则 failed。"""
+    path = Path(pptx_path)
+    if path.is_file():
+        size = path.stat().st_size
+        if size >= 10 * 1024:
+            logger.info("[P9] PPTX Python fallback 验证通过 size=%d", size)
+            return "ok"
+        elif size > 0:
+            logger.warning("[P9] PPTX Python fallback 文件过小 size=%d", size)
+            return "partial"
+        else:
+            logger.warning("[P9] PPTX Python fallback 文件大小为 0")
+            return "failed"
+    logger.warning("[P9] PPTX 文件确认不存在: %s", pptx_path)
+    return "failed"
 
 
 class PPTExportNode(PlanNode):
@@ -346,9 +365,19 @@ class PPTExportNode(PlanNode):
                 timeout_seconds=30, required=False, workdir=pptx_root,
             )
             if result.exit_code != 0:
-                logger.warning("[P9] PPTX stat 失败，跳过大小验证")
-                return "ok"
-            size = int(result.stdout.strip() or "0")
+                logger.warning(
+                    "[P9] PPTX stat 失败 exit=%d，尝试 Python fallback: %s",
+                    result.exit_code, pptx_path,
+                )
+                return _pptx_exists_status(pptx_path)
+            stdout_stripped = result.stdout.strip()
+            if not stdout_stripped or not stdout_stripped.lstrip('-').isdigit():
+                logger.warning(
+                    "[P9] PPTX stat 输出非数字，尝试 Python fallback: %s",
+                    stdout_stripped[:200] if stdout_stripped else "(empty)",
+                )
+                return _pptx_exists_status(pptx_path)
+            size = int(stdout_stripped)
             if size < 10 * 1024:
                 logger.warning("[P9] PPTX 文件过小 size=%d < 10KB", size)
                 return "partial"
@@ -357,8 +386,8 @@ class PPTExportNode(PlanNode):
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
-            logger.warning("[P9] PPTX 验证失败: %s", e)
-            return "ok"
+            logger.warning("[P9] PPTX 验证失败，尝试 Python fallback: %s", e)
+            return _pptx_exists_status(pptx_path)
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
