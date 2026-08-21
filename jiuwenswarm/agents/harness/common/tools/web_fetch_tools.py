@@ -244,6 +244,20 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
     }
 
 
+def _is_non_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True if the IP is a non-public address (private/loopback/link-local/reserved/...)."""
+    return any(
+        (
+            ip.is_private,
+            ip.is_loopback,
+            ip.is_link_local,
+            ip.is_reserved,
+            ip.is_multicast,
+            ip.is_unspecified,
+        )
+    )
+
+
 def _is_private_or_loopback(hostname: str) -> bool:
     """True if the hostname resolves to a private/loopback/link-local/reserved address.
 
@@ -256,14 +270,7 @@ def _is_private_or_loopback(hostname: str) -> bool:
     except ValueError:
         pass
     else:
-        return (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        )
+        return _is_non_public_ip(ip)
     # Hostnames containing characters that are never valid in DNS cannot be resolved
     # to a verifiable public address; treat them as non-public.
     if not re.fullmatch(r"[A-Za-z0-9._~-]+", raw):
@@ -279,14 +286,7 @@ def _is_private_or_loopback(hostname: str) -> bool:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+        if _is_non_public_ip(ip):
             return True
     return False
 
