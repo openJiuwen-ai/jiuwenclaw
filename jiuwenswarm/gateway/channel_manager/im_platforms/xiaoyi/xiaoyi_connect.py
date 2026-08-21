@@ -316,7 +316,9 @@ class XYFileUploadService:
             if status < 200 or status >= 300:
                 raise RuntimeError(f"Upload failed: HTTP {status}")
 
-            complete_url = f"{self.base_url}/osms/v1/file/manager/complete"
+            # completeAndQuery：与桌面客户端上传链路（osms-upload.ts）同一端点；
+            # /complete 在该网关 401（authFailed），completeAndQuery 携 credential 可用
+            complete_url = f"{self.base_url}/osms/v1/file/manager/completeAndQuery"
             complete_data = {
                 "objectId": object_id,
                 "draftId": draft_id,
