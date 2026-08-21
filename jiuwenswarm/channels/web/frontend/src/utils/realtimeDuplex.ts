@@ -13,8 +13,8 @@ export interface RealtimeToolResult {
 export interface RealtimeDuplexCallbacks {
   getVideoFrame: () => string | null;
   onAssistantText: (text: string, final: boolean, toolJobId?: string, turnId?: string) => void;
-  onUserActivity: () => void;
-  onTurnAudio: (wavDataUrl: string, turnId: string) => void;
+  onUserTurnStarted: (turnId: string) => void;
+  onUserTurnAudio: (wavDataUrl: string, turnId: string) => void;
   onState: (state: 'connecting' | 'listening' | 'speaking' | 'closed') => void;
   onError: (message: string) => void;
   onDiagnostic?: (event: Record<string, unknown>) => void;
@@ -23,13 +23,13 @@ export interface RealtimeDuplexCallbacks {
 
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
-const SEND_INTERVAL_MS = 1_000;
-const USER_TURN_SILENCE_MS = 900;
+const SEND_INTERVAL_MS = 200;
+const USER_TURN_SILENCE_MS = 1_200;
 const ACTIVE_TASK_REMINDER_INTERVAL_MS = 5_000;
-const REALTIME_CLIENT_BUILD = 'openai-realtime-protocol-v9';
-const LISTENING_SPEECH_MS = 120;
-const BARGE_IN_SPEECH_MS = 320;
-const BARGE_IN_SILENCE_TOLERANCE_MS = 220;
+const REALTIME_CLIENT_BUILD = 'openai-realtime-protocol-v10';
+const LISTENING_SPEECH_MS = 240;
+const INITIAL_PLAYBACK_BUFFER_MS = 400;
+const OFFICIAL_OMNI_INSTRUCTIONS = 'Streaming Omni Conversation.';
 type PlaybackLane = 'normal' | 'urgent';
 const BASE_INSTRUCTIONS = [
   '你是九问实时视觉助手。',
@@ -104,9 +104,9 @@ export class RealtimeDuplexSession {
   private lastSentContext = '';
   private sessionReady = false;
   private responseId: string | null = null;
-  private cancelledResponseIds = new Set<string>();
   private injectionQueue: Promise<void> = Promise.resolve();
   private pendingTextInputs: Array<{ text: string; turnId: string; isFresh: () => boolean }> = [];
+  private pendingTaskControl: string | null = null;
   private pendingToolResults: RealtimeToolResult[] = [];
   private acceptedToolResultIds = new Set<string>();
   private activeToolJobId: string | null = null;
@@ -115,8 +115,9 @@ export class RealtimeDuplexSession {
   private turnSamples = 0;
   private assistantPlaying = false;
   private responseActive = false;
-  private discardOfficialResponseUntilListen = false;
-  private playbackEpoch = 0;
+  private playbackOperation: Promise<void> = Promise.resolve();
+  private playbackGeneration = 0;
+  private queuedDrainResponseId: string | null = null;
   private noiseFloor = 120;
   private userSpeechMs = 0;
   private userSilenceMs = 0;
@@ -124,14 +125,12 @@ export class RealtimeDuplexSession {
   private turnHasUserActivity = false;
   private assistantTranscript = '';
   private pendingUserTurnId: string | null = null;
+  private activeUserTurnId: string | null = null;
   private activeAssistantTurnId: string | null = null;
   private turnSequence = 0;
   private pendingResponseLane: PlaybackLane | null = null;
   private activeResponseLane: PlaybackLane = 'normal';
   private responseLanes = new Map<string, PlaybackLane>();
-  private bargeInCandidate = false;
-  private bargeInPeakLevel = 0;
-  private bargeInThreshold = 0;
 
   constructor(
     private readonly config: RealtimeDuplexConfig,
@@ -141,7 +140,21 @@ export class RealtimeDuplexSession {
   updateContext(currentTask: string, recentChat: ReadonlyArray<{ role: string; text: string }>): void {
     const normalizedTask = currentTask.trim();
     const taskChanged = normalizedTask !== this.activeTask;
-    if (taskChanged) this.lastTaskReminderAt = 0;
+    if (taskChanged) {
+      this.lastTaskReminderAt = 0;
+      this.pendingTaskControl = normalizedTask
+        ? [
+          '<|im_start|>system',
+          `[当前任务已更新]\n${normalizedTask}`,
+          '从现在开始持续执行该任务；不要把任务条件当成已经发生。此控制消息无需单独回答。',
+          '<|im_end|>\n',
+        ].join('\n')
+        : [
+          '<|im_start|>system',
+          '[当前任务已停止]\n立即停止之前的持续观察任务，仅继续普通实时对话。此控制消息无需单独回答。',
+          '<|im_end|>\n',
+        ].join('\n');
+    }
     this.activeTask = normalizedTask;
     this.hasActiveTask = Boolean(normalizedTask);
     const chat = recentChat
@@ -168,17 +181,17 @@ export class RealtimeDuplexSession {
     this.playbackNode = new AudioWorkletNode(this.playbackContext, 'jiuwen-duplex-playback');
     this.playbackNode.port.onmessage = ({ data }) => {
       if (data.type === 'cleared') {
-        if (data.responseId) {
-          // The official PyTorch protocol owns listen/speak decisions and does
-          // not accept playback acknowledgements or response cancellation.
-        }
+        this.playbackGeneration += 1;
+        this.playbackOperation = Promise.resolve();
+        this.queuedDrainResponseId = null;
         this.assistantPlaying = false;
         return;
       }
       if (data.type !== 'drained') return;
-      this.assistantPlaying = Boolean(data.hasPending);
-      if (!this.assistantPlaying) this.sendContextUpdate();
-      if (!this.responseActive && !this.assistantPlaying) this.callbacks.onState('listening');
+      if (this.queuedDrainResponseId === data.responseId) this.queuedDrainResponseId = null;
+      this.assistantPlaying = false;
+      this.sendContextUpdate();
+      if (!this.responseActive) this.callbacks.onState('listening');
     };
     this.playbackNode.connect(this.playbackContext.destination);
     await this.playbackContext.resume();
@@ -202,55 +215,30 @@ export class RealtimeDuplexSession {
       }
       const level = this.rms(pcm);
       const frameMs = pcm.length * 1_000 / INPUT_RATE;
-      const assistantOutputActive = this.assistantPlaying || this.responseActive || this.bargeInCandidate;
-      const threshold = assistantOutputActive
-        ? Math.max(1_400, this.noiseFloor * 5)
-        : Math.max(700, this.noiseFloor * 3);
+      const threshold = Math.max(350, this.noiseFloor * 2.5);
       if (level > threshold) {
         this.lastVoiceAt = Date.now();
         this.lastInteractiveInputAt = this.lastVoiceAt;
         this.userSpeechMs += frameMs;
         this.userSilenceMs = 0;
-        if (assistantOutputActive && !this.userActivityActive) {
-          this.startBargeInCandidate(level, threshold);
-        }
-        const requiredSpeechMs = this.bargeInCandidate ? BARGE_IN_SPEECH_MS : LISTENING_SPEECH_MS;
-        if (!this.userActivityActive && this.userSpeechMs >= requiredSpeechMs) {
+        if (!this.userActivityActive && this.userSpeechMs >= LISTENING_SPEECH_MS) {
           this.userActivityActive = true;
           this.turnHasUserActivity = true;
           // ASR only receives this utterance, not up to 20 seconds of old
           // silence or assistant playback that encourages hallucinations.
           this.turnAudio = this.turnAudio.slice(-1);
           this.turnSamples = this.turnAudio.reduce((total, chunk) => total + chunk.length, 0);
-          if (this.bargeInCandidate) {
-            this.emitDiagnostic('barge_in_confirmed', {
-              level: Math.round(level),
-              peak_level: Math.round(this.bargeInPeakLevel),
-              threshold: Math.round(this.bargeInThreshold),
-              speech_ms: Math.round(this.userSpeechMs),
-            });
-            this.clearBargeInCandidate(false);
-          }
-          this.interruptForUserInput();
-          this.callbacks.onUserActivity();
+          this.activeUserTurnId = this.newTurnId('voice');
+          this.pendingUserTurnId = this.activeUserTurnId;
+          this.callbacks.onUserTurnStarted(this.activeUserTurnId);
+          this.emitDiagnostic('realtime_user_turn_started', {
+            turn_id: this.activeUserTurnId,
+            speech_ms: Math.round(this.userSpeechMs),
+          });
         }
       } else {
         this.userSilenceMs += frameMs;
-        if (this.bargeInCandidate && !this.userActivityActive) {
-          if (this.userSilenceMs >= BARGE_IN_SILENCE_TOLERANCE_MS) {
-            this.emitDiagnostic('barge_in_rejected', {
-              level: Math.round(level),
-              peak_level: Math.round(this.bargeInPeakLevel),
-              threshold: Math.round(this.bargeInThreshold),
-              speech_ms: Math.round(this.userSpeechMs),
-              reason: 'short_noise_or_echo',
-            });
-            this.clearBargeInCandidate(true);
-            this.userSpeechMs = 0;
-          }
-        } else if (!this.userActivityActive) {
-          this.userSpeechMs = 0;
-        }
+        if (!this.userActivityActive) this.userSpeechMs = 0;
         if (this.userSilenceMs >= USER_TURN_SILENCE_MS) this.userActivityActive = false;
       }
       this.observeNoise(pcm);
@@ -281,6 +269,7 @@ export class RealtimeDuplexSession {
     this.pending = [];
     this.pendingSamples = 0;
     this.pendingTextInputs = [];
+    this.pendingTaskControl = null;
     this.pendingToolResults = [];
     this.acceptedToolResultIds.clear();
     this.activeToolJobId = null;
@@ -293,14 +282,16 @@ export class RealtimeDuplexSession {
     this.responseActive = false;
     this.pendingUserTurnId = null;
     this.activeAssistantTurnId = null;
+    this.activeUserTurnId = null;
     this.pendingResponseLane = null;
     this.activeResponseLane = 'normal';
     this.responseLanes.clear();
     this.userSpeechMs = 0;
     this.userSilenceMs = 0;
     this.userActivityActive = false;
-    this.clearBargeInCandidate(false);
-    this.cancelledResponseIds.clear();
+    this.playbackGeneration += 1;
+    this.playbackOperation = Promise.resolve();
+    this.queuedDrainResponseId = null;
     this.callbacks.onState('closed');
   }
 
@@ -309,9 +300,13 @@ export class RealtimeDuplexSession {
     if (!normalized || !isFresh()) return null;
     const turnId = this.newTurnId('text');
     this.lastInteractiveInputAt = Date.now();
-    this.pendingResponseLane = 'normal';
-    this.interruptForUserInput();
     const queued = this.injectionQueue.then(async () => {
+      const deadline = Date.now() + 45_000;
+      while ((this.responseActive || this.assistantPlaying) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        if (!isFresh()) return null;
+      }
+      if (this.responseActive || this.assistantPlaying) return null;
       if (!isFresh()) return null;
       this.pendingTextInputs.push({
         text: `<|im_start|>user\n${normalized}<|im_end|>\n`,
@@ -343,50 +338,6 @@ export class RealtimeDuplexSession {
     return true;
   }
 
-  interruptForUserInput(): void {
-    this.pendingResponseLane = 'normal';
-    if (!this.assistantPlaying && !this.responseActive && !this.activeToolJobId) return;
-    if (this.activeToolJobId) {
-      this.emitDiagnostic('search_result_response_interrupted', {
-        job_id: this.activeToolJobId,
-      });
-      this.activeToolJobId = null;
-    }
-    // MiniCPM accepts force_listen on an input chunk. It closes the speaking
-    // turn and resets remote TTS while local playback is cleared immediately.
-    this.discardOfficialResponseUntilListen = this.responseActive;
-    this.playbackEpoch += 1;
-    this.cancelActiveResponse(false);
-    this.assistantTranscript = '';
-    this.activeAssistantTurnId = null;
-    this.sendForceListen();
-    this.callbacks.onState('listening');
-  }
-
-  private startBargeInCandidate(level: number, threshold: number): void {
-    this.bargeInPeakLevel = Math.max(this.bargeInPeakLevel, level);
-    if (this.bargeInCandidate) return;
-    this.bargeInCandidate = true;
-    this.bargeInThreshold = threshold;
-    this.playbackNode?.port.postMessage({ type: 'pause' });
-    this.emitDiagnostic('barge_in_candidate', {
-      level: Math.round(level),
-      threshold: Math.round(threshold),
-      noise_floor: Math.round(this.noiseFloor),
-      assistant_playing: this.assistantPlaying,
-      response_active: this.responseActive,
-    });
-  }
-
-  private clearBargeInCandidate(resumePlayback: boolean): void {
-    if (resumePlayback && this.bargeInCandidate) {
-      this.playbackNode?.port.postMessage({ type: 'resume' });
-    }
-    this.bargeInCandidate = false;
-    this.bargeInPeakLevel = 0;
-    this.bargeInThreshold = 0;
-  }
-
   private emitDiagnostic(event: string, details: Record<string, unknown>): void {
     this.callbacks.onDiagnostic?.({
       event,
@@ -396,22 +347,9 @@ export class RealtimeDuplexSession {
     });
   }
 
-  private sendForceListen(): void {
-    const silence = new Int16Array(INPUT_RATE);
-    this.send({
-      type: 'input_audio_buffer.append',
-      audio: bytesToBase64(new Uint8Array(silence.buffer)),
-      format: 'pcm16',
-      sample_rate_hz: INPUT_RATE,
-      force_listen: true,
-      max_slice_nums: 1,
-    });
-  }
-
   private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = new URL(this.config.url);
-      url.searchParams.set('mode', 'video');
       url.searchParams.set('duplex', '1');
       url.searchParams.set('model', this.config.model);
       url.searchParams.set('minicpmo45_native_duplex', '1');
@@ -444,12 +382,10 @@ export class RealtimeDuplexSession {
         this.send({
           type: 'session.update',
           session: {
-            model: this.config.model,
             modalities: ['audio', 'text'],
             voice: 'default',
             ref_audio: this.config.refAudio,
-            instructions: this.contextInstructions,
-            input_audio_format: 'pcm16',
+            instructions: OFFICIAL_OMNI_INSTRUCTIONS,
             extra_body: {
               auto_response: true,
               minicpmo45_native_duplex: true,
@@ -460,6 +396,9 @@ export class RealtimeDuplexSession {
       socket.onopen = () => {
         this.emitDiagnostic('realtime_websocket_open', { url: url.toString() });
         void sendInit();
+        // Match the official client: microphone upload begins as soon as the
+        // native duplex socket is open instead of waiting for session.created.
+        resolveOnce();
       };
       socket.onmessage = ({ data }) => {
         if (this.socket !== socket) return;
@@ -469,19 +408,20 @@ export class RealtimeDuplexSession {
           const type = String(event.type || '');
           if (type === 'session.closed' && !this.sessionReady) {
             const closeReason = readableError(event.reason || event.error || '远端在初始化阶段主动关闭');
+            const startupAlreadyResolved = settled;
             this.emitDiagnostic('realtime_websocket_error', {
               url: url.toString(),
               message: closeReason,
             });
             rejectOnce(new Error(`Realtime 会话初始化失败：${closeReason}`));
+            if (startupAlreadyResolved) this.callbacks.onError(`Realtime 会话初始化失败：${closeReason}`);
             return;
           }
           if (type === 'session.queue_done' || type === 'queue_done') {
             void sendInit();
             return;
           }
-          if (type === 'session.updated') resolveOnce();
-          if (type === 'session.updated') {
+          if (type === 'session.updated' || type === 'session.created') {
             this.sessionReady = true;
             this.lastSentContext = this.contextInstructions;
             this.lastTaskReminderAt = Date.now();
@@ -501,7 +441,11 @@ export class RealtimeDuplexSession {
         this.emitDiagnostic('realtime_websocket_closed', { code, message: reason });
         if (!this.sessionReady) {
           const closeReason = reason || (code === 1000 ? '远端在初始化阶段主动关闭' : `关闭代码 ${code}`);
+          const startupAlreadyResolved = settled;
           rejectOnce(new Error(`Realtime 会话初始化失败：${closeReason}`));
+          if (startupAlreadyResolved) this.callbacks.onError(`Realtime 会话初始化失败：${closeReason}`);
+        } else if (code !== 1000) {
+          this.callbacks.onError(`Realtime 连接已断开（${code}），请确认远端模型服务仍可用。`);
         }
         this.callbacks.onState('closed');
       };
@@ -515,21 +459,17 @@ export class RealtimeDuplexSession {
   private sendContextUpdate(): boolean {
     if (!this.sessionReady || this.responseActive
       || this.contextInstructions === this.lastSentContext) return false;
+    // Native MiniCPM duplex owns the live listen/speak state. Mid-session
+    // session.update messages are intentionally avoided; task checks and tool
+    // results use normal input chunks below.
     this.lastSentContext = this.contextInstructions;
-    this.send({
-      type: 'session.update',
-      session: {
-        instructions: this.contextInstructions,
-      },
-    });
-    this.lastTaskReminderAt = Date.now();
-    this.emitDiagnostic('realtime_context_updated', { has_active_task: this.hasActiveTask });
-    return true;
+    this.emitDiagnostic('realtime_context_recorded', { has_active_task: this.hasActiveTask });
+    return false;
   }
 
   private flush(): void {
-    if (this.pendingSamples < INPUT_RATE) return;
-    const outgoing = new Int16Array(INPUT_RATE);
+    if (this.pendingSamples === 0) return;
+    const outgoing = new Int16Array(this.pendingSamples);
     let written = 0;
     while (written < outgoing.length && this.pending.length > 0) {
       const chunk = this.pending[0];
@@ -547,7 +487,10 @@ export class RealtimeDuplexSession {
     }
     this.sendAudio(outgoing, true);
     if (this.turnHasUserActivity && !this.userActivityActive && this.userSilenceMs >= USER_TURN_SILENCE_MS) {
-      this.dispatchUserTurn(`turn-${Date.now()}`);
+      this.dispatchUserTurn(this.activeUserTurnId || this.newTurnId('voice'));
+      this.activeUserTurnId = null;
+      this.userSpeechMs = 0;
+      this.userSilenceMs = 0;
     }
   }
 
@@ -555,11 +498,6 @@ export class RealtimeDuplexSession {
     let energy = 0;
     for (let index = 0; index < pcm.length; index += 8) energy += pcm[index] * pcm[index];
     return Math.sqrt(energy / Math.ceil(pcm.length / 8));
-  }
-
-  private discardPendingMic(): void {
-    this.pending = [];
-    this.pendingSamples = 0;
   }
 
   private observeNoise(pcm: Int16Array): void {
@@ -588,6 +526,12 @@ export class RealtimeDuplexSession {
       input.force_speak = true;
       this.pendingUserTurnId = pendingText.turnId;
       this.pendingResponseLane = 'normal';
+    } else if (this.pendingTaskControl) {
+      input.text = this.pendingTaskControl;
+      this.pendingTaskControl = null;
+      this.emitDiagnostic('realtime_task_control_dispatched', {
+        has_active_task: this.hasActiveTask,
+      });
     } else if (!contextUpdated && this.activeTask && !this.responseActive
       && !this.userActivityActive
       && !this.turnHasUserActivity
@@ -631,8 +575,7 @@ export class RealtimeDuplexSession {
         this.activeToolJobId = toolResult.jobId;
       }
     }
-    const shouldSendVideo = this.hasActiveTask || Date.now() - this.lastVoiceAt < 2_500;
-    if (includeVideo && shouldSendVideo) {
+    if (includeVideo) {
       const frame = this.callbacks.getVideoFrame();
       if (frame) input.video_frames = [frame];
     }
@@ -671,17 +614,14 @@ export class RealtimeDuplexSession {
     if (type === 'session.created' || type === 'response.listen') {
       if (type === 'response.listen') {
         this.finishOfficialTurn();
-        this.discardOfficialResponseUntilListen = false;
       }
       this.callbacks.onState('listening');
     } else if (type === 'response.output.delta') {
       const kind = String(event.kind || '');
       if (kind === 'listen') {
         this.finishOfficialTurn();
-        this.discardOfficialResponseUntilListen = false;
         this.callbacks.onState('listening');
       } else if (kind === 'text') {
-        if (this.discardOfficialResponseUntilListen) return;
         this.beginOfficialTurn(eventResponseId);
         const delta = String(event.text || '');
         this.assistantTranscript += delta;
@@ -692,22 +632,14 @@ export class RealtimeDuplexSession {
           this.activeAssistantTurnId || undefined,
         );
       } else if (kind === 'audio') {
-        if (this.discardOfficialResponseUntilListen) return;
         this.beginOfficialTurn(eventResponseId);
         const encoded = String(event.audio || '');
         if (!encoded || !this.playbackNode) return;
-        const playbackEpoch = this.playbackEpoch;
-        const lane = this.responseLane(eventResponseId);
-        void this.decodeOutputAudio({ format: 'pcm_f32le', sample_rate_hz: OUTPUT_RATE }, encoded).then((output) => {
-          if (!output || !this.playbackNode || playbackEpoch !== this.playbackEpoch
-            || this.discardOfficialResponseUntilListen) return;
-          this.assistantPlaying = true;
-          this.playbackNode.port.postMessage({ type: 'audio', lane, pcm: output.buffer }, [output.buffer]);
-          // The final short audio chunk can finish decoding after the model has
-          // already emitted `listen`. Re-send drain after enqueue so that tail
-          // audio below the startup buffer threshold is still played.
-          if (!this.responseActive) this.playbackNode.port.postMessage({ type: 'drain', lane });
-        }).catch(() => this.callbacks.onError('Realtime 音频解码失败'));
+        this.enqueueAudioDelta(
+          { format: 'pcm_f32le', sample_rate_hz: OUTPUT_RATE },
+          encoded,
+          eventResponseId,
+        );
       }
     } else if (type === 'response.created' || type === 'response.speak') {
       if (eventResponseId) this.responseId = eventResponseId;
@@ -721,9 +653,6 @@ export class RealtimeDuplexSession {
         this.userSilenceMs = 0;
         this.userActivityActive = false;
         this.assistantTranscript = '';
-        this.dispatchUserTurn(eventResponseId || `turn-${Date.now()}`);
-      } else {
-        this.dispatchUserTurn(eventResponseId || `turn-${Date.now()}`);
       }
       this.bindAssistantTurn();
       this.callbacks.onState('speaking');
@@ -737,31 +666,15 @@ export class RealtimeDuplexSession {
       const encoded = String(event.delta || event.audio || '');
       if (!encoded || !this.playbackNode) return;
       const responseId = eventResponseId || this.responseId;
-      if (responseId && this.cancelledResponseIds.has(responseId)) return;
-      const playbackEpoch = this.playbackEpoch;
-      const lane = this.responseLane(responseId);
-      void this.decodeOutputAudio(event, encoded).then((output) => {
-        if (!output || !this.playbackNode || playbackEpoch !== this.playbackEpoch
-          || (responseId && this.cancelledResponseIds.has(responseId))) return;
-        this.assistantPlaying = true;
-        this.playbackNode.port.postMessage({ type: 'audio', lane, pcm: output.buffer, responseId }, [output.buffer]);
-      }).catch(() => this.callbacks.onError('Realtime 音频解码失败'));
+      this.enqueueAudioDelta(event, encoded, responseId);
     } else if (type === 'response.audio.done' || type === 'response.output_audio.done' || type === 'response.done') {
       const affectsActive = !eventResponseId || eventResponseId === this.responseId;
       if (type === 'response.done' && affectsActive) {
         this.responseActive = false;
       }
-      const wasCancelled = Boolean(eventResponseId && this.cancelledResponseIds.has(eventResponseId));
-      if (affectsActive && !wasCancelled) {
-        const responseId = eventResponseId || this.responseId;
-        this.playbackNode?.port.postMessage({
-          type: 'drain',
-          lane: this.responseLane(responseId),
-          responseId,
-        });
-      }
-    } else if (type === 'response.audio_transcript.delta') {
-      if (eventResponseId && this.cancelledResponseIds.has(eventResponseId)) return;
+      if (affectsActive) this.enqueuePlaybackDrain(eventResponseId || this.responseId);
+    } else if (type === 'response.audio_transcript.delta'
+      || type === 'response.output_audio_transcript.delta') {
       const delta = String(event.delta || '');
       if (!delta) return;
       if (delta.startsWith(this.assistantTranscript)) this.assistantTranscript = delta;
@@ -772,8 +685,8 @@ export class RealtimeDuplexSession {
         this.activeToolJobId || undefined,
         this.activeAssistantTurnId || undefined,
       );
-    } else if (type === 'response.audio_transcript.done') {
-      if (eventResponseId && this.cancelledResponseIds.has(eventResponseId)) return;
+    } else if (type === 'response.audio_transcript.done'
+      || type === 'response.output_audio_transcript.done') {
       this.assistantTranscript = String(event.transcript || this.assistantTranscript);
       this.finishAssistantText();
     } else if (type === 'error') {
@@ -786,14 +699,12 @@ export class RealtimeDuplexSession {
     this.activateResponseLane(responseId);
     this.responseActive = true;
     this.assistantTranscript = '';
-    this.dispatchUserTurn(`turn-${Date.now()}`);
     this.bindAssistantTurn();
     this.callbacks.onState('speaking');
   }
 
   private finishOfficialTurn(): void {
     const wasSpeaking = this.responseActive || this.assistantPlaying;
-    const lane = this.activeResponseLane;
     this.responseActive = false;
     if (this.assistantTranscript) {
       this.finishAssistantText();
@@ -804,7 +715,7 @@ export class RealtimeDuplexSession {
       this.activeToolJobId = null;
     }
     this.activeAssistantTurnId = null;
-    if (wasSpeaking) this.playbackNode?.port.postMessage({ type: 'drain', lane });
+    if (wasSpeaking) this.enqueuePlaybackDrain(this.responseId);
     this.pendingResponseLane = null;
     this.activeResponseLane = 'normal';
   }
@@ -830,26 +741,38 @@ export class RealtimeDuplexSession {
     this.activeAssistantTurnId = null;
   }
 
-  private rememberCancelledResponse(): void {
-    if (!this.responseId) return;
-    this.cancelledResponseIds.add(this.responseId);
-    if (this.cancelledResponseIds.size <= 8) return;
-    const oldest = this.cancelledResponseIds.values().next().value;
-    if (oldest) this.cancelledResponseIds.delete(oldest);
+  private enqueueAudioDelta(
+    event: Record<string, unknown>,
+    encoded: string,
+    responseId: string | null,
+  ): void {
+    const generation = this.playbackGeneration;
+    const lane = this.responseLane(responseId);
+    this.playbackOperation = this.playbackOperation
+      .then(() => this.decodeOutputAudio(event, encoded))
+      .then((output) => {
+        if (generation !== this.playbackGeneration || !output || !this.playbackNode) return;
+        this.assistantPlaying = true;
+        this.playbackNode.port.postMessage({
+          type: 'audio',
+          lane,
+          pcm: output.buffer,
+          responseId,
+          initialBufferMs: INITIAL_PLAYBACK_BUFFER_MS,
+        }, [output.buffer]);
+      })
+      .catch(() => this.callbacks.onError('Realtime 音频解码失败'));
   }
 
-  private cancelActiveResponse(discardPendingMic = true): void {
-    const responseId = this.responseId;
-    const cancelRemote = this.responseActive;
-    if (responseId && (this.assistantPlaying || cancelRemote) && !this.cancelledResponseIds.has(responseId)) {
-      this.rememberCancelledResponse();
-    }
-    if (discardPendingMic) this.discardPendingMic();
-    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: cancelRemote });
-    this.assistantPlaying = false;
-    this.responseActive = false;
-    this.responseId = null;
-    this.activeAssistantTurnId = null;
+  private enqueuePlaybackDrain(responseId: string | null): void {
+    if (responseId && this.queuedDrainResponseId === responseId) return;
+    this.queuedDrainResponseId = responseId;
+    const generation = this.playbackGeneration;
+    const lane = this.responseLane(responseId);
+    this.playbackOperation = this.playbackOperation.then(() => {
+      if (generation !== this.playbackGeneration) return;
+      this.playbackNode?.port.postMessage({ type: 'drain', lane, responseId });
+    });
   }
 
   private async decodeOutputAudio(event: Record<string, unknown>, encoded: string): Promise<Int16Array | null> {
@@ -903,8 +826,7 @@ export class RealtimeDuplexSession {
   private dispatchUserTurn(turnId: string): void {
     if (!this.turnHasUserActivity || this.turnSamples < INPUT_RATE / 2) return;
     this.turnHasUserActivity = false;
-    this.pendingUserTurnId = turnId;
-    this.callbacks.onTurnAudio(this.takeTurnAudio(), turnId);
+    this.callbacks.onUserTurnAudio(this.takeTurnAudio(), turnId);
   }
 
   private bindAssistantTurn(): void {

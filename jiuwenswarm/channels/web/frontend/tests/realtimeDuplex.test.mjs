@@ -18,8 +18,8 @@ function createSession(videoFrame = null) {
       onAssistantText: (text, final, toolJobId, turnId) => (
         assistantTexts.push({ text, final, toolJobId, turnId })
       ),
-      onUserActivity: () => undefined,
-      onTurnAudio: () => undefined,
+      onUserTurnStarted: () => undefined,
+      onUserTurnAudio: () => undefined,
       onState: (state) => states.push(state),
       onError: () => undefined,
       onToolResultDispatched: (jobId) => dispatchedToolResults.push(jobId),
@@ -41,7 +41,7 @@ test('base instructions forbid unsupported visual and external claims', () => {
   assert.match(session.contextInstructions, /材料不足.*不得自行补齐结论/);
 });
 
-test('urgent playback preempts normal audio and then resumes it', () => {
+test('playback waits for the target 400ms startup buffer and drains short tails', () => {
   const workletSource = readFileSync(new URL('../public/duplex-playback.js', import.meta.url), 'utf8');
   const workletEvents = [];
   let PlaybackProcessor;
@@ -65,48 +65,40 @@ test('urgent playback preempts normal audio and then resumes it', () => {
     return Array.from(output).map((sample) => Math.round(sample * 32768));
   };
 
-  send({ type: 'audio', lane: 'normal', pcm: new Int16Array([1000, 1000, 1000, 1000]).buffer });
-  send({ type: 'drain', lane: 'normal' });
-  assert.deepEqual(render(), [1000, 1000]);
+  send({ type: 'audio', pcm: new Int16Array(400).fill(1000).buffer, responseId: 'response-1' });
+  assert.deepEqual(render(), [0, 0]);
+  for (let index = 0; index < 199; index += 1) render();
+  assert.notDeepEqual(render(), [0, 0]);
 
-  send({ type: 'audio', lane: 'urgent', pcm: new Int16Array([2000, 2000]).buffer });
-  send({ type: 'drain', lane: 'urgent' });
-  assert.deepEqual(render(), [2000, 2000]);
-  assert.deepEqual(render(), [1000, 1000]);
-  assert.deepEqual(workletEvents.map((event) => event.lane), ['urgent', 'normal']);
+  send({ type: 'drain', responseId: 'response-1' });
+  for (let index = 0; index < 200; index += 1) render();
+  assert.equal(workletEvents.at(-1).type, 'drained');
+  assert.equal(workletEvents.at(-1).responseId, 'response-1');
 });
 
-test('interrupt immediately clears active playback and ignores the old official response', () => {
-  const { session, states, posted, sent } = createSession();
-  session.assistantPlaying = true;
-  session.responseActive = true;
-
-  session.interruptForUserInput();
-
-  assert.deepEqual(posted, [{ type: 'clear', cancelResponse: true }]);
-  assert.equal(session.assistantPlaying, false);
-  assert.equal(session.responseActive, false);
-  assert.equal(session.discardOfficialResponseUntilListen, true);
-  assert.deepEqual(states, ['listening']);
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].type, 'input_audio_buffer.append');
-  assert.equal(sent[0].force_listen, true);
-  assert.equal(sent[0].format, 'pcm16');
-  assert.equal(sent[0].sample_rate_hz, 16_000);
-});
-
-test('a new text instruction is queued without waiting for the old response', async () => {
+test('MiniCPM user activity does not clear playback or send force-listen', () => {
   const { session, posted, sent } = createSession();
   session.assistantPlaying = true;
   session.responseActive = true;
+
+  session.userSpeechMs = 240;
+
+  assert.deepEqual(posted, []);
+  assert.deepEqual(sent, []);
+  assert.equal(session.assistantPlaying, true);
+  assert.equal(session.responseActive, true);
+});
+
+test('a new text instruction is queued without hard-interrupting MiniCPM', async () => {
+  const { session, posted, sent } = createSession();
 
   const accepted = await session.sendTextTurn('停止监控');
 
   assert.match(accepted, /^text-/);
   assert.equal(session.pendingTextInputs.length, 1);
   assert.match(session.pendingTextInputs[0].text, /停止监控/);
-  assert.deepEqual(posted, [{ type: 'clear', cancelResponse: true }]);
-  assert.equal(sent[0].force_listen, true);
+  assert.deepEqual(posted, []);
+  assert.deepEqual(sent, []);
 });
 
 test('a completed tool result waits without interrupting an active response', () => {
@@ -177,6 +169,7 @@ test('a voice turn keeps its id through the final realtime answer', () => {
   session.turnHasUserActivity = true;
   session.turnAudio = [new Int16Array(16_000)];
   session.turnSamples = 16_000;
+  session.pendingUserTurnId = 'voice-turn-1';
 
   session.dispatchUserTurn('voice-turn-1');
   session.handleEvent({ type: 'response.created', response: { id: 'response-1' } });
@@ -204,22 +197,22 @@ test('a text turn returns the id used by its final realtime answer', async () =>
   assert.equal(assistantTexts.at(-1).text, '这是农夫山泉。');
 });
 
-test('an interrupted tool answer is not attributed to the next response', () => {
-  const { session, assistantTexts, diagnostics } = createSession();
+test('a completed tool answer is not attributed to the next model response', () => {
+  const { session, assistantTexts } = createSession();
   session.enqueueToolResult({ jobId: 'search-old', question: '旧问题', result: '旧结果' });
   session.lastInteractiveInputAt = Date.now() - 3_000;
   session.sendAudio(new Int16Array(16_000), true);
 
-  session.responseActive = true;
-  session.interruptForUserInput();
-  session.discardOfficialResponseUntilListen = false;
+  session.handleEvent({ type: 'response.output.delta', kind: 'text', text: '旧问题的搜索回答' });
+  session.handleEvent({ type: 'response.listen' });
   session.handleEvent({ type: 'response.output.delta', kind: 'text', text: '新的普通回答' });
   session.handleEvent({ type: 'response.listen' });
 
   assert.equal(assistantTexts.at(-1).toolJobId, undefined);
-  assert.ok(diagnostics.some((event) => (
-    event.event === 'search_result_response_interrupted' && event.job_id === 'search-old'
-  )));
+  assert.equal(
+    assistantTexts.find((item) => item.text === '旧问题的搜索回答' && item.final)?.toolJobId,
+    'search-old',
+  );
 });
 
 test('new user text has priority over a queued tool result', async () => {
@@ -241,7 +234,7 @@ test('new user text has priority over a queued tool result', async () => {
   assert.match(sent[1].text, /旧问题的搜索结果/);
 });
 
-test('a task context deferred during a response is sent with the next audio frame', () => {
+test('a task change uses normal input instead of a mid-session session.update', () => {
   const { session, sent } = createSession();
   session.sessionReady = true;
   session.responseActive = true;
@@ -252,10 +245,10 @@ test('a task context deferred during a response is sent with the next audio fram
   session.responseActive = false;
   session.sendAudio(new Int16Array(16_000), true);
 
-  assert.equal(sent.length, 2);
-  assert.match(sent[0].session.instructions, /continuously inspect the latest frame/);
-  assert.equal(sent[0].type, 'session.update');
-  assert.equal(sent[1].type, 'input_audio_buffer.append');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'input_audio_buffer.append');
+  assert.match(sent[0].text, /continuously inspect the latest frame/);
+  assert.equal(sent.some((event) => event.type === 'session.update'), false);
 });
 
 test('changing a task updates context without replacing the realtime websocket', () => {
@@ -267,9 +260,24 @@ test('changing a task updates context without replacing the realtime websocket',
 
   assert.equal(session.socket, previousSocket);
   assert.equal(session.activeTask, 'continuously translate new English text');
+  assert.equal(sent.length, 0);
+  assert.match(session.contextInstructions, /continuously translate new English text/);
+});
+
+test('stopping a task reaches MiniCPM without force-listen or session.update', () => {
+  const { session, sent } = createSession();
+  session.sessionReady = true;
+  session.updateContext('continuously translate new English text', []);
+  session.sendAudio(new Int16Array(3_200), true);
+  sent.length = 0;
+
+  session.updateContext('', []);
+  session.sendAudio(new Int16Array(3_200), true);
+
   assert.equal(sent.length, 1);
-  assert.match(sent[0].session.instructions, /continuously translate new English text/);
-  assert.equal(sent[0].type, 'session.update');
+  assert.match(sent[0].text, /当前任务已停止/);
+  assert.equal(sent[0].force_listen, undefined);
+  assert.equal(sent.some((event) => event.type === 'session.update'), false);
 });
 
 test('an idle active task checks the latest frame without forcing a decision', () => {
@@ -277,6 +285,7 @@ test('an idle active task checks the latest frame without forcing a decision', (
   const { session, sent } = createSession(frame);
   session.sessionReady = true;
   session.updateContext('continuously inspect the latest frame', []);
+  session.sendAudio(new Int16Array(3_200), true);
   sent.length = 0;
   session.lastTaskReminderAt = Date.now() - 6_000;
 
@@ -293,6 +302,7 @@ test('local playback tail does not block a reminder after the model returned to 
   const { session, sent, diagnostics } = createSession();
   session.sessionReady = true;
   session.updateContext('continuously inspect the latest frame', []);
+  session.sendAudio(new Int16Array(3_200), true);
   sent.length = 0;
   session.lastTaskReminderAt = Date.now() - 6_000;
   session.responseActive = false;
@@ -312,6 +322,7 @@ test('urgent current task check has priority over a queued search result', () =>
   const { session, sent } = createSession();
   session.sessionReady = true;
   session.updateContext('remind me immediately when I drink', []);
+  session.sendAudio(new Int16Array(3_200), true);
   session.enqueueToolResult({ jobId: 'search-waiting', question: 'brand info', result: 'grounded result' });
   sent.length = 0;
   session.lastTaskReminderAt = Date.now() - 6_000;
@@ -323,40 +334,31 @@ test('urgent current task check has priority over a queued search result', () =>
   assert.equal(session.pendingResponseLane, 'urgent');
 });
 
-test('audio from an urgent task response is tagged for urgent playback', async () => {
+test('decoded response chunks stay ordered before the playback drain', async () => {
   const { session, posted } = createSession();
-  session.activeTask = 'remind me immediately when I drink';
-  session.hasActiveTask = true;
-  session.pendingResponseLane = 'urgent';
-  session.decodeOutputAudio = async () => new Int16Array([1, 2]);
+  const decoded = [];
+  session.decodeOutputAudio = async (_event, encoded) => {
+    if (encoded === 'first') await new Promise((resolve) => setTimeout(resolve, 5));
+    decoded.push(encoded);
+    return new Int16Array(encoded === 'first' ? [1] : [2]);
+  };
 
-  session.handleEvent({ type: 'response.created', response: { id: 'urgent-response' } });
+  session.handleEvent({ type: 'response.created', response: { id: 'response-ordered' } });
   session.handleEvent({
     type: 'response.audio.delta',
-    response_id: 'urgent-response',
-    delta: 'ignored-by-test-decoder',
+    response_id: 'response-ordered',
+    delta: 'first',
   });
-  await Promise.resolve();
+  session.handleEvent({
+    type: 'response.audio.delta',
+    response_id: 'response-ordered',
+    delta: 'second',
+  });
+  session.handleEvent({ type: 'response.done', response_id: 'response-ordered' });
+  await new Promise((resolve) => setTimeout(resolve, 15));
 
-  const audio = posted.find((message) => message.type === 'audio');
-  assert.equal(audio.lane, 'urgent');
-  session.handleEvent({ type: 'response.done', response_id: 'urgent-response' });
-  const drain = posted.find((message) => message.type === 'drain');
-  assert.equal(drain.lane, 'urgent');
-});
-
-test('a short barge-in candidate pauses playback and resumes without cancelling', () => {
-  const { session, posted, sent } = createSession();
-  session.assistantPlaying = true;
-  session.responseActive = true;
-
-  session.startBargeInCandidate(1600, 1400);
-  session.clearBargeInCandidate(true);
-
-  assert.deepEqual(posted, [{ type: 'pause' }, { type: 'resume' }]);
-  assert.equal(session.responseActive, true);
-  assert.equal(session.assistantPlaying, true);
-  assert.deepEqual(sent, []);
+  assert.deepEqual(decoded, ['first', 'second']);
+  assert.deepEqual(posted.map((message) => message.type), ['audio', 'audio', 'drain']);
 });
 
 test('session.closed before session.created rejects startup with the backend reason', async () => {
@@ -380,8 +382,8 @@ test('session.closed before session.created rejects startup with the backend rea
     {
       getVideoFrame: () => null,
       onAssistantText: () => undefined,
-      onUserActivity: () => undefined,
-      onTurnAudio: () => undefined,
+      onUserTurnStarted: () => undefined,
+      onUserTurnAudio: () => undefined,
       onState: () => undefined,
       onError: () => undefined,
       onDiagnostic: (event) => diagnostics.push(event),

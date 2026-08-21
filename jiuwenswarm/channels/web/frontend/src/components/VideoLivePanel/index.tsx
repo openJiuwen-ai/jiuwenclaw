@@ -6,6 +6,11 @@ import {
   collectVideoAgentTurns,
   VideoAgentSegment,
 } from '../../utils/videoAgentSegments';
+import { RealtimeVideoFrameScheduler } from '../../utils/realtimeVideoFrameScheduler';
+import {
+  isVideoSourceReady,
+  waitForFirstVideoFrame,
+} from '../../utils/realtimeVideoSourceReadiness';
 import { JoyAIProvider } from './joyaiProvider';
 import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvider';
 import {
@@ -33,10 +38,9 @@ const FRAME_INTERVAL_MS = 500;
 const MAX_FRAMES = 6;
 const MAX_SCREENS = 4;
 const MAX_FRAME_WIDTH = 1024;
-const SCREEN_PREVIEW_FRAME_RATE = 30;
+const SCREEN_PREVIEW_FRAME_RATE = 5;
 const FRAME_JPEG_QUALITY = 0.8;
 const AGENT_DEBOUNCE_MS = 700;
-const FIRST_FRAME_WAIT_MS = 3_000;
 
 function cleanAssistantText(text: string): string {
   return text
@@ -101,14 +105,6 @@ export function VideoLivePanel() {
       client_time: new Date().toISOString(),
       ...details,
     }, { timeoutMs: 5_000 }).catch(() => undefined);
-  };
-
-  const waitForFirstFrame = async (): Promise<boolean> => {
-    const deadline = Date.now() + FIRST_FRAME_WAIT_MS;
-    while (framesRef.current.length === 0 && Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 100));
-    }
-    return framesRef.current.length > 0;
   };
 
   const stopModelTransport = () => {
@@ -685,19 +681,18 @@ export function VideoLivePanel() {
       source: source || 'none',
       frame_count: framesRef.current.length,
     });
-    if (framesRef.current.length === 0) {
-      if (!source) {
-        const message = '请先打开摄像头、视频或共享屏幕。';
-        setError(message);
-        setRealtimeStatus('');
-        setIsRealtimeStarting(false);
-        reportRealtimeEvent('realtime_start_blocked_no_source');
-        return;
-      }
+    if (source) {
       setError('');
       setRealtimeStatus('正在等待视频首帧…');
       reportRealtimeEvent('realtime_first_frame_waiting', { source });
-      if (!await waitForFirstFrame()) {
+      const sourceReady = () => isVideoSourceReady({
+        source,
+        cameraStream: cameraStreamRef.current,
+        screens,
+        screenStreams: screenStreamsRef.current,
+        video: videoRef.current,
+      });
+      if (!await waitForFirstVideoFrame(sourceReady, () => framesRef.current.length > 0)) {
         const message = '尚未读取到视频画面，请确认画面正在播放后重试。';
         setError(message);
         setRealtimeStatus('');
@@ -727,8 +722,12 @@ export function VideoLivePanel() {
         await getJoyAIProvider().start();
         return;
       }
+      const videoFrames = new RealtimeVideoFrameScheduler(1_000);
       const session = createRealtimeProvider(config, {
-        getVideoFrame: () => framesRef.current.at(-1)?.data_url.split(',', 2)[1] || null,
+        getVideoFrame: () => {
+          const frame = videoFrames.take(framesRef.current);
+          return frame?.data_url.split(',', 2)[1] || null;
+        },
         onAssistantText: (text, final, toolJobId, turnId) => {
           const visibleText = cleanAssistantText(text);
           if (!visibleText) return;
@@ -741,7 +740,7 @@ export function VideoLivePanel() {
             commitAssistantAnswer(visibleText, toolJobId, turnId);
           }
         },
-        onUserActivity: () => {
+        onUserTurnStarted: () => {
           agentRequestVersionRef.current += 1;
           const interruptedAnswer = streamingAnswerRef.current;
           if (interruptedAnswer) {
@@ -756,7 +755,7 @@ export function VideoLivePanel() {
             setStreamingAnswer('');
           }
         },
-        onTurnAudio: (audioDataUrl, turnId) => {
+        onUserTurnAudio: (audioDataUrl, turnId) => {
           if (handledAgentTurnsRef.current.has(turnId)) return;
           handledAgentTurnsRef.current.add(turnId);
           if (agentDebounceTimerRef.current !== null) {
@@ -1035,7 +1034,7 @@ export function VideoLivePanel() {
               </button>
             )}
             <span className="video-live__frame-count">
-              滚动窗口：{frameCount}/{MAX_FRAMES} 帧
+              {source ? `滚动窗口：${frameCount}/${MAX_FRAMES} 帧` : '纯语音不发送画面'}
               {source === 'screen' ? ` · ${screens.length}/${MAX_SCREENS} 屏` : ''}
             </span>
           </div>
