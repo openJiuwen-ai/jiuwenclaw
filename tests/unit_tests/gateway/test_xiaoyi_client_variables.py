@@ -194,7 +194,11 @@ def test_with_workspace_directive(workspace):
     text = with_workspace_directive("你好", str(workspace), "default")
     assert text.startswith("你好\n\n")
     assert "<claw_workspace>" in text and "【工作空间】当前项目目录是" in text
-    assert with_workspace_directive("你好", str(workspace), "full_access") == "你好"
+    assert "必须落在该目录" in text
+    # full_access：也注入（位置提示，不含约束措辞）——否则该档下模型对工作空间零感知
+    full = with_workspace_directive("你好", str(workspace), "full_access")
+    assert full.startswith("你好\n\n") and "<claw_workspace>" in full
+    assert "必须落在该目录" not in full
     assert with_workspace_directive("你好", "", "default") == "你好"
 
 
@@ -282,7 +286,7 @@ async def test_message_stream_applies_workspace_and_permission(cfg_file, workspa
     captured, sent = [], []
     ch = _make_channel(captured, sent)
     try:
-        # full_access：project_dir/cwd 下发、无 trusted_dirs、不注入指令、护栏关闭
+        # full_access：project_dir/cwd 下发、无 trusted_dirs、注入位置提示（非约束）、护栏关闭
         await ch._handle_message_stream(
             _build_stream_msg("帮我打个zip包", {"workspace": str(workspace), "permission": "full_access"})
         )
@@ -290,7 +294,9 @@ async def test_message_stream_applies_workspace_and_permission(cfg_file, workspa
         assert m.params["project_dir"] == os.path.abspath(str(workspace))
         assert m.params["cwd"] == os.path.abspath(str(workspace))
         assert "trusted_dirs" not in m.params
-        assert m.params["query"] == "帮我打个zip包"
+        assert m.params["query"].startswith("帮我打个zip包\n\n")
+        assert "<claw_workspace>" in m.params["query"]
+        assert "必须落在该目录" not in m.params["query"]
         assert m.metadata["xiaoyi_task_id"] == "task-1"
         # beta3：session_id 取 params.sessionId（逻辑会话），chat_id 兜底同值
         assert m.session_id == "conv-1" and m.chat_id == "conv-1"

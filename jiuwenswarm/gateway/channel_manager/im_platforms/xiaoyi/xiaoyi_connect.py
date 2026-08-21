@@ -201,8 +201,10 @@ def _generate_signature(sk: str, timestamp: str) -> str:
 class XYFileUploadService:
     def __init__(self, base_url: str, api_key: str, uid: str):
         self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
-        self.uid = uid
+        # uid/api_key 强制 str：config.yaml 里纯数字 uid 会被 YAML 解析成 int，
+        # 直接进请求头会触发 aiohttp「Cannot serialize non-str key」静默失败
+        self.api_key = str(api_key) if api_key is not None else ""
+        self.uid = str(uid) if uid is not None else ""
         self.session = None
 
     async def __aenter__(self):

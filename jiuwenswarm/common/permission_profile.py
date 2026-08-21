@@ -114,11 +114,24 @@ def resolve_trusted_dirs(profile: Optional[str], workspace: str) -> Optional[lis
 
 
 def with_workspace_directive(text: str, workspace: str, profile: Optional[str]) -> str:
-    """注入工作空间约束指令（与桌面端 withWorkspaceDir 完全一致；完全访问档不注入）。"""
+    """注入工作空间提示（受限档为约束指令；完全访问档为位置提示）。
+
+    手机端经 clientVariables.workspace 显式选择了工作空间——即便完全访问档，
+    模型也必须知道落盘位置：xiaoyi/desktop 渠道没有 RuntimePromptRail 的目录
+    上下文段（仅 tui/web 注入），此前 full_access 下零提示，任务全落默认工作目录。
+    """
     path = (workspace or "").strip()
-    if not path or profile == PERMISSION_PROFILE_FULL_ACCESS:
+    if not path:
         return text
     payload = json.dumps({"path": path}, ensure_ascii=False)
+    if profile == PERMISSION_PROFILE_FULL_ACCESS:
+        # 位置提示（非权限约束）：完全访问档不设写入边界，但落盘默认位置要告知
+        return (
+            f"{text}\n\n"
+            f"<claw_workspace>{payload}</claw_workspace>\n"
+            f"【工作空间】当前项目目录是 `{path}`。除非用户明确指定其他位置，"
+            f"新建与写入文件请落在该目录下（可用相对路径）。"
+        )
     return (
         f"{text}\n\n"
         f"<claw_workspace>{payload}</claw_workspace>\n"
