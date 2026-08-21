@@ -1512,6 +1512,17 @@
     "marketplaceTabs": {
       "builtin": "预置"
     },
+    "marketplaceCategories": {
+      "all": "全部",
+      "software-development": "软件开发",
+      "office-productivity": "办公效率",
+      "content-creation": "内容创作",
+      "multimodal-media": "多模态媒体",
+      "data-science-research": "数据与科研",
+      "compliance-legal": "合规与法律",
+      "lifestyle-health": "生活与健康",
+      "finance-wealth": "金融与理财"
+    },
     "swarmskills": {
       "title": "SwarmSkills在线搜索",
       "searchPlaceholder": "输入关键词搜索SwarmSkills"

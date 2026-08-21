@@ -1514,6 +1514,17 @@
     "marketplaceTabs": {
       "builtin": "Built-in"
     },
+    "marketplaceCategories": {
+      "all": "All",
+      "software-development": "Software Development",
+      "office-productivity": "Office Productivity",
+      "content-creation": "Content Creation",
+      "multimodal-media": "Multimodal & Media",
+      "data-science-research": "Data & Research",
+      "compliance-legal": "Legal & Compliance",
+      "lifestyle-health": "Lifestyle & Health",
+      "finance-wealth": "Finance"
+    },
     "swarmskills": {
       "title": "SwarmSkills Online Search",
       "searchPlaceholder": "Enter keywords to search SwarmSkills"
