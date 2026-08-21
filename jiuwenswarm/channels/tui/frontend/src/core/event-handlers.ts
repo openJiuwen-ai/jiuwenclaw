@@ -936,17 +936,19 @@ function handleSubtaskUpdate(
 ): boolean {
   const taskId = typeof payload.task_id === "string" ? payload.task_id : "";
   if (!taskId) return false;
+  const legacyStatus =
+    typeof payload.legacy_status === "string" ? payload.legacy_status : undefined;
+  const rawStatus = typeof payload.status === "string" ? payload.status : "starting";
+  const progressStatus = legacyStatus ?? rawStatus;
   const subtasks = delegate.getActiveSubtasks();
-  if (payload.status === "completed" || payload.status === "error") {
+  if (progressStatus === "completed" || progressStatus === "error") {
     subtasks.delete(taskId);
     return true;
   }
   subtasks.set(taskId, {
     task_id: taskId,
     description: typeof payload.description === "string" ? payload.description : "",
-    status: (typeof payload.status === "string"
-      ? payload.status
-      : "starting") as SubtaskState["status"],
+    status: progressStatus as SubtaskState["status"],
     index: typeof payload.index === "number" ? payload.index : 0,
     total: typeof payload.total === "number" ? payload.total : 0,
     tool_name: typeof payload.tool_name === "string" ? payload.tool_name : undefined,

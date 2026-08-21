@@ -88,6 +88,11 @@ from openjiuwen.harness.rails.context_engineer.context_assemble_rail import Cont
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
+from openjiuwen.harness.subagent_runtime import (
+    SUBAGENT_ACTIVITY_EVENT_TYPE,
+    SUBAGENT_MESSAGE_EVENT_TYPE,
+    SUBAGENT_UPDATED_EVENT_TYPE,
+)
 from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -337,6 +342,7 @@ from jiuwenswarm.common.config import (
     get_sandbox_endpoint,
     get_sandbox_runtime,
     get_sandbox_startup_mode,
+    is_subagent_runtime_enabled,
     get_mcp_server_config,
     get_config_yaml_mcp_servers,
     resolve_env_vars,
@@ -1168,6 +1174,9 @@ class JiuWenSwarmDeepAdapter:
     SESSION_ADAPTER_IDLE_TTL_SEC = 2 * 60 * 60
     SESSION_ADAPTER_EVICT_BATCH_SIZE = 3
     SESSION_ADAPTER_RELOAD_RETRY_INTERVAL_SEC = 30.0
+    _subagent_runtime_supported: bool = True
+    _subagent_progress_batches: dict[str, list[str]] = {}
+    _subagent_progress_batches_lock = threading.Lock()
     _RUNTIME_STATE_WRITE_LIMIT = threading.BoundedSemaphore(2)
     # Goal stream bookkeeping (see __init__ for what each one tracks). Declared
     # on the class as well so the goal helpers stay safe to call on an instance
@@ -5536,12 +5545,20 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
-    @staticmethod
-    def _build_subagent_rail() -> SubagentRail | None:
+    def _build_subagent_rail(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
+            subagent_rail = BrowserTaskPromptRail(
+                enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
+            )
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] SubagentRail create success "
+                "(subagent_runtime=%s)",
+                self._resolve_enable_subagent_runtime(config_base),
+            )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
             subagent_rail = None
@@ -6114,7 +6131,11 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
-            _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
+            _RailBuildInfo(
+                "_subagent_rail",
+                self._build_subagent_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo(
                 "_permission_rail",
                 build_permission_rail,
@@ -6212,6 +6233,15 @@ class JiuWenSwarmDeepAdapter:
             return True
         return configured_value
 
+    def _resolve_enable_subagent_runtime(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return whether persistent subagent runtime tools should be enabled."""
+        if not getattr(self, "_subagent_runtime_supported", True):
+            return False
+        return is_subagent_runtime_enabled(config_base or get_config())
+
     def _make_deep_agent_config(
         self,
         *,
@@ -6259,6 +6289,7 @@ class JiuWenSwarmDeepAdapter:
             ),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
+            enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             max_iterations=config.get("max_iterations", 15),
             subagents=configured_subagents,
             add_general_purpose_agent=should_add_general_agent,
@@ -6677,6 +6708,33 @@ class JiuWenSwarmDeepAdapter:
         # 实例，不会再往下递归。
         return adapter.get_live_session_instance(session_id)
 
+    async def release_subagent_runtime_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reason: str = "session_deleted",
+    ) -> None:
+        """Cancel cached subagents and flush persistence for one parent session."""
+        sid = self._session_adapter_key(session_id)
+        if not sid:
+            return
+        self._clear_subagent_progress_batch(sid)
+        from openjiuwen.harness.tools.subagent import release_subagent_control
+
+        deep_agent = self.get_live_session_instance(sid)
+        if deep_agent is None:
+            deep_agent = self._instance
+        if deep_agent is None:
+            return
+        try:
+            await release_subagent_control(deep_agent, sid, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] release_subagent_runtime failed: session_id=%s error=%s",
+                sid,
+                exc,
+            )
+
     async def ensure_live_session_instance(self, session_id: str | None) -> Any | None:
         """Start the session-scoped adapter if needed and return its DeepAgent.
 
@@ -6824,6 +6882,7 @@ class JiuWenSwarmDeepAdapter:
             # deferred and indexed by ProgressiveToolRail at startup.
             progressive_tool_enabled=get_progressive_tool_enabled(config_base),
             enable_task_loop=self._resolve_enable_task_loop(config, config_base),
+            enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             add_general_purpose_agent=should_enable_general_agent,
             max_iterations=config.get("max_iterations", 15),
             workspace=Workspace(
@@ -8072,6 +8131,11 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_reload_failures.clear()
         else:
             try:
+                if self._parent_session_id:
+                    await self.release_subagent_runtime_for_session(
+                        self._parent_session_id,
+                        reason="adapter_cleanup",
+                    )
                 await self.stop_interaction()
             except Exception as exc:
                 logger.warning(
@@ -10461,7 +10525,7 @@ class JiuWenSwarmDeepAdapter:
                             collected_content.append(text)
                     else:
                         # check for error in other typed chunks (e.g. controller_output.task_failed)
-                        parsed = self._parse_stream_chunk(chunk)
+                        parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                         if parsed is not None:
                             event_type = str(parsed.get("event_type") or "").strip()
                             # execution.error（DeepAgent round 级异常，如模型调用失败）
@@ -10471,7 +10535,7 @@ class JiuWenSwarmDeepAdapter:
                                 if err:
                                     error_text = str(err)
                 else:
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     if parsed is not None:
                         text = parsed.get("content", "")
                         if text:
@@ -11317,7 +11381,7 @@ class JiuWenSwarmDeepAdapter:
                 if run_failure is None:
                     run_failure = self._run_failure(chunk)
                 if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     # Only stamp provenance / inject split on new visible deltas.
                     # A late user-round chat.final must keep the prior content kind.
                     if isinstance(parsed, dict) and parsed.get("event_type") == "chat.delta":
@@ -11488,7 +11552,11 @@ class JiuWenSwarmDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     if has_streamed_content:
-                        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                        parsed = self._parse_stream_chunk(
+                            chunk,
+                            _has_streamed_content=True,
+                            _parent_session_id=self._parent_session_id,
+                        )
                         parsed = self._adapt_goal_intermediate_final(parsed)
                         if parsed is not None:
                             if should_skip_duplicate_ask_user(parsed):
@@ -11502,7 +11570,7 @@ class JiuWenSwarmDeepAdapter:
                                 is_complete=False,
                             )
                         continue
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     parsed = self._adapt_goal_intermediate_final(parsed)
                     if parsed is not None:
                         if should_skip_duplicate_ask_user(parsed):
@@ -11533,7 +11601,7 @@ class JiuWenSwarmDeepAdapter:
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
-                parsed = self._parse_stream_chunk(chunk)
+                parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                 parsed = self._adapt_goal_intermediate_final(parsed)
                 if parsed is not None:
                     if should_skip_duplicate_ask_user(parsed):
@@ -11839,12 +11907,208 @@ class JiuWenSwarmDeepAdapter:
 
         return None
 
+    @classmethod
+    def _clear_subagent_progress_batch(cls, parent_session_id: str | None) -> None:
+        if not parent_session_id:
+            return
+        with cls._subagent_progress_batches_lock:
+            cls._subagent_progress_batches.pop(parent_session_id, None)
+
+    @classmethod
+    def _resolve_subagent_parallel_fields(
+        cls,
+        *,
+        parent_session_id: str,
+        subagent_id: str,
+        legacy_status: str,
+    ) -> tuple[int, int, bool]:
+        """Assign stable 0-based index/total for legacy Web SubtaskProgress."""
+        if not parent_session_id or not subagent_id:
+            return 0, 1, False
+
+        with cls._subagent_progress_batches_lock:
+            order = cls._subagent_progress_batches.setdefault(parent_session_id, [])
+
+            if legacy_status in ("completed", "error"):
+                if subagent_id not in order:
+                    return 0, 1, False
+                index = order.index(subagent_id)
+                total = max(len(order), 1)
+                order.remove(subagent_id)
+                if not order:
+                    cls._subagent_progress_batches.pop(parent_session_id, None)
+                return index, total, total > 1
+
+            if subagent_id not in order:
+                order.append(subagent_id)
+            index = order.index(subagent_id)
+            total = len(order)
+            return index, total, total > 1
+
+    @staticmethod
+    def _resolve_subagent_legacy_status(projection: dict) -> tuple[str, str]:
+        """Return (legacy_status, message) for Web SubtaskProgress compatibility."""
+        status = str(projection.get("status") or "running")
+        closed_reason = projection.get("closed_reason")
+        message = ""
+        if status == "closed":
+            if closed_reason == "failed":
+                legacy_status = "error"
+                error = projection.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "")
+            else:
+                legacy_status = "completed"
+        elif status == "idle":
+            turn_outcome = projection.get("turn_outcome")
+            if turn_outcome == "failed":
+                legacy_status = "error"
+                error = projection.get("error")
+                if isinstance(error, dict):
+                    message = str(error.get("message") or "")
+            else:
+                legacy_status = "completed"
+        else:
+            legacy_status = "starting"
+        return legacy_status, message
+
+    @staticmethod
+    def _project_subagent_updated_for_web(projection: dict) -> dict:
+        """Project runtime subagent_updated for Web without overwriting canonical status."""
+        subagent_id = str(projection.get("subagent_id") or "")
+        description = (
+            str(projection.get("display_name") or "").strip()
+            or str(projection.get("task_description") or "").strip()
+            or subagent_id
+        )
+        legacy_status, message = JiuWenSwarmDeepAdapter._resolve_subagent_legacy_status(projection)
+
+        parent_session_id = str(projection.get("parent_session_id") or "")
+        index, total, is_parallel = JiuWenSwarmDeepAdapter._resolve_subagent_parallel_fields(
+            parent_session_id=parent_session_id,
+            subagent_id=subagent_id,
+            legacy_status=legacy_status,
+        )
+
+        payload = {
+            "event_type": "chat.subtask_update",
+            **projection,
+            "task_id": subagent_id,
+            "description": description,
+            "legacy_status": legacy_status,
+            "index": index,
+            "total": total,
+            "is_parallel": is_parallel,
+        }
+        if message:
+            payload["message"] = message
+        return payload
+
+    @staticmethod
+    def _persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        seq = projection.get("seq")
+        request_id = f"{subagent_id}:{seq}" if seq is not None else subagent_id
+        role = str(projection.get("role") or "assistant")
+        event_type = str(projection.get("event_type") or "").strip() or None
+        content = str(projection.get("content") or "")
+        timestamp_ms = projection.get("at_ms")
+        timestamp = float(timestamp_ms) / 1000 if timestamp_ms else time.time()
+
+        extra: dict[str, Any] = {}
+        reasoning_content = projection.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            extra["reasoning_content"] = reasoning_content.strip()
+        try:
+            phase_id = int(projection.get("phase_id") or 0)
+        except (TypeError, ValueError):
+            phase_id = 0
+        if phase_id > 0:
+            extra["phase_id"] = phase_id
+        nested_extra = projection.get("extra")
+        if isinstance(nested_extra, dict):
+            extra.update(nested_extra)
+        extra["parent_session_id"] = parent_session_id
+
+        append_history_record(
+            session_id=parent_session_id,
+            subagent_id=subagent_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role=role,
+            content=content,
+            timestamp=timestamp,
+            event_type=event_type if role == "assistant" else None,
+            extra=extra or None,
+            mode="subagent",
+        )
+
+    @staticmethod
+    def _persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        updated_at_ms = projection.get("updated_at_ms") or projection.get("created_at_ms")
+        timestamp = float(updated_at_ms) / 1000 if updated_at_ms else time.time()
+        revision = projection.get("revision")
+        request_id = (
+            f"subagent-roster-{subagent_id}:{revision}"
+            if revision is not None
+            else f"subagent-roster-{subagent_id}"
+        )
+        append_history_record(
+            session_id=parent_session_id,
+            subagent_id=subagent_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role="assistant",
+            event_type="chat.subtask_update",
+            content=str(web_payload.get("description") or subagent_id),
+            timestamp=timestamp,
+            extra=web_payload,
+            mode="subagent",
+        )
+
+    @staticmethod
+    def _persist_subagent_activity(projection: dict[str, Any]) -> None:
+        parent_session_id = str(projection.get("parent_session_id") or "").strip()
+        subagent_id = str(projection.get("subagent_id") or "").strip()
+        if not parent_session_id or not subagent_id:
+            return
+
+        task_id = str(projection.get("task_id") or "").strip() or "turn"
+        seq = projection.get("seq")
+        seq_part = str(seq) if seq is not None else str(projection.get("at_ms") or "0")
+        request_id = f"{subagent_id}:activity:{task_id}:{seq_part}"
+        timestamp_ms = projection.get("at_ms")
+        timestamp = float(timestamp_ms) / 1000 if timestamp_ms else time.time()
+        activity = {**projection, "parent_session_id": parent_session_id}
+        append_history_record(
+            session_id=parent_session_id,
+            subagent_id=subagent_id,
+            request_id=request_id,
+            channel_id="subagent",
+            role="assistant",
+            content=str(projection.get("summary") or ""),
+            timestamp=timestamp,
+            event_type="chat.subagent_activity",
+            extra={"subagent_activity": activity},
+            mode="subagent",
+        )
+
     @staticmethod
     def _parse_stream_chunk(
         chunk,
         *,
         _has_streamed_content: bool = False,
         _stage: str = "",
+        _parent_session_id: str | None = None,
     ) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
 
@@ -12037,6 +12301,40 @@ class JiuWenSwarmDeepAdapter:
                     todos = payload.get("todos", []) if isinstance(payload, dict) else []
                     return {"event_type": "todo.updated", "todos": todos}
 
+                if chunk_type == SUBAGENT_UPDATED_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_updated") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    web_payload = JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+                    JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
+                    return web_payload
+
+                if chunk_type == SUBAGENT_MESSAGE_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_message") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
+                    return None
+
+                if chunk_type == SUBAGENT_ACTIVITY_EVENT_TYPE:
+                    projection = (
+                        payload.get("subagent_activity") if isinstance(payload, dict) else None
+                    )
+                    if not isinstance(projection, dict):
+                        return None
+                    persist_projection = dict(projection)
+                    parent_session_id = str(
+                        persist_projection.get("parent_session_id") or _parent_session_id or ""
+                    ).strip()
+                    if parent_session_id:
+                        persist_projection["parent_session_id"] = parent_session_id
+                    JiuWenSwarmDeepAdapter._persist_subagent_activity(persist_projection)
+                    return {"event_type": "chat.subagent_activity", **projection}
+
                 if chunk_type == "context.usage":
                     if isinstance(payload, dict):
                         usage_payload = {
@@ -12221,6 +12519,44 @@ class JiuWenSwarmDeepAdapter:
             logger.debug("[_parse_stream_chunk] 解析异常", exc_info=True)
 
         return None
+
+    @staticmethod
+    def parse_stream_chunk(
+        chunk,
+        *,
+        has_streamed_content: bool = False,
+        stage: str = "",
+        parent_session_id: str | None = None,
+    ) -> dict | None:
+        """Public entry for OutputSchema stream chunk parsing."""
+        return JiuWenSwarmDeepAdapter._parse_stream_chunk(
+            chunk,
+            _has_streamed_content=has_streamed_content,
+            _stage=stage,
+            _parent_session_id=parent_session_id,
+        )
+
+    @staticmethod
+    def project_subagent_updated_for_web(projection: dict) -> dict:
+        """Public entry for subagent roster projection."""
+        return JiuWenSwarmDeepAdapter._project_subagent_updated_for_web(projection)
+
+    @staticmethod
+    def persist_subagent_roster_history(projection: dict, web_payload: dict) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_roster_history(projection, web_payload)
+
+    @staticmethod
+    def persist_subagent_activity(projection: dict[str, Any]) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_activity(projection)
+
+    @staticmethod
+    def persist_subagent_transcript_message(projection: dict[str, Any]) -> None:
+        JiuWenSwarmDeepAdapter._persist_subagent_transcript_message(projection)
+
+    @classmethod
+    def clear_subagent_progress_batches(cls) -> None:
+        with cls._subagent_progress_batches_lock:
+            cls._subagent_progress_batches.clear()
 
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()

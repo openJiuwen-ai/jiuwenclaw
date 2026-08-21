@@ -806,7 +806,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 @pytest.mark.asyncio
 async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    rail = _TestableJiuWenSwarmDeepAdapter()._build_subagent_rail()
     if rail is None:
         pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
     rail.tools = [object()]
@@ -820,24 +820,34 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     )
     await rail.before_model_call(ctx)
 
-    task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
-    assert "## Browser Subagent Rules" in task_section.content["en"]
-    assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
+    section = rail.system_prompt_builder.get_section("subagent_tools")
+    if section is None:
+        section = rail.system_prompt_builder.get_section("task_tool")
+    if section is None:
+        pytest.skip("subagent prompt section is unavailable in this tool configuration")
+    assert "## Browser Subagent Rules" in section.content["en"]
+    assert 'set `subagent_type` to `"browser_agent"`' in section.content["en"]
+    if "task_tool" in section.content["en"] and section.name == "task_tool":
+        assert "# Subagent Usage Rules" in section.content["en"]
+        assert "## task_tool" not in section.content["en"]
+    else:
+        assert "subagent_spawn" in section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
     assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
 
     rail.set_channel("tui")
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+    non_web_section = rail.system_prompt_builder.get_section("subagent_tools")
+    if non_web_section is None:
+        non_web_section = rail.system_prompt_builder.get_section("task_tool")
+    if non_web_section is None:
+        pytest.skip("subagent prompt section is unavailable in this tool configuration")
+    if non_web_section.name == "task_tool":
+        assert "# Subagent Usage Rules" in non_web_section.content["en"]
+    else:
+        assert "subagent_spawn" in non_web_section.content["en"]
+    assert "## Browser Subagent Rules" not in non_web_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():

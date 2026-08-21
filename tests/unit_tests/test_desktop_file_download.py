@@ -1,6 +1,10 @@
 from pathlib import Path
 import urllib.request
 
+import pytest
+
+pytest.importorskip("webview")
+
 from jiuwenswarm.channels.desktop import desktop_app
 
 

@@ -280,6 +280,71 @@ Do not end your turn without calling exit_plan_mode when planning is complete.
 ask_user is only for clarifying requirements — do not use it for approval questions.
 """
 
+_ENTER_PLAN_MODE_INSTRUCTIONS_RUNTIME_EN = """
+## Entering Plan Mode
+
+You are now in **plan mode**. You must only plan — you must not make any modifications (except to the plan file), must not run any non-read-only tools, and must not make any changes to the system. This constraint takes priority over any other instructions you receive.
+
+### Available Tools (only)
+- Read-only tools: read_file, grep, list_files, glob
+- Plan file tools: write_file, edit_file (only .plans/<slug>.md)
+- Interactive tools: ask_user
+- Sub-agent tools: subagent_spawn, subagent_wait, subagent_list (dispatch explore_agent / plan_agent)
+- Control tools: exit_plan_mode
+- bash (read-only operations only; git write / mkdir / touch / rm are blocked)
+
+### Prohibited Actions
+- Do NOT use switch_mode to exit plan mode
+- Do NOT edit any file except the plan file
+- Do NOT execute git write operations (commit, push, add, merge, rebase, etc.)
+- Do NOT use bash for write operations (mkdir, touch, rm, mv, etc.)
+- Do NOT use todo_create, sessions_list, or other session management tools
+
+### Plan Workflow
+
+#### Phase 1: Initial Understanding
+Goal: Gain a comprehensive understanding of the user's request by reading code and asking questions.
+1. Focus on understanding existing architecture and patterns; identify relevant files and dependencies
+2. Launch explore sub-agents via subagent_spawn; collect each result with subagent_wait in the same turn
+3. Quality over quantity — use the fewest agents possible
+
+#### Phase 2: Design
+Goal: Design the implementation approach.
+1. Launch a plan sub-agent via subagent_spawn, then subagent_wait, based on Phase 1 exploration results
+2. Provide full background context in the agent prompt
+
+#### Phase 3: Review
+Goal: Review the Phase 2 plan to ensure alignment with user intent.
+1. Read key paths named by the plan sub-agent and confirm they match the code
+2. Use ask_user to clarify any unresolved questions with the user
+
+#### Phase 4: Write Final Plan
+Goal: Write the final plan to the plan file.
+- Start with a Context section
+- Include key file paths that need modification
+- Reference reusable existing functions and tools
+- Include a Verification section
+
+#### Phase 5: End Planning Phase
+Call exit_plan_mode to end the planning phase.
+
+### Turn Ending Rules
+Your turn can only end in one of these two ways:
+1. Call ask_user to clarify requirements or ask the user to choose between options
+2. Call exit_plan_mode to end the planning phase and request user approval
+
+Do not end your turn without calling exit_plan_mode when planning is complete.
+ask_user is only for clarifying requirements — do not use it for approval questions.
+"""
+
+
+def _code_enter_plan_instructions(config_base: dict[str, Any] | None = None) -> str:
+    from jiuwenswarm.common.config import is_subagent_runtime_enabled
+
+    if is_subagent_runtime_enabled(config_base or get_config()):
+        return _ENTER_PLAN_MODE_INSTRUCTIONS_RUNTIME_EN
+    return _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+
 # ---------------------------------------------------------------------------
 # Plan mode exit notification appended to exit_plan_mode tool_result.
 # Explicitly tells the model it can now edit files. Without this, the model only sees
@@ -387,12 +452,19 @@ def create_coding_memory_rail(
 
 # ─── Plan mode allowed tools for code mode ──────────────────────────────
 # Excludes switch_mode so the LLM cannot unilaterally exit plan mode.
+# subagent_* entries are harmless when runtime is off (tools are not registered).
 
 _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "enter_plan_mode",
     "exit_plan_mode",
     "ask_user",
     "task_tool",
+    "subagent_spawn",
+    "subagent_wait",
+    "subagent_list",
+    "subagent_send_input",
+    "subagent_close",
+    "subagent_resume",
     "read_file",
     "grep",
     "list_files",
@@ -415,16 +487,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
     - _update_runtime_config(): 保留 ProjectMemoryRail 语言同步
     """
 
+    _subagent_runtime_supported = True
+
     # 固定 Rails 名字集合 — 用于动态 Rails 去重
     _FIXED_RAIL_NAMES = frozenset({
         "RuntimePromptRail", "ResponsePromptRail",
         "JiuSwarmStreamEventRail", "SecurityRail",
-        "LspRail", "ProjectMemoryRail", "PermissionInterruptRail",
+        "PermissionInterruptRail",
         "ContextProcessorRail",
         "SysOperationRail", "CodingMemoryRail",
         "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名
+        "SubagentRail",
     })
 
     def __init__(self) -> None:
@@ -582,6 +657,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             context_engine_config=context_engine_config,
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
             auto_create_workspace=False,
             completion_timeout=resolve_task_loop_completion_timeout(config),
         )
@@ -694,7 +770,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_code_filesystem_rail", self._build_filesystem_rail),
             _RailBuildInfo("_coding_memory_rail", self._build_coding_memory_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
-            _RailBuildInfo("_code_agent_mode_rail", self._build_agent_mode_rail),
+            _RailBuildInfo(
+                "_code_agent_mode_rail",
+                self._build_agent_mode_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_code_ask_user_rail", self._build_structured_ask_user_rail),
             _RailBuildInfo(
                 "_code_confirm_interrupt_rail",
@@ -705,6 +785,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_code_task_planning_rail", self._build_code_task_planning_rail),
             _RailBuildInfo("_code_agent_rail", self._build_code_agent_rail),
             _RailBuildInfo("_code_plan_approval_rail", self._build_plan_approval_rail),
+            _RailBuildInfo(
+                "_subagent_rail",
+                self._build_subagent_rail,
+                {"config_base": config_base},
+            ),
         ]
 
         # 动态 Rails — 从 config.yaml::modes.code.rails 读取
@@ -760,7 +845,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             logger.warning("[JiuwenSwarmCodeAdapter] SysOperationRail create failed: %s", exc)
             return None
 
-    def _build_agent_mode_rail(self) -> AgentModeRail | None:
+    def _build_agent_mode_rail(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> AgentModeRail | None:
         """构建 CodeAgentModeRail。
 
         与 Claude Code 对齐：
@@ -780,7 +868,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return CodeAgentModeRail(
                 allowed_tools=_CODE_PLAN_ALLOWED_TOOLS,
                 plan_mode_attachment_note=_PLAN_MODE_SYSTEM_NOTE,
-                enter_plan_instructions=_ENTER_PLAN_MODE_INSTRUCTIONS_EN,
+                enter_plan_instructions=_code_enter_plan_instructions(config_base),
                 exit_plan_notification=_EXIT_PLAN_MODE_NOTIFICATION,
             )
         except Exception as exc:
@@ -1143,7 +1231,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # ── 自定义 agent 不加入 deep_config.subagents ──
         # Code 模式下，自定义 agent 由 CodeAgentRail 的 Agent 工具管理，
-        # 不走 SubagentRail 的 task_tool 路径。
+        # 不走 SubagentRail 的 subagent_spawn / task_tool 路径。
         # （agent 模式仍由 interface_deep.py 的 _load_custom_subagents 管理）
 
         return subagents or None, False
@@ -1157,7 +1245,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """Code 模式下的 rail 生命周期管理.
 
         code.normal / code.plan 等模式：
-        - 保留 SubagentRail（主 Agent 通过 task_tool 派发 explore/plan 子代理）
+        - 保留 SubagentRail（主 Agent 通过 subagent_spawn 或 task_tool 派发 explore/plan 子代理）
         - 保留 ProjectMemoryRail（code 模式始终挂载）
         - 保留 CodingMemoryRail（code 模式始终挂载）
         - 卸载 TaskPlanningRail、SkillEvolutionRail
@@ -1181,7 +1269,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
         # code 模式保留 SubagentRail；若缺失则补充注册
         if self._subagent_rail is None:
-            self._subagent_rail = self._build_subagent_rail()
+            self._subagent_rail = self._build_subagent_rail(get_config())
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
                 logger.info(
@@ -1283,6 +1371,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
+        from jiuwenswarm.agents.harness.common.rails.browser_task_prompt_rail import (
+            BrowserTaskPromptRail,
+        )
+
+        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
+            self._subagent_rail.set_channel(resolved_channel)
         eternal_conversation_rail = getattr(self, "_eternal_conversation_rail", None)
         if eternal_conversation_rail is not None:
             self._eternal_conversation_enabled = runtime_config.eternal_conversation_enabled
@@ -1640,7 +1734,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         added_subagents = _merge_subagents(agent, subagents)
         added_mcps = self.merge_member_mcp_configs(agent, config_base)
         if getattr(deep_config, "subagents", None):
-            subagent_rail = self._build_subagent_rail()
+            subagent_rail = self._build_subagent_rail(config_base)
             if _queue_rail_if_missing(agent, subagent_rail):
                 added_rails += 1
 

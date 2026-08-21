@@ -33,6 +33,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.tool_result',
   'chat.usage_summary',
   'chat.file',
+  'chat.subtask_update',
   'team.message',
   'team.member',
   'team.task',
@@ -101,6 +102,7 @@ export interface HistoryCompactionReplay {
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
+  subagentId?: string;
   onReady: (messages: Message[], totalPages: number | null) => void;
   /** 与消息同一时间线顺序，用于恢复 ToolGroupDisplay */
   onToolReplay?: (items: HistoryToolReplayItem[]) => void;
@@ -125,12 +127,14 @@ export interface HistoryRestoreHandle {
 let restoreGeneration = 0;
 const activeHistoryRequests = new Map<string, HistoryRestoreHandle>();
 
-function makeHistoryRestoreKey(sessionId: string): string {
-  return `${sessionId}:restore`;
+function makeHistoryRestoreKey(sessionId: string, subagentId?: string): string {
+  return subagentId ? `${sessionId}:subagent:${subagentId}:restore` : `${sessionId}:restore`;
 }
 
-function makeHistoryPageKey(sessionId: string, pageIdx: number): string {
-  return `${sessionId}:page:${pageIdx}`;
+function makeHistoryPageKey(sessionId: string, pageIdx: number, subagentId?: string): string {
+  return subagentId
+    ? `${sessionId}:subagent:${subagentId}:page:${pageIdx}`
+    : `${sessionId}:page:${pageIdx}`;
 }
 
 function replaceActiveHistoryRequest(key: string): void {
@@ -1158,10 +1162,20 @@ function shouldProcessHistoryPayload(
   payload: Record<string, unknown>,
   expectedSessionId: string,
   expectedPageIdx?: number,
-  allowLegacyNoSession = false
+  allowLegacyNoSession = false,
+  expectedSubagentId?: string,
 ): boolean {
   const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
   if (sid && sid !== expectedSessionId) {
+    return false;
+  }
+  const subagentId =
+    typeof payload.subagent_id === 'string' ? payload.subagent_id.trim() : '';
+  if (expectedSubagentId) {
+    if (subagentId && subagentId !== expectedSubagentId) {
+      return false;
+    }
+  } else if (subagentId) {
     return false;
   }
   if (expectedPageIdx !== undefined && payload.page_idx !== expectedPageIdx) {
@@ -1174,7 +1188,7 @@ function shouldProcessHistoryPayload(
 }
 
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
-  const requestKey = makeHistoryRestoreKey(options.sessionId);
+  const requestKey = makeHistoryRestoreKey(options.sessionId, options.subagentId);
   const releaseLiveEvents = webClient.suspendSessionEvents(options.sessionId);
   replaceActiveHistoryRequest(requestKey);
 
@@ -1194,7 +1208,13 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, undefined, activeHistoryRequests.size === 1)) {
+    if (!shouldProcessHistoryPayload(
+      payload,
+      options.sessionId,
+      undefined,
+      activeHistoryRequests.size === 1,
+      options.subagentId,
+    )) {
       return;
     }
 
@@ -1316,6 +1336,7 @@ export interface FetchHistoryPageResult {
 export interface FetchHistoryPageOptions {
   sessionId: string;
   pageIdx: number;
+  subagentId?: string;
   onReady: (result: FetchHistoryPageResult) => void;
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -1326,7 +1347,7 @@ export interface FetchHistoryPageOptions {
  * 调用方需在订阅建立后再发 `history.get`（含对应 `page_idx`）。
  */
 export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryRestoreHandle {
-  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx);
+  const requestKey = makeHistoryPageKey(options.sessionId, options.pageIdx, options.subagentId);
   replaceActiveHistoryRequest(requestKey);
 
   const generation = restoreGeneration + 1;
@@ -1345,7 +1366,13 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
     }
 
     const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.pageIdx, activeHistoryRequests.size === 1)) {
+    if (!shouldProcessHistoryPayload(
+      payload,
+      options.sessionId,
+      options.pageIdx,
+      activeHistoryRequests.size === 1,
+      options.subagentId,
+    )) {
       return;
     }
 
