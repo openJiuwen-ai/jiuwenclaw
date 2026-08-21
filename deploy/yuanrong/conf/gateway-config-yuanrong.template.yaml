@@ -1100,3 +1100,7 @@ sandbox:
   enabled: <<TOOL_SANDBOX_ENABLE>>
   executor: <<TOOL_SANDBOX_EXECUTOR>>
   image: <<TOOL_SANDBOX_IMAGE>>
+  # CPU 限制，单位：毫核（1000 = 1 核）
+  cpu: <<TOOL_SANDBOX_CPU>>
+  # 内存限制，单位：MB
+  memory: <<TOOL_SANDBOX_MEMORY>>
