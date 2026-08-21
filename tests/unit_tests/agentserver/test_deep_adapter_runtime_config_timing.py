@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
@@ -133,3 +136,129 @@ async def test_failing_stage_still_reports_how_far_it_got(loggers) -> None:
     assert "rail_setters=" in breakdown
     # The stage that raised never closed, so it must not appear as completed.
     assert "runtime_state=" not in breakdown
+
+
+class _EmbeddingProvider:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+
+    async def embed_query(self, _text):
+        if self.error:
+            raise self.error
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_memory_embedding_probe_marks_failed_model_as_unavailable() -> None:
+    rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
+    rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
+    provider = _EmbeddingProvider(error=RuntimeError("model not found"))
+    manager = SimpleNamespace(
+        provider=provider,
+        provider_key="stable-index-key",
+    )
+
+    await rail._install_runtime_circuit_breaker(manager)
+
+    assert manager.provider is provider
+    assert manager.provider_key == "stable-index-key"
+    assert rail._embedding_health.available is False
+    assert rail._embedding_health.error == "embedding validation failed: RuntimeError"
+    with pytest.raises(interface_deep._MemoryEmbeddingUnavailable):
+        await provider.embed_query("query")
+
+
+@pytest.mark.asyncio
+async def test_memory_embedding_probe_marks_working_model_as_available() -> None:
+    rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
+    rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
+    provider = _EmbeddingProvider(result=[0.1, 0.2])
+    manager = SimpleNamespace(
+        provider=provider,
+        provider_key="stable-index-key",
+    )
+
+    await rail._install_runtime_circuit_breaker(manager)
+
+    assert manager.provider is provider
+    assert rail._embedding_health.available is True
+    assert rail._embedding_health.error is None
+    assert await provider.embed_query("query") == [0.1, 0.2]
+
+
+@pytest.mark.asyncio
+async def test_memory_runtime_failure_opens_circuit_without_changing_index_identity() -> None:
+    rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
+    rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
+    provider = _EmbeddingProvider(result=[0.1, 0.2])
+    manager = SimpleNamespace(
+        provider=provider,
+        provider_key="stable-index-key",
+    )
+
+    await rail._install_runtime_circuit_breaker(manager)
+    provider.error = RuntimeError("service unavailable")
+
+    with pytest.raises(RuntimeError, match="service unavailable"):
+        await provider.embed_query("query")
+
+    assert manager.provider is provider
+    assert manager.provider_key == "stable-index-key"
+    assert rail._embedding_health.available is False
+    assert rail._embedding_health.error == "embedding request failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_exposes_keyword_fallback_state(monkeypatch) -> None:
+    tool = object.__new__(interface_deep._MemorySearchToolWithHealth)
+    tool._ctx = SimpleNamespace(manager=SimpleNamespace())
+    tool._health = interface_deep._MemoryEmbeddingHealth(
+        available=False,
+        error="embedding validation failed: RuntimeError",
+    )
+    monkeypatch.setattr(
+        interface_deep.memory_tool_ops,
+        "memory_search_with_context",
+        AsyncMock(return_value={"results": [{"path": "MEMORY.md"}], "disabled": False}),
+    )
+
+    output = await tool.invoke({"query": "Orion"})
+
+    assert output.success is True
+    assert output.data["search_mode"] == "keyword_only"
+    assert output.data["embedding_available"] is False
+    assert output.data["embedding_error"] == "embedding validation failed: RuntimeError"
+    assert output.data["provider"] is None
+    assert output.data["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_exposes_semantic_state_from_manager(monkeypatch) -> None:
+    health = interface_deep._MemoryEmbeddingHealth(available=True)
+    manager = SimpleNamespace()
+    setattr(manager, interface_deep._MEMORY_EMBEDDING_HEALTH_ATTR, health)
+    tool = object.__new__(interface_deep._MemorySearchToolWithHealth)
+    tool._ctx = SimpleNamespace(manager=manager)
+    tool._health = interface_deep._MemoryEmbeddingHealth()
+    monkeypatch.setattr(
+        interface_deep.memory_tool_ops,
+        "memory_search_with_context",
+        AsyncMock(
+            return_value={
+                "results": [{"path": "MEMORY.md"}],
+                "provider": "openai_compatible",
+                "model": "BAAI/bge-m3",
+                "disabled": False,
+            }
+        ),
+    )
+
+    output = await tool.invoke({"query": "Orion"})
+
+    assert output.success is True
+    assert output.data["search_mode"] == "semantic"
+    assert output.data["embedding_available"] is True
+    assert output.data["embedding_error"] is None
+    assert output.data["provider"] == "openai_compatible"
+    assert output.data["model"] == "BAAI/bge-m3"

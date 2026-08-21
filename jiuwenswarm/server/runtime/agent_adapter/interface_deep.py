@@ -24,7 +24,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from openjiuwen.harness.schema.config import SubAgentConfig
@@ -37,7 +37,9 @@ from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.common.logging import server_logger
+from openjiuwen.core.memory.lite import memory_tool_ops
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
@@ -175,6 +177,7 @@ from jiuwenswarm.agents.harness.common.auto_harness import (
     AutoHarnessService,
     validate_harness_config,
 )
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     build_permission_rail,
@@ -424,6 +427,184 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+
+
+_MEMORY_EMBEDDING_PROBE_TEXT = "memory availability check"
+_MEMORY_EMBEDDING_TIMEOUT_SECONDS = 10.0
+_MEMORY_EMBEDDING_HEALTH_ATTR = "_jiuwenswarm_embedding_health"
+_MEMORY_EMBEDDING_WRAPPED_ATTR = "_jiuwenswarm_embedding_wrapped"
+
+
+@dataclass
+class _MemoryEmbeddingHealth:
+    available: bool = False
+    error: Optional[str] = None
+
+
+class _MemoryEmbeddingUnavailable(RuntimeError):
+    """Raised locally while the embedding circuit is open."""
+
+
+class _MemorySearchToolWithHealth(Tool):
+    """Expose JiuwenSwarm's embedding health in memory_search responses."""
+
+    def __init__(
+        self,
+        ctx: Any,
+        health: _MemoryEmbeddingHealth,
+        language: str,
+        agent_id: Optional[str],
+    ):
+        from openjiuwen.harness.prompts.tools import build_tool_card
+
+        super().__init__(
+            build_tool_card("memory_search", "MemorySearchTool", language, agent_id=agent_id)
+        )
+        self._ctx = ctx
+        self._health = health
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        query = inputs.get("query")
+        if not query:
+            return ToolOutput(success=False, error="query is required")
+        result = await memory_tool_ops.memory_search_with_context(
+            self._ctx,
+            str(query),
+            max_results=inputs.get("max_results"),
+            min_score=inputs.get("min_score"),
+            session_key=inputs.get("session_key"),
+        )
+        if not result.get("disabled", False):
+            manager = getattr(self._ctx, "manager", None)
+            health = getattr(manager, _MEMORY_EMBEDDING_HEALTH_ATTR, self._health)
+            result.update(
+                search_mode="semantic" if health.available else "keyword_only",
+                embedding_available=health.available,
+                embedding_error=health.error,
+            )
+            if not health.available:
+                result["provider"] = None
+                result["model"] = None
+        disabled = bool(result.get("disabled", False))
+        return ToolOutput(success=not disabled, data=result, error=result.get("error"))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any):
+        pass
+
+
+class _EmbeddingHealthMemoryRail(MemoryRail):
+    """MemoryRail compatibility adapter for agent-core versions without health checks."""
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._embedding_health = _MemoryEmbeddingHealth()
+
+    async def _init_memory_manager(self, ctx: Any) -> None:
+        # Let agent-core initialize with the real configuration so its persisted
+        # provider fingerprint remains authoritative for index rebuilds.
+        await super()._init_memory_manager(ctx)
+        if self._tool_ctx and self._tool_ctx.manager:
+            await self._install_runtime_circuit_breaker(self._tool_ctx.manager)
+
+    async def _install_runtime_circuit_breaker(self, manager: Any) -> None:
+        shared_health = getattr(manager, _MEMORY_EMBEDDING_HEALTH_ATTR, None)
+        if shared_health is not None:
+            self._embedding_health = shared_health
+            return
+
+        shared_health = self._embedding_health
+        setattr(manager, _MEMORY_EMBEDDING_HEALTH_ATTR, shared_health)
+        provider = getattr(manager, "provider", None)
+        if provider is None:
+            shared_health.error = "embedding configuration is missing"
+            return
+
+        if getattr(provider, _MEMORY_EMBEDDING_WRAPPED_ATTR, False):
+            return
+
+        original_embed_query = provider.embed_query
+
+        try:
+            vector = await asyncio.wait_for(
+                original_embed_query(_MEMORY_EMBEDDING_PROBE_TEXT),
+                timeout=_MEMORY_EMBEDDING_TIMEOUT_SECONDS,
+            )
+            if not vector:
+                raise RuntimeError("embedding endpoint returned an empty vector")
+            shared_health.available = True
+            shared_health.error = None
+        except Exception as exc:
+            shared_health.available = False
+            shared_health.error = f"embedding validation failed: {type(exc).__name__}"
+            logger.warning("Embedding health check failed; using keyword memory search: %s", exc)
+
+        async def guarded_embed_query(text: str):
+            if not shared_health.available:
+                raise _MemoryEmbeddingUnavailable(
+                    shared_health.error or "embedding is unavailable"
+                )
+            try:
+                vector = await asyncio.wait_for(
+                    original_embed_query(text), timeout=_MEMORY_EMBEDDING_TIMEOUT_SECONDS
+                )
+                if not vector:
+                    raise RuntimeError("embedding endpoint returned an empty vector")
+                return vector
+            except Exception as exc:
+                shared_health.available = False
+                shared_health.error = (
+                    f"embedding request failed: {type(exc).__name__}"
+                )
+                logger.warning("Embedding request failed; switching memory search to FTS5: %s", exc)
+                raise
+
+        provider.embed_query = guarded_embed_query
+        setattr(provider, _MEMORY_EMBEDDING_WRAPPED_ATTR, True)
+
+    def _register_memory_tools(self, agent: Any) -> None:
+        """Register standard tools, replacing only memory_search with our adapter."""
+        if not hasattr(agent, "ability_manager"):
+            logger.warning("[MemoryRail] Agent has no ability_manager")
+            return
+        try:
+            from openjiuwen.core.memory.lite.config import create_memory_settings
+            from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
+            from openjiuwen.harness.tools.memory import create_memory_tools
+
+            agent_id = getattr(getattr(agent, "card", None), "id", None) or "default"
+            language = getattr(self.system_prompt_builder, "language", "cn")
+            memory_dir = str(self.workspace.get_node_path("memory") or "") if self.workspace else ""
+            settings = create_memory_settings(memory_dir)
+            self._tool_ctx = MemoryToolContext(
+                workspace=self.workspace,
+                settings=settings,
+                agent_id=agent_id,
+                embedding_config=self._embedding_config,
+                sys_operation=self.sys_operation,
+                manager=None,
+                node_name="memory",
+            )
+            memory_tools = create_memory_tools(self._tool_ctx, language=language, agent_id=agent_id)
+            memory_tools = [
+                _MemorySearchToolWithHealth(
+                    self._tool_ctx,
+                    self._embedding_health,
+                    language,
+                    agent_id,
+                )
+                if getattr(getattr(tool, "card", None), "name", "") == "memory_search"
+                else tool
+                for tool in memory_tools
+            ]
+            for tool in memory_tools:
+                tool_card = getattr(tool, "card", None)
+                if tool_card is None:
+                    continue
+                result = agent.ability_manager.add_ability(tool_card, tool)
+                if result.added:
+                    self._owned_tool_cards[tool_card.name] = tool_card
+        except Exception as exc:
+            logger.error("[EmbeddingHealthMemoryRail] Failed to register memory tools: %s", exc)
 
 
 def _diag_auth_headers(cfg: Any) -> str:
@@ -5680,7 +5861,7 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] MemoryRail create failed: No available embedding config"
                 )
             self._is_proactive_memory = is_proactive_memory(mode, config)
-            memory_rail = MemoryRail(
+            memory_rail = _EmbeddingHealthMemoryRail(
                 embedding_config=EmbeddingConfig(
                     model_name=embed_config.get("embed_model"),
                     base_url=embed_config.get("embed_base_url"),
