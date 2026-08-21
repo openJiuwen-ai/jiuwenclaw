@@ -724,6 +724,11 @@ gateway:
   # 分布式下用于实例标识；空则启动时自动生成
   instance_id: ${GATEWAY_INSTANCE_ID:-}
 
+  # 企业版 Gateway 多副本：从共享库轮询 Gateway 自身配置（channel/logging/log_masking）
+  config_poll:
+    enabled: ${GATEWAY_CONFIG_POLL_ENABLED:-false}
+    interval_seconds: ${GATEWAY_CONFIG_POLL_INTERVAL_SECONDS:-10}
+
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
   # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
   agent_client:

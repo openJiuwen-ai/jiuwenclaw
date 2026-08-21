@@ -2639,6 +2639,16 @@ async def _run_with_telemetry(
     )
 
     await channel_manager.start_dispatch()
+
+    config_poll_scheduler = None
+    try:
+        from jiuwenswarm.gateway.config_poll import get_config_poll_scheduler
+
+        config_poll_scheduler = get_config_poll_scheduler()
+        await config_poll_scheduler.start()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[App] gateway config poll scheduler failed to start: %s", exc)
+
     # cron jobs 的 work_mode 补全已改为惰性迁移:scheduler.start() → reload() →
     # list_jobs() 读取时按需推断并写回磁盘(见 CronJobStore.list_jobs),无需启动全量扫描。
     # default/default scheduler already started via get_controller above.
@@ -2704,6 +2714,11 @@ async def _run_with_telemetry(
     except asyncio.CancelledError:
         pass
     finally:
+        if config_poll_scheduler is not None:
+            try:
+                await config_poll_scheduler.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[App] gateway config poll scheduler stop failed: %s", exc)
         if prewarm_sync_debounce_task is not None:
             prewarm_sync_debounce_task.cancel()
             try:
