@@ -474,16 +474,32 @@ class _MemorySearchToolWithHealth(Tool):
         query = inputs.get("query")
         if not query:
             return ToolOutput(success=False, error="query is required")
-        result = await memory_tool_ops.memory_search_with_context(
-            self._ctx,
-            str(query),
-            max_results=inputs.get("max_results"),
-            min_score=inputs.get("min_score"),
-            session_key=inputs.get("session_key"),
-        )
+        query = str(query)
+        result = None
+        search_error = None
+        try:
+            result = await memory_tool_ops.memory_search_with_context(
+                self._ctx,
+                query,
+                max_results=inputs.get("max_results"),
+                min_score=inputs.get("min_score"),
+                session_key=inputs.get("session_key"),
+            )
+        except Exception as exc:
+            search_error = exc
+
+        manager = getattr(self._ctx, "manager", None)
+        health = getattr(manager, _MEMORY_EMBEDDING_HEALTH_ATTR, self._health)
+        if not health.available and (result is None or result.get("disabled", False)):
+            fallback = await self._keyword_fallback(manager, query, inputs)
+            if fallback is not None:
+                result = fallback
+                search_error = None
+
+        if result is None:
+            error = str(search_error or "Memory manager not available")
+            return ToolOutput(success=False, error=error)
         if not result.get("disabled", False):
-            manager = getattr(self._ctx, "manager", None)
-            health = getattr(manager, _MEMORY_EMBEDDING_HEALTH_ATTR, self._health)
             result.update(
                 search_mode="semantic" if health.available else "keyword_only",
                 embedding_available=health.available,
@@ -495,8 +511,51 @@ class _MemorySearchToolWithHealth(Tool):
         disabled = bool(result.get("disabled", False))
         return ToolOutput(success=not disabled, data=result, error=result.get("error"))
 
-    async def stream(self, inputs: Dict[str, Any], **kwargs: Any):
-        pass
+    async def stream(
+        self, inputs: Dict[str, Any], **kwargs: Any
+    ) -> AsyncIterator[ToolOutput]:
+        yield await self.invoke(inputs, **kwargs)
+
+    @staticmethod
+    async def _keyword_fallback(
+        manager: Any,
+        query: str,
+        inputs: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        keyword_search = getattr(manager, "_search_keyword", None)
+        if not callable(keyword_search):
+            return None
+        try:
+            query_settings = getattr(getattr(manager, "settings", None), "query", {}) or {}
+            max_results = inputs.get("max_results")
+            if max_results is None:
+                max_results = query_settings.get("max_results", 10)
+            max_results = max(1, int(max_results))
+            hybrid = query_settings.get("hybrid") or {}
+            candidates = min(
+                200,
+                max(1, int(max_results * (hybrid.get("candidateMultiplier") or 2.0))),
+            )
+            results = await keyword_search(query, candidates)
+            min_score = query_settings.get("keywordMinScore", 0.1)
+            results = [item for item in results if item.get("score", 0.0) >= min_score][
+                :max_results
+            ]
+            for item in results:
+                start_line = item.get("start_line")
+                end_line = item.get("end_line")
+                path = item.get("path")
+                if path is not None and start_line is not None and end_line is not None:
+                    line_suffix = (
+                        f"L{start_line}"
+                        if start_line == end_line
+                        else f"L{start_line}-L{end_line}"
+                    )
+                    item["citation"] = f"{path}#{line_suffix}"
+            return {"results": results, "disabled": False}
+        except Exception as exc:
+            logger.warning("Keyword memory fallback failed: %s", exc)
+            return None
 
 
 class _EmbeddingHealthMemoryRail(MemoryRail):
@@ -588,7 +647,11 @@ class _EmbeddingHealthMemoryRail(MemoryRail):
         setattr(provider, _MEMORY_EMBEDDING_WRAPPED_ATTR, True)
 
     def _register_memory_tools(self, agent: Any) -> None:
-        """Register standard tools, replacing only memory_search with our adapter."""
+        """Register standard tools, replacing memory_search before registration.
+
+        Calling ``super()`` first would register the native search tool and then
+        overwrite it, leaving ownership ambiguous during rail teardown.
+        """
         if not hasattr(agent, "ability_manager"):
             logger.warning("[MemoryRail] Agent has no ability_manager")
             return
@@ -623,12 +686,19 @@ class _EmbeddingHealthMemoryRail(MemoryRail):
                 for tool in memory_tools
             ]
             for tool in memory_tools:
-                tool_card = getattr(tool, "card", None)
-                if tool_card is None:
-                    continue
-                result = agent.ability_manager.add_ability(tool_card, tool)
-                if result.added:
-                    self._owned_tool_cards[tool_card.name] = tool_card
+                try:
+                    tool_card = getattr(tool, "card", None)
+                    if tool_card is None:
+                        continue
+                    result = agent.ability_manager.add_ability(tool_card, tool)
+                    added = result if isinstance(result, bool) else getattr(result, "added", True)
+                    if bool(added):
+                        self._owned_tool_cards[tool_card.name] = tool_card
+                except Exception as exc:
+                    logger.warning(
+                        "[EmbeddingHealthMemoryRail] Failed to register tool: %s",
+                        exc,
+                    )
         except Exception as exc:
             logger.error("[EmbeddingHealthMemoryRail] Failed to register memory tools: %s", exc)
 
