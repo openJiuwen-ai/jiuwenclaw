@@ -14,7 +14,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -24,7 +24,7 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveEffectiveModel,
+  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -550,9 +550,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const inputValue = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.inputValue ?? '');
   const evolutionStatus = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.evolutionStatus ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
-  const persistSessionDraft = useSessionStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.persistSession ?? false,
-  );
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []) as InputAreaTeamMember[];
   const currentSession = useSessionStore((s) => s.currentSession);
   const activeSession = useSessionStore((s) => {
@@ -584,13 +581,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
-  const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
-    ? persistSessionDraft
-    : activeSession?.persist_session === true;
-  const canUsePersistSessionMenu = isAgentMode;
-  const persistSessionLocked = Boolean(
-    activeSessionId && activeSessionId !== NEW_CONVERSATION_ID,
-  );
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -2371,40 +2361,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     </button>
                   );
                 })()}
-                {canUsePersistSessionMenu && (
-                  <button
-                    type="button"
-                    className={clsx(
-                      'chat-mode-select__option',
-                      persistSessionEnabled && 'chat-mode-select__option--active',
-                    )}
-                    role="menuitemcheckbox"
-                    aria-checked={persistSessionEnabled}
-                    disabled={persistSessionLocked}
-                    title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-                    onClick={() => {
-                      if (persistSessionLocked || !activeSessionId) return;
-                      useSessionStore
-                        .getState()
-                        .setPersistSession(activeSessionId, !persistSessionEnabled);
-                      setAttachMenuOpen(false);
-                    }}
-                  >
-                    <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
-                        <InfinityIcon className="w-4 h-4" />
-                      </span>
-                      <span className="chat-mode-select__label">
-                        {t('persistSession.toolbarTag')}
-                      </span>
-                    </span>
-                    {persistSessionEnabled && (
-                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                      </svg>
-                    )}
-                  </button>
-                )}
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
                   // 避免在当前这轮还没结束时又叠加切一次模式。
@@ -2611,40 +2567,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </div>
           )}
 
-          {persistSessionEnabled && (
-            <div
-              className={clsx(
-                'chat-goal-tag',
-                persistSessionLocked && 'chat-goal-tag--locked',
-              )}
-              title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-            >
-              <button type="button" className="chat-mode-select__trigger" tabIndex={-1}>
-                <span className="chat-mode-select__value">
-                  <span className="chat-mode-select__icon" aria-hidden="true">
-                    <InfinityIcon className="w-4 h-4" />
-                  </span>
-                  <span className="chat-mode-select__label">
-                    {t('persistSession.toolbarTag')}
-                  </span>
-                </span>
-              </button>
-              {!persistSessionLocked && (
-                <button
-                  type="button"
-                  className="chat-goal-tag__close"
-                  title={t('persistSession.closeTag')}
-                  onClick={() => {
-                    if (!activeSessionId) return;
-                    useSessionStore.getState().setPersistSession(activeSessionId, false);
-                  }}
-                >
-                  <X size={11} strokeWidth={2.5} />
-                </button>
-              )}
-            </div>
-          )}
-
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" data-testid="chat-panel-input-evolution-pill" title={evolutionLabel}>
               <span className="chat-input-evolution-pill__dot" />
@@ -2677,10 +2599,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               )}
             </button>
           )} */}
-
+          
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
           />
 
           <button
@@ -2983,10 +2904,8 @@ function ComposerSuggestionMenu({
 
 function ModelSelector({
   disabled = false,
-  lockedToDefault = false,
 }: {
   disabled?: boolean;
-  lockedToDefault?: boolean;
 }) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -3015,14 +2934,12 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
-  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
-  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
-  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
-  // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
-  // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
+  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
+  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
+  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
+  // 兜底结果（bug003）。
   const selectedModel =
-    resolveEffectiveModel(chatAvailableModels, selectedModelName, defaultModelName) ??
+    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -3044,7 +2961,7 @@ function ModelSelector({
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
+        title={t('chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {

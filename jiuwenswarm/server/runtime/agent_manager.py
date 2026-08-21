@@ -16,6 +16,11 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -1040,7 +1045,13 @@ class AgentManager:
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
-                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                # 默认回落优先取"普通 agent"实例：旧串 "agent" 与新 canonical
+                # agent.work.* 都要命中。deprecate 归一把新旧形式统一成
+                # agent.work.normal / agent.work.plan 再判定。
+                if deprecate_mode(getattr(agent, "_jiuwenswarm_agent_mode", "")) in (
+                    NEW_AGENT_WORK_NORMAL,
+                    NEW_AGENT_WORK_PLAN,
+                ):
                     return self._borrow_agent(agent)
             agent = next(iter(channel_agents.values()), None)
             return self._borrow_agent(agent) if agent is not None else None

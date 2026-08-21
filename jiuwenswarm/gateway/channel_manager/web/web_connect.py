@@ -1462,7 +1462,7 @@ class WebChannel(BaseWsChannel):
 
     @staticmethod
     def _parse_mode(raw_mode: Any) -> Mode:
-        return Mode.from_raw(raw_mode, default=Mode.AGENT)
+        return Mode.from_raw(raw_mode, default=Mode.AGENT_WORK_NORMAL)
 
     @staticmethod
     def _make_session_id() -> str:

@@ -43,7 +43,20 @@ export interface Session {
   last_user_message_at?: number; // 最后一条用户消息时间(Unix时间戳)
 }
 
-export type AgentMode = 'agent' | 'team' | 'auto_harness';
+export type AgentMode =
+  // 旧 UI 基础模式（localStorage 兼容期保留）
+  | 'agent'
+  | 'team'
+  | 'auto_harness'
+  // 新三段命名 canonical（与 TUI ClientMode 对齐，前端 normalizeAgentMode 仍归一到基础三态）
+  | 'agent.work.normal'
+  | 'agent.work.plan'
+  | 'agent.code.normal'
+  | 'agent.code.plan'
+  | 'team.work.normal'
+  | 'team.work.plan'
+  | 'team.code.normal'
+  | 'team.code.plan';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 export type Permission = 'default' | 'full_access';
 

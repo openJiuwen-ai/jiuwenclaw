@@ -136,6 +136,12 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
   const { t } = useTranslation();
   const [form, setForm] = useState<CronTaskFormValue>(initial ?? emptyForm());
 
+  const handleModeChange = (nextMode: AgentMode) => {
+    setForm((current) => ({ ...current, mode: nextMode }));
+  };
+
+  const submittedForm = form;
+
   const title = mode === 'edit' ? t('cron.drawer.titleEdit') : mode === 'template' ? t('cron.drawer.titleTemplate') : t('cron.drawer.titleCreate');
   // 显式加一条 value 为空串的"-"选项，代表"未选项目"，放在真实项目列表最后面（列表顺序：
   // 真实项目在前，"-"清空项在最后）。SimpleSelect 按 value 严格匹配，真实项目的 project_dir
@@ -279,10 +285,14 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
               <div className="cron-drawer-mode-model-row flex items-center gap-1.5 border-t border-border/60 px-1 py-1" data-testid="cron-drawer-mode-model-row">
                 <ModeSelector
                   value={form.mode}
-                  onChange={(m) => setForm({ ...form, mode: m })}
+                  onChange={handleModeChange}
                   disabled={proactiveLocked}
                 />
-                <ModelPicker value={form.modelName} onChange={(modelName) => setForm({ ...form, modelName })} disabled={proactiveLocked} />
+                <ModelPicker
+                  value={form.modelName}
+                  onChange={(modelName) => setForm({ ...form, modelName })}
+                  disabled={proactiveLocked}
+                />
               </div>
             </div>
             {form.description.length >= CRON_DESCRIPTION_MAX_LENGTH && (
@@ -359,7 +369,7 @@ export default function CronTaskDrawer({ mode, initial, projects, targetOptions,
                 提示渠道，span 上的 title 只是锦上添花的 hover 备份。 */}
             <span title={missingFieldsHint}>
               <button
-                onClick={() => onSubmit(form)}
+                onClick={() => onSubmit(submittedForm)}
                 disabled={!canSubmit}
                 data-testid="cron-drawer-submit-btn"
                 className="rounded-full bg-cron-action px-10 py-1.5 text-sm font-bold text-cron-action-foreground hover:bg-cron-action-hover disabled:opacity-50"

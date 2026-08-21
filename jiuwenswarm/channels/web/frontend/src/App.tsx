@@ -35,6 +35,7 @@ import {
   type FetchHistoryPageResult,
 } from './features/historyRestore';
 import { prefetchHistoryPages } from './features/historyPagination';
+import { isPlanWireMode } from './features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from './features/goalPendingObjectiveBubble';
 import {
   normalizeToolCallPayload,
@@ -65,6 +66,7 @@ import {
   forgetCreatedConversation,
   isConversationMissing,
   registerCreatedConversation,
+  resolveNewConversationEntrySettings,
   resetNewConversationRuntime,
 } from './multi-session/state/newConversationLifecycle';
 import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
@@ -74,7 +76,10 @@ import {
   resolveFrontendPlatform,
   type SidebarNavKey,
 } from './utils/frontendPlatform';
-import { createConversationSession } from './multi-session/state/createConversationSession';
+import {
+  createConversationSession,
+  parsePersistSessionCommand,
+} from './multi-session/state/createConversationSession';
 import {
   resolvePendingPreviousSession,
   type PendingPreviousSession,
@@ -95,15 +100,9 @@ import {
   type ModelSetupGuideStep,
 } from './features/modelSetupGuide/ModelSetupGuide';
 import { isSetupGuideEnabled } from './features/modelSetupGuide/modelSetupGuideState';
+import { isTeamAgentMode } from './features/planMode/wireMode';
 import './App.css';
 
-const TEAM_SESSION_MODES = new Set([
-  'team',
-  'team.plan',
-  'team.plan.normal',
-  'team.plan.code',
-  'code.team',
-]);
 const CHAT_PANEL_DEFAULT_WIDTH_PCT = 33.33;
 const CHAT_PANEL_MIN_WIDTH_PCT = 20;
 const CHAT_PANEL_MAX_WIDTH_PCT = 70;
@@ -124,10 +123,6 @@ const EXTERNAL_CLI_AGENT_CONFIG_KEYS = new Set([
   "external_cli_agent_codex_use_builtin",
   "external_cli_agent_codex_cli_path",
 ]);
-
-function isTeamMode(mode: string): boolean {
-  return TEAM_SESSION_MODES.has(mode);
-}
 
 function shouldPreviewModelSetupGuide(): boolean {
   return PREVIEW_MODEL_SETUP_GUIDE;
@@ -389,12 +384,11 @@ function AppContent() {
       setConfigInitialExpandGroup(null);
     }
     if (activeNav === 'chat') {
-      const { availableModels, setSelectedModelName } = useSessionStore.getState();
-      const defaultModel = availableModels[0];
+      const { defaultModelName, setSelectedModelName } = useSessionStore.getState();
       const runtime = useSessionStore.getState().getRuntime(sessionId);
-      if (defaultModel && !runtime?.selectedModelName) {
+      if (defaultModelName && !runtime?.selectedModelName) {
         useSessionStore.getState().ensureRuntime(sessionId);
-        setSelectedModelName(sessionId, defaultModel.alias || defaultModel.model_name);
+        setSelectedModelName(sessionId, defaultModelName);
       }
     }
   }, [activeNav, sessionId]);
@@ -436,6 +430,8 @@ function AppContent() {
   const historyPageCancelRef = useRef(new Map<string, () => void>());
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
+  /** 离开新建任务页后，仍未发送的临时会话可以被再次打开。 */
+  const pendingNewConversationRef = useRef(route.kind === 'chat-new');
   const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
@@ -515,6 +511,7 @@ function AppContent() {
       setActiveNav('chat');
     } else if (route.kind === 'chat-new') {
       if (window.location.pathname !== '/chat/new') navigate({ kind: 'chat-new' }, { replace: true });
+      pendingNewConversationRef.current = true;
       if (preserveSelectedProjectOnChatNewRef.current) {
         preserveSelectedProjectOnChatNewRef.current = false;
       } else {
@@ -1816,6 +1813,11 @@ function AppContent() {
   ) => {
     const currentSessionId = sessionIdRef.current;
     const currentRuntime = useSessionStore.getState().getRuntime(currentSessionId);
+    const pendingNewRuntime = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID);
+    const shouldRestorePendingNewConversation =
+      currentSessionId !== NEW_CONVERSATION_ID
+      && pendingNewConversationRef.current
+      && Boolean(pendingNewRuntime);
     newConversationPreviousSessionRef.current = resolvePendingPreviousSession({
       currentSessionId,
       currentMode: currentRuntime?.mode ?? mode,
@@ -1823,9 +1825,15 @@ function AppContent() {
       newConversationId: NEW_CONVERSATION_ID,
       clear: lifecycle.clearPreviousSession,
     });
-    // 新建会话固定使用配置的默认模型，不继承当前会话手动切换过的模型；
+    // 返回尚未发送的新建任务时，恢复该临时会话自己的模式和模型；真正开始一个新任务时，
+    // 仍固定使用配置的默认模型，不继承当前正式会话手动切换过的模型。
     // 默认模型列表尚未加载完成时兜底沿用当前会话的模型，避免新会话没有模型可用。
-    const selectedModelName = useSessionStore.getState().defaultModelName ?? currentRuntime?.selectedModelName ?? null;
+    const { mode: nextMode, selectedModelName } = resolveNewConversationEntrySettings(
+      targetMode,
+      useSessionStore.getState().defaultModelName,
+      currentRuntime?.selectedModelName ?? null,
+      shouldRestorePendingNewConversation ? pendingNewRuntime : null,
+    );
     const selectedProject = options.project ?? useWorkspaceStore.getState().selectedProject;
     const projectDir = resolveNewConversationProjectDir(
       options.preserveProject,
@@ -1836,7 +1844,7 @@ function AppContent() {
       currentSessionId !== NEW_CONVERSATION_ID ? currentSessionId : undefined,
     );
     setHistoryLoadingMore(false);
-    resetNewConversationRuntime({ mode: targetMode, selectedModelName, projectDir });
+    resetNewConversationRuntime({ mode: nextMode, selectedModelName, projectDir });
     if (options.initialInputValue) {
       useChatStore.getState().setInputValue(NEW_CONVERSATION_ID, options.initialInputValue);
     }
@@ -1935,6 +1943,12 @@ function AppContent() {
     const currentSessionId = sessionIdRef.current;
     if (!currentSessionId) return;
     if (currentSessionId === NEW_CONVERSATION_ID) {
+      const persistCommand = parsePersistSessionCommand(content);
+      if (persistCommand.persistSession && !persistCommand.content) {
+        window.alert(t('persistSession.textRequired'));
+        return;
+      }
+      const messageContent = persistCommand.content;
       if (creatingSessionRef.current) return;
       creatingSessionRef.current = true;
       useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, true);
@@ -1943,7 +1957,7 @@ function AppContent() {
         mode: newRuntime?.mode ?? mode,
         selectedModelName: useSessionStore.getState().getEffectiveModelName(NEW_CONVERSATION_ID),
         projectDir: newRuntime?.projectDirectory ?? null,
-        persistSession: newRuntime?.persistSession ?? false,
+        persistSession: persistCommand.persistSession,
       };
       const baseWorkContext = getWorkContextForSession(NEW_CONVERSATION_ID);
       const preservedProject = newConversationProjectRef.current;
@@ -1957,7 +1971,7 @@ function AppContent() {
           create_token: generateUuidV4(),
           mode: runtimeSettings.mode,
           is_swarm: runtimeSettings.mode === 'team',
-          title: createConversationTitle(content).slice(0, 100),
+          title: createConversationTitle(messageContent).slice(0, 100),
           work_mode: workContext.work_mode,
           view_id: kvcViewIdRef.current,
           persist_session: runtimeSettings.persistSession,
@@ -1982,7 +1996,7 @@ function AppContent() {
           created.session_id,
           { ...runtimeSettings, persistSession: created.persist_session },
           Date.now(),
-          content,
+          messageContent,
           {
             project_id: created.project_id || workContext.project_id,
             project_dir: created.project_dir || workContext.project_dir,
@@ -1995,11 +2009,14 @@ function AppContent() {
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
         // 迁移 'new' 会话的 metadata 到新会话（skill-creator 统一入口等场景）
+        // 必须在 removeRuntime 之前完成，否则 NEW 会话 runtime 会被清掉
         const pendingMetadata = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.metadata;
         if (pendingMetadata) {
           useSessionStore.getState().setSessionMetadata(newSid, pendingMetadata);
           useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, null);
         }
+        pendingNewConversationRef.current = false;
+        useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实
         // 会话，否则 sendMessage 取到的是新会话的默认值 false，这条消息就不会带
         // `.plan`，整个 Plan 流程（只读约束、计划审批弹窗）全都不会触发。
@@ -2024,12 +2041,12 @@ function AppContent() {
         if (goalArmedOnNew) {
           // 欢迎页 "+" 选了「目标」：这条内容不走普通 chat.send，
           // 本地落一条 user 消息（供徽章匹配）后改调 command.goal（见 InputArea.tsx 的同款分流逻辑）
-          queueOrAddGoalObjectiveMessage(newSid, content);
-          setGoalObjective(newSid, content);
+          queueOrAddGoalObjectiveMessage(newSid, messageContent);
+          setGoalObjective(newSid, messageContent);
         } else {
-          const sent = await sendMessage(content, newSid, mediaItems);
+          const sent = await sendMessage(messageContent, newSid, mediaItems);
           if (!sent) {
-            useChatStore.getState().setInputValue(newSid, content);
+            useChatStore.getState().setInputValue(newSid, messageContent);
           }
         }
         newConversationProjectRef.current = null;
@@ -2224,7 +2241,7 @@ function AppContent() {
             view_id: kvcViewIdRef.current,
           });
         } catch (error) {
-          if (isTeamMode(resolvedMode)) {
+          if (isTeamAgentMode(resolvedMode)) {
             console.error('Failed to switch team session:', error);
             window.alert(t('sessions.errors.switchSession'));
             return;
@@ -2254,9 +2271,9 @@ function AppContent() {
       setSessionId(targetSessionId);
       if (targetSession) {
         upsertSessionMetadata(targetSession, { setCurrent: true });
-        // 还原后端记录的会话模型：打开会话时若后端 metadata 带 model，写进
-        // runtime.selectedModelName，避免 selectedModelName 为空被全局默认兜底，
-        // 导致界面显示成默认模型（如定时任务选了非默认模型的会话，bug002）。
+        // 会话打开时若后端 metadata 带 model（首条 chat.send 显式携带 model_name 时
+        // 由后端落盘），写进 runtime.selectedModelName——单 Agent 与集群（team）会话
+        // 同样恢复，保证刷新页面后模型选择不回退到默认模型。
         if (targetSession.model) {
           useSessionStore.getState().setSelectedModelName(targetSessionId, targetSession.model);
         }
@@ -2265,6 +2282,16 @@ function AppContent() {
       }
       if (resolvedMode) {
         setMode(targetSessionId, resolvedMode as AgentMode);
+        // 恢复会话时同步 Plan 开关：后端回传的 mode 可能是三段命名
+        // `agent.{work|code}.plan` / `team.{work|code}.plan`，而 setMode 会把
+        // 它归一成基础模式（normalizeAgentMode 折叠成 `agent` / `team`）。若不
+        // 补一次 setActive，planStore 仍是空 runtime（active:false），后续
+        // sendMessage 走 resolveOutgoingMode 时 isActive 为 false，出站 mode
+        // 退回基础模式，Plan 流程静默丢失。按 isPlanWireMode 判定，非 plan
+        // 会话不受影响。
+        if (isPlanWireMode(resolvedMode)) {
+          usePlanStore.getState().setActive(targetSessionId, true);
+        }
       }
       setActiveNav('chat');
       navigate({ kind: 'chat-session', sessionId: targetSessionId });

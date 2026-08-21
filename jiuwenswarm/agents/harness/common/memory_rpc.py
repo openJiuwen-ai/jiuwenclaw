@@ -28,6 +28,7 @@ from jiuwenswarm.agents.harness.common.rails.project_memory import (
 )
 from jiuwenswarm.common.coding_memory_paths import resolve_project_coding_memory_dir
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.mode_matrix import is_code_profile_mode
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,9 @@ def _scan_md_files(directory: str, kind: str, workspace: str, project_dir: str |
 
 
 def _is_code_mode(mode: str) -> bool:
-    return mode.startswith("code")
+    # code profile 族：旧 "code"/"code.*" 前缀 + 新 canonical agent.code.* /
+    # team.code.*（复用 mode_matrix 谓词，与 memory.config 的归一逻辑一致）。
+    return is_code_profile_mode(mode) or (mode or "").startswith("code")
 
 
 def _is_agent_mode(mode: str) -> bool:

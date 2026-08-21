@@ -185,7 +185,15 @@ class RuntimePromptRail(DeepAgentRail):
         configured_mode: str,
     ) -> str:
         """用 DeepAgent session state 覆盖 code 模式的请求初始快照。"""
-        if configured_mode not in {"code", "code.normal", "code.plan"}:
+        # 只对单 agent 的 code profile 走 live 覆盖（返回的 legacy 串
+        # "code.plan"/"code.normal" 只携带单 agent code 语义）。保留旧
+        # {"code", "code.normal", "code.plan"} 语义，并补上新三段命名单 agent
+        # code canonical agent.code.*；code.team / team.code.* / team.plan.code
+        # 仍按原样返回，避免把 team 系覆盖成单 agent 串。
+        if configured_mode not in {
+            "code", "code.normal", "code.plan",
+            "agent.code.normal", "agent.code.plan",
+        }:
             return configured_mode
 
         agent = self._agent or ctx.agent

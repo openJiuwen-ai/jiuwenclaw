@@ -7,6 +7,28 @@
 
 from typing import TypedDict, NotRequired
 
+# ── ``plan_entry_source`` 字面量契约常量 ──
+# 这些字面量是前后端共享的硬契约：
+# - 后端 ``AgentWebSocketServer._is_explicit_plan_entry_request`` 只认这些字面量
+#   （通过 ``_PLAN_ENTRY_SOURCES`` 间接引用本常量）；
+# - TUI ``app-state.ts`` ``pendingPlanEntrySource`` 与 Web 前端
+#   ``useWebSocket.ts`` ``resolvePlanEntryPayload`` 序列化成 ``plan_entry_source``
+#   字段，必须使用同名字面量。
+# 改动这些取值前先跑 ``tests/unit_tests/test_plan_entry_source_contract.py``。
+PLAN_ENTRY_SOURCE_SLASH_COMMAND = "slash_command"
+"""TUI 的 ``/plan`` 命令产出的 entry source。"""
+
+PLAN_ENTRY_SOURCE_PLAN_TOGGLE = "plan_toggle"
+"""Web 用户手动打开 Plan 开关的那一条消息产出的 entry source。"""
+
+PLAN_ENTRY_SOURCES: frozenset[str] = frozenset(
+    {
+        PLAN_ENTRY_SOURCE_SLASH_COMMAND,
+        PLAN_ENTRY_SOURCE_PLAN_TOGGLE,
+    }
+)
+"""``plan_entry_source`` 字段的合法取值集合（防重入闸门只认这几种）。"""
+
 
 class ChatSendParams(TypedDict, total=False):
     """chat.send 参数契约（TypedDict，供类型标注与文档）。
@@ -84,7 +106,16 @@ class ChatSendParams(TypedDict, total=False):
     """
 
     plan_entry_source: NotRequired[str]
-    """plan 模式入口来源（internal use）。"""
+    """plan 模式入口来源（internal use）。
+
+    合法取值见模块级常量 :data:`PLAN_ENTRY_SOURCES`：
+    ``PLAN_ENTRY_SOURCE_SLASH_COMMAND``（TUI ``/plan``）或
+    ``PLAN_ENTRY_SOURCE_PLAN_TOGGLE``（Web 手动打开开关）。
+    前端（TUI ``app-state.ts`` / Web ``useWebSocket.ts``）与后端
+    ``AgentWebSocketServer._is_explicit_plan_entry_request`` 必须引用同名字面量，
+    否则防重入闸门失效。详见
+    ``tests/unit_tests/test_plan_entry_source_contract.py``。
+    """
 
     answers: NotRequired[list]
     """用户交互问答（interrupt resume 场景）。"""

@@ -40,6 +40,24 @@ export interface CreateConversationSessionOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+export interface PersistSessionCommand {
+  content: string;
+  persistSession: boolean;
+}
+
+/**
+ * Persist Session is a creation-time choice.  Keep the command parsing in the
+ * client so the control prefix never becomes part of the user message or the
+ * generated session title.
+ */
+export function parsePersistSessionCommand(input: string): PersistSessionCommand {
+  const match = input.match(/^\/persist(?=$|\s)/i);
+  if (!match) return { content: input, persistSession: false };
+
+  const remainder = input.slice(match[0].length).trim();
+  return { content: remainder, persistSession: true };
+}
+
 function normalizeWorkMode(value: unknown): WorkMode | undefined {
   return value === 'work' || value === 'code' ? value : undefined;
 }

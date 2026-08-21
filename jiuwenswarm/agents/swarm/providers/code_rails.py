@@ -35,8 +35,8 @@ from openjiuwen.harness.prompts import resolve_language
 
 from jiuwenswarm.agents.swarm.context import SwarmBuildContext
 from jiuwenswarm.common.mode_matrix import (
-    TEAM_PLAN_NORMAL_MODE,
     is_code_profile_mode,
+    is_team_mode,
     is_team_plan_mode,
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
@@ -100,7 +100,7 @@ def code_runtime_language(ctx: SwarmBuildContext) -> str:
 
 def structured_ask_user_language(ctx: SwarmBuildContext) -> str:
     """Resolve the StructuredAskUserRail language for team/code profiles."""
-    if ctx.role == "leader" and (ctx.mode == "team" or is_team_plan_mode(ctx.mode)):
+    if ctx.role == "leader" and (is_team_mode(ctx.mode) or is_team_plan_mode(ctx.mode)):
         return resolve_language((ctx.config or {}).get("preferred_language", "zh"))
     return code_runtime_language(ctx)
 
@@ -351,7 +351,11 @@ def build_code_coding_memory(params: dict[str, Any], ctx: SwarmBuildContext) -> 
 def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     """Build one profile-aware plan rail for code or normal Team Plan contexts."""
     try:
-        if ctx.mode == TEAM_PLAN_NORMAL_MODE and ctx.role == "leader":
+        if (
+            is_team_plan_mode(ctx.mode)
+            and not is_code_profile_mode(ctx.mode)
+            and ctx.role == "leader"
+        ):
             from jiuwenswarm.agents.harness.work.rails.work_agent_mode_rail import (
                 WorkAgentModeRail,
             )

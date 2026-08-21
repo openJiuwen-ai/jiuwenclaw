@@ -14,7 +14,7 @@ from typing import Any
 from datetime import datetime, timezone
 
 from jiuwenswarm.common.utils import get_agent_sessions_dir
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.common.mode_matrix import deprecate_mode, is_new_canonical_mode, is_team_mode
 from jiuwenswarm.server.runtime.session.work_mode import (
     DEFAULT_WEB_WORK_MODE,
     SUPPORTED_WORK_MODES,
@@ -231,6 +231,27 @@ def _apply_metadata_defaults_with_inference(
         if resolved_wm is not None:
             metadata["work_mode"] = resolved_wm
             changed = True
+
+    # mode 惰性迁移:旧 canonical（agent / agent.plan / code.team / team.plan.* 等）
+    # 静默映射到新三段命名 canonical（agent.work.normal 等）。仅迁移非空且非新
+    # canonical 的 mode 字段；映射后写盘以避免后续读路径重复迁移。
+    existing_mode = metadata.get("mode")
+    if existing_mode and not is_new_canonical_mode(existing_mode):
+        new_mode = deprecate_mode(existing_mode)
+        if new_mode != existing_mode:
+            logger.info(
+                "session_metadata 惰性迁移: session=%s mode '%s' -> '%s'",
+                session_id, existing_mode, new_mode,
+            )
+            metadata["mode"] = new_mode
+            changed = True
+        elif new_mode == existing_mode:
+            # 旧 canonical 但不在 DEPRECATION_MAP（如未识别值），避免静默丢字段
+            logger.warning(
+                "session_metadata mode 迁移未命中: session=%s mode='%s' "
+                "非新 canonical 但未在 DEPRECATION_MAP，原样保留",
+                session_id, existing_mode,
+            )
 
     # project_id: 缺失时尝试按 work_mode 反查唯一真实 Project
     if not str(metadata.get("project_id") or "").strip():
@@ -1016,9 +1037,18 @@ def sync_session_request_metadata(
         if last_user_message_at is not None:
             metadata["last_user_message_at"] = last_user_message_at
         # mode：显式覆盖式——仅当请求方显式携带 mode 才覆盖；
-        # 未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已锁定的会话 mode
+        # 未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已锁定的会话 mode。
+        # 同时经 deprecate_mode 归一为新三段命名 canonical，旧串静默映射。
         if mode is not None and explicit_mode_provided:
-            metadata["mode"] = mode
+            new_mode = deprecate_mode(mode)
+            old_mode = metadata.get("mode")
+            if new_mode != old_mode:
+                logger.info(
+                    "session_metadata 显式更新 mode: session=%s '%s' -> '%s' "
+                    "(raw=%r)",
+                    session_id, old_mode, new_mode, mode,
+                )
+            metadata["mode"] = new_mode
         # channel_id：首次锁定——仅当磁盘值为空时写入，后续不覆盖
         # （与 project_dir/project_id/cron_id/user_id/work_mode 一致语义）
         if channel_id and not (
