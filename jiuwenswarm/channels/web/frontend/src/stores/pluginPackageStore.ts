@@ -97,13 +97,23 @@ interface PluginPackageState {
   error: string | null;
   /** v2 §3.6：卸载成功但包声明了 connector 依赖时，后端带的引导文案（原文透传，不是 i18n key）。 */
   noticeMessage: string | null;
+  /** install 真正落盘成功（非半途 pending_connectors）时的提示 i18n key——照抄 connectorStore.ts
+   * 的 successMessage/successKey 机制，2026-08-21 用户要求卡片网格+详情页两个入口都要有安装
+   * 成功提示，统一在 install() 里 set 一次即可覆盖，不用调用方各自维护。 */
+  successMessage: string | null;
   busyId: string | null;
 
   loadList: (filter?: 'builtin' | 'local', options?: { silent?: boolean }) => Promise<void>;
   // 返回是否成功——PluginDetailPage.tsx 卸载后要重新 show() 探测这个插件还在不在（新方案
   // "我的插件"卸载后的收尾逻辑：还能读到就留在详情页，读不到才退出到列表页），需要知道结果。
   loadDetail: (id: string) => Promise<boolean>;
-  create: (params: { id: string; name: string; description: string; skills: string[] }) => Promise<boolean>;
+  /** 跟 loadDetail 几乎一样，唯一区别是失败时不 set 全局 error——2026-08-21 用户反馈根因确认：
+   * 卸载插件（uninstall_plugin_package）后端会把整个包目录删掉（不是只翻 installed 标记），
+   * 卸载后探测"这个包还在不在"时 show() 404 是预期中的正常结果（走 onDeleted 退出到列表页），
+   * 不该弹一条吓人的红色错误提示——真正的卸载结果反馈已经由 uninstall()/deletePackage() 自己的
+   * successMessage/error 负责，这个探测只是导航判断用。 */
+  probeExists: (id: string) => Promise<boolean>;
+  create: (params: { id: string; name: string; description: string; skills: string[]; mcps: string[] }) => Promise<boolean>;
   importLocal: (params: { path: string }) => Promise<boolean>;
   install: (id: string) => Promise<void>;
   uninstall: (id: string) => Promise<void>;
@@ -112,6 +122,7 @@ interface PluginPackageState {
   clearInstallPending: (id: string) => void;
   clearError: () => void;
   clearNotice: () => void;
+  clearSuccess: () => void;
 }
 
 const persisted = loadPersistedLocalState();
@@ -124,6 +135,21 @@ const persisted = loadPersistedLocalState();
 // 序号桶，否则这两者各自的序号互不感知，挡不住彼此的旧请求覆盖。
 const listRequestSeq: Record<'local' | 'packages', number> = { local: 0, packages: 0 };
 
+// 照抄 connectorStore.ts 的 scheduleQuickRefresh：install() 成功后本地乐观 patch
+// connectionStateMap 只是让 UI 立刻可信，仍需要一次真实的 loadList('local') 兜底校准，防止
+// 乐观值和后端真实状态长期不同步（比如乐观 patch 后紧接着这个插件在别处又被断开）。防抖到 1.5s
+// 后只跑一次，避免连续装好几个插件时打出一串重复请求。
+let quickRefreshTimer: number | null = null;
+const QUICK_REFRESH_DELAY_MS = 1500;
+
+function scheduleQuickRefresh(): void {
+  if (quickRefreshTimer !== null) window.clearTimeout(quickRefreshTimer);
+  quickRefreshTimer = window.setTimeout(() => {
+    quickRefreshTimer = null;
+    void usePluginPackageStore.getState().loadList('local', { silent: true });
+  }, QUICK_REFRESH_DELAY_MS);
+}
+
 export const usePluginPackageStore = create<PluginPackageState>((set) => ({
   packages: [],
   localPackages: [],
@@ -134,6 +160,7 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
   isLoading: false,
   error: null,
   noticeMessage: null,
+  successMessage: null,
   busyId: null,
 
   // silent=true 用于切页/回到市场页时的轮询兜底刷新（每 10s，见 ConnectorMarketPanel）：
@@ -190,9 +217,30 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     }
   },
 
+  probeExists: async (id: string) => {
+    try {
+      const detail = await pluginPackagesApi.show(id);
+      set((state) => ({
+        detailCache: { ...state.detailCache, [id]: detail },
+        connectionStateMap: { ...state.connectionStateMap, [id]: detail.connectionState },
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   // 和 install 不同：create 产出的是一个全新实体，后续 show() 还要能读到它，前端没法安全地
   // "假装成功"——后端没实现这个接口时（backend-requests.md 需求2），这里如实失败，让调用方给
   // 用户看错误提示，而不是伪造一条本地数据后刷新就消失。
+  //
+  // 2026-08-21 用户反馈根因确认：create_plugin_package 落盘时固定 installed=False（见后端
+  // upsert_plugin_marketplace_entry(..., installed=False, ...)），手动创建的插件永远是"已创建
+  // 但未安装"，之前这里创建成功就直接结束，用户还得自己再点一次安装——跟 MCP 侧 registerCustom
+  // 已经改成"注册成功后紧接着真正调一次 connect()"是同一个模式（见 connectorStore.ts），这里
+  // 照抄，创建成功后紧接着调一次 install(id)。install() 自己不会抛异常（真正的半途失败会被它
+  // 内部 catch 掉记进 installPendingMap，不冒泡），所以直接 await 不需要额外 try/catch；install()
+  // 成功时会自己 set successMessage（"插件安装成功"），不用在这里重复处理。
   create: async (params) => {
     try {
       await pluginPackagesApi.create(params);
@@ -200,6 +248,7 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
       // loadList() 的 filter 语义改成跟 MCP 侧对齐后，裸调 loadList()（等价于 filter='builtin'）
       // 会用只含 builtin 的结果覆盖 packages，刷不出刚创建的这条、还会短暂污染"插件广场"数据。
       await usePluginPackageStore.getState().loadList('local');
+      await usePluginPackageStore.getState().install(params.id);
       return true;
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
@@ -225,15 +274,33 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
   // loadList() 用真实值覆盖。失败区分两种（§1.6.3）：带 pending_connectors 的半途失败不算
   // "出错"给用户看一句 error 文案，而是记进 installPendingMap，交给组件层驱动连接续跑后幂等
   // 重试本方法；不带 pending_connectors 的才是普通硬失败，走原来的 error 展示路径。
+  //
+  // 2026-08-21 用户反馈根因排查确认：install() 之前只 patch installed，从不碰
+  // connectionStateMap——装完那一刻卡片/详情页读到的还是安装前缓存的旧值（对一个之前没装过的
+  // 插件，这个旧值基本就是后端在广场列表里给的初始态，大概率是 'disconnected'），只有等下一次
+  // loadList/loadDetail 真正打后端才会被覆盖成真实值，期间会有一段"明明装好了却显示未连接"的
+  // 误导窗口（用户实测：离开面板重新进详情页触发一次新 loadDetail 后确认会自动变成已连接，
+  // 证实是纯前端 timing 问题，不是后端语义有问题）。
+  // §1.6.3 状态机含义：install() 不抛异常就代表这次请求确认所有依赖 connector 都已就绪——真正的
+  // 半途失败会抛 PluginInstallPendingError，走不到这个分支——所以这里可以照抄 MCP connect() 的
+  // 做法，成功就乐观 patch connectionStateMap 为 'connected'，不用干等下一次拉取；随后再
+  // scheduleQuickRefresh 一次真实 loadList('local') 兜底校准（同 connectorStore.ts 的
+  // scheduleQuickRefresh，避免乐观值和后端真实状态长期不同步）。
   install: async (id: string) => {
-    set((state) => ({ busyId: id, error: null, installPendingMap: { ...state.installPendingMap, [id]: undefined } }));
+    set((state) => ({ busyId: id, error: null, successMessage: null, installPendingMap: { ...state.installPendingMap, [id]: undefined } }));
     try {
       await pluginPackagesApi.install(id);
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: true };
         persistLocalState({ installed: nextInstalled });
-        return { installed: nextInstalled, busyId: null };
+        return {
+          installed: nextInstalled,
+          busyId: null,
+          successMessage: successKey.pluginInstalled,
+          connectionStateMap: { ...state.connectionStateMap, [id]: 'connected' },
+        };
       });
+      scheduleQuickRefresh();
     } catch (error) {
       if (error instanceof PluginInstallPendingError) {
         set((state) => ({
@@ -246,19 +313,34 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
     }
   },
 
-  // 卸载只让 installed 变 false——"我的插件"列表的成员资格现在只看 source==='local'
-  // （见文件头注释），卸载不影响它是否还留在"我的"里。如实报错，不强行本地模拟成功。
+  // 2026-08-21 用户反馈根因确认：这条注释原来写的是"卸载只让 installed 变 false，不影响是否
+  // 还留在'我的'里"——实测发现是错的，后端 uninstall_plugin_package 会把整个包目录 rmtree 掉
+  // 并从 marketplace 名单里移除条目（不是只翻 installed 标记），卸载后这个包在 list/show 里
+  // 就是真的查不到了。PluginDetailPage.tsx 的"我的"视角卸载收尾（探测还在不在，不在就退出到
+  // 列表页）原来就是按这个真实行为写的，只是探测用的 loadDetail 会在探测失败时顺带弹一条红色
+  // 错误 Toast，把"预期内的 404"和"真错误"混在一起了，已经改成用不弹 error 的 probeExists。
+  //
+  // 之前这里从来没有默认的"卸载成功"提示——只有后端返回 notice（该插件依赖的 connector 仍
+  // 保持连接）时才会弹一条绿色 Toast，没有 notice 就什么反馈都没有，用户看不出卸载到底成没成功。
+  // 现在补上：没有 notice 时 set 一个默认的"卸载成功" successMessage；有 notice 时沿用原来的
+  // noticeMessage（那条本来就是"卸载成功但有件事要提醒"，同一个绿色 Toast 语义已经包含成功
+  // 信息），两者不会同时 set，不会抢同一个 Toast 展示位。
   //
   // 2026-08-15：新方案里插件的"卸载"按钮在广场/我的两处都统一叫"卸载"（不再单独区分"删除"），
   // 都是这一个 action——见 deletePackage 的注释，两者本来就是同一个后端调用。
   uninstall: async (id: string) => {
-    set({ busyId: id, error: null });
+    set({ busyId: id, error: null, successMessage: null });
     try {
       const { notice } = await pluginPackagesApi.uninstall(id);
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: false };
         persistLocalState({ installed: nextInstalled });
-        return { installed: nextInstalled, busyId: null, noticeMessage: notice ?? null };
+        return {
+          installed: nextInstalled,
+          busyId: null,
+          noticeMessage: notice ?? null,
+          successMessage: notice ? null : successKey.pluginUninstalled,
+        };
       });
     } catch (error) {
       set({ busyId: null, error: error instanceof Error ? error.message : String(error) });
@@ -270,13 +352,18 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
   // "我的插件"详情页调用这个入口，方便调用方（PluginDetailPage.tsx）在卸载后按需要做
   // 探测收尾（见该组件注释）。等后端真的给出独立的删除接口再拆开。
   deletePackage: async (id: string) => {
-    set({ busyId: id, error: null });
+    set({ busyId: id, error: null, successMessage: null });
     try {
       const { notice } = await pluginPackagesApi.uninstall(id);
       set((state) => {
         const nextInstalled = { ...state.installed, [id]: false };
         persistLocalState({ installed: nextInstalled });
-        return { installed: nextInstalled, busyId: null, noticeMessage: notice ?? null };
+        return {
+          installed: nextInstalled,
+          busyId: null,
+          noticeMessage: notice ?? null,
+          successMessage: notice ? null : successKey.pluginUninstalled,
+        };
       });
       return true;
     } catch (error) {
@@ -290,4 +377,13 @@ export const usePluginPackageStore = create<PluginPackageState>((set) => ({
 
   clearError: () => set({ error: null }),
   clearNotice: () => set({ noticeMessage: null }),
+  clearSuccess: () => set({ successMessage: null }),
 }));
+
+// success Toast 文案 key——照抄 connectorStore.ts 同名机制，放顶层而不是组件内联：调用方
+// （MarketplacePage.tsx 卡片网格/PluginDetailPage.tsx 安装按钮）都只管调 install()，提示统一在
+// 这个 store 里 set，顶层订阅者（ConnectorMarket/index.tsx）负责翻译成绿色 Toast。
+const successKey = {
+  pluginInstalled: 'connectorMarket.toast.pluginInstalled',
+  pluginUninstalled: 'connectorMarket.toast.pluginUninstalled',
+};

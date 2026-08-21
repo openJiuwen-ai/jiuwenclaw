@@ -2696,11 +2696,7 @@
       "mcpOptional": "MCP配置（可选）",
       "addMcp": "添加MCP",
       "pickSkillTitle": "选择技能",
-      "mySkills": "我的技能",
-      "skillPlaza": "技能广场",
       "pickMcpTitle": "选择MCP",
-      "myMcps": "我的MCP",
-      "mcpPlaza": "MCP广场",
       "submitError": "创建失败，该功能仍在等待后端支持",
       "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
     },
@@ -2789,8 +2785,11 @@
       "next": "下一页"
     },
     "toast": {
+      "mcpConnected": "MCP已连接成功。",
       "mcpCreated": "MCP已创建成功。",
-      "mcpCreatedAndConnected": "MCP已创建并连接成功。"
+      "mcpCreatedAndConnected": "MCP已创建并连接成功。",
+      "pluginInstalled": "插件安装成功。",
+      "pluginUninstalled": "插件卸载成功。"
     },
     "tokenModal": {
       "title": "连接 {{name}}",

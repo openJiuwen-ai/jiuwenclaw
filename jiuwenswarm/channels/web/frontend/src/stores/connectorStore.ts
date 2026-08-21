@@ -277,6 +277,9 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
     // 发请求前先翻 connecting + 置 busy，让卡片层立刻看到"连接中"占位（基于 connectionState
     // 或 busy 都能判出来，见 mcpState.ts deriveCardState）。旧版只置 busyName 且不翻 connecting，
     // 卡片层读不到中间态。失败时翻 error 让"连失败"可见（旧版静默回到原态，用户分不出没连过 vs 连失败）。
+    // 2026-08-21：真正连接成功（本方法/waitAuth/saveCredentialsAndConnect 三处 response.type===
+    // 'connected' 分支）都统一 set successMessage，让卡片网格快速连接、Token/CLI授权弹窗、
+    // 详情页安装按钮这几个各自独立的调用方不用各自维护本地 toast，一次覆盖全部入口。
     set((state) => ({
       ...patchConnectionAll(state, name, 'connecting'),
       busyMap: { ...state.busyMap, [name]: 'connect' },
@@ -289,6 +292,7 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
           ...patchConnectionAll(state, name, 'connected'),
           detailCache: invalidateDetail(state.detailCache, name),
           busyMap: { ...state.busyMap, [name]: undefined },
+          successMessage: successKey.mcpConnected,
         }));
       } else {
         // credentials_required / auth_required 分支：连接未完成但非失败，回 idle 等用户走弹窗流程。
@@ -371,6 +375,7 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
           ...patchConnectionAll(state, name, 'connected'),
           detailCache: invalidateDetail(state.detailCache, name),
           busyMap: { ...state.busyMap, [name]: undefined },
+          successMessage: successKey.mcpConnected,
         }));
       } else {
         set((state) => ({ busyMap: { ...state.busyMap, [name]: undefined } }));
@@ -459,6 +464,7 @@ export const useConnectorStore = create<ConnectorState>((set, get) => ({
           ...patchConnectionAll(state, name, 'connected'),
           detailCache: invalidateDetail(state.detailCache, name),
           busyMap: { ...state.busyMap, [name]: undefined },
+          successMessage: successKey.mcpConnected,
         }));
       } else {
         set((state) => ({
@@ -493,6 +499,7 @@ if (typeof window !== 'undefined') {
 // success Toast 文案 key——放 store 顶层而不是组件内联，是因为 registerCustom 是 fire-and-reload，
 // 成功发生在后台 .then 里，那时组件上下文已经不在了，得用稳定的常量 key 让顶层订阅者去翻译。
 const successKey = {
+  mcpConnected: 'connectorMarket.toast.mcpConnected',
   mcpCreated: 'connectorMarket.toast.mcpCreated',
   mcpCreatedAndConnected: 'connectorMarket.toast.mcpCreatedAndConnected',
 };

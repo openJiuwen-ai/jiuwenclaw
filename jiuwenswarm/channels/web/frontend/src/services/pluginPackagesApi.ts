@@ -88,6 +88,10 @@ interface RawPluginPackageDetail extends RawPluginPackageSummary {
   mcps: PluginCapabilityRef[];
   // v2 §3.2：仅 show 有，未就绪的待连 MCP 名单。
   pending_connectors?: string[];
+  // 2026-08-21 后端新增（extension_package_manager.py _build_show_card）：manifest 的
+  // quick_inputs 双语示例问法，字段名后端已经是驼峰 quickInputs，不用像 connection_state 那样
+  // 转写。
+  quickInputs?: LocalizedText[];
 }
 
 function fromRawDetail(raw: RawPluginPackageDetail): PluginPackageDetail {
@@ -102,6 +106,7 @@ function fromRawDetail(raw: RawPluginPackageDetail): PluginPackageDetail {
     rails: raw.rails ?? [],
     mcps: raw.mcps ?? [],
     pendingConnectors: raw.pending_connectors,
+    quickInputs: raw.quickInputs ?? [],
   };
 }
 
@@ -130,7 +135,10 @@ export const pluginPackagesApi = {
     const payload = await webRequest<{ package: RawPluginPackageDetail }>('plugin_packages.show', { id });
     return fromRawDetail(payload.package);
   },
-  create: (params: { id: string; name: string; description: string; skills: string[] }) =>
+  // 2026-08-21：后端 create_plugin_package（extension_package_manager.py）新增了 mcps 参数
+  // （_require_mcp_names 校验，connector 名称数组，缺省/[] 都视为不挂 MCP）——之前这里没有承载
+  // 位，CreatePluginPage.tsx 选的 mcpIds 提交时一直没带上，现在补齐。
+  create: (params: { id: string; name: string; description: string; skills: string[]; mcps: string[] }) =>
     webRequest<void>('plugin_packages.create', params),
   // 2026-08-20：用户截图给出的真实接口（后端尚未实现，先按此形状对接）——path 是后端本地
   // 文件系统上的绝对路径（前端通过 features/workspace/localFilePicker.ts 的原生选择/桌面拖拽

@@ -50,6 +50,12 @@ interface ConnectorMarketPanelProps {
    */
   onUseExample?: (text: string, mcpName: string) => void;
   /**
+   * 插件详情页"试试这样用"里点某条示例——跟 onUseExample 是同一个设计，但插件版 quickInputs
+   * 是后端 2026-08-21 新增的字段，第二个参数是 pluginId（不是 mcpName），单独开一个 prop
+   * 而不是复用 onUseExample，见 PluginDetailPage.tsx 该 prop 的类型注释。
+   */
+  onUsePluginExample?: (text: string, pluginId: string) => void;
+  /**
    * 插件/MCP 详情页顶部"使用"按钮——跳新会话并顺带打开这个扩展的会话内启用开关（跟
    * onUseExample 是同一条 requestSessionNavigation('new', ...) 通道，只是这次带的是
    * initialEnabledPlugins/initialEnabledMcps 而不是 initialInputValue，两者可以同时带
@@ -67,7 +73,7 @@ interface ConnectorMarketPanelProps {
   onCreateViaChat?: () => void;
 }
 
-export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateViaChat }: ConnectorMarketPanelProps = {}) {
+export function ConnectorMarketPanel({ onUseExample, onUsePluginExample, onUseExtension, onCreateViaChat }: ConnectorMarketPanelProps = {}) {
   const { t } = useTranslation();
   const [view, setView] = useState<View>({ name: 'market' });
   const [topTab, setTopTab] = useState<TopTab>(() => (pendingManageView ? 'my' : 'plugin'));
@@ -99,6 +105,8 @@ export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateVia
   const clearPluginError = usePluginPackageStore((s) => s.clearError);
   const pluginNotice = usePluginPackageStore((s) => s.noticeMessage);
   const clearPluginNotice = usePluginPackageStore((s) => s.clearNotice);
+  const pluginSuccess = usePluginPackageStore((s) => s.successMessage);
+  const clearPluginSuccess = usePluginPackageStore((s) => s.clearSuccess);
   const [errorToast, setErrorToast] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
@@ -125,6 +133,15 @@ export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateVia
       clearConnectorSuccess();
     }
   }, [connectorSuccess, clearConnectorSuccess, t]);
+
+  // 插件版同款——install() 落盘成功后 set 的 i18n key，覆盖卡片网格快速安装 + 详情页安装按钮
+  // 两个入口（2026-08-21 用户明确要求两处都要有提示）。
+  useEffect(() => {
+    if (pluginSuccess) {
+      setSuccessToast(t(pluginSuccess));
+      clearPluginSuccess();
+    }
+  }, [pluginSuccess, clearPluginSuccess, t]);
 
   // plugin_packages.uninstall 的 notice 是后端直接下发的原文提示（不是 i18n key，跟 error 一样
   // 原样透传，不经过 t()），复用同一个绿色 Toast 展示——语义上是"卸载成功但有件事要提醒"，不是
@@ -201,6 +218,7 @@ export function ConnectorMarketPanel({ onUseExample, onUseExtension, onCreateVia
           onBack={() => setView({ name: 'market' })}
           onDeleted={() => setView({ name: 'market' })}
           onUse={onUseExtension ? () => onUseExtension({ kind: 'plugin', id: view.id }) : handleUseNotWired}
+          onUseExample={onUsePluginExample}
         />
       )}
 

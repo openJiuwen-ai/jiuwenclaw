@@ -66,6 +66,12 @@ export interface PluginPackageDetail extends PluginPackageSummary {
    * 名单串行走 mcp.connect，不要自己猜 MCP 名。
    */
   pendingConnectors?: string[];
+  /**
+   * 2026-08-21 后端新增：manifest 里的 quick_inputs（双语示例问法），仅 show 有——跟 MCP 侧
+   * ConnectorDetail.examples 是同一个"详情页试试这样用"概念，但插件这边沿用包文案的双语对象
+   * 惯例（同 displayName/tags），不是 MCP 那边的纯字符串数组，渲染时要过 localizedText()。
+   */
+  quickInputs?: LocalizedText[];
 }
 
 export function localizedText(value: LocalizedText, language: string): string {

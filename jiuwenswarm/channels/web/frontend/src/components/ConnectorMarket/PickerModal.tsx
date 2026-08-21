@@ -11,15 +11,10 @@ export interface PickerItem {
 
 interface PickerModalProps {
   title: string;
-  myLabel: string;
-  plazaLabel: string;
-  myItems: PickerItem[];
-  plazaItems: PickerItem[];
+  items: PickerItem[];
   initialSelectedIds: string[];
   /** 数据是否正在拉取——2026-08-19 新增，调用方在打开弹窗时触发一次 list 请求，这段时间用它
-   * 避免列表短暂闪一下"暂无结果"。2026-08-20 用户反馈"切 tab 也各发一次请求"太多，改成只在
-   * 打开弹窗时由调用方各自 fetch 一次（不再挂 onTabChange），之后"我的"/"广场"切换纯前端过滤
-   * 弹窗打开时已经取到的这份数据。 */
+   * 避免列表短暂闪一下"暂无结果"。 */
   loading?: boolean;
   onCancel: () => void;
   onConfirm: (ids: string[]) => void;
@@ -27,17 +22,17 @@ interface PickerModalProps {
 
 // 对应高保真 3.2 选择MCP / 3.3 选择技能——两列卡片网格，选中态是整卡蓝色描边，
 // 名称右侧直接跟一个 +/✓ 图标。右侧边缘弹出的抽屉，紧贴上下右三边。
-// 2026-08-19："我的/广场"两个 tab 改成真的按数据源区分：调用方（CreatePluginPage）现在分别传入
-// myItems/plazaItems（技能用 source==='local' vs is_builtin_source 区分，MCP 直接复用
-// connectorStore 的 myConnectors/builtinConnectors），tab 切换真正切换渲染哪份列表，不再是两个
-// tab 共用同一份 items 的占位实现。
-export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, initialSelectedIds, loading, onCancel, onConfirm }: PickerModalProps) {
+// 2026-08-21 用户明确要求去掉"我的/广场"两个 tab，只展示"我的"这一份数据（技能走
+// utils/mySkills.ts 的 computeMySkills，跟技能管理页"我的技能"同一套口径；MCP 直接是
+// connectorStore.myConnectors）——手动创建插件本来就是给自己的插件挂已经在用的技能/MCP，
+// "广场"里那些还没装/没连的条目挂上去也不能真正生效，之前的 tab 是当时"简化实现"遗留的，
+// 见该 prop 曾经的 myItems/plazaItems 双份设计。
+export function PickerModal({ title, items, initialSelectedIds, loading, onCancel, onConfirm }: PickerModalProps) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState<string[]>(initialSelectedIds);
   const [query, setQuery] = useState('');
-  const [tab, setTab] = useState<'mine' | 'plaza'>('mine');
 
-  const visible = (tab === 'mine' ? myItems : plazaItems).filter((item) => {
+  const visible = items.filter((item) => {
     const q = query.trim().toLowerCase();
     if (!q) return true;
     return item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q);
@@ -61,20 +56,6 @@ export function PickerModal({ title, myLabel, plazaLabel, myItems, plazaItems, i
           <button type="button" onClick={onCancel} className="text-text-muted hover:text-text">
             <X size={18} />
           </button>
-        </div>
-
-        <div className="mb-3 flex shrink-0 items-center gap-5 border-b border-border">
-          {([{ key: 'mine', label: myLabel }, { key: 'plaza', label: plazaLabel }] as const).map((t2) => (
-            <button
-              key={t2.key}
-              type="button"
-              onClick={() => setTab(t2.key)}
-              className={`relative pb-2 text-[13px] ${tab === t2.key ? 'font-semibold text-text' : 'font-normal text-text-muted'}`}
-            >
-              {t2.label}
-              {tab === t2.key && <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-text" />}
-            </button>
-          ))}
         </div>
 
         <div className="relative mb-3 shrink-0">

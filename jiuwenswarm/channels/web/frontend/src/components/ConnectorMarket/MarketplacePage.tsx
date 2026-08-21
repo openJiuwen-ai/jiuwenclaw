@@ -11,7 +11,6 @@ import { ConnectTokenModal } from './ConnectTokenModal';
 import { CliAuthModal } from './CliAuthModal';
 import type { ConnectorConnectResponse } from '../../types/connector';
 import { deriveCardState, derivePluginCardState, deriveMcpAvailability, cardStateToStatusFilter } from './mcpState';
-import { Toast } from './Toast';
 import { useClickOutside } from './useClickOutside';
 import { usePendingConnectorFlow, PendingConnectorModals } from './usePendingConnectorFlow';
 import SimpleSelect from '../CronPanel/SimpleSelect';
@@ -185,7 +184,6 @@ export function MarketplacePage({
 
   const [tokenTarget, setTokenTarget] = useState<{ name: string; displayName: string; icon?: string; response: ConnectorConnectResponse } | null>(null);
   const [authTarget, setAuthTarget] = useState<{ name: string; response: ConnectorConnectResponse } | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
 
   // connectors：合并视图，按 name 查找/枚举全部已知 MCP 用（mcpCardStates、handleConnectorQuickAdd
   // 的 .find）；builtinConnectors/myConnectors：后端已经按 filter 分好的两份原始列表，"MCP广场"/
@@ -233,9 +231,10 @@ export function MarketplacePage({
       setTokenTarget({ name, displayName: connector.displayName, icon: connector.icon ?? undefined, response });
     } else if (response.type === 'auth_required') {
       setAuthTarget({ name, response });
-    } else if (response.type === 'connected') {
-      setToast(t('connectorMarket.toast.mcpConnected'));
     }
+    // type === 'connected'：connect() 内部已经 set 了 successMessage（2026-08-21 起提升为 store
+    // 全局机制，见 connectorStore.ts），顶层 ConnectorMarket/index.tsx 统一订阅弹 Toast，这里不用
+    // 再自己维护一份本地 toast。
     // D 类（loopback OAuth）响应的 sentinel 后端还没定（backend-requests.md 需求6），
     // 这里没有对应分支——遇到未知 type 时安全地什么都不做，等后端定下来再接。
   }
@@ -658,10 +657,7 @@ export function MarketplacePage({
           iconUrl={tokenTarget.icon}
           response={tokenTarget.response}
           onCancel={() => setTokenTarget(null)}
-          onConnected={() => {
-            setTokenTarget(null);
-            setToast(t('connectorMarket.toast.mcpConnected'));
-          }}
+          onConnected={() => setTokenTarget(null)}
         />
       )}
 
@@ -670,16 +666,11 @@ export function MarketplacePage({
           name={authTarget.name}
           initial={authTarget.response}
           onCancel={() => setAuthTarget(null)}
-          onConnected={() => {
-            setAuthTarget(null);
-            setToast(t('connectorMarket.toast.mcpConnected'));
-          }}
+          onConnected={() => setAuthTarget(null)}
         />
       )}
 
       <PendingConnectorModals flow={pluginInstallFlow} />
-
-      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
   );
 }

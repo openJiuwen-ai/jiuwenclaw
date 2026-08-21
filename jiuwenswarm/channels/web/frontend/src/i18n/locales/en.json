@@ -2695,11 +2695,7 @@
       "mcpOptional": "MCP (optional)",
       "addMcp": "Add MCP",
       "pickSkillTitle": "Select skills",
-      "mySkills": "My skills",
-      "skillPlaza": "Skill marketplace",
       "pickMcpTitle": "Select MCP",
-      "myMcps": "My MCPs",
-      "mcpPlaza": "MCP marketplace",
       "submitError": "Creation failed - this still awaits backend support",
       "withSkillNotWired": "This entry point isn't wired to the chat panel yet"
     },
@@ -2788,8 +2784,11 @@
       "next": "Next page"
     },
     "toast": {
+      "mcpConnected": "MCP connected successfully.",
       "mcpCreated": "MCP created successfully.",
-      "mcpCreatedAndConnected": "MCP created and connected successfully."
+      "mcpCreatedAndConnected": "MCP created and connected successfully.",
+      "pluginInstalled": "Plugin installed successfully.",
+      "pluginUninstalled": "Plugin uninstalled successfully."
     },
     "tokenModal": {
       "title": "Connect {{name}}",

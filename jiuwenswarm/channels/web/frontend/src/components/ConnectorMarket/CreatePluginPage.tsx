@@ -5,6 +5,7 @@ import { webRequest } from '../../services/webClient';
 import { useConnectorStore } from '../../stores/connectorStore';
 import { usePluginPackageStore } from '../../stores/pluginPackageStore';
 import { getSkillAvatar } from '../../utils/skillAvatar';
+import { computeMySkills, buildInstalledSkillNames } from '../../utils/mySkills';
 import { EntityAvatar } from './EntityAvatar';
 import { PickerModal, type PickerItem } from './PickerModal';
 
@@ -14,11 +15,17 @@ interface SkillItem {
   name: string;
   display_name?: string;
   description: string;
-  // "我的技能"/"技能广场" 拆分用，跟 SkillPanel/index.tsx 的字段语义一致：source==='local' 是
-  // 用户自己的技能，is_builtin(_source) 是内置/广场技能。
+  // computeMySkills（utils/mySkills.ts）判定"我的技能"要用到的字段，跟 SkillPanel/index.tsx
+  // 的字段语义一致：source==='local' 是用户自己的技能，is_builtin(_source) 是内置/广场技能。
   source?: string;
   is_builtin?: boolean;
   is_builtin_source?: boolean;
+}
+
+/** skills.list 响应里的 plugins 字段——只取 computeMySkills 需要的 skills 名单，跟
+ * SkillPanel/index.tsx 的 InstalledPluginItem 是同一个后端形状，这里不需要其余字段。 */
+interface InstalledPluginItem {
+  skills: string[];
 }
 
 interface CreatePluginPageProps {
@@ -31,9 +38,9 @@ interface CreatePluginPageProps {
 // 提交调 pluginPackageStore.create——2026-08-07 对齐专家与插件装备-前端接口(3).md §3.3 真实参数
 // 形状 {id, name, description, skills}：id 是必填目录名，手动输入或按名称自动建议一个 slug，
 // 用户可编辑；name/description 是纯字符串，不再是双语对象。
-// mcpIds 选择仍保留在 UI 里（用户可以继续挑 MCP 卡片），但真实 create 接口完全没有承载这份
-// 选择的参数位——提交时不会带上，纯本地展示，等后端定下插件包和 MCP 绑定关系怎么建（backend-
-// requests.md 需求 2 遗留问题）才能接上。
+// 2026-08-21：后端 create_plugin_package 补上了 mcps 参数（extension_package_manager.py
+// _require_mcp_names，connector 名称数组，可选），mcpIds 选择现在会真的带进 create() 提交
+// ——之前这里没有承载位，选了也是纯本地展示，backend-requests.md 需求 2 已解决。
 // 头像选择：点击可以真的打开文件选择器并本地预览（上一轮这里只是个纯静态图标，点了没反应），
 // 但 plugin_packages.* 完全没有图标字段（backend-requests.md 需求9），选中的图片选不进
 // create() 的参数里，只能停留在本地预览——选好图片后额外提示一句，不让用户误以为真的保存了。
@@ -93,6 +100,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   const [description, setDescription] = useState('');
   const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [installedSkillNames, setInstalledSkillNames] = useState<Set<string>>(new Set());
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mcpIds, setMcpIds] = useState<string[]>([]);
@@ -102,22 +110,29 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
 
   const connectors = useConnectorStore((s) => s.connectors);
   const myConnectors = useConnectorStore((s) => s.myConnectors);
-  const builtinConnectors = useConnectorStore((s) => s.builtinConnectors);
   const connectorLoading = useConnectorStore((s) => s.isLoading);
   const loadConnectorList = useConnectorStore((s) => s.loadList);
   const createPlugin = usePluginPackageStore((s) => s.create);
 
   // 2026-08-19 用户明确要求："选择技能"/"选择MCP"弹窗要真的向后端拉数据，不能只在
   // CreatePluginPage 挂载时统一拉一次、之后弹窗里所有交互都是纯前端过滤旧数据。
-  // 2026-08-20 用户反馈：改成每次切"我的"/"广场" tab 都各发一次请求"有点多了"，改为只在点击
-  // "添加技能"/"添加MCP"、弹窗刚打开的那一刻各自 fetch 一次（skills.list 一次；mcp.list 按
-  // filter='local'/'builtin' 各一次，仍是两次独立请求），弹窗内切 tab 之后不再重复请求，纯前端
-  // 过滤这一份已经取到的数据——见下面两个按钮的 onClick。
+  // 2026-08-21 用户明确要求去掉"我的/广场"两个 tab，只展示"我的"——不用再拉广场那份数据，
+  // "选择MCP"只调 loadConnectorList('local')（见下面按钮 onClick），"选择技能"这里的
+  // skills.list 本来就是一次性把 skills+plugins 都拿回来（跟 SkillPanel/index.tsx 的
+  // fetchSkills 同一个接口/同一次调用），之前只取了 payload.skills、没接 payload.plugins，
+  // 导致 computeMySkills 缺了"installedSkillNames"这个候选条件，"我的技能"少算了通过插件
+  // 装进来的那些（用户反馈的根因）。
   function loadSkills() {
     setSkillsLoading(true);
-    webRequest<{ skills?: SkillItem[] }>('skills.list', { with_installed: true })
-      .then((payload) => setSkills(payload.skills ?? []))
-      .catch(() => setSkills([]))
+    webRequest<{ skills?: SkillItem[]; plugins?: InstalledPluginItem[] }>('skills.list', { with_installed: true })
+      .then((payload) => {
+        setSkills(payload.skills ?? []);
+        setInstalledSkillNames(buildInstalledSkillNames(payload.plugins ?? []));
+      })
+      .catch(() => {
+        setSkills([]);
+        setInstalledSkillNames(new Set());
+      })
       .finally(() => setSkillsLoading(false));
   }
 
@@ -138,13 +153,8 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
   const selectedSkills = skills.filter((s) => skillIds.includes(s.name));
   const selectedMcps = connectors.filter((c) => mcpIds.includes(c.name));
 
-  // "我的技能" = 用户自己的（source==='local'）；"技能广场" = 内置/广场技能，两者不是互斥兜底
-  // 关系而是各自独立的真实过滤条件，跟 SkillPanel 的 builtinSkills/我的 tab 语义对齐。
-  const myPickerSkills = useMemo(() => skills.filter((s) => s.source === 'local'), [skills]);
-  const plazaPickerSkills = useMemo(
-    () => skills.filter((s) => s.is_builtin === true || s.is_builtin_source === true),
-    [skills],
-  );
+  // 复用 SkillPanel/index.tsx"我的技能"tab 同一套判定规则，见 utils/mySkills.ts 头注释。
+  const myPickerSkills = useMemo(() => computeMySkills(skills, installedSkillNames), [skills, installedSkillNames]);
 
   async function handleSubmit() {
     setSubmitting(true);
@@ -154,6 +164,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       name,
       description,
       skills: skillIds,
+      mcps: mcpIds,
     });
     setSubmitting(false);
     if (ok) {
@@ -268,7 +279,7 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
                   </span>
                   <span className="text-[14px] font-semibold leading-[22px] text-text">{label}</span>
                 </div>
-                <p className="line-clamp-2 text-[13px] leading-5 text-[color:var(--color-text-placeholder)]">{skill.description}</p>
+                <p className="line-clamp-2 min-h-[40px] text-[13px] leading-5 text-[color:var(--color-text-placeholder)]">{skill.description}</p>
               </div>
             );
           })}
@@ -283,7 +294,6 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
             onClick={() => {
               setPicker('mcp');
               loadConnectorList('local');
-              loadConnectorList('builtin');
             }}
             className="flex items-center gap-1 rounded-full px-2.5 py-1 text-[13px] text-text hover:bg-connector-add-hover-surface hover:text-[color:var(--color-chat-accent)]"
           >
@@ -306,6 +316,11 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
                   </span>
                   <span className="text-[14px] font-semibold leading-[22px] text-text">{mcp.displayName}</span>
                 </div>
+                {/* 之前这里漏渲染了描述——上面技能卡片有 <p>，MCP 卡片当时照抄整个 div 结构时
+                    少拷了这一行，导致 MCP 卡片只有 icon+名字（2026-08-21 用户反馈）。min-h-[40px]
+                    跟技能卡片同一个值（text-[13px] leading-5 两行 = 20px*2），描述不管几行/有没有
+                    卡片高度都固定，不会有的高有的矮。 */}
+                <p className="line-clamp-2 min-h-[40px] text-[13px] leading-5 text-[color:var(--color-text-placeholder)]">{mcp.description}</p>
               </div>
             );
           })}
@@ -326,11 +341,8 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       {picker === 'skill' && (
         <PickerModal
           title={t('connectorMarket.create.pickSkillTitle')}
-          myLabel={t('connectorMarket.create.mySkills')}
-          plazaLabel={t('connectorMarket.create.skillPlaza')}
           initialSelectedIds={skillIds}
-          myItems={toSkillPickerItems(myPickerSkills)}
-          plazaItems={toSkillPickerItems(plazaPickerSkills)}
+          items={toSkillPickerItems(myPickerSkills)}
           loading={skillsLoading}
           onCancel={() => setPicker(null)}
           onConfirm={(ids) => {
@@ -343,11 +355,8 @@ export function CreatePluginPage({ onBack, onCreated }: CreatePluginPageProps) {
       {picker === 'mcp' && (
         <PickerModal
           title={t('connectorMarket.create.pickMcpTitle')}
-          myLabel={t('connectorMarket.create.myMcps')}
-          plazaLabel={t('connectorMarket.create.mcpPlaza')}
           initialSelectedIds={mcpIds}
-          myItems={myConnectors.map(toMcpPickerItem)}
-          plazaItems={builtinConnectors.map(toMcpPickerItem)}
+          items={myConnectors.map(toMcpPickerItem)}
           loading={connectorLoading}
           onCancel={() => setPicker(null)}
           onConfirm={(ids) => {

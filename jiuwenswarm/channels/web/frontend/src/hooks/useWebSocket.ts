@@ -73,6 +73,7 @@ import {
   findOverlappingFileExecutionEvent,
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
+import { pruneEnabledExtensions } from '../utils/enabledExtensions';
 import { makeEventDedupKey } from '../utils/wsEventDedup';
 import {
   normalizeToolCallPayload,
@@ -1470,8 +1471,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 权威字段定义，继续乐观发送（backend-requests.md 需求11遗留）；MCP 这半 2026-08-17 已经
       // 有权威定义（MCP 接口文档 v2 §6.2，字段名是 `mcp`，见下方 chat.send 调用处）。两者都不
       // 接入消息气泡展示——消息气泡怎么交织渲染插件/MCP 不在这轮范围内，只做输入栏可选可发送。
-      const enabledPlugins = useSessionStore.getState().getRuntime(sessionId)?.enabledPlugins ?? [];
-      const enabledMcps = useSessionStore.getState().getRuntime(sessionId)?.enabledMcps ?? [];
+      // 2026-08-21 用户明确要求：这两个数组只在用户点开关那一刻校验过一次连接态，之后如果对应
+      // MCP 断连/插件被卸载不会自动摘除，发送前用 pruneEnabledExtensions 兜底重新核对一遍"我的
+      // 插件/我的MCP里已连接的"，避免把早就失效的名字发给后端；被摘掉的项同步从 sessionStore
+      // 里移除，让"+"扩展面板的开关同步变回关闭。
+      const { plugins: enabledPlugins, mcps: enabledMcps } = pruneEnabledExtensions(sessionId);
       useChatStore.getState().addMessage(sessionId, {
         id: `user-${Date.now()}`,
         role: 'user',

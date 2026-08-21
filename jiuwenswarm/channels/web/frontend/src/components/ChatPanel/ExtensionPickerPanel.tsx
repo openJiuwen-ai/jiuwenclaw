@@ -16,6 +16,7 @@ import { CliAuthModal } from '../ConnectorMarket/CliAuthModal';
 import { requestManageView } from '../ConnectorMarket';
 import { usePendingConnectorFlow, PendingConnectorModals } from '../ConnectorMarket/usePendingConnectorFlow';
 import { Switch } from '../Switch';
+import { pruneEnabledExtensions } from '../../utils/enabledExtensions';
 
 const PANEL_WIDTH = 320;
 const PANEL_MAX_HEIGHT = 440;
@@ -129,6 +130,16 @@ export function ExtensionPickerPanel({ anchorRect, onClose, panelRef }: Extensio
     void loadConnectorList('local', { silent: myConnectors.length > 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 2026-08-21 用户明确要求：不止 chat.send 发送前兜底一次（见 useWebSocket.ts），面板每次拿到
+  // 最新的插件/MCP连接态后也要顺手核对一遍当前会话已启用的开关是否还真的连接着——断连/被卸载的
+  // 项直接摘掉，让开关同步变回关闭，不用等到真正发消息那一刻才被静默过滤掉。两处共用同一个
+  // pruneEnabledExtensions（见该文件头注释：不做"断连/卸载那一刻全局清理所有会话"的源头治理，
+  // 只做这两处兜底）。
+  useEffect(() => {
+    if (!activeSessionId) return;
+    pruneEnabledExtensions(activeSessionId);
+  }, [activeSessionId, installedMap, pluginConnectionStateMap, myConnectors]);
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {

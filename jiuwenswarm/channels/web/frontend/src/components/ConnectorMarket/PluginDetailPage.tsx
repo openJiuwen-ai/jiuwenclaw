@@ -19,6 +19,15 @@ interface PluginDetailPageProps {
   onDeleted?: () => void;
   /** "会话使用"点击——真正入口是 ChatPanel 输入框的"+"面板，这里没有真实目的地。 */
   onUse?: () => void;
+  /**
+   * 点"试试这样用"下面的某个示例——跳新会话并把示例文案填进输入框，同时打开这个插件的会话内
+   * 启用开关。跟 McpDetailPage.tsx 的 onUseExample 是同一条设计（App.tsx 那边对称接了
+   * onUsePluginExample，走同一个 requestSessionNavigation('new', {initialInputValue,
+   * initialEnabledPlugins:[id]})），只是插件这边不复用 MCP 那个 prop——两者的第二个参数语义
+   * 不同（mcpName vs pluginId），且各自的"能不能点"门控条件也不共享一个 onUseExample 引用更
+   * 清楚。不传就退化成纯展示（同款可选 prop 处理见 onUse）。
+   */
+  onUseExample?: (text: string, pluginId: string) => void;
 }
 
 // 2026-08-15 按钮矩阵再整改（去除全局启用/禁用，见
@@ -45,10 +54,11 @@ interface PluginDetailPageProps {
 //   uninstall 从不会让条目从 plugin_packages.list/show 里消失（只是 installed 变 false，见
 //   pluginPackageStore.ts uninstall 的注释），所以这条"读不到就退出"分支在当前后端行为下大概率
 //   不会触发，但逻辑按方案原文实现，为将来后端行为变化（真的会让条目消失）留好退路。
-export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse }: PluginDetailPageProps) {
+export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse, onUseExample }: PluginDetailPageProps) {
   const { t, i18n } = useTranslation();
   const detail = usePluginPackageStore((s) => s.detailCache[id]);
   const loadDetail = usePluginPackageStore((s) => s.loadDetail);
+  const probeExists = usePluginPackageStore((s) => s.probeExists);
   const installed = usePluginPackageStore((s) => s.installed[id] ?? false);
   const connectionState = usePluginPackageStore((s) => s.connectionStateMap[id] ?? 'disconnected');
   const installPending = usePluginPackageStore((s) => s.installPendingMap[id]);
@@ -122,7 +132,11 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse }: Plugi
     await uninstall(id);
     setConfirmUninstall(false);
     if (fromMy) {
-      const stillExists = await loadDetail(id);
+      // 2026-08-21 用户反馈根因确认：后端卸载会把包目录整个删掉，探测"还在不在"用 probeExists
+      // （不是 loadDetail）——404 在这里是预期内的正常结果，不该像 loadDetail 那样在失败时顺带
+      // 弹一条红色错误 Toast，把"卸载完预期中的探测404"和"真错误"混在一起，见 pluginPackageStore.ts
+      // probeExists 的注释。
+      const stillExists = await probeExists(id);
       setUninstalling(false);
       if (!stillExists) onDeleted?.();
     } else {
@@ -238,6 +252,39 @@ export function PluginDetailPage({ id, onBack, fromMy, onDeleted, onUse }: Plugi
       <Section title={t('connectorMarket.detail.sections.basicInfo')}>
         <p className="text-[12px] leading-[18px] text-text">{localizedText(detail.displayDescription, i18n.language)}</p>
       </Section>
+
+      {/* "试试这样用"——照抄 McpDetailPage.tsx 同款示例区，2026-08-21 后端 show 接口新增
+          quickInputs（双语对象数组，跟 MCP 的 examples: string[] 不同，要过 localizedText()）。
+          未就绪（installed && !linked）时这个插件在会话里根本用不了，示例点了也没意义，跟 MCP
+          那边"onUseExample && linked 才可点，否则渲染成不可点的纯展示 span"是同一个门控。 */}
+      {detail.quickInputs && detail.quickInputs.length > 0 && (
+        <div className="mb-6">
+          <h2 className="mb-3 text-[14px] font-semibold leading-[22px] text-text">{t('connectorMarket.detail.sections.examples')}</h2>
+          <div className="flex flex-wrap gap-2">
+            {detail.quickInputs.map((quickInput) => {
+              const text = localizedText(quickInput, i18n.language);
+              return onUseExample && linked ? (
+                <button
+                  key={text}
+                  type="button"
+                  onClick={() => onUseExample(text, id)}
+                  className="flex items-center gap-1.5 rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted transition-colors hover:border-[color:var(--color-chat-accent)] hover:text-[color:var(--color-chat-accent)]"
+                >
+                  <NewConversationIcon size={12} />
+                  {text}
+                </button>
+              ) : (
+                <span
+                  key={text}
+                  className="rounded-full border border-border bg-bg-muted px-3 py-1 text-[12px] leading-[18px] text-text-muted"
+                >
+                  {text}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {detail.skills.length > 0 && (
         <Section title={t('connectorMarket.detail.sections.skills')}>

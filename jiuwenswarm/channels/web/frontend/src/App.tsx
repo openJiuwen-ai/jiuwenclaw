@@ -2862,6 +2862,9 @@ function AppContent() {
               onUseExample={(initialInputValue, mcpName) =>
                 requestSessionNavigation('new', { initialInputValue, initialEnabledMcps: [mcpName] })
               }
+              onUsePluginExample={(initialInputValue, pluginId) =>
+                requestSessionNavigation('new', { initialInputValue, initialEnabledPlugins: [pluginId] })
+              }
               onUseExtension={({ kind, id }) =>
                 requestSessionNavigation(
                   'new',
