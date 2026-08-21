@@ -2247,8 +2247,8 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
         _TEAM_PLAN_EXIT_NOTIFICATION_EN,
     )
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
-        _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
         _PLAN_MODE_SYSTEM_NOTE,
+        _code_enter_plan_instructions,
     )
 
     plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
@@ -2275,7 +2275,9 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     # to use build_team.
     assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
     assert "plan_mode_attachment_note" not in team_config
-    assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert team_config["enter_plan_instructions"] == _code_enter_plan_instructions(
+        plan_leader.config
+    )
     assert team_config["exit_plan_notification"] == _TEAM_PLAN_EXIT_NOTIFICATION_EN
     assert "Team Leader" in team_config["exit_plan_notification"]
     assert "build_team" in team_config["exit_plan_notification"]
@@ -2284,7 +2286,9 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     # notification (only Team Plan leaders receive the Team Leader reminder).
     assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
     assert "plan_mode_attachment_note" not in code_config
-    assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert code_config["enter_plan_instructions"] == _code_enter_plan_instructions(
+        code_team_leader.config
+    )
     assert code_config["exit_plan_notification"] is None
     assert "ask_user" in code_config["allowed_tools"]
 

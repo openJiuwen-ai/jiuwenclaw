@@ -76,7 +76,7 @@ class _AgentServer(agent_ws_server_module.AgentWebSocketServer):
         super().__init__()
         self.team_session_ids: list[str] = []
         self._agent_manager = SimpleNamespace(
-            get_agent_nowait=lambda *_: object(),
+            get_agent_nowait=lambda *args, **kwargs: None,
             cleanup_session_runtime=AsyncMock(return_value=False),
         )
 

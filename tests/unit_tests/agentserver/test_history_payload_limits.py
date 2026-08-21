@@ -151,11 +151,11 @@ def test_history_get_sanitizes_large_restorable_records(monkeypatch):
         },
     }
 
-    monkeypatch.setattr(agent_ws_server_module, "history_exists", lambda session_id: True)
+    monkeypatch.setattr(agent_ws_server_module, "history_exists", lambda session_id, **_kwargs: True)
     monkeypatch.setattr(
         agent_ws_server_module,
         "load_history_records",
-        lambda session_id: [large_record],
+        lambda session_id, **_kwargs: [large_record],
     )
 
     # get_conversation_history 现在返回 raw record（不在内部 sanitize）——

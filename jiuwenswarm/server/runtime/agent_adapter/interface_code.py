@@ -341,7 +341,8 @@ ask_user is only for clarifying requirements — do not use it for approval ques
 def _code_enter_plan_instructions(config_base: dict[str, Any] | None = None) -> str:
     from jiuwenswarm.common.config import is_subagent_runtime_enabled
 
-    if is_subagent_runtime_enabled(config_base or get_config()):
+    cfg = get_config() if config_base is None else config_base
+    if is_subagent_runtime_enabled(cfg):
         return _ENTER_PLAN_MODE_INSTRUCTIONS_RUNTIME_EN
     return _ENTER_PLAN_MODE_INSTRUCTIONS_EN
 
@@ -495,7 +496,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         "JiuSwarmStreamEventRail", "SecurityRail",
         "PermissionInterruptRail",
         "ContextProcessorRail",
-        "SysOperationRail", "CodingMemoryRail",
+        "SysOperationRail", "LspRail", "ProjectMemoryRail", "CodingMemoryRail",
         "MemoryForbiddenRail",
         "AgentModeRail", "StructuredAskUserRail", "ConfirmInterruptRail",
         "FileSystemRail",  # 别名

@@ -2902,6 +2902,9 @@ async def test_handle_session_delete_drains_runtime_before_kvc_and_checkpoint_cl
     events = []
 
     class RuntimeManager:
+        def get_agent_nowait(self, *args, **kwargs):
+            return None
+
         async def cleanup_session_runtime(self, *, channel_id="", session_id: str):
             events.append(("runtime", channel_id, session_id))
             return True
