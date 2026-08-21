@@ -2658,6 +2658,19 @@ class SkillTurboExecutor:
             )
             return
 
+        # HITL 中断的 stage 在 resume 快照里仍为 in_progress。重放时若再次
+        # 发 task.start，前端会看到重复的 start（日志中“3 次 start 1 次
+        # complete”的根因）。跳过重复的 task.start 事件发送，但保留 current
+        # task context，让执行继续走到中断的 tool_call_id 命中 resume input。
+        if task_state.get("status") == "in_progress":
+            logger.info(
+                "[SkillTurboExecutor] skip duplicate task.start for in-progress stage "
+                "(HITL resume replay): task_id=%s plan_name=%s",
+                task_id,
+                subplan.plan_name,
+            )
+            return
+
         # 兜底：启动较早 stage 时，把更靠后仍 in_progress 的 stage 收成 pending，
         # 保证右侧任务列表同一时刻只有一个 running。
         self._park_later_in_progress_tasks(task_state, task_states)
