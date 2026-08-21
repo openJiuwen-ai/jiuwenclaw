@@ -3762,14 +3762,23 @@ class QAFixNode(PlanNode):
                 pattern=f"_backup/*/page-{page_num}.pptx.html",
                 path=pages_dir,
             )
-            paths = self._parse_listing(result)
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
             logger.warning("[P8.2] 查找 backup 失败 page=%d: %s", page_num, e)
             return ""
-        if not paths:
+        # 不能用 _parse_listing：它会把结果裁成裸文件名，丢失 _backup/<ts>/ 目录，
+        # 直接从原始返回中提取时间戳，重建以 pages_dir 为锚点的完整路径。
+        timestamps = re.findall(
+            rf"_backup[/\\]+(\d+)[/\\]+page-{page_num}\.pptx\.html",
+            str(result),
+        )
+        if not timestamps:
             return ""
+        paths = [
+            f"{pages_dir}/_backup/{ts}/page-{page_num}.pptx.html"
+            for ts in set(timestamps)
+        ]
         return max(paths, key=_extract_backup_timestamp)
 
     async def _fix_pages(
