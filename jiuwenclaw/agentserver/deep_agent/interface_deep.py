@@ -1799,6 +1799,7 @@ class JiuWenClawDeepAdapter:
         """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
 
         不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
+        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
         """
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
@@ -1807,6 +1808,23 @@ class JiuWenClawDeepAdapter:
                 "[JiuWenClawDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
             )
             return
+
+        try:
+            recon = await SkillWhitelistSynchronizer(
+                self._workspace_dir,
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            ).reconcile_disk_into_ledger()
+            if recon.errors:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] disk→ledger reconcile warnings: %s",
+                    recon.errors,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenClawDeepAdapter] disk→ledger reconcile failed: %s",
+                exc,
+            )
 
         from jiuwenclaw.agentserver.installed_skill import (
             SOURCE_PREBUILT,
