@@ -12,6 +12,7 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
 
 logger = logging.getLogger(__name__)
 
@@ -212,26 +213,36 @@ def _resolve_default_model_config(
 ) -> dict[str, Any]:
     models_raw = config_base.get("models", {})
     if not isinstance(models_raw, dict):
-        return {}
+        models_raw = {}
 
     defaults_raw = models_raw.get("defaults")
-    if isinstance(defaults_raw, list):
+    defaults_list = defaults_raw if isinstance(defaults_raw, list) else []
+
+    requested = (requested_model_name or "").strip()
+    if requested:
         # When the caller (chat page) provides a requested model name, prefer
         # the entry whose ``model_client_config.model_name`` matches it so
         # team members without an explicit ``modes.team.agents.*.model`` fall
         # back to the page-selected model instead of the first list item.
-        requested = (requested_model_name or "").strip()
-        if requested:
-            for item in defaults_raw:
-                if not isinstance(item, dict):
-                    continue
-                mcc = item.get("model_client_config") or {}
-                if isinstance(mcc, dict) and mcc.get("model_name") == requested:
-                    return item
-
-        for item in defaults_raw:
-            if isinstance(item, dict):
+        for item in defaults_list:
+            if not isinstance(item, dict):
+                continue
+            mcc = item.get("model_client_config") or {}
+            if isinstance(mcc, dict) and mcc.get("model_name") == requested:
                 return item
+
+        # The selected model may be a Zen free model that is appended to
+        # ``models.list`` at runtime but never written into ``models.defaults``
+        # (see ``opencode_zen``). Match it from the in-memory Zen cache so a
+        # page-selected free model still drives the whole team's fallback model.
+        for item in get_zen_free_model_entries():
+            mcc = item.get("model_client_config") or {}
+            if isinstance(mcc, dict) and mcc.get("model_name") == requested:
+                return item
+
+    for item in defaults_list:
+        if isinstance(item, dict):
+            return item
 
     legacy_default = models_raw.get("default")
     if isinstance(legacy_default, dict):

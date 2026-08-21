@@ -27,3 +27,20 @@ def test_default_round_level_compressor_config_uses_context_ratio():
         assert round_level_config["trigger_context_ratio"] == 0.8
         assert "trigger_total_tokens" not in round_level_config
         assert "tokens_threshold" not in round_level_config
+
+
+def test_default_skill_evolution_switch_is_disabled():
+    repo_root = Path(__file__).resolve().parents[2]
+    config_files = [
+        repo_root / "jiuwenswarm" / "resources" / "config.yaml",
+        repo_root / "jiuwenswarm" / "resources" / "config.team.distributed.leader.yaml",
+        repo_root / "jiuwenswarm" / "resources" / "config.team.distributed.teammate.yaml",
+    ]
+
+    for config_file in config_files:
+        data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        evolution = data["react"]["evolution"]
+
+        assert evolution["skill_evolution"] is False
+        assert evolution["auto_save"] is False
+        assert evolution["review_feedback_min_confidence"] == 0.7

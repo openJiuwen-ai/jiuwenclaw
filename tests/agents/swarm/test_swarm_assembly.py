@@ -209,10 +209,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
+        self.review_feedback_config = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
+
+    def configure_review_feedback_evolution(self, **kwargs) -> None:
+        self.review_feedback_config = kwargs
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -1636,12 +1640,16 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.review_feedback_config["session_id"] == "sess"
+    assert rail.review_feedback_config["team_id"] == "t"
+    assert rail.review_feedback_config["min_confidence"] == 0.7
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    create_rail = object()
 
     class _FakeManager:
         @staticmethod
@@ -1651,6 +1659,11 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def get_team_skill_create_rail(session_id):
+            calls.append(f"create:{session_id}")
+            return create_rail
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1680,12 +1693,13 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         team_id="team-1",
         config={},
     )
-
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
+    assert rail._review_feedback_skill_create_rail is create_rail
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
+        "create:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]
@@ -1799,6 +1813,9 @@ def test_team_skill_create_rail_registers_full_workspace(
     assert rail is not None
 
     captured: dict[str, object] = {}
+    team_rail = SimpleNamespace(
+        bind_review_feedback_skill_create_rail=MagicMock(),
+    )
 
     class _RecorderTeamManager:
         def register_team_live_rail(self, session_id, agent, registered_rail) -> None:
@@ -1806,6 +1823,9 @@ def test_team_skill_create_rail_registers_full_workspace(
 
         def register_team_skill_create_rail(self, session_id, registered_rail) -> None:
             captured["create_rail"] = (session_id, registered_rail)
+
+        def get_team_skill_rail(self, session_id):
+            return team_rail
 
         def get_team_rail_context(self, session_id):
             return None
@@ -1824,6 +1844,7 @@ def test_team_skill_create_rail_registers_full_workspace(
     )
     rail.init(fake_agent)
 
+    team_rail.bind_review_feedback_skill_create_rail.assert_called_once_with(rail)
     workspace = captured["rail_context"].team_workspace
     assert workspace.root_dir == "/tmp/team-x"
     # The team owns no skills/ directory: the library is the global one.

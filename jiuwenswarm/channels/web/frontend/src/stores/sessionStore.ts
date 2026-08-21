@@ -339,6 +339,8 @@ export interface SessionRuntime {
   teamHistoryMessages: Message[];
   /** 当前会话输入栏已选中的技能名（用于随消息发送） */
   selectedSkills: string[];
+  /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
+  metadata?: Record<string, unknown>;
 }
 
 function createEmptyRuntime(): SessionRuntime {
@@ -363,6 +365,7 @@ function createEmptyRuntime(): SessionRuntime {
     teamMemberContextCompression: {},
     teamHistoryMessages: [],
     selectedSkills: [],
+    metadata: undefined,
   };
 }
 
@@ -423,6 +426,8 @@ interface SessionState {
   removeSelectedSkill: (sessionId: string, skill: string) => void;
   /** 输入栏已选技能：清空 */
   clearSelectedSkills: (sessionId: string) => void;
+  /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
+  setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
   addTeamMember: (sessionId: string, member: TeamMember) => void;
   updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
   setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
@@ -970,6 +975,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, selectedSkills: [] },
+        },
+      };
+    });
+  },
+
+  setSessionMetadata: (sessionId, metadata) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, metadata: metadata ?? undefined },
         },
       };
     });

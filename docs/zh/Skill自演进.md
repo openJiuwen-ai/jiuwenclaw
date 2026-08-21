@@ -42,11 +42,22 @@ react:
 
 系统会在**每次完整对话结束后**（`after_invoke` 阶段）统一检测演进信号，确保拥有完整的对话上下文来判断。当检测到执行异常或用户纠错时，会生成演进记录。
 
-系统会自动识别可演进信号并生成候选经验。是否需要用户确认取决于角色和 `auto_save` 配置；经验保存后，下次调用该 Skill 时会自动加载。
+系统会自动识别可演进信号并生成候选经验。是否需要用户确认取决于角色和 `auto_save` 配置；默认 `auto_save=false`，常规全局经验需要确认审批后才会写入。经验保存后，下次调用该 Skill 时会自动加载。
 
 ![自动触发](../assets/images/skill演进_自动触发.png)
 
-### 2.3 手动触发演进
+### 2.3 Reviewer Feedback 驱动的团队演进
+
+在 scheduled 团队中，当 Task 验收失败且开启 `react.evolution.skill_evolution` 时，系统会对 Reviewer Feedback 进行归因：
+
+- 每个验收失败的 Task Feedback 都会先由归因模型独立转译为结构化 observation。
+- Skill 缺陷：保留 observation；全部 Task 结束后按 Skill 汇总，再交给原有 Team Skill 演进与审批流程。
+- 执行者失误或无法归因：记录失败，不修改 Skill。
+- 无可归因 Skill 且跨 Task 重复出现相同可复用模式：生成新 Team Skill 审批。
+
+Reviewer Feedback 链路不会创建或更新成员私有 Skill 副本。统一自演进开关默认关闭，Team Skill 更新和新建 Skill 默认均需审批。
+
+### 2.4 手动触发演进
 
 如果希望立即为某个 Skill 触发演进，可以输入：
 
@@ -64,7 +75,7 @@ react:
 
 ![手动触发](../assets/images/skill演进_手动触发.png)
 
-### 2.4 查看演进状态
+### 2.5 查看演进状态
 
 想知道哪些 Skill 有待固化的演进经验，可以输入：
 
@@ -76,7 +87,7 @@ react:
 
 ![信息总览](../assets/images/skill演进_查看和整理经验.png)
 
-### 2.5 管理演进经验
+### 2.6 管理演进经验
 
 演进经验存储在 Skill 目录下的 `evolutions.json` 文件中（首次触发演进时才会创建该文件，未触发时可能不存在），你可以直接编辑该文件来管理演进经验：
 

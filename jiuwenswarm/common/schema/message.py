@@ -108,6 +108,10 @@ class ReqMethod(Enum):
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
+    SKILLS_VERSIONS_LIST = "skills.versions.list"
+    SKILLS_FILES_LIST = "skills.files.list"
+    SKILLS_FILES_GET = "skills.files.get"
+    SKILLS_REBUILD = "skills.rebuild"
     SKILLS_TOGGLE = "skills.toggle"
     # Per-workspace Skill visibility (team mode): the Skill entities themselves
     # live in exactly one global library, so who may see which Skill is metadata

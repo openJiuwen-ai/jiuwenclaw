@@ -58,7 +58,7 @@ def _serve_file(
     monkeypatch.setattr(
         web_file_download,
         "validate_file_download_token",
-        lambda _token: {"path": str(file_path)},
+        lambda _token, **_kwargs: {"path": str(file_path)},
     )
     handler = _DownloadHandlerStub(command=command, headers=headers)
     _SpaStaticHandler._handle_file_download(handler, query)

@@ -612,6 +612,99 @@ def _update_skills_state_for_builtin(
         logger.error(f"保存技能状态文件失败: {e}")
 
 
+def _repair_skill_creator_normal_frontmatter(normal_dir: Path) -> None:
+    """将 ``skill-creator-normal/SKILL.md`` 中残留的 ``name: skill-creator`` 改为目录名.
+
+    仅改目录、不改正文 name 时，skills.list 会扫出两个同名 ``skill-creator``，
+    前端 ``key={skill.name}`` 在切换「团队技能」等过滤时会叠出重复卡片。
+    """
+    skill_md = normal_dir / "SKILL.md"
+    if not skill_md.is_file():
+        return
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "name: skill-creator-normal" in text:
+        return
+    if "name: skill-creator" not in text:
+        return
+    # 新路由入口文案不应落在 normal 目录；若误判则跳过
+    router_markers = (
+        "Routes skill creation",
+        "Unified entry point",
+        "统一入口",
+    )
+    if any(marker in text for marker in router_markers):
+        return
+    updated = text.replace("name: skill-creator", "name: skill-creator-normal", 1)
+    if updated == text:
+        return
+    try:
+        skill_md.write_text(updated, encoding="utf-8")
+        logger.info("已修复 skill-creator-normal frontmatter name")
+    except OSError as exc:
+        logger.warning(f"修复 skill-creator-normal frontmatter 失败: {exc}")
+
+
+def _migrate_skill_creator_router_rename(user_skills_dir: Path) -> None:
+    """一次性迁移：skill-creator-router → skill-creator，旧 skill-creator → skill-creator-normal.
+
+    避免用户目录已有旧 ``skill-creator`` 时跳过安装，导致装不上新的路由入口。
+    迁移后删除旧 router 目录，由后续默认安装从内置资源拷贝新的 ``skill-creator``。
+    """
+    old_router = user_skills_dir / "skill-creator-router"
+    old_creator = user_skills_dir / "skill-creator"
+    normal = user_skills_dir / "skill-creator-normal"
+
+    def _looks_like_legacy_monadic_creator(skill_dir: Path) -> bool:
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return False
+        try:
+            text = skill_md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        # 新路由 / 旧 router 文案
+        router_markers = (
+            "Routes skill creation",
+            "Unified entry point",
+            "统一入口",
+            "创建/修改的**路由**",
+            "创建/修改的**分发器**",
+        )
+        if any(marker in text for marker in router_markers):
+            return False
+        has_legacy_name = "name: skill-creator" in text
+        has_normal_name = "name: skill-creator-normal" in text
+        return has_legacy_name or has_normal_name
+
+    try:
+        if old_router.is_dir():
+            if old_creator.is_dir() and not normal.exists():
+                old_creator.rename(normal)
+                logger.info("已迁移默认技能: skill-creator -> skill-creator-normal")
+            elif old_creator.is_dir() and normal.exists():
+                shutil.rmtree(old_creator)
+                logger.info("已移除冲突的旧 skill-creator，将安装新的路由 skill-creator")
+            shutil.rmtree(old_router)
+            logger.info("已移除旧 skill-creator-router，将安装新的路由 skill-creator")
+        elif (
+            old_creator.is_dir()
+            and not normal.exists()
+            and _looks_like_legacy_monadic_creator(old_creator)
+        ):
+            # 仅有旧单体 skill-creator、尚无 skill-creator-normal
+            old_creator.rename(normal)
+            logger.info("已迁移默认技能: skill-creator -> skill-creator-normal（无 router 目录）")
+
+        # 无论本次是否刚改名：修复已存在的 normal 目录残留 name
+        if normal.is_dir():
+            _repair_skill_creator_normal_frontmatter(normal)
+    except OSError as exc:
+        logger.warning(f"skill-creator 重命名迁移失败，将尝试按默认列表安装: {exc}")
+
+
 def _install_default_builtin_skills(
     builtin_dir: Path,
     user_skills_dir: Path,
@@ -621,8 +714,10 @@ def _install_default_builtin_skills(
     """安装默认的内置技能到用户技能目录.
 
     默认安装的技能：
-    - skill-creator: 技能创建助手
-    - swarmskill-creator: Swarm技能创建助手
+    - skill-creator: 所有 Skill Creator 的统一入口（创建/修改路由）
+    - skill-creator-normal: 单体技能创建助手（由 skill-creator 路由选中）
+    - swarmskill-creator: Swarm技能创建助手（由 skill-creator 路由选中）
+    - skill-omni-creation: 链接/网页/视频技能创建助手（由 skill-creator 路由选中）
     - huawei-cloud-maas-setup: 华为云MaaS购买与配置引导
 
     Args:
@@ -632,13 +727,20 @@ def _install_default_builtin_skills(
         cumulative_diff: 累积的文件变更追踪结果
     """
     # 定义默认安装的技能列表
-    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
+    default_skills = [
+        "skill-creator",
+        "skill-creator-normal",
+        "swarmskill-creator",
+        "skill-omni-creation",
+        "huawei-cloud-maas-setup",
+    ]
 
     if not builtin_dir.exists() or not builtin_dir.is_dir():
         logger.warning(f"内置技能目录不存在，跳过默认技能安装: {builtin_dir}")
         return
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)
+    _migrate_skill_creator_router_rename(user_skills_dir)
 
     # 记录成功安装的技能，用于后续更新状态文件
     installed_skills = []
@@ -691,9 +793,16 @@ def ensure_default_builtin_skills() -> None:
         logger.warning(f"内置技能目录不存在，跳过默认技能补齐: {builtin_dir}")
         return
 
-    default_skills = ["skill-creator", "swarmskill-creator", "huawei-cloud-maas-setup"]
+    default_skills = [
+        "skill-creator",
+        "skill-creator-normal",
+        "swarmskill-creator",
+        "skill-omni-creation",
+        "huawei-cloud-maas-setup",
+    ]
 
     user_skills_dir.mkdir(parents=True, exist_ok=True)
+    _migrate_skill_creator_router_rename(user_skills_dir)
 
     installed_skills = []
     for skill_name in default_skills:

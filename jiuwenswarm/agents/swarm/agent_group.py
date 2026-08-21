@@ -177,10 +177,10 @@ def _load_member_template(
         manifest_path,
         label=f"AgentTemplate manifest for {agent_name!r}",
     )
-    if manifest.get("packageType") != "agent_template":
+    if manifest.get("package_type") != "agent_template":
         raise ValueError(
             f"AgentTemplate {agent_name!r} must declare "
-            "packageType='agent_template'"
+            "package_type='agent_template'"
         )
     persona_dir = _persona_dir(agent_dir, manifest, agent_name=agent_name)
 
@@ -198,10 +198,15 @@ def _load_member_template(
         )
 
     template = load_agent_template_package(manifest_path)
+    # Team member identity is defined by the AgentGroup roster/directory;
+    # the template's top-level name remains its user-facing display name.
     if template.agent_card.id != agent_name:
-        raise ValueError(
-            f"AgentTemplate derived id mismatch: directory={agent_name!r}, "
-            f"agent id={template.agent_card.id!r}"
+        template = template.model_copy(
+            update={
+                "agent_card": template.agent_card.model_copy(
+                    update={"id": agent_name}
+                )
+            }
         )
 
     # A leader manifest normally uses persona.dir="." so the standard loader

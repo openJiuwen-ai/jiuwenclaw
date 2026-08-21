@@ -1872,8 +1872,13 @@ function AppContent() {
   // 监听从 SkillPanel 发来的"新建会话并插入技能"事件
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string; metadata?: Record<string, unknown> };
       enterNewConversation();
+      // 存储 metadata，sendMessage 时随 chat.send 发送后清除（skill-creator 统一入口等场景）
+      if (detail.metadata) {
+        useSessionStore.getState().ensureRuntime(NEW_CONVERSATION_ID);
+        useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, detail.metadata);
+      }
       // 延迟派发，确保 ChatPanel/InputArea 已挂载并注册了事件监听器
       setTimeout(() => {
         window.dispatchEvent(new CustomEvent('chat-input-insert-skill', {
@@ -2003,6 +2008,13 @@ function AppContent() {
         const pendingSkills = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.selectedSkills ?? [];
         pendingSkills.forEach((skill) => useSessionStore.getState().addSelectedSkill(newSid, skill));
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
+        // 迁移 'new' 会话的 metadata 到新会话（skill-creator 统一入口等场景）
+        // 必须在 removeRuntime 之前完成，否则 NEW 会话 runtime 会被清掉
+        const pendingMetadata = useSessionStore.getState().getRuntime(NEW_CONVERSATION_ID)?.metadata;
+        if (pendingMetadata) {
+          useSessionStore.getState().setSessionMetadata(newSid, pendingMetadata);
+          useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, null);
+        }
         pendingNewConversationRef.current = false;
         useSessionStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         // Plan 开关是按 session 存的。欢迎页上开关记在 'new' 名下，这里必须搬到真实

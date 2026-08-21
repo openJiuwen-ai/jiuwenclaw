@@ -1329,7 +1329,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useGoalStore.getState().recordGoalObjectiveText(sessionId, objective);
         }
         try {
-          await sendGoalStreamCommand({ sessionId, action, objective, mode });
+          const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
+          await sendGoalStreamCommand({
+            sessionId,
+            action,
+            objective,
+            mode,
+            modelName: selectedModel,
+          });
         } catch (error) {
           // WS 层直接发送失败（未连接等）：这是能明确识别的失败，弹提示；set 不做进一步兜底
           // （"没有创建"本来就成立，不需要额外收敛），resume 按 b/c 步骤的约定补一次 get 兜底。
@@ -1542,6 +1549,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const activeGoal = useGoalStore.getState().getRuntime(sessionId)?.goal;
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+        const sessionMetadata = useSessionStore.getState().getRuntime(sessionId)?.metadata;
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1553,7 +1561,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           skills: selectedSkills,
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
+          ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
         });
+        if (sessionMetadata) {
+          useSessionStore.getState().setSessionMetadata(sessionId, null);
+        }
         consumePlanEntryMark(sessionId, outgoingMode);
         return true;
       } catch (error) {

@@ -4377,6 +4377,32 @@ class JiuWenSwarmDeepAdapter:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _session_stored_model_name(session_id: str | None) -> str:
+        """Read the model last persisted on this session, if any."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return ""
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            metadata = get_session_metadata(
+                sid,
+                cache_bust=True,
+                enable_writeback=False,
+            )
+        except Exception:
+            logger.debug(
+                "[JiuWenSwarmDeepAdapter] failed to load session model for %s",
+                sid,
+                exc_info=True,
+            )
+            return ""
+        stored = metadata.get("model") if isinstance(metadata, dict) else None
+        return stored.strip() if isinstance(stored, str) else ""
+
     def _resolve_model_by_name(self, requested_model_name: str = "") -> Model | None:
         """Resolve the exact model object that will be used."""
         requested = (requested_model_name or "").strip()
@@ -4431,14 +4457,36 @@ class JiuWenSwarmDeepAdapter:
         )
         return self._model
 
+    def _requested_model_name(self, request: AgentRequest) -> str:
+        """Resolve the model name this request should use.
+
+        Explicit ``model_name`` wins. Otherwise, if this adapter has not yet
+        applied a model, fall back to the session's persisted ``model`` so
+        ``command.goal`` / interrupt resume can still hit the user's choice.
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        requested = str(params.get("model_name") or "").strip()
+        if requested:
+            return requested
+        if getattr(self, "_last_resolved_model", None) is not None:
+            return ""
+        return self._session_stored_model_name(getattr(request, "session_id", None))
+
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
         """根据请求中的 model_name 参数查找对应模型（支持别名），未匹配则回退默认模型。
 
         支持两种格式：
         - 纯 model_name：查找 is_default=true 的条目
         - {model_name}#{index}：查找指定索引的条目
+
+        请求未显式携带 model_name 时：最近一次已应用模型 → 会话 metadata.model
+        → 适配器默认模型。避免 command.goal / 中断恢复在适配器重建后掉回默认。
         """
-        requested = (request.params.get("model_name") or "").strip()
+        requested = self._requested_model_name(request)
+        if not requested:
+            last = getattr(self, "_last_resolved_model", None)
+            if last is not None:
+                return last
         model = self._resolve_model_by_name(requested)
         if model is None:
             raise RuntimeError("No model configured for request")
@@ -4626,6 +4674,11 @@ class JiuWenSwarmDeepAdapter:
             config.model_name = model.model_config.model_name
             config.model_client_config = model.model_client_config
             config.model_config_obj = model.model_config
+        # TaskCompletionRail 的 transcript assessor 读的是 deep_config.model，
+        # 只换 react_agent 会让每轮目标评估仍打到构建时的默认模型。
+        deep_config = getattr(self._instance, "deep_config", None)
+        if deep_config is not None:
+            deep_config.model = model
         self._model_request_config = model.model_config
         # 记录最近一次解析并应用的模型，供 ask_user_interrupt 等不带 model_name
         # 的中断恢复请求回退使用，避免回退到 config.yaml 默认占位模型。
@@ -9449,9 +9502,28 @@ class JiuWenSwarmDeepAdapter:
 
         if accepted:
             await approve_evolution_records(rail, request_id, approved_record_ids)
-            # Skills live in a single physical library, so an approved evolution is visible to
-            # every agent as soon as it lands: SkillUseRail re-stats the library on each model
-            # call and picks the change up on its own. No view has to be re-linked.
+            pop_continuation = getattr(rail, "pop_approval_continuation", None)
+            continuation = (
+                pop_continuation(request_id)
+                if callable(pop_continuation)
+                else None
+            )
+            if continuation:
+                from jiuwenswarm.agents.harness.team.team_manager import get_team_manager
+
+                delivered, reason = await get_team_manager(channel_id).interact(
+                    session_id,
+                    continuation,
+                )
+                if not delivered:
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] approved evolution continuation "
+                        "failed: request_id=%s reason=%s",
+                        request_id,
+                        reason,
+                    )
+            # Skills live in one physical library, so no workspace links need
+            # refreshing after the approval has been persisted.
             logger.info("[JiuWenSwarmDeepAdapter] team skill evolve accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(rail, request_id)
@@ -10280,7 +10352,7 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
-        _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
+        _req_model = self._requested_model_name(request)
         if not self._has_valid_model_config(_req_model):
             return AgentResponse(
                 request_id=request.request_id,
@@ -10627,7 +10699,7 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
 
-        _req_model = (request.params.get("model_name") or "") if isinstance(request.params, dict) else ""
+        _req_model = self._requested_model_name(request)
         if not self._has_valid_model_config(_req_model):
             yield AgentResponseChunk(
                 request_id=request.request_id,
