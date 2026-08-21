@@ -4343,13 +4343,19 @@ class AgentWebSocketServer:
                                 reason="session.delete: ",
                             )
                         else:
-                            # The foreground chat stream may already be complete
-                            # while session-owned background work (for example
-                            # online Skill evolution) is still winding down.
-                            # Release the runtime first and require the manager's
-                            # post-cleanup check to prove that no session-scoped
-                            # adapter remains.  Only then is it safe to evict KVC
-                            # and remove checkpoint/history state.
+                            agent = self._agent_manager.get_agent_nowait(channel_id=channel_id)
+                            if agent is not None:
+                                adapter = self._resolve_adapter(agent)
+                                release_runtime = getattr(
+                                    adapter,
+                                    "release_subagent_runtime_for_session",
+                                    None,
+                                )
+                                if callable(release_runtime):
+                                    await release_runtime(
+                                        target,
+                                        reason="session_deleted",
+                                    )
                             await self._agent_manager.cleanup_session_runtime(
                                 channel_id=channel_id or "",
                                 session_id=target,
@@ -4842,7 +4848,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        subagent_id = params.get("subagent_id")
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            subagent_id=subagent_id if isinstance(subagent_id, str) else None,
+        )
         if data is None:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -5368,7 +5379,12 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         session_id = params.get("session_id")
         page_idx = params.get("page_idx")
-        data = self.get_conversation_history(session_id=session_id, page_idx=page_idx)
+        subagent_id = params.get("subagent_id")
+        data = self.get_conversation_history(
+            session_id=session_id,
+            page_idx=page_idx,
+            subagent_id=subagent_id if isinstance(subagent_id, str) else None,
+        )
         if data is None:
             err_chunk = AgentResponseChunk(
                 request_id=request.request_id,
@@ -5391,6 +5407,7 @@ class AgentWebSocketServer:
         messages = data.get("messages", [])
         total_pages = data.get("total_pages")
         page = data.get("page_idx")
+        response_subagent_id = data.get("subagent_id")
         sequence = 0
         # 仅 web 通道走分片流（前端 HistoryRecordReassembler 重组）。
         # 其他通道（tui/acp/...）不认 _part 字段，走旧 _sanitize_history_record_for_wire
@@ -5410,6 +5427,7 @@ class AgentWebSocketServer:
                             "event_type": "history.message",
                             "message": chunk_record,
                             "session_id": str(session_id or ""),
+                            "subagent_id": str(response_subagent_id or subagent_id or ""),
                             "total_pages": total_pages,
                             "page_idx": page,
                         },
@@ -5478,6 +5496,7 @@ class AgentWebSocketServer:
                 "event_type": "history.message",
                 "status": "done",
                 "session_id": str(session_id or ""),
+                "subagent_id": str(response_subagent_id or subagent_id or ""),
                 "total_pages": total_pages,
                 "page_idx": page,
             },
@@ -9048,7 +9067,12 @@ class AgentWebSocketServer:
         return self._agent_manager
 
     @staticmethod
-    def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
+    def get_conversation_history(
+        session_id: str,
+        page_idx: int,
+        *,
+        subagent_id: str | None = None,
+    ) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录
         if not isinstance(session_id, str) or not session_id.strip():
             return None
@@ -9056,10 +9080,24 @@ class AgentWebSocketServer:
             return None
 
         normalized_session_id = session_id.strip()
-        if not history_exists(normalized_session_id):
+        normalized_subagent_id = (
+            subagent_id.strip() if isinstance(subagent_id, str) and subagent_id.strip() else None
+        )
+        if normalized_subagent_id:
+            if not history_exists(normalized_session_id, subagent_id=normalized_subagent_id):
+                return {
+                    "messages": [],
+                    "total_pages": 1,
+                    "page_idx": page_idx,
+                    "subagent_id": normalized_subagent_id,
+                }
+        elif not history_exists(normalized_session_id):
             return None
         try:
-            raw = load_history_records(normalized_session_id)
+            raw = load_history_records(
+                normalized_session_id,
+                subagent_id=normalized_subagent_id,
+            )
         except Exception:
             return None
         if not isinstance(raw, list):
@@ -9083,19 +9121,24 @@ class AgentWebSocketServer:
         # 切片器拿到的就只剩 16KB，分片就失去意义。
         page_messages = list(ordered[start:end])
         logger.debug(
-            "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
+            "[history.get] session_id=%s subagent_id=%s page_idx=%s "
+            "raw_total=%s restorable_total=%s total_pages=%s returned=%s",
             normalized_session_id,
+            normalized_subagent_id or "",
             page_idx,
             len(raw),
             total,
             total_pages,
             len(page_messages),
         )
-        return {
+        result = {
             "messages": page_messages,
             "total_pages": total_pages,
             "page_idx": page_idx,
         }
+        if normalized_subagent_id:
+            result["subagent_id"] = normalized_subagent_id
+        return result
 
     async def _handle_initialize(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
