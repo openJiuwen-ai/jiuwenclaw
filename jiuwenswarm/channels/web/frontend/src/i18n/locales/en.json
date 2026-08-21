@@ -1487,9 +1487,9 @@
       "unpublished": "Unpublished"
     },
     "skillTypes": {
-      "industry": "Industry Skill Packs",
+      "skill": "Skill Pack",
       "team": "Team Skills",
-      "skill": "Multimodal"
+      "multimodal": "Multimodal"
     },
     "marketplaceCategories": {
       "all": "All",
@@ -1558,6 +1558,7 @@
       "goToChat": "Go to Chat",
       "goTry": "Try It",
       "publish": "Publish",
+      "rebuild": "Rebuild",
       "synthesizeNewVersion": "Rebuild Skill",
       "synthesizeTooltip": "Synthesize accumulated skill experience with the original skill to generate a new version"
     },
@@ -1649,6 +1650,15 @@
     "detail": {
       "basicInfo": "Basic Info",
       "versionManage": "Version Management",
+      "versionsLoadFailed": "Failed to load versions",
+      "noVersions": "No version records",
+      "fileTree": "File Tree",
+      "filesLoadFailed": "Failed to load file list",
+      "noFiles": "No files",
+      "binaryFileDownload": "This file cannot be previewed as text. Please download it.",
+      "noPreview": "Unable to preview this file",
+      "contentPreview": "Content Preview",
+      "selectFileToPreview": "Select a file on the left to preview",
       "tabs": {
         "contentDetail": "Content Details",
         "filePreview": "File Preview",
