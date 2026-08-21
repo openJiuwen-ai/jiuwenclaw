@@ -41,6 +41,7 @@ _VERB_BY_TOOL: dict[str, str] = {
     "run_python": "运行代码", "python": "运行代码", "execute_python": "运行代码",
     "run_code": "运行代码", "execute_code": "运行代码", "code_interpreter": "运行代码", "code": "运行代码",
     "todo_create": "创建待办", "todo_modify": "更新待办", "todo_list": "查看待办", "todo_get": "读取待办",
+    "todo_complete": "完成任务", "todo_insert": "插入任务", "todo_remove": "删除任务",
     "skill_tool": "查看技能",
     # team tools often omit call_goal
     "spawn_member": "创建成员", "spawn_teammate": "创建成员",
@@ -53,7 +54,26 @@ _FILE_VERBS = frozenset(["写入", "读取", "编辑", "删除", "移动", "重�
 _QUERY_VERBS = frozenset(["搜索", "查找", "联网搜索"])
 _COMMAND_VERBS = frozenset(["执行", "运行代码"])
 _SKILL_VERBS = frozenset(["查看技能"])
-_TODO_VERBS = frozenset(["创建待办", "更新待办", "查看待办", "读取待办"])
+_TODO_VERBS = frozenset(
+    ["创建待办", "更新待办", "查看待办", "读取待办", "完成任务", "插入任务", "删除任务"]
+)
+
+# todo_modify 的 action（openjiuwen schema：update/delete/cancel/append/insert_*）
+_TODO_ACTION_LABELS = {
+    "update": "更新任务",
+    "delete": "删除任务",
+    "cancel": "取消任务",
+    "append": "追加任务",
+    "insert_after": "插入任务",
+    "insert_before": "插入任务",
+}
+# todo 项 status 值（TodoStatus 枚举）
+_TODO_STATUS_LABELS = {
+    "completed": "完成",
+    "in_progress": "进行中",
+    "pending": "待办",
+    "cancelled": "取消",
+}
 
 _FILE_ARG_KEYS = (
     "target_file", "file_path", "filepath", "filePath", "path",
@@ -132,6 +152,22 @@ def _basename(path: str) -> str:
 def _truncate(value: str, max_len: int) -> str:
     one_line = " ".join(value.split())
     return one_line[:max_len] + "…" if len(one_line) > max_len else one_line
+
+
+def _todo_item_label(item: Any) -> str:
+    """从 todo 项提取可读标签：str 原样；dict 依次取 content/activeForm/description/id。"""
+    if isinstance(item, str) and item.strip():
+        return item.strip()
+    if isinstance(item, Mapping):
+        for key in ("content", "activeForm", "description", "id"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _todo_count_suffix(items: list) -> str:
+    return f" 等{len(items)}项" if len(items) > 1 else ""
 
 
 def inject_call_goal_schema(parameters: Any) -> None:
@@ -265,14 +301,57 @@ def build_tool_display_name(name: str, arguments: Any) -> str:
     if verb in _SKILL_VERBS and skill:
         return f"{verb} {skill}"
     if verb == "创建待办":
+        # deep 模式 tasks 为 str 列表；code 模式为 content/activeForm 字典列表。
         tasks = args.get("tasks")
-        count = len(tasks) if isinstance(tasks, list) else 0
-        return f"{verb} {count}" if count else verb
+        if not isinstance(tasks, list):
+            tasks = args.get("todos")
+        items = tasks if isinstance(tasks, list) else []
+        if not items:
+            return verb
+        first = _todo_item_label(items[0])
+        if first:
+            return f"{verb}：{_truncate(first, 32)}{_todo_count_suffix(items)}"
+        return f"{verb} {len(items)} 项"
     if verb == "更新待办":
-        action = args.get("action")
-        if isinstance(action, str) and action.strip():
-            return f"{verb} {action.strip()}"
+        action = str(args.get("action") or "").strip().lower()
+        ids = args.get("ids")
+        todos = args.get("todos")
+        if not isinstance(todos, list):
+            todo_data = args.get("todo_data")
+            if isinstance(todo_data, Mapping) and isinstance(todo_data.get("items"), list):
+                todos = todo_data["items"]
+        targets: list[str] = []
+        if isinstance(ids, list):
+            targets = [str(i).strip() for i in ids if str(i).strip()]
+        elif isinstance(todos, list):
+            targets = [label for label in (_todo_item_label(t) for t in todos) if label]
+        label = _TODO_ACTION_LABELS.get(action, action)
+        if action == "update" and isinstance(todos, list) and todos:
+            first = todos[0]
+            if isinstance(first, Mapping):
+                status = _TODO_STATUS_LABELS.get(
+                    str(first.get("status") or "").strip().lower(), ""
+                )
+                if status in ("完成", "取消"):
+                    label = f"{status}任务"
+        if targets:
+            target = _truncate(targets[0], 32)
+            if len(targets) > 1:
+                target += f" 等{len(targets)}项"
+            return f"{verb}：{label} {target}" if label else f"{verb}：{target}"
         return verb
+    if verb in ("完成任务", "删除任务"):
+        idx = args.get("idx")
+        return f"{verb} {idx}" if idx else verb
+    if verb == "插入任务":
+        tasks = args.get("tasks")
+        items = tasks if isinstance(tasks, list) else []
+        if items:
+            first = _todo_item_label(items[0])
+            if first:
+                return f"{verb}：{_truncate(first, 32)}{_todo_count_suffix(items)}"
+        idx = args.get("idx")
+        return f"{verb} {idx}" if idx else verb
     if verb in _TODO_VERBS:
         return verb
 
