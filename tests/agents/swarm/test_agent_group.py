@@ -31,8 +31,8 @@ def _minimal_group(tmp_path: Path) -> Path:
         _write_json(
             group / "agents" / name / "manifest.json",
             {
-                "packageType": "agent_template",
-                "name": name,
+                "package_type": "agent_template",
+                "name": f"{name} display name",
                 "description": f"{name} description",
                 "persona": {"dir": "." if name == "leader" else "./persona"},
             },
@@ -45,6 +45,19 @@ def _minimal_group(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return group
+
+
+def test_load_agent_group_uses_directory_as_id_and_name_as_display_name(
+    tmp_path: Path,
+) -> None:
+    group = _minimal_group(tmp_path)
+
+    templates = load_agent_group_package(group)
+
+    assert templates["leader"].agent_card.id == "leader"
+    assert templates["leader"].agent_card.name == "leader display name"
+    assert templates["member1"].agent_card.id == "member1"
+    assert templates["member1"].agent_card.name == "member1 display name"
 
 
 def test_load_agent_group_rejects_member_agent_md(tmp_path: Path) -> None:

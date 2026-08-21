@@ -400,7 +400,7 @@ def _build_list_card(
 ) -> dict | None:
     """Build one list card with marketplace status overlay."""
     manifest = _read_package_manifest(pkg_dir)
-    if manifest is None or manifest.get("packageType") != package_type:
+    if manifest is None or manifest.get("package_type") != package_type:
         return None
     category = manifest.get("category")
     card: dict[str, Any] = {
@@ -432,7 +432,7 @@ def _build_show_card(
 ) -> dict | None:
     """Build one show/detail card (no components; skills/tools/rails/mcps mapped)."""
     manifest = _read_package_manifest(pkg_dir)
-    if manifest is None or manifest.get("packageType") != package_type:
+    if manifest is None or manifest.get("package_type") != package_type:
         return None
     resolved_source = source if source is not None else _source_from_pkg_dir(pkg_dir)
     avatar = manifest.get("avatar")
@@ -752,10 +752,10 @@ def _validate_package_manifest(
     manifest = _read_package_manifest(candidate)
     if manifest is None:
         raise ValueError(f"{kind_label} package missing/corrupt manifest.json: {candidate.name}")
-    declared = manifest.get("packageType")
+    declared = manifest.get("package_type")
     if declared != package_type:
         raise ValueError(
-            f"{kind_label} package wrong packageType: {candidate.name} "
+            f"{kind_label} package wrong package_type: {candidate.name} "
             f"(expected {package_type}, got {declared!r})"
         )
     return candidate
@@ -1276,8 +1276,9 @@ def create_agent_template(params: dict) -> None:
         (persona_dir / f"{package_id}.md").write_text(persona, encoding="utf-8")
         _copy_workspace_skills(pkg_dir, skill_names)
         manifest = {
-            "packageType": "agent_template",
-            "agentCard": {"id": package_id, "name": name, "description": description},
+            "package_type": "agent_template",
+            "name": name,
+            "description": description,
             "persona": {"dir": "./persona"},
             "displayName": {"zh": name, "en": name},
             "displayDescription": {"zh": description, "en": description},
@@ -1318,7 +1319,7 @@ def create_plugin_package(params: dict) -> None:
         pkg_dir.mkdir(parents=False, exist_ok=False)
         _copy_workspace_skills(pkg_dir, skill_names)
         manifest = {
-            "packageType": "plugin",
+            "package_type": "plugin",
             "id": package_id,
             "name": name,
             "description": description,
