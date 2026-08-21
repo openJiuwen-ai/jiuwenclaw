@@ -8,6 +8,10 @@ from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
 
+# bash 工具偶发只回 content="Exit code 1\n..."，不带 exit_code 字段；
+# 若不识别会把失败当成功（P9 convert 假完成）。
+_EXIT_CODE_RE = re.compile(r"(?im)^\s*Exit code\s+(\d+)\s*$")
+
 
 class BashExecError(RuntimeError):
     """bash 命令执行失败（required=True 时抛出）。"""
@@ -47,6 +51,39 @@ def cli_path(subcommand: str, pptx_root: str) -> str:
     if not cli.is_file():
         raise BashExecError(f"cli.js 不存在: {cli}")
     return f"node {quote_path(str(cli))} {subcommand}"
+
+
+def _exit_code_from_text(*parts: str) -> int | None:
+    for part in parts:
+        if not part:
+            continue
+        for line in str(part).splitlines():
+            matched = _EXIT_CODE_RE.match(line.strip())
+            if matched:
+                return int(matched.group(1))
+    return None
+
+
+def _coerce_exit_code(
+    exit_code: int,
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    success: bool | None = None,
+    error: str = "",
+) -> int:
+    if exit_code != 0:
+        return exit_code
+    if success is False:
+        return 1
+    if error.strip():
+        return 1
+    if "[ERROR]" in stdout or "[ERROR]" in stderr:
+        return 1
+    inferred = _exit_code_from_text(stdout, stderr)
+    if inferred is not None and inferred != 0:
+        return inferred
+    return exit_code
 
 
 def normalize_tool_text(result: Any) -> str:
@@ -95,16 +132,25 @@ def parse_bash_payload(text: str) -> BashResult:
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
-        return BashResult(exit_code=0, stdout=stripped, stderr="", raw=text)
+        exit_code = _coerce_exit_code(0, stdout=stripped)
+        return BashResult(exit_code=exit_code, stdout=stripped, stderr="", raw=text)
 
     if not isinstance(payload, dict):
-        return BashResult(exit_code=0, stdout=stripped, stderr="", raw=text)
+        exit_code = _coerce_exit_code(0, stdout=stripped)
+        return BashResult(exit_code=exit_code, stdout=stripped, stderr="", raw=text)
 
     exit_code = int(payload.get("exit_code", 0) or 0)
-    stdout = str(payload.get("stdout") or "")
+    stdout = str(payload.get("stdout") or payload.get("content") or "")
     stderr = str(payload.get("stderr") or "")
-    if exit_code == 0 and "[ERROR]" in stdout:
-        exit_code = 1
+    success = payload.get("success")
+    error = str(payload.get("error") or "")
+    exit_code = _coerce_exit_code(
+        exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        success=success if isinstance(success, bool) else None,
+        error=error,
+    )
     return BashResult(exit_code=exit_code, stdout=stdout, stderr=stderr, raw=text)
 
 
@@ -148,14 +194,23 @@ def _extract_bash_result(raw: Any) -> BashResult | None:
             stdout = value
             break
     stderr = str(data.get("stderr") or "")
-    if exit_code == 0 and "[ERROR]" in stdout:
-        exit_code = 1
-    if exit_code == 0 and success is False:
-        exit_code = 1
-    if exit_code == 0 and stdout:
-        parsed_exit = _parse_exit_code_from_text(stdout)
-        if parsed_exit is not None:
-            exit_code = parsed_exit
+    success = data.get("success")
+    if not isinstance(success, bool) and hasattr(raw, "success"):
+        # 直接属性访问；禁止 getattr（builtin skill_code AST 校验）
+        raw_success = raw.success
+        success = raw_success if isinstance(raw_success, bool) else None
+    error = str(data.get("error") or "")
+    if not error and hasattr(raw, "error"):
+        raw_error = raw.error
+        if isinstance(raw_error, str):
+            error = raw_error
+    exit_code = _coerce_exit_code(
+        exit_code,
+        stdout=stdout,
+        stderr=stderr,
+        success=success if isinstance(success, bool) else None,
+        error=error,
+    )
     return BashResult(exit_code=exit_code, stdout=stdout, stderr=stderr, raw=str(raw))
 
 

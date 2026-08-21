@@ -4,7 +4,6 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from jiuwenswarm.server.runtime.skill_turbo.plan_node import AbortError, PlanNode
@@ -53,24 +52,6 @@ class ExportPaths:
     pptx_root: str
 
 
-def _pptx_exists_status(pptx_path: str) -> str:
-    """node stat 失败时的 pathlib 回退：存在且 ≥10KB→ok，>0→partial，否则 failed。"""
-    path = Path(pptx_path)
-    if path.is_file():
-        size = path.stat().st_size
-        if size >= 10 * 1024:
-            logger.info("[P9] PPTX Python fallback 验证通过 size=%d", size)
-            return "ok"
-        elif size > 0:
-            logger.warning("[P9] PPTX Python fallback 文件过小 size=%d", size)
-            return "partial"
-        else:
-            logger.warning("[P9] PPTX Python fallback 文件大小为 0")
-            return "failed"
-    logger.warning("[P9] PPTX 文件确认不存在: %s", pptx_path)
-    return "failed"
-
-
 class PPTExportNode(PlanNode):
     """P9 — PPTX 导出（对应 SKILL Stage 8）。"""
 
@@ -116,7 +97,9 @@ class PPTExportNode(PlanNode):
                 "- fill.js check 出现内容质量类 HARD 错误：export_status = failed（manifest 声明类警告忽略）\n"
                 "- snapshot-template-dna / template-safe fix 失败：export_status = failed\n"
                 "- cli.js convert 失败：export_status = failed，pptx_path 为空\n"
+                "- PPTX 不存在 / stat 失败：export_status = failed\n"
                 "- PPTX 文件过小（< 10KB）：export_status = partial\n"
+                "- 上游 missing_pages 非空或 ppt_gen_status=failed：export_status = failed\n"
                 "- bash 不可用：export_status = failed\n"
             ),
         )
@@ -142,6 +125,24 @@ class PPTExportNode(PlanNode):
         pptx_path = f"{output_dir}/{pptx_filename}"
 
         pptx_root = str(inputs.get("pptx_root") or "").strip()
+
+        # 上游 P8 缺页时 convert 必然因页码不连续失败；提前硬失败，避免假 status=ok。
+        missing_pages = inputs.get("missing_pages") or []
+        if isinstance(missing_pages, list) and missing_pages:
+            logger.error("[P9] 上游页面缺失 missing=%s，拒绝导出", missing_pages)
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+        ppt_gen_status = str(inputs.get("ppt_gen_status") or "").strip()
+        if ppt_gen_status == "failed":
+            logger.error("[P9] 上游 ppt_gen_status=failed，拒绝导出")
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
 
         # 模板画布分支：style_mode == template_canvas 时走模板终检导出流程
         style_mode = str(inputs.get("style_mode") or "").strip()
@@ -310,6 +311,14 @@ class PPTExportNode(PlanNode):
                 "export_status": "failed",
             }
 
+        export_status = await self._validate_pptx(pptx_path, pptx_root)
+        if export_status == "failed":
+            return {
+                "pptx_path": "",
+                "pptx_filename": pptx_filename,
+                "export_status": "failed",
+            }
+
         # 6. 产物硬闸
         try:
             artifact_cmd = (
@@ -325,11 +334,11 @@ class PPTExportNode(PlanNode):
         except BashExecError as e:
             logger.warning("[P9-TF] check-pptx-artifact 异常: %s（不阻塞交付）", e)
 
-        logger.info("[P9-TF] 模板终检导出完成: %s", pptx_path)
+        logger.info("[P9-TF] 模板终检导出完成: %s status=%s", pptx_path, export_status)
         return {
             "pptx_path": pptx_path,
             "pptx_filename": pptx_filename,
-            "export_status": "ok",
+            "export_status": export_status,
         }
 
     async def _run_convert(self, pages_dir: str, pptx_path: str, pptx_root: str) -> bool:
@@ -365,19 +374,15 @@ class PPTExportNode(PlanNode):
                 timeout_seconds=30, required=False, workdir=pptx_root,
             )
             if result.exit_code != 0:
-                logger.warning(
-                    "[P9] PPTX stat 失败 exit=%d，尝试 Python fallback: %s",
-                    result.exit_code, pptx_path,
-                )
-                return _pptx_exists_status(pptx_path)
-            stdout_stripped = result.stdout.strip()
-            if not stdout_stripped or not stdout_stripped.lstrip('-').isdigit():
-                logger.warning(
-                    "[P9] PPTX stat 输出非数字，尝试 Python fallback: %s",
-                    stdout_stripped[:200] if stdout_stripped else "(empty)",
-                )
-                return _pptx_exists_status(pptx_path)
-            size = int(stdout_stripped)
+                detail = (result.stderr or result.stdout or "").strip()
+                logger.error("[P9] PPTX 不存在或 stat 失败，导出判定 failed: %s", detail[:500])
+                return "failed"
+            size_text = (result.stdout or "").strip()
+            try:
+                size = int(size_text or "0")
+            except ValueError:
+                logger.error("[P9] PPTX 大小解析失败 stdout=%r", size_text[:200])
+                return "failed"
             if size < 10 * 1024:
                 logger.warning("[P9] PPTX 文件过小 size=%d < 10KB", size)
                 return "partial"
@@ -386,8 +391,8 @@ class PPTExportNode(PlanNode):
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
-            logger.warning("[P9] PPTX 验证失败，尝试 Python fallback: %s", e)
-            return _pptx_exists_status(pptx_path)
+            logger.error("[P9] PPTX 验证失败: %s", e)
+            return "failed"
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
