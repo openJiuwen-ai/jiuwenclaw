@@ -224,3 +224,10 @@ def test_installer_cleans_only_confirmed_stale_openjiuwen_descriptions():
     assert script.index("CleanupStaleOpenJiuwenDescriptions();") < script.index(
         "DoctorSucceeded := False;"
     )
+
+
+def test_installer_keeps_workswarm_upgrade_app_id():
+    script = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    assert "AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}" in script
+    assert "B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C" not in script
