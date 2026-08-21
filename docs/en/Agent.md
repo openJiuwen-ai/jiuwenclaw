@@ -154,13 +154,13 @@ Loadable modules. Each skill typically defines goals, steps, tool usage, and out
 
 #### 5. Memory
 
-Three kinds:
+Memory is organized into three files:
 
-- **User profile** — who you are, preferences, habits  
-- **Episodic** — events, decisions, conversation snippets  
-- **Semantic** — background knowledge and concepts  
+- **USER.md (user profile)** — Located at the workspace root; stores user identity, preferences, and habits
+- **MEMORY.md (long-term memory)** — Under `memory/`; stores durable, reusable content like decisions and persistent facts
+- **YYYY-MM-DD.md (daily log)** — Under `memory/daily_memory/`; archives daily runtime context and conversation snippets by date
 
-**Note:** Memory is mostly automatic; you can search history when needed.
+**Note:** Memory is mostly automatic; you can search history when needed. See [Memory](Memory.md) for the full structure.
 
 #### 6. Config
 
@@ -189,7 +189,7 @@ JiuwenSwarm supports multi-agent collaboration through team-based workflows to h
 - Result aggregation: The leader collects and integrates results from teammates  
 - Dynamic adjustment: Task assignments adapt based on execution progress  
 
-**Configuration:** Team settings are configured in the `team` section of `config/config.yaml`
+**Configuration:** Team settings are configured under `modes.team.<team_name>` in `config/config.yaml`
 
 > See team collaboration documentation for more details on multi-agent workflows.
 
@@ -244,7 +244,7 @@ C:\Users\<username>\.jiuwenswarm\
 | `agent/workspace/SOUL_ZH.md` | Values and persona (Chinese) | Customizable | Affects tone and style |
 | `agent/workspace/USER.md` | User profile and preferences | Auto-managed by system | Affects personalization; update via agent conversation |
 | `agent/workspace/skills/` | Skills | Add skills | Extends capabilities |
-| `agent/workspace/memory/` | Memory store (user profile, episodic, semantic) | Do not edit by hand | Risk of corrupting memory data |
+| `agent/workspace/memory/` | Memory store (MEMORY.md, USER.md, daily logs) | Do not edit by hand | Risk of corrupting memory data |
 | `agent/workspace/todo/` | Agent todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `todo/` | Global todo items storage | Auto-managed by system | Affects task tracking; manage via agent conversation |
 | `logs/` | Logs | View only | Used for troubleshooting |
