@@ -760,17 +760,18 @@ function RunNode({
     return detectPhaseLoops(topLevel);
   }, [run.phases]);
 
-  // Exhaustion hint source: explicit failure scope first, then the per-run
-  // ledger. A completed run can still finish over budget — its in-flight calls
-  // were settled after the limit was crossed — so the pill must not be gated
-  // on status === 'failed'. Session-level budget is deliberately NOT surfaced
-  // in the web UI: a session scope (explicit or inferred) renders nothing,
-  // only the per-run exhaustion does.
+  // Exhaustion hint source: explicit failure scope first, then the ledgers.
+  // A completed run can still finish over budget — its in-flight calls were
+  // settled after the limit was crossed — so the pill must not be gated on
+  // status === 'failed'. Session exhaustion is surfaced only when a team
+  // ceiling is configured (run.budget.total != null).
   const budgetExhaustedScope =
-    (run.budget_exhausted_scope ??
-      (run.workflow_budget?.exhausted ? 'workflow' : null)) === 'workflow'
+    run.budget_exhausted_scope ??
+    (run.workflow_budget?.exhausted
       ? 'workflow'
-      : null;
+      : run.budget?.total != null && run.budget?.exhausted
+        ? 'session'
+        : null);
 
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-card/50">
@@ -803,6 +804,18 @@ function RunNode({
           </span>
         )}
         <ProgressBar completed={completedCount} total={totalCount} />
+        {run.budget && run.budget.total != null && (
+          <span
+            className={`text-xs shrink-0 tabular-nums px-1.5 py-0.5 rounded-full ${
+              run.budget.exhausted
+                ? 'bg-red-500/10 text-red-500'
+                : 'bg-blue-500/10 text-blue-500'
+            }`}
+            title={t('swarmflow.sessionBudget')}
+          >
+            {t('swarmflow.sessionBudgetShort')} {formatBudgetK(run.budget)}
+          </span>
+        )}
         {run.workflow_budget && (
           <span
             className={`text-xs shrink-0 tabular-nums px-1.5 py-0.5 rounded-full ${
@@ -818,7 +831,11 @@ function RunNode({
         )}
         {budgetExhaustedScope && (
           <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-500 shrink-0">
-            {t('swarmflow.budgetExhaustedWorkflow')}
+            {t(
+              budgetExhaustedScope === 'session'
+                ? 'swarmflow.budgetExhaustedSession'
+                : 'swarmflow.budgetExhaustedWorkflow',
+            )}
           </span>
         )}
         {(run.status === 'running' || run.status === 'paused') && (
