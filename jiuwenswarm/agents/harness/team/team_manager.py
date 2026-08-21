@@ -92,6 +92,117 @@ TEAM_EVENT_QUEUE_MAXSIZE = 64
 _WAITER_PUT_RECHECK_TIMEOUT_SEC = 0.1
 
 
+def _agent_model_name(agent_spec: Any) -> str:
+    """Return the explicit model name carried by one DeepAgent spec mapping."""
+    if not isinstance(agent_spec, dict):
+        return ""
+    model = agent_spec.get("model")
+    if not isinstance(model, dict):
+        return ""
+    client = model.get("model_client_config")
+    if not isinstance(client, dict):
+        return ""
+    return str(client.get("model_name") or "").strip()
+
+
+def _bind_named_member_models(
+    spec_dict: dict[str, Any],
+    config_base: dict[str, Any],
+) -> None:
+    """Bind member-named model configs to predefined team members.
+
+    Team members share the semantic ``teammate`` role, while JiuwenSwarm also
+    permits named ``agents.<member_name>`` model configs. Project those names
+    onto ``TeamMemberSpec.model_name`` and expose their endpoints through the
+    model pool so a specialist does not silently use the generic teammate
+    model.
+    """
+    agents = spec_dict.get("agents")
+    if not isinstance(agents, dict):
+        return
+    named_model_names = {
+        str(agent_key): model_name
+        for agent_key, agent_spec in agents.items()
+        if (model_name := _agent_model_name(agent_spec))
+    }
+
+    predefined = spec_dict.get("predefined_members")
+    if isinstance(predefined, list):
+        for member in predefined:
+            if not isinstance(member, dict):
+                continue
+            member_name = str(member.get("member_name") or "").strip()
+            model_name = named_model_names.get(member_name, "")
+            if model_name:
+                member["model_name"] = model_name
+
+    leader = spec_dict.get("leader")
+    if isinstance(leader, dict) and named_model_names.get("leader"):
+        leader["model_name"] = named_model_names["leader"]
+
+    model_sources: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for entry in get_default_models(config_base):
+        if not isinstance(entry, dict):
+            continue
+        client = entry.get("model_client_config")
+        request = entry.get("model_config_obj")
+        if isinstance(client, dict):
+            model_sources.append((client, request if isinstance(request, dict) else {}))
+    for agent_spec in agents.values():
+        if not isinstance(agent_spec, dict):
+            continue
+        model = agent_spec.get("model")
+        if not isinstance(model, dict):
+            continue
+        client = model.get("model_client_config")
+        request = model.get("model_request_config")
+        if isinstance(client, dict):
+            model_sources.append((client, request if isinstance(request, dict) else {}))
+
+    from openjiuwen.agent_teams.schema.team import ModelPoolEntry
+
+    pool_entries: list[dict[str, Any]] = []
+    seen_endpoints: set[tuple[str, str, str]] = set()
+    for client, request_source in model_sources:
+        model_name = str(client.get("model_name") or "").strip()
+        if not model_name:
+            continue
+        endpoint_key = (
+            model_name,
+            str(client.get("api_base") or "").strip(),
+            str(client.get("client_provider") or "").strip(),
+        )
+        if endpoint_key in seen_endpoints:
+            continue
+        seen_endpoints.add(endpoint_key)
+        request_config = build_reasoning_model_request_kwargs(
+            model_client_config=client,
+            model_config_obj=request_source,
+            model_name=model_name,
+        )
+        request_config.pop("model", None)
+        pool_entry = ModelPoolEntry(
+            model_name=model_name,
+            api_key=client.get("api_key", ""),
+            api_base_url=client.get("api_base", ""),
+            api_provider=client.get("client_provider", ""),
+            metadata={
+                "client": {
+                    key: value
+                    for key, value in client.items()
+                    if key not in ("model_name", "api_key", "api_base", "client_provider")
+                    and value is not None
+                },
+                "request": request_config,
+            },
+        )
+        pool_entries.append(pool_entry.model_dump())
+
+    if len({entry["model_name"] for entry in pool_entries}) > 1:
+        spec_dict["model_pool"] = pool_entries
+        spec_dict["model_pool_strategy"] = "by_model_name"
+
+
 def _safe_payload_preview(payload: Any) -> str:
     """Render an interact payload as a bounded single-line log fragment.
 
@@ -629,6 +740,7 @@ class TeamManager:
             strict_template=strict_template,
         )
         spec_dict = TeamManager._normalize_team_identity_fields(spec_dict)
+        _bind_named_member_models(spec_dict, config_base)
         if TeamManager._is_distributed_mode(config_base):
             spec_dict = TeamManager._normalize_distributed_transport_fields(config_base, spec_dict)
 
@@ -636,7 +748,7 @@ class TeamManager:
         # and set model_pool_strategy to by_model_name so team members
         # can be assigned different model endpoints from the pool.
         default_models = get_default_models(config_base)
-        if len(default_models) > 1:
+        if len(default_models) > 1 and not spec_dict.get("model_pool"):
             from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 
             pool_entries: list[dict] = []
