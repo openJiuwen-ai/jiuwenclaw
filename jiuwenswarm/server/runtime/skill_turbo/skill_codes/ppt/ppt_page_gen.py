@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 _CHART_CANDIDATE_TYPES = {"data", "comparison", "technology", "trend"}
+# P8.2：只读校验 / 单页 fix 硬超时，避免 read_file 或 bash 挂死拖死 gather。
+_P82_READ_TIMEOUT_SECONDS = 60.0
+_P82_FIX_ONE_TIMEOUT_SECONDS = 360.0
 
 
 def _extract_designer_section(
@@ -439,6 +442,100 @@ def _has_placeholder_slop(text: str) -> bool:
     return normalized in _PLACEHOLDER_SLOP_VALUES
 
 
+def _plain_text_fragment(html_fragment: str) -> str:
+    return re.sub(r"<[^>]+>", "", html_fragment or "").strip()
+
+
+def _extract_filled_title_inner(filled_html: str) -> str:
+    match = _H1_INNER_TEXT_RE.search(filled_html or "")
+    if match:
+        return match.group(2).strip()
+    match = _TITLE_TAG_RE.search(filled_html or "")
+    return match.group(2).strip() if match else ""
+
+
+def _extract_filled_footer_inner(filled_html: str) -> str:
+    footer_block = _extract_footer_block(filled_html)
+    if not footer_block:
+        return ""
+    match = _P_INNER_TEXT_RE.search(footer_block)
+    return match.group(2).strip() if match else ""
+
+
+def _replace_main_inner_html(html: str, new_inner: str) -> str:
+    open_match = _MAIN_OPEN_TAG_RE.search(html or "")
+    if not open_match:
+        return html or ""
+    close_match = _MAIN_CLOSE_TAG_RE.search(html or "", open_match.end())
+    if not close_match:
+        return html or ""
+    return (html or "")[:open_match.end()] + new_inner + (html or "")[close_match.start():]
+
+
+_REPAIRABLE_CONTENT_TEMPLATE_REASONS = frozenset({
+    "content_template_chrome_changed",
+    "main_tag_changed",
+})
+
+
+def _repair_content_template_chrome(seed_html: str, filled_html: str) -> str | None:
+    """Restore Page Chrome from seed; keep filled title/content/footer slot values.
+
+    When the model rewrites head/header/footer/`<main>` chrome but still fills usable
+    slots, reassemble onto the seed skeleton instead of forcing a full LLM retry.
+    Returns None when filled output lacks extractable slot content.
+    """
+    if not (seed_html or "").strip() or not (filled_html or "").strip():
+        return None
+
+    title_inner = _extract_filled_title_inner(filled_html)
+    if not title_inner or _has_placeholder_slop(_plain_text_fragment(title_inner)):
+        return None
+
+    main_inner = _extract_main_inner_html(filled_html)
+    if not main_inner.strip() or "{{PAGE_CONTENT}}" in main_inner:
+        return None
+
+    footer_inner = _extract_filled_footer_inner(filled_html)
+    if not footer_inner or _has_placeholder_slop(_plain_text_fragment(footer_inner)):
+        return None
+
+    out = seed_html
+    if "{{PAGE_TITLE}}" in out:
+        out = out.replace("{{PAGE_TITLE}}", title_inner)
+    else:
+        out = _TITLE_TAG_RE.sub(
+            lambda m: f"{m.group(1)}{title_inner}{m.group(3)}",
+            out,
+            count=1,
+        )
+        out = _H1_INNER_TEXT_RE.sub(
+            lambda m: f"{m.group(1)}{title_inner}{m.group(3)}",
+            out,
+            count=1,
+        )
+
+    if "{{PAGE_CONTENT}}" in out:
+        out = out.replace("{{PAGE_CONTENT}}", main_inner)
+    else:
+        out = _replace_main_inner_html(out, main_inner)
+
+    if "{{PAGE_FOOTER}}" in out:
+        out = out.replace("{{PAGE_FOOTER}}", footer_inner)
+    else:
+        seed_footer = _extract_footer_block(out)
+        if not seed_footer:
+            return None
+        repaired_footer = _P_INNER_TEXT_RE.sub(
+            lambda m: f"{m.group(1)}{footer_inner}{m.group(3)}",
+            seed_footer,
+            count=1,
+        )
+        out = out.replace(seed_footer, repaired_footer, 1)
+
+    return out
+
+
 def _validate_content_template_fill_output(seed_html: str, filled_html: str) -> tuple[bool, str]:
     """Stage 6 软门禁：内容页必须基于 seed 填槽，不能改 chrome。"""
     if not _is_valid_html(filled_html):
@@ -575,6 +672,18 @@ def _build_content_template_fill_prompt(
         "7. 每个占位符必须填有意义内容；禁止空串、`—`/`–`/`-`、`N/A`、`TBD`、`暂无`、`待补充`、`待定`、`占位`\n"
         "8. 图表候选页必须优先激活模板内 `CHART_SCAFFOLD`，按模板注释填充 option；禁止额外手写第二套图表初始化框架\n"
         "9. 直接输出完整 HTML，禁止 Markdown 代码块包裹与解释文字\n\n"
+        "## Page Chrome 硬锁（违反将导致校验失败 `content_template_chrome_changed`）\n"
+        "- **Chrome = 除 `{{PAGE_CONTENT}}` 以外的一切**：`<head>`（含 script/link/style/`tailwind.config`）、"
+        "`.content-safe` 到 `<main>` 之前的 header 带、`<main>` 开标签、footer 骨架\n"
+        "- **允许改动的仅是占位符文本**：\n"
+        "  - `<title>` / `<h1>` 内文字 ← `{{PAGE_TITLE}}`\n"
+        "  - footer 内首个 `<p>` 文字 ← `{{PAGE_FOOTER}}`\n"
+        "  - `<main>` **内部** HTML ← `{{PAGE_CONTENT}}`\n"
+        "- **禁止**增删/重排 chrome 节点，禁止改 chrome 上的 class/style/属性/注释/空白结构，"
+        "禁止把图表、卡片、遮罩、装饰线挪到 header/footer/`<head>`\n"
+        "- **操作方式**：以预铺 HTML 为底稿，只做三处字符串级替换后原样输出；"
+        "不要“重新生成一版更美观的同款页面”\n"
+        "- **自检**：输出前对比预铺稿——若除上述三处文本/main 内部外仍有任何差异，必须撤回重填\n\n"
         "## 风格文件（正文区配色/字体/组件权威；不得把风格元数据写成观众可见文字）\n"
         f"{style_text}\n\n"
         "## 大纲 — 本页规划\n"
@@ -588,7 +697,7 @@ def _build_content_template_fill_prompt(
         f"{designer_section}"
         f"{layout_template}\n"
         f"{rewrite_section}"
-        "## 预铺模板 HTML（只填槽，勿重写）\n"
+        "## 预铺模板 HTML（只填槽，勿重写；Chrome 必须与下方稿逐字节一致，除三处占位符外）\n"
         f"{seed_html}\n"
     )
 
@@ -3641,8 +3750,11 @@ class PageWorkerNode(PlanNode):
                     rewrite_hint=rewrite_hint,
                 ),
                 system_prompt=(
-                    "你是 PPT 内容页模板填充师。只替换模板中的 PAGE_TITLE、PAGE_CONTENT、PAGE_FOOTER，"
-                    "直接输出完整 HTML 原文，不输出任何解释。"
+                    "你是 PPT 内容页模板填充师，不是设计师。"
+                    "唯一任务：在预铺 HTML 上替换 {{PAGE_TITLE}}、{{PAGE_CONTENT}}、{{PAGE_FOOTER}} 三处占位符。"
+                    "Page Chrome（head/header/`<main>` 开标签/footer 骨架/class/script/style）必须与预铺稿保持一致；"
+                    "改 chrome 会触发 content_template_chrome_changed 校验失败。"
+                    "只输出完整 HTML 原文，不要解释、不要 Markdown 代码块。"
                 ),
                 node_name=f"p8_1_content_fill_{ctx.page_num}",
                 concurrent=True,
@@ -3667,6 +3779,34 @@ class PageWorkerNode(PlanNode):
         html = _strip_chart_header_unit(html)
         html = _fix_chart_height_chain(html)
         ok, reason = _validate_content_template_fill_output(seed_html, html)
+        if not ok and reason in _REPAIRABLE_CONTENT_TEMPLATE_REASONS:
+            repaired = _repair_content_template_chrome(seed_html, html)
+            if repaired:
+                repaired = _fix_echarts_svg_renderer(repaired)
+                repaired = _strip_unsupported_fullpage_overlays(repaired)
+                repaired = _strip_chart_header_unit(repaired)
+                repaired = _fix_chart_height_chain(repaired)
+                ok_repaired, reason_repaired = _validate_content_template_fill_output(
+                    seed_html,
+                    repaired,
+                )
+                if ok_repaired:
+                    logger.info(
+                        "[P8.1] repaired=content_template_chrome page=%d style=%s "
+                        "from_reason=%s",
+                        ctx.page_num,
+                        ctx.style_id,
+                        reason,
+                    )
+                    return repaired, "", ""
+                logger.warning(
+                    "[P8.1] 内容页 chrome 自动修复后仍失败 page=%d style=%s "
+                    "from_reason=%s repair_reason=%s",
+                    ctx.page_num,
+                    ctx.style_id,
+                    reason,
+                    reason_repaired,
+                )
         if not ok:
             logger.warning(
                 "[P8.1] 内容页填槽校验失败 page=%d style=%s reason=%s",
@@ -3886,8 +4026,18 @@ class QAFixNode(PlanNode):
         if not path or not self.has_tool("read_file"):
             return ""
         try:
-            result = await self.call_tool("read_file", file_path=path)
+            result = await asyncio.wait_for(
+                self.call_tool("read_file", file_path=path),
+                timeout=_P82_READ_TIMEOUT_SECONDS,
+            )
             return PptCommon.parse_tool_file_content(result)
+        except TimeoutError:
+            logger.warning(
+                "[P8.2] 读取页面超时 path=%s timeout=%.0fs",
+                path,
+                _P82_READ_TIMEOUT_SECONDS,
+            )
+            return ""
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
@@ -3945,51 +4095,69 @@ class QAFixNode(PlanNode):
         """仅对指定页面并发执行新版 pptx-craft fix。"""
         sem = asyncio.Semaphore(10)
 
+        async def _fix_one_body(page_num: int) -> tuple[int, bool, str]:
+            page_path = f"{pages_dir}/page-{page_num}.pptx.html"
+            before_html = await self._read_page_file(page_path)
+            before_ok = bool(before_html) and _is_slide_exportable(before_html)
+
+            style_arg = (
+                f" --style {quote_path(style_file_path)}"
+                if style_file_path
+                else ""
+            )
+            cmd = (
+                f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
+                f"--fix --pages {page_num}{style_arg}"
+            )
+            result = await run_bash(
+                self,
+                cmd,
+                timeout_seconds=300,
+                required=False,
+                workdir=pptx_root,
+            )
+            output = combined_output(result)[:500]
+            ok = result.exit_code == 0
+            if not ok:
+                logger.warning(
+                    "[P8.2] page-%d fix 失败 exit=%d",
+                    page_num,
+                    result.exit_code,
+                )
+
+            after_html = await self._read_page_file(page_path)
+            after_ok = bool(after_html) and _is_slide_exportable(after_html)
+            if before_ok and not after_ok:
+                backup_path = await self._find_latest_backup_path(pages_dir, page_num)
+                if backup_path:
+                    backup_html = await self._read_page_file(backup_path)
+                    if backup_html and _is_slide_exportable(backup_html):
+                        if await self._write_page_file(page_path, backup_html):
+                            logger.warning(
+                                "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
+                                page_num,
+                            )
+                            output = f"{output} dom_restored_from_backup"
+            return page_num, ok, output
+
         async def _fix_one(page_num: int) -> tuple[int, bool, str]:
             async with sem:
-                page_path = f"{pages_dir}/page-{page_num}.pptx.html"
-                before_html = await self._read_page_file(page_path)
-                before_ok = bool(before_html) and _is_slide_exportable(before_html)
-
-                style_arg = (
-                    f" --style {quote_path(style_file_path)}"
-                    if style_file_path
-                    else ""
-                )
-                cmd = (
-                    f"{cli_path('fix', pptx_root)} {quote_path(pages_dir + '/')} "
-                    f"--fix --pages {page_num}{style_arg}"
-                )
-                result = await run_bash(
-                    self,
-                    cmd,
-                    timeout_seconds=300,
-                    required=False,
-                    workdir=pptx_root,
-                )
-                output = combined_output(result)[:500]
-                ok = result.exit_code == 0
-                if not ok:
-                    logger.warning(
-                        "[P8.2] page-%d fix 失败 exit=%d",
-                        page_num,
-                        result.exit_code,
+                try:
+                    return await asyncio.wait_for(
+                        _fix_one_body(page_num),
+                        timeout=_P82_FIX_ONE_TIMEOUT_SECONDS,
                     )
-
-                after_html = await self._read_page_file(page_path)
-                after_ok = bool(after_html) and _is_slide_exportable(after_html)
-                if before_ok and not after_ok:
-                    backup_path = await self._find_latest_backup_path(pages_dir, page_num)
-                    if backup_path:
-                        backup_html = await self._read_page_file(backup_path)
-                        if backup_html and _is_slide_exportable(backup_html):
-                            if await self._write_page_file(page_path, backup_html):
-                                logger.warning(
-                                    "[P8.2] page-%d fix 破坏 DOM，已回退 backup",
-                                    page_num,
-                                )
-                                output = f"{output} dom_restored_from_backup"
-                return page_num, ok, output
+                except TimeoutError:
+                    logger.error(
+                        "[P8.2] page-%d fix 整体超时 timeout=%.0fs",
+                        page_num,
+                        _P82_FIX_ONE_TIMEOUT_SECONDS,
+                    )
+                    return page_num, False, "fix_one_timeout"
+                except AbortError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
 
         results = await asyncio.gather(
             *[_fix_one(page_num) for page_num in page_nums],
@@ -4905,12 +5073,15 @@ class PPTPageGenNode(PlanNode):
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
         status_map = {"ok": "ok", "partial": "warning", "failed": "error"}
+        page_files = result.get("page_files") or []
+        missing = result.get("missing_pages") or []
+        status = result.get("ppt_gen_status", "")
+        message = f"PPT 页面生成 status={status} 成功 {len(page_files)} 页"
+        if missing:
+            message += f"，缺失 {len(missing)} 页（不可按成功交付）"
         yield {
             **result,
             "node": self.plan_name,
-            "status": status_map.get(result.get("ppt_gen_status", ""), "warning"),
-            "message": (
-                f"PPT 生成完成 status={result.get('ppt_gen_status')} "
-                f"成功 {len(result.get('page_files', []))} 页"
-            ),
+            "status": status_map.get(status, "warning"),
+            "message": message,
         }
