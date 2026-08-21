@@ -133,6 +133,27 @@ _ERROR_EVENT = getattr(InteractionEventType, "EXECUTION_ERROR", None)
 if _ERROR_EVENT is None:
     _ERROR_EVENT = getattr(InteractionEventType, "RUNTIME_ERROR")
 ERROR_EVENT_TYPE = _ERROR_EVENT.value
+# 与 skill_turbo/executor.STREAM_SOURCE_ID_FIELD 一致：并发节点用它标识 source，
+# 前端据其路由到 subagent 行。adapter 转发 llm_reasoning / llm_output 时须原样透传。
+STREAM_SOURCE_ID_FIELD = "stream_source_id"
+
+
+def _propagate_stream_source_id(
+    src_payload: Any, result: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """将上游 payload 中的 stream_source_id 透传到输出帧（原地写入，无则原样返回）。
+
+    skill_turbo 并发节点（如 p6_1_page_worker）用它标识 source，
+    前端据其路由到 subagent 行，避免并发思考/正文混流。
+    """
+    if result is None or not isinstance(src_payload, dict):
+        return result
+    source_id = src_payload.get(STREAM_SOURCE_ID_FIELD)
+    if source_id:
+        result[STREAM_SOURCE_ID_FIELD] = source_id
+    return result
+
+
 _DEEPRESEARCH_REWRITE_REPLAY_STATE_KEY = "deepresearch_rewrite_fast_path_replays"
 _DEEPRESEARCH_REWRITE_REPLAY_SCHEMA_VERSION = 1
 _DEEPRESEARCH_REWRITE_REPLAY_MAX_ENTRIES = 32
@@ -11151,14 +11172,9 @@ class JiuWenSwarmDeepAdapter:
         )
         skill_path = params.get("skill_path") or params.get("path")
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                self._resolve_skill_dirs(),
-                str(skill_path),
-            )
             evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=skill_name,
-                allowed_roots=allowed,
             )
             skills_base = evolution_version_ctl.skills_root_from_skill_md_path(str(skill_path))
             store = evolution_version_ctl.get_disk_evolution_store(
@@ -11223,16 +11239,10 @@ class JiuWenSwarmDeepAdapter:
             store_dirs = [str(skills_dirs_param).strip()]
         else:
             store_dirs = None
-        resolve_dirs = store_dirs if store_dirs is not None else self._resolve_skill_dirs()
         if skill_path:
-            allowed = evolution_version_ctl.allowed_skill_roots_for_path(
-                resolve_dirs,
-                str(skill_path),
-            )
             resolved_skill_md = evolution_version_ctl.validate_rebuild_skill_path(
                 str(skill_path),
                 skill_name=name,
-                allowed_roots=allowed,
             )
 
         logger.info(
@@ -14372,6 +14382,10 @@ class JiuWenSwarmDeepAdapter:
             # chat.invocation_paused 终结帧（而非普通完成帧），避免前端把"等待用户
             # 输入"误判为"任务完成"。镜像 vendor(clowder-ai) 的 _detect_hitl_pause。
             hitl_pending_stream = False
+            # HITL 检测到 ask_user 后，跳过后续所有 chunk（chat.final / chat.delta /
+            # chat.reasoning 等），由循环后的 chat.invocation_paused 终结帧收尾。
+            # 镜像 enterprise_dev 的 suppress_stream_after_hitl 机制。
+            suppress_stream_after_hitl = False
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
@@ -14387,6 +14401,8 @@ class JiuWenSwarmDeepAdapter:
                 and not goal_stream_request
             )
             async for chunk in interaction_stream:
+                if suppress_stream_after_hitl:
+                    continue
                 # [DIAG] HITL resume 调试：对照 forwarder([DeepAgent][fwd]) 转发的 chunk，
                 # 确认主循环实际从 interaction_stream 消费到什么类型。
                 _stream_ct = getattr(chunk, "type", None) or type(chunk).__name__
@@ -14463,6 +14479,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 chunk_type = chunk.type
@@ -14507,6 +14526,7 @@ class JiuWenSwarmDeepAdapter:
                     )
                     if reasoning_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, reasoning_payload)
                     boundary = self._begin_visible_chat_content(stream_is_user_originated)
                     if boundary is not None:
                         yield AgentResponseChunk(
@@ -14533,6 +14553,7 @@ class JiuWenSwarmDeepAdapter:
                     delta_payload = self._stream_text_payload("chat.delta", content)
                     if delta_payload is None:
                         continue
+                    _propagate_stream_source_id(chunk.payload, delta_payload)
                     has_streamed_content = True
                     if accumulated_reasoning:
                         yield AgentResponseChunk(
@@ -14598,6 +14619,9 @@ class JiuWenSwarmDeepAdapter:
                                 payload=note_chat_payload(parsed),
                                 is_complete=False,
                             )
+                            if hitl_pending_stream:
+                                suppress_stream_after_hitl = True
+                                continue
                         continue
                     parsed = self._parse_stream_chunk(chunk)
                     parsed = self._adapt_goal_intermediate_final(parsed)
@@ -14614,6 +14638,9 @@ class JiuWenSwarmDeepAdapter:
                             payload=note_chat_payload(parsed),
                             is_complete=False,
                         )
+                        if hitl_pending_stream:
+                            suppress_stream_after_hitl = True
+                            continue
                     continue
 
                 if accumulated_text:
@@ -14647,8 +14674,11 @@ class JiuWenSwarmDeepAdapter:
                         payload=note_chat_payload(parsed),
                         is_complete=False,
                     )
+                    if hitl_pending_stream:
+                        suppress_stream_after_hitl = True
+                        continue
 
-            if accumulated_text:
+            if accumulated_text and not hitl_pending_stream:
                 # Same rule as _adapt_goal_intermediate_final: demote host
                 # flush only when the flushed text belonged to a goal round.
                 if self._should_demote_goal_intermediate_final():
@@ -14669,7 +14699,7 @@ class JiuWenSwarmDeepAdapter:
                     payload=note_chat_payload(flush_payload),
                     is_complete=False,
                 )
-            if accumulated_reasoning:
+            if accumulated_reasoning and not hitl_pending_stream:
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -14680,7 +14710,9 @@ class JiuWenSwarmDeepAdapter:
             # pause→clear (and similar): round cancelled, iterator ends without
             # a model chat.final. Synthesize a real final so the frontend can
             # stopStreaming; do not demote.
-            if self._should_emit_stream_end_chat_final(
+            # HITL 暂停时跳过合成 final：由循环后的 chat.invocation_paused 终结帧
+            # 收尾，避免 relayclaw sidecar 提前关闭 FrameQueue 导致 recoverable_pause 丢失。
+            if not hitl_pending_stream and self._should_emit_stream_end_chat_final(
                 had_assistant_output=had_assistant_output,
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):
@@ -15091,9 +15123,10 @@ class JiuWenSwarmDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    delta_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.delta", content
                     )
+                    return _propagate_stream_source_id(payload, delta_payload)
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -15101,9 +15134,10 @@ class JiuWenSwarmDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    return JiuWenSwarmDeepAdapter._stream_text_payload(
+                    reasoning_payload = JiuWenSwarmDeepAdapter._stream_text_payload(
                         "chat.reasoning", content
                     )
+                    return _propagate_stream_source_id(payload, reasoning_payload)
 
                 if chunk_type == "content_chunk":
                     content = (
