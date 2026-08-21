@@ -986,15 +986,6 @@ class TelemetryRail(DeepAgentRail):
 
         span, start_time, span_tool_name = entry
 
-        # 用户可见日志：工具调用完成
-        duration = time.monotonic() - start_time
-        logger.info(
-            "[TelemetryRail] 工具调用完成: tool=%s, duration=%.2fs",
-            span_tool_name,
-            duration,
-            extra={'user_visible': 'critical'}
-        )
-
         # Get result
         result = None
         if hasattr(ctx, "inputs"):
@@ -1017,6 +1008,16 @@ class TelemetryRail(DeepAgentRail):
             elif result_str:
                 lower = result_str.lower()
                 is_error = "error" in lower or "exception" in lower or "traceback" in lower
+
+        # 用户可见日志：工具调用完成
+        duration = time.monotonic() - start_time
+        logger.info(
+            "[TelemetryRail] 工具调用完成: tool=%s, status=%s, duration=%.2fs",
+            span_tool_name,
+            "error" if is_error else "success",
+            duration,
+            extra={'user_visible': 'critical'}
+        )
 
         if is_error:
             span.set_status(StatusCode.ERROR, result_str[:256])
