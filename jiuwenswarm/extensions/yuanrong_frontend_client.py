@@ -1085,11 +1085,18 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         req = urllib.request.Request(self._invoke_url(), data=data, headers=headers, method="POST")
         return self._urlopen_request(req, raise_on_timeout=True)
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         """发送非流式请求.
 
         Args:
             envelope: E2A 信封
+            timeout: 等待上限（秒），由接口约定保留；当前 HTTP invoke 路径
+                自带超时语义，此处不额外截断，保持原有行为.
 
         Returns:
             AgentResponse 响应

@@ -94,7 +94,12 @@ class FakeYuanRongClient:
     async def get_agent_info(self, instance_id: str) -> dict:
         return {"instance_id": instance_id, "node_ip": "127.0.0.1", "sandbox_ip": "127.0.0.1"}
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         self.send_calls += 1
         return AgentResponse(
             request_id=str(envelope.request_id or ""),
@@ -146,7 +151,12 @@ class FakeAgentWsClient:
     async def disconnect(self) -> None:
         self.disconnected = True
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         return await self._yuanrong.send_request(envelope)
 
     def send_request_stream(

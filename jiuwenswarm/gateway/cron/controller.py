@@ -495,7 +495,7 @@ class CronController:
                             "type": "integer",
                             "description": (
                                 "Execution timeout in seconds (60-259200). "
-                                "Default 600 for normal modes and 1200 for team modes."
+                                "Default 3600 (1 hour) for both normal and team modes."
                             ),
                         },
                         "model_name": {
