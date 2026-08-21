@@ -20,6 +20,7 @@ parse_dotenv_early("jiuwenswarm-app")
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.utils import (
+    cleanup_stale_openjiuwen_descs,
     cleanup_team_files,
     ensure_default_builtin_skills,
     get_env_file,
@@ -39,6 +40,9 @@ _old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
 # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
 cleanup_team_files(_workspace_dir)
+
+# 清理 OpenJiuwen 描述文件目录迁移后遗留的平铺副本。
+cleanup_stale_openjiuwen_descs()
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):

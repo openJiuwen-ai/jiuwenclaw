@@ -20,11 +20,16 @@ import logging.handlers
 import os
 import sys
 
-from openjiuwen.core.common.logging import LogManager
-
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
 parse_dotenv_early("jiuwenswarm-agentserver")
+
+# Repair OpenJiuwen package-data leftovers before importing any OpenJiuwen
+# modules that may construct the recursive tool-description index.
+from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
+cleanup_stale_openjiuwen_descs()
+
+from openjiuwen.core.common.logging import LogManager
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
