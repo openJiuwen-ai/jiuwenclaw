@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-from openjiuwen.core.common.logging import LogManager
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError
 
 from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws_peer, describe_ws_exception
@@ -37,9 +36,16 @@ from jiuwenswarm.common.ws_diagnostics import format_ws_diagnostics, describe_ws
 _SAFE_USER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early, load_dotenv_runtime
-from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 parse_dotenv_early("jiuwenswarm-gateway")
+
+# Repair OpenJiuwen package-data leftovers before importing any OpenJiuwen
+# modules that may construct the recursive tool-description index.
+from jiuwenswarm.common.utils import cleanup_stale_openjiuwen_descs
+cleanup_stale_openjiuwen_descs()
+
+from openjiuwen.core.common.logging import LogManager
+from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect import AcpGatewayBridge

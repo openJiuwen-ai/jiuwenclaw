@@ -1018,6 +1018,83 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _is_windows_frozen_bundle() -> bool:
+    """Return whether this process is a packaged Windows application."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def cleanup_stale_openjiuwen_descs() -> None:
+    """Remove flat OpenJiuwen descriptions left by the domain-layout migration.
+
+    New OpenJiuwen releases store tool descriptions below domain directories,
+    while an in-place upgrade can leave the former flat files beside them.  The
+    recursive description index treats both files as the same key and refuses
+    to start.  A flat file is removed only when a non-fragment, nested file with
+    the same stem exists, so older flat-only layouts and fragment files remain
+    untouched.
+
+    Raises:
+        RuntimeError: If a confirmed stale file cannot be removed. Continuing
+            would only defer the failure to OpenJiuwen's description loader and
+            hide the actionable filesystem error. Windows frozen bundles skip
+            runtime cleanup because Inno Setup performs it with administrator
+            privileges during installation.
+    """
+    if _is_windows_frozen_bundle():
+        logger.info(
+            "[Cleanup] Skipping OpenJiuwen description cleanup in frozen Windows "
+            "bundle; the elevated installer performs upgrade cleanup."
+        )
+        return
+
+    try:
+        import openjiuwen
+    except ModuleNotFoundError as exc:
+        if exc.name == "openjiuwen":
+            return
+        raise
+
+    package_file = getattr(openjiuwen, "__file__", None)
+    if not package_file:
+        return
+
+    descs_dir = (
+        Path(package_file).parent
+        / "agent_teams"
+        / "tools"
+        / "locales"
+        / "descs"
+    )
+    if not descs_dir.is_dir():
+        return
+
+    for lang_dir in sorted(path for path in descs_dir.iterdir() if path.is_dir()):
+        nested_stems = {
+            path.stem
+            for path in lang_dir.rglob("*.md")
+            if path.parent != lang_dir
+            and "fragments" not in path.relative_to(lang_dir).parts
+        }
+        for flat_md in sorted(lang_dir.glob("*.md")):
+            if flat_md.stem not in nested_stems:
+                continue
+            try:
+                flat_md.unlink()
+                logger.info(
+                    f"[Cleanup] Removed stale flat OpenJiuwen description: {flat_md}"
+                )
+            except FileNotFoundError:
+                # Another Swarm process may have completed the same idempotent
+                # startup migration between globbing and unlinking.
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    "Failed to remove stale OpenJiuwen description "
+                    f"'{flat_md}'. Ensure the Python environment is writable "
+                    "or reinstall OpenJiuwen in a clean environment."
+                ) from exc
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
