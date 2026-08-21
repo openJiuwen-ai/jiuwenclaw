@@ -210,3 +210,10 @@ def test_installer_blocks_running_app_and_preserves_user_data(exe_entry):
     assert 'Type: filesandordirs; Name: "{app}"' not in uninstall_delete
     assert "{userappdata}" not in uninstall_delete
     assert "{userprofile}" not in uninstall_delete
+
+
+def test_installer_keeps_workswarm_upgrade_app_id():
+    script = INSTALLER_PATH.read_text(encoding="utf-8")
+
+    assert "AppId={{6DC96977-C194-44FE-812D-D4F0B576BD905}" in script
+    assert "B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C" not in script
