@@ -18,7 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import aiohttp
 
@@ -207,6 +207,48 @@ class XYFileUploadService:
         self.uid = str(uid) if uid is not None else ""
         self.session = None
 
+    @staticmethod
+    def _smart_proxy_for(url: str) -> str | None:
+        """按目标地址智能路由：环回/内网 IP 直连；公网域名经 CLAW_HTTP_PROXY 出网。
+
+        桌面客户端在子进程环境注入 CLAW_HTTP_PROXY（= 系统代理，custom 优先）——
+        OSMS prepare/complete 走 127.0.0.1 本地代理必须直连，而 OBS 直传签名 URL
+        （公网域名）在公司内网直连不通，必须走代理。
+        """
+        try:
+            host = urlsplit(url).hostname or ""
+        except Exception:
+            return None
+        if not host:
+            return None
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return None
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", host):
+            return None
+        proxy = (os.environ.get("CLAW_HTTP_PROXY") or "").strip()
+        return proxy or None
+
+    def _request(self, method: str, url: str, **kwargs: Any):
+        """带智能路由的请求上下文管理器（公网域名自动挂代理）。"""
+        kwargs.setdefault("proxy", self._smart_proxy_for(url))
+        return self.session.request(method, url, **kwargs)
+
+    async def _request_with_tls_fallback(self, method: str, url: str, **kwargs: Any):
+        """证书链错误（公司代理 TLS 拦截私有根 CA 重签）时容忍拦截重试一次。
+
+        仅在经代理访问时兜底；直连目标（本地代理/内网）不做此放宽。
+        """
+        try:
+            async with self._request(method, url, **kwargs) as resp:
+                return resp.status, await resp.read()
+        except (ssl.SSLError, aiohttp.ClientSSLError, aiohttp.ClientConnectorCertificateError) as exc:
+            if not kwargs.get("proxy") and not self._smart_proxy_for(url):
+                raise
+            logger.warning("[XY File Upload] 代理 TLS 拦截（%s），容忍拦截重试一次", exc)
+            kwargs["ssl"] = False
+            async with self._request(method, url, **kwargs) as resp:
+                return resp.status, await resp.read()
+
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
         return self
@@ -246,13 +288,14 @@ class XYFileUploadService:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
 
-            async with self.session.post(prepare_url, json=prepare_data, headers=headers) as resp:
-                if not resp.ok:
-                    raise Exception(f"Prepare failed: HTTP {resp}")
-
-                prepare_resp = await resp.json()
-                if prepare_resp.get("code") != "0":
-                    raise RuntimeError(f"Prepare failed: {prepare_resp.get('desc', 'Unknown error')}")
+            status, body = await self._request_with_tls_fallback(
+                "POST", prepare_url, json=prepare_data, headers=headers
+            )
+            if status < 200 or status >= 300:
+                raise Exception(f"Prepare failed: HTTP {status}")
+            prepare_resp = json.loads(body.decode("utf-8"))
+            if prepare_resp.get("code") != "0":
+                raise RuntimeError(f"Prepare failed: {prepare_resp.get('desc', 'Unknown error')}")
 
             object_id = prepare_resp.get("objectId")
             draft_id = prepare_resp.get("draftId")
@@ -266,14 +309,12 @@ class XYFileUploadService:
             upload_method = upload_info.get("method", "PUT")
             upload_headers = upload_info.get("headers", {})
 
-            async with self.session.request(
-                    upload_method,
-                    upload_url,
-                    data=file_content,
-                    headers=upload_headers
-            ) as resp:
-                if not resp.ok:
-                    raise RuntimeError(f"Upload failed: HTTP {resp.status}")
+            # 直传（公网 OBS 签名 URL）：智能路由挂代理 + TLS 拦截容忍
+            status, _ = await self._request_with_tls_fallback(
+                upload_method, upload_url, data=file_content, headers=upload_headers
+            )
+            if status < 200 or status >= 300:
+                raise RuntimeError(f"Upload failed: HTTP {status}")
 
             complete_url = f"{self.base_url}/osms/v1/file/manager/complete"
             complete_data = {
@@ -281,13 +322,15 @@ class XYFileUploadService:
                 "draftId": draft_id,
             }
 
-            async with self.session.post(complete_url, json=complete_data, headers=headers) as resp:
-                if not resp.ok:
-                    raise RuntimeError(f"Complete failed: HTTP {resp.status}")
+            status, body = await self._request_with_tls_fallback(
+                "POST", complete_url, json=complete_data, headers=headers
+            )
+            if status < 200 or status >= 300:
+                raise RuntimeError(f"Complete failed: HTTP {status}")
 
-                complete_resp = await resp.json()
-                if complete_resp.get("code") != "0":
-                    raise RuntimeError(f"Complete failed: {complete_resp.get('desc', 'Unknown error')}")
+            complete_resp = json.loads(body.decode("utf-8"))
+            if complete_resp.get("code") != "0":
+                raise RuntimeError(f"Complete failed: {complete_resp.get('desc', 'Unknown error')}")
 
             return object_id
 
