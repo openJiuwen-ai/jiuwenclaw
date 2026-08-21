@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -142,15 +143,25 @@ class _EmbeddingProvider:
     def __init__(self, result=None, error=None):
         self.result = result
         self.error = error
+        self.calls = 0
+        self.started = None
+        self.release = None
 
     async def embed_query(self, _text):
+        self.calls += 1
         if self.error:
             raise self.error
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None:
+            await self.release.wait()
         return self.result
 
 
 @pytest.mark.asyncio
-async def test_memory_embedding_probe_marks_failed_model_as_unavailable() -> None:
+async def test_memory_embedding_probe_recovers_after_cooldown(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(interface_deep, "_memory_embedding_now", lambda: clock[0])
     rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
     rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
     provider = _EmbeddingProvider(error=RuntimeError("model not found"))
@@ -165,8 +176,18 @@ async def test_memory_embedding_probe_marks_failed_model_as_unavailable() -> Non
     assert manager.provider_key == "stable-index-key"
     assert rail._embedding_health.available is False
     assert rail._embedding_health.error == "embedding validation failed: RuntimeError"
+    provider.error = None
+    provider.result = [0.1, 0.2]
     with pytest.raises(interface_deep._MemoryEmbeddingUnavailable):
         await provider.embed_query("query")
+    assert provider.calls == 1
+
+    clock[0] += interface_deep._MEMORY_EMBEDDING_RETRY_COOLDOWN_SECONDS
+
+    assert await provider.embed_query("query") == [0.1, 0.2]
+    assert provider.calls == 2
+    assert rail._embedding_health.available is True
+    assert rail._embedding_health.error is None
 
 
 @pytest.mark.asyncio
@@ -188,7 +209,11 @@ async def test_memory_embedding_probe_marks_working_model_as_available() -> None
 
 
 @pytest.mark.asyncio
-async def test_memory_runtime_failure_opens_circuit_without_changing_index_identity() -> None:
+async def test_memory_runtime_failure_recovers_without_changing_index_identity(
+    monkeypatch,
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(interface_deep, "_memory_embedding_now", lambda: clock[0])
     rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
     rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
     provider = _EmbeddingProvider(result=[0.1, 0.2])
@@ -207,6 +232,45 @@ async def test_memory_runtime_failure_opens_circuit_without_changing_index_ident
     assert manager.provider_key == "stable-index-key"
     assert rail._embedding_health.available is False
     assert rail._embedding_health.error == "embedding request failed: RuntimeError"
+    provider.error = None
+    with pytest.raises(interface_deep._MemoryEmbeddingUnavailable):
+        await provider.embed_query("query")
+    assert provider.calls == 2
+
+    clock[0] += interface_deep._MEMORY_EMBEDDING_RETRY_COOLDOWN_SECONDS
+
+    assert await provider.embed_query("query") == [0.1, 0.2]
+    assert provider.calls == 3
+    assert manager.provider_key == "stable-index-key"
+    assert rail._embedding_health.available is True
+    assert rail._embedding_health.error is None
+
+
+@pytest.mark.asyncio
+async def test_memory_half_open_allows_only_one_recovery_probe(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(interface_deep, "_memory_embedding_now", lambda: clock[0])
+    rail = object.__new__(interface_deep._EmbeddingHealthMemoryRail)
+    rail._embedding_health = interface_deep._MemoryEmbeddingHealth()
+    provider = _EmbeddingProvider(error=RuntimeError("service unavailable"))
+    manager = SimpleNamespace(provider=provider, provider_key="stable-index-key")
+    await rail._install_runtime_circuit_breaker(manager)
+
+    provider.error = None
+    provider.result = [0.1, 0.2]
+    provider.started = asyncio.Event()
+    provider.release = asyncio.Event()
+    clock[0] += interface_deep._MEMORY_EMBEDDING_RETRY_COOLDOWN_SECONDS
+
+    recovery = asyncio.create_task(provider.embed_query("first query"))
+    await provider.started.wait()
+    with pytest.raises(interface_deep._MemoryEmbeddingUnavailable):
+        await provider.embed_query("second query")
+
+    provider.release.set()
+    assert await recovery == [0.1, 0.2]
+    assert provider.calls == 2
+    assert rail._embedding_health.available is True
 
 
 @pytest.mark.asyncio

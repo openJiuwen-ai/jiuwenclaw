@@ -21,7 +21,7 @@ import threading
 import time
 from collections import Counter
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
@@ -97,6 +97,7 @@ from openjiuwen.harness.tools import (
     create_audio_tools,
     create_vision_tools,
 )
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.goal.schema import GoalOperationError, GoalStatus
 from openjiuwen.harness.schema.interaction import (
     InteractionEventType,
@@ -177,7 +178,6 @@ from jiuwenswarm.agents.harness.common.auto_harness import (
     AutoHarnessService,
     validate_harness_config,
 )
-from openjiuwen.harness.tools.base_tool import ToolOutput
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     build_permission_rail,
@@ -431,14 +431,21 @@ logger = logging.getLogger(__name__)
 
 _MEMORY_EMBEDDING_PROBE_TEXT = "memory availability check"
 _MEMORY_EMBEDDING_TIMEOUT_SECONDS = 10.0
+_MEMORY_EMBEDDING_RETRY_COOLDOWN_SECONDS = 30.0
 _MEMORY_EMBEDDING_HEALTH_ATTR = "_jiuwenswarm_embedding_health"
 _MEMORY_EMBEDDING_WRAPPED_ATTR = "_jiuwenswarm_embedding_wrapped"
+
+
+def _memory_embedding_now() -> float:
+    return time.monotonic()
 
 
 @dataclass
 class _MemoryEmbeddingHealth:
     available: bool = False
     error: Optional[str] = None
+    retry_at: float = 0.0
+    recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class _MemoryEmbeddingUnavailable(RuntimeError):
@@ -524,6 +531,13 @@ class _EmbeddingHealthMemoryRail(MemoryRail):
 
         original_embed_query = provider.embed_query
 
+        def mark_unavailable(error: str) -> None:
+            shared_health.available = False
+            shared_health.error = error
+            shared_health.retry_at = (
+                _memory_embedding_now() + _MEMORY_EMBEDDING_RETRY_COOLDOWN_SECONDS
+            )
+
         try:
             vector = await asyncio.wait_for(
                 original_embed_query(_MEMORY_EMBEDDING_PROBE_TEXT),
@@ -533,30 +547,42 @@ class _EmbeddingHealthMemoryRail(MemoryRail):
                 raise RuntimeError("embedding endpoint returned an empty vector")
             shared_health.available = True
             shared_health.error = None
+            shared_health.retry_at = 0.0
         except Exception as exc:
-            shared_health.available = False
-            shared_health.error = f"embedding validation failed: {type(exc).__name__}"
+            mark_unavailable(f"embedding validation failed: {type(exc).__name__}")
             logger.warning("Embedding health check failed; using keyword memory search: %s", exc)
 
         async def guarded_embed_query(text: str):
+            recovery_probe = False
             if not shared_health.available:
-                raise _MemoryEmbeddingUnavailable(
-                    shared_health.error or "embedding is unavailable"
-                )
+                if (
+                    _memory_embedding_now() < shared_health.retry_at
+                    or shared_health.recovery_lock.locked()
+                ):
+                    raise _MemoryEmbeddingUnavailable(
+                        shared_health.error or "embedding is unavailable"
+                    )
+                await shared_health.recovery_lock.acquire()
+                recovery_probe = True
             try:
                 vector = await asyncio.wait_for(
                     original_embed_query(text), timeout=_MEMORY_EMBEDDING_TIMEOUT_SECONDS
                 )
                 if not vector:
                     raise RuntimeError("embedding endpoint returned an empty vector")
+                shared_health.available = True
+                shared_health.error = None
+                shared_health.retry_at = 0.0
                 return vector
             except Exception as exc:
-                shared_health.available = False
-                shared_health.error = (
+                mark_unavailable(
                     f"embedding request failed: {type(exc).__name__}"
                 )
                 logger.warning("Embedding request failed; switching memory search to FTS5: %s", exc)
                 raise
+            finally:
+                if recovery_probe:
+                    shared_health.recovery_lock.release()
 
         provider.embed_query = guarded_embed_query
         setattr(provider, _MEMORY_EMBEDDING_WRAPPED_ATTR, True)
