@@ -284,6 +284,34 @@ class TestDebugTraceLoggerFeed:
         assert "input_tokens=100" in out and "model_name=GLM-5.2" in out
 
 
+    def test_answer_chunk_dropped_when_model_output_off(self, tmp_path):
+        # include_model_output=False must suppress the trailing `answer`
+        # chunk too — it re-sends the whole reply and is classified as
+        # text, so without this guard the reply leaks into the dump as a
+        # category=text JSON blob even though llm_output was suppressed.
+        s = debug_config.DebugTraceSettings(
+            mode="code.normal",
+            enabled=True,
+            dump_enabled=True,
+            otel_enabled=False,
+            include_model_output=False,
+        )
+        lg = DebugTraceLogger(
+            file_path=tmp_path / "dump.txt",
+            mode="code.normal",
+            session_id="sess",
+            request_id="req-1",
+            settings=s,
+        )
+        lg.start_run()
+        lg.feed(_chunk("llm_output", {"content": "streamed reply"}))
+        lg.feed(_chunk("answer", {"content": "streamed reply"}))
+        lg.end_run(status="ok")
+        out = _read(lg)
+        assert "streamed reply" not in out
+        assert "category=text" not in out
+
+
 # ── session registry (cross-task logger recovery) ──────────────────────────
 class TestSessionRegistry:
     """Dispatch sites run in the DeepAgent supervisor task, where the per-request

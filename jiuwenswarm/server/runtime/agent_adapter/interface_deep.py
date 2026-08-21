@@ -82,6 +82,7 @@ from openjiuwen.harness.rails import (
     configure_skill_evolution_runtime,
     unconfigure_skill_evolution,
 )
+from openjiuwen.harness.rails.personal_context import PersonalContextRail
 from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
@@ -344,6 +345,7 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
+    probe_mcp_live_connection,
 )
 from jiuwenswarm.server.runtime.mcp.call_timeout_patch import apply_mcp_call_timeout_patch
 from jiuwenswarm.common.task_loop_config import (
@@ -1242,6 +1244,8 @@ class JiuWenSwarmDeepAdapter:
         self._eternal_conversation_enabled: bool = False
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._personal_context_rail: PersonalContextRail | None = None
+        self._personal_context_rail_lock = asyncio.Lock()
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -1251,8 +1255,14 @@ class JiuWenSwarmDeepAdapter:
         self._memory_embedding_fingerprint: str = ""
         # 最近一次请求使用的 mode：reload 时无 runtime_config 上下文，靠它主动刷新 memory rail。
         self._last_mode: str | None = None
+        # PersonalContext is controlled by the Host runtime switch.  Keep the
+        # last control-plane snapshot here so the disabled path never mounts a
+        # rail merely because an Agent mode request arrived.
+        self._personal_context_runtime_enabled: bool = False
         # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
         self._memory_reindex_task: asyncio.Task | None = None
+        # 后台预热：web 重启后对 connected MCP 建进程级连接缓存，首轮对话不重 spawn。
+        self._mcp_prewarm_task: asyncio.Task | None = None
         self._model_anomaly_detection_rail: ModelAnomalyDetectionRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -1421,6 +1431,9 @@ class JiuWenSwarmDeepAdapter:
         # Inherit the channel id so the child's MCP load strategy matches the
         # parent's (TUI loads the global set, web loads nothing on init).
         adapter._channel_id = getattr(self, "_channel_id", "")
+        adapter.set_personal_context_runtime_enabled(
+            self._personal_context_runtime_enabled
+        )
         if self._skill_manager is not None:
             adapter.set_skill_manager(self._skill_manager)
         return adapter
@@ -3357,6 +3370,60 @@ class JiuWenSwarmDeepAdapter:
                     "reconcile failed: %s", exc,
                 )
 
+    def _start_mcp_prewarm(self) -> None:
+        """后台预热 connected MCP 的进程级连接缓存（仅 web root adapter）。
+
+        只建 Runner.resource_mgr 缓存，不挂任何会话（不碰
+        _session_selected_mcp / _registered_mcp_servers），保持 default-False 契约。
+        首轮对话 reconcile 命中 existing-entry 不重 spawn。失败隔离：单个 MCP
+        预热失败不阻断其余、不降级 state。
+        """
+        if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
+            return
+        self._mcp_prewarm_task = asyncio.create_task(
+            self._do_mcp_prewarm(),
+            name=f"mcp-prewarm-{self._agent_name}",
+        )
+
+    async def _do_mcp_prewarm(self) -> None:
+        """对 state=connected 的 MCP 跑 probe_mcp_live_connection 建进程级缓存。
+
+        预热失败不降级 state（保持 connected，让首轮对话 reconcile 重试）——web
+        用户可能重启后还没发消息，不应自动摘掉连接态，与 TUI 的 one-shot
+        disconnected 降级不同。
+        """
+        try:
+            from jiuwenswarm.server.runtime.mcp.state_store import (
+                list_truly_connected_mcps,
+            )
+            names = [
+                str(r.get("name", "")).strip()
+                for r in list_truly_connected_mcps()
+                if r.get("name")
+            ]
+            if not names:
+                return
+            logger.info(
+                "[mcp-prewarm] prewarming %d connected MCP(s): %s",
+                len(names), names,
+            )
+            for name in names:
+                try:
+                    ok, reason = await probe_mcp_live_connection(name)
+                    if ok:
+                        logger.info("[mcp-prewarm] '%s' prewarmed", name)
+                    else:
+                        logger.warning(
+                            "[mcp-prewarm] '%s' prewarm failed: %s "
+                            "(will lazy-connect on first chat)", name, reason,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[mcp-prewarm] '%s' prewarm error: %s", name, exc,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[mcp-prewarm] background prewarm failed: %s", exc)
+
     async def _register_mcp_servers_from_config(
         self, config_base: dict[str, Any], *, tag: str = "agent.main"
     ) -> None:
@@ -4333,6 +4400,19 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] resolve zen free model %s failed",
                 requested, exc_info=True,
             )
+        # 显式请求的模型全部未命中（不在 config / model_cache / Zen 免费缓存）：
+        # 打 warning 暴露配置漂移（如 cron job 引用已下线模型、两进程缓存分歧），
+        # 不再静默回退默认模型——cron 无人值守场景，静默用错模型难以及时发现。
+        fallback_name = str(
+            getattr(getattr(self._model, "model_config", None), "model_name", "") or ""
+        )
+        logger.warning(
+            "[JiuWenSwarmDeepAdapter] requested model %r not found in "
+            "configured models or zen free-model cache; falling back to "
+            "default model %r",
+            requested,
+            fallback_name or type(self._model).__name__,
+        )
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
@@ -6677,6 +6757,15 @@ class JiuWenSwarmDeepAdapter:
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
         if self._skip_own_instance_build():
+            # Root adapter 只做 router/template holder，不建 DeepAgent instance。
+            # web channel 在此后台预热 connected MCP 的进程级连接缓存——首轮对话
+            # reconcile 在 session child 注册时命中缓存不重 spawn。不阻塞 create
+            # instance（fire-and-forget），不挂任何会话（不碰 _session_selected_mcp）。
+            if (
+                getattr(self, "_channel_id", "") == "web"
+                and not self._is_session_scoped_adapter
+            ):
+                self._start_mcp_prewarm()
             return
 
         model = self._create_model(config_base)
@@ -7027,6 +7116,14 @@ class JiuWenSwarmDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # cron 普通模式执行时 channel_id 是内部标识 "__cron__"（隔离执行会话），
+        # 真实推送渠道由 scheduler 通过 metadata["targets"] 下发（= job.targets，
+        # 与 cron 文本结果推送到同一批渠道）。这里归一为真实渠道，供 send_file
+        # 等按渠道开关的工具注册判定，并作为文件推送的 channel_id。
+        if normalized_channel == "__cron__":
+            cron_targets = str(normalized_metadata.get("targets") or "").strip()
+            if cron_targets:
+                normalized_channel = cron_targets
 
         session_metadata: dict[str, Any] = {}
         if isinstance(session_id, str) and session_id.strip():
@@ -7095,6 +7192,97 @@ class JiuWenSwarmDeepAdapter:
         """
         self._last_mode = mode
         await self._update_agent_rails()
+        await self._sync_personal_context_rail(mode)
+
+    def _personal_context_rail_enabled(self, mode: str) -> bool:
+        """Return whether this request mode uses the embedded Core Rail."""
+
+        return (
+            not self._is_code_agent
+            and mode in {"agent", "agent.fast", "agent.plan"}
+            and self._personal_context_runtime_enabled
+        )
+
+    def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
+        """Store the Host switch snapshot for this adapter and future sessions."""
+
+        self._personal_context_runtime_enabled = bool(enabled)
+        if not self._is_session_scoped_adapter:
+            for adapter in list(getattr(self, "_session_adapters", {}).values()):
+                adapter.set_personal_context_runtime_enabled(enabled)
+
+    async def refresh_personal_context_rail(self) -> None:
+        """Apply the current Host switch to this adapter and live session adapters."""
+
+        mode = self._last_mode
+        if mode is not None:
+            await self._sync_personal_context_rail(mode)
+        if not self._is_session_scoped_adapter:
+            for adapter in list(self._session_adapters.values()):
+                cancelled: asyncio.CancelledError | None = None
+                try:
+                    await adapter.refresh_personal_context_rail()
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] optional PersonalContext session "
+                        "Rail refresh failed: %s",
+                        type(exc).__name__,
+                    )
+                if cancelled is not None:
+                    raise cancelled
+
+    async def _sync_personal_context_rail(self, mode: str) -> None:
+        """Register or detach the fixed-path Core Rail for normal agent modes."""
+
+        async with self._personal_context_rail_lock:
+            enabled = self._personal_context_rail_enabled(mode)
+            rail = self._personal_context_rail
+
+            if rail is not None and not enabled:
+                try:
+                    await self._instance.unregister_rail(rail)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] optional PersonalContext Rail "
+                        "unregister failed: %s",
+                        type(exc).__name__,
+                    )
+                    return
+                self._personal_context_rail = None
+                rail = None
+
+            if not enabled:
+                return
+
+            if rail is None:
+                try:
+                    rail = PersonalContextRail(
+                        Path.home() / ".jiuwenswarm" / ".personal_context"
+                    )
+                    await self._instance.register_rail(rail)
+                except Exception as exc:  # noqa: BLE001
+                    if rail is not None:
+                        try:
+                            await self._instance.unregister_rail(rail)
+                        except Exception as cleanup_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[JiuWenSwarmDeepAdapter] optional PersonalContext Rail "
+                                "registration cleanup failed: %s",
+                                type(cleanup_exc).__name__,
+                            )
+                    self._personal_context_rail = None
+                    logger.warning(
+                        "[JiuWenSwarmDeepAdapter] optional PersonalContext Rail "
+                        "registration failed: %s",
+                        type(exc).__name__,
+                    )
+                    return
+                self._personal_context_rail = rail
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] PersonalContextRail registered for %s", mode
+                )
 
     @staticmethod
     def _user_interaction_rail_attribute() -> str:
@@ -7342,6 +7530,13 @@ class JiuWenSwarmDeepAdapter:
         channel = (
             str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         )
+        # cron 执行时 channel_id 是内部标识（如 "__cron__"），真实推送渠道由
+        # _bind_runtime_cron_context 归一后写入 contextvar（= job.targets，与 cron
+        # 文本结果推送到同一批渠道）。send_file 的注册判定与文件推送都按真实渠道进行。
+        if _CRON_TOOL_BOUND.get():
+            cron_channel = str(_CRON_TOOL_CHANNEL_ID.get() or "").strip()
+            if cron_channel:
+                channel = cron_channel
         send_file_enabled = (
             config_base.get("channels", {}).get(channel, {}).get("send_file_allowed")
         )
@@ -7876,6 +8071,13 @@ class JiuWenSwarmDeepAdapter:
                     self._parent_session_id,
                     exc,
                 )
+        try:
+            await self._sync_personal_context_rail("cleanup")
+        except BaseException as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] PersonalContextRail cleanup failed: %s",
+                exc,
+            )
         self._teardown_agent_owned_tools()
         self._release_sys_operations()
         # 取消未到期的延时重索引 task，避免 adapter cleanup 后仍有孤儿 task
@@ -7883,6 +8085,10 @@ class JiuWenSwarmDeepAdapter:
         if self._memory_reindex_task is not None and not self._memory_reindex_task.done():
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
+        # 取消 MCP 预热后台 task，避免 cleanup 后孤儿 task 触发 probe。
+        if self._mcp_prewarm_task is not None and not self._mcp_prewarm_task.done():
+            self._mcp_prewarm_task.cancel()
+        self._mcp_prewarm_task = None
         await self._close_a2x_client()
 
     async def _cleanup_evolution_background_tasks(self) -> None:
@@ -10163,7 +10369,16 @@ class JiuWenSwarmDeepAdapter:
             # has a parent for LLM/tool spans (see streaming path for details).
             sync_agent_observability()
             mark_single_agent_team(self._instance)
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            from jiuwenswarm.server.runtime.debug_trace.paths import (
+                resolve_debug_trace_mode,
+            )
+
+            _run_span = open_agent_run_span(
+                session_id=session_id,
+                mode=resolve_debug_trace_mode(
+                    mode, getattr(request, "_original_mode", None)
+                ),
+            )
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
             if attach_goal:
@@ -10223,7 +10438,9 @@ class JiuWenSwarmDeepAdapter:
                         parsed = self._parse_stream_chunk(chunk)
                         if parsed is not None:
                             event_type = str(parsed.get("event_type") or "").strip()
-                            if event_type in ("chat.error", "error"):
+                            # execution.error（DeepAgent round 级异常，如模型调用失败）
+                            # 与 chat.error / error 一样视为终端失败，透传其 message。
+                            if event_type in ("chat.error", "error", ERROR_EVENT_TYPE):
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
@@ -10271,12 +10488,17 @@ class JiuWenSwarmDeepAdapter:
 
         content = "".join(collected_content) if collected_content else ""
 
-        if not content and error_text:
+        if error_text:
+            # 模型/round 级错误：即使已流出部分内容，也按失败返回并透传错误消息，
+            # 避免 cron 等调用方误判为"执行完成但未返回结果"。
+            payload: dict[str, Any] = {"error": error_text}
+            if content:
+                payload["content"] = content
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=False,
-                payload={"error": error_text},
+                payload=payload,
                 metadata=request.metadata,
             )
 
@@ -10785,7 +11007,9 @@ class JiuWenSwarmDeepAdapter:
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
             mark_single_agent_team(self._instance)
-            _run_span = open_agent_run_span(session_id=session_id, mode=mode)
+            _run_span = open_agent_run_span(
+                session_id=session_id, mode=_debug_trace_mode
+            )
             _otel_trace_id = ""
             _otel_span_id = ""
             if _run_span is not None:

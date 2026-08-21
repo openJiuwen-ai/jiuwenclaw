@@ -674,6 +674,7 @@ def update_session_metadata(
     mode: str | None = None,
     team_name: str | None = None,
     team_template_id: str | None = None,
+    agent_group_name: str | None = None,
     accent_color: str | None = None,
     project_dir: str | None = None,
     project_id: str | None = None,
@@ -747,6 +748,7 @@ def update_session_metadata(
             "mode": mode if mode is not None else "unknown",
             "team_name": team_name or "",
             "team_template_id": team_template_id or "",
+            "agent_group_name": agent_group_name or "",
             "round_id": 0,
             "project_dir": project_dir or "",
             "project_id": project_id or "",
@@ -764,7 +766,13 @@ def update_session_metadata(
             metadata["channel_metadata"] = channel_metadata
     else:
         # 更新现有元数据
-        if channel_id is not None:
+        # channel_id：首次锁定——仅当磁盘值为空时写入，后续不覆盖
+        # （与 project_dir/project_id/cron_id/user_id/work_mode 一致语义，
+        # 避免联机共享会话被其他通道消息覆写归属通道）
+        if channel_id and not (
+            isinstance(metadata.get("channel_id"), str)
+            and metadata.get("channel_id", "").strip()
+        ):
             metadata["channel_id"] = channel_id
         if user_id is not None:
             metadata["user_id"] = user_id
@@ -774,6 +782,8 @@ def update_session_metadata(
             metadata["team_name"] = team_name
         if team_template_id is not None:
             metadata["team_template_id"] = team_template_id
+        if agent_group_name is not None:
+            metadata["agent_group_name"] = agent_group_name
         if accent_color is not None:
             metadata["accent_color"] = accent_color
         # model：覆盖式——每次请求更新为本次模型
@@ -1009,7 +1019,12 @@ def sync_session_request_metadata(
         # 未显式携带（如只读 RPC 默认推断）则保持磁盘原值，不腐蚀已锁定的会话 mode
         if mode is not None and explicit_mode_provided:
             metadata["mode"] = mode
-        if channel_id is not None:
+        # channel_id：首次锁定——仅当磁盘值为空时写入，后续不覆盖
+        # （与 project_dir/project_id/cron_id/user_id/work_mode 一致语义）
+        if channel_id and not (
+            isinstance(metadata.get("channel_id"), str)
+            and metadata.get("channel_id", "").strip()
+        ):
             metadata["channel_id"] = channel_id
         # user_id：首次锁定，已锁定则忽略请求值（与 project_id/cron_id 一致不可改）。
         # 由 envelope.user_id 透传，供 gateway 列表接口按用户隔离会话历史。
@@ -1051,6 +1066,7 @@ def get_session_metadata(
         )
         metadata.setdefault("team_name", "")
         metadata.setdefault("team_template_id", "")
+        metadata.setdefault("agent_group_name", "")
     return metadata
 
 
@@ -1285,7 +1301,14 @@ def set_session_delivery_context(
             "status": "idle",
         }
     else:
-        if normalized_channel_id:
+        # channel_id：首次锁定——会话归属通道稳定，不被联机场景下其他通道的
+        # server_push 覆写；delivery_context.channel_id 仍保持动态更新，
+        # 供 build_server_push_message 路由异步推送（evolution watcher 等）到
+        # 用户最近活动的通道。
+        if normalized_channel_id and not (
+            isinstance(metadata.get("channel_id"), str)
+            and metadata.get("channel_id", "").strip()
+        ):
             metadata["channel_id"] = normalized_channel_id
         metadata["last_message_at"] = _current_timestamp()
 

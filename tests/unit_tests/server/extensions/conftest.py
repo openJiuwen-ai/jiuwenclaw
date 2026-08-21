@@ -12,6 +12,7 @@ import jiuwenswarm.common.utils as utils
 from jiuwenswarm.server.runtime import extension_package_manager as catalog
 
 AGENT_TEMPLATES = "agent_templates"
+AGENT_GROUPS = "agent_groups"
 PLUGIN_PACKAGES = "plugin_packages"
 
 
@@ -20,6 +21,7 @@ def extension_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
     """Isolate equipment workspace and hide the real resources shelf."""
     monkeypatch.setattr(utils, "_workspace_base_dir", tmp_path / ".jiuwenswarm")
     monkeypatch.setattr(catalog, "get_equipment_resources_agent_templates_dir", lambda: None)
+    monkeypatch.setattr(catalog, "get_equipment_resources_agent_groups_dir", lambda: None)
     monkeypatch.setattr(catalog, "get_equipment_resources_plugin_packages_dir", lambda: None)
     return utils.get_agent_workspace_dir()
 

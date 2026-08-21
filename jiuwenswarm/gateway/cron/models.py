@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -14,6 +15,8 @@ from jiuwenswarm.common.mode_matrix import (
     is_team_mode,
 )
 from jiuwenswarm.gateway.cron.cron_expr import validate_cron_expression
+
+logger = logging.getLogger(__name__)
 
 
 class CronTargetChannel(str, Enum):
@@ -150,8 +153,8 @@ def cron_job_metadata() -> dict[str, str | list[str] | int]:
     }
 
 
-CRON_DEFAULT_TIMEOUT_SECONDS: int = 10 * 60
-CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 20 * 60
+CRON_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
+CRON_TEAM_DEFAULT_TIMEOUT_SECONDS: int = 60 * 60
 CRON_MAX_TIMEOUT_SECONDS: int = 72 * 60 * 60
 # Backward-compatible alias used by older imports/tests.
 CRON_TEAM_STREAM_TIMEOUT_SECONDS: float = float(CRON_TEAM_DEFAULT_TIMEOUT_SECONDS)
@@ -177,6 +180,13 @@ def validate_cron_model(raw: Any) -> str | None:
 
     If the input is an alias, resolves to the underlying ``model_client_config.model_name``
     so the stored value is always a key AgentServer ``_model_cache`` can look up.
+
+    Opencode Zen free models are in-memory only (never written to config.yaml), so a
+    configured-models miss falls back to the Zen free-model cache: the frontend appends
+    free models to ``models.list`` and lets the user pick one for a cron job, and the
+    stored canonical id is later resolved by AgentServer the same way. When the free-model
+    toggle is off or Zen is unreachable the cache is empty and the Unknown-model error is
+    raised as before.
     """
     if raw is None:
         return None
@@ -190,6 +200,22 @@ def validate_cron_model(raw: Any) -> str | None:
         mcc = entry.get("model_client_config") or {}
         canonical = (mcc.get("model_name") or "").strip()
         return canonical if canonical else value
+
+    # Opencode Zen 免费模型（纯内存态，不入 config.yaml）：按 model_name 或 alias
+    # 匹配内存缓存，返回 canonical model_name（即 Zen API id），与 get_model_config
+    # 的解析语义保持一致。匹配失败/缓存为空时保持原 Unknown model 行为。
+    try:
+        from jiuwenswarm.server.runtime.opencode_zen import get_zen_free_model_entries
+        for zent in get_zen_free_model_entries():
+            zmcc = zent.get("model_client_config") or {}
+            zname = (zmcc.get("model_name") or "").strip()
+            if zname and (
+                zname == value or str(zent.get("alias") or "").strip() == value
+            ):
+                return zname
+    except Exception as exc:  # noqa: BLE001 - free-model lookup must never break cron create
+        logger.debug("[cron] zen free-model lookup failed for %r: %s", value, exc)
+
     available = get_model_names()
     hint = ", ".join(available[:20]) if available else "(no models configured)"
     if len(available) > 20:
@@ -263,7 +289,7 @@ class CronJob:
     mode: str = CRON_JOB_DEFAULT_MODE
     # 执行一次后自动删除（用于提醒类任务）
     delete_after_run: bool = False
-    # 单次执行超时（秒）；未配置时普通模式 10 分钟，team 模式 20 分钟
+    # 单次执行超时（秒）；未配置时普通模式与 team 模式默认均为 1 小时
     timeout_seconds: int | None = None
     # 归属项目 ID；由创建时 project_dir 匹配获得，匹配不到可见项目为空串（默认项目）
     project_id: str = ""

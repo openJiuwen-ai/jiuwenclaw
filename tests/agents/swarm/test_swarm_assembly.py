@@ -848,6 +848,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "request_id",
         "channel_id",
         "request_metadata",
+        "agent_group_name",
     }
 
 
@@ -1140,6 +1141,63 @@ def test_enriched_spec_serialization_round_trip() -> None:
     rail_types = {rail["type"] for rail in leader_rails}
     assert any(name.startswith("swarm.") for name in rail_types)
     assert any(not name.startswith("swarm.") for name in rail_types)
+
+
+def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
+    """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
+    spec = _make_team_spec()
+    spec.leader.prompt = "existing leader agreement"
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id="web",
+        agent_group_name="sample-expert-group",
+    )
+
+    assert spec.team_mode == "hybrid"
+    assert [member.member_name for member in spec.predefined_members] == [
+        "member1",
+        "member2",
+    ]
+    assert set(spec.agents) >= {"leader", "teammate", "member1", "member2"}
+
+    assert spec.leader.prompt.startswith("existing leader agreement\n\n")
+    assert "# Expert Group Leader" in spec.leader.prompt
+    assert "# 专家团负责人" in spec.leader.prompt
+    assert "Leader 负责理解用户目标" in spec.leader.prompt
+
+    predefined = {member.member_name: member for member in spec.predefined_members}
+    assert "# 方案分析专家" in predefined["member1"].prompt
+    assert "# 风险与质量复核专家" in predefined["member2"].prompt
+    for member in predefined.values():
+        assert "Leader 负责理解用户目标" in member.prompt
+
+    for name in ("leader", "member1", "member2"):
+        member_spec = spec.agents[name]
+        snapshot = member_spec.agent_template_spec
+        assert snapshot is not None
+        assert snapshot["agent_card"]["id"] == name
+        assert snapshot["prompt_sections"] == []
+        assert "skill_name_1" in (member_spec.skills or [])
+
+    # The generic teammate remains an unbound fallback; exact member names win
+    # in AgentConfigurator.resolve_agent_spec.
+    assert getattr(spec.agents["teammate"], "agent_template_spec", None) is None
+
+    # This JiuwenSwarm PR is paired with the AgentTemplate snapshot change in
+    # agent-core.  Keep the assembly assertions runnable against the preceding
+    # core baseline used by independent CI, while exercising JSON round-trip as
+    # soon as that paired schema field is available.
+    if "agent_template_spec" in DeepAgentSpec.model_fields:
+        restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
+        assert restored.agents["member1"].agent_template_spec is not None
+        restored_members = {
+            member.member_name: member for member in restored.predefined_members
+        }
+        assert restored_members["member1"].prompt == predefined["member1"].prompt
+        assert restored.leader.prompt == spec.leader.prompt
 
 
 def test_send_file_returns_empty_without_request_id() -> None:

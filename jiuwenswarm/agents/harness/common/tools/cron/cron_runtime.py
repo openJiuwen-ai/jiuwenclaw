@@ -72,6 +72,56 @@ class _CronToolsCronBackend(CronToolBackend):
             app_id=app_id,
         )
 
+    @staticmethod
+    def _inherit_session_model(
+        payload: dict[str, Any],
+        context: CronToolContext | None,
+    ) -> dict[str, Any]:
+        """创建 cron 时直接复用创建它的 chat-session 的模型配置。
+
+        用户通过对话（chat-session）创建定时任务时，会话当前使用的模型（如免费模型
+        ``mimo-v2.5-free``）已写入会话 metadata 的 ``model`` 字段；这里无条件用该
+        值覆盖 ``model_name``，保证 cron 执行与创建它的会话使用同一模型配置，而不是
+        回退到 config 默认模型（用户自配 key 失效时会 401）。会话无模型 / 模型校验
+        不过时保持原 payload（此时显式传入的 model_name 仍生效），不阻断创建。
+        """
+        if context is None:
+            return payload
+        session_id = getattr(context, "session_id", None)
+        if not (isinstance(session_id, str) and session_id.strip()):
+            return payload
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            meta = get_session_metadata(session_id, cache_bust=True)
+            if not isinstance(meta, dict):
+                return payload
+            inherited = str(meta.get("model") or "").strip()
+            if not inherited:
+                return payload
+            from jiuwenswarm.gateway.cron.models import validate_cron_model
+
+            canonical = validate_cron_model(inherited)
+            if canonical:
+                out = dict(payload)
+                out["model_name"] = canonical
+                logger.info(
+                    "[CronRuntimeBridge] cron job reuses chat-session model: "
+                    "session=%s model=%s",
+                    session_id,
+                    canonical,
+                )
+                return out
+        except Exception as exc:  # noqa: BLE001 - 继承失败不阻断创建
+            logger.debug(
+                "[CronRuntimeBridge] reuse session model failed session=%s: %s",
+                session_id,
+                exc,
+            )
+        return payload
+
     async def list_jobs(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
         jobs = await self._cron_tools.list_jobs()
         rows = [self._to_backend_job(job) for job in jobs]
@@ -105,6 +155,10 @@ class _CronToolsCronBackend(CronToolBackend):
             sorted(list((params or {}).keys())),
         )
         payload = _extract_legacy_params(dict(params or {}), context=context, require_schedule=True)
+        # cron 的模型直接复用创建它的 chat-session 的模型配置（用户在对话中选用的
+        # 模型，如免费模型 mimo-v2.5-free），保证 cron 执行与创建它的会话使用同一
+        # 模型配置，而不是回退到 config 默认模型。
+        payload = self._inherit_session_model(payload, context=context)
         logger.info(
             "[CronRuntimeBridge] create_job mapped payload.targets=%s payload.id=%s payload.name=%s",
             payload.get("targets"),
@@ -126,6 +180,8 @@ class _CronToolsCronBackend(CronToolBackend):
         context: CronToolContext | None = None,
     ) -> dict[str, Any]:
         payload = _extract_legacy_params(dict(patch or {}), context=context, require_schedule=False)
+        # update 不继承 chat-session 的模型配置：通过对话修改 cron 的配置（时间/名称等）
+        # 不应改动 cron 已落库的模型；只有 create 时才会继承会话模型（见 create_job）。
         token = self._cron_tools.push_cron_route(self._route_from_context(context))
         try:
             job = await self._cron_tools.update_job(job_id, payload)
@@ -362,6 +418,11 @@ def _extract_legacy_params(
             out["wake_offset_seconds"] = data.get("wake_offset_seconds")
         if "deleteAfterRun" in data:
             out["delete_after_run"] = bool(data.get("deleteAfterRun"))
+        # model_name：透传（新版格式可挂在顶层，也可能随 payload 传入），
+        # 供 CronTools.create_job 落盘；未显式传时由调用方继承会话模型。
+        model_name_raw = data.get("model_name") or payload_block.get("model_name")
+        if model_name_raw is not None and str(model_name_raw).strip():
+            out["model_name"] = str(model_name_raw).strip()
 
         context_session_id = getattr(context, "session_id", None)
         context_metadata = getattr(context, "metadata", None) or {}
@@ -524,7 +585,12 @@ _QUARTZ_DOW_DECLARATION_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _patch_cron_tool_cards(tools: list[Any]) -> list[Any]:
-    """修正 cron 工具 ToolCard 的 description/input_params 中的 dow 语义，返回修正后的 tools。"""
+    """修正 cron 工具 ToolCard 的 description/input_params 中的 dow 语义，返回修正后的 tools。
+
+    注意：不在工具描述中注入 model_name 字段——cron 的模型由创建它的 chat-session
+    直接复用（见 ``_CronToolsCronBackend._inherit_session_model``），不需要 LLM 参与
+    模型选择，避免 LLM 传入与创建会话不一致的模型。
+    """
     for tool in tools:
         card = getattr(tool, "card", None)
         if card is None:

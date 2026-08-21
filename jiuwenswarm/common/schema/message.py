@@ -153,6 +153,33 @@ class ReqMethod(Enum):
     SKILLS_GRAPH_GET = "skills.graph.get"
     SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
 
+    PERSONAL_CONTEXT_RUNTIME_STATUS = "personal_context.runtime.status"
+    PERSONAL_CONTEXT_RUNTIME_START = "personal_context.runtime.start"
+    PERSONAL_CONTEXT_RUNTIME_STOP = "personal_context.runtime.stop"
+    PERSONAL_CONTEXT_RUNTIME_GET_CONFIG = "personal_context.runtime.get_config"
+    PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG = "personal_context.runtime.patch_config"
+    PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL = "personal_context.runtime.select_model"
+    PERSONAL_CONTEXT_FETCH_LIST_SERVICES = "personal_context.fetch.list_services"
+    PERSONAL_CONTEXT_FETCH_CREATE_SERVICE = "personal_context.fetch.create_service"
+    PERSONAL_CONTEXT_FETCH_DELETE_SERVICE = "personal_context.fetch.delete_service"
+    PERSONAL_CONTEXT_FETCH_PATCH_SERVICE = "personal_context.fetch.patch_service"
+    PERSONAL_CONTEXT_FETCH_START_SERVICE = "personal_context.fetch.start_service"
+    PERSONAL_CONTEXT_FETCH_STOP_SERVICE = "personal_context.fetch.stop_service"
+    PERSONAL_CONTEXT_FETCH_START_SCHEDULER = "personal_context.fetch.start_scheduler"
+    PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER = "personal_context.fetch.stop_scheduler"
+    PERSONAL_CONTEXT_FETCH_RUN_ALL = "personal_context.fetch.run_all"
+    PERSONAL_CONTEXT_FETCH_RUN_ONE = "personal_context.fetch.run_one"
+    PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS = "personal_context.fetch.get_run_status"
+    PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS = (
+        "personal_context.fetch.get_authorization_status"
+    )
+    PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER = (
+        "personal_context.fetch.authorize_provider"
+    )
+    PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH = "personal_context.context.stream_graph"
+    PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES = "personal_context.context.search_pages"
+    PERSONAL_CONTEXT_CONTEXT_GET_NODE = "personal_context.context.get_node"
+
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
     PLUGINS_INSTALL = "plugins.install"

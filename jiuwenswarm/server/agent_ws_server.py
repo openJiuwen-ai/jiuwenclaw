@@ -129,6 +129,11 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_REMINDER_ORIGINAL_QUERY_KEY,
 )
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.personal_context import PersonalContextHostAPI
+from jiuwenswarm.server.personal_context.ws_handler import (
+    PERSONAL_CONTEXT_REQUEST_METHODS as _PERSONAL_CONTEXT_REQ_METHODS,
+    handle_personal_context_request,
+)
 from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
@@ -934,6 +939,11 @@ class AgentWebSocketServer:
         self._default_model: Optional[Any] = None
         # 本地 jiuwenbox 子进程管理器 (lazy 启动, 在 /sandbox enable 时 ensure_running)
         self._jiuwenbox_runner = JiuwenBoxRunner.instance()
+        # AgentServer 内唯一持有的进程内 PersonalContext Host；Context Rail 使用同一固定目录。
+        self._personal_context_host = PersonalContextHostAPI(
+            home=Path.home() / ".jiuwenswarm" / ".personal_context",
+        )
+        self._personal_context_start_task: asyncio.Task[None] | None = None
         # checkpointer 后台预热任务 (start() 里 fire-and-forget, stop() 时 cancel)
         self._checkpointer_warmup_task: Optional[asyncio.Task] = None
         # 图像模态探针重探任务 (模型配置变更时拉起, stop() 时 cancel)
@@ -1062,10 +1072,51 @@ class AgentWebSocketServer:
         self._checkpointer_warmup_task = asyncio.create_task(
             _warmup_checkpointer(), name="checkpointer-warmup"
         )
+        self._personal_context_start_task = asyncio.create_task(
+            self._start_personal_context_best_effort(),
+            name="personal-context-host-start",
+        )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
         await self._bootstrap_internal_jiuwenbox()
+
+    async def _start_personal_context_best_effort(self) -> None:
+        """Start optional PersonalContext without changing AgentServer readiness."""
+        start_cancelled: asyncio.CancelledError | None = None
+        try:
+            await self._personal_context_host.start()
+        except asyncio.CancelledError as exc:
+            start_cancelled = exc
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PersonalContext startup failed: %s",
+                type(exc).__name__,
+            )
+            return
+        if start_cancelled is not None:
+            raise start_cancelled
+
+        rail_sync_cancelled: asyncio.CancelledError | None = None
+        try:
+            state_reader = getattr(
+                self._personal_context_host, "is_runtime_enabled", None
+            )
+            enabled = bool(await state_reader()) if callable(state_reader) else False
+            manager_setter = getattr(
+                self._agent_manager, "set_personal_context_runtime_enabled", None
+            )
+            if callable(manager_setter):
+                await manager_setter(enabled)
+        except asyncio.CancelledError as exc:
+            rail_sync_cancelled = exc
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PersonalContext Rail sync failed: %s",
+                type(exc).__name__,
+            )
+        if rail_sync_cancelled is not None:
+            raise rail_sync_cancelled
 
     async def _bootstrap_internal_jiuwenbox(self) -> None:
         """启动时按 ``config.yaml::sandbox`` 自动拉起 jiuwenbox 子进程。
@@ -1287,8 +1338,46 @@ class AgentWebSocketServer:
         )
         return forbidden_origin_response(args)
 
+    async def _stop_personal_context_best_effort(self) -> None:
+        """Cancel PersonalContext startup and stop PersonalContext without masking main shutdown."""
+        start_task = self._personal_context_start_task
+        self._personal_context_start_task = None
+        if start_task is not None:
+            if not start_task.done():
+                start_task.cancel()
+            try:
+                await start_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[AgentWebSocketServer] optional PersonalContext startup cleanup failed: %s",
+                    type(exc).__name__,
+                )
+        stop_cancelled: asyncio.CancelledError | None = None
+        try:
+            await self._personal_context_host.stop()
+        except asyncio.CancelledError as exc:
+            stop_cancelled = exc
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentWebSocketServer] optional PersonalContext stop failed: %s",
+                type(exc).__name__,
+            )
+        if stop_cancelled is not None:
+            raise stop_cancelled
+
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        try:
+            await self._stop_main_services()
+        finally:
+            await self._stop_personal_context_best_effort()
+
+    async def _stop_main_services(self) -> None:
+        """Run the unchanged AgentServer shutdown before optional PersonalContext cleanup."""
         # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
         warmup = self._checkpointer_warmup_task
         self._checkpointer_warmup_task = None
@@ -1485,6 +1574,22 @@ class AgentWebSocketServer:
             )
 
         try:
+            if request.req_method in _PERSONAL_CONTEXT_REQ_METHODS:
+                manager = getattr(self, "_agent_manager", None)
+                runtime_callback = getattr(
+                    manager, "set_personal_context_runtime_enabled", None
+                )
+                await handle_personal_context_request(
+                    self._personal_context_host,
+                    ws,
+                    request,
+                    send_lock,
+                    runtime_enabled_changed=(
+                        runtime_callback if callable(runtime_callback) else None
+                    ),
+                )
+                return
+
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)
@@ -6592,6 +6697,7 @@ class AgentWebSocketServer:
         backend may be headless/remote), then sends ``mcp.wait_auth`` which
         holds-open polling ``complete_cli_auth`` until OAuth completes.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import CliConnectError
         try:
             from jiuwenswarm.server.runtime.mcp.registry import connect_mcp
             params = request.params or {}
@@ -6709,6 +6815,23 @@ class AgentWebSocketServer:
                 ok=False,
                 payload={"type": "connect_failed", "error": str(exc), "code": "MCP_NOT_FOUND"},
             )
+        except CliConnectError as exc:
+            # Classifiable CLI failure (runtime missing / network / incomplete).
+            # Surface code + runtime + install_cmd so the frontend shows an
+            # actionable i18n hint instead of the raw "[WinError 2]" string.
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "type": "connect_failed",
+                    "error": str(exc),
+                    "code": exc.code,
+                    "runtime": exc.runtime,
+                    "install_cmd": exc.install_cmd,
+                    "name": name,
+                },
+            )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -6740,6 +6863,7 @@ class AgentWebSocketServer:
         ``connected``/``auth_failed`` response. Holds the RPC open for minutes;
         the frontend shows a "connecting…" spinner while waiting.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import CliConnectError
         try:
             params = request.params or {}
             name = str(params.get("name", "")).strip()
@@ -6762,6 +6886,20 @@ class AgentWebSocketServer:
                     ok=True,
                     payload=result,
                 )
+        except CliConnectError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "type": "connect_failed",
+                    "error": str(exc),
+                    "code": exc.code,
+                    "runtime": exc.runtime,
+                    "install_cmd": exc.install_cmd,
+                    "name": name,
+                },
+            )
         except ValueError as exc:
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -6936,7 +7074,10 @@ class AgentWebSocketServer:
         ``itype == "cli"`` calls ``_connect_cli`` which can return the
         ``auth_required`` sentinel). No form A/B/D path triggers this loop.
         """
-        from jiuwenswarm.server.runtime.mcp.registry import complete_cli_auth
+        from jiuwenswarm.server.runtime.mcp.registry import (
+            CliConnectError,
+            complete_cli_auth,
+        )
 
         cur_step = max(0, int(step_index))
         last_output = ""
@@ -6975,6 +7116,11 @@ class AgentWebSocketServer:
             if last_output:
                 timeout_error = f"{timeout_error} (last status: {last_output})"
             return {"type": "auth_failed", "name": name, "error": timeout_error}
+        except CliConnectError:
+            # Re-raise so _handle_mcp_wait_auth's except CliConnectError can
+            # surface the structured code; otherwise the generic except below
+            # flattens it into an auth_failed string, dropping code/runtime.
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] _await_cli_auth '%s' failed: %s", name, exc)
             return {"type": "auth_failed", "name": name, "error": str(exc)}
@@ -6989,6 +7135,7 @@ class AgentWebSocketServer:
         activate it. Editing an already-connected custom MCP removes the old live
         instance so the new config takes effect on connect.
         """
+        from jiuwenswarm.server.runtime.mcp.registry import McpRegistryError
         try:
             from jiuwenswarm.server.runtime.mcp.registry import register_custom_mcp
             params = request.params or {}
@@ -7019,6 +7166,16 @@ class AgentWebSocketServer:
                     "name": name,
                     "item": self._mask_sensitive_fields(entry),
                 },
+            )
+        except McpRegistryError as exc:
+            # Classifiable registry failure (e.g. name collides with a builtin
+            # package). Surface code so the frontend shows an actionable hint
+            # ("name taken by a builtin, rename") instead of a generic bad_request.
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"type": "bad_request", "error": str(exc), "code": exc.code, "name": name},
             )
         except ValueError as exc:
             resp = AgentResponse(
@@ -8604,6 +8761,18 @@ class AgentWebSocketServer:
                         reason="model config change",
                     )
                 )
+            # 模型配置变更时同步刷新本进程（AgentServer）的 Zen 免费模型缓存
+            # （与上方 image modality 刷新同一 model scope）。Gateway 进程在
+            # config.set/config.save_all 时会 warm，但两进程缓存独立：若本进程
+            # 启动时免费模型开关关闭（后台重试循环已退出），之后经 web 打开开关，
+            # 本进程缓存会一直为空，免费模型解析将静默回退默认模型。放后台任务
+            # 执行——warm 自带超时且失败后自动调度后台重试，不阻塞 reload 响应。
+            if should_refresh_image_modality:
+                from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+
+                asyncio.create_task(
+                    warm_zen_free_models(reason="agent.reload_config")
+                )
             if should_reload_agents:
                 await self._agent_manager.reload_agents_config(
                     config_payload,
@@ -9313,6 +9482,10 @@ class AgentWebSocketServer:
                     project_id=project_id,
                     persist_session=persist_session,
                     work_mode=final_work_mode,
+                    # cron 执行会话（cron-session）创建时即写入 job 的 model（scheduler
+                    # SESSION_CREATE 携带 model_name），否则要等首条 chat.send 才落盘，
+                    # 前端首开会话会显示默认模型（刷新后才正确）。同步写盘，创建即可读。
+                    model=str(params.get("model_name") or "").strip(),
                     cron_id=str(params.get("cron_id") or "").strip(),
                     channel_metadata=channel_metadata,
                 )

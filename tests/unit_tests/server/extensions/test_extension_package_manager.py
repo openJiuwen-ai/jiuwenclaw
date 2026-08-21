@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime import extension_package_manager as catalog
 from jiuwenswarm.server.runtime.mcp import state_store as mcp_state
 
 from tests.unit_tests.server.extensions.conftest import (
+    AGENT_GROUPS,
     AGENT_TEMPLATES,
     PLUGIN_PACKAGES,
     create_package,
@@ -38,6 +39,8 @@ class TestPrepareWorkspaceAndMarketplace:
             assert not (plugins / kind / "marketplace.json").exists()
             assert not any((plugins / kind / "built_in").iterdir())
             assert not any((plugins / kind / "local").iterdir())
+        assert (plugins / AGENT_GROUPS / "built_in").is_dir()
+        assert (plugins / AGENT_GROUPS / "local").is_dir()
 
     def test_prepare_overwrite_true_resets_false_keeps_built_in(self, tmp_path: Path) -> None:
         utils.prepare_workspace(overwrite=True, workspace_dir=tmp_path)
@@ -93,6 +96,60 @@ class TestPrepareWorkspaceAndMarketplace:
         from jiuwenswarm.server import app_agentserver
 
         importlib.reload(app_agentserver)
+
+
+class TestAgentGroupResolution:
+    def test_resolve_local_agent_group(
+        self,
+        extension_workspace: Path,
+    ) -> None:
+        package = (
+            extension_workspace
+            / "plugins"
+            / AGENT_GROUPS
+            / "local"
+            / "finance-group"
+        )
+        package.mkdir(parents=True)
+        (package / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "finance-group",
+                    "package_type": "agent_group",
+                    "agents": ["leader"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert catalog.resolve_agent_group_dir("finance-group") == package.resolve()
+
+    def test_resolve_agent_group_rejects_conflict(
+        self,
+        extension_workspace: Path,
+    ) -> None:
+        for source in ("local", "built_in"):
+            package = (
+                extension_workspace
+                / "plugins"
+                / AGENT_GROUPS
+                / source
+                / "duplicate"
+            )
+            package.mkdir(parents=True)
+            (package / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "name": "duplicate",
+                        "package_type": "agent_group",
+                        "agents": ["leader"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        with pytest.raises(ValueError, match="package conflict"):
+            catalog.resolve_agent_group_dir("duplicate")
 
 
 class TestCreateInstallUninstall:

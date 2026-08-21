@@ -1363,9 +1363,9 @@ def prepare_workspace(
     agent_sessions.mkdir(parents=True, exist_ok=True)
     default_project_workspace.mkdir(parents=True, exist_ok=True)
 
-    # Equipment tree: plugins/{agent_templates,plugin_packages}/{built_in,local}.
+    # Equipment tree: plugins/{agent_templates,agent_groups,plugin_packages}/{built_in,local}.
     # Template copy ignores plugins/; package reconcile belongs to runtime equipment module.
-    for kind in ("agent_templates", "plugin_packages"):
+    for kind in ("agent_templates", "agent_groups", "plugin_packages"):
         kind_root = deepagent_workspace / "plugins" / kind
         (kind_root / "built_in").mkdir(parents=True, exist_ok=True)
         (kind_root / "local").mkdir(parents=True, exist_ok=True)

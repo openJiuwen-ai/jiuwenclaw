@@ -68,6 +68,11 @@ import {
 } from './multi-session/state/newConversationLifecycle';
 import { resolveNewConversationProjectDir } from './multi-session/state/newConversationProject';
 import { toDisplaySessionTitle } from './utils/documentMessage';
+import {
+  getHiddenNavItemsForPlatform,
+  resolveFrontendPlatform,
+  type SidebarNavKey,
+} from './utils/frontendPlatform';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import {
   resolvePendingPreviousSession,
@@ -136,7 +141,7 @@ function normalizeConfigBoolean(value: unknown): boolean {
   );
 }
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = SidebarNavKey;
 
 type LoadedHistoryPage = {
   pageIdx: number;
@@ -646,6 +651,14 @@ function AppContent() {
   const restoreReasoningSegments = useChatStore((s) => s.restoreReasoningSegments);
   const isRestoringHistorySession = isLoadingHistory && !historyPagerMeta && messages.length === 0;
   const isRestoringTeamHistory = mode === 'team' && isRestoringHistorySession;
+
+  const frontendPlatform = resolveFrontendPlatform(
+    typeof window !== 'undefined' ? window.__JIWEN_PLATFORM__ : undefined,
+    import.meta.env.VITE_PLATFORM,
+    import.meta.env.MODE,
+    typeof serverConfig?.runtime_platform === 'string' ? serverConfig.runtime_platform : undefined,
+  );
+  const hiddenNavItems = getHiddenNavItemsForPlatform(frontendPlatform);
 
   useEffect(() => {
     if (!serverConfig) {
@@ -2538,7 +2551,7 @@ function AppContent() {
         isConnected={isConnected}
         onNewSession={handleNewSession}
         showNewSession={false}
-        hiddenNavItems={['sessions']}
+        hiddenNavItems={hiddenNavItems}
         onMorePanelOpenChange={setSidebarMorePanelOpen}
       />
 

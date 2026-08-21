@@ -40,6 +40,62 @@ def test_team_event_queue_is_bounded() -> None:
     assert queue.maxsize > 0
 
 
+def test_agent_group_selection_inherits_session_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"agent_group_name": "finance-group"},
+    )
+
+    assert team_helpers._resolve_agent_group_selection(
+        session_id="s",
+        params={},
+        is_first_request=False,
+    ) == ("finance-group", False)
+
+
+def test_agent_group_selection_binds_only_on_first_team_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {},
+    )
+
+    assert team_helpers._resolve_agent_group_selection(
+        session_id="s",
+        params={"agent_group_name": "sample-expert-group"},
+        is_first_request=True,
+    ) == ("sample-expert-group", True)
+
+    with pytest.raises(ValueError, match="only be selected"):
+        team_helpers._resolve_agent_group_selection(
+            session_id="s",
+            params={"agent_group_name": "sample-expert-group"},
+            is_first_request=False,
+        )
+
+
+def test_agent_group_selection_rejects_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        team_helpers,
+        "get_session_metadata",
+        lambda *args, **kwargs: {"agent_group_name": "group-a"},
+    )
+
+    with pytest.raises(ValueError, match="cannot be changed"):
+        team_helpers._resolve_agent_group_selection(
+            session_id="s",
+            params={"agent_group_name": "group-b"},
+            is_first_request=True,
+        )
+
+
 def test_persist_team_history_event_keeps_human_spawn_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -23,6 +23,7 @@ import websockets
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BTW_MODEL_RESPONSE_TIMEOUT = 120.0
 
 
 # =============================================================================
@@ -206,10 +207,11 @@ async def test_btw_command_system_roundtrip(
             }
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
-            # 真实 question 会走 get_agent + session adapter 冷启动（create_instance /
-            # start_interaction），合入更多 rail 后常见 >15s；再叠加无可用模型时的
-            # 快速失败路径，与其它 ST 的 ready 等待对齐到 60s。
-            btw_res = await _recv_until_response(ws, "req-btw-st", timeout=60)
+            btw_res = await _recv_until_response(
+                ws,
+                "req-btw-st",
+                timeout=BTW_MODEL_RESPONSE_TIMEOUT,
+            )
             # Verify response frame structure
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-st"
@@ -385,9 +387,10 @@ async def test_btw_no_context_when_no_session(
             }
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
-            # 与 roundtrip 相同：冷启动 session adapter，15s 在 CI 上易误报
             btw_res = await _recv_until_response(
-                ws, "req-btw-nocontext-st", timeout=60
+                ws,
+                "req-btw-nocontext-st",
+                timeout=BTW_MODEL_RESPONSE_TIMEOUT,
             )
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-nocontext-st"

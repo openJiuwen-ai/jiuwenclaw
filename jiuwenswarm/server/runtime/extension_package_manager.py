@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 _CATALOG_ROOT_PREVIEWABLE_FILES: frozenset[str] = frozenset({"README.md", "manifest.json"})
 _CATALOG_PREVIEWABLE_DIRS: frozenset[str] = frozenset(
-    {"persona", "skills", "tools", "rails", "subagents"}
+    {"agents", "persona", "skills", "tools", "rails", "subagents"}
 )
 _CATALOG_PREVIEWABLE_EXTS: frozenset[str] = frozenset({".md", ".py"})
 _MAX_PREVIEW_FILE_BYTES = 1 * 1024 * 1024
 _AGENT_TEMPLATE_KIND = "agent_templates"
+_AGENT_GROUP_KIND = "agent_groups"
 _PLUGIN_PACKAGE_KIND = "plugin_packages"
 
 
@@ -62,6 +63,15 @@ def get_equipment_resources_agent_templates_dir() -> Path | None:
     if root is None:
         return None
     path = root / _AGENT_TEMPLATE_KIND
+    return path if path.is_dir() else None
+
+
+def get_equipment_resources_agent_groups_dir() -> Path | None:
+    """Return package resources agent_groups dir, or None if absent."""
+    root = _resources_plugins_root()
+    if root is None:
+        return None
+    path = root / _AGENT_GROUP_KIND
     return path if path.is_dir() else None
 
 
@@ -616,6 +626,8 @@ def _marketplace_path(kind: str, *, agent_workspace: Path | None = None) -> Path
 def _resources_root(kind: str) -> Path | None:
     if kind == _AGENT_TEMPLATE_KIND:
         return get_equipment_resources_agent_templates_dir()
+    if kind == _AGENT_GROUP_KIND:
+        return get_equipment_resources_agent_groups_dir()
     if kind == _PLUGIN_PACKAGE_KIND:
         return get_equipment_resources_plugin_packages_dir()
     return None
@@ -774,6 +786,56 @@ def resolve_agent_template_dir(name: Any) -> Path:
         kind_label="agent_template",
         package_type="agent_template",
     )
+
+
+def resolve_agent_group_dir(name: Any) -> Path:
+    """Resolve an AgentGroup package from local, built_in, or resources.
+
+    AgentGroup is a runtime-only package kind in this release, so it does not
+    participate in the equipment catalog lifecycle.  Unlike installed
+    AgentTemplate packages, every source is treated as an independent package:
+    the same name in more than one source is rejected instead of shadowed.
+    """
+    safe_name = _reject_package_name(name, "agent_group")
+    roots: list[tuple[str, Path | None]] = [
+        ("local", _local_root(_AGENT_GROUP_KIND)),
+        ("built_in", _built_in_root(_AGENT_GROUP_KIND)),
+        ("resources", _resources_root(_AGENT_GROUP_KIND)),
+    ]
+    matches: list[tuple[str, Path]] = []
+    for source, root in roots:
+        if root is None:
+            continue
+        candidate = _package_dir_if_present(root, safe_name)
+        if candidate is not None:
+            matches.append((source, candidate))
+
+    if not matches:
+        raise ValueError(f"agent_group package not found: {safe_name}")
+    if len(matches) > 1:
+        sources = ", ".join(source for source, _ in matches)
+        raise ValueError(
+            f"agent_group package conflict: {safe_name} exists in {sources}"
+        )
+
+    candidate = matches[0][1]
+    manifest = _read_package_manifest(candidate)
+    if manifest is None:
+        raise ValueError(
+            f"agent_group package missing/corrupt manifest.json: {safe_name}"
+        )
+    declared_type = manifest.get("package_type")
+    if declared_type != "agent_group":
+        raise ValueError(
+            f"agent_group package wrong package_type: {safe_name} "
+            f"(expected 'agent_group', got {declared_type!r})"
+        )
+    if manifest.get("name") != safe_name:
+        raise ValueError(
+            f"agent_group package name mismatch: directory={safe_name!r}, "
+            f"manifest={manifest.get('name')!r}"
+        )
+    return candidate
 
 
 def resolve_plugin_dir(name: Any) -> Path:
