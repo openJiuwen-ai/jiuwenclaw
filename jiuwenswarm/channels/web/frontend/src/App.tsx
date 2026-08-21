@@ -42,6 +42,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
+import { processOAuthCallback } from './utils/gitcodeOAuth';
 import { useTeamPanelState } from './features/teamPanelState';
 import { AgentMode, MediaItem, UserAnswer, ModelEntry, type Session } from './types';
 import {
@@ -373,6 +374,15 @@ function AppContent() {
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  // OAuth 回调处理：页面加载时检测 URL 中的 code，自动换 token + 获取用户信息
+  useEffect(() => {
+    processOAuthCallback()
+      .finally(() => {
+        // 无论成功或失败都派发事件，SkillPanel 根据有无 oauth_error 决定显示错误或开抽屉
+        window.dispatchEvent(new CustomEvent('oauth-callback-complete'));
+      });
+  }, []);
 
   useEffect(() => {
     if (activeNav !== 'configpanel') {
@@ -1856,7 +1866,7 @@ function AppContent() {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string; metadata?: Record<string, unknown> };
       enterNewConversation();
-      // 存储 metadata，sendMessage 时随 chat.send 发送后清除
+      // 存储 metadata，sendMessage 时随 chat.send 发送后清除（skill-creator 统一入口等场景）
       if (detail.metadata) {
         useSessionStore.getState().ensureRuntime(NEW_CONVERSATION_ID);
         useSessionStore.getState().setSessionMetadata(NEW_CONVERSATION_ID, detail.metadata);
