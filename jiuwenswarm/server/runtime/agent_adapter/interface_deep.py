@@ -11605,6 +11605,8 @@ class JiuWenSwarmDeepAdapter:
             self._stream_event_rail.reset_abort(session_id)
         image_files_token = None
         _run_span: Any = None
+        _run_exception: BaseException | None = None
+        _run_error_type = ""
         collected_content: list[str] = []
         error_text: str | None = None
         interaction_stream = None
@@ -11678,6 +11680,9 @@ class JiuWenSwarmDeepAdapter:
                 mode=resolve_debug_trace_mode(
                     mode, getattr(request, "_original_mode", None)
                 ),
+                request_id=request.request_id,
+                run_id=request.request_id,
+                turn_id=request.request_id,
             )
             attach_goal = self._wants_attach_goal(request.params)
             dispatch_mode = self._resolve_input_dispatch_mode(request.params)
@@ -11724,6 +11729,9 @@ class JiuWenSwarmDeepAdapter:
                     metadata=request.metadata,
                 )
             async for chunk in interaction_stream:
+                terminal_failure = self._run_failure(chunk)
+                if terminal_failure is not None:
+                    _run_error_type, error_text = terminal_failure
                 if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                     # openjiuwen emits terminal model failures as an ``answer``
                     # chunk whose error text is in ``payload.output`` and whose
@@ -11741,6 +11749,8 @@ class JiuWenSwarmDeepAdapter:
                         error_text = str(output) if output else "task failed"
                         continue
                     if chunk.type in ("llm_output", "answer"):
+                        if terminal_failure is not None:
+                            continue
                         text = (
                             chunk.payload.get("content", "")
                             if isinstance(chunk.payload, dict)
@@ -11759,6 +11769,12 @@ class JiuWenSwarmDeepAdapter:
                                 err = parsed.get("error") or parsed.get("message") or ""
                                 if err:
                                     error_text = str(err)
+                                    if terminal_failure is None:
+                                        _run_error_type = str(
+                                            parsed.get("error_type")
+                                            or parsed.get("code")
+                                            or event_type
+                                        )
                 else:
                     parsed = self._parse_stream_chunk(chunk, _parent_session_id=self._parent_session_id)
                     if parsed is not None:
@@ -11766,7 +11782,8 @@ class JiuWenSwarmDeepAdapter:
                         if text:
                             collected_content.append(text)
             interaction_stream_abort = False
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _run_exception = exc
             logger.info(
                 "[JiuWenSwarmDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s",
                 request.request_id,
@@ -11774,20 +11791,10 @@ class JiuWenSwarmDeepAdapter:
             )
             raise
         except Exception as e:
+            _run_exception = e
             logger.error("[JiuWenSwarmDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
-            close_agent_run_span(
-                _run_span,
-                session_id=session_id,
-                output="".join(collected_content),
-            )
-            if image_files_token is not None:
-                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
-                    reset_current_multimodal_image_files,
-                )
-
-                reset_current_multimodal_image_files(image_files_token)
             if interaction_stream is not None:
                 try:
                     await interaction_stream.close(
@@ -11795,6 +11802,20 @@ class JiuWenSwarmDeepAdapter:
                     )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output="".join(collected_content),
+                exception=_run_exception,
+                error_type=_run_error_type,
+                error_message=error_text or "",
+            )
+            if image_files_token is not None:
+                from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
+                    reset_current_multimodal_image_files,
+                )
+
+                reset_current_multimodal_image_files(image_files_token)
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -12260,6 +12281,8 @@ class JiuWenSwarmDeepAdapter:
         stream_consumer_cancelled = False
         image_files_token = None
         _run_span: Any = None
+        _run_exception: BaseException | None = None
+        run_failure: tuple[str, str] | None = None
         _debug_logger = None
         _debug_trace_token = None  # reset token for the ContextVar-bound logger
         interaction_stream = None
@@ -12358,7 +12381,11 @@ class JiuWenSwarmDeepAdapter:
             # before running.
             sync_agent_observability(force=_dbg_settings.otel_enabled)
             _run_span = open_agent_run_span(
-                session_id=session_id, mode=_debug_trace_mode
+                session_id=session_id,
+                mode=_debug_trace_mode,
+                request_id=request.request_id,
+                run_id=request.request_id,
+                turn_id=request.request_id,
             )
             _otel_trace_id = ""
             _otel_span_id = ""
@@ -12451,6 +12478,14 @@ class JiuWenSwarmDeepAdapter:
                     interaction_stream_abort = False
                     return
                 if result_type == "goal_error":
+                    goal_error_type = str(
+                        control.get("error_code", "goal_error") or "goal_error"
+                    )
+                    goal_error_message = str(
+                        control.get("error", "goal operation failed")
+                        or "goal operation failed"
+                    )
+                    run_failure = (goal_error_type, goal_error_message)
                     if interaction_stream is not None:
                         await interaction_stream.close(abort_active_round=False)
                         interaction_stream = None
@@ -12459,8 +12494,8 @@ class JiuWenSwarmDeepAdapter:
                         channel_id=cid,
                         payload={
                             "event_type": ERROR_EVENT_TYPE,
-                            "code": control.get("error_code", "goal_error"),
-                            "message": control.get("error", "goal operation failed"),
+                            "code": goal_error_type,
+                            "message": goal_error_message,
                             "goal": control.get("goal"),
                         },
                         is_complete=True,
@@ -12600,7 +12635,6 @@ class JiuWenSwarmDeepAdapter:
                         mode=self._resolve_input_dispatch_mode(request.params),
                     )
                 )
-            run_failure: tuple[str, str] | None = None
             # Start of the wait for the runner's first chunk; every branch above
             # has either handed the message over or attached to a running round.
             runner_stream_started_at = time.monotonic()
@@ -12942,7 +12976,8 @@ class JiuWenSwarmDeepAdapter:
                 else:
                     _debug_logger.end_run(status="ok")
             interaction_stream_abort = run_failure is not None
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            _run_exception = exc
             stream_consumer_cancelled = True
             logger.info(
                 "[JiuWenSwarmDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
@@ -12959,6 +12994,7 @@ class JiuWenSwarmDeepAdapter:
                 _debug_logger.end_run(status="cancelled")
             raise
         except Exception as exc:
+            _run_exception = exc
             logger.exception("[JiuWenSwarmDeepAdapter] 流式任务异常: %s", exc)
             if _debug_logger is not None:
                 _debug_logger.end_run(status="error", error=exc)
@@ -12977,11 +13013,6 @@ class JiuWenSwarmDeepAdapter:
             # goal set 因 lease 被占而早退时，chat 流还在，不能在这里落盘。
             if not self._session_has_other_running_agent_tasks(session_id):
                 self._flush_pending_goal_objective_history(session_id)
-            close_agent_run_span(
-                _run_span,
-                session_id=session_id,
-                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
-            )
             if _debug_logger is not None:
                 _debug_logger.flush()
             if _debug_trace_token is not None:
@@ -13004,6 +13035,14 @@ class JiuWenSwarmDeepAdapter:
                     )
                 except Exception:
                     logger.debug("[Goal] interaction stream close failed", exc_info=True)
+            close_agent_run_span(
+                _run_span,
+                session_id=session_id,
+                output=_assemble_run_answer(run_answer_deltas, run_answer_final),
+                exception=_run_exception,
+                error_type=run_failure[0] if run_failure is not None else "",
+                error_message=run_failure[1] if run_failure is not None else "",
+            )
             self._unregister_session_agent_task(session_id)
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
@@ -13128,36 +13167,66 @@ class JiuWenSwarmDeepAdapter:
         """
         ctype = getattr(chunk, "type", None)
         payload = getattr(chunk, "payload", None)
+        if isinstance(chunk, dict):
+            ctype = chunk.get("type") or chunk.get("event_type")
+            payload = chunk.get("payload", chunk)
+        ctype = getattr(ctype, "value", ctype)
+        normalized_type = str(ctype or "").strip()
 
         def _get(key, default=None):
             if isinstance(payload, dict):
                 return payload.get(key, default)
             return getattr(payload, key, default)
 
-        if ctype == "controller_output" and payload is not None:
-            inner_t = getattr(payload, "type", None)
+        def _failure(default_type: str, default_message: str) -> tuple[str, str]:
+            error_type = (
+                _get("error_type")
+                or _get("code")
+                or _get("type")
+                or default_type
+            )
+            message = (
+                _get("message")
+                or _get("error")
+                or _get("detail")
+                or default_message
+            )
+            return str(error_type), str(message)
+
+        if normalized_type == "controller_output" and payload is not None:
+            inner_t = _get("type")
             inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
             if inner_val == "task_failed":
-                data = getattr(payload, "data", None) or []
+                data = _get("data") or []
                 msg = next(
                     (
-                        getattr(item, "text", None)
+                        item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
                         for item in data
-                        if hasattr(item, "text")
                     ),
                     None,
                 )
                 return "task_failed", (msg or "task failed")
             return None
 
-        if ctype == "answer" and _get("result_type") == "error":
+        if normalized_type == "answer" and _get("result_type") == "error":
             out = _get("output")
             if isinstance(out, dict):
                 out = out.get("output")
             return "answer_error", (str(out) if out else "task failed")
 
-        if isinstance(chunk, dict) and chunk.get("result_type") == "error":
-            return "answer_error", str(chunk.get("output") or "task failed")
+        if normalized_type == ERROR_EVENT_TYPE:
+            return _failure("execution_error", "execution error")
+
+        if normalized_type in {"error", "chat.error"}:
+            return _failure(normalized_type, "task failed")
+
+        if _get("result_type") in {"error", "goal_error"}:
+            out = _get("output")
+            if isinstance(out, dict):
+                out = out.get("output") or out.get("message") or out.get("error")
+            if out:
+                return _failure("answer_error", str(out))
+            return _failure("answer_error", "task failed")
 
         return None
 

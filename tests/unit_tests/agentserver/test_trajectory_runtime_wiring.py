@@ -18,12 +18,14 @@ from openjiuwen.harness.observability import span_context as agent_span_context
 
 from jiuwenswarm.agents.harness import agent_observability
 from jiuwenswarm.agents.harness.team import team_manager
+from jiuwenswarm.observability import runtime as trajectory_runtime
 
 
 @pytest.fixture(autouse=True)
 def reset_observability_demands():
     """Isolate the process-wide observability state around each test."""
     def _reset():
+        trajectory_runtime.shutdown_trajectory_runtime()
         observability_demand.reset_observability_demands()
         agent_span_context.reset_run_root_spans()
         agent_observability._agent_observability_active = False
@@ -101,13 +103,103 @@ def test_team_observability_can_be_disabled_without_evolution_demand(monkeypatch
     assert releases == ["team"]
 
 
+def test_trajectory_ui_is_an_additive_agent_provider_demand(monkeypatch, tmp_path):
+    acquired = []
+    runtime_settings = []
+    monkeypatch.setattr(
+        agent_observability,
+        "get_config",
+        lambda: {
+            "agent_observability": {"enabled": False, "exporter": "file"},
+            "trajectory_ui": {
+                "enabled": True,
+                "db_path": str(tmp_path / "trajectory.sqlite3"),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        agent_observability,
+        "acquire_observability",
+        lambda config: acquired.append(config) or False,
+    )
+    monkeypatch.setattr(
+        agent_observability,
+        "sync_trajectory_runtime",
+        lambda settings: runtime_settings.append(settings),
+    )
+
+    agent_observability.sync_agent_observability()
+
+    assert len(acquired) == 1
+    assert len(runtime_settings) == 1
+    assert runtime_settings[0].enabled is True
+    assert runtime_settings[0].database_path == tmp_path / "trajectory.sqlite3"
+    assert agent_observability._agent_observability_active is True
+
+
+def test_disabled_trajectory_runtime_is_stopped_while_exporters_remain_active(
+    monkeypatch,
+):
+    runtime_settings = []
+    monkeypatch.setattr(
+        agent_observability,
+        "get_config",
+        lambda: {
+            "agent_observability": {"enabled": True},
+            "trajectory_ui": {"enabled": False},
+        },
+    )
+    monkeypatch.setattr(
+        agent_observability,
+        "acquire_observability",
+        lambda _config: False,
+    )
+    monkeypatch.setattr(
+        agent_observability,
+        "sync_trajectory_runtime",
+        lambda settings: runtime_settings.append(settings),
+    )
+
+    agent_observability.sync_agent_observability()
+
+    assert len(runtime_settings) == 1
+    assert runtime_settings[0].enabled is False
+    assert agent_observability._agent_observability_active is True
+
+
+def test_agent_shutdown_unregisters_trajectory_before_releasing_provider(monkeypatch):
+    events = []
+    agent_observability._agent_observability_active = True
+    monkeypatch.setattr(
+        agent_observability,
+        "shutdown_trajectory_runtime",
+        lambda: events.append("trajectory.shutdown") or True,
+    )
+    monkeypatch.setattr(
+        agent_observability,
+        "release_observability",
+        lambda: events.append("provider.release"),
+    )
+
+    agent_observability.shutdown_agent_observability()
+
+    assert events == ["trajectory.shutdown", "provider.release"]
+    assert agent_observability._agent_observability_active is False
+
+
 def test_agent_observability_init_receives_process_processor(monkeypatch, tmp_path):
     """Evolution captures trajectories off the spans this processor sees."""
     processor = object()
+    span_record_processor = object()
     calls = []
     state = {"initialized": False}
     monkeypatch.setattr(
         observability_demand, "get_trajectory_span_processor", lambda: processor
+    )
+    monkeypatch.setattr(
+        observability_demand,
+        "get_span_record_processor",
+        lambda: span_record_processor,
     )
     monkeypatch.setattr(
         shared_observability_setup, "is_initialized", lambda: state["initialized"]
@@ -132,15 +224,21 @@ def test_agent_observability_init_receives_process_processor(monkeypatch, tmp_pa
 
     agent_observability.sync_agent_observability()
 
-    assert calls == [(processor,)]
+    assert calls == [(processor, span_record_processor)]
 
 
 def test_team_observability_init_receives_process_processor(monkeypatch, tmp_path):
     processor = object()
+    span_record_processor = object()
     calls = []
     state = {"initialized": False}
     monkeypatch.setattr(
         observability_demand, "get_trajectory_span_processor", lambda: processor
+    )
+    monkeypatch.setattr(
+        observability_demand,
+        "get_span_record_processor",
+        lambda: span_record_processor,
     )
     monkeypatch.setattr(
         shared_observability_setup, "is_initialized", lambda: state["initialized"]
@@ -165,4 +263,4 @@ def test_team_observability_init_receives_process_processor(monkeypatch, tmp_pat
 
     team_manager.sync_team_observability()
 
-    assert calls == [(processor,)]
+    assert calls == [(processor, span_record_processor)]

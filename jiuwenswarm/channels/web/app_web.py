@@ -15,6 +15,7 @@ import logging
 import mimetypes
 import os
 import posixpath
+import re
 import select
 import socket
 import ssl
@@ -255,6 +256,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "transfer-encoding",
         "upgrade",
     }
+    _UNTRUSTED_FORWARDED_HOST_HEADERS = {
+        "forwarded",
+        "x-forwarded-host",
+        "x-forwarded-server",
+        "x-jiuwenswarm-original-host",
+        "x-original-host",
+    }
     _WS_LOG_MAX_CHARS = 2000
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
@@ -460,7 +468,80 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         connection = self.headers.get("Connection", "")
         return "websocket" in upgrade.lower() and "upgrade" in connection.lower()
 
+    def _clean_outer_host(self) -> str | None:
+        """Return one canonical browser-facing Host value for proxying."""
+        host_values = self.headers.get_all("Host") or []
+        if len(host_values) != 1:
+            return None
+        raw_host = str(host_values[0] or "").strip()
+        if (
+            not raw_host
+            or len(raw_host) > 512
+            or not raw_host.isascii()
+            or raw_host.endswith(":")
+            or any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in raw_host
+            )
+            or any(
+                separator in raw_host
+                for separator in ("/", "\\", "?", "#", "@", ",")
+            )
+        ):
+            return None
+        try:
+            parsed_host = urlparse(f"//{raw_host}")
+            hostname = parsed_host.hostname
+            port = parsed_host.port
+        except ValueError:
+            return None
+        if (
+            hostname is None
+            or parsed_host.username is not None
+            or parsed_host.password is not None
+            or parsed_host.path
+            or parsed_host.params
+            or parsed_host.query
+            or parsed_host.fragment
+        ):
+            return None
+        normalized_hostname = hostname.lower().rstrip(".")
+        if (
+            not normalized_hostname
+            or not normalized_hostname.isascii()
+            or "%" in normalized_hostname
+        ):
+            return None
+        if ":" in normalized_hostname:
+            normalized_host = f"[{normalized_hostname}]"
+        else:
+            if re.fullmatch(r"[a-z0-9._-]+", normalized_hostname) is None:
+                return None
+            normalized_host = normalized_hostname
+        if port is not None:
+            normalized_host = f"{normalized_host}:{port}"
+        return normalized_host
+
+    def _write_proxy_error(self, status: int, error: str) -> None:
+        """Write a non-cacheable JSON proxy rejection."""
+        data = json.dumps(
+            {"error": error, "code": "BAD_PROXY_REQUEST"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+
     def _proxy_http(self) -> None:
+        outer_host = self._clean_outer_host()
+        if outer_host is None:
+            self._write_proxy_error(400, "invalid Host header")
+            return
         parsed = urlparse(self.api_target)
         if parsed.scheme == "https":
             ssl_ctx = None if get_ssl_verify() else get_insecure_ssl_context()
@@ -485,12 +566,15 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             forward_headers: dict[str, str] = {}
             for key, value in self.headers.items():
-                if key.lower() in self._HOP_BY_HOP_HEADERS:
+                normalized_key = key.lower()
+                if normalized_key in self._HOP_BY_HOP_HEADERS:
                     continue
-                if key.lower() == "host":
+                if normalized_key == "host":
+                    continue
+                if normalized_key in self._UNTRUSTED_FORWARDED_HOST_HEADERS:
                     continue
                 forward_headers[key] = value
-            forward_headers["Host"] = parsed.netloc
+            forward_headers["Host"] = outer_host
 
             conn.request(self.command, self.path, body=body, headers=forward_headers)
             resp = conn.getresponse()
@@ -506,7 +590,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(resp_body)
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy http error: %s", exc)
-            self.send_error(502, "proxy http error")
+            self._write_proxy_error(502, "proxy http error")
         finally:
             conn.close()
 

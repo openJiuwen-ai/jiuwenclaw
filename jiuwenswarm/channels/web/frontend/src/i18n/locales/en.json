@@ -343,6 +343,20 @@
     "validation": {
       "required": "This field is required",
       "integerRange": "Enter an integer from {{min}} to {{max}}"
+
+    }
+  },
+  "trajectory": {
+    "loading": "Loading trajectory UI…",
+    "tabs": {
+      "aria": "Single-Agent content view",
+      "trajectory": "Trajectory"
+    },
+    "layout": {
+      "hideSessions": "Collapse sessions",
+      "showSessions": "Show sessions",
+      "hideTasks": "Collapse tasks",
+      "showTasks": "Show tasks"
     }
   },
   "team": {

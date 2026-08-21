@@ -37,6 +37,11 @@ from jiuwenswarm.common.config import (
     get_skill_evolution_enabled,
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
+from jiuwenswarm.observability.config import load_trajectory_store_settings
+from jiuwenswarm.observability.runtime import (
+    shutdown_trajectory_runtime,
+    sync_trajectory_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +85,11 @@ def sync_agent_observability(*, force: bool = False) -> None:
 
     config = get_config()
     cfg = config.get("agent_observability", {}) or {}
+    trajectory_settings = load_trajectory_store_settings(config)
     evolution_requested = get_skill_evolution_enabled(config)
     want_enabled = (
         bool(cfg.get("enabled", False))
+        or trajectory_settings.enabled
         or evolution_requested
         or force
         or _force_ever_enabled
@@ -91,6 +98,10 @@ def sync_agent_observability(*, force: bool = False) -> None:
         _force_ever_enabled = True
 
     if not want_enabled:
+        try:
+            sync_trajectory_runtime(trajectory_settings)
+        except Exception as exc:
+            logger.warning("[AgentObservability] trajectory runtime stop failed: %s", exc)
         if _agent_observability_active:
             shutdown_agent_observability()
         return
@@ -105,6 +116,12 @@ def sync_agent_observability(*, force: bool = False) -> None:
         provider_existed = acquire_observability(obs_cfg)
         was_active = _agent_observability_active
         _agent_observability_active = True
+        try:
+            sync_trajectory_runtime(trajectory_settings)
+        except Exception as exc:
+            # The trajectory read store is an optional fan-out. Existing file,
+            # OTLP and Langfuse exporters must keep the Agent path available.
+            logger.warning("[AgentObservability] trajectory runtime init failed: %s", exc)
         if not was_active:
             if provider_existed:
                 logger.info(
@@ -135,6 +152,11 @@ def sync_agent_observability(*, force: bool = False) -> None:
 def shutdown_agent_observability() -> None:
     """Shutdown single-agent observability (on disable or process exit)."""
     global _agent_observability_active
+    try:
+        if not shutdown_trajectory_runtime():
+            logger.warning("[AgentObservability] trajectory runtime did not drain cleanly")
+    except Exception as exc:
+        logger.warning("[AgentObservability] trajectory runtime shutdown failed: %s", exc)
     if not _agent_observability_active:
         return
     try:
