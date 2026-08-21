@@ -855,6 +855,7 @@
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
       "swarmflowEnabled": "Enable SwarmFlow",
+      "swarmflowBudget": "Team budget (token ceiling, blank = unlimited)",
       "externalCliAgentClaudeEnabled": "Enable Claude",
       "externalCliAgentUseBuiltin": "Use built-in",
       "externalCliAgentCliPath": "CLI path",

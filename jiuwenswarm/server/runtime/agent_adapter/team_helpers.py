@@ -98,6 +98,7 @@ logger = logging.getLogger(__name__)
 # is no module-level global waiter registry — reach it via
 # get_team_manager(channel_id) or the team_manager handle passed in.
 _WORKFLOW_RUNS_STATE_KEY = "workflow_runs"
+_SESSION_BUDGET_STATE_KEY = "session_budget"
 
 _TEAM_CREATE_KINDS = {
     RunActionKind.CREATE.value,
@@ -534,6 +535,35 @@ def restore_workflow_runs(session_id: str) -> dict[str, WorkflowRunState] | None
         run_id: WorkflowRunState.model_validate(run_data)
         for run_id, run_data in runs_data.items()
     }
+
+
+def persist_session_budget(session_id: str, snapshot: dict) -> None:
+    """Persist the session-wide (leader-shared) budget snapshot to session metadata.
+
+    The session budget is team-scoped and shared across every run, so it lives in
+    metadata alongside ``workflow_runs`` (NOT inside any single run's journal).
+    ``snapshot`` is ``{total, spent, remaining, scope, exhausted}``. No-op when the
+    metadata read fails (mirrors ``persist_workflow_runs``).
+    """
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
+    metadata = _read_metadata(session_id, cache_bust=True)
+    if not metadata.get("session_id"):
+        logger.warning(
+            "[TeamHelpers] skipping session_budget persist: failed to read "
+            "session metadata (session_id=%s)",
+            session_id,
+        )
+        return
+    metadata[_SESSION_BUDGET_STATE_KEY] = snapshot
+    _enqueue_write(session_id, metadata)
+
+
+def restore_session_budget(session_id: str) -> dict | None:
+    """Restore the session-wide budget snapshot from session metadata, or None."""
+    from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata
+    metadata = _read_metadata(session_id, cache_bust=True)
+    snapshot = metadata.get(_SESSION_BUDGET_STATE_KEY)
+    return snapshot if isinstance(snapshot, dict) else None
 
 
 def _resolve_channel_id(channel_id: str | None) -> str:
