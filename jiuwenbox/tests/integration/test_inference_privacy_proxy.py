@@ -2552,7 +2552,10 @@ class TestBasicAuthResolution:
         return build_proxy_route, ProxyRouteEntry(**base)
 
     def test_api_key_and_basic_mutually_exclusive(self):
-        build, entry = self._entry(api_key=_TEST_API_KEY, basic_auth={"username": "u", "password": _TEST_BASIC_PASSWORD})
+        build, entry = self._entry(
+            api_key=_TEST_API_KEY,
+            basic_auth={"username": "u", "password": _TEST_BASIC_PASSWORD},
+        )
         with pytest.raises(ValueError, match="mutually exclusive"):
             build(entry)
 
@@ -2567,7 +2570,13 @@ class TestBasicAuthResolution:
             build(entry)
 
     def test_password_and_password_file_mutually_exclusive(self):
-        build, entry = self._entry(basic_auth={"username": "u", "password": _TEST_BASIC_PASSWORD, "password_file": "/tmp/x"})
+        build, entry = self._entry(
+            basic_auth={
+                "username": "u",
+                "password": _TEST_BASIC_PASSWORD,
+                "password_file": "/tmp/x",
+            },
+        )
         with pytest.raises(ValueError, match="mutually exclusive"):
             build(entry)
 

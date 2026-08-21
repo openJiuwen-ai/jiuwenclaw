@@ -2567,9 +2567,9 @@ def save_results() -> None:
 def main():
     """主函数"""
     if not SSH_PWD:
-        print("ERROR: JIUWENBOX_TEST_SSH_PWD is not set. Cannot run e2e tests.")
-        print("Set JIUWENBOX_TEST_HOST, JIUWENBOX_TEST_SSH_USER, JIUWENBOX_TEST_SSH_PWD")
-        print("environment variables before running this test.")
+        logging.error("JIUWENBOX_TEST_SSH_PWD is not set. Cannot run e2e tests.")
+        logging.error("Set JIUWENBOX_TEST_HOST, JIUWENBOX_TEST_SSH_USER, JIUWENBOX_TEST_SSH_PWD")
+        logging.error("environment variables before running this test.")
         sys.exit(1)
     log("=" * 60)
     log("JiuwenBox Proxy Basic 认证测试")
