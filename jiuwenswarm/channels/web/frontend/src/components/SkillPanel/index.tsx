@@ -1544,7 +1544,7 @@ export function SkillPanel({
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
         skillName: 'skill-creator',
-        suffixText: '帮我修改这个技能',
+        suffixText: t('skills.chatPrompts.editSkill'),
         secondSkillName: skillName,
         metadata: {
           scene: 'edit_skill',
@@ -1553,18 +1553,18 @@ export function SkillPanel({
         }
       }
     }));
-  }, []);
+  }, [t]);
 
   // 通过聊天创建：新建会话，选中 skill-creator（统一入口）并在 chip 后追加创建提示文字
   const handleCreateViaChat = useCallback(() => {
     window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
       detail: {
         skillName: 'skill-creator',
-        suffixText: '请帮我创建一个可以实现xxx功能的技能/团队技能/多模态技能',
+        suffixText: t('skills.chatPrompts.createSkill'),
         metadata: { scene: 'create_skill' }
       }
     }));
-  }, []);
+  }, [t]);
 
   // ---- 技能经验（内联展示） ----
   const sortedEvolutionEntries = useMemo(
@@ -2082,7 +2082,7 @@ export function SkillPanel({
                 <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
                 <path d="M21 3v5h-5" />
               </svg>
-              {activeTab === "graph" && graphReading ? "正在读取技能总谱" : t('common.refresh')}
+              {activeTab === "graph" && graphReading ? t('skills.graph.status.reading') : t('common.refresh')}
             </button>
           </div>
         </div>
