@@ -12,6 +12,7 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenswarm.common.config import get_config
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -250,11 +251,32 @@ def _build_default_model_dict(
         requested_model_name=requested_model_name,
     )
     model_client_config = dict(model_config.get("model_client_config", {}))
-    model_request_config = dict(model_config.get("model_config_obj", {}))
+    raw_request_config = dict(model_config.get("model_config_obj", {}))
 
     model_name = model_client_config.get("model_name", "")
-    if model_name and "model" not in model_request_config:
-        model_request_config["model"] = model_name
+    # Preserve the previous ``model`` precedence: an explicit value in
+    # ``model_config_obj`` wins, and no name at all means no ``model`` key.
+    # Detection must follow the same precedence -- the provider knob has to be
+    # picked for the id that actually goes out on the wire, not the client
+    # config's name, or a client name from one provider paired with an
+    # explicit override for another provider's model leaks that provider's
+    # knob onto the wrong request.
+    explicit_model = raw_request_config.get("model")
+    request_model_name = str(explicit_model).strip() if explicit_model else model_name
+    # ``reasoning_level`` is an internal hint, not an OpenAI request parameter.
+    # Map it to the provider-specific payload here; forwarding it raw lets
+    # ``ModelRequestConfig`` (extra=allow) pass it through to
+    # ``AsyncCompletions.create()``, which fails every model call with
+    # ``unexpected keyword argument 'reasoning_level'``.
+    model_request_config = build_reasoning_model_request_kwargs(
+        model_client_config=model_client_config,
+        model_config_obj=raw_request_config,
+        model_name=request_model_name,
+    )
+    if explicit_model:
+        model_request_config["model"] = explicit_model
+    elif not model_name:
+        model_request_config.pop("model", None)
 
     logger.info(
         "[TeamConfigLoader] model config loaded: model_name=%s, provider=%s",
@@ -295,6 +317,34 @@ def _build_agent_defaults() -> tuple[dict[str, Any], int, float]:
     )
 
 
+def _sanitize_agent_model_override(model_raw: Any) -> Any:
+    """Map ``reasoning_level`` inside an explicit per-agent model override.
+
+    Same hazard as ``_build_default_model_dict``: the value is an internal hint
+    and must never reach the OpenAI SDK as a request parameter. Per-agent
+    overrides arrive already shaped as ``model_client_config`` /
+    ``model_request_config`` and therefore bypass the default model path.
+    """
+    if not isinstance(model_raw, dict):
+        return model_raw
+
+    request_config = model_raw.get("model_request_config")
+    if not isinstance(request_config, dict) or "reasoning_level" not in request_config:
+        return model_raw
+
+    client_config_raw = model_raw.get("model_client_config")
+    client_config = dict(client_config_raw) if isinstance(client_config_raw, dict) else {}
+    model_name = client_config.get("model_name", "") or request_config.get("model", "")
+
+    sanitized = dict(model_raw)
+    sanitized["model_request_config"] = build_reasoning_model_request_kwargs(
+        model_client_config=client_config,
+        model_config_obj=request_config,
+        model_name=model_name,
+    )
+    return sanitized
+
+
 def _build_agent_spec_dict(
     agent_config: dict[str, Any],
     *,
@@ -304,6 +354,8 @@ def _build_agent_spec_dict(
     completion_timeout: float,
 ) -> dict[str, Any]:
     merged = deepcopy(agent_config)
+    if "model" in merged:
+        merged["model"] = _sanitize_agent_model_override(merged["model"])
     merged.setdefault("model", deepcopy(default_model))
     merged.setdefault("workspace", deepcopy(default_workspace))
     merged.setdefault("max_iterations", max_iterations)
