@@ -68,6 +68,7 @@ SSH_USER = os.getenv("JIUWENBOX_TEST_SSH_USER", "root")
 SSH_PWD = os.getenv("JIUWENBOX_TEST_SSH_PWD", "")
 TIMEOUT = 30
 WORK_DIR = os.getenv("JIUWENBOX_TEST_WORK_DIR", os.path.join(os.getenv("TEMP", "/tmp"), "jiuwenbox_tests"))
+os.makedirs(WORK_DIR, exist_ok=True)
 POWERSHELL_PATH = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 S = requests.Session()

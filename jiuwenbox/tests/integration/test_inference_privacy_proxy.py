@@ -50,13 +50,15 @@ _TEST_PATH_PREFIX_NEO4J = "/neo4j"
 # Test-only synthetic credentials. Not real secrets. Used to verify
 # API key injection and basic auth logic. Values are intentionally
 # non-sensitive and do not grant access to any real service.
-# Set via environment variables before running tests; empty by default.
-_TEST_API_KEY = os.getenv("JIUWENBOX_TEST_API_KEY", "")
-_TEST_API_KEY_2 = os.getenv("JIUWENBOX_TEST_API_KEY_2", "")
-_TEST_API_KEY_NEW = os.getenv("JIUWENBOX_TEST_API_KEY_NEW", "")
-_TEST_API_KEY_ANT = os.getenv("JIUWENBOX_TEST_API_KEY_ANT", "")
-_TEST_BASIC_USER = os.getenv("JIUWENBOX_TEST_BASIC_USER", "")
-_TEST_BASIC_PASSWORD = os.getenv("JIUWENBOX_TEST_BASIC_PWD", "")
+# Defaults are non-empty synthetic strings so that assert-in-response_text
+# checks have real verification power in default/CI runs.
+# Override via environment variables when targeting real services.
+_TEST_API_KEY = os.getenv("JIUWENBOX_TEST_API_KEY", "sk-test-key-synthetic")
+_TEST_API_KEY_2 = os.getenv("JIUWENBOX_TEST_API_KEY_2", "sk-test-key-2-synthetic")
+_TEST_API_KEY_NEW = os.getenv("JIUWENBOX_TEST_API_KEY_NEW", "sk-test-key-new-synthetic")
+_TEST_API_KEY_ANT = os.getenv("JIUWENBOX_TEST_API_KEY_ANT", "sk-test-key-ant-synthetic")
+_TEST_BASIC_USER = os.getenv("JIUWENBOX_TEST_BASIC_USER", "neo4j")
+_TEST_BASIC_PASSWORD = os.getenv("JIUWENBOX_TEST_BASIC_PWD", "test-pwd-synthetic")
 
 # Skip API key / basic auth tests when synthetic credentials are not provided.
 _skip_no_api_key = pytest.mark.skipif(
@@ -2071,6 +2073,7 @@ class TestModelValidation:
             assert route.path_prefix == expected
 
 
+@_skip_no_api_key
 class TestRouteLongestPrefixMatching:
     """Test that longest-prefix matching prevents route collision."""
 
@@ -2447,7 +2450,7 @@ class TestBasicAuthInjection:
         m = re.search(r"Authorization: Basic (\S+)", out)
         assert m is not None
         decoded = base64.b64decode(m.group(1)).decode()
-        assert decoded == "user name:p@ss w:rd"
+        assert decoded == f"user name:{_TEST_BASIC_PASSWORD}"
 
     @pytest.mark.asyncio
     async def test_api_key_route_unchanged_by_basic_branch(self):
@@ -2460,7 +2463,7 @@ class TestBasicAuthInjection:
         proxy = InferencePrivacyProxy(InferencePrivacyProxyConfig(routes=[route]))
         headers = f"Authorization: Bearer {PLACEHOLDER}\r\nHost: x\r\n".encode()
         out = proxy.inject_api_key(headers, route).decode()
-        assert "Authorization: Bearer sk-key" in out
+        assert f"Authorization: Bearer {_TEST_API_KEY}" in out
 
     @pytest.mark.asyncio
     async def test_no_auth_route_passthrough(self):
@@ -2471,6 +2474,7 @@ class TestBasicAuthInjection:
         assert proxy.inject_api_key(headers, route) == headers
 
 
+@_skip_no_basic
 class TestBasicAuthHttpForwarding:
     """End-to-end Basic injection through a real in-process proxy (req tests 1-3, 6, 12)."""
 
@@ -2527,7 +2531,7 @@ class TestBasicAuthHttpForwarding:
             server_task.cancel()
 
         upstream = received.get("raw", "")
-        expected = base64.b64encode(f"neo4j:{secret}".encode()).decode()
+        expected = base64.b64encode(f"{_TEST_BASIC_USER}:{secret}".encode()).decode()
         assert f"Authorization: Basic {expected}" in upstream
         assert upstream.lower().count("authorization:") == 1
         # Logs must not contain the secret or the base64 credential.
