@@ -191,7 +191,7 @@ def test_web_search_entry_delegates_to_orchestrator(monkeypatch):
 
     calls = 0
 
-    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None, cache=None):
         nonlocal calls
         calls += 1
         assert query == "hello"
@@ -216,7 +216,7 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None, cache=None):
         calls.append(search_mode)
         return "ok"
 

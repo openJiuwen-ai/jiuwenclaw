@@ -3387,6 +3387,10 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+                    get_agent_cache_registry,
+                )
+
                 subagents.append(
                     build_research_agent_config(
                         model,
@@ -3400,6 +3404,9 @@ class JiuWenSwarmDeepAdapter:
                         tools=build_jiuwen_harness_named_web_tools(
                             agent_id="research_agent",
                             language=resolved_language,
+                            cache=get_agent_cache_registry().get_cache_sync(
+                                "research_agent",
+                            ),
                         ),
                     )
                 )
@@ -7105,9 +7112,15 @@ class JiuWenSwarmDeepAdapter:
             registered = self._register_shared_tool(wtool)
             tool_cards.append(registered.card)
 
+        from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+            get_agent_cache_registry,
+        )
+
+        content_cache = await get_agent_cache_registry().get_cache(agent_id)
         for tool_instance in build_jiuwen_harness_named_web_tools(
             agent_id=agent_id,
             language=self._resolve_runtime_language(),
+            cache=content_cache,
         ):
             registered = self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(registered.card)
