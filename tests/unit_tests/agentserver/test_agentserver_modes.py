@@ -40,9 +40,17 @@ def test_external_memory_unload_commits_serialized_session_messages(monkeypatch)
             assert mode == "json"
             return {"role": "assistant", "content": "done"}
 
+    class FakeToDictMessage:
+        def to_dict(self):
+            return {"role": "assistant", "content": "archived"}
+
     class FakeContext:
         def get_messages(self):
-            return [{"role": "user", "content": "hello"}, FakeMessage()]
+            return [
+                {"role": "user", "content": "hello"},
+                FakeMessage(),
+                FakeToDictMessage(),
+            ]
 
     class FakeContextEngine:
         def __init__(self):
@@ -110,6 +118,7 @@ def test_external_memory_unload_commits_serialized_session_messages(monkeypatch)
     assert provider.messages == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "done"},
+        {"role": "assistant", "content": "archived"},
     ]
     assert instance.unregistered == [rail]
     assert adapter._external_memory_rail is None

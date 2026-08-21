@@ -12291,15 +12291,16 @@ class JiuWenSwarmDeepAdapter:
             try:
                 if isinstance(message, dict):
                     serialized = message
-                elif callable(model_dump := getattr(message, "model_dump", None)):
-                    try:
-                        serialized = model_dump(mode="json")
-                    except TypeError:
-                        serialized = model_dump()
-                elif callable(to_dict := getattr(message, "to_dict", None)):
-                    serialized = to_dict()
                 else:
-                    serialized = None
+                    model_dump = getattr(message, "model_dump", None)
+                    if callable(model_dump):
+                        try:
+                            serialized = model_dump(mode="json")
+                        except TypeError:
+                            serialized = model_dump()
+                    else:
+                        to_dict = getattr(message, "to_dict", None)
+                        serialized = to_dict() if callable(to_dict) else None
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] serialize external memory message failed: "
