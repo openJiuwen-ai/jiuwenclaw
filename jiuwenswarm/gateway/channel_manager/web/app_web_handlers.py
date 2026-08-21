@@ -91,7 +91,10 @@ from jiuwenswarm.server.runtime.a2ui.integration import (
     get_default_a2ui_config_payload,
     validate_a2ui_config_update,
 )
-from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.reasoning_injector import (
+    build_reasoning_model_request_kwargs,
+    core_has_context_window_field,
+)
 from jiuwenswarm.common.updater import DEFAULT_SOURCE_CONFIG, UpdaterService
 from jiuwenswarm.common.utils import (
     get_env_file,
@@ -2044,14 +2047,20 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 if isinstance(obj, dict):
                     model_config_obj = dict(obj)
                 # AgentOS 备份模型的 mco 含 _source=="agentos" 标记（由
-                # get_default_models 注入）。其 max_tokens 是输入侧上下文窗口
-                # 别名（-> ContextEngineConfig.context_window_tokens，压缩阈值，
-                # 不发厂商），不得进入输出侧的 ModelRequestConfig.max_tokens
-                # （否则会被当输出上限发给厂商）。_source 标记本身由
-                # reasoning_injector._build_model_request_kwargs 统一 pop，
-                # 这里只需清 max_tokens。
-                if model_config_obj.get("_source") == "agentos":
-                    model_config_obj.pop("max_tokens", None)
+                # get_default_models 注入）。其 context_window 是"模型上下文总
+                # 长度"配置，供 core 从 ModelRequestConfig 取值。是否在出口
+                # 清掉取决于 core 是否已把 context_window 加为 ModelRequestConfig
+                # 正式字段（见 reasoning_injector.core_has_context_window_field）：
+                # - core 未加字段（过渡期）：context_window 进 extra 会被
+                #   base_model_client 经 model_dump 透传给厂商 SDK 报 unexpected
+                #   keyword argument -> 需清。
+                # - core 已加字段：context_window 作正式字段，core 自行 exclude
+                #   不发厂商、可读 -> 不清（否则切掉 core 想读的值）。
+                # _source 标记本身由 reasoning_injector._build_model_request_kwargs
+                # 统一 pop；此处与公共出口同口径，覆盖绕过 build_model_from_entry
+                # 的 validate 路径。
+                if model_config_obj.get("_source") == "agentos" and not core_has_context_window_field():
+                    model_config_obj.pop("context_window", None)
                 logger.info(
                     "[config.validate_model] loaded model_config_obj for '%s' "
                     "(matched_by=%s): %s",

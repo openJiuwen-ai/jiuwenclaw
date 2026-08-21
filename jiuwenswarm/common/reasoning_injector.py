@@ -12,6 +12,33 @@ from jiuwenswarm.common.reasoning_config import (
 )
 
 
+def core_has_context_window_field() -> bool:
+    """core 的 ``ModelRequestConfig`` 是否已声明 ``context_window`` 正式字段。
+
+    用于决定 jiuwenswarm 是否需要在出口 pop 掉 agentos 的 ``context_window``：
+
+    - **False（过渡期，core 未加正式字段）**：``context_window`` 进
+      ``ModelRequestConfig`` 的 extra，core 的
+      ``base_model_client._build_request_params`` 会把 extra 经
+      ``model_dump(exclude={model_name,model,temperature,top_p,max_tokens,stop})``
+      透传给厂商 SDK（base_model_client.py:444-449），SDK 不认该 kwarg 报
+      unexpected keyword argument -> jiuwenswarm 需在出口 pop 防发厂商。
+    - **True（core 已加正式字段）**：``context_window`` 作为正式字段进
+      ``ModelRequestConfig``，core 自行决定是否发厂商（按 core 现有 max_tokens
+      模式，"不发厂商"语义的字段会被 core 纳入上述 exclude、不进 params），
+      ``self.model_config.context_window`` 可被 core 读取 -> jiuwenswarm
+      **不得** pop，否则会切掉 core 想读的值。
+
+    自动适配 core 两种状态，无需 jiuwenswarm 与 core 人工同步去 pop。
+    """
+    try:
+        from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+        return "context_window" in ModelRequestConfig.model_fields
+    except Exception:
+        # core 不可用（如独立测试环境）按过渡期处理：pop 防发厂商
+        return False
+
+
 def _model_config_to_dict(model_config_obj: Any) -> dict[str, Any]:
     if model_config_obj is None:
         return {}
@@ -125,15 +152,15 @@ def _build_model_request_kwargs(
     # / image_modality_warmup 等所有走本函数的路径。
     is_agentos = request_kwargs.get("_source") == "agentos"
     request_kwargs.pop("_source", None)
-    # agentos 的 max_tokens 是"输入侧上下文窗口"别名（-> ContextEngineConfig，
-    # 不发厂商），绝不能进 core 的 ModelRequestConfig.max_tokens（那是"输出
-    # token 上限"语义、会发厂商）。此处是所有路径的公共出口，统一在此 pop，
-    # 保证 web validate 等绕过 build_model_from_entry 的路径也不会把它误当成
-    # 输出上限。build_model_from_entry 会从原始 mco 取该值，挂到 Model 的普通属性
-    # _agentos_ctx_window（不进 ModelRequestConfig 的 extra，故不经 model_dump
-    # 流到 SDK），供 _deep_agent_context_engine_config 路径 A 读取；不依赖此处的 pop。
-    if is_agentos:
-        request_kwargs.pop("max_tokens", None)
+    # agentos 的 context_window 是"模型支持的上下文总长度"配置，供 core 从
+    # ModelRequestConfig 取值。是否在出口 pop 取决于 core 是否已把 context_window
+    # 加为 ModelRequestConfig 正式字段（见 core_has_context_window_field）：
+    # - core 未加字段（过渡期）：context_window 进 extra，会被 base_model_client
+    #   经 model_dump 透传给厂商 SDK 报 unexpected keyword argument -> 需 pop。
+    # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
+    #   self.model_config.context_window 可读 -> 不得 pop（否则切掉 core 想读的值）。
+    if is_agentos and not core_has_context_window_field():
+        request_kwargs.pop("context_window", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
 
