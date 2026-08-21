@@ -290,6 +290,7 @@
       "video_model": { "title": "模型名称" },
       "video_provider": { "title": "模型提供商" },
       "swarmflow_enabled": { "title": "动态工作流", "description": "控制智能体团队是否启用动态工作流能力" },
+      "swarmflow_budget": { "title": "动态工作流会话级别token上限", "description": "Team budget（token 上限，留空=不限）" },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
       "external_cli_agent_claude_enabled": {

@@ -302,6 +302,10 @@
         "title": "Dynamic workflow",
         "description": "Control whether the agent team enables dynamic workflow capabilities."
       },
+      "swarmflow_budget": {
+        "title": "SwarmFlow Budget",
+        "description": "Team budget (token ceiling, blank = unlimited)"
+      },
       "permissions_mode": {
         "title": "Global permission mode",
         "description": "Choose the shared guardrail mode for ordinary Agents and Teams."

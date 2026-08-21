@@ -5964,3 +5964,44 @@ async def test_consume_stream_passes_session_scoped_background_task_controller(
     assert captured["background_task_controller"] is team_helpers.get_background_task_controller(
         session_id
     )
+
+
+def test_persist_and_restore_session_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """session budget round-trips through session metadata (session_budget key)."""
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    store: dict[str, Any] = {"session_id": "sess-budget", "title": "t"}
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: dict(store),
+    )
+    written: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        session_metadata,
+        "_enqueue_write",
+        lambda session_id, metadata: written.append((session_id, dict(metadata))),
+    )
+
+    snapshot = {"total": 500000, "spent": 280000, "remaining": 220000, "scope": "session", "exhausted": False}
+    team_helpers.persist_session_budget("sess-budget", snapshot)
+
+    assert written == [("sess-budget", {**store, "session_budget": snapshot})]
+    # restore reads it back
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {**store, "session_budget": snapshot},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") == snapshot
+
+
+def test_restore_session_budget_absent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jiuwenswarm.server.runtime.session import session_metadata
+
+    monkeypatch.setattr(
+        session_metadata,
+        "_read_metadata",
+        lambda session_id, cache_bust=True: {"session_id": "sess-budget"},
+    )
+    assert team_helpers.restore_session_budget("sess-budget") is None

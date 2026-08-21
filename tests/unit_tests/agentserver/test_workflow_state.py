@@ -1098,3 +1098,34 @@ def test_resume_workflow_started_keeps_original_started_at():
     state.apply(_make_progress("workflow_paused"))
     state.apply(_make_progress("workflow_started", workflow_name="test"))
     assert state.started_at == original
+
+
+def test_relaunch_workflow_started_resets_phase_tree():
+    """A script-edit relaunch (relaunch_kind="relaunch") drops stale phases/agents.
+
+    The edited script may remove or rename phases, so the old phase cards (and
+    any agents under them) must not survive the re-run; the new META phase list
+    rebuilds from scratch. A normal resume (no relaunch_kind) keeps the tree.
+    """
+    state = WorkflowRunState()
+    old_phases = [PhasePlan(title="调研"), PhasePlan(title="分析"), PhasePlan(title="撰写")]
+    state.apply(_make_progress("workflow_started", workflow_name="test", phases=old_phases))
+    assert len(state.phases) == 3
+    # add an agent under the first phase so it must be dropped too
+    state.apply(_make_progress("agent_started", phase="调研", label="r", agent_id="k1", node_type="agent"))
+    assert state.phases[0].agents
+
+    new_phases = [PhasePlan(title="调研"), PhasePlan(title="撰写")]  # "分析" dropped
+    state.apply(_make_progress(
+        "workflow_started", workflow_name="test", phases=new_phases, relaunch_kind="relaunch",
+    ))
+    assert [p.name for p in state.phases] == ["调研", "撰写"]
+    assert all(not p.agents for p in state.phases)  # stale agents cleared
+
+
+def test_resume_workflow_started_keeps_phase_tree():
+    """A normal pause→resume (relaunch_kind="resume") keeps the existing phases."""
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")]))
+    state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")], relaunch_kind="resume"))
+    assert [p.name for p in state.phases] == ["调研"]  # not duplicated

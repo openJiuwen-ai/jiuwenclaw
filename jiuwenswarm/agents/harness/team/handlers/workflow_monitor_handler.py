@@ -46,6 +46,9 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
         super().__init__(monitor, session_id)
         self._channel_id = channel_id
         self._runs: dict[str, WorkflowRunState] = dict(initial_runs or {})
+        # Session-wide (leader-shared) budget snapshot, updated from each
+        # progress event's ``budget`` field and persisted to session metadata.
+        self._session_budget: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -118,6 +121,10 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
             )
             return
 
+        # Track the session-wide budget snapshot from each event (leader-shared).
+        if progress.budget is not None:
+            self._session_budget = progress.budget
+
         delta = run_state.apply(progress)
         if delta is None:
             logger.debug(
@@ -155,8 +162,13 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
 
     def _persist(self) -> None:
         try:
-            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import persist_workflow_runs
+            from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
+                persist_session_budget,
+                persist_workflow_runs,
+            )
             persist_workflow_runs(self._runs, self._session_id)
+            if self._session_budget is not None:
+                persist_session_budget(self._session_id, self._session_budget)
         except Exception as e:
             logger.warning("[WorkflowMonitorHandler] checkpoint persist failed: %s", e)
 
@@ -237,6 +249,7 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
                 budget=getattr(payload, "budget", None),
                 workflow_budget=getattr(payload, "workflow_budget", None),
                 budget_exhausted_scope=getattr(payload, "budget_exhausted_scope", None),
+                relaunch_kind=getattr(payload, "relaunch_kind", None),
                 phase_type=getattr(payload, "phase_type", None),
                 nested_phase=getattr(payload, "nested_phase", None),
                 parent_phase=getattr(payload, "parent_phase", None),

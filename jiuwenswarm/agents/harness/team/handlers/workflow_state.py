@@ -83,6 +83,7 @@ class WorkflowProgress(BaseModel):
     budget: Optional[dict] = None
     workflow_budget: Optional[dict] = None
     budget_exhausted_scope: Optional[str] = None
+    relaunch_kind: Optional[str] = None
     phase_type: Optional[str] = None
     nested_phase: Optional[str] = None
     parent_phase: Optional[str] = None
@@ -832,6 +833,13 @@ class WorkflowRunState(BaseModel):
         self.status = "running"
         if self.started_at is None:
             self.started_at = self._now_iso()
+
+        # Script-edit relaunch (same run_id, relaunch_kind="relaunch"): reset the
+        # whole phase/agent tree — the edited script may drop or rename phases and
+        # agents, so stale cards from the prior run must not survive. A normal
+        # pause→resume (relaunch_kind="resume" or absent) keeps the tree.
+        if progress.relaunch_kind == "relaunch":
+            self.phases = []
 
         # Resume guard: on a paused/stopped run, the engine re-emits
         # WORKFLOW_STARTED with the same full META ``phases`` list for the same
