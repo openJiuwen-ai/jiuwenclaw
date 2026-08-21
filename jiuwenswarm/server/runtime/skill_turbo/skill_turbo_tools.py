@@ -248,6 +248,39 @@ async def skill_turbo(query: str) -> dict[str, Any]:
         })
     # ── [/TEMP-TEMPLATE-BYPASS] ──
 
+    # ── [REGION-EDIT-BYPASS] 选区/编辑已有 PPT 请求拦截 ──
+    # office-claw 前端在用户选中 PPT 某区域做修改（改字体/文案/样式/局部替换）时，
+    # 注入的 user message 带固定选区字段（PPT选区/选区原文/选区类型/选区位置/选区容器/
+    # 选区 class/修改要求）。这类请求本质是"编辑已有 PPT 局部"，而非从零生成整套演示文稿。
+    # skill 加速器（pptx-craft 流水线）只会从 Stage 1 重新生成全新 PPT，无法复用已有文件
+    # 做局部修改（第二次选区修复被 LLM 调进 skill_acceleration_exec，从 stage1 全量重跑，丢失原 PPT）。
+    # 信号源说明：理想信号在"外层 user message"里，而本工具拿到的 query 是 LLM 重写的
+    # 忠实总结——多数选区请求会保留"选区"字样，但 LLM 偶尔会脑补成"生成 N 页 PPT"
+    # （上述 case 即如此，query 变成"8页左右"）。因此本块是对"query 保留选区语义"的兜底；
+    # 真正的主防线在 SkillTurboPromptRail 注入的排除提示词（LLM 调工具前能看到完整
+    # user message）。两层叠加降低误进概率。
+    # 删除方式：待 pptx-craft 流水线支持"编辑已有 PPT"短路分支后，搜索 [REGION-EDIT-BYPASS] 删除本块。
+    region_keywords = (
+        "PPT选区", "选区原文", "选区类型", "选区位置", "选区容器",
+        "选区 class", "选区class", "修改要求", "选区字段", "布局优化", "选区优化", "内容优化"
+    )
+    if any(kw in query for kw in region_keywords):
+        logger.info(
+            "[SkillTurboTool] 检测到 PPT 选区/编辑已有 PPT 请求，跳过 skill 加速器，"
+            "建议改用 skill_tool 走 pptx-craft 标准流程或直接编辑已有 PPT 文件"
+        )
+        return _wrap_skill_turbo_result({
+            "success": False,
+            "error": (
+                "检测到该请求是针对已有 PPT 某区域的局部修改（选区/编辑已有 PPT），"
+                "skill 加速器仅支持从零生成全新 PPT（会从 Stage 1 全量重跑，无法复用原文件）。"
+                "请改用 skill_tool 加载 pptx-craft 标准流程（支持编辑已有 PPT），"
+                "或直接用 edit_file / 读写 pptx 的工具完成局部修改"
+                "（直接执行，无需再调用 skill_acceleration_exec）。"
+            ),
+        })
+    # ── [/REGION-EDIT-BYPASS] ──
+
     from jiuwenswarm.server.runtime.skill_turbo.agent import SkillTurbo, SkillTurboNotHandled
     from jiuwenswarm.agents.harness.common.tools.subagent_executor import (
         get_subagent_parent_session,
