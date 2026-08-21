@@ -1445,6 +1445,65 @@ class AgentManager:
             if skill_dirs_token is not None:
                 reset_session_registered_skill_dirs(skill_dirs_token)
 
+    def _resolve_request_mode(self, request: Any, params: dict) -> str:
+        """解析请求的 agent 模式.
+
+        优先取 params["mode"]；interrupt resume 请求（权限审批/确认/ask_user）
+        未携带 mode 时，从 session metadata 读取原始请求的 mode，避免从
+        code.normal 降级为 agent，导致 adapter 实例不匹配、无法恢复原
+        interaction；其余情况默认 "agent"。
+
+        Args:
+            request: AgentRequest 对象
+            params: request.params 字典
+
+        Returns:
+            完整 mode 字符串（如 "code.normal"、"agent.plan"）
+        """
+        mode_full = params.get("mode")
+        if mode_full:
+            return str(mode_full)
+
+        source = str(params.get("source") or "").strip()
+        answers = params.get("answers")
+        req_id = str(params.get("request_id") or "").strip()
+        if (
+            source in {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
+            and isinstance(answers, list)
+            and bool(req_id)
+        ):
+            sid = getattr(request, "session_id", "") or ""
+            if sid:
+                try:
+                    from jiuwenswarm.common.utils import resolve_tenant_sessions_dir
+                    from jiuwenswarm.server.runtime.session.session_metadata import (
+                        get_session_metadata,
+                    )
+                    sessions_root = resolve_tenant_sessions_dir(
+                        self.service_id, self.agent_id,
+                    )
+                    meta = get_session_metadata(
+                        sid, cache_bust=True, enable_writeback=False,
+                        sessions_root=sessions_root,
+                    )
+                    stored_mode = str(meta.get("mode") or "").strip()
+                    if stored_mode and stored_mode != "unknown":
+                        # 回写 params，让下游 run_stream 等也能拿到正确 mode
+                        params["mode"] = stored_mode
+                        logger.info(
+                            "[AgentManager] interrupt resume mode resolved"
+                            " from session metadata: session_id=%s"
+                            " mode=%s source=%s",
+                            sid, stored_mode, source,
+                        )
+                        return stored_mode
+                except Exception:
+                    logger.debug(
+                        "[AgentManager] resolve mode from session metadata failed",
+                        exc_info=True,
+                    )
+        return "agent"
+
     async def process_message(self, request: Any) -> Any:
         """处理非流式请求.
 
@@ -1463,7 +1522,7 @@ class AgentManager:
 
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent")
+            mode_full = self._resolve_request_mode(request, params)
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 
@@ -1493,7 +1552,7 @@ class AgentManager:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
-            mode_full = params.get("mode", "agent")
+            mode_full = self._resolve_request_mode(request, params)
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
             workspace_dir = params.get("workspace_dir")
 
