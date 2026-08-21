@@ -60,24 +60,6 @@ _OVERLAYS: dict[str, tuple[str, tuple[str, ...]]] = {
     "memory_config": ("/memory", ()),
 }
 
-# 无 personal 文件；只注册 DbLayout
-_ENTERPRISE_ONLY: tuple[str, ...] = (
-    "config_effective_global_policy",
-    "config_effective_service_policy",
-    "config_effective_agent_policy",
-    "config_default_template_mapping",
-    "model_template",
-    "embedding_template",
-    "extension_config_template",
-    "skill_whitelist_template",
-    "service_config_template",
-    "log_masking_rule",
-    "task_memory_config",
-    "manager_sign_pubkey",
-    "gateway_enc_keypair",
-    "gateway_sign_keypair",
-)
-
 
 def _build_layouts(
     *,
@@ -85,6 +67,11 @@ def _build_layouts(
     config_file: Path | None,
 ) -> dict[str, StoreLayout]:
     """汇总全部业务 name 的布局：JSON 文件、YAML overlay、企业专属表。"""
+    # 延迟导入：catalog 与 layouts 共用同一批企业表名，避免两处手写漂移
+    from jiuwenswarm.gateway.config.enterprise.catalog import (
+        ENTERPRISE_RECORD_STORE_NAMES,
+    )
+
     layouts: dict[str, StoreLayout] = {
         "session_map": StoreLayout(
             file=_persist_file(
@@ -111,7 +98,7 @@ def _build_layouts(
         layouts[name] = _overlay(
             name, pointer, config_file=config_file, key_fields=key_fields
         )
-    for table in _ENTERPRISE_ONLY:
+    for table in ENTERPRISE_RECORD_STORE_NAMES:
         layouts[table] = _db_only(table)
     return layouts
 
