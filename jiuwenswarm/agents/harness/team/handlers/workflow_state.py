@@ -838,7 +838,8 @@ class WorkflowRunState(BaseModel):
         # whole phase/agent tree — the edited script may drop or rename phases and
         # agents, so stale cards from the prior run must not survive. A normal
         # pause→resume (relaunch_kind="resume" or absent) keeps the tree.
-        if progress.relaunch_kind == "relaunch":
+        relaunch_kind = progress.relaunch_kind
+        if relaunch_kind == "relaunch":
             self.phases = []
 
         # Resume guard: on a paused/stopped run, the engine re-emits
@@ -867,7 +868,13 @@ class WorkflowRunState(BaseModel):
         if progress.workflow_budget is not None:
             self.workflow_budget = progress.workflow_budget
 
-        return self._build_top_level_delta()
+        delta = self._build_top_level_delta()
+        # Carry the relaunch kind on THIS started delta only, so the frontend can
+        # distinguish "replace the whole phase tree" (relaunch) from "continue
+        # merging" (resume / fresh). Not persisted on the run state.
+        if relaunch_kind:
+            delta["relaunch_kind"] = relaunch_kind
+        return delta
 
     def _find_child_phase_by_name(self, name: str):
         for ph in self.phases:
