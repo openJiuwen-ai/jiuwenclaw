@@ -958,7 +958,7 @@ def update_session_metadata(
             metadata["channel_id"] = channel_id
         if user_id is not None:
             metadata["user_id"] = user_id
-        if mode is not None:
+        if mode is not None and mode != "unknown":
             metadata["mode"] = mode
         if team_name is not None:
             metadata["team_name"] = team_name
