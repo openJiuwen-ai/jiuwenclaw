@@ -11,6 +11,7 @@ import socket
 import textwrap
 import time
 import uuid
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -444,6 +445,15 @@ class TestSandboxCRUD:
         assert "command" not in data
         assert "workdir" not in data
         assert data["phase"] in ("provisioning", "ready", "error")
+        created_at = datetime.fromisoformat(data["created_at"])
+        now = datetime.now().astimezone()
+        assert created_at.tzinfo is not None
+        assert abs((created_at - now).total_seconds()) < 30
+        if data.get("started_at"):
+            started_at = datetime.fromisoformat(data["started_at"])
+            assert started_at.tzinfo is not None
+            assert abs((started_at - created_at).total_seconds()) < 30
+            assert abs((started_at - now).total_seconds()) < 30
 
     @staticmethod
     def test_list_sandboxes_after_create(client):

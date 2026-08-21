@@ -18,7 +18,6 @@ import textwrap
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 # Cap stdout/stderr at this many chars per audit event. Large model
@@ -70,6 +69,7 @@ from jiuwenbox.models.sandbox import (
     SandboxSpec,
     generate_job_id,
     generate_sandbox_id,
+    local_now,
     validate_custom_job_id,
     validate_custom_sandbox_id,
 )
@@ -415,7 +415,7 @@ class SandboxManager:
             except asyncio.TimeoutError:
                 pass
 
-            now = datetime.now(timezone.utc)
+            now = local_now()
             cutoff = now.timestamp() - idle_timeout
             async with self._lock:
                 expired_ids: list[str] = []
@@ -429,9 +429,9 @@ class SandboxManager:
                         continue
                     reference_ts = ref.last_active_at or ref.started_at or ref.created_at
                     if reference_ts.tzinfo is None:
-                        # SandboxRef.created_at uses datetime.now() (naive) by
-                        # default; coerce to UTC so the comparison is well-defined.
-                        reference_ts = reference_ts.replace(tzinfo=timezone.utc)
+                        # Pre-fix state files stored naive local timestamps.
+                        # Treat them as host-local, not UTC.
+                        reference_ts = reference_ts.astimezone()
                     if reference_ts.timestamp() < cutoff:
                         expired_ids.append(sid)
 
@@ -516,14 +516,14 @@ class SandboxManager:
 
     @staticmethod
     def _mark_active(ref: SandboxRef) -> None:
-        """Stamp ``ref.last_active_at`` with the current UTC time.
+        """Stamp ``ref.last_active_at`` with the current local time.
 
         Caller must already hold ``self._lock`` (typical pattern: call this
         right after the phase==READY check inside the same ``async with``
         block, so the timestamp is established before the IO call leaves the
         lock and races with the idle reaper).
         """
-        ref.last_active_at = datetime.now(timezone.utc)
+        ref.last_active_at = local_now()
 
     async def create_sandbox(
         self,
@@ -581,7 +581,7 @@ class SandboxManager:
                     ref.phase = SandboxPhase.READY
                     ref.pid = pid
                     ref.ip_address = ip_address
-                    now = datetime.now(timezone.utc)
+                    now = local_now()
                     ref.started_at = now
                     # 沙箱刚创建即视为最近一次活跃, 避免在第一次 exec 到来之前就被
                     # reaper 当成 idle 误杀 (理论上不会, 但显式初始化更直白)。
@@ -651,7 +651,7 @@ class SandboxManager:
             ref.phase = SandboxPhase.READY
             ref.pid = pid
             ref.ip_address = ip_address
-            now = datetime.now(timezone.utc)
+            now = local_now()
             ref.started_at = now
             ref.last_active_at = now
             ref.error_message = None
