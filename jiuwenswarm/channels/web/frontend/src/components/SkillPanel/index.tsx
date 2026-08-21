@@ -53,6 +53,8 @@ type SkillItem = {
   has_evolutions?: boolean;
   /** 是否启用 */
   enabled?: boolean;
+  /** 技能类型：industry / team / skill（多模态）等 */
+  skill_type?: string;
 };
 
 type InstalledPluginItem = {
