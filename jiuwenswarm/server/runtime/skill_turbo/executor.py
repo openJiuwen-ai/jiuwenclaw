@@ -944,11 +944,24 @@ class SkillTurboExecutor:
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():
             try:
-                from openjiuwen.core.sys_operation.cwd import set_cwd
+                from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd
 
                 resolved_workspace_dir = effective_project_dir.strip()
                 set_effective_request_workspace_dir(resolved_workspace_dir)
-                set_cwd(resolved_workspace_dir)
+                if self._stream_event_rail is not None:
+                    self._stream_event_rail.set_runtime_cwd_paths(
+                        cwd=resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                try:
+                    init_cwd(
+                        resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                except Exception:
+                    set_cwd(resolved_workspace_dir)
                 logger.debug(
                     "[SkillTurboExecutor] effective request workspace set: %s",
                     resolved_workspace_dir,

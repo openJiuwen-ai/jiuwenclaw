@@ -1141,6 +1141,31 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         )
         task_cwd = runtime_config.cwd or project_workspace
         self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
+        # Same CwdState rebind contract as deep adapter: interaction round tasks
+        # do not inherit request-task init_cwd.
+        if self._stream_event_rail is not None:
+            self._stream_event_rail.set_runtime_cwd_paths(
+                cwd=task_cwd,
+                project_root=runtime_config.project_dir
+                or self._project_dir
+                or project_workspace,
+                workspace=project_workspace,
+            )
+            # Keep metadata copy for effective_project_dir ContextVar rebind in
+            # before_tool_call (code mode also uses StreamEventRail).
+            meta = dict(runtime_config.request_metadata or {})
+            meta.setdefault("request_id", runtime_config.request_id or "")
+            meta.setdefault("channel_id", runtime_config.channel_id or "")
+            meta.setdefault("session_id", runtime_config.session_id)
+            md_epd = (
+                meta.get("effective_project_dir")
+                if isinstance(meta.get("effective_project_dir"), str)
+                else None
+            )
+            meta["effective_project_dir"] = (
+                md_epd.strip() if md_epd and md_epd.strip() else project_workspace
+            )
+            self._stream_event_rail.set_skill_turbo_request_metadata(meta)
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
