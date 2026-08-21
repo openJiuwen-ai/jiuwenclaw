@@ -301,12 +301,12 @@ def test_service_failure_transitions_loading_state_without_worker_window_calls(
     assert doctor_calls == []
 
 
-def test_installer_runs_doctor_before_offering_launch() -> None:
+def test_installer_does_not_block_completion_on_doctor() -> None:
     installer = (
         Path(__file__).resolve().parents[2] / "scripts" / "installer.iss"
     ).read_text(encoding="utf-8")
 
-    assert "ExecAsOriginalUser" in installer
-    assert "ewWaitUntilTerminated" in installer
-    assert "--doctor --doctor-output" in installer
-    assert "Check: DoctorPassed" in installer
+    assert "Flags: nowait postinstall" in installer
+    assert "--doctor" not in installer
+    assert "ewWaitUntilTerminated" not in installer
+    assert "Check: DoctorPassed" not in installer
