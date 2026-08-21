@@ -581,6 +581,25 @@ class TestCleanupStaleOpenjiuwenDescs:
             utils.cleanup_stale_openjiuwen_descs()
 
     @staticmethod
+    def test_skips_cleanup_for_frozen_windows_bundle(tmp_path, monkeypatch):
+        fake, descs = TestCleanupStaleOpenjiuwenDescs._fake_package(tmp_path)
+        domain_dir = descs / "cn" / "async_task"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "async_task_cancel.md").write_text("new", encoding="utf-8")
+        flat = descs / "cn" / "async_task_cancel.md"
+        flat.write_text("old", encoding="utf-8")
+
+        monkeypatch.setattr(utils.sys, "platform", "win32")
+        monkeypatch.setattr(utils.sys, "frozen", True, raising=False)
+        with (
+            patch.dict(sys.modules, {"openjiuwen": fake}),
+            patch.object(Path, "unlink", side_effect=PermissionError("read-only")),
+        ):
+            utils.cleanup_stale_openjiuwen_descs()
+
+        assert flat.exists()
+
+    @staticmethod
     def test_noop_when_openjiuwen_missing():
         with patch.dict(sys.modules, {"openjiuwen": None}):
             utils.cleanup_stale_openjiuwen_descs()

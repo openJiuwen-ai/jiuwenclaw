@@ -101,6 +101,125 @@ begin
   end;
 end;
 
+function HasDescriptionStemInTree(const Directory, Stem: String): Boolean;
+var
+  FindRec: TFindRec;
+  ChildDirectory: String;
+begin
+  Result := False;
+  if not FindFirst(AddBackslash(Directory) + '*', FindRec) then
+    exit;
+
+  try
+    repeat
+      if (FindRec.Name = '.') or (FindRec.Name = '..') then
+        continue;
+
+      if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+      begin
+        if CompareText(FindRec.Name, 'fragments') <> 0 then
+        begin
+          ChildDirectory := AddBackslash(Directory) + FindRec.Name;
+          if HasDescriptionStemInTree(ChildDirectory, Stem) then
+          begin
+            Result := True;
+            exit;
+          end;
+        end;
+      end
+      else if (CompareText(ExtractFileExt(FindRec.Name), '.md') = 0) and
+              (CompareText(ChangeFileExt(FindRec.Name, ''), Stem) = 0) then
+      begin
+        Result := True;
+        exit;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+function HasNestedDescriptionReplacement(const LanguageDirectory, Stem: String): Boolean;
+var
+  FindRec: TFindRec;
+  ChildDirectory: String;
+begin
+  Result := False;
+  if not FindFirst(AddBackslash(LanguageDirectory) + '*', FindRec) then
+    exit;
+
+  try
+    repeat
+      if (FindRec.Name = '.') or (FindRec.Name = '..') then
+        continue;
+
+      if ((FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+         (CompareText(FindRec.Name, 'fragments') <> 0) then
+      begin
+        ChildDirectory := AddBackslash(LanguageDirectory) + FindRec.Name;
+        if HasDescriptionStemInTree(ChildDirectory, Stem) then
+        begin
+          Result := True;
+          exit;
+        end;
+      end;
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
+procedure CleanupStaleOpenJiuwenDescriptions();
+var
+  DescsDirectory: String;
+  LanguageDirectory: String;
+  StalePath: String;
+  Stem: String;
+  LanguageRec: TFindRec;
+  FlatRec: TFindRec;
+begin
+  DescsDirectory := ExpandConstant(
+    '{app}\_internal\openjiuwen\agent_teams\tools\locales\descs'
+  );
+  if not DirExists(DescsDirectory) then
+    exit;
+
+  if not FindFirst(AddBackslash(DescsDirectory) + '*', LanguageRec) then
+    exit;
+
+  try
+    repeat
+      if (LanguageRec.Name = '.') or (LanguageRec.Name = '..') or
+         ((LanguageRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0) then
+        continue;
+
+      LanguageDirectory := AddBackslash(DescsDirectory) + LanguageRec.Name;
+      if not FindFirst(AddBackslash(LanguageDirectory) + '*.md', FlatRec) then
+        continue;
+
+      try
+        repeat
+          Stem := ChangeFileExt(FlatRec.Name, '');
+          if not HasNestedDescriptionReplacement(LanguageDirectory, Stem) then
+            continue;
+
+          StalePath := AddBackslash(LanguageDirectory) + FlatRec.Name;
+          if DeleteFile(StalePath) then
+            Log('Removed stale OpenJiuwen description: ' + StalePath)
+          else
+            RaiseException(
+              'Unable to remove stale OpenJiuwen description: ' + StalePath
+            );
+        until not FindNext(FlatRec);
+      finally
+        FindClose(FlatRec);
+      end;
+    until not FindNext(LanguageRec);
+  finally
+    FindClose(LanguageRec);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   DoctorOutputPath: String;
@@ -112,6 +231,9 @@ var
 begin
   if CurStep <> ssPostInstall then
     exit;
+
+  { Setup is elevated, unlike the installed application's ordinary user. }
+  CleanupStaleOpenJiuwenDescriptions();
 
   DoctorSucceeded := False;
   DoctorOutputPath := ExpandConstant('{tmp}\jiuwenswarm-doctor.json');

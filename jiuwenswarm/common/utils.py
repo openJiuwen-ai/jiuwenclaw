@@ -1018,6 +1018,11 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _is_windows_frozen_bundle() -> bool:
+    """Return whether this process is a packaged Windows application."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
 def cleanup_stale_openjiuwen_descs() -> None:
     """Remove flat OpenJiuwen descriptions left by the domain-layout migration.
 
@@ -1029,10 +1034,19 @@ def cleanup_stale_openjiuwen_descs() -> None:
     untouched.
 
     Raises:
-        RuntimeError: If a confirmed stale file cannot be removed.  Continuing
+        RuntimeError: If a confirmed stale file cannot be removed. Continuing
             would only defer the failure to OpenJiuwen's description loader and
-            hide the actionable filesystem error.
+            hide the actionable filesystem error. Windows frozen bundles skip
+            runtime cleanup because Inno Setup performs it with administrator
+            privileges during installation.
     """
+    if _is_windows_frozen_bundle():
+        logger.info(
+            "[Cleanup] Skipping OpenJiuwen description cleanup in frozen Windows "
+            "bundle; the elevated installer performs upgrade cleanup."
+        )
+        return
+
     try:
         import openjiuwen
     except ModuleNotFoundError as exc:
