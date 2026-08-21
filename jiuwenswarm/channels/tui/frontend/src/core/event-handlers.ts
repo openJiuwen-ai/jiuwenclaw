@@ -25,7 +25,7 @@ import {
 } from "./types.js";
 import type { ConnectionStatus } from "./ws-client.js";
 import { createId, findLastIndex, isIgnorableHistoryRestoreError } from "./app-state-helpers.js";
-import { isClientMode, type ClientMode } from "./modes.js";
+import { isClientMode, normalizeToClientMode, type ClientMode } from "./modes.js";
 import type { WorkflowRun } from "./workflows.js";
 
 type PreferredLanguage = "zh" | "en";
@@ -253,10 +253,21 @@ function _handleAgentModeToolResult(
 
   const existingMode = delegate.getMode();
   let newMode: ClientMode | null = null;
-  if (existingMode.startsWith("code.")) {
-    newMode = subMode === "team" ? "code.team" : "code.normal";
-  } else if (existingMode.startsWith("agent.")) {
-    newMode = subMode === "plan" ? "agent.plan" : "agent.fast";
+  if (existingMode.startsWith("agent.code.")) {
+    newMode = subMode === "team" ? "team.code.normal" : "agent.code.normal";
+  } else if (existingMode.startsWith("team.code.")) {
+    newMode = subMode === "plan" ? "team.code.plan" : "team.code.normal";
+  } else if (existingMode.startsWith("agent.work.")) {
+    newMode = subMode === "plan" ? "agent.work.plan" : "agent.work.normal";
+  } else if (existingMode.startsWith("team.work.")) {
+    newMode = subMode === "plan" ? "team.work.plan" : "team.work.normal";
+  } else {
+    // 四个前缀分支全部失配：existingMode 可能是旧 canonical 串
+    // （agent / agent.plan / team / code.team / team.plan.normal 等），
+    // 理论上有 setMode 归一兜底，但竞态/直写场景可能落到旧串，导致
+    // newMode 保持 null、switch_mode 回显不驱动 UI 切换，与后端 mode 静默错位。
+    // 用 normalizeToClientMode 归一成新 canonical 后兜底；归一无效则保持 null。
+    newMode = normalizeToClientMode(existingMode) ?? null;
   }
 
   if (newMode && newMode !== existingMode) {
@@ -1251,9 +1262,17 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       return connectionChanged;
 
     case "plan.mode_exited": {
-      const mode = typeof payload.mode === "string" ? payload.mode : "code.normal";
-      if (mode === "code.normal" && delegate.getMode().startsWith("code.")) {
-        delegate.setMode("code.normal");
+      const rawMode = typeof payload.mode === "string" ? payload.mode : "";
+      const current = delegate.getMode();
+      // 旧判据 startsWith("code.") 在新 canonical（agent.code.*）下永不成立，故用 endsWith(".plan") 复位。
+      if (!current.endsWith(".plan")) return true;
+      const normalTarget = (current.slice(0, -".plan".length) + ".normal") as ClientMode;
+      // 后端推的 exit_mode 可能是旧 canonical 串（如 "agent" / "code.normal"），
+      // 走 normalizeToClientMode 两端都归一到新串再比，避免旧串精确匹配失败导致
+      // UI 卡在 plan 态不复位。
+      const expectedNormal = normalizeToClientMode(rawMode);
+      if (expectedNormal === normalTarget) {
+        delegate.setMode(normalTarget);
       }
       return true;
     }
@@ -1353,8 +1372,12 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
 
     case "session.updated": {
       const mode = typeof payload.mode === "string" ? payload.mode : "";
-      if (isClientMode(mode)) {
-        delegate.setMode(mode);
+      // 后端推送可能仍带旧 canonical 串（历史 session / cron 拓扑），
+      // 走 normalizeToClientMode 归一到新 canonical 再 setMode，避免
+      // isClientMode 拒收导致 UI mode 与后端真实状态错位。
+      const normalized = normalizeToClientMode(mode);
+      if (normalized) {
+        delegate.setMode(normalized);
       }
       if (typeof payload.title === "string") {
         delegate.setSessionTitle(payload.title);

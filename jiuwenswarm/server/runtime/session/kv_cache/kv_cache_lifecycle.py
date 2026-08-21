@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Session lifecycle hooks for Ascend KV cache affinity."""
+"""Provider-facing lifecycle operations for root Session KV cache affinity."""
 
 from __future__ import annotations
 
@@ -12,12 +12,18 @@ from typing import Any, Literal
 from openjiuwen.core.foundation.kv_cache import resolve_kvc_action_timeout
 
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.kv_cache_affinity_config import (
+    ASCEND_AFFINITY_PROVIDER,
+    get_default_model_provider,
+    is_affinity_enabled,
+    model_provider,
+    normalize_provider,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 
 logger = logging.getLogger(__name__)
 
 KVAction = Literal["evict", "offload", "prefetch"]
-ASCEND_AFFINITY_PROVIDER = "AscendAffinity"
 
 
 @dataclass(frozen=True)
@@ -46,9 +52,7 @@ def _result(
 def is_kv_cache_affinity_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether jiuwenswarm should emit Ascend KV lifecycle calls."""
     cfg = config if isinstance(config, dict) else get_config()
-    react_cfg = cfg.get("react") or {}
-    kv_cfg = react_cfg.get("kv_cache_affinity_config") or {}
-    return bool(kv_cfg.get("enable_kv_cache_affinity", False))
+    return is_affinity_enabled(cfg)
 
 
 def _model_supports_kv_cache_affinity(model: Any) -> bool:
@@ -61,28 +65,8 @@ def _model_supports_kv_cache_affinity(model: Any) -> bool:
     )
 
 
-def _normalize_provider(provider: Any) -> str:
-    if provider is None:
-        return ""
-    value = getattr(provider, "value", provider)
-    return str(value or "").strip()
-
-
 def _is_ascend_affinity_provider(provider: Any) -> bool:
-    return _normalize_provider(provider).lower() == ASCEND_AFFINITY_PROVIDER.lower()
-
-
-def _provider_from_model(model: Any) -> str:
-    model_client_config = getattr(model, "model_client_config", None)
-    return _normalize_provider(getattr(model_client_config, "client_provider", None))
-
-
-def _default_model_provider(config: dict[str, Any]) -> str:
-    entry = _default_model_entry(config)
-    if entry is None:
-        return ""
-    model_client_config, _ = entry
-    return _normalize_provider(model_client_config.get("client_provider"))
+    return normalize_provider(provider).lower() == ASCEND_AFFINITY_PROVIDER.lower()
 
 
 def _model_from_jiuwenswarm_agent(agent: Any) -> Any | None:
@@ -187,7 +171,11 @@ async def run_session_kv_cache_lifecycle(
             return _result("skipped")
 
         model = resolve_kv_cache_affinity_model(agent=agent, config=cfg)
-        provider = _provider_from_model(model) if model is not None else _default_model_provider(cfg)
+        provider = (
+            model_provider(model)
+            if model is not None
+            else get_default_model_provider(cfg)
+        )
         if provider and not _is_ascend_affinity_provider(provider):
             logger.warning(
                 "[KVCacheAffinityLifecycle] %s blocked: session_id=%s provider=%s requires=%s",
@@ -206,13 +194,8 @@ async def run_session_kv_cache_lifecycle(
         if not callable(action_fn):
             return _result("skipped")
 
-        if action == "evict":
-            previous = _BACKGROUND_TAILS.get(normalized_session_id)
-            if previous is not None and previous is not asyncio.current_task():
-                await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
-
         action_timeout = resolve_kvc_action_timeout(action, "session", timeout)
-        action_call = action_fn(
+        action_kwargs = dict(
             target="session",
             session_id=normalized_session_id,
             parent_session_id=parent_session_id or normalized_session_id,
@@ -221,8 +204,33 @@ async def run_session_kv_cache_lifecycle(
         # OpenAIModelClient owns the whole-action deadline when kv_cache.mode=affinity (including
         # retries/backoff). Product lifecycle code only selects and forwards
         # the shared budget so timeout ownership remains unambiguous.
-        action_result = await action_call
-        ok = bool(action_result)
+        if action == "evict":
+            previous = _BACKGROUND_TAILS.get(normalized_session_id)
+            barrier = asyncio.get_running_loop().create_future()
+            # Register evict as the current tail before waiting for older
+            # actions.  A later offload/prefetch for the same Session will
+            # therefore queue behind this destructive action.
+            _BACKGROUND_TAILS[normalized_session_id] = barrier
+            _EVICT_BARRIERS[normalized_session_id] = barrier
+            succeeded = False
+            try:
+                if previous is not None and previous is not asyncio.current_task():
+                    await asyncio.gather(
+                        asyncio.shield(previous),
+                        return_exceptions=True,
+                    )
+                succeeded = bool(await action_fn(**action_kwargs))
+                ok = succeeded
+            finally:
+                if not barrier.done():
+                    barrier.set_result(_result("ok" if succeeded else "failed"))
+                if _EVICT_BARRIERS.get(normalized_session_id) is barrier:
+                    _EVICT_BARRIERS.pop(normalized_session_id, None)
+                if _BACKGROUND_TAILS.get(normalized_session_id) is barrier:
+                    _BACKGROUND_TAILS.pop(normalized_session_id, None)
+        else:
+            action_result = await action_fn(**action_kwargs)
+            ok = bool(action_result)
     except Exception as exc:
         logger.warning(
             "[KVCacheAffinityLifecycle] %s failed: session_id=%s error=%s",
@@ -249,7 +257,8 @@ async def run_session_kv_cache_lifecycle(
 
 
 _BACKGROUND_ACTIONS: set[asyncio.Task[KVCacheLifecycleResult]] = set()
-_BACKGROUND_TAILS: dict[str, asyncio.Task[KVCacheLifecycleResult]] = {}
+_BACKGROUND_TAILS: dict[str, asyncio.Future[KVCacheLifecycleResult]] = {}
+_EVICT_BARRIERS: dict[str, asyncio.Future[KVCacheLifecycleResult]] = {}
 
 
 def dispatch_session_kv_cache_lifecycle(
@@ -336,6 +345,22 @@ async def cancel_pending_kv_cache_lifecycle_tasks() -> None:
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _BACKGROUND_TAILS.clear()
+    _EVICT_BARRIERS.clear()
+
+
+async def wait_for_session_kv_cache_evict(session_id: str) -> None:
+    """Wait only for an in-flight root Session evict.
+
+    Inference deliberately does not wait for offload or prefetch.  This
+    narrow barrier exists solely to prevent a later same-Session step from
+    overtaking a destructive evict.
+    """
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    barrier = _EVICT_BARRIERS.get(normalized_session_id)
+    if barrier is not None:
+        await asyncio.gather(asyncio.shield(barrier), return_exceptions=True)
 
 
 async def prefetch_session_kv_cache(

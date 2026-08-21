@@ -2,9 +2,14 @@
 
 """统一消息模型."""
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
+
+from jiuwenswarm.common.mode_matrix import deprecate_mode
+
+logger = logging.getLogger(__name__)
 
 
 class ReqMethod(Enum):
@@ -43,6 +48,7 @@ class ReqMethod(Enum):
     SESSION_CREATE = "session.create"
     SESSION_SWITCH = "session.switch"
     SESSION_DELETE = "session.delete"
+    SESSION_KVC_PREPARE = "session.kvc.prepare"
     SESSION_RENAME = "session.rename"
     SESSION_FORK = "session.fork"
     SESSION_REBIND_PROJECT = "session.rebind_project"
@@ -102,6 +108,10 @@ class ReqMethod(Enum):
     SKILLS_LIST = "skills.list"
     SKILLS_INSTALLED = "skills.installed"
     SKILLS_GET = "skills.get"
+    SKILLS_VERSIONS_LIST = "skills.versions.list"
+    SKILLS_FILES_LIST = "skills.files.list"
+    SKILLS_FILES_GET = "skills.files.get"
+    SKILLS_REBUILD = "skills.rebuild"
     SKILLS_TOGGLE = "skills.toggle"
     # Per-workspace Skill visibility (team mode): the Skill entities themselves
     # live in exactly one global library, so who may see which Skill is metadata
@@ -147,6 +157,33 @@ class ReqMethod(Enum):
     SKILLS_GRAPH_STATUS = "skills.graph.status"
     SKILLS_GRAPH_GET = "skills.graph.get"
     SKILLS_GRAPH_CANCEL = "skills.graph.cancel"
+
+    PERSONAL_CONTEXT_RUNTIME_STATUS = "personal_context.runtime.status"
+    PERSONAL_CONTEXT_RUNTIME_START = "personal_context.runtime.start"
+    PERSONAL_CONTEXT_RUNTIME_STOP = "personal_context.runtime.stop"
+    PERSONAL_CONTEXT_RUNTIME_GET_CONFIG = "personal_context.runtime.get_config"
+    PERSONAL_CONTEXT_RUNTIME_PATCH_CONFIG = "personal_context.runtime.patch_config"
+    PERSONAL_CONTEXT_RUNTIME_SELECT_MODEL = "personal_context.runtime.select_model"
+    PERSONAL_CONTEXT_FETCH_LIST_SERVICES = "personal_context.fetch.list_services"
+    PERSONAL_CONTEXT_FETCH_CREATE_SERVICE = "personal_context.fetch.create_service"
+    PERSONAL_CONTEXT_FETCH_DELETE_SERVICE = "personal_context.fetch.delete_service"
+    PERSONAL_CONTEXT_FETCH_PATCH_SERVICE = "personal_context.fetch.patch_service"
+    PERSONAL_CONTEXT_FETCH_START_SERVICE = "personal_context.fetch.start_service"
+    PERSONAL_CONTEXT_FETCH_STOP_SERVICE = "personal_context.fetch.stop_service"
+    PERSONAL_CONTEXT_FETCH_START_SCHEDULER = "personal_context.fetch.start_scheduler"
+    PERSONAL_CONTEXT_FETCH_STOP_SCHEDULER = "personal_context.fetch.stop_scheduler"
+    PERSONAL_CONTEXT_FETCH_RUN_ALL = "personal_context.fetch.run_all"
+    PERSONAL_CONTEXT_FETCH_RUN_ONE = "personal_context.fetch.run_one"
+    PERSONAL_CONTEXT_FETCH_GET_RUN_STATUS = "personal_context.fetch.get_run_status"
+    PERSONAL_CONTEXT_FETCH_GET_AUTHORIZATION_STATUS = (
+        "personal_context.fetch.get_authorization_status"
+    )
+    PERSONAL_CONTEXT_FETCH_AUTHORIZE_PROVIDER = (
+        "personal_context.fetch.authorize_provider"
+    )
+    PERSONAL_CONTEXT_CONTEXT_STREAM_GRAPH = "personal_context.context.stream_graph"
+    PERSONAL_CONTEXT_CONTEXT_SEARCH_PAGES = "personal_context.context.search_pages"
+    PERSONAL_CONTEXT_CONTEXT_GET_NODE = "personal_context.context.get_node"
 
     # Plugin management (reuses skills marketplace infrastructure)
     PLUGINS_LIST = "plugins.list"
@@ -297,37 +334,59 @@ class Mode(Enum):
     TEAM = "team"
     TEAM_PLAN_NORMAL = "team.plan.normal"
     TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留以兼容历史持久化反解析）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":
-        """解析 mode。plan / fast 已合并：agent.plan / agent.fast 归一为 agent。"""
-        fallback = default or cls.AGENT
+        """解析 mode：新 canonical 原样返回，旧 canonical 静默映射到新 canonical。
+
+        单一逻辑路径——不再维护手写白名单：``deprecate_mode`` 对新 canonical
+        原样返回（不在 :data:`DEPRECATION_MAP` 里），对旧 canonical 映射到新串，
+        对未知串原样返回后由 ``cls(...)`` 抛 ``ValueError`` 兜底到 ``fallback``。
+        裸 ``plan`` / ``fast`` 与 CLI ``MODE_ALIASES`` 同语义，直接落到
+        :attr:`AGENT_WORK_NORMAL`，不绕 ``agent.fast`` 中间步。
+        """
+        fallback = default or cls.AGENT_WORK_NORMAL
         if isinstance(raw_mode, Mode):
-            # 历史枚举成员归一到合并后的 AGENT。
-            if raw_mode in (cls.AGENT_PLAN, cls.AGENT_FAST):
-                return cls.AGENT
-            return raw_mode
+            raw_mode = raw_mode.value
         if not isinstance(raw_mode, str):
             return fallback
         normalized = raw_mode.strip().lower()
         if not normalized:
             return fallback
-        # 任何 agent* 请求（agent / agent.plan / agent.fast）归一到 AGENT。
-        if normalized.split(".", 1)[0] == "agent":
-            return cls.AGENT
-        # 历史裸 plan / fast（同 CLI MODE_ALIASES）显式归一到 AGENT，
-        # 不依赖 fallback 默认值恰好等于 AGENT。
         if normalized in ("plan", "fast"):
-            return cls.AGENT
-        if normalized == "team.plan":
-            return cls.TEAM_PLAN_NORMAL
+            logger.debug("Mode.from_raw: bare '%s' -> AGENT_WORK_NORMAL", normalized)
+            return cls.AGENT_WORK_NORMAL
+        new_mode_str = deprecate_mode(normalized)
         try:
-            return cls(normalized)
+            mode = cls(new_mode_str)
         except ValueError:
+            logger.warning(
+                "Mode.from_raw: 无法识别的 mode=%r (deprecate 后=%r)，兜底 %s",
+                raw_mode, new_mode_str, fallback.value,
+            )
             return fallback
+        if new_mode_str != normalized:
+            logger.debug(
+                "Mode.from_raw: '%s' -> '%s' (legacy canonical 静默迁移)",
+                normalized, new_mode_str,
+            )
+        return mode
 
     def to_runtime_mode(self) -> str:
-        """输出 runtime mode 值；历史 agent.plan / agent.fast 归一为 agent。"""
+        """输出 runtime mode 值；历史 agent.plan / agent.fast 归一为 agent。
+
+        新枚举原样返回（canonical 串即 runtime 串）。旧枚举按历史语义归一为
+        合并后的 ``agent`` / 自身 canonical 串。
+        """
         if self in (Mode.AGENT_PLAN, Mode.AGENT_FAST):
             return Mode.AGENT.value
         return self.value
@@ -352,7 +411,12 @@ class Message:
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None
-    mode: Mode = Mode.AGENT
+    # 与 Mode.from_raw 的 fallback 对齐：客户端不传 mode 时落到 canonical
+    # ``agent.work.normal``，避免 schema 默认值与 from_raw 不一致导致
+    # Message.mode 在两条入口路径下产生不同默认值。旧 ``Mode.AGENT`` 仍由
+    # from_raw("agent") 经 DEPRECATION_MAP 映射到 AGENT_WORK_NORMAL，故不会
+    # 丢失旧 canonical 的反解析能力。
+    mode: Mode = Mode.AGENT_WORK_NORMAL
     is_stream: bool = False
     stream_seq: int | None = None
     stream_id: str | None = None

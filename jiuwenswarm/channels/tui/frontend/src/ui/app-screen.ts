@@ -58,7 +58,7 @@ import type { McpListItem, McpListPayload } from "../core/commands/builtins/mcp.
 import { buildModeAutocompleteItems } from "../core/commands/builtins/mode.js";
 import { MemoryViewController, type MemoryViewTab } from "./memory-view.js";
 import { PIPELINE_VALUES, PIPELINE_OPTIONS, INTERVAL_VALUES, INTERVAL_OPTIONS, FLAG_OPTIONS } from "../core/commands/builtins/auto-harness.js";
-import { formatModeForDisplay, isClientMode, isTeamMode } from "../core/modes.js";
+import { formatModeForDisplay, isTeamMode, normalizeToClientMode } from "../core/modes.js";
 import {
   countWaitingForHuman,
   sessionTurnLabelNumber,
@@ -4189,10 +4189,10 @@ export class AppScreen implements Component, Focusable {
     this.resumeSessionList = null;
     const snapshot = this.state.getSnapshot();
     const previousSessionId = snapshot.sessionId;
+    // 历史 session 可能存旧 canonical 串（agent.plan / team / code.team），
+    // 走 normalizeToClientMode 归一到新串；空/未知串回退当前 mode。
     const targetMode =
-      matchedSession?.mode && isClientMode(matchedSession.mode)
-        ? matchedSession.mode
-        : snapshot.mode;
+      normalizeToClientMode(matchedSession?.mode ?? "") ?? snapshot.mode;
     try {
       await this.state.request("session.switch", {
         session_id: nextSessionId,

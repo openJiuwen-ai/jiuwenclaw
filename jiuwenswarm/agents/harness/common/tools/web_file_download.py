@@ -7,7 +7,8 @@
 
 协议：
 - 令牌格式: Base64URL(payload_json) + "." + Hex(HMAC-SHA256)
-- payload 包含: path, exp, session_id
+- 普通下载 payload: path, exp, sid
+- Skill 正文图片 payload: purpose=skill_content_image, name, version, relative_path, exp, sid（无 path）
 - 密钥来源: 环境变量 JIUWENSWARM_FILE_DOWNLOAD_SECRET 或自动生成并写入共享文件
 """
 
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_EXPIRES_SECONDS = 600
 _SECRET_ENV_KEY = "JIUWENSWARM_FILE_DOWNLOAD_SECRET"
 _SECRET_FILE_NAME = ".file_download_secret"
+
+PURPOSE_SKILL_CONTENT_IMAGE = "skill_content_image"
 
 
 def _get_secret_file_path() -> Path:
@@ -85,17 +88,7 @@ class WebFileDownloadManager:
     def reset_instance(cls) -> None:
         cls._instance = None
 
-    def generate_token(
-        self,
-        file_path: str,
-        session_id: str = "",
-        expires_in: int = _DEFAULT_EXPIRES_SECONDS,
-    ) -> str:
-        payload = {
-            "path": file_path,
-            "exp": int(time.time()) + expires_in,
-            "sid": session_id,
-        }
+    def _sign_payload(self, payload: dict[str, Any]) -> str:
         payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         payload_b64 = base64.urlsafe_b64encode(
             payload_json.encode("utf-8")
@@ -107,7 +100,60 @@ class WebFileDownloadManager:
         ).hexdigest()
         return f"{payload_b64}.{signature}"
 
-    def validate_token(self, token: str) -> dict[str, Any] | None:
+    def generate_token(
+        self,
+        file_path: str,
+        session_id: str = "",
+        expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+    ) -> str:
+        payload = {
+            "path": file_path,
+            "exp": int(time.time()) + expires_in,
+            "sid": session_id,
+        }
+        return self._sign_payload(payload)
+
+    def generate_skill_content_image_token(
+        self,
+        *,
+        name: str,
+        version: str | None,
+        relative_path: str,
+        session_id: str,
+        expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+    ) -> str:
+        """签发正文图片预览 token（不携带服务端绝对路径）."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("skill_content_image token 需要非空 session_id")
+        skill_name = str(name or "").strip()
+        rel = str(relative_path or "").strip().replace("\\", "/")
+        if not skill_name or not rel:
+            raise ValueError("skill_content_image token 需要 name 与 relative_path")
+        payload: dict[str, Any] = {
+            "purpose": PURPOSE_SKILL_CONTENT_IMAGE,
+            "name": skill_name,
+            "version": version if version is None else str(version).strip() or None,
+            "relative_path": rel,
+            "exp": int(time.time()) + expires_in,
+            "sid": sid,
+        }
+        return self._sign_payload(payload)
+
+    def validate_token(
+        self,
+        token: str,
+        *,
+        session_id: str | None = None,
+        check_expiry: bool = True,
+    ) -> dict[str, Any] | None:
+        """校验下载令牌。
+
+        Args:
+            token: HMAC 签名令牌。
+            session_id: 若提供非空字符串，则要求 payload.sid 与之相等。
+            check_expiry: 是否校验 ``exp`` 过期时间（默认开启）。
+        """
         try:
             parts = token.split(".")
             if len(parts) != 2:
@@ -125,6 +171,19 @@ class WebFileDownloadManager:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
                 return None
+            if check_expiry:
+                # 兼容历史令牌：无 exp 字段时不强制过期；有 exp 则严格校验
+                exp = payload.get("exp")
+                if exp is not None and (
+                    not isinstance(exp, (int, float)) or int(exp) < int(time.time())
+                ):
+                    logger.warning("[WebFileDownload] 令牌已过期")
+                    return None
+            if session_id is not None and str(session_id).strip():
+                token_sid = str(payload.get("sid") or "").strip()
+                if token_sid != str(session_id).strip():
+                    logger.warning("[WebFileDownload] 令牌会话不匹配")
+                    return None
             return payload
         except Exception:
             logger.debug("[WebFileDownload] 令牌解析异常", exc_info=True)
@@ -145,8 +204,34 @@ def generate_file_download_token(
     )
 
 
-def validate_file_download_token(token: str) -> dict[str, Any] | None:
-    return WebFileDownloadManager.get_instance().validate_token(token)
+def generate_skill_content_image_token(
+    *,
+    name: str,
+    version: str | None,
+    relative_path: str,
+    session_id: str,
+    expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+) -> str:
+    return WebFileDownloadManager.get_instance().generate_skill_content_image_token(
+        name=name,
+        version=version,
+        relative_path=relative_path,
+        session_id=session_id,
+        expires_in=expires_in,
+    )
+
+
+def validate_file_download_token(
+    token: str,
+    *,
+    session_id: str | None = None,
+    check_expiry: bool = True,
+) -> dict[str, Any] | None:
+    return WebFileDownloadManager.get_instance().validate_token(
+        token,
+        session_id=session_id,
+        check_expiry=check_expiry,
+    )
 
 
 def build_file_download_info(

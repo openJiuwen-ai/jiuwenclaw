@@ -264,6 +264,19 @@ class SendFileToolkit:
         Returns:
             Success message or error description.
         """
+        # skills.rebuild 静默 Agent：禁止 push / chat.file，避免保存卡片污染 UI
+        if isinstance(self._request_metadata, dict) and self._request_metadata.get(
+            "skills_rebuild_silent"
+        ):
+            logger.info(
+                "[SendFileToolkit] skills_rebuild_silent 跳过 send_file session_id=%s",
+                self.session_id,
+            )
+            return (
+                "skills.rebuild 静默模式禁止 send_file_to_user；"
+                "请直接用文件写入工具修改 SKILL.md，不要投递文件给用户。"
+            )
+
         target_channel_list = SendFileToolkit._normalize_target_channels(target_channels)
         if target_channel_list:
             logger.info(

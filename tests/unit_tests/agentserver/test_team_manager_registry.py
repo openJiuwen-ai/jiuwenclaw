@@ -445,6 +445,13 @@ def test_find_team_skill_rail_for_request_uses_pending_governance() -> None:
     assert manager.find_team_skill_rail_for_request("missing") is None
 
 
+def test_find_team_skill_rail_for_request_uses_core_owned_child_request() -> None:
+    manager = TeamManager()
+    rail = _FakeTeamSkillEvolutionRail()
+    rail.add_pending_approval_snapshot("skill_evolve_review_req1")
+    manager.register_team_skill_rail("sess-1", rail)
+
+    assert manager.find_team_skill_rail_for_request("skill_evolve_review_req1") is rail
 @pytest.mark.asyncio
 async def test_update_evolution_config_disables_team_skill_create_rail(
     monkeypatch: pytest.MonkeyPatch,

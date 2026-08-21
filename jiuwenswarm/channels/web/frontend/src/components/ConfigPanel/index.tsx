@@ -495,6 +495,9 @@ const PROACTIVE_KEYS = new Set([
 ]);
 // ConfigPanel 暂不展示这些配置；保留后端下发值，并在比较/提交时跳过。
 const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
+  "a2ui_enabled",
+  "a2ui_generation_enabled",
+  "a2ui_rendering_enabled",
   "proactive_recommendation_tick_interval_minutes",
   "kv_cache_release_enabled",
   "kv_cache_affinity_enabled",
@@ -1558,14 +1561,12 @@ const OPENAI_ACCOUNT_LOGIN_START_TIMEOUT_MS = 90_000;
 
 const MODEL_PROVIDER_OPTIONS = [
   "OpenAI",
-  OPENAI_ACCOUNT_PROVIDER,
   "OpenRouter",
   "DashScope",
   "SiliconFlow",
   "InferenceAffinity",
   "DeepSeek",
 ] as const;
-const REASONING_LEVEL_OPTIONS = ["off", "low", "medium", "high"] as const;
 
 function isOpenAIAccountProvider(provider?: string): boolean {
   return (provider || "").trim().toLowerCase() === OPENAI_ACCOUNT_PROVIDER.toLowerCase();
@@ -2729,7 +2730,7 @@ function MultiModelSection({
               </div>
               {isExpanded && (
                 <div className="border-t border-border px-3 py-2 space-y-2" data-testid="config-panel-model-item-detail">
-                  {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
+                  {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
                     <div key={field} className="flex items-center gap-2 text-xs" data-testid="config-panel-model-item-field" data-variant={field}>
                       <label className="w-28 text-text-muted shrink-0">
                         <ConfigFieldHintLabel
@@ -2752,17 +2753,6 @@ function MultiModelSection({
                         >
                           <option value="" disabled>{t("config.selectModelProvider")}</option>
                           {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-                        </select>
-                      ) : field === "reasoning_level" ? (
-                        <select
-                          value={models[idx]?.reasoning_level ?? ""}
-                          onChange={(e) => updateModel(idx, field, e.target.value)}
-                          data-testid="config-panel-model-item-field-reasoning-select"
-                          data-variant="reasoning_level"
-                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                        >
-                          <option value="">{t("config.modelList.reasoningDefault")}</option>
-                          {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
                         </select>
                       ) : (
                         <input
@@ -2822,7 +2812,7 @@ function MultiModelSection({
 
         {addingNew ? (
           <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2" data-testid="config-panel-model-add">
-            {(["model_name", "alias", "api_base", "api_key", "model_provider", "reasoning_level"] as const).map((field) => (
+            {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
               <div key={field} className="flex items-center gap-2 text-xs" data-testid="config-panel-model-add-field" data-variant={field}>
                 <label className="w-28 text-text-muted shrink-0">
                   <ConfigFieldHintLabel
@@ -2844,16 +2834,6 @@ function MultiModelSection({
                   >
                     <option value="" disabled>{t("config.selectModelProvider")}</option>
                     {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-                  </select>
-                ) : field === "reasoning_level" ? (
-                  <select
-                    value={newModel.reasoning_level ?? ""}
-                    onChange={(e) => handleNewModelChange(field, e.target.value)}
-                    data-testid="config-panel-model-add-field-reasoning-select"
-                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                  >
-                    <option value="">{t("config.modelList.reasoningDefault")}</option>
-                    {REASONING_LEVEL_OPTIONS.map((level) => <option key={level} value={level}>{level}</option>)}
                   </select>
                 ) : (
                   <input
@@ -4073,8 +4053,7 @@ export function ConfigPanel({
   const isProcessing = useChatStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.isProcessing ?? false : false));
   const globalTaskRunning = useChatStore((s) => s.globalTaskRunning);
   const availableModels = useSessionStore((s) => s.availableModels);
-  const mode = useSessionStore((s) => (activeSessionId ? s.runtimes[activeSessionId]?.mode ?? 'agent' : 'agent'));
-  const configSaveBlocked = (isProcessing || globalTaskRunning) && mode !== 'team';
+  const configSaveBlocked = isProcessing || globalTaskRunning;
   // 免费模型（如 Opencode Zen）只在对话下拉框展示，不在“模型配置”页编辑--
   // 它们是内存态、不入 config.yaml，在此过滤掉以免误编辑/误提交。
   // 用 useMemo 缓存：只有 availableModels 真正变化才重算，避免每次渲染返回
@@ -4546,12 +4525,14 @@ export function ConfigPanel({
 
   const groups = useMemo<ConfigGroup[]>(() => {
     if (!Object.keys(normalizedConfig).length) return [];
-    const externalCliAgentsSupported = parseBoolValue(normalizedConfig[EXTERNAL_CLI_AGENTS_SUPPORTED_KEY] ?? "true");
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
       if (HIDDEN_CONFIG_KEYS.has(key) || HIDDEN_FROM_UI_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
-      if (tag === "external_cli_agents" && !externalCliAgentsSupported) continue;
+      // 按产品要求暂不在配置页展示三方 Agent，保留后端下发值及运行能力。
+      if (tag === "external_cli_agents") continue;
+      // 按产品要求暂不在配置页展示记忆敏感信息过滤，保留后端下发值及运行能力。
+      if (tag === "memory") continue;
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;
       // 飞书配置已迁移到 ChannelsPanel 管理，这里不再展示。
@@ -5031,7 +5012,8 @@ export function ConfigPanel({
           return;
         }
         setExternalCliInstallStatuses({});
-        if (hasModelChanges && onModelsRefresh) await onModelsRefresh();
+        // enable_free_models 开关变更需要刷新模型列表（免费模型的添加/清除依赖 models.list 重新拉取）
+        if ((hasModelChanges || "enable_free_models" in configUpdates) && onModelsRefresh) await onModelsRefresh();
         if (hasAgentsTeamsChanges) {
           setAgentsTeamsJustSaved(true);
           // 记录保存后的配置到ref，用于后续比较
@@ -5077,6 +5059,8 @@ export function ConfigPanel({
           }
           setExternalCliInstallStatuses({});
         }
+        // enable_free_models 开关变更后刷新模型列表（旧后端路径）
+        if ("enable_free_models" in configUpdates && onModelsRefresh) await onModelsRefresh();
       }
   } catch (saveError) {
       const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
@@ -5269,12 +5253,13 @@ export function ConfigPanel({
                   ) : null}
                   <div
                     id="config-group-enable_free_models"
+                    data-testid="config-panel-group-enable_free_models"
                     className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
                   >
-                    <div className="px-4 py-3 bg-secondary/30 border-b border-border flex items-center justify-between gap-3">
+                    <div className="px-4 py-3 bg-secondary/30 border-b border-border flex items-center justify-between gap-3" data-testid="config-panel-group-enable_free_models-header">
                       <div className="min-w-0">
-                        <span className="block text-sm font-medium text-text-strong">{t("config.keys.enableFreeModels")}</span>
-                        <span className="block text-xs text-text-muted mt-0.5">{t("config.keyHelp.enableFreeModels")}</span>
+                        <span className="block text-sm font-medium text-text-strong" data-testid="config-panel-group-enable_free_models-label">{t("config.keys.enableFreeModels")}</span>
+                        <span className="block text-xs text-text-muted mt-0.5" data-testid="config-panel-group-enable_free_models-hint">{t("config.keyHelp.enableFreeModels")}</span>
                       </div>
                       <button
                         type="button"
@@ -5283,6 +5268,7 @@ export function ConfigPanel({
                         onClick={() => handleFieldChange("enable_free_models", parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "false" : "true")}
                         title={t("config.keys.enableFreeModels")}
                         className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "bg-[var(--color-toggle-enabled)]" : "bg-[var(--color-toggle-disabled)]"}`}
+                        data-testid="config-panel-group-enable_free_models-switch"
                       >
                         <span
                           className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${parseBoolValue(draftValues["enable_free_models"] ?? "true") ? "translate-x-4" : "translate-x-0"}`}

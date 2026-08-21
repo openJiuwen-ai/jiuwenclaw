@@ -741,6 +741,7 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
         requested_model_name: str | None = None,
+        agent_group_name: str | None = None,
     ) -> TeamAgentSpec:
         """Build a team spec via provider-based assembly (no parent DeepAgent).
 
@@ -756,6 +757,7 @@ class TeamManager:
             request_id: Originating request id, if any.
             channel_id: Raw channel id from the request, if any.
             request_metadata: Request metadata mapping.
+            agent_group_name: Optional AgentGroup package bound to the session.
 
         Returns:
             The enriched ``TeamAgentSpec`` ready to build (``build_context`` set;
@@ -782,6 +784,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=agent_group_name,
         )
         return spec
 
@@ -873,18 +876,14 @@ class TeamManager:
         one active session per channel.
         """
         normalized_previous = str(previous_session_id or "").strip()
-        pre_signaled_session_ids: set[str] = set()
         if normalized_previous and normalized_previous != target_session_id:
-            await self.offload_session_kv_cache(
-                normalized_previous,
-                reason=f"{reason}session-switch",
-            )
+            # Product foreground/task facts own KVC offload.  A navigation
+            # event must not offload a Team that is still running.
             await self.stop_paused_session_runtime(
                 normalized_previous,
                 reason=f"{reason}session-switch: ",
                 offload=False,
             )
-            pre_signaled_session_ids.add(normalized_previous)
 
         if not self._is_distributed_mode(get_config()):
             logger.info(
@@ -898,7 +897,6 @@ class TeamManager:
             await self._stop_stale_distributed_sessions(
                 target_session_id,
                 reason=reason,
-                pre_signaled_session_ids=pre_signaled_session_ids,
             )
 
     async def offload_session_kv_cache(self, session_id: str, reason: str = "") -> bool:
@@ -924,7 +922,6 @@ class TeamManager:
         target_session_id: str,
         *,
         reason: str,
-        pre_signaled_session_ids: set[str] | None = None,
     ) -> None:
         """Stop active or pending distributed sessions except the target."""
         stale_sessions = [
@@ -946,13 +943,7 @@ class TeamManager:
             list(dict.fromkeys(stale_sessions)),
         )
 
-        already_signaled = pre_signaled_session_ids or set()
         for stale_session_id in dict.fromkeys(stale_sessions):
-            if stale_session_id not in already_signaled:
-                await self.offload_session_kv_cache(
-                    stale_session_id,
-                    reason=f"{reason}session-switch",
-                )
             await self.stop_session_runtime(
                 stale_session_id,
                 reason=reason,
@@ -1161,6 +1152,10 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=str(
+                (request_metadata or {}).get("agent_group_name") or ""
+            ).strip()
+            or None,
         )
 
         logger.info("[TeamManager] TeamAgentSpec ready: team_name=%s", spec.team_name)
@@ -1309,6 +1304,9 @@ class TeamManager:
     def find_team_skill_rail_for_request(self, request_id: str) -> Any | None:
         """Find the TeamSkillEvolutionRail that owns a pending approval with this request_id."""
         for rail in self._team_skill_rails.values():
+            owns_request = getattr(rail, "owns_approval_request", None)
+            if callable(owns_request) and owns_request(request_id):
+                return rail
             if request_id in getattr(rail, "_pending_approval_snapshots", {}):
                 return rail
             if request_id in getattr(rail, "_pending_governance", {}):

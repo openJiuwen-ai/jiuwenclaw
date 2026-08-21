@@ -41,6 +41,7 @@ from jiuwenswarm.common.config import (
     update_config,
 )
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
+from jiuwenswarm.common.mode_matrix import is_team_mode
 from jiuwenswarm.gateway.routing.route_binding import GatewayRouteBinding
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -1794,7 +1795,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
                 logger.warning("[cli session.delete] forward to agent failed, fallback local: %s", e)
 
         metadata = get_session_metadata(target)
-        if str(metadata.get("mode") or "").strip().lower() == "team":
+        if is_team_mode(metadata.get("mode")):
             await channel.send_response(
                 ws,
                 req_id,
@@ -1829,7 +1830,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
 
-        from jiuwenswarm.server.runtime.session.kv_cache_affinity_lifecycle import (
+        from jiuwenswarm.server.runtime.session.kv_cache.kv_cache_lifecycle import (
             evict_session_kv_cache,
         )
 

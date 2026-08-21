@@ -118,6 +118,7 @@ class UserTurn:
         if self.trusted_dirs:
             envelope["trusted_dirs"] = json.dumps(self.trusted_dirs, ensure_ascii=False)
         envelope.update(self._sender_fields())
+        envelope.update(self._skill_scene_fields())
         return envelope
 
     def _resolve_skills(self, content: Any) -> list[str]:
@@ -148,6 +149,22 @@ class UserTurn:
         sender_name = str(self.metadata.get("sender_name") or "").strip()
         if sender_name:
             fields["sender"] = sender_name
+        return fields
+
+    def _skill_scene_fields(self) -> dict[str, str]:
+        """Return create/edit skill scene fields from request metadata."""
+        if not self.metadata:
+            return {}
+        fields: dict[str, str] = {}
+        scene = str(self.metadata.get("scene") or "").strip()
+        if scene:
+            fields["scene"] = scene
+        target_skill = str(self.metadata.get("target_skill") or "").strip()
+        if target_skill:
+            fields["target_skill"] = target_skill
+        target_skill_type = str(self.metadata.get("target_skill_type") or "").strip()
+        if target_skill_type:
+            fields["target_skill_type"] = target_skill_type
         return fields
 
     def _interaction_prefix(self) -> str:

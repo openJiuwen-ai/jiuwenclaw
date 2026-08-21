@@ -47,6 +47,17 @@ from jiuwenswarm.gateway.message_handler.prompts.security_review_prompt import (
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.common.mode_matrix import (
+    DEPRECATION_MAP,
+    MODE_ALIASES,
+    NEW_AGENT_CODE_NORMAL,
+    NEW_AGENT_CODE_PLAN,
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    NEW_CANONICAL_MODES,
+    NEW_TEAM_CODE_NORMAL,
+    deprecate_mode,
+)
 from jiuwenswarm.gateway.hooks.handler import GatewayHookHandler
 from jiuwenswarm.gateway.routing.keys import RoutingKey, AgentRef, make_delivery_target
 from jiuwenswarm.gateway.routing.session_sharing import SessionSharingRegistry, SubRole
@@ -55,6 +66,15 @@ logger = logging.getLogger(__name__)
 
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
+# \mode 切换合法输入集：新 canonical + 旧 canonical（DEPRECATION_MAP.keys()）
+# + 正式别名（MODE_ALIASES.keys()，如 team.plan / team.code）。
+# 单一事实源，前置校验与分发同源，避免和 ModeSubcommand/_VALID_MODE_LINES 漂移。
+# team.plan / team.code 不在 DEPRECATION_MAP 里（它们经 canonicalize_mode_text
+# 先归一到 team.plan.normal / code.team，再 deprecate_mode 映到新 canonical），
+# 故白名单必须显式并入 MODE_ALIASES.keys()，否则会被前置校验判「非法指令」。
+_VALID_MODE_INPUTS: frozenset[str] = frozenset(
+    NEW_CANONICAL_MODES | set(DEPRECATION_MAP.keys()) | set(MODE_ALIASES.keys())
+)
 # ACP: one in-flight chat replaces any prior work on that channel.
 # TUI/CLI 已移除此列表：多窗口 TUI 各自维护独立 session，互不干扰。
 _SINGLE_USER_CHANNEL_IDS = frozenset({
@@ -131,6 +151,15 @@ class ChannelMode(str, Enum):
     TEAM_PLAN = "team.plan.normal"
     TEAM_PLAN_NORMAL = "team.plan.normal"
     TEAM_PLAN_CODE = "team.plan.code"
+    # 新三段命名 canonical（P2 引入；旧成员保留以兼容历史持久化反解析）。
+    AGENT_WORK_NORMAL = "agent.work.normal"
+    AGENT_WORK_PLAN = "agent.work.plan"
+    AGENT_CODE_NORMAL = "agent.code.normal"
+    AGENT_CODE_PLAN = "agent.code.plan"
+    TEAM_WORK_NORMAL = "team.work.normal"
+    TEAM_WORK_PLAN = "team.work.plan"
+    TEAM_CODE_NORMAL = "team.code.normal"
+    TEAM_CODE_PLAN = "team.code.plan"
 
     @classmethod
     def is_team_mode(cls, mode: str) -> bool:
@@ -138,6 +167,53 @@ class ChannelMode(str, Enum):
         from jiuwenswarm.common.mode_matrix import is_team_mode
 
         return is_team_mode(mode)
+
+
+def channel_mode_from_str(mode_str: str) -> ChannelMode:
+    """把任意 mode 字符串归一到 :class:`ChannelMode`。
+
+    与 ``/mode`` 分发同源：``deprecate_mode`` 先把旧 canonical（含 team.plan 等
+    别名）静默映射到新 canonical，再用 ``ChannelMode`` 直接构造；不在
+    :data:`NEW_CANONICAL_MODES` 的串（如未知值、未迁移值）兜底为
+    :attr:`ChannelMode.AGENT`。集中此逻辑避免 ``_get_channel_default_state``、
+    ``handle_mode_switch``、``_external_session_aliases`` 等多处手抄。
+    """
+    new_mode_str = deprecate_mode(mode_str)
+    if new_mode_str in NEW_CANONICAL_MODES:
+        try:
+            return ChannelMode(new_mode_str)
+        except ValueError:
+            logger.warning(
+                "channel_mode_from_str: new canonical '%s' 命中 NEW_CANONICAL_MODES "
+                "但 ChannelMode 构造失败，兜底 AGENT (raw=%r)",
+                new_mode_str, mode_str,
+            )
+            pass
+    if new_mode_str != (mode_str or "").strip().lower():
+        logger.debug(
+            "channel_mode_from_str: '%s' -> new canonical '%s' (非 NEW_CANONICAL_MODES，兜底 AGENT)",
+            mode_str, new_mode_str,
+        )
+    else:
+        logger.debug(
+            "channel_mode_from_str: '%s' 未命中 NEW_CANONICAL_MODES，兜底 AGENT",
+            mode_str,
+        )
+    return ChannelMode.AGENT
+
+
+# ``/switch`` 子指令判据：``state.mode`` 经 ``handle_mode_switch`` 落定后必为新
+# canonical，旧枚举成员（AGENT / AGENT_PLAN / CODE_PLAN / CODE_TEAM …）永不命中，
+# 故判据改查新 canonical 字符串集合，行为与旧 ``in (ChannelMode.X, ...)`` 等价。
+# 历史等价：``agent`` / ``agent.plan`` / ``agent.fast`` → 新 ``agent.work.*``；
+# ``code.plan`` / ``code.normal`` / ``code.team`` → 新 ``agent.code.plan`` /
+# ``agent.code.normal`` / ``team.code.normal``。
+_SWITCH_AGENT_WORK_MODES: frozenset[str] = frozenset(
+    {NEW_AGENT_WORK_NORMAL, NEW_AGENT_WORK_PLAN}
+)
+_SWITCH_CODE_MODES: frozenset[str] = frozenset(
+    {NEW_AGENT_CODE_PLAN, NEW_AGENT_CODE_NORMAL, NEW_TEAM_CODE_NORMAL}
+)
 
 
 @dataclass
@@ -665,20 +741,13 @@ class MessageHandler(ABC):
         sid_raw = ch_cfg.get("default_session_id") or ""
         sid = str(sid_raw).strip() or None
         mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
-        mode_map = {
-            "agent": ChannelMode.AGENT,
-            # plan / fast 已合并：历史 default_mode 归一到 agent。
-            "agent.plan": ChannelMode.AGENT,
-            "agent.fast": ChannelMode.AGENT,
-            "code.plan": ChannelMode.CODE_PLAN,
-            "code.normal": ChannelMode.CODE_NORMAL,
-            "code.team": ChannelMode.CODE_TEAM,
-            "team": ChannelMode.TEAM,
-            "team.plan": ChannelMode.TEAM_PLAN,
-            "team.plan.normal": ChannelMode.TEAM_PLAN_NORMAL,
-            "team.plan.code": ChannelMode.TEAM_PLAN_CODE,
-        }
-        mode = mode_map.get(mode_raw, ChannelMode.AGENT)
+        # 与 /mode 分发同源：deprecate_mode 把旧 canonical（含 team.plan 等别名）
+        # 静默映射到新 canonical，再以 ChannelMode 直接构造（P2 已加 8 个新成员）。
+        # 历史值 plan / fast 经 deprecate_mode 归一到 agent.work.normal；agent.plan
+        # 是真实 plan 模式，经 deprecate_mode 落到 agent.work.plan；裸 code 归一到
+        # agent.code.normal；不在 NEW_CANONICAL_MODES 的串（如未来未迁移值）兜底为
+        # AGENT，与旧 mode_map.get(mode_raw, ChannelMode.AGENT) 一致。
+        mode = channel_mode_from_str(mode_raw)
         return ChannelControlState(session_id=sid, mode=mode)
 
     def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
@@ -780,10 +849,11 @@ class MessageHandler(ABC):
                 resolved = self._external_session_aliases.get(key)
                 if resolved is None:
                     raw_mode = str((msg.params or {}).get("mode") or "agent")
-                    try:
-                        mode = ChannelMode(raw_mode)
-                    except ValueError:
-                        mode = ChannelMode.AGENT
+                    # 与 /mode 分发同源：旧 canonical 先经 deprecate_mode 映射到
+                    # 新 canonical 再构造 ChannelMode，否则 a2a 通道的旧值（如
+                    # agent.fast / team.plan）会被原样解析成 ValueError 兜底为
+                    # AGENT，丢失原有语义。
+                    mode = channel_mode_from_str(raw_mode)
                     resolved = await self._allocate_channel_session(
                         msg, ChannelControlState(mode=mode)
                     )
@@ -1508,6 +1578,84 @@ class MessageHandler(ABC):
     def _build_mode_change_notice_text(mode_label: str) -> str:
         return f"[收到 CLI 指令], mode 已变更为 {mode_label}"
 
+    def handle_mode_switch(
+        self,
+        mode_str: str,
+        *,
+        state: "ChannelControlState",
+        user_infos: dict[str, Any] | None = None,
+        channel_id: str = "",
+        reply_session_id: str | None = None,
+        msg: "Message | None" = None,
+    ) -> bool:
+        """校验并应用 \\mode 指令切换运行模式（P3 抽出，降低 MODE_OK 分支耦合）。
+
+        把原内联在 MODE_OK 分支里的「前置白名单校验 + deprecate_mode 查表分发 +
+        通知调度」三段集中到本方法，单一事实源::
+
+            _VALID_MODE_INPUTS = NEW_CANONICAL_MODES | DEPRECATION_MAP.keys()
+
+        - 前置校验：mode_str 不在 ``_VALID_MODE_INPUTS`` 时下发「非法指令」通知并
+          返回 True（消息已被消费，无需转发给 Agent）。
+        - 分发：``deprecate_mode(mode_str)`` 把旧 canonical 静默映射到新 canonical，
+          再用 ``ChannelMode(new_mode_str)`` 直接构造（P2 已加 8 个新成员）。新串
+          不在 NEW_CANONICAL_MODES 时兜底为 ``ChannelMode.AGENT``。
+        - 通知：mode 实际变更时调度 ``_mode_change_cancel_and_notice``（取消旧
+          会话任务 + 下发变更提示），否则下发普通变更提示。``user_infos`` 为 None
+          时跳过通知调度（仅供单测直接喂状态用）。
+
+        Returns:
+            True：消息已被消费（无论合法与否），调用方 ``return True`` 即可。
+        """
+        if mode_str not in _VALID_MODE_INPUTS:
+            logger.warning(
+                "handle_mode_switch: 非法指令 mode_str=%r channel=%s sid=%s",
+                mode_str, channel_id, reply_session_id,
+            )
+            if user_infos is not None:
+                asyncio.create_task(
+                    self.send_channel_notice(
+                        user_infos,
+                        channel_id,
+                        reply_session_id,
+                        "非法指令",
+                    )
+                )
+            return True
+        old_mode = state.mode
+        old_sid = state.session_id
+        state.mode = channel_mode_from_str(mode_str)
+        new_label = state.mode.value
+        logger.info(
+            "handle_mode_switch: channel=%s mode '%s' -> '%s' (old_sid=%s)",
+            channel_id, mode_str, new_label, old_sid,
+        )
+        if user_infos is None:
+            return True
+        if old_mode != state.mode:
+            asyncio.create_task(
+                self._mode_change_cancel_and_notice(
+                    ModeChangeCancelParams(
+                        user_infos=user_infos,
+                        channel_id=channel_id,
+                        reply_session_id=reply_session_id,
+                        old_sid=old_sid,
+                        new_mode_label=new_label,
+                    ),
+                    msg,
+                )
+            )
+        else:
+            asyncio.create_task(
+                self.send_channel_notice(
+                    user_infos,
+                    channel_id,
+                    reply_session_id,
+                    self._build_mode_change_notice_text(new_label),
+                )
+            )
+        return True
+
     async def _handle_channel_control(self, msg: "Message") -> bool:
         r"""处理 \new_session / \mode / \skills 指令.
 
@@ -1616,115 +1764,36 @@ class MessageHandler(ABC):
 
         if parsed.action is ParsedControlAction.MODE_OK:
             mode_str = parsed.mode_subcommand or ""
-            if mode_str not in (
-                "agent",
-                "code",
-                "team",
-                "agent.plan",
-                "agent.fast",
-                "code.plan",
-                "code.normal",
-                "code.team",
-                "team.plan",
-                "team.plan.normal",
-                "team.plan.code",
-            ):
-                asyncio.create_task(
-                    self.send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        "非法指令",
-                    )
-                )
-                return True
-            old_mode = state.mode
-            old_sid = state.session_id
-            if mode_str == "agent":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "code":
-                state.mode = ChannelMode.CODE_NORMAL
-            elif mode_str == "team":
-                state.mode = ChannelMode.TEAM
-            elif mode_str == "agent.plan":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "agent.fast":
-                state.mode = ChannelMode.AGENT
-            elif mode_str == "code.plan":
-                state.mode = ChannelMode.CODE_PLAN
-            elif mode_str == "code.normal":
-                state.mode = ChannelMode.CODE_NORMAL
-            elif mode_str == "code.team":
-                state.mode = ChannelMode.CODE_TEAM
-            elif mode_str == "team.plan":
-                state.mode = ChannelMode.TEAM_PLAN
-            elif mode_str == "team.plan.normal":
-                state.mode = ChannelMode.TEAM_PLAN_NORMAL
-            elif mode_str == "team.plan.code":
-                state.mode = ChannelMode.TEAM_PLAN_CODE
-            new_label = state.mode.value
-            if old_mode != state.mode:
-                asyncio.create_task(
-                    self._mode_change_cancel_and_notice(
-                        ModeChangeCancelParams(
-                            user_infos=user_infos,
-                            channel_id=ch,
-                            reply_session_id=msg.session_id,
-                            old_sid=old_sid,
-                            new_mode_label=new_label,
-                        ),
-                        msg,
-                    )
-                )
-            else:
-                asyncio.create_task(
-                    self.send_channel_notice(
-                        user_infos,
-                        ch,
-                        msg.session_id,
-                        self._build_mode_change_notice_text(new_label),
-                    )
-                )
-            return True
+            return self.handle_mode_switch(
+                mode_str,
+                state=state,
+                user_infos=user_infos,
+                channel_id=ch,
+                reply_session_id=msg.session_id,
+                msg=msg,
+            )
         if parsed.action is ParsedControlAction.SWITCH_OK:
             switch_str = parsed.switch_subcommand or ""
             target_mode: ChannelMode | None = None
+            # state.mode 经 handle_mode_switch 落定后必为新 canonical，故判据查新
+            # canonical 字符串集合（与旧 ``in (ChannelMode.X, ...)`` 等价，见
+            # ``_SWITCH_AGENT_WORK_MODES`` / ``_SWITCH_CODE_MODES``）。
             if switch_str == "plan":
-                # agent 下 plan / fast 已合并：/switch plan 保持 agent 。
-                if state.mode in (
-                    ChannelMode.AGENT,
-                    ChannelMode.AGENT_PLAN,
-                    ChannelMode.AGENT_FAST,
-                ):
-                    target_mode = ChannelMode.AGENT
-                elif state.mode in (
-                    ChannelMode.CODE_PLAN,
-                    ChannelMode.CODE_NORMAL,
-                    ChannelMode.CODE_TEAM,
-                ):
-                    target_mode = ChannelMode.CODE_PLAN
+                # agent 下 plan / fast 已合并：/switch plan 保持 agent.work.normal。
+                if state.mode.value in _SWITCH_AGENT_WORK_MODES:
+                    target_mode = ChannelMode.AGENT_WORK_NORMAL
+                elif state.mode.value in _SWITCH_CODE_MODES:
+                    target_mode = ChannelMode.AGENT_CODE_PLAN
             elif switch_str == "fast":
-                # agent 下 plan / fast 已合并：/switch fast 保持 agent 。
-                if state.mode in (
-                    ChannelMode.AGENT,
-                    ChannelMode.AGENT_PLAN,
-                    ChannelMode.AGENT_FAST,
-                ):
-                    target_mode = ChannelMode.AGENT
+                # agent 下 plan / fast 已合并：/switch fast 保持 agent.work.normal。
+                if state.mode.value in _SWITCH_AGENT_WORK_MODES:
+                    target_mode = ChannelMode.AGENT_WORK_NORMAL
             elif switch_str == "normal":
-                if state.mode in (
-                    ChannelMode.CODE_PLAN,
-                    ChannelMode.CODE_NORMAL,
-                    ChannelMode.CODE_TEAM,
-                ):
-                    target_mode = ChannelMode.CODE_NORMAL
+                if state.mode.value in _SWITCH_CODE_MODES:
+                    target_mode = ChannelMode.AGENT_CODE_NORMAL
             elif switch_str == "team":
-                if state.mode in (
-                    ChannelMode.CODE_PLAN,
-                    ChannelMode.CODE_NORMAL,
-                    ChannelMode.CODE_TEAM,
-                ):
-                    target_mode = ChannelMode.CODE_TEAM
+                if state.mode.value in _SWITCH_CODE_MODES:
+                    target_mode = ChannelMode.TEAM_CODE_NORMAL
             if target_mode is None:
                 asyncio.create_task(
                     self.send_channel_notice(

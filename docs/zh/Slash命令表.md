@@ -583,7 +583,7 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 
 - **超时**：`install`、`uninstall`、`marketplace toggle` 请求在 TUI 侧有 120 秒超时；其余子命令无显式超时设置。
 - **内置技能自动识别**：使用 `/skills install <skill>` 安装时，若技能名称不带 `@`，系统会自动检查是否为内置技能并重定向到内置安装流程；若不是内置技能则返回格式提示。
-- **路径/URL 自动识别**：使用 `/skills install <path_or_url>` 安装时，若参数为本地路径（如 `/path/to/skill`、`C:\skill`）或远程 URL（如 `https://...`），系统自动走本地导入流程（`skills.import_local`）。所有 URL 统一走 import_local，不自动路由 SkillNet。
+- **路径/URL 自动识别**：使用 `/skills install <path_or_url>` 安装时，若参数为本地路径（如 `/path/to/skill`、`~/skill`、`C:\skill`）或远程 URL（如 `https://...`），系统自动走本地导入流程（`skills.import_local`）。所有 URL 统一走 import_local，不自动路由 SkillNet。本地路径须为**绝对路径**或 `~/...` 路径；`~` 表示服务端 JiuwenClaw 进程用户的 home 目录。其他相对路径、位于系统/敏感目录（如 `/etc`、`~/.ssh`）的源、符号链接，以及不含合法 `name`/`description` frontmatter 的 `SKILL.md` 会被拒绝。
 - **`@skillnet` 搜索安装**：使用 `/skills install <name>@skillnet` 时，前端先调用 `skills.skillnet.search` 搜索。**只有精确匹配 skill_name 时才自动安装**；无精确匹配时只展示搜索结果列表（含 URL 和名称），不自动安装第一个结果，用户需从中选择后用 `/skills skillnet install <url>` 或 `/skills install <精确名称>@skillnet` 安装。这是因为 SkillNet 搜索是语义匹配，搜索 "code" 可能返回 "taskflow"、"coding-agent" 等名称不含 "code" 的技能。
 - **ClawHub token 必需**：从 ClawHub 安装技能前必须先配置 CLI token（通过 `/skills marketplace clawhub token <value>`）。未配置 token 时，`@clawhub` 安装会失败并提示配置方法。Token 可在 [clawhub.ai](https://clawhub.ai) 注册获取。
 - **ClawHub slug 与展示名**：ClawHub 技能的唯一标识是 **slug**（如 `code-review-security`），而非展示名（如 "Code Review Assistant"）。当直接使用 slug 安装失败时，系统会自动搜索 ClawHub 并列出匹配结果（含真实 slug 和简介），帮助用户找到正确的技能。

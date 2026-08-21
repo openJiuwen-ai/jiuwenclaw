@@ -23,6 +23,7 @@ import websockets
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+BTW_MODEL_RESPONSE_TIMEOUT = 120.0
 
 
 # =============================================================================
@@ -149,6 +150,9 @@ async def test_btw_command_system_roundtrip(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -206,7 +210,11 @@ async def test_btw_command_system_roundtrip(
             }
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
-            btw_res = await _recv_until_response(ws, "req-btw-st", timeout=15)
+            btw_res = await _recv_until_response(
+                ws,
+                "req-btw-st",
+                timeout=BTW_MODEL_RESPONSE_TIMEOUT,
+            )
             # Verify response frame structure
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-st"
@@ -235,6 +243,9 @@ async def test_btw_command_empty_question(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -325,6 +336,9 @@ async def test_btw_no_context_when_no_session(
 
     env = os.environ.copy()
     env["HOME"] = str(temp_home)
+    # Tell load_dotenv_runtime to preserve session-injected ports instead of
+    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -383,7 +397,9 @@ async def test_btw_no_context_when_no_session(
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
             btw_res = await _recv_until_response(
-                ws, "req-btw-nocontext-st", timeout=15
+                ws,
+                "req-btw-nocontext-st",
+                timeout=BTW_MODEL_RESPONSE_TIMEOUT,
             )
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-nocontext-st"

@@ -16,6 +16,11 @@ from weakref import WeakValueDictionary
 from jiuwenswarm.common.e2a.acp.protocol import build_acp_initialize_result
 from jiuwenswarm.agents.harness.team import get_team_manager
 from jiuwenswarm.common.config import get_config, get_default_models
+from jiuwenswarm.common.mode_matrix import (
+    NEW_AGENT_WORK_NORMAL,
+    NEW_AGENT_WORK_PLAN,
+    deprecate_mode,
+)
 
 if TYPE_CHECKING:
     from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
@@ -113,6 +118,9 @@ class AgentManager:
 
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
+        # Snapshot of the optional PersonalContext runtime switch.  New
+        # cached agents inherit it before their first rail synchronization.
+        self._personal_context_runtime_enabled: bool = False
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
@@ -447,6 +455,9 @@ class AgentManager:
             project_dir or None,
         )
         agent = JiuWenSwarm()
+        setter = getattr(agent, "set_personal_context_runtime_enabled", None)
+        if callable(setter):
+            setter(self._personal_context_runtime_enabled)
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
@@ -462,6 +473,39 @@ class AgentManager:
         }
         logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
         return agent
+
+    async def set_personal_context_runtime_enabled(self, enabled: bool) -> None:
+        """Broadcast the Host switch to already cached Agent facades.
+
+        The manager deliberately iterates only existing wrappers.  Toggling
+        PersonalContext must not create an Agent or otherwise affect normal
+        AgentServer work when the feature is disabled.
+        """
+
+        self._personal_context_runtime_enabled = bool(enabled)
+        for channel_agents in list(self.agents.values()):
+            if not isinstance(channel_agents, dict):
+                continue
+            for agent in list(channel_agents.values()):
+                cancelled: asyncio.CancelledError | None = None
+                try:
+                    setter = getattr(
+                        agent, "set_personal_context_runtime_enabled", None
+                    )
+                    if callable(setter):
+                        setter(self._personal_context_runtime_enabled)
+                    refresher = getattr(agent, "refresh_personal_context_rail", None)
+                    if callable(refresher):
+                        await refresher()
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[AgentManager] PersonalContext Rail refresh failed: %s",
+                        type(exc).__name__,
+                    )
+                if cancelled is not None:
+                    raise cancelled
 
     async def initialize(
         self, channel_id: str = "", extra_config: dict[str, Any] | None = None
@@ -810,6 +854,7 @@ class AgentManager:
         project_dir: str | None,
         work_mode: str,
         is_swarm: bool,
+        persist_session: bool = False,
         prewarm_eligible: bool = True,
         create_token: str | None = None,
     ):
@@ -821,7 +866,10 @@ class AgentManager:
             work_mode=work_mode,
             is_swarm=is_swarm,
         )
-        create_signature = (key, bool(prewarm_eligible))
+        # persist_session 不属于 WarmKey：同一预热 Agent 可服务开启或关闭的
+        # Session，避免为布尔开关复制预热槽。但它属于 session.create 的幂等
+        # 身份，同一 create_token 不允许用不同值重试。
+        create_signature = (key, bool(prewarm_eligible), bool(persist_session))
         token_key = (key.channel_id, token)
         async with self._session_create_token_lock:
             if token:
@@ -997,7 +1045,13 @@ class AgentManager:
 
         if mode is None and project_dir is None and sub_mode is None:
             for agent in channel_agents.values():
-                if getattr(agent, "_jiuwenswarm_agent_mode", "") == "agent":
+                # 默认回落优先取"普通 agent"实例：旧串 "agent" 与新 canonical
+                # agent.work.* 都要命中。deprecate 归一把新旧形式统一成
+                # agent.work.normal / agent.work.plan 再判定。
+                if deprecate_mode(getattr(agent, "_jiuwenswarm_agent_mode", "")) in (
+                    NEW_AGENT_WORK_NORMAL,
+                    NEW_AGENT_WORK_PLAN,
+                ):
                     return self._borrow_agent(agent)
             agent = next(iter(channel_agents.values()), None)
             return self._borrow_agent(agent) if agent is not None else None

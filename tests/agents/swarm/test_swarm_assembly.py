@@ -209,10 +209,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
+        self.review_feedback_config = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
+
+    def configure_review_feedback_evolution(self, **kwargs) -> None:
+        self.review_feedback_config = kwargs
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -848,6 +852,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "request_id",
         "channel_id",
         "request_metadata",
+        "agent_group_name",
     }
 
 
@@ -1140,6 +1145,63 @@ def test_enriched_spec_serialization_round_trip() -> None:
     rail_types = {rail["type"] for rail in leader_rails}
     assert any(name.startswith("swarm.") for name in rail_types)
     assert any(not name.startswith("swarm.") for name in rail_types)
+
+
+def test_enrich_applies_agent_group_as_hybrid_member_snapshots() -> None:
+    """AgentGroup prompts stay Team-owned while capabilities use snapshots."""
+    spec = _make_team_spec()
+    spec.leader.prompt = "existing leader agreement"
+
+    enrich_team_spec_for_swarm(
+        spec,
+        session_id="s",
+        mode="team",
+        channel_id="web",
+        agent_group_name="sample-expert-group",
+    )
+
+    assert spec.team_mode == "hybrid"
+    assert [member.member_name for member in spec.predefined_members] == [
+        "member1",
+        "member2",
+    ]
+    assert set(spec.agents) >= {"leader", "teammate", "member1", "member2"}
+
+    assert spec.leader.prompt.startswith("existing leader agreement\n\n")
+    assert "# Expert Group Leader" in spec.leader.prompt
+    assert "# 专家团负责人" in spec.leader.prompt
+    assert "Leader 负责理解用户目标" in spec.leader.prompt
+
+    predefined = {member.member_name: member for member in spec.predefined_members}
+    assert "# 方案分析专家" in predefined["member1"].prompt
+    assert "# 风险与质量复核专家" in predefined["member2"].prompt
+    for member in predefined.values():
+        assert "Leader 负责理解用户目标" in member.prompt
+
+    for name in ("leader", "member1", "member2"):
+        member_spec = spec.agents[name]
+        snapshot = member_spec.agent_template_spec
+        assert snapshot is not None
+        assert snapshot["agent_card"]["id"] == name
+        assert snapshot["prompt_sections"] == []
+        assert "skill_name_1" in (member_spec.skills or [])
+
+    # The generic teammate remains an unbound fallback; exact member names win
+    # in AgentConfigurator.resolve_agent_spec.
+    assert getattr(spec.agents["teammate"], "agent_template_spec", None) is None
+
+    # This JiuwenSwarm PR is paired with the AgentTemplate snapshot change in
+    # agent-core.  Keep the assembly assertions runnable against the preceding
+    # core baseline used by independent CI, while exercising JSON round-trip as
+    # soon as that paired schema field is available.
+    if "agent_template_spec" in DeepAgentSpec.model_fields:
+        restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
+        assert restored.agents["member1"].agent_template_spec is not None
+        restored_members = {
+            member.member_name: member for member in restored.predefined_members
+        }
+        assert restored_members["member1"].prompt == predefined["member1"].prompt
+        assert restored.leader.prompt == spec.leader.prompt
 
 
 def test_send_file_returns_empty_without_request_id() -> None:
@@ -1578,12 +1640,16 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.review_feedback_config["session_id"] == "sess"
+    assert rail.review_feedback_config["team_id"] == "t"
+    assert rail.review_feedback_config["min_confidence"] == 0.7
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    create_rail = object()
 
     class _FakeManager:
         @staticmethod
@@ -1593,6 +1659,11 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def get_team_skill_create_rail(session_id):
+            calls.append(f"create:{session_id}")
+            return create_rail
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1622,12 +1693,13 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         team_id="team-1",
         config={},
     )
-
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
+    assert rail._review_feedback_skill_create_rail is create_rail
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
+        "create:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]
@@ -1741,6 +1813,9 @@ def test_team_skill_create_rail_registers_full_workspace(
     assert rail is not None
 
     captured: dict[str, object] = {}
+    team_rail = SimpleNamespace(
+        bind_review_feedback_skill_create_rail=MagicMock(),
+    )
 
     class _RecorderTeamManager:
         def register_team_live_rail(self, session_id, agent, registered_rail) -> None:
@@ -1748,6 +1823,9 @@ def test_team_skill_create_rail_registers_full_workspace(
 
         def register_team_skill_create_rail(self, session_id, registered_rail) -> None:
             captured["create_rail"] = (session_id, registered_rail)
+
+        def get_team_skill_rail(self, session_id):
+            return team_rail
 
         def get_team_rail_context(self, session_id):
             return None
@@ -1766,6 +1844,7 @@ def test_team_skill_create_rail_registers_full_workspace(
     )
     rail.init(fake_agent)
 
+    team_rail.bind_review_feedback_skill_create_rail.assert_called_once_with(rail)
     workspace = captured["rail_context"].team_workspace
     assert workspace.root_dir == "/tmp/team-x"
     # The team owns no skills/ directory: the library is the global one.
@@ -2157,7 +2236,16 @@ async def test_code_plan_approval_still_contains_inline_choices(tmp_path: Path) 
 
 
 def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch) -> None:
-    """Approved team plans should resume the Leader into team execution semantics."""
+    """Approved team plans should resume the Leader into team execution semantics.
+
+    ``team.plan.code`` leader routes through ``CodeAgentModeRail`` (code profile
+    prompts + team exit notification); ``code.team`` leader keeps the code
+    profile prompts without an exit notification. The fake rail records every
+    kwarg passed by either caller so we can assert on both shapes.
+    """
+    from jiuwenswarm.agents.swarm.providers.code_rails import (
+        _TEAM_PLAN_EXIT_NOTIFICATION_EN,
+    )
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
         _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
         _PLAN_MODE_SYSTEM_NOTE,
@@ -2168,23 +2256,12 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     captured_configs: list[dict[str, object]] = []
 
     class FakeCodeAgentModeRail:
-        def __init__(
-            self,
-            *,
-            allowed_tools,
-            plan_mode_system_note,
-            enter_plan_instructions,
-            exit_plan_notification,
-        ):
-            captured_configs.append(
-                {
-                    "allowed_tools": allowed_tools,
-                    "plan_mode_system_note": plan_mode_system_note,
-                    "enter_plan_instructions": enter_plan_instructions,
-                    "exit_plan_notification": exit_plan_notification,
-                }
-            )
+        def __init__(self, **kwargs: object) -> None:
+            captured_configs.append(dict(kwargs))
 
+    # build_code_agent_mode lazy-imports CodeAgentModeRail at call time, so
+    # patching the module attribute is enough to capture both callers — both
+    # team.plan.code and code.team leaders resolve to the code rail branch.
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.code.rails.code_agent_mode_rail.CodeAgentModeRail",
         FakeCodeAgentModeRail,
@@ -2193,14 +2270,22 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     code_rails.build_code_agent_mode({}, code_team_leader)
 
     team_config, code_config = captured_configs
+    # team.plan.code leader goes through CodeAgentModeRail with the code
+    # profile prompts plus the team exit notification prompting Team Leader
+    # to use build_team.
     assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert "plan_mode_attachment_note" not in team_config
     assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert team_config["exit_plan_notification"] == _TEAM_PLAN_EXIT_NOTIFICATION_EN
     assert "Team Leader" in team_config["exit_plan_notification"]
     assert "build_team" in team_config["exit_plan_notification"]
+    assert "ask_user" in team_config["allowed_tools"]
+    # code.team leader stays on the code profile prompts with no exit
+    # notification (only Team Plan leaders receive the Team Leader reminder).
     assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
+    assert "plan_mode_attachment_note" not in code_config
     assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
     assert code_config["exit_plan_notification"] is None
-    assert "ask_user" in team_config["allowed_tools"]
     assert "ask_user" in code_config["allowed_tools"]
 
 

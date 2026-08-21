@@ -1,13 +1,17 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Pure configuration rules for Ascend KV cache affinity."""
+"""Canonical configuration and provider rules for KV cache affinity."""
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+
 ASCEND_AFFINITY_PROVIDER = "AscendAffinity"
+logger = logging.getLogger(__name__)
 KVC_CONFIG_KEYS = frozenset(
     {
         "kv_cache_affinity_enabled",
@@ -15,6 +19,51 @@ KVC_CONFIG_KEYS = frozenset(
         "model_provider",
     }
 )
+
+
+def normalize_provider(provider: Any) -> str:
+    """Return one stable provider name from enums, strings or missing values."""
+
+    value = getattr(provider, "value", provider)
+    return str(value or "").strip()
+
+
+def model_provider(model: Any | None) -> str:
+    """Resolve the effective provider from an OpenJiuwen Model or its client."""
+
+    for owner in (model, getattr(model, "_client", None)):
+        model_client_config = getattr(owner, "model_client_config", None)
+        provider = getattr(model_client_config, "client_provider", None)
+        if provider is not None:
+            return normalize_provider(provider)
+    return ""
+
+
+def build_kv_cache_affinity_config(
+    react_config: dict[str, Any] | None,
+    *,
+    provider: str,
+) -> KVCacheAffinityConfig:
+    """Build the shared Agent/Team KVC policy and fail closed by provider."""
+
+    react_config = react_config or {}
+    raw = react_config.get("kv_cache_affinity_config")
+    raw = raw if isinstance(raw, dict) else {}
+    affinity_enabled = bool(raw.get("enable_kv_cache_affinity", False))
+    normalized_provider = normalize_provider(provider)
+    if affinity_enabled and normalized_provider != ASCEND_AFFINITY_PROVIDER:
+        logger.warning(
+            "KV cache affinity failed closed: model provider=%s requires=%s",
+            normalized_provider or "<empty>",
+            ASCEND_AFFINITY_PROVIDER,
+        )
+        affinity_enabled = False
+    return KVCacheAffinityConfig(
+        enable_kv_cache_release=bool(
+            raw.get("enable_kv_cache_release", False)
+        ),
+        enable_kv_cache_affinity=affinity_enabled,
+    )
 
 
 def parse_bool(value: Any) -> bool:

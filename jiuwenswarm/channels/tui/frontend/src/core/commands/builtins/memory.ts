@@ -224,8 +224,10 @@ function discoverMemoryFilesFromFs(cwd: string): MemoryFile[] {
 }
 
 function modeToShort(mode: string): string {
-  if (mode.startsWith("code")) return "code";
-  return mode.replace("agent.", "");
+  // 新三段命名 agent.code.* / team.code.* 也是 code profile；agent.work.* 归到 canonical "agent"。
+  if (mode.startsWith("code") || mode.startsWith("agent.code") || mode.startsWith("team.code")) return "code";
+  if (mode.startsWith("agent")) return "agent";
+  return mode;
 }
 
 /** 收集并排序可编辑规则文件（合并后端 list + 前端发现，含占位条目）。

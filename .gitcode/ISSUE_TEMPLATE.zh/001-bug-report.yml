@@ -6,6 +6,17 @@ labels: ["bug"]
 type: "Bug-Report"
 body:
   - type: dropdown
+    id: branch_select
+    attributes:
+      label: 分支选择
+      options:
+        - dev-stable
+        - develop
+        - agent-os
+        - xiaoyi
+    validations:
+      required: true
+  - type: dropdown
     id: module_select
     attributes:
       label: 模块选择

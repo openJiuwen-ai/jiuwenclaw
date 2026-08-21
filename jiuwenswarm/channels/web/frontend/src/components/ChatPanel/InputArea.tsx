@@ -1,4 +1,4 @@
-﻿import {
+import {
   useState,
   useRef,
   useCallback,
@@ -10,6 +10,7 @@
   useMemo,
   forwardRef,
   useImperativeHandle,
+  FormEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -23,7 +24,7 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveEffectiveModel,
+  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -71,6 +72,7 @@ type InputAreaSkillItem = {
   is_builtin?: boolean;
   is_builtin_source?: boolean;
   enabled?: boolean;
+  installed?: boolean;
 };
 
 /** 已安装插件信息（用于判定技能是否已安装） */
@@ -132,6 +134,8 @@ function isDefaultProject(project: ProjectInfo): boolean {
 
 interface InputAreaProps {
   onSubmit: (content: string, mediaItems?: MediaItem[]) => void;
+  /** Signals that the user is editing an existing real Session. */
+  onInputIntent?: (sessionId: string) => void;
   onPersistMedia: (content: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   onPersistDocuments: (content: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   onInterrupt: (newInput?: string) => void;
@@ -479,6 +483,7 @@ function buildSubmitContent(text: string, attachments: AttachmentDraft[]): strin
 export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function InputArea(
   {
     onSubmit,
+    onInputIntent,
     onPersistMedia,
     onPersistDocuments,
     onInterrupt,
@@ -1544,8 +1549,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     el.focus();
   }, [extractPlainText, getCurrentComposerTrigger, setRangeStartByTextOffset]);
 
+  const notifyKVCInputIntent = useCallback(() => {
+    if (!activeSessionId || activeSessionId === NEW_CONVERSATION_ID) return;
+    onInputIntent?.(activeSessionId);
+  }, [activeSessionId, onInputIntent]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
+      // keydown is the most reliable signal in the current Web frontend. Keep
+      // beforeinput/input/paste below as IME and WebView compatibility paths.
+      const isPrintableKey = e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey;
+      const isPasteShortcut = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v';
+      if (isPrintableKey || isPasteShortcut) {
+        notifyKVCInputIntent();
+      }
       if (composerSuggestion) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -1593,7 +1610,23 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       composerSuggestionItems,
       handleSubmit,
       insertComposerToken,
+      notifyKVCInputIntent,
     ]
+  );
+
+  /**
+   * Start KVC preparation on the leading edge of a real editor insertion.
+   * `onInput` remains below as a compatibility fallback for WebViews that do
+   * not expose a useful beforeinput event.
+   */
+  const handleEditorBeforeInput = useCallback(
+    (event: FormEvent<HTMLDivElement>) => {
+      const nativeEvent = event.nativeEvent as InputEvent;
+      if (String(nativeEvent.inputType || '').startsWith('insert')) {
+        notifyKVCInputIntent();
+      }
+    },
+    [notifyKVCInputIntent],
   );
 
   /** contenteditable 输入时同步纯文本到 store + 联动 selectedSkills */
@@ -1603,6 +1636,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     // 提取纯文本
     const text = extractPlainText();
     useChatStore.getState().setInputValue(sid, text);
+    if (text.trim() && sid !== NEW_CONVERSATION_ID) {
+      notifyKVCInputIntent();
+    }
     // 联动 selectedSkills：扫描 contenteditable 现有 chip，移除已不在的技能（backspace 删除等情况）
     const el = inputRef.current;
     if (el) {
@@ -1620,7 +1656,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       });
     }
     updateComposerSuggestion();
-  }, [extractPlainText, updateComposerSuggestion]);
+  }, [extractPlainText, notifyKVCInputIntent, updateComposerSuggestion]);
 
   /** 保存当前光标位置（用于技能插入时定位） */
   const saveSelection = useCallback(() => {
@@ -1691,12 +1727,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLDivElement>) => {
+      if (event.clipboardData.getData('text/plain').trim()) {
+        notifyKVCInputIntent();
+      }
       if (handleDesktopFilePaste(event)) return;
       if (clipboardHasFileItems(event.clipboardData)) {
         event.preventDefault();
       }
     },
-    [handleDesktopFilePaste],
+    [handleDesktopFilePaste, notifyKVCInputIntent],
   );
 
   useEffect(() => {
@@ -1835,6 +1874,54 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const sid = useChatStore.getState().activeSessionId;
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
   }, [extractPlainText]);
+
+  // 监听从 SkillPanel 发来的"跳转到聊天并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      const sid = useChatStore.getState().activeSessionId;
+      if (!sid || !inputRef.current) return;
+
+      // 清空输入框并插入前缀文本（如"帮我修改这个技能"）
+      inputRef.current.textContent = detail.prefixText || '';
+      inputRef.current.focus();
+
+      // 将光标移到末尾，确保技能 chip 插入在前缀文本之后
+      const range = document.createRange();
+      range.selectNodeContents(inputRef.current);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+
+      // 先更新 store 中的 selectedSkills，再插入 chip DOM
+      useSessionStore.getState().addSelectedSkill(sid, detail.skillName);
+      insertSkillChip(detail.skillName);
+
+      // 如果有后缀文本（如"帮我修改这个技能"），追加到 chip 之后
+      if (detail.suffixText) {
+        inputRef.current.appendChild(document.createTextNode(detail.suffixText));
+        // 光标移到末尾
+        const r = document.createRange();
+        r.selectNodeContents(inputRef.current);
+        r.collapse(false);
+        const s = window.getSelection();
+        s?.removeAllRanges();
+        s?.addRange(r);
+      }
+
+      // 如果有第二个技能（如被编辑的技能），追加 chip
+      if (detail.secondSkillName) {
+        useSessionStore.getState().addSelectedSkill(sid, detail.secondSkillName);
+        insertSkillChip(detail.secondSkillName);
+      }
+
+      // 同步纯文本到 store（chip 不进入纯文本，前缀/后缀文本会保留）
+      useChatStore.getState().setInputValue(sid, extractPlainText());
+    };
+    window.addEventListener('chat-input-insert-skill', handler);
+    return () => window.removeEventListener('chat-input-insert-skill', handler);
+  }, [insertSkillChip, extractPlainText]);
 
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;
@@ -2144,6 +2231,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         ref={inputRef}
         contentEditable
         suppressContentEditableWarning
+        onBeforeInput={handleEditorBeforeInput}
         onInput={handleEditorInput}
         onKeyDown={handleKeyDown}
         onCompositionStart={() => { isComposingRef.current = true; }}
@@ -2511,10 +2599,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               )}
             </button>
           )} */}
-
+          
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
           />
 
           <button
@@ -2817,10 +2904,8 @@ function ComposerSuggestionMenu({
 
 function ModelSelector({
   disabled = false,
-  lockedToDefault = false,
 }: {
   disabled?: boolean;
-  lockedToDefault?: boolean;
 }) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -2849,14 +2934,12 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
-  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
-  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
-  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
-  // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
-  // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
+  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
+  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
+  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
+  // 兜底结果（bug003）。
   const selectedModel =
-    resolveEffectiveModel(chatAvailableModels, selectedModelName, defaultModelName) ??
+    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2878,7 +2961,7 @@ function ModelSelector({
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
+        title={t('chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -2927,7 +3010,7 @@ function ModelSelector({
             const renderGroup = (label: string, models: ModelEntry[]) =>
               models.length === 0 ? null : (
                 <>
-                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header">{label}</div>
+                  <div className="model-select__section-header" data-testid="chat-panel-model-selector-section-header" data-variant={label === t('chat.modelSelector.free') ? 'free' : 'configured'}>{label}</div>
                   {models.map((m, idx) => {
                     const key = m.alias || m.model_name;
                     const isActive = key === (selectedModel.alias || selectedModel.model_name);
@@ -3165,6 +3248,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
 
   const isSkillInstalled = useCallback(
     (skill: InputAreaSkillItem): boolean =>
+      skill.installed === true ||
       installedSkillMap.has(skill.name) ||
       skill.source === 'local' ||
       skill.source === 'project',

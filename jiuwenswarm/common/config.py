@@ -242,6 +242,21 @@ def get_config():
     return config_base
 
 
+def get_configured_read_image_multimodal(
+    config: dict[str, Any] | None = None,
+) -> bool | None:
+    """Return the explicit native-image policy, or ``None`` for auto mode."""
+
+    resolved = config if isinstance(config, dict) else get_config()
+    react = resolved.get("react")
+    value = (
+        react.get("enable_read_image_multimodal")
+        if isinstance(react, dict)
+        else None
+    )
+    return value if isinstance(value, bool) else None
+
+
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
     return _read_with_retry(CONFIG_YAML_PATH)
@@ -300,6 +315,16 @@ def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
     return bool(value)
+
+
+def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
+    """Return the minimum confidence required for reviewer-driven evolution."""
+
+    raw = _get_evolution_config(config).get("review_feedback_min_confidence", 0.7)
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.7
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:

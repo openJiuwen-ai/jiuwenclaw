@@ -43,7 +43,13 @@ import {
   useWorkspaceStore,
   useCronStore,
 } from '../stores';
-import { isPlanWireMode, resolvePlanWireMode } from '../features/planMode/wireMode';
+import {
+  isPlanWireMode,
+  isTeamAgentMode,
+  resolvePlanWireMode,
+  stripPlanSuffix,
+} from '../features/planMode/wireMode';
+import { PLAN_ENTRY_SOURCE_PLAN_TOGGLE } from '../features/planMode/planEntrySource';
 import { flushPendingGoalObjectiveBubble } from '../features/goalPendingObjectiveBubble';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
@@ -421,14 +427,50 @@ function resolveInterruptResumeMode(sessionId: string): AgentMode {
 }
 
 /**
+ * 取该会话的 work_mode（`work` / `code`）。
+ *
+ * 与 `getSessionWorkContext` 同一套取值顺序：session → selectedProject →
+ * workspaceStore。这里单独抽出，是因为 team + plan 时 `resolvePlanWireMode`
+ * 要据此区分 `team.work.plan` / `team.code.plan`，而那个函数不读 store。
+ */
+function getSessionWorkMode(sessionId: string): string | undefined {
+  const sessionStore = useSessionStore.getState();
+  const workspaceStore = useWorkspaceStore.getState();
+  const session =
+    sessionStore.currentSession?.session_id === sessionId
+      ? sessionStore.currentSession
+      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+  const selectedProject = workspaceStore.selectedProject;
+  // 用 .trim() 过滤空白而非纯 falsy 短路：session.work_mode 存在但为空串时，
+  // 旧逻辑会 fallback 到全局 workspaceStore.workMode，把 code profile 的会话
+  // 路由成 work（profile 由 resolveOutgoingMode 拼进 mode 字段，错位会被后端
+  // 按 work 解析）。trim 后空串/纯空白视为未设置，才继续往 project / 全局找。
+  return (
+    session?.work_mode?.trim() ||
+    selectedProject?.work_mode?.trim() ||
+    workspaceStore.workMode
+  );
+}
+
+/**
  * 组合出本次请求要发送的 mode。
  *
  * UI 的 `AgentMode` 只有 agent / team / auto_harness；Plan 是独立开关。所有出站
  * 请求（普通消息、队列重发、interrupt resume）都必须走这里，否则 Plan 状态会被
- * `normalizeAgentMode` 抹平，后端就收不到 `agent.plan`。
+ * `normalizeAgentMode` 抹平，后端就收不到 `agent.{work|code}.plan`。team + plan
+ * 时还要带上 work_mode，以便 `resolvePlanWireMode` 路由到 `team.work.plan` /
+ * `team.code.plan`。
  */
 function resolveOutgoingMode(sessionId: string, baseMode: AgentMode | string | undefined): string {
-  return resolvePlanWireMode(baseMode, usePlanStore.getState().isActive(sessionId));
+  // profile（work/code）取自 per-session 的 Session.work_mode（getSessionWorkMode
+  // 优先 session，再 project、最后全局 workMode），否则 session 切换时全局 workMode
+  // 不同步，跨 profile 看历史会话 / interrupt resume / 队列重发会产出
+  // `agent.work.plan` 而 session 实际是 code profile，后端按 work 解析错位。
+  return resolvePlanWireMode(
+    baseMode,
+    usePlanStore.getState().isActive(sessionId),
+    getSessionWorkMode(sessionId)
+  );
 }
 
 /**
@@ -443,7 +485,7 @@ function resolvePlanEntryPayload(
 ): Record<string, string> {
   if (!isPlanWireMode(outgoingMode)) return {};
   if (!usePlanStore.getState().hasPendingExplicitEntry(sessionId)) return {};
-  return { plan_entry_source: 'plan_toggle' };
+  return { plan_entry_source: PLAN_ENTRY_SOURCE_PLAN_TOGGLE };
 }
 
 /** 请求成功发出后才消费标记，失败时保留以便重试。 */
@@ -543,6 +585,8 @@ interface UseWebSocketOptions {
   onDisconnect?: () => void;
   onError?: (error: string) => void;
   onConfigChanged?: (updatedKeys?: string[]) => void;
+  /** 免费模型后台重试成功后触发，前端自动刷新模型列表 */
+  onModelsUpdated?: () => void;
   /** cron 最终结果（非占位）广播到达后触发，用于自动跳转到执行会话并加载完整历史 */
   onCronResultArrived?: (sessionId: string, jobId: string) => void;
 }
@@ -659,11 +703,14 @@ function getSessionWorkContext(sessionId: string): Record<string, unknown> {
   const selectedProject = workspaceStore.selectedProject;
   const projectId = session?.project_id || selectedProject?.project_id || '';
   const projectDir = session?.project_dir || selectedProject?.project_dir || '';
-  const workMode = session?.work_mode || selectedProject?.work_mode || workspaceStore.workMode;
+  // 注意：work_mode 不再 spread 到 chat.send 的 params 里——mode 解析已改认
+  // 三段命名串 `agent.{work|code}.plan`（profile 由 resolveOutgoingMode 直接
+  // 拼进 mode 字段），后端 resolve_request_mode 不依赖 params.work_mode。
+  // work_mode 仅在创建会话时（App.tsx handleSendMessage）作为项目分桶键传给
+  // 后端 session 元数据，写入 session/project 绑定，详见 createConversationSession。
   return {
     ...(projectId ? { project_id: projectId } : {}),
     ...(projectDir ? { project_dir: projectDir } : {}),
-    ...(workMode ? { work_mode: workMode } : {}),
   };
 }
 
@@ -684,10 +731,10 @@ interface PendingContextCompressionStart {
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
   if (typeof rawMode !== 'string') return 'agent';
-  const normalized = rawMode.trim().toLowerCase();
-  if (normalized === 'team' || normalized === 'team.code' || normalized === 'code.team') {
-    return 'team';
-  }
+  if (isTeamAgentMode(rawMode)) return 'team';
+  // 后端 session.mode 可能是新命名 `agent.{work|code}.plan`，先剥掉 plan 后缀
+  // 再归一化（旧 `team.plan.*` / `team.code.*` 已被上面的 isTeamAgentMode 拦截）。
+  const normalized = stripPlanSuffix(rawMode.trim().toLowerCase());
   if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent';
 }
@@ -816,6 +863,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnect,
     onError,
     onConfigChanged,
+    onModelsUpdated,
     onCronResultArrived,
   } = options;
 
@@ -833,6 +881,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const onDisconnectRef = useRef(onDisconnect);
   const onErrorRef = useRef(onError);
   const onConfigChangedRef = useRef(onConfigChanged);
+  const onModelsUpdatedRef = useRef(onModelsUpdated);
   const onCronResultArrivedRef = useRef(onCronResultArrived);
   const sendMessageRef = useRef<typeof sendMessage>();
   // 标记本地 sendMessage 刚发起但后端尚未确认 processing_status=true 的 session。
@@ -1280,7 +1329,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useGoalStore.getState().recordGoalObjectiveText(sessionId, objective);
         }
         try {
-          await sendGoalStreamCommand({ sessionId, action, objective, mode });
+          const selectedModel = useSessionStore.getState().getEffectiveModelName(sessionId);
+          await sendGoalStreamCommand({
+            sessionId,
+            action,
+            objective,
+            mode,
+            modelName: selectedModel,
+          });
         } catch (error) {
           // WS 层直接发送失败（未连接等）：这是能明确识别的失败，弹提示；set 不做进一步兜底
           // （"没有创建"本来就成立，不需要额外收敛），resume 按 b/c 步骤的约定补一次 get 兜底。
@@ -1493,6 +1549,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const activeGoal = useGoalStore.getState().getRuntime(sessionId)?.goal;
         const inputMode = activeGoal?.status === 'active' ? 'steer' : undefined;
         const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+        const sessionMetadata = useSessionStore.getState().getRuntime(sessionId)?.metadata;
         await request('chat.send', {
           session_id: sessionId,
           content: outgoingContent,
@@ -1504,7 +1561,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           skills: selectedSkills,
           ...(inputMode ? { input_mode: inputMode } : {}),
           ...resolvePlanEntryPayload(sessionId, outgoingMode),
+          ...(sessionMetadata ? { metadata: sessionMetadata } : {}),
         });
+        if (sessionMetadata) {
+          useSessionStore.getState().setSessionMetadata(sessionId, null);
+        }
         consumePlanEntryMark(sessionId, outgoingMode);
         return true;
       } catch (error) {
@@ -1640,9 +1701,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         if (['pause', 'resume', 'cancel', 'supplement'].includes(intent)) {
-          params.mode = currentMode;
+          // 出站 mode 与普通消息/队列重发同一套组合逻辑（resolveOutgoingMode）：
+          // Plan 打开时补全三段命名 `agent.{work|code}.plan` / `team.{work|code}.plan`，
+          // 否则会被 normalizeAgentMode 抹平成 `agent`，后端把 supplement 续跑 /
+          // 恢复当普通模式处理，plan 语义丢失。非 plan 场景结果与 currentMode 完全一致。
+          const outgoingMode = resolveOutgoingMode(sessionId, currentMode);
+          params.mode = outgoingMode;
           if (currentMode === 'team') {
             params.team = true;
+          }
+          if (intent === 'supplement') {
+            // 补充输入等同普通出站请求：按需带 plan_entry_source，让防重入闸门
+            // 识别这条输入来自 plan 上下文。
+            Object.assign(params, resolvePlanEntryPayload(sessionId, outgoingMode));
           }
         }
         if (intent === 'supplement') {
@@ -1651,6 +1722,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (selectedModel) params.model_name = selectedModel;
         }
         await request('chat.interrupt', params);
+        if (intent === 'supplement') {
+          // 成功发出后才消费 explicit-entry 标记（与 sendMessage 一致），失败时保留以便重试。
+          consumePlanEntryMark(sessionId, String(params.mode));
+        }
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1921,8 +1996,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onDisconnectRef.current = onDisconnect;
     onErrorRef.current = onError;
     onConfigChangedRef.current = onConfigChanged;
+    onModelsUpdatedRef.current = onModelsUpdated;
     onCronResultArrivedRef.current = onCronResultArrived;
-  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError]);
+  }, [onConfigChanged, onConnect, onCronResultArrived, onDisconnect, onError, onModelsUpdated]);
 
   const shouldDropDuplicatedEvent = useCallback(
     (eventName: string, payload: Record<string, unknown>): boolean => {
@@ -3257,6 +3333,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           ? payload.updated_keys.filter((key): key is string => typeof key === 'string')
           : undefined;
         onConfigChangedRef.current?.(updatedKeys);
+      }),
+      webClient.on('models.updated', () => {
+        onModelsUpdatedRef.current?.();
       }),
       webClient.on('task.global_running', ({ payload }) => {
         useChatStore.getState().setGlobalTaskRunning(Boolean(payload?.running));

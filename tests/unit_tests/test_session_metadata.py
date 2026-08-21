@@ -24,10 +24,14 @@ def sessions_dir(tmp_path, monkeypatch):
     # 清空内存缓存，避免跨用例污染（不同用例可能复用同一 session_id）
     from jiuwenswarm.server.runtime.session.session_metadata import (
         _METADATA_CACHE,
+        _METADATA_QUEUE,
         _SESSION_REBIND_GEN,
     )
     _METADATA_CACHE.clear()
     _SESSION_REBIND_GEN.clear()
+    # 排空异步写队列，避免上一个用例残留的 write task 在 init 之后写盘，
+    # 把 project_dir 等字段回写为旧值（mode 惰性迁移 + 额外写回放大窗口）。
+    _METADATA_QUEUE.join()
     return d
 
 
@@ -179,8 +183,54 @@ class TestUpdateSessionMetadata:
         _METADATA_QUEUE.join()
 
         data = _read_json(sessions_dir / "sess_u1" / "metadata.json")
-        assert data["channel_id"] == "feishu"
+        assert data["channel_id"] == "web"  # 首次锁定：保持 web，不被 feishu 覆写
         assert data["message_count"] == 1
+
+    @staticmethod
+    def test_channel_id_empty_string_does_not_clear_locked(sessions_dir):
+        """channel_id 首次锁定：空串更新不再清空已锁定的归属通道。
+
+        旧实现 `if channel_id is not None` 会把空串写入并清空 channel_id；
+        新守卫跳过空串，保留锁定值。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+            _METADATA_QUEUE,
+        )
+
+        init_session_metadata(session_id="sess_u_emp", channel_id="web")
+
+        update_session_metadata(
+            session_id="sess_u_emp",
+            channel_id="",
+            increment_message_count=True,
+        )
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_u_emp" / "metadata.json")
+        assert data["channel_id"] == "web"  # 空串不覆盖已锁定归属通道
+        assert data["message_count"] == 1
+
+    @staticmethod
+    def test_update_agent_group_binding(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            update_session_metadata,
+        )
+
+        init_session_metadata(session_id="sess_agent_group", channel_id="web")
+        update_session_metadata(
+            session_id="sess_agent_group",
+            agent_group_name="sample-expert-group",
+            touch_last_message_at=False,
+            sync_write=True,
+        )
+
+        data = _read_json(
+            sessions_dir / "sess_agent_group" / "metadata.json"
+        )
+        assert data["agent_group_name"] == "sample-expert-group"
 
     @staticmethod
     def test_fallback_create_when_no_metadata(sessions_dir):
@@ -835,6 +885,41 @@ class TestDeliveryContext:
         assert push["session_id"] == "sess_push"
         assert push["metadata"]["telegram_chat_id"] == "chat-1"
 
+    @staticmethod
+    def test_delivery_context_channel_dynamic_while_top_level_channel_locked(sessions_dir):
+        """顶层 metadata.channel_id 首次锁定；delivery_context.channel_id 保持动态。
+
+        顶层归属通道稳定为 web，不被 feishu server_push 覆写（否则 web 侧栏丢会话）；
+        而 delivery_context.channel_id 必须仍为 feishu，供 build_server_push_message
+        路由异步推送回到用户最近活动的 feishu 通道。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _METADATA_QUEUE,
+            init_session_metadata,
+            get_session_delivery_context,
+            set_session_delivery_context,
+        )
+
+        init_session_metadata(session_id="sess_delivery_lock", channel_id="web")
+
+        set_session_delivery_context(
+            session_id="sess_delivery_lock",
+            channel_id="feishu",
+            source_request_id="req-1",
+            route_metadata={"feishu_chat_id": "oc_1"},
+        )
+        _METADATA_QUEUE.join()
+
+        data = _read_json(sessions_dir / "sess_delivery_lock" / "metadata.json")
+        assert data["channel_id"] == "web", "顶层 channel_id 首次锁定，不被 server_push 覆写"
+        assert (
+            data["delivery_context"]["channel_id"] == "feishu"
+        ), "delivery_context.channel_id 保持动态更新"
+
+        context = get_session_delivery_context("sess_delivery_lock")
+        assert context is not None
+        assert context["channel_id"] == "feishu"
+
 
 # ===========================================================================
 # 需求验证: 会话标题稳定性
@@ -1008,6 +1093,46 @@ class TestSyncSessionRequestMetadata:
     """sync_session_request_metadata：校验请求参数 vs 磁盘 metadata，按字段语义写入。"""
 
     @staticmethod
+    def test_persist_session_is_initialized_and_immutable(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            get_session_metadata,
+            init_session_metadata,
+            sync_session_request_metadata,
+        )
+
+        init_session_metadata(session_id="persist_locked", persist_session=True)
+        sync_session_request_metadata(
+            session_id="persist_locked", persist_session=False
+        )
+        _drain_queue()
+
+        assert get_session_metadata("persist_locked")["persist_session"] is True
+
+    @staticmethod
+    def test_legacy_metadata_can_lock_persist_session_once(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            _write_metadata_sync,
+            get_session_metadata,
+            sync_session_request_metadata,
+        )
+
+        _write_metadata_sync(
+            "persist_legacy",
+            {"session_id": "persist_legacy", "project_dir": ""},
+        )
+        sync_session_request_metadata(
+            session_id="persist_legacy", persist_session=True
+        )
+        _drain_queue()
+        assert get_session_metadata("persist_legacy")["persist_session"] is True
+
+        sync_session_request_metadata(
+            session_id="persist_legacy", persist_session=False
+        )
+        _drain_queue()
+        assert get_session_metadata("persist_legacy")["persist_session"] is True
+
+    @staticmethod
     def test_project_dir_first_lock_writes_and_returns(sessions_dir):
         """project_dir 首次锁定：磁盘为空 → 写入请求值并返回"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
@@ -1097,6 +1222,26 @@ class TestSyncSessionRequestMetadata:
         _drain_queue()
         assert effective is None
         assert get_session_metadata("s1")["project_dir"] == ""
+
+    @staticmethod
+    def test_sync_channel_id_first_locked_not_overwritten(sessions_dir):
+        """channel_id 首次锁定：web 归属的会话不被 feishu 通道消息覆写。
+
+        联机/共享会话场景下 feishu 人机消息经 _forward_loop 转发进共享会话时，
+        若 sync 无条件写 channel_id 会把归属通道从 web 翻转为 feishu，
+        导致 web 侧栏按 channel_id=="web" 过滤后会话消失。
+        """
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            sync_session_request_metadata,
+            get_session_metadata,
+        )
+
+        init_session_metadata(session_id="s_lock_ch", channel_id="web")
+        # feishu 通道的请求同步进来 → 不得覆盖已锁定的归属通道
+        sync_session_request_metadata(session_id="s_lock_ch", channel_id="feishu")
+        _drain_queue()
+        assert get_session_metadata("s_lock_ch")["channel_id"] == "web"
 
     @staticmethod
     def test_sync_model_overwritten_each_call(sessions_dir):
@@ -1203,7 +1348,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s1", mode="agent.plan", explicit_mode_provided=True
         )
         _drain_queue()
-        assert get_session_metadata("s1")["mode"] == "agent.plan"
+        # 读路径惰性迁移：旧 canonical agent.plan → 新 canonical agent.work.plan
+        assert get_session_metadata("s1")["mode"] == "agent.work.plan"
 
     @staticmethod
     def test_sync_mode_not_overwritten_when_implicit(sessions_dir):
@@ -1224,7 +1370,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s_team", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_team")["mode"] == "team", \
+        # 读路径惰性迁移：旧 canonical team → 新 canonical team.work.normal
+        assert get_session_metadata("s_team")["mode"] == "team.work.normal", \
             "未显式携带 mode 时不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1249,7 +1396,8 @@ class TestSyncSessionRequestMetadata:
             session_id="s_ws", mode="agent.plan", explicit_mode_provided=False
         )
         _drain_queue()
-        assert get_session_metadata("s_ws")["mode"] == "team", \
+        # 读路径惰性迁移：旧 canonical team → 新 canonical team.work.normal
+        assert get_session_metadata("s_ws")["mode"] == "team.work.normal", \
             "空白/未显式 mode 不得覆盖磁盘已锁定的 team"
 
     @staticmethod
@@ -1275,7 +1423,8 @@ class TestSyncSessionRequestMetadata:
         meta = get_session_metadata("s_new")
         assert meta["project_dir"] == "E:\\newproj"
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["last_user_message_at"] == 1234.0
         assert meta["status"] == "idle"
 
@@ -1340,7 +1489,7 @@ class TestSyncSessionRequestMetadata:
         assert data["pin_order"] == 1, "pin_order 不应丢失"
         # 请求级字段仍按语义写入
         assert data["model"] == "glm-5"
-        assert data["mode"] == "code"
+        assert data["mode"] == "agent.code.normal"
         assert data["last_user_message_at"] == 9999.0
 
     @staticmethod
@@ -1419,7 +1568,8 @@ class TestSyncChatRequestMetadata:
         assert effective == "E:\\projA"
         meta = get_session_metadata("sess_1")
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["project_dir"] == "E:\\projA"
         assert meta["channel_id"] == "web"
         # last_user_message_at 被刷新为当前时刻（chat 轮次 → is_chat_turn=True → 真正写入）
@@ -1573,7 +1723,8 @@ class TestSyncChatRequestMetadata:
         assert effective == "E:\\newproj"
         meta = get_session_metadata("s_new")
         assert meta["model"] == "glm-5"
-        assert meta["mode"] == "code"
+        # 读路径惰性迁移：旧 canonical code → 新 canonical agent.code.normal
+        assert meta["mode"] == "agent.code.normal"
         assert meta["project_dir"] == "E:\\newproj"
         assert meta["status"] == "idle"
 
@@ -1772,7 +1923,8 @@ class TestSessionGetMetadataHandler:
         assert resp["ok"] is True
         payload = resp["payload"]
         assert payload["session_id"] == "sess_x"
-        assert payload["mode"] == "agent.plan"
+        # 读路径惰性迁移：旧 canonical agent.plan → 新 canonical agent.work.plan
+        assert payload["mode"] == "agent.work.plan"
         assert payload["model"] == "glm-5"
         assert payload["project_dir"] == "E:\\myproj"
         assert payload["last_user_message_at"] == 1234.0
