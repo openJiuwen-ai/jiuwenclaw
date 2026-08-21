@@ -160,7 +160,7 @@ def test_run_web_search_free_does_not_call_paid(monkeypatch):
 
 
 def test_run_web_search_default_paid_then_free(monkeypatch):
-    async def fake_paid(query, settings, preferred_provider=None):
+    async def fake_paid(query, settings, preferred_provider=None, **kwargs):
         return None, []
 
     async def fake_free(query, settings):
@@ -191,7 +191,7 @@ def test_web_search_entry_delegates_to_orchestrator(monkeypatch):
 
     calls = 0
 
-    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None, **kwargs):
         nonlocal calls
         calls += 1
         assert query == "hello"
@@ -216,7 +216,7 @@ def test_web_search_invalid_search_mode_falls_back_to_default(monkeypatch):
 
     calls: list[str] = []
 
-    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None):
+    async def fake_run(query, *, search_mode="default", search_source=None, max_results=None, **kwargs):
         calls.append(search_mode)
         return "ok"
 

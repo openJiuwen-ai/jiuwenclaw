@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
 from jiuwenclaw.agentserver.tools.web_search.free import _free_search_engines
@@ -170,6 +171,7 @@ async def run_web_search(
     search_mode: str = "default",
     search_source: str | None = None,
     max_results: int | None = None,
+    cache: Any | None = None,
 ) -> str:
     settings = resolve_web_search_settings(max_results)
     mode, extracted_source = normalize_search_mode(search_mode)
@@ -237,7 +239,9 @@ async def run_web_search(
         paid_run: ProviderRun | None = None
         tried: list[str] = []
         if preferred_source:
-            paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
+            paid_run, tried = await run_paid_chain(
+                query, settings, preferred_provider=preferred_source, cache=cache,
+            )
         else:
             if not any_paid_provider_available(settings.paid_provider_order):
                 availability = paid_availability_report(settings.paid_provider_order)
@@ -250,7 +254,7 @@ async def run_web_search(
                 if _free_search_engines():
                     return "[ERROR]: paid search unavailable. Use search_mode=free instead."
                 return "[ERROR]: paid search unavailable. No search source is available."
-            paid_run, tried = await run_paid_chain(query, settings)
+            paid_run, tried = await run_paid_chain(query, settings, cache=cache)
         if paid_run and paid_run.quality_passed:
             _log_done(
                 query=query,
@@ -280,7 +284,9 @@ async def run_web_search(
             return "[ERROR]: paid search failed. You may retry with search_mode=free."
         return "[ERROR]: paid search failed. No search source is available."
 
-    paid_run, tried = await run_paid_chain(query, settings, preferred_provider=preferred_source)
+    paid_run, tried = await run_paid_chain(
+        query, settings, preferred_provider=preferred_source, cache=cache,
+    )
     if paid_run and paid_run.quality_passed:
         _log_done(
             query=query,

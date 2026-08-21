@@ -637,39 +637,53 @@ async def _fetch_webpage_async(
     raise RuntimeError(_combine_brief_failures(failures))
 
 
-@tool(
-    card=ToolCard(
-        id="mcp_fetch_webpage",
-        name="mcp_fetch_webpage",
-        description=(
-            "抓取网页文本内容，支持并发回退。"
-            "返回状态码、标题和纯文本正文。"
-        ),
-        properties={"truncate_length": 60000},
-        input_params={
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "The URL of the webpage to fetch",
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "description": "Maximum characters of content to return (500-50000, default 12000)",
-                    "default": 12000,
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "HTTP request timeout in seconds (3-10, default 5)",
-                    "default": 5,
-                },
-            },
-            "required": ["url"],
-        },
+_FETCH_TOOL_CARD = ToolCard(
+    id="mcp_fetch_webpage",
+    name="mcp_fetch_webpage",
+    description=(
+        "抓取网页文本内容。"
+        "默认优先从内存缓存读取（use_cache=true），"
+        "若缓存内容不够新或需要最新数据，请用 use_cache=false 重新从原站抓取。"
+        "返回状态码、标题和纯文本正文。"
     ),
+    properties={"truncate_length": 60000},
+    input_params={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The URL of the webpage to fetch",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Maximum characters of content to return (500-50000, default 12000)",
+                "default": 12000,
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "HTTP request timeout in seconds (3-10, default 5)",
+                "default": 5,
+            },
+            "use_cache": {
+                "type": "boolean",
+                "description": (
+                    "If true, read from cache first (default). "
+                    "If false, bypass cache and fetch from origin."
+                ),
+                "default": True,
+            },
+        },
+        "required": ["url"],
+    },
 )
-async def mcp_fetch_webpage(
-    url: str, max_chars: int = 12000, timeout_seconds: int = 5
+
+
+async def mcp_fetch_webpage_impl(
+    url: str,
+    max_chars: int = 12000,
+    timeout_seconds: int = 5,
+    use_cache: bool = True,
+    cache: Any | None = None,
 ) -> str:
     url = _normalize_url(url)
     if not url:
@@ -678,6 +692,14 @@ async def mcp_fetch_webpage(
     max_chars = max(500, min(max_chars, 50000))
     timeout_seconds = max(3, min(timeout_seconds, 10))
     overall_timeout = 5
+
+    if cache is not None and use_cache:
+        cached = await _try_cache_fetch(url, cache)
+        if cached is not None:
+            _log_cache_stats(cache)
+            return _format_fetch_result(cached, max_chars, from_cache=True)
+    elif cache is not None and not use_cache:
+        cache.bypassed += 1
 
     try:
         data = await _fetch_webpage_async(url, timeout_seconds, overall_timeout)
@@ -693,14 +715,81 @@ async def mcp_fetch_webpage(
         reason = _clip_user_text(str(exc).strip() or "unknown error")
         return _clip_user_text(f"[ERROR]: fetch failed ({reason})")
 
+    if cache is not None:
+        _log_cache_stats(cache)
+
+    return _format_fetch_result(data, max_chars, from_cache=False)
+
+
+mcp_fetch_webpage = tool(card=_FETCH_TOOL_CARD)(mcp_fetch_webpage_impl)
+
+
+async def _try_cache_fetch(url: str, cache: Any) -> dict[str, Any] | None:
+    """从传入的缓存实例读取，附带元数据供模型决策。"""
+    entry = await cache.get(url)
+    if entry is None:
+        logger.debug("[mcp_fetch_webpage] cache miss url=%s", url)
+        return None
+
+    import time as _time
+
+    cache_age_days = round((_time.time() - entry.cached_at) / 86400, 1)
+    page_update_days = None
+    if entry.update_time is not None:
+        page_update_days = round((_time.time() - float(entry.update_time)) / 86400, 1)
+
+    logger.info(
+        "[mcp_fetch_webpage] cache hit url=%s source=%s cache_age_days=%s page_update_days=%s",
+        url,
+        entry.source,
+        cache_age_days,
+        page_update_days,
+    )
+    return {
+        "url": entry.url,
+        "status_code": 200,
+        "title": entry.title,
+        "content": entry.content,
+        "provider": f"cache:{entry.source}",
+        "cache_age_days": cache_age_days,
+        "page_update_days": page_update_days,
+    }
+
+
+def _log_cache_stats(cache: Any) -> None:
+    """输出缓存命中率汇总日志。"""
+    stats = cache.stats()
+    logger.info(
+        "[FetchCache] hits=%d misses=%d bypassed=%d "
+        "hit_rate=%.1f%% entries=%d",
+        stats["hits"],
+        stats["misses"],
+        stats["bypassed"],
+        stats["hit_rate_pct"],
+        stats["entries"],
+    )
+
+
+def _format_fetch_result(
+    data: dict[str, Any], max_chars: int, *, from_cache: bool
+) -> str:
     lines = [
-        f"URL: {data.get('url', url)}",
+        f"URL: {data.get('url', '')}",
         f"Status: {data.get('status_code', '')}",
     ]
     if data.get("title"):
         lines.append(f"Title: {data['title']}")
     if data.get("provider"):
         lines.append(f"Provider: {data['provider']}")
+    lines.append(f"FromCache: {'true' if from_cache else 'false'}")
+    if from_cache:
+        lines.append(f"CacheAgeDays: {data.get('cache_age_days', '?')}")
+        page_update = data.get("page_update_days")
+        if page_update is not None:
+            lines.append(f"PageUpdateDays: {page_update}")
+        lines.append(
+            "Hint: 若缓存内容不够新或需要最新数据，请用 use_cache=false 重新抓取。"
+        )
     lines.append("Content:")
     lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
     return "\n".join(lines)

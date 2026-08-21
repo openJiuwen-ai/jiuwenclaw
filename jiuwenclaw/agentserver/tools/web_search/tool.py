@@ -15,7 +15,6 @@ from jiuwenclaw.agentserver.tools.web_search.orchestrator import (
     run_web_search,
 )
 from jiuwenclaw.agentserver.tools.web_search.constants import KNOWN_PAID_PROVIDERS
-
 logger = logging.getLogger(__name__)
 
 _WEB_SEARCH_HARNESS_METADATA_REGISTERED = False
@@ -52,6 +51,10 @@ def _has_enabled_free_engines() -> bool:
 
 def _build_web_search_description() -> str:
     has_free = _has_enabled_free_engines()
+    suffix = (
+        "搜索结果默认仅返回摘要与 URL 列表；"
+        "若需查看网页正文，请调用 fetch_webpage 工具（优先从内存缓存读取）。"
+    )
     if has_free:
         return (
             "网页搜索统一入口。"
@@ -63,7 +66,7 @@ def _build_web_search_description() -> str:
             "若用户指定使用某搜索引擎（如 bing、duckduckgo），请在 query 开头包含该引擎名称（如 'bing 今天的天气'），"
             "以便系统识别并在引擎不可用时向用户说明。"
             "default 模式已尝试所有可用搜索源（付费与免费），任何失败（all sources exhausted 或 no results）都不要再单独用 search_mode=paid 或 free 重试，"
-            "也不要换 query 重试，直接告知用户搜索失败。"
+            "也不要换 query 重试，直接告知用户搜索失败。" + suffix
         )
     else:
         return (
@@ -75,19 +78,16 @@ def _build_web_search_description() -> str:
             "若用户指定使用某搜索引擎（如 bing、duckduckgo），请在 query 开头包含该引擎名称（如 'bing 今天的天气'），"
             "以便系统识别并在引擎不可用时向用户说明。"
             "default 模式已尝试所有可用搜索源（付费），任何失败（all sources exhausted 或 no results）都不要再单独用 search_mode=paid 重试，"
-            "也不要换 query 重试，直接告知用户搜索失败。"
+            "也不要换 query 重试，直接告知用户搜索失败。" + suffix
         )
 
 
-@tool(
-    name="web_search",
-    description=_build_web_search_description(),
-)
-async def web_search(
+async def web_search_impl(
     query: str,
     search_mode: str = "default",
     search_source: str | None = None,
     max_results: int | None = None,
+    cache: Any | None = None,
 ) -> str:
     query = (query or "").strip()
     if not query:
@@ -109,7 +109,15 @@ async def web_search(
         if raw in KNOWN_PAID_PROVIDERS:
             source = raw
 
-    return await run_web_search(query, search_mode=mode, search_source=source, max_results=max_results)
+    return await run_web_search(
+        query, search_mode=mode, search_source=source, max_results=max_results, cache=cache,
+    )
+
+
+web_search = tool(
+    name="web_search",
+    description=_build_web_search_description(),
+)(web_search_impl)
 
 
 def _fallback_web_search_input_params(language: str) -> dict[str, Any]:

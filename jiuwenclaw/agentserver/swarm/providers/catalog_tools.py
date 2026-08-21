@@ -212,9 +212,16 @@ def _build_jiuwen_web_fetch(params: dict[str, Any], context: Any) -> list[Any]:
         or ""
     ).strip() or None
     lang = str(getattr(context, "language", None) or "cn")
+    from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
     return [
         _reuse_registered_tool(
-            JiuwenHarnessFetchWebpageTool(language=lang, agent_id=agent_id)
+            JiuwenHarnessFetchWebpageTool(
+                language=lang, agent_id=agent_id, cache=content_cache,
+            )
         )
     ]
 
@@ -236,8 +243,15 @@ def _build_jiuwen_web_search(params: dict[str, Any], context: Any) -> list[Any]:
         or ""
     ).strip() or None
     lang = str(getattr(context, "language", None) or "cn")
+    from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
     tool = _reuse_registered_tool(
-        JiuwenHarnessWebSearchTool(language=lang, agent_id=agent_id)
+        JiuwenHarnessWebSearchTool(
+            language=lang, agent_id=agent_id, cache=content_cache,
+        )
     )
     logger.info(
         "[swarm.catalog_tools] built jiuwen_web_search agent_id=%s lang=%s",

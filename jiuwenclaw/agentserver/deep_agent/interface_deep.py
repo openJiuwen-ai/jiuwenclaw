@@ -1772,6 +1772,10 @@ class JiuWenClawDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+                    get_agent_cache_registry,
+                )
+
                 subagents.append(
                     build_research_agent_config(
                         model,
@@ -1784,6 +1788,9 @@ class JiuWenClawDeepAdapter:
                         tools=build_jiuwen_harness_named_web_tools(
                             agent_id="research_agent",
                             language=resolved_language,
+                            cache=get_agent_cache_registry().get_cache_sync(
+                                "research_agent",
+                            ),
                         ),
                     )
                 )
@@ -4134,9 +4141,15 @@ class JiuWenClawDeepAdapter:
         """Get tool cards with session-qualified resource_mgr registration."""
         tool_cards = []
 
+        from jiuwenclaw.agentserver.tools.web_search.content_cache import (
+            get_agent_cache_registry,
+        )
+
+        content_cache = await get_agent_cache_registry().get_cache(agent_card_id)
         web_tools = build_jiuwen_harness_named_web_tools(
             agent_id=agent_card_id,
             language=self._resolve_runtime_language(),
+            cache=content_cache,
         )
         self._register_runtime_tools(list(web_tools), agent_card_id)
         tool_cards.extend(t.card for t in web_tools)

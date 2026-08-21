@@ -11,7 +11,7 @@ from openjiuwen.harness.prompts import resolve_language
 
 from jiuwenclaw.agentserver.tools.web_search.tool import (
     build_web_search_tool_card,
-    web_search,
+    web_search_impl,
 )
 from jiuwenclaw.utils import logger
 
@@ -24,19 +24,23 @@ class JiuwenHarnessWebSearchTool(Tool):
         language: str = "cn",
         agent_id: Optional[str] = None,
         card: Optional[ToolCard] = None,
+        cache: Any | None = None,
     ) -> None:
         lang = resolve_language(language or "cn")
         super().__init__(
             card
             or build_web_search_tool_card(agent_id=agent_id, language=lang),
         )
+        self._cache = cache
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> Any:
         logger.debug(
             "[JiuwenHarnessWebTools] web_search card_id=%s",
             self.card.id,
         )
-        return await web_search.invoke(inputs, **kwargs)
+        if self._cache is not None:
+            kwargs["cache"] = self._cache
+        return await web_search_impl(**inputs, **{k: v for k, v in kwargs.items() if k in ("cache",)})
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         yield "Stream is not supported for this tool."
