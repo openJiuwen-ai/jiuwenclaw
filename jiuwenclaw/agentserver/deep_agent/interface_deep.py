@@ -268,6 +268,7 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
 from jiuwenclaw.agentserver.permissions.core import init_permission_engine, get_permission_engine
 from jiuwenclaw.agentserver.llm_usage import (
     bind_aux_llm_usage_sink,
+    build_late_llm_usage_reporter,
     reset_aux_llm_usage_sink,
 )
 from jiuwenclaw.agentserver.memory import (
@@ -9324,6 +9325,11 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         usage_accumulator = self._new_usage_accumulator()
         auxiliary_usage_accumulator = self._new_usage_accumulator()
+        auxiliary_usage_finalized = False
+        late_auxiliary_usage_reporter = build_late_llm_usage_reporter(
+            request.params,
+            session_id,
+        )
 
         # ── SkillTurbo V2：resume 请求仍由适配器层面路由 ──
         skill_turbo_resume_stream = await self._try_skill_turbo_resume(request, inputs)
@@ -9495,11 +9501,21 @@ class JiuWenClawDeepAdapter:
         token_perm = setup_permission_context(request)
 
         async def _capture_auxiliary_usage(usage_metadata: Any) -> None:
+            nonlocal auxiliary_usage_finalized
             normalized = self._normalize_usage_metadata(usage_metadata)
-            if normalized is not None:
-                self._accumulate_usage_metadata(
-                    auxiliary_usage_accumulator,
-                    normalized,
+            if normalized is None:
+                return
+            if not auxiliary_usage_finalized:
+                self._accumulate_usage_metadata(auxiliary_usage_accumulator, normalized)
+                return
+            if late_auxiliary_usage_reporter is not None:
+                await late_auxiliary_usage_reporter(normalized)
+            else:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] late auxiliary llm usage could not be reported: "
+                    "request_id=%s session_id=%s",
+                    rid,
+                    session_id,
                 )
 
         token_aux_usage = bind_aux_llm_usage_sink(_capture_auxiliary_usage)
@@ -10077,6 +10093,7 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
         finally:
+            auxiliary_usage_finalized = True
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             reset_aux_llm_usage_sink(token_aux_usage)

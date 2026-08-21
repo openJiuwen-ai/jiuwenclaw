@@ -5,8 +5,12 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from contextvars import ContextVar, Token
 from typing import Any, Awaitable, Callable
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,65 @@ def _serialize_llm_usage(usage_metadata: Any) -> dict[str, Any]:
     return result
 
 
+def build_late_llm_usage_reporter(
+    request_params: Any,
+    session_id: str,
+) -> AuxLlmUsageSink | None:
+    """Build an authenticated callback sink for usage arriving after chat.done."""
+    if not isinstance(request_params, dict):
+        return None
+    office_claw_mcp = request_params.get("office_claw_mcp")
+    if not isinstance(office_claw_mcp, dict):
+        return None
+    env = office_claw_mcp.get("env")
+    if not isinstance(env, dict):
+        return None
+    api_url = str(env.get("OFFICE_CLAW_API_URL") or "").strip().rstrip("/")
+    invocation_id = str(env.get("OFFICE_CLAW_INVOCATION_ID") or "").strip()
+    callback_token = str(env.get("OFFICE_CLAW_CALLBACK_TOKEN") or "").strip()
+    if not api_url or not invocation_id or not callback_token or not session_id:
+        return None
+
+    async def _report(usage_metadata: Any) -> None:
+        serialized = _serialize_llm_usage(usage_metadata)
+        usage = {
+            key: value
+            for key, value in {
+                "inputTokens": serialized.get("input_tokens"),
+                "outputTokens": serialized.get("output_tokens"),
+                "cacheReadTokens": serialized.get(
+                    "cache_tokens",
+                    serialized.get("cache_read_input_tokens"),
+                ),
+                "costUsd": serialized.get("total_cost"),
+            }.items()
+            if isinstance(value, (int, float)) and value >= 0
+        }
+        if not usage:
+            return
+        usage_event_id = uuid.uuid4().hex
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"{api_url}/api/callbacks/report-llm-usage",
+                json={
+                    "invocationId": invocation_id,
+                    "callbackToken": callback_token,
+                    "sessionId": session_id,
+                    "usageEventId": usage_event_id,
+                    "usage": usage,
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+            response.raise_for_status()
+        logger.info(
+            "[llm_usage] late auxiliary usage reported: session_id=%s usage_event_id=%s",
+            session_id,
+            usage_event_id,
+        )
+
+    return _report
+
+
 async def emit_llm_usage_to_session(session: Any, usage_metadata: Any) -> None:
     """Report auxiliary usage to the active request, falling back to the session stream."""
     if not usage_metadata:
@@ -88,9 +151,35 @@ async def emit_llm_usage_to_session(session: Any, usage_metadata: Any) -> None:
         logger.warning("[llm_usage] auxiliary usage.stream_failed", exc_info=True)
 
 
+class AuxiliaryUsageReportingModel:
+    """Delegate model calls while reporting direct ``invoke`` usage.
+
+    Evolution components call their model directly instead of going through the
+    agent telemetry rail.  Keeping this wrapper local to the evolution rail
+    avoids double-counting normal agent calls while forwarding their response
+    usage to the request-scoped accounting sink.
+    """
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    async def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        response = await self._delegate.invoke(*args, **kwargs)
+        await emit_llm_usage_to_session(
+            None,
+            getattr(response, "usage_metadata", None),
+        )
+        return response
+
+
 __all__ = [
+    "AuxiliaryUsageReportingModel",
     "AuxLlmUsageSink",
     "bind_aux_llm_usage_sink",
+    "build_late_llm_usage_reporter",
     "emit_llm_usage_to_session",
     "reset_aux_llm_usage_sink",
 ]
