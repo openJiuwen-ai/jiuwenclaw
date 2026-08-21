@@ -8,18 +8,20 @@ export interface RealtimeDuplexCallbacks {
   getVideoFrame: () => string | null;
   onAssistantText: (text: string, final: boolean) => void;
   onUserText: (text: string, final: boolean) => void;
-  onUserActivity: () => void;
-  onTurnAudio: (wavDataUrl: string, turnId: string) => void;
+  onUserTurnStarted: (turnId: string) => void;
+  onUserTurnAudio: (wavDataUrl: string, turnId: string) => void;
   onState: (state: 'connecting' | 'listening' | 'speaking' | 'closed') => void;
   onError: (message: string) => void;
 }
 
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
-const SEND_INTERVAL_MS = 1_000;
-const USER_TURN_SILENCE_MS = 900;
-const BARGE_IN_SPEECH_MS = 240;
-const BARGE_IN_RMS_FLOOR = 1_800;
+const SEND_INTERVAL_MS = 200;
+const TRANSCRIPT_END_SILENCE_MS = 1_200;
+const TRANSCRIPT_MIN_SPEECH_MS = 240;
+const TRANSCRIPT_PREROLL_MS = 1_000;
+const INITIAL_PLAYBACK_BUFFER_MS = 400;
+const OFFICIAL_OMNI_INSTRUCTIONS = 'Streaming Omni Conversation.';
 const BASE_INSTRUCTIONS = [
   '你是九问实时视觉助手。',
   '始终结合当前会话中的近期聊天、近期画面和最新画面回答；最新画面优先，不得把已经消失的物体当成仍在画面中。',
@@ -39,6 +41,10 @@ function readableError(value: unknown): string {
     try { return JSON.stringify(value); } catch { return 'Realtime 服务错误'; }
   }
   return String(value || 'Realtime 服务错误');
+}
+
+function versionedPublicAsset(path: string): string {
+  return `${path}?v=${Date.now()}`;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -70,39 +76,56 @@ function resample(input: Int16Array, sourceRate: number, targetRate: number): In
   return output;
 }
 
+function buildNativeSessionUpdate(refAudio: string): Record<string, unknown> {
+  return {
+    type: 'session.update',
+    session: {
+      modalities: ['audio', 'text'],
+      voice: 'default',
+      ref_audio: refAudio,
+      instructions: OFFICIAL_OMNI_INSTRUCTIONS,
+      extra_body: { auto_response: true, minicpmo45_native_duplex: true },
+    },
+  };
+}
+
 export class RealtimeDuplexSession {
   private socket: WebSocket | null = null;
   private microphone: MediaStream | null = null;
   private captureContext: AudioContext | null = null;
+  private captureRate = INPUT_RATE;
   private playbackContext: AudioContext | null = null;
   private captureNode: AudioWorkletNode | null = null;
   private playbackNode: AudioWorkletNode | null = null;
-  private pending: Int16Array[] = [];
-  private pendingSamples = 0;
+  private pendingCaptureChunks: Int16Array[] = [];
+  private pendingCaptureSamples = 0;
+  private userTurnAudio: Int16Array[] = [];
+  private userTurnSamples = 0;
+  private userTurnActive = false;
+  private userTurnSpeechMs = 0;
+  private userTurnSilenceMs = 0;
+  private userTurnId = '';
+  private userTurnAnnounced = false;
+  private transcriptNoiseFloor = 120;
   private sendTimer: number | null = null;
-  private lastVoiceAt = 0;
-  private hasActiveTask = false;
   private contextInstructions = `${BASE_INSTRUCTIONS}\n\n[当前任务]\n无`;
   private lastSentContext = '';
   private sessionReady = false;
+  private microphoneUploadEnabled = false;
   private responseId: string | null = null;
   private cancelledResponseIds = new Set<string>();
-  private injecting = false;
   private injectionQueue: Promise<void> = Promise.resolve();
   private pendingTextInputs: Array<{ text: string; isFresh: () => boolean }> = [];
-  private turnAudio: Int16Array[] = [];
-  private turnSamples = 0;
   private assistantPlaying = false;
   private responseActive = false;
-  private noiseFloor = 120;
-  private userSpeechMs = 0;
-  private userSilenceMs = 0;
-  private userActivityActive = false;
-  private turnHasUserActivity = false;
   private assistantTranscript = '';
-  private bargeInSpeechMs = 0;
+  private assistantTranscriptFinal = false;
   private forceListenNextChunk = false;
   private interruptPending = false;
+  private openAiDuplex = false;
+  private playbackOperation: Promise<void> = Promise.resolve();
+  private playbackGeneration = 0;
+  private queuedDrainResponseId: string | null = null;
 
   constructor(
     private readonly config: RealtimeDuplexConfig,
@@ -110,7 +133,6 @@ export class RealtimeDuplexSession {
   ) {}
 
   updateContext(currentTask: string, recentChat: ReadonlyArray<{ role: string; text: string }>): void {
-    this.hasActiveTask = Boolean(currentTask.trim());
     const chat = recentChat
       .slice(-8)
       .map((item) => {
@@ -130,70 +152,75 @@ export class RealtimeDuplexSession {
 
   async start(): Promise<void> {
     this.callbacks.onState('connecting');
+    await this.initializePlayback();
+    await this.initializeCapture();
+    await this.openSocket();
+    this.microphoneUploadEnabled = true;
+    this.sendTimer = window.setInterval(() => this.flush(), SEND_INTERVAL_MS);
+  }
+
+  private async initializePlayback(): Promise<void> {
     this.playbackContext = new AudioContext({ sampleRate: OUTPUT_RATE });
-    await this.playbackContext.audioWorklet.addModule('/duplex-playback.js');
+    await this.playbackContext.audioWorklet.addModule(versionedPublicAsset('/duplex-playback.js'));
     this.playbackNode = new AudioWorkletNode(this.playbackContext, 'jiuwen-duplex-playback');
     this.playbackNode.port.onmessage = ({ data }) => {
       if (data.type === 'cleared') {
-        if (data.responseId) {
-          // The official PyTorch protocol owns listen/speak decisions and does
-          // not accept playback acknowledgements or response cancellation.
+        this.playbackGeneration += 1;
+        this.playbackOperation = Promise.resolve();
+        this.queuedDrainResponseId = null;
+        if (this.openAiDuplex && data.responseId) {
+          if (data.playedMs) this.send({
+            type: 'playback.ack', response_id: data.responseId,
+            item_id: `item_${data.responseId}`,
+            played_ms: data.playedMs, committed_ms: data.playedMs,
+          });
         }
         this.assistantPlaying = false;
         return;
       }
       if (data.type !== 'drained') return;
+      if (this.queuedDrainResponseId === data.responseId) this.queuedDrainResponseId = null;
       this.assistantPlaying = false;
+      if (this.openAiDuplex && data.responseId && data.playedMs) this.send({
+        type: 'playback.ack', response_id: data.responseId,
+        item_id: `item_${data.responseId}`,
+        played_ms: data.playedMs, committed_ms: data.playedMs,
+      });
       this.sendContextUpdate();
       if (!this.responseActive) this.callbacks.onState('listening');
     };
     this.playbackNode.connect(this.playbackContext.destination);
     await this.playbackContext.resume();
+  }
 
+  private async initializeCapture(): Promise<void> {
     this.microphone = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: { ideal: INPUT_RATE },
+      },
     });
-    this.captureContext = new AudioContext({ sampleRate: INPUT_RATE });
-    await this.captureContext.audioWorklet.addModule('/duplex-capture.js');
+    try {
+      this.captureContext = new AudioContext({ sampleRate: INPUT_RATE });
+    } catch {
+      this.captureContext = new AudioContext();
+    }
+    this.captureRate = this.captureContext.sampleRate;
+    await this.captureContext.audioWorklet.addModule(versionedPublicAsset('/duplex-capture.js'));
     const source = this.captureContext.createMediaStreamSource(this.microphone);
     this.captureNode = new AudioWorkletNode(this.captureContext, 'jiuwen-duplex-capture');
     this.captureNode.port.onmessage = ({ data }) => {
-      const pcm = resample(new Int16Array(data), this.captureContext?.sampleRate || INPUT_RATE, INPUT_RATE);
-      this.pending.push(pcm);
-      this.pendingSamples += pcm.length;
-      const maxPending = INPUT_RATE * 2;
-      while (this.pendingSamples > maxPending && this.pending.length > 1) {
-        this.pendingSamples -= this.pending.shift()?.length || 0;
-      }
-      if (!this.injecting) {
-        const level = this.rms(pcm);
-        const frameMs = pcm.length * 1_000 / INPUT_RATE;
-        if (this.assistantPlaying && !this.interruptPending) {
-          const threshold = Math.max(BARGE_IN_RMS_FLOOR, this.noiseFloor * 8);
-          this.bargeInSpeechMs = level > threshold ? this.bargeInSpeechMs + frameMs : 0;
-          if (this.bargeInSpeechMs >= BARGE_IN_SPEECH_MS) this.interrupt();
-        } else {
-          this.bargeInSpeechMs = 0;
-        }
-        if (level > Math.max(700, this.noiseFloor * 3)) {
-          this.lastVoiceAt = Date.now();
-          this.userSpeechMs += frameMs;
-          this.userSilenceMs = 0;
-          if (!this.userActivityActive && this.userSpeechMs >= 120) {
-            this.userActivityActive = true;
-            this.turnHasUserActivity = true;
-            // ASR only receives this utterance, not up to 20 seconds of old
-            // silence or assistant playback that encourages hallucinations.
-            this.turnAudio = this.turnAudio.slice(-1);
-            this.turnSamples = this.turnAudio.reduce((total, chunk) => total + chunk.length, 0);
-            this.callbacks.onUserActivity();
-          }
-        } else {
-          this.userSpeechMs = 0;
-          this.userSilenceMs += frameMs;
-          if (this.userSilenceMs >= USER_TURN_SILENCE_MS) this.userActivityActive = false;
-        }
-        this.observeNoise(pcm);
+      const captured = new Int16Array(data);
+      if (!this.microphoneUploadEnabled) return;
+      this.pendingCaptureChunks.push(captured);
+      this.pendingCaptureSamples += captured.length;
+      this.observeTranscriptAudio(captured);
+      const maxPending = this.captureRate * 2;
+      while (this.pendingCaptureSamples > maxPending && this.pendingCaptureChunks.length > 1) {
+        this.pendingCaptureSamples -= this.pendingCaptureChunks.shift()?.length || 0;
       }
     };
     const silent = this.captureContext.createGain();
@@ -201,12 +228,10 @@ export class RealtimeDuplexSession {
     source.connect(this.captureNode);
     this.captureNode.connect(silent).connect(this.captureContext.destination);
     await this.captureContext.resume();
-
-    await this.openSocket();
-    this.sendTimer = window.setInterval(() => this.flush(), SEND_INTERVAL_MS);
   }
 
   stop(): void {
+    this.microphoneUploadEnabled = false;
     if (this.sendTimer !== null) window.clearInterval(this.sendTimer);
     this.sendTimer = null;
     this.send({ type: 'session.close' });
@@ -217,20 +242,28 @@ export class RealtimeDuplexSession {
     void this.captureContext?.close();
     void this.playbackContext?.close();
     this.captureContext = null;
+    this.captureRate = INPUT_RATE;
     this.playbackContext = null;
-    this.pending = [];
-    this.pendingSamples = 0;
+    this.pendingCaptureChunks = [];
+    this.pendingCaptureSamples = 0;
+    this.userTurnAudio = [];
+    this.userTurnSamples = 0;
+    this.userTurnActive = false;
+    this.userTurnSpeechMs = 0;
+    this.userTurnSilenceMs = 0;
+    this.userTurnId = '';
+    this.userTurnAnnounced = false;
     this.forceListenNextChunk = false;
     this.interruptPending = false;
-    this.bargeInSpeechMs = 0;
     this.pendingTextInputs = [];
-    this.hasActiveTask = false;
     this.sessionReady = false;
     this.lastSentContext = '';
     this.responseActive = false;
-    this.userSpeechMs = 0;
-    this.userSilenceMs = 0;
-    this.userActivityActive = false;
+    this.assistantTranscript = '';
+    this.assistantTranscriptFinal = false;
+    this.playbackGeneration += 1;
+    this.playbackOperation = Promise.resolve();
+    this.queuedDrainResponseId = null;
     this.cancelledResponseIds.clear();
     this.callbacks.onState('closed');
   }
@@ -239,22 +272,20 @@ export class RealtimeDuplexSession {
     if (!this.sessionReady || this.interruptPending
       || (!this.responseActive && !this.assistantPlaying)) return false;
     this.interruptPending = true;
-    this.forceListenNextChunk = true;
-    this.bargeInSpeechMs = 0;
-    if (this.assistantTranscript) {
+    this.forceListenNextChunk = !this.openAiDuplex;
+    if (this.openAiDuplex) this.rememberCancelledResponse();
+    this.playbackGeneration += 1;
+    this.playbackOperation = Promise.resolve();
+    this.queuedDrainResponseId = null;
+    if (this.assistantTranscript && !this.assistantTranscriptFinal) {
       this.callbacks.onAssistantText(this.assistantTranscript, true);
-      this.assistantTranscript = '';
     }
-    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
+    this.assistantTranscript = '';
+    this.assistantTranscriptFinal = false;
+    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: this.openAiDuplex });
     this.assistantPlaying = false;
     this.callbacks.onState('listening');
     return true;
-  }
-
-  async sendAudioDataUrl(dataUrl: string, isFresh: () => boolean = () => true): Promise<void> {
-    const queued = this.injectionQueue.then(() => this.injectAudioDataUrl(dataUrl, true, isFresh));
-    this.injectionQueue = queued.then(() => undefined, () => undefined);
-    await queued;
   }
 
   async sendTextTurn(text: string, isFresh: () => boolean = () => true): Promise<boolean> {
@@ -267,6 +298,14 @@ export class RealtimeDuplexSession {
         if (!isFresh()) return false;
       }
       if (!isFresh() || this.responseActive || this.assistantPlaying) return false;
+      if (this.openAiDuplex) {
+        if (!this.sessionReady || this.socket?.readyState !== WebSocket.OPEN) return false;
+        this.send({
+          type: 'input.text.append',
+          text: `<|im_start|>user\n${normalized}<|im_end|>\n<|im_start|>assistant\n`,
+        });
+        return true;
+      }
       this.pendingTextInputs.push({
         text: `<|im_start|>user\n${normalized}<|im_end|>\n`,
         isFresh,
@@ -279,10 +318,17 @@ export class RealtimeDuplexSession {
 
   holdForTool(): void {
     if (!this.sessionReady) return;
+    // The native OpenAI duplex session owns its listen/speak lifecycle.
+    // Jiuwen tools must not clear or cancel that session.
+    if (this.openAiDuplex) return;
     this.responseActive = false;
     this.assistantPlaying = false;
     this.assistantTranscript = '';
-    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
+    this.assistantTranscriptFinal = false;
+    this.playbackNode?.port.postMessage({
+      type: 'clear',
+      cancelResponse: false,
+    });
     this.send({
       type: 'input.append',
       input: {
@@ -291,39 +337,6 @@ export class RealtimeDuplexSession {
       },
     });
     this.callbacks.onState('listening');
-  }
-
-  private async injectAudioDataUrl(
-    dataUrl: string,
-    interruptActive: boolean,
-    isFresh: () => boolean,
-  ): Promise<boolean> {
-    const context = this.captureContext || new AudioContext();
-    const pcm = await this.decodeDataUrl(dataUrl, context, INPUT_RATE);
-    if (!isFresh()) return false;
-    if (this.assistantPlaying || this.responseActive) {
-      if (!interruptActive) return false;
-      this.cancelActiveResponse();
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      if (!isFresh()) return false;
-    }
-    if (!interruptActive && (this.assistantPlaying || this.responseActive)) return false;
-    this.injecting = true;
-    this.turnAudio = [];
-    this.turnSamples = 0;
-    try {
-      const chunkSize = INPUT_RATE;
-      for (let offset = 0; offset < pcm.length; offset += chunkSize) {
-        if (!isFresh()) return false;
-        const chunk = pcm.subarray(offset, offset + chunkSize);
-        this.sendAudio(chunk, true);
-        await new Promise((resolve) => window.setTimeout(resolve, SEND_INTERVAL_MS));
-      }
-    } finally {
-      this.injecting = false;
-      this.flush();
-    }
-    return true;
   }
 
   private async decodeDataUrl(dataUrl: string, context: AudioContext, targetRate: number): Promise<Int16Array> {
@@ -343,7 +356,8 @@ export class RealtimeDuplexSession {
   private openSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const url = new URL(this.config.url);
-      url.searchParams.set('mode', 'video');
+      this.openAiDuplex = url.searchParams.get('duplex') === '1';
+      if (!this.openAiDuplex) url.searchParams.set('mode', 'video');
       const socket = new WebSocket(url);
       this.socket = socket;
       let initSent = false;
@@ -366,7 +380,11 @@ export class RealtimeDuplexSession {
           reject(error);
         }
       };
-      socket.onopen = () => undefined;
+      socket.onopen = () => {
+        if (!this.openAiDuplex) return;
+        this.send(buildNativeSessionUpdate(this.config.refAudio));
+        resolve();
+      };
       socket.onmessage = ({ data }) => {
         if (typeof data !== 'string') return;
         try {
@@ -376,7 +394,7 @@ export class RealtimeDuplexSession {
             void sendInit();
             return;
           }
-          if (type === 'session.created') resolve();
+          if (type === 'session.created' && !this.openAiDuplex) resolve();
           if (type === 'session.created') {
             this.sessionReady = true;
             this.lastSentContext = this.contextInstructions;
@@ -386,7 +404,12 @@ export class RealtimeDuplexSession {
         catch { this.callbacks.onError('Realtime 返回了无效事件'); }
       };
       socket.onerror = () => reject(new Error(`Realtime WebSocket 连接失败：${url}`));
-      socket.onclose = () => this.callbacks.onState('closed');
+      socket.onclose = (event) => {
+        if (this.socket !== socket) return;
+        this.stop();
+        this.callbacks.onState('closed');
+        this.callbacks.onError(`Realtime 连接已断开（${event.code}），请确认没有其他页面占用模型会话。`);
+      };
     });
   }
 
@@ -397,6 +420,10 @@ export class RealtimeDuplexSession {
   private sendContextUpdate(): void {
     if (!this.sessionReady || this.responseActive || this.assistantPlaying
       || this.contextInstructions === this.lastSentContext) return;
+    // Match the official MiniCPM-o client: instructions are set only during
+    // the initial session.update. Mid-session updates are not part of its
+    // native duplex contract and can disturb an active turn.
+    if (this.openAiDuplex) return;
     this.lastSentContext = this.contextInstructions;
     this.send({
       type: 'input.append',
@@ -408,48 +435,43 @@ export class RealtimeDuplexSession {
   }
 
   private flush(): void {
-    if (this.injecting || this.pendingSamples < INPUT_RATE) return;
-    const outgoing = new Int16Array(INPUT_RATE);
-    let written = 0;
-    while (written < outgoing.length && this.pending.length > 0) {
-      const chunk = this.pending[0];
-      const count = Math.min(chunk.length, outgoing.length - written);
-      outgoing.set(chunk.subarray(0, count), written);
-      written += count;
-      this.pendingSamples -= count;
-      if (count === chunk.length) this.pending.shift();
-      else this.pending[0] = chunk.slice(count);
-    }
-    this.turnAudio.push(outgoing.slice());
-    this.turnSamples += outgoing.length;
-    while (this.turnSamples > INPUT_RATE * 20 && this.turnAudio.length > 1) {
-      this.turnSamples -= this.turnAudio.shift()?.length || 0;
-    }
+    const captured = this.drainPendingCapture();
+    if (!captured) return;
+    const outgoing = resample(captured, this.captureRate, INPUT_RATE);
     this.sendAudio(outgoing, true);
-    if (this.turnHasUserActivity && !this.userActivityActive && this.userSilenceMs >= USER_TURN_SILENCE_MS) {
-      this.dispatchUserTurn(`turn-${Date.now()}`);
+  }
+
+  private drainPendingCapture(): Int16Array | null {
+    if (this.pendingCaptureSamples === 0) return null;
+    const captured = new Int16Array(this.pendingCaptureSamples);
+    let written = 0;
+    while (written < captured.length && this.pendingCaptureChunks.length > 0) {
+      const chunk = this.pendingCaptureChunks[0];
+      const count = Math.min(chunk.length, captured.length - written);
+      captured.set(chunk.subarray(0, count), written);
+      written += count;
+      this.pendingCaptureSamples -= count;
+      if (count === chunk.length) this.pendingCaptureChunks.shift();
+      else this.pendingCaptureChunks[0] = chunk.slice(count);
     }
-  }
-
-  private rms(pcm: Int16Array): number {
-    let energy = 0;
-    for (let index = 0; index < pcm.length; index += 8) energy += pcm[index] * pcm[index];
-    return Math.sqrt(energy / Math.ceil(pcm.length / 8));
-  }
-
-  private discardPendingMic(): void {
-    this.pending = [];
-    this.pendingSamples = 0;
-  }
-
-  private observeNoise(pcm: Int16Array): void {
-    const level = this.rms(pcm);
-    if (level > this.noiseFloor * 3) return;
-    const weight = level < this.noiseFloor ? 0.05 : 0.005;
-    this.noiseFloor = Math.max(50, this.noiseFloor * (1 - weight) + level * weight);
+    return captured;
   }
 
   private sendAudio(pcm: Int16Array, includeVideo: boolean): void {
+    if (this.openAiDuplex) {
+      const event: Record<string, unknown> = {
+        type: 'input_audio_buffer.append',
+        audio: bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)),
+        format: 'pcm16',
+        sample_rate_hz: INPUT_RATE,
+      };
+      if (includeVideo) {
+        const frame = this.callbacks.getVideoFrame();
+        if (frame) event.video_frames = [frame];
+      }
+      this.send(event);
+      return;
+    }
     const fixed = new Float32Array(INPUT_RATE);
     const sampleCount = Math.min(pcm.length, INPUT_RATE);
     for (let index = 0; index < sampleCount; index += 1) fixed[index] = pcm[index] / 32768;
@@ -470,8 +492,7 @@ export class RealtimeDuplexSession {
       input.text = pendingText.text;
       input.force_speak = true;
     }
-    const shouldSendVideo = this.hasActiveTask || this.injecting || Date.now() - this.lastVoiceAt < 2_500;
-    if (includeVideo && shouldSendVideo) {
+    if (includeVideo) {
       const frame = this.callbacks.getVideoFrame();
       if (frame) input.video_frames = [frame];
     }
@@ -483,7 +504,10 @@ export class RealtimeDuplexSession {
     const response = event.response as Record<string, unknown> | undefined;
     const eventResponseId = String(event.response_id || response?.id || '') || null;
     if (type === 'session.created' || type === 'response.listen') {
-      if (type === 'response.listen') this.finishOfficialTurn();
+      if (type === 'response.listen') {
+        this.interruptPending = false;
+        this.responseActive = false;
+      }
       this.callbacks.onState('listening');
     } else if (type === 'response.output.delta') {
       const kind = String(event.kind || '');
@@ -513,18 +537,19 @@ export class RealtimeDuplexSession {
         }).catch(() => this.callbacks.onError('Realtime 音频解码失败'));
       }
     } else if (type === 'response.created' || type === 'response.speak') {
+      const startsResponse = type === 'response.created'
+        || !this.responseActive
+        || Boolean(eventResponseId && eventResponseId !== this.responseId);
       if (eventResponseId) this.responseId = eventResponseId;
       this.responseActive = true;
-      if (type === 'response.created') {
-        this.userSpeechMs = 0;
-        this.userSilenceMs = 0;
-        this.userActivityActive = false;
+      if (startsResponse) {
         this.assistantTranscript = '';
-        this.dispatchUserTurn(eventResponseId || `turn-${Date.now()}`);
+        this.assistantTranscriptFinal = false;
       }
       this.callbacks.onState('speaking');
     } else if (type === 'audio.cancelled' || type === 'response.audio.cancelled') {
       if (!eventResponseId || eventResponseId === this.responseId) {
+        this.interruptPending = false;
         this.responseActive = false;
         this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: false });
         this.callbacks.onState('listening');
@@ -534,31 +559,36 @@ export class RealtimeDuplexSession {
       if (!encoded || !this.playbackNode) return;
       const responseId = eventResponseId || this.responseId;
       if (responseId && this.cancelledResponseIds.has(responseId)) return;
-      void this.decodeOutputAudio(event, encoded).then((output) => {
-        if (!output || !this.playbackNode || (responseId && this.cancelledResponseIds.has(responseId))) return;
-        this.assistantPlaying = true;
-        this.playbackNode.port.postMessage({ type: 'audio', pcm: output.buffer, responseId }, [output.buffer]);
-      }).catch(() => this.callbacks.onError('Realtime 音频解码失败'));
-    } else if (type === 'response.audio.done' || type === 'response.output_audio.done' || type === 'response.done') {
+      this.enqueueAudioDelta(event, encoded, responseId);
+    } else if (type === 'response.audio.done' || type === 'response.output_audio.done') {
       const affectsActive = !eventResponseId || eventResponseId === this.responseId;
-      if (type === 'response.done' && affectsActive) {
-        this.responseActive = false;
-      }
       const wasCancelled = Boolean(eventResponseId && this.cancelledResponseIds.has(eventResponseId));
       if (affectsActive && !wasCancelled) {
-        this.playbackNode?.port.postMessage({ type: 'drain', responseId: eventResponseId || this.responseId });
+        this.enqueuePlaybackDrain(eventResponseId || this.responseId);
       }
-    } else if (type === 'response.audio_transcript.delta') {
+    } else if (type === 'response.done') {
+      const affectsActive = !eventResponseId || eventResponseId === this.responseId;
+      const wasCancelled = Boolean(eventResponseId && this.cancelledResponseIds.has(eventResponseId));
+      if (affectsActive) {
+        this.responseActive = false;
+        if (this.assistantTranscript && !this.assistantTranscriptFinal) {
+          this.callbacks.onAssistantText(this.assistantTranscript, true);
+          this.assistantTranscriptFinal = true;
+        }
+        if (!wasCancelled) this.enqueuePlaybackDrain(eventResponseId || this.responseId);
+      }
+    } else if (type === 'response.audio_transcript.delta' || type === 'response.output_audio_transcript.delta') {
       if (eventResponseId && this.cancelledResponseIds.has(eventResponseId)) return;
       const delta = String(event.delta || '');
       if (!delta) return;
-      if (delta.startsWith(this.assistantTranscript)) this.assistantTranscript = delta;
-      else if (!this.assistantTranscript.endsWith(delta)) this.assistantTranscript += delta;
+      this.assistantTranscript += delta;
+      this.assistantTranscriptFinal = false;
       this.callbacks.onAssistantText(this.assistantTranscript, false);
-    } else if (type === 'response.audio_transcript.done') {
+    } else if (type === 'response.audio_transcript.done' || type === 'response.output_audio_transcript.done') {
       if (eventResponseId && this.cancelledResponseIds.has(eventResponseId)) return;
       this.assistantTranscript = String(event.transcript || this.assistantTranscript);
       this.callbacks.onAssistantText(this.assistantTranscript, true);
+      this.assistantTranscriptFinal = true;
     } else if (type === 'conversation.item.input_audio_transcription.delta') {
       this.callbacks.onUserText(String(event.delta || ''), false);
     } else if (type === 'conversation.item.input_audio_transcription.completed') {
@@ -572,18 +602,95 @@ export class RealtimeDuplexSession {
     if (this.responseActive) return;
     this.responseActive = true;
     this.assistantTranscript = '';
-    this.dispatchUserTurn(`turn-${Date.now()}`);
+    this.assistantTranscriptFinal = false;
     this.callbacks.onState('speaking');
   }
 
   private finishOfficialTurn(): void {
     const wasSpeaking = this.responseActive || this.assistantPlaying;
     this.responseActive = false;
-    if (this.assistantTranscript) {
+    if (this.assistantTranscript && !this.assistantTranscriptFinal) {
       this.callbacks.onAssistantText(this.assistantTranscript, true);
-      this.assistantTranscript = '';
     }
+    this.assistantTranscript = '';
+    this.assistantTranscriptFinal = false;
     if (wasSpeaking) this.playbackNode?.port.postMessage({ type: 'drain' });
+  }
+
+  private observeTranscriptAudio(captured: Int16Array): void {
+    let energy = 0;
+    for (let index = 0; index < captured.length; index += 8) energy += captured[index] * captured[index];
+    const level = Math.sqrt(energy / Math.ceil(captured.length / 8));
+    const chunkMs = captured.length * 1_000 / this.captureRate;
+    const threshold = Math.max(350, this.transcriptNoiseFloor * 2.5);
+    const speech = level >= threshold;
+
+    if (!this.userTurnActive && !speech) {
+      this.transcriptNoiseFloor = Math.max(50, this.transcriptNoiseFloor * 0.98 + level * 0.02);
+      this.userTurnAudio.push(captured.slice());
+      this.userTurnSamples += captured.length;
+      const prerollSamples = Math.round(this.captureRate * TRANSCRIPT_PREROLL_MS / 1_000);
+      while (this.userTurnSamples > prerollSamples && this.userTurnAudio.length > 1) {
+        this.userTurnSamples -= this.userTurnAudio.shift()?.length || 0;
+      }
+      return;
+    }
+
+    if (!this.userTurnActive) {
+      this.userTurnActive = true;
+      this.userTurnId = `turn-${Date.now()}`;
+    }
+    this.userTurnAudio.push(captured.slice());
+    this.userTurnSamples += captured.length;
+    if (speech) {
+      this.userTurnSpeechMs += chunkMs;
+      this.userTurnSilenceMs = 0;
+      if (!this.userTurnAnnounced && this.userTurnSpeechMs >= TRANSCRIPT_MIN_SPEECH_MS) {
+        this.userTurnAnnounced = true;
+        this.callbacks.onUserTurnStarted(this.userTurnId);
+      }
+    } else {
+      this.userTurnSilenceMs += chunkMs;
+    }
+    if (this.userTurnSilenceMs < TRANSCRIPT_END_SILENCE_MS
+      && this.userTurnSamples < this.captureRate * 20) return;
+    const shouldDispatch = this.userTurnSpeechMs >= TRANSCRIPT_MIN_SPEECH_MS;
+    const turnId = this.userTurnId;
+    this.userTurnActive = false;
+    this.userTurnSpeechMs = 0;
+    this.userTurnSilenceMs = 0;
+    this.userTurnId = '';
+    this.userTurnAnnounced = false;
+    if (shouldDispatch) this.dispatchUserTurn(turnId);
+    else {
+      this.userTurnAudio = [];
+      this.userTurnSamples = 0;
+    }
+  }
+
+  private dispatchUserTurn(turnId: string): void {
+    if (!this.userTurnSamples) return;
+    const captured = new Int16Array(this.userTurnSamples);
+    let offset = 0;
+    for (const chunk of this.userTurnAudio) {
+      captured.set(chunk, offset);
+      offset += chunk.length;
+    }
+    this.userTurnAudio = [];
+    this.userTurnSamples = 0;
+    const pcm = resample(captured, this.captureRate, INPUT_RATE);
+    const buffer = new ArrayBuffer(44 + pcm.byteLength);
+    const view = new DataView(buffer);
+    const write = (at: number, value: string) => {
+      for (let index = 0; index < value.length; index += 1) view.setUint8(at + index, value.charCodeAt(index));
+    };
+    write(0, 'RIFF'); view.setUint32(4, 36 + pcm.byteLength, true); write(8, 'WAVE');
+    write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, INPUT_RATE, true);
+    view.setUint32(28, INPUT_RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    write(36, 'data'); view.setUint32(40, pcm.byteLength, true);
+    new Uint8Array(buffer, 44).set(new Uint8Array(pcm.buffer));
+    this.callbacks.onUserTurnAudio(`data:audio/wav;base64,${bytesToBase64(new Uint8Array(buffer))}`, turnId);
   }
 
   private rememberCancelledResponse(): void {
@@ -594,17 +701,36 @@ export class RealtimeDuplexSession {
     if (oldest) this.cancelledResponseIds.delete(oldest);
   }
 
-  private cancelActiveResponse(): void {
-    const responseId = this.responseId;
-    const cancelRemote = this.responseActive;
-    if (responseId && (this.assistantPlaying || cancelRemote) && !this.cancelledResponseIds.has(responseId)) {
-      this.rememberCancelledResponse();
-    }
-    this.discardPendingMic();
-    this.playbackNode?.port.postMessage({ type: 'clear', cancelResponse: cancelRemote });
-    this.assistantPlaying = false;
-    this.responseActive = false;
-    this.responseId = null;
+  private enqueueAudioDelta(
+    event: Record<string, unknown>,
+    encoded: string,
+    responseId: string | null,
+  ): void {
+    const generation = this.playbackGeneration;
+    this.playbackOperation = this.playbackOperation
+      .then(() => this.decodeOutputAudio(event, encoded))
+      .then((output) => {
+        if (generation !== this.playbackGeneration || !output || !this.playbackNode
+          || (responseId && this.cancelledResponseIds.has(responseId))) return;
+        this.assistantPlaying = true;
+        this.playbackNode.port.postMessage({
+          type: 'audio',
+          pcm: output.buffer,
+          responseId,
+          initialBufferMs: INITIAL_PLAYBACK_BUFFER_MS,
+        }, [output.buffer]);
+      })
+      .catch(() => this.callbacks.onError('Realtime 音频解码失败'));
+  }
+
+  private enqueuePlaybackDrain(responseId: string | null): void {
+    if (responseId && this.queuedDrainResponseId === responseId) return;
+    this.queuedDrainResponseId = responseId;
+    const generation = this.playbackGeneration;
+    this.playbackOperation = this.playbackOperation.then(() => {
+      if (generation !== this.playbackGeneration) return;
+      this.playbackNode?.port.postMessage({ type: 'drain', responseId });
+    });
   }
 
   private async decodeOutputAudio(event: Record<string, unknown>, encoded: string): Promise<Int16Array | null> {
@@ -635,29 +761,4 @@ export class RealtimeDuplexSession {
     return resample(pcm, sourceRate, this.playbackContext?.sampleRate || OUTPUT_RATE);
   }
 
-  private takeTurnAudio(): string {
-    const pcm = new Int16Array(this.turnSamples);
-    let offset = 0;
-    for (const chunk of this.turnAudio) { pcm.set(chunk, offset); offset += chunk.length; }
-    this.turnAudio = [];
-    this.turnSamples = 0;
-    const buffer = new ArrayBuffer(44 + pcm.byteLength);
-    const view = new DataView(buffer);
-    const write = (at: number, value: string) => {
-      for (let index = 0; index < value.length; index += 1) view.setUint8(at + index, value.charCodeAt(index));
-    };
-    write(0, 'RIFF'); view.setUint32(4, 36 + pcm.byteLength, true); write(8, 'WAVE');
-    write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true); view.setUint32(24, INPUT_RATE, true);
-    view.setUint32(28, INPUT_RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-    write(36, 'data'); view.setUint32(40, pcm.byteLength, true);
-    new Uint8Array(buffer, 44).set(new Uint8Array(pcm.buffer));
-    return `data:audio/wav;base64,${bytesToBase64(new Uint8Array(buffer))}`;
-  }
-
-  private dispatchUserTurn(turnId: string): void {
-    if (!this.turnHasUserActivity || this.turnSamples < INPUT_RATE / 2) return;
-    this.turnHasUserActivity = false;
-    this.callbacks.onTurnAudio(this.takeTurnAudio(), turnId);
-  }
 }

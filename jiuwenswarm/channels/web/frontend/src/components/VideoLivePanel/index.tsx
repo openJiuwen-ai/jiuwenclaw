@@ -2,9 +2,15 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from
 import { Camera, FileVideo, Mic, Monitor, Pause, Send, Square, Video, X } from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
 import { RealtimeDuplexSession } from '../../utils/realtimeDuplex';
+import { RealtimeVideoFrameScheduler } from '../../utils/realtimeVideoFrameScheduler';
+import {
+  isVideoSourceReady,
+  RealtimeVideoSource,
+  waitForFirstVideoFrame,
+} from '../../utils/realtimeVideoSourceReadiness';
 import './VideoLivePanel.css';
 
-type VideoSource = 'camera' | 'file' | 'screen' | null;
+type VideoSource = RealtimeVideoSource;
 interface CapturedFrame {
   data_url: string;
   source_id: string;
@@ -29,11 +35,9 @@ interface AgentProgress {
   engine?: string;
 }
 
-const FRAME_INTERVAL_MS = 500;
+const FRAME_INTERVAL_MS = 1_000;
 const MAX_FRAMES = 6;
 const MAX_SCREENS = 4;
-const MAX_FRAME_WIDTH = 1024;
-const AGENT_DEBOUNCE_MS = 700;
 
 function cleanAssistantText(text: string): string {
   return text
@@ -67,18 +71,13 @@ export function VideoLivePanel() {
   const answerRef = useRef('');
   const currentTaskRef = useRef('');
   const recentChatRef = useRef<ChatContextItem[]>([]);
+  const displayChatRef = useRef<ChatContextItem[]>([]);
+  const displayTurnOrderRef = useRef<Map<string, number>>(new Map());
   const startingRealtimeRef = useRef<Promise<void> | null>(null);
-  const handledAgentTurnsRef = useRef<Set<string>>(new Set());
-  const agentSegmentsRef = useRef<Array<{ order: number; text: string }>>([]);
-  const agentSegmentOrderRef = useRef(0);
-  const agentDebounceTimerRef = useRef<number | null>(null);
-  const agentRequestVersionRef = useRef(0);
   const interactionEpochRef = useRef(0);
   const agentProgressTokenRef = useRef('');
   const chatSequenceRef = useRef(0);
-  const pendingTranscriptionsRef = useRef(0);
   const pendingAssistantRef = useRef<string[]>([]);
-  const userTurnVisualAnswerRef = useRef('');
   const streamingAnswerRef = useRef('');
   const suppressAssistantRef = useRef(false);
   const agentRoutingRef = useRef(false);
@@ -100,22 +99,17 @@ export function VideoLivePanel() {
 
   const resetVisualContext = () => {
     answerRef.current = '';
-    handledAgentTurnsRef.current.clear();
-    agentSegmentsRef.current = [];
-    agentRequestVersionRef.current += 1;
     interactionEpochRef.current += 1;
     agentProgressTokenRef.current = '';
     chatSequenceRef.current = 0;
-    pendingTranscriptionsRef.current = 0;
     pendingAssistantRef.current = [];
-    userTurnVisualAnswerRef.current = '';
     streamingAnswerRef.current = '';
     suppressAssistantRef.current = false;
     agentRoutingRef.current = false;
     currentTaskRef.current = '';
     recentChatRef.current = [];
-    if (agentDebounceTimerRef.current !== null) window.clearTimeout(agentDebounceTimerRef.current);
-    agentDebounceTimerRef.current = null;
+    displayChatRef.current = [];
+    displayTurnOrderRef.current.clear();
     setAnswer('');
     setChatHistory([]);
     setStreamingAnswer('');
@@ -123,16 +117,36 @@ export function VideoLivePanel() {
     setToolStatus('');
   };
 
-  const appendChat = (role: ChatContextItem['role'], text: string) => {
+  const appendChat = (role: ChatContextItem['role'], text: string, includeInContext = true) => {
     const normalized = text.trim();
     if (!normalized) return;
-    const previous = recentChatRef.current.at(-1);
+    const previous = displayChatRef.current.at(-1);
     if (previous?.role === role && previous.text === normalized) return;
-    recentChatRef.current = [
-      ...recentChatRef.current,
-      { id: ++chatSequenceRef.current, role, text: normalized },
-    ].slice(-12);
-    setChatHistory(recentChatRef.current);
+    const item = { id: ++chatSequenceRef.current, role, text: normalized };
+    displayChatRef.current = [...displayChatRef.current, item].slice(-12);
+    setChatHistory(displayChatRef.current);
+    if (includeInContext) recentChatRef.current = [...recentChatRef.current, item].slice(-12);
+  };
+
+  const insertDisplayTranscript = (text: string, id: number) => {
+    const normalized = text.trim();
+    if (!isUsefulTranscript(normalized)) return;
+    const matching = displayChatRef.current.filter((item) => item.role === 'user'
+      && Math.abs(item.id - id) === 1
+      && item.text !== normalized
+      && (normalized.includes(item.text) || item.text.includes(normalized)));
+    const effectiveId = matching.reduce((earliest, item) => Math.min(earliest, item.id), id);
+    const longestText = matching.reduce(
+      (longest, item) => item.text.length > longest.length ? item.text : longest,
+      normalized,
+    );
+    const matchingIds = new Set(matching.map((item) => item.id));
+    const item: ChatContextItem = { id: effectiveId, role: 'user', text: longestText };
+    displayChatRef.current = [
+      ...displayChatRef.current.filter((existing) => !matchingIds.has(existing.id)),
+      item,
+    ].sort((left, right) => left.id - right.id).slice(-12);
+    setChatHistory(displayChatRef.current);
   };
 
   const applyCurrentTask = (task: string) => {
@@ -239,15 +253,14 @@ export function VideoLivePanel() {
       if (!canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
       if (!video.videoWidth || !video.videoHeight) return;
 
-      const scale = Math.min(1, MAX_FRAME_WIDTH / video.videoWidth);
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
       const context = canvas.getContext('2d');
       if (!context) return;
 
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
       const frame = {
-        data_url: canvas.toDataURL('image/jpeg', 0.85),
+        data_url: canvas.toDataURL('image/jpeg', 0.7),
         source_id: sourceId,
         source_label: sourceLabel,
       };
@@ -293,7 +306,7 @@ export function VideoLivePanel() {
     setError('');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: true,
         audio: false,
       });
       cameraStreamRef.current = stream;
@@ -425,167 +438,155 @@ export function VideoLivePanel() {
     }
   };
 
+  const handleFinalUserText = (text: string, visualAnswerAtTurn = answerRef.current) => {
+    const transcript = text.trim();
+    if (!isUsefulTranscript(transcript)) return;
+    const interactionEpoch = ++interactionEpochRef.current;
+    agentProgressTokenRef.current = '';
+    suppressAssistantRef.current = false;
+    pendingAssistantRef.current = [];
+    streamingAnswerRef.current = '';
+    setStreamingAnswer('');
+    setToolStatus('');
+    appendChat('user', transcript);
+    agentRoutingRef.current = true;
+    const progressToken = crypto.randomUUID();
+    agentProgressTokenRef.current = progressToken;
+    void (async () => {
+      try {
+        const action = await webRequest<{
+          answer?: string;
+          current_task?: string;
+          tools_used?: string[];
+        }>('video.agent', {
+          question: transcript,
+          visual_answer: visualAnswerAtTurn,
+          current_task: currentTaskRef.current,
+          client_token: progressToken,
+        }, { timeoutMs: 45_000 });
+        if (interactionEpoch !== interactionEpochRef.current) return;
+        agentRoutingRef.current = false;
+        if (action.current_task) applyCurrentTask(action.current_task);
+        if (action.tools_used?.includes('mcp_free_search') && action.answer) {
+          pendingAssistantRef.current = [];
+          const sent = await returnToolResultToRealtime(action.answer, interactionEpoch);
+          if (!sent && interactionEpoch === interactionEpochRef.current) {
+            setToolStatus('九问结果回填失败，请重试');
+          }
+        } else {
+          setToolStatus('');
+          flushPendingAssistant();
+        }
+      } catch {
+        agentRoutingRef.current = false;
+        setToolStatus('九问搜索失败，请重试');
+        suppressAssistantRef.current = false;
+        flushPendingAssistant();
+      }
+    })();
+  };
+
   const startRealtime = async () => {
     if (duplexRef.current) return;
     if (startingRealtimeRef.current) return startingRealtimeRef.current;
     const start = (async () => {
-    if (framesRef.current.length === 0) {
-      setError('请先打开视频并等待画面开始播放。');
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) {
-      setError('当前浏览器不支持 Realtime 音频。');
-      return;
-    }
-    setError('');
-    try {
-      const config = await webRequest<{ url: string; model: string; ref_audio_base64?: string }>('video.realtime.config', {});
-      if (!config.ref_audio_base64) throw new Error('请配置 Realtime 参考音频');
-      setModel(config.model);
-      const session = new RealtimeDuplexSession({
-        ...config,
-        refAudio: `data:audio/wav;base64,${config.ref_audio_base64}`,
-      }, {
-        getVideoFrame: () => framesRef.current.at(-1)?.data_url.split(',', 2)[1] || null,
-        onAssistantText: (text, final) => {
-          const visibleText = cleanAssistantText(text);
-          if (!visibleText) return;
-          answerRef.current = visibleText;
-          if (!final) {
-            streamingAnswerRef.current = visibleText;
-            setStreamingAnswer(visibleText);
-          } else {
-            if (suppressAssistantRef.current) {
+      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) {
+        setError('当前浏览器不支持 Realtime 音频。');
+        return;
+      }
+      try {
+        if (source) {
+          setError('正在等待首帧画面…');
+          const sourceReady = () => isVideoSourceReady({
+            source,
+            cameraStream: cameraStreamRef.current,
+            screens,
+            screenStreams: screenStreamsRef.current,
+            video: videoRef.current,
+          });
+          const ready = await waitForFirstVideoFrame(
+            sourceReady,
+            () => framesRef.current.length > 0,
+          );
+          if (!ready) throw new Error('画面尚未就绪，请等待预览出现后再开启 Realtime。');
+        }
+        setError('');
+        const config = await webRequest<{ url: string; model: string; ref_audio_base64?: string }>('video.realtime.config', {});
+        if (!config.ref_audio_base64) throw new Error('请配置 Realtime 参考音频');
+        setModel(config.model);
+        const videoFrames = new RealtimeVideoFrameScheduler(FRAME_INTERVAL_MS);
+        const session = new RealtimeDuplexSession({
+          ...config,
+          refAudio: `data:audio/wav;base64,${config.ref_audio_base64}`,
+        }, {
+          getVideoFrame: () => {
+            const frame = videoFrames.take(framesRef.current);
+            if (!frame) return null;
+            return frame.data_url.split(',', 2)[1] || null;
+          },
+          onAssistantText: (text, final) => {
+            const visibleText = cleanAssistantText(text);
+            if (!visibleText) return;
+            answerRef.current = visibleText;
+            if (!final) {
               streamingAnswerRef.current = visibleText;
               setStreamingAnswer(visibleText);
-              return;
-            }
-            streamingAnswerRef.current = '';
-            setStreamingAnswer('');
-            if (pendingTranscriptionsRef.current > 0 || agentDebounceTimerRef.current !== null || agentRoutingRef.current) {
-              pendingAssistantRef.current.push(visibleText);
             } else {
-              appendChat('assistant', visibleText);
-            }
-            setAnswer(visibleText);
-            if (agentProgressTokenRef.current) {
-              agentProgressTokenRef.current = '';
-              setToolStatus('');
-            }
-          }
-        },
-        onUserText: () => undefined,
-        onUserActivity: () => {
-          userTurnVisualAnswerRef.current = answerRef.current;
-          interactionEpochRef.current += 1;
-          agentProgressTokenRef.current = '';
-          suppressAssistantRef.current = false;
-          pendingAssistantRef.current = [];
-          streamingAnswerRef.current = '';
-          setStreamingAnswer('');
-          setToolStatus('');
-        },
-        onTurnAudio: (audioDataUrl, turnId) => {
-          if (handledAgentTurnsRef.current.has(turnId)) return;
-          handledAgentTurnsRef.current.add(turnId);
-          if (handledAgentTurnsRef.current.size > 8) {
-            const oldest = handledAgentTurnsRef.current.values().next().value;
-            if (oldest) handledAgentTurnsRef.current.delete(oldest);
-          }
-          const visualAnswerAtTurn = userTurnVisualAnswerRef.current;
-          const segmentOrder = ++agentSegmentOrderRef.current;
-          pendingTranscriptionsRef.current += 1;
-          void (async () => {
-            try {
-              const asr = await webRequest<{ transcript?: string }>('video.transcribe', {
-                audio_data_url: audioDataUrl,
-              }, { timeoutMs: 45_000 });
-              const transcript = asr.transcript?.trim();
-              if (!transcript) return;
-              agentSegmentsRef.current.push({ order: segmentOrder, text: transcript });
-              const version = ++agentRequestVersionRef.current;
-              if (agentDebounceTimerRef.current !== null) window.clearTimeout(agentDebounceTimerRef.current);
-              agentDebounceTimerRef.current = window.setTimeout(() => {
-                agentDebounceTimerRef.current = null;
-                const segments = agentSegmentsRef.current
-                  .sort((left, right) => left.order - right.order)
-                  .map((segment) => segment.text)
-                  .filter(isUsefulTranscript);
-                agentSegmentsRef.current = [];
-                const combined = segments.filter((text, index) => text !== segments[index - 1]).join('。');
-                if (!combined) {
-                  flushPendingAssistant();
-                  return;
-                }
-                appendChat('user', combined);
-                void (async () => {
-                  agentRoutingRef.current = true;
-                  const interactionEpoch = interactionEpochRef.current;
-                  const progressToken = crypto.randomUUID();
-                  agentProgressTokenRef.current = progressToken;
-                  try {
-                    const action = await webRequest<{
-                      answer?: string;
-                      current_task?: string;
-                      tools_used?: string[];
-                    }>('video.agent', {
-                      question: combined,
-                      visual_answer: visualAnswerAtTurn,
-                      current_task: currentTaskRef.current,
-                      client_token: progressToken,
-                    }, { timeoutMs: 45_000 });
-                    if (version !== agentRequestVersionRef.current) {
-                      agentRoutingRef.current = false;
-                      pendingAssistantRef.current = [];
-                      return;
-                    }
-                    agentRoutingRef.current = false;
-                    if (action.current_task) {
-                      applyCurrentTask(action.current_task);
-                    }
-                    if (action.tools_used?.includes('mcp_free_search') && action.answer) {
-                      pendingAssistantRef.current = [];
-                      const sent = await returnToolResultToRealtime(action.answer, interactionEpoch);
-                      if (!sent && interactionEpoch === interactionEpochRef.current) {
-                        setToolStatus('九问结果回填失败，请重试');
-                      }
-                    } else {
-                      setToolStatus('');
-                      flushPendingAssistant();
-                    }
-                  } catch {
-                    agentRoutingRef.current = false;
-                    setToolStatus('九问搜索失败，请重试');
-                    suppressAssistantRef.current = false;
-                    flushPendingAssistant();
-                  }
-                })();
-              }, AGENT_DEBOUNCE_MS);
-            } catch {
-              // Realtime 主链不因辅助工具失败而中断。
-            } finally {
-              pendingTranscriptionsRef.current = Math.max(0, pendingTranscriptionsRef.current - 1);
-              if (pendingTranscriptionsRef.current === 0 && agentDebounceTimerRef.current === null) {
-                flushPendingAssistant();
+              if (suppressAssistantRef.current) {
+                streamingAnswerRef.current = visibleText;
+                setStreamingAnswer(visibleText);
+                return;
+              }
+              streamingAnswerRef.current = '';
+              setStreamingAnswer('');
+              if (agentRoutingRef.current) {
+                pendingAssistantRef.current.push(visibleText);
+              } else {
+                appendChat('assistant', visibleText);
+              }
+              setAnswer(visibleText);
+              if (agentProgressTokenRef.current) {
+                agentProgressTokenRef.current = '';
+                setToolStatus('');
               }
             }
-          })();
-        },
-        onState: (state) => {
-          setIsRecording(state !== 'closed');
-          if (state === 'speaking') setAnswer((current) => current || '正在回答…');
-        },
-        onError: setError,
-      });
-      duplexRef.current = session;
-      session.updateContext(currentTaskRef.current, recentChatRef.current);
-      await session.start();
-    } catch (realtimeError) {
-      duplexRef.current?.stop();
-      duplexRef.current = null;
-      setIsRecording(false);
-      setError(realtimeError instanceof Error ? realtimeError.message : 'Realtime 会话启动失败。');
-    }
+          },
+          onUserText: (text, final) => {
+            if (!final) return;
+            handleFinalUserText(text);
+          },
+          onUserTurnStarted: (turnId) => {
+            displayTurnOrderRef.current.set(turnId, ++chatSequenceRef.current);
+          },
+          onUserTurnAudio: (audioDataUrl, turnId) => {
+            const displayOrder = displayTurnOrderRef.current.get(turnId) || ++chatSequenceRef.current;
+            displayTurnOrderRef.current.delete(turnId);
+            void (async () => {
+              try {
+                const asr = await webRequest<{ transcript?: string }>('video.transcribe', {
+                  audio_data_url: audioDataUrl,
+                }, { timeoutMs: 45_000 });
+                if (duplexRef.current !== session) return;
+                const transcript = asr.transcript?.trim() || '';
+                insertDisplayTranscript(transcript, displayOrder);
+              } catch { /* Realtime answer remains usable when optional transcript fails. */ }
+            })();
+          },
+          onState: (state) => {
+            setIsRecording(state !== 'closed');
+            if (state === 'speaking') setAnswer((current) => current || '正在回答…');
+          },
+          onError: setError,
+        });
+        duplexRef.current = session;
+        session.updateContext(currentTaskRef.current, recentChatRef.current);
+        await session.start();
+      } catch (realtimeError) {
+        duplexRef.current?.stop();
+        duplexRef.current = null;
+        setIsRecording(false);
+        setError(realtimeError instanceof Error ? realtimeError.message : 'Realtime 会话启动失败。');
+      }
     })();
     startingRealtimeRef.current = start;
     try {
@@ -654,13 +655,13 @@ export function VideoLivePanel() {
         <div className="video-live__brand">
           <span className="video-live__brand-icon"><Video aria-hidden /></span>
           <div>
-            <h1>Jiuwen Realtime</h1>
+            <h1>Full Duplex</h1>
             <p>实时多屏音视频问答</p>
           </div>
         </div>
-        <div className={`video-live__status ${isPlaying ? 'is-live' : ''}`}>
+        <div className={`video-live__status ${isRecording ? 'is-live' : ''}`}>
           <span />
-          {isPlaying ? 'STREAMING' : 'IDLE'}
+          {isRecording ? (source ? 'STREAMING' : 'VOICE') : 'IDLE'}
         </div>
       </header>
 
@@ -712,9 +713,9 @@ export function VideoLivePanel() {
             )}
             {!source && (
               <div className="video-live__empty">
-                <span className="video-live__empty-icon"><Video aria-hidden /></span>
-                <strong>打开一个实时画面</strong>
-                <p>使用摄像头、本地视频，或添加多个屏幕</p>
+                <span className="video-live__empty-icon"><Mic aria-hidden /></span>
+                <strong>{isRecording ? '纯语音通话中' : '可直接开始纯语音'}</strong>
+                <p>摄像头为推荐场景，也可使用本地视频或多个屏幕</p>
               </div>
             )}
             {source && source !== 'screen' && (
@@ -731,6 +732,15 @@ export function VideoLivePanel() {
           </div>
 
           <div className="video-live__source-actions">
+            <button
+              type="button"
+              className={`video-live__source-button${isRecording && !source ? ' video-live__source-button--active' : ''}`}
+              disabled={isRecording && Boolean(source)}
+              onClick={isRecording && !source ? stopRealtime : () => void startRealtime()}
+            >
+              <Mic aria-hidden />
+              {isRecording && !source ? '结束语音' : '纯语音'}
+            </button>
             <button type="button" className="video-live__source-button" onClick={() => void startCamera()}>
               <Camera aria-hidden />
               摄像头
@@ -756,8 +766,8 @@ export function VideoLivePanel() {
               </button>
             )}
             <span className="video-live__frame-count">
-              滚动窗口：{frameCount}/{MAX_FRAMES} 帧
-              {source === 'screen' ? ` · ${screens.length}/${MAX_SCREENS} 屏` : ''}
+              {source ? `画面缓存：${frameCount}/${MAX_FRAMES} 帧` : '纯语音不发送画面'}
+              {source === 'screen' ? ` · ${screens.length}/${MAX_SCREENS} 屏轮询` : ''}
             </span>
           </div>
         </div>
@@ -830,7 +840,7 @@ export function VideoLivePanel() {
             <input
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
-              placeholder={isRecording ? '也可以在当前会话中输入文字……' : '先开启 Realtime……'}
+              placeholder={isRecording ? '也可以在当前会话中输入文字……' : '开启纯语音或音视频 Realtime……'}
             />
             <button
               type="submit"
