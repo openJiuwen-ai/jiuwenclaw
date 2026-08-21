@@ -391,6 +391,10 @@ class CronSchedulerService:
         if self._running:
             return
         self._running = True
+        # 以真正进入启动流程的时刻重置 boot_time：__init__ 到 start() 之间
+        # 可能超过 grace 窗口（初始化耗时长），此时崩溃重启后的首次 reload
+        # 不应被误判为运行期而恢复原先要避免的重复执行风险。
+        self._boot_time = self._now_fn()
         await self.reload()
         self._task = asyncio.create_task(self._loop(), name="cron-scheduler")
         logger.info("[Cron] scheduler started")

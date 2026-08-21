@@ -1924,6 +1924,19 @@ class TestExtractTextFromAgentPayload:
         assert result == ""
 
 
+class _Clock:
+    """可控时钟，供 now_fn 注入测试，避免依赖真实秒数导致边界抖动。"""
+
+    def __init__(self, t: float) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
 class TestCrashRecoveryGraceWindow:
     """crash_recovery_skip 仅在进程启动 grace 窗口内启用。
 
@@ -2066,3 +2079,64 @@ class TestCrashRecoveryGraceWindow:
         stored = await store.get_job(job.id)
         assert stored is not None
         assert stored.last_session_id == "cron_agentserver_allocated"
+
+    @pytest.mark.asyncio
+    async def test_start_resets_boot_time(self, tmp_path):
+        """start() 应将 boot_time 重置为启动时刻，覆盖构造到启动之间的延迟。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        clock = _Clock(1000.0)
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=FakeAgentClient(),
+            message_handler=FakeMessageHandler(),
+            now_fn=clock,
+        )
+        assert svc.boot_time == 1000.0
+        clock.advance(500)
+        await svc.start()
+        assert svc.boot_time == 1500.0
+        await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_e2e_store_change_reload_keeps_pending_wake(self, tmp_path):
+        """端到端：未来 wake 排入后，其他任务写 store 触发 _check_store_changed
+        二次 reload，原事件被清空重排时运行期不应误丢（可控 now_fn）。"""
+        store_file = tmp_path / "cron_jobs.json"
+        store = CronJobStore(path=store_file)
+        clock = _Clock(time.time())
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.fromtimestamp(clock.t, tz=tz) + timedelta(seconds=65)
+        expr = (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+        job_a = await store.create_job(
+            name="A", cron_expr=expr, timezone="Asia/Shanghai",
+            description="r", targets="tui", wake_offset_seconds=0,
+        )
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=FakeAgentClient(),
+            message_handler=FakeMessageHandler(),
+            now_fn=clock,
+        )
+        svc.boot_time = clock.t
+        await svc.reload()
+        wake_before = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_before) == 1
+
+        clock.advance(66)
+
+        store2 = CronJobStore(path=store_file)
+        await store2.create_job(
+            name="B", cron_expr="0 0 9 * * ? *", timezone="Asia/Shanghai",
+            description="r", targets="tui",
+        )
+        changed = await svc.check_store_changed()
+        assert changed is True
+
+        wake_a_after = [
+            ev for _, _, ev in svc.events
+            if ev.kind == "wake" and ev.job_id == job_a.id
+        ]
+        assert len(wake_a_after) == 1
