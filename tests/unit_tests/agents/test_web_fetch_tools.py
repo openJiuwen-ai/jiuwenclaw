@@ -125,6 +125,138 @@ class TestFetchFallbackChain:
         assert "jina rendered it" in result
 
 
+# ── mcp_fetch_webpage: Jina fallback 安全护栏 ──────────────────────
+
+
+def _fake_http_error_response(status_code: int) -> SimpleNamespace:
+    """_fake_response 但 raise_for_status 真实抛 HTTPError (模拟真实 requests.Response)。"""
+    resp = _fake_response(b"error", status_code=status_code)
+    err = requests.exceptions.HTTPError(f"{status_code} Server Error")
+
+    def raise_http():
+        raise err
+
+    resp.raise_for_status = raise_http
+    return resp
+
+
+class TestFetchFallbackSecurity:
+    def test_timeout_skips_fallback_for_sensitive_query(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = {"fallback": False}
+
+        def fail_fallback(url, timeout_seconds):
+            called["fallback"] = True
+            raise AssertionError("fallback must not be called")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get", fail_get
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            fail_fallback,
+        )
+        url = "https://bucket.s3.amazonaws.com/obj?X-Amz-Signature=abc123&X-Amz-Credential=AKIA"
+        result = _call(url)
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_http_403_skips_fallback_for_private_ip(self, monkeypatch) -> None:
+        called = {"fallback": False}
+
+        def fail_fallback(url, timeout_seconds):
+            called["fallback"] = True
+            raise AssertionError("fallback must not be called")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get",
+            lambda url, **kwargs: _fake_http_error_response(403),
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            fail_fallback,
+        )
+        result = _call("http://10.0.0.5/internal/status")
+        assert "[FETCH_ERROR: http_error]" in result
+        assert called["fallback"] is False
+
+    def test_http_403_skips_fallback_for_loopback(self, monkeypatch) -> None:
+        called = {"fallback": False}
+
+        def fail_fallback(url, timeout_seconds):
+            called["fallback"] = True
+            raise AssertionError("fallback must not be called")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get",
+            lambda url, **kwargs: _fake_http_error_response(403),
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            fail_fallback,
+        )
+        result = _call("https://127.0.0.1:8080/admin")
+        assert "[FETCH_ERROR: http_error]" in result
+        assert called["fallback"] is False
+
+    def test_http_403_skips_fallback_for_common_token_param(self, monkeypatch) -> None:
+        called = {"fallback": False}
+
+        def fail_fallback(url, timeout_seconds):
+            called["fallback"] = True
+            raise AssertionError("fallback must not be called")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get",
+            lambda url, **kwargs: _fake_http_error_response(403),
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            fail_fallback,
+        )
+        result = _call("https://example.com/data?access_token=sekrit")
+        assert "[FETCH_ERROR: http_error]" in result
+        assert called["fallback"] is False
+
+    def test_fallback_still_allowed_for_public_url_403(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get",
+            lambda url, **kwargs: _fake_response(b"forbidden", status_code=403),
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            lambda url, timeout_seconds: {
+                "url": url,
+                "status_code": 200,
+                "title": "",
+                "content": "public page via jina",
+            },
+        )
+        result = _call("https://example.com/page")
+        assert "public page via jina" in result
+
+    def test_fallback_still_allowed_for_public_url_timeout(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get", fail_get
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+            lambda url, timeout_seconds: {
+                "url": url,
+                "status_code": 200,
+                "title": "",
+                "content": "public page via jina",
+            },
+        )
+        result = _call("https://example.com/page")
+        assert "public page via jina" in result
+
+
 # ── mcp_fetch_webpage: 内容解析 ────────────────────────────────────
 
 

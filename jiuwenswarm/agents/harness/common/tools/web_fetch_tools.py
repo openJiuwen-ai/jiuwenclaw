@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import re
+import socket
 from html import unescape
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -29,6 +31,43 @@ _CHARSET_HEADER_RE = re.compile(r"charset=([^\s;]+)", flags=re.IGNORECASE)
 _CHARSET_META_RE = re.compile(
     br"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
+)
+
+# Query parameter names that may carry credentials / presigned tokens. When any of
+# these is present, the URL must never be forwarded to a third-party reader.
+_SENSITIVE_QUERY_PARAMS = frozenset(
+    {
+        # AWS S3 / CloudFront presigned URLs
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+        "x-amz-algorithm",
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-signedheaders",
+        # Common credential / token parameters
+        "signature",
+        "sig",
+        "token",
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "api_key",
+        "apikey",
+        "key",
+        "secret",
+        "client_secret",
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "password",
+        "passwd",
+        "session",
+        "session_id",
+        "sessionid",
+        "private_key",
+    }
 )
 
 
@@ -200,17 +239,83 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
     }
 
 
+def _is_private_or_loopback(hostname: str) -> bool:
+    """True if the hostname resolves to a private/loopback/link-local/reserved address."""
+    raw = hostname.strip("[]")
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        pass
+    else:
+        return (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    try:
+        infos = socket.getaddrinfo(raw, None)
+    except socket.gaierror:
+        # DNS resolution failed locally: we cannot prove the target is public.
+        # Do NOT block the fallback here - a local DNS outage is precisely the
+        # case the reader fallback exists for, and a resolvable hostname is not
+        # evidence of an internal address.
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return True
+    return False
+
+
+def _should_skip_jina_fallback(url: str) -> bool:
+    """Security guard: never forward credential-bearing or non-public URLs to r.jina.ai.
+
+    The Jina fallback rewrites the URL to https://r.jina.ai/<original-url>, which sends
+    the full original URL (including any query string) to a third-party service. Skip
+    the fallback when the URL is not a public http(s) target so presigned tokens, query
+    credentials and internal hostnames never leave the trust boundary.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return True
+    hostname = parsed.hostname
+    if not hostname:
+        return True
+    if _is_private_or_loopback(hostname):
+        return True
+    query = parse_qs(parsed.query)
+    return any(key.lower() in _SENSITIVE_QUERY_PARAMS for key in query)
+
+
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     try:
         response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-        # Network-level failures: try the reader fallback before giving up.
-        try:
-            return _fetch_via_jina_reader_sync(url, timeout_seconds)
-        except Exception as reader_exc:
-            raise exc from reader_exc
+        # Network-level failures: try the reader fallback before giving up,
+        # unless the URL must not leave the trust boundary.
+        if not _should_skip_jina_fallback(url):
+            try:
+                return _fetch_via_jina_reader_sync(url, timeout_seconds)
+            except Exception as reader_exc:
+                raise exc from reader_exc
+        raise
     if response.status_code in {401, 403, 429}:
-        return _fetch_via_jina_reader_sync(url, timeout_seconds)
+        if not _should_skip_jina_fallback(url):
+            return _fetch_via_jina_reader_sync(url, timeout_seconds)
+        response.raise_for_status()
     response.raise_for_status()
 
     text = _decode_response_text(response)
