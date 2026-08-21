@@ -41,7 +41,7 @@ EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_tran
 _ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
 # Keep progressive tool search enabled by default for existing user workspaces
 # whose config.yaml predates this switch.
-DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
