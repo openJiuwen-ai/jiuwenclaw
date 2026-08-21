@@ -1116,19 +1116,23 @@ def test_relaunch_workflow_started_resets_phase_tree():
     assert state.phases[0].agents
 
     new_phases = [PhasePlan(title="调研"), PhasePlan(title="撰写")]  # "分析" dropped
-    state.apply(_make_progress(
+    delta = state.apply(_make_progress(
         "workflow_started", workflow_name="test", phases=new_phases, relaunch_kind="relaunch",
     ))
     assert [p.name for p in state.phases] == ["调研", "撰写"]
     assert all(not p.agents for p in state.phases)  # stale agents cleared
+    # The started delta carries relaunch_kind so the frontend replaces the tree.
+    assert delta["relaunch_kind"] == "relaunch"
 
 
 def test_resume_workflow_started_keeps_phase_tree():
     """A normal pause→resume (relaunch_kind="resume") keeps the existing phases."""
     state = WorkflowRunState()
     state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")]))
-    state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")], relaunch_kind="resume"))
+    delta = state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")], relaunch_kind="resume"))
     assert [p.name for p in state.phases] == ["调研"]  # not duplicated
+    # resume still carries the kind (frontend ignores it for merging), not "relaunch".
+    assert delta["relaunch_kind"] == "resume"
 
 
 def test_workflow_stopped_preserves_budget_and_scope():

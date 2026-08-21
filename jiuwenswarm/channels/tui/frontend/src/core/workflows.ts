@@ -103,6 +103,8 @@ export interface WorkflowRun {
   workflow_budget?: WorkflowBudget | null;
   /** Which ledger triggered a budget failure: "session" | "workflow". */
   budget_exhausted_scope?: "session" | "workflow" | null;
+  /** "relaunch" = script-edit re-run (replace the phase tree); "resume" = normal pause→resume. */
+  relaunch_kind?: "relaunch" | "resume" | null;
   /** Absent on list summaries from ``action=list`` (fetch via ``action=get_workflow``). */
   phases?: WorkflowPhase[];
   /** List summary only — full detail not yet fetched via ``action=get_workflow``. */
@@ -568,6 +570,16 @@ export function mergeWorkflowRun(
   existing: WorkflowRun | undefined,
   incoming: WorkflowRun,
 ): WorkflowRun {
+  // Script-edit relaunch: the backend reset the phase/agent tree (stale cards
+  // from the prior run were dropped). Replace the phases outright instead of
+  // incrementally merging, or the old agents would survive.
+  if (incoming.relaunch_kind === "relaunch") {
+    return {
+      ...existing,
+      ...incoming,
+      phases: Array.isArray(incoming.phases) ? incoming.phases : [],
+    };
+  }
   const existingPhases = existing?.phases ?? [];
   const mergedPhases = [...existingPhases];
   const incomingHasPhases = Object.prototype.hasOwnProperty.call(incoming, "phases");
