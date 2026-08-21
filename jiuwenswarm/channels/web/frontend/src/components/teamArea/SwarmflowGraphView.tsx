@@ -122,18 +122,17 @@ const RunGraphNode = ({ data }: NodeProps) => {
   const total =
     run.agent_count ??
     (run.phases ?? []).reduce((s, p) => s + (p.agents ?? []).length, 0);
-  const showBudget = Boolean(run.workflow_budget);
-  // Exhaustion hint source: explicit failure scope first, then the per-run
-  // ledger. A completed run can still finish over budget — its in-flight calls
-  // were settled after the limit was crossed — so the hint must not be gated
-  // on status === 'failed'. Session-level budget is deliberately NOT surfaced
-  // in the web UI: a session scope (explicit or inferred) renders nothing,
-  // only the per-run exhaustion does.
+  const showBudget = Boolean(run.workflow_budget || (run.budget && run.budget.total != null));
+  // Exhaustion hint source: explicit failure scope first, then the ledgers.
+  // Session exhaustion is surfaced only when a team ceiling is configured
+  // (run.budget.total != null).
   const budgetExhaustedScope =
-    (run.budget_exhausted_scope ??
-      (run.workflow_budget?.exhausted ? 'workflow' : null)) === 'workflow'
+    run.budget_exhausted_scope ??
+    (run.workflow_budget?.exhausted
       ? 'workflow'
-      : null;
+      : run.budget?.total != null && run.budget?.exhausted
+        ? 'session'
+        : null);
 
   return (
     <div className={`px-3 py-2 rounded-lg border-2 bg-card shadow-md min-w-[140px] ${statusBorder(run.status)}`}>
@@ -150,6 +149,18 @@ const RunGraphNode = ({ data }: NodeProps) => {
       </div>
       {showBudget && (
         <div className="flex flex-wrap items-center gap-1 mt-0.5 text-[10px] tabular-nums">
+          {run.budget && run.budget.total != null && (
+            <span
+              className={`px-1.5 rounded ${
+                run.budget.exhausted
+                  ? 'bg-red-500/10 text-red-500'
+                  : 'bg-blue-500/10 text-blue-500'
+              }`}
+              title={t('swarmflow.sessionBudget')}
+            >
+              {t('swarmflow.sessionBudgetShort')} {formatBudgetK(run.budget)}
+            </span>
+          )}
           {run.workflow_budget && (
             <span
               className={`px-1.5 rounded ${
@@ -167,7 +178,11 @@ const RunGraphNode = ({ data }: NodeProps) => {
       )}
       {budgetExhaustedScope && (
         <div className="mt-0.5 text-[10px] text-red-500">
-          {t('swarmflow.budgetExhaustedWorkflow')}
+          {t(
+            budgetExhaustedScope === 'session'
+              ? 'swarmflow.budgetExhaustedSession'
+              : 'swarmflow.budgetExhaustedWorkflow',
+          )}
         </div>
       )}
     </div>
