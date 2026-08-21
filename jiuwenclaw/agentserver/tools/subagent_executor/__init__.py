@@ -39,6 +39,8 @@ from .executor import (
 from .globals import (
     get_fork_agent_executor,
     init_subagent_executor,
+    reset_fork_agent_executor,
+    set_fork_agent_executor,
 )
 
 
@@ -58,7 +60,9 @@ __all__ = [
     "SubagentSessionProxy",
     # Executor
     "ForkAgentExecutor",
-    # Global instance management
+    # Request-local executor management
     "get_fork_agent_executor",
     "init_subagent_executor",
+    "reset_fork_agent_executor",
+    "set_fork_agent_executor",
 ]
