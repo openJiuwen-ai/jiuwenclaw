@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from types import SimpleNamespace
 
 import requests
@@ -255,6 +256,105 @@ class TestFetchFallbackSecurity:
         )
         result = _call("https://example.com/page")
         assert "public page via jina" in result
+
+
+# ── mcp_fetch_webpage: Jina fallback 安全护栏 (deep-audit 补充) ────
+
+
+def _make_fallback_guard(monkeypatch, http_get) -> dict:
+    """安装 Timeout http_get + 记录 fallback 调用。"""
+    called = {"fallback": False}
+
+    def fail_get(url, **kwargs):
+        return http_get(url, **kwargs)
+
+    def fail_fallback(url, timeout_seconds):
+        called["fallback"] = True
+        raise AssertionError("fallback must not be called")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._http_get", fail_get
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.tools.web_fetch_tools._fetch_via_jina_reader_sync",
+        fail_fallback,
+    )
+    return called
+
+
+class TestFetchFallbackSecurityDeep:
+    def test_skips_fallback_for_userinfo_credentials(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("https://user:pass123@example.com/data")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_when_dns_unresolvable_fail_closed(self, monkeypatch) -> None:
+        """DNS 解析失败 (内网主机名/编码 host) → fail-closed, 不 fallback。"""
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        def fake_getaddrinfo(host, port):
+            raise socket.gaierror(-2, "Name or service not known")
+
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.tools.web_fetch_tools.socket.getaddrinfo",
+            fake_getaddrinfo,
+        )
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("http://intranet.internal/status")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_for_percent_encoded_host(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("http://%31%32%37%2E%30%2E%30%2E%31/x")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_for_hyphenated_token_param(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("https://example.com/data?access-token=sekrit")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_for_mixed_case_token_param(self, monkeypatch) -> None:
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("https://example.com/data?Access-Token=sekrit")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_for_ipv4_mapped_ipv6(self, monkeypatch) -> None:
+        """::ffff:127.0.0.1 (IPv4-mapped loopback) 必须被拦截。"""
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("http://[::ffff:127.0.0.1]/admin")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
+
+    def test_skips_fallback_for_integer_ip(self, monkeypatch) -> None:
+        """2130706433 (十进制整数形式 127.0.0.1) 必须被拦截。"""
+        def fail_get(url, **kwargs):
+            raise requests.exceptions.Timeout("timed out")
+
+        called = _make_fallback_guard(monkeypatch, fail_get)
+        result = _call("http://2130706433/admin")
+        assert "[FETCH_ERROR: timeout]" in result
+        assert called["fallback"] is False
 
 
 # ── mcp_fetch_webpage: 内容解析 ────────────────────────────────────

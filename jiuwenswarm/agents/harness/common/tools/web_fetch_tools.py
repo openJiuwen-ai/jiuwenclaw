@@ -70,6 +70,11 @@ _SENSITIVE_QUERY_PARAMS = frozenset(
     }
 )
 
+# Normalized (lowercase, separators stripped) forms for case/separator-insensitive matching.
+_SENSITIVE_QUERY_PARAMS_NORM = frozenset(
+    re.sub(r"[-_.]", "", name.lower()) for name in _SENSITIVE_QUERY_PARAMS
+)
+
 
 def _extract_declared_charset(response: requests.Response) -> str:
     content_type = response.headers.get("Content-Type", "") or ""
@@ -240,7 +245,11 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 
 def _is_private_or_loopback(hostname: str) -> bool:
-    """True if the hostname resolves to a private/loopback/link-local/reserved address."""
+    """True if the hostname resolves to a private/loopback/link-local/reserved address.
+
+    Fail-closed: if the hostname cannot be resolved at all we cannot prove it is
+    public, so treat it as non-public (returns True).
+    """
     raw = hostname.strip("[]")
     try:
         ip = ipaddress.ip_address(raw)
@@ -255,14 +264,16 @@ def _is_private_or_loopback(hostname: str) -> bool:
             or ip.is_multicast
             or ip.is_unspecified
         )
+    # Hostnames containing characters that are never valid in DNS cannot be resolved
+    # to a verifiable public address; treat them as non-public.
+    if not re.fullmatch(r"[A-Za-z0-9._~-]+", raw):
+        return True
     try:
         infos = socket.getaddrinfo(raw, None)
     except socket.gaierror:
-        # DNS resolution failed locally: we cannot prove the target is public.
-        # Do NOT block the fallback here - a local DNS outage is precisely the
-        # case the reader fallback exists for, and a resolvable hostname is not
-        # evidence of an internal address.
-        return False
+        # DNS resolution failed: we cannot verify the target is public.
+        # Fail-closed: do not forward the URL to a third-party reader.
+        return True
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0])
@@ -280,6 +291,11 @@ def _is_private_or_loopback(hostname: str) -> bool:
     return False
 
 
+def _normalize_param_name(name: str) -> str:
+    """Normalize a query parameter name for sensitive-name matching (case/sep-insensitive)."""
+    return re.sub(r"[-_.]", "", name.lower())
+
+
 def _should_skip_jina_fallback(url: str) -> bool:
     """Security guard: never forward credential-bearing or non-public URLs to r.jina.ai.
 
@@ -294,10 +310,14 @@ def _should_skip_jina_fallback(url: str) -> bool:
     hostname = parsed.hostname
     if not hostname:
         return True
+    # URLs carrying credentials in the userinfo (user:password@host) must never be
+    # forwarded to a third-party reader.
+    if parsed.username or parsed.password:
+        return True
     if _is_private_or_loopback(hostname):
         return True
     query = parse_qs(parsed.query)
-    return any(key.lower() in _SENSITIVE_QUERY_PARAMS for key in query)
+    return any(_normalize_param_name(key) in _SENSITIVE_QUERY_PARAMS_NORM for key in query)
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
