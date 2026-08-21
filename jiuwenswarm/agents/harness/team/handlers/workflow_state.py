@@ -841,6 +841,17 @@ class WorkflowRunState(BaseModel):
         relaunch_kind = progress.relaunch_kind
         if relaunch_kind == "relaunch":
             self.phases = []
+            # Drop every terminal leftover from the prior run so the frontend does
+            # not show a stale "budget exhausted" / failed badge over the fresh
+            # attempt, and the run-level counts rebuild from zero.
+            self.agent_count = 0
+            self.completed_agent_count = 0
+            self.completed_at = None
+            self.duration_ms = None
+            self.result = None
+            self.error = None
+            self.budget_exhausted_scope = None
+            self.token_count = None
 
         # Resume guard: on a paused/stopped run, the engine re-emits
         # WORKFLOW_STARTED with the same full META ``phases`` list for the same
