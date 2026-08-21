@@ -202,7 +202,7 @@ export interface SubagentToolStatusUpdate {
   task_id?: string;
 }
 
-const STATUS_TOOL_NAMES = new Set(['subagent_list', 'subagent_resume', 'subagent_send_input', 'subagent_spawn']);
+const STATUS_TOOL_NAMES = new Set(['subagent_close', 'subagent_list', 'subagent_resume', 'subagent_send_input', 'subagent_spawn']);
 
 function normalizeToolStatus(value: unknown): SubagentStatus | null {
   const status = asString(value)?.toLowerCase();
@@ -279,6 +279,12 @@ export function normalizeSubagentToolStatusUpdates(value: unknown): SubagentTool
 
   const resultText = extractToolResultText(raw);
   if (!toolResultSucceeded(raw, resultText)) return [];
+
+  if (toolName === 'subagent_close') {
+    const subagentId = asString(nested.subagent_id ?? nested.subagentId ?? raw.subagent_id ?? raw.subagentId)
+      ?? /["']?subagent_id["']?\s*:\s*["']([^"']+)["']/.exec(resultText)?.[1]?.trim();
+    return subagentId ? [{ subagent_id: subagentId, status: 'closed' }] : [];
+  }
 
   const updates = new Map<string, SubagentToolStatusUpdate>();
   collectStructuredToolStatuses(nested, updates);

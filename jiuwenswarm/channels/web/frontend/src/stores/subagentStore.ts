@@ -179,19 +179,31 @@ function upsertSubagentTurn(
   taskId: string,
   taskDescription = '',
   startedAt = Date.now(),
+  descriptionSource: 'fallback' | 'explicit' = 'explicit',
 ): SubagentRuntime {
   const normalizedTaskId = taskId.trim();
   if (!normalizedTaskId) return runtime;
   const turns = runtime.turnsBySubagentId[subagentId] ?? {};
   const current = turns[normalizedTaskId];
+  const normalizedTaskDescription = taskDescription.trim();
+  const useIncomingDescription = Boolean(normalizedTaskDescription)
+    && (!current?.task_description || current.description_source === 'fallback' || descriptionSource === 'explicit');
+  const nextTaskDescription = useIncomingDescription
+    ? normalizedTaskDescription
+    : current?.task_description || '';
+  const nextDescriptionSource = useIncomingDescription && descriptionSource === 'fallback'
+    ? 'fallback' as const
+    : current?.description_source;
   const next: SubagentTurn = {
     task_id: normalizedTaskId,
-    task_description: taskDescription.trim() || current?.task_description || '',
+    task_description: nextTaskDescription,
+    ...(nextDescriptionSource ? { description_source: nextDescriptionSource } : {}),
     started_at: Math.min(current?.started_at ?? startedAt, startedAt),
     ...(current?.result ? { result: current.result } : {}),
   };
   if (current
     && current.task_description === next.task_description
+    && current.description_source === next.description_source
     && current.started_at === next.started_at
     && current.result === next.result) return runtime;
   return {
@@ -213,13 +225,15 @@ function updateLatestSubagentTurnDescription(
   const ordered = Object.values(turns).sort((left, right) => left.started_at - right.started_at);
   const latest = ordered[ordered.length - 1];
   if (!latest || latest.task_description.trim()) return runtime;
+  const nextLatest = { ...latest, task_description: taskDescription.trim() };
+  delete nextLatest.description_source;
   return {
     ...runtime,
     turnsBySubagentId: {
       ...runtime.turnsBySubagentId,
       [subagentId]: {
         ...turns,
-        [latest.task_id]: { ...latest, task_description: taskDescription.trim() },
+        [latest.task_id]: nextLatest,
       },
     },
   };
@@ -256,6 +270,7 @@ function attachTurnResult(runtime: SubagentRuntime, result: SubagentResult): Sub
           task_id: taskId,
           task_description: current?.task_description ?? '',
           started_at: current?.started_at ?? result.at_ms ?? Date.now(),
+          ...(current?.description_source ? { description_source: current.description_source } : {}),
           result: nextResult,
         },
       },
@@ -417,6 +432,7 @@ export function applySubagentToolStatus(
 ): SubagentRuntime {
   const current = runtime.subagentsById[subagentId];
   if (!current) return runtime;
+  const hasExplicitTaskDescription = Boolean(taskDescription?.trim());
   const nextTaskDescription = taskDescription?.trim() || current.task_description;
   if (current.status === status && nextTaskDescription === current.task_description) return runtime;
 
@@ -465,7 +481,14 @@ export function applySubagentToolStatus(
     selectedSubagentId: chooseDefaultSubagentId(runtime.subagentsById, runtime.selectedSubagentId),
   };
   const withTurnDescription = taskId
-    ? upsertSubagentTurn(nextRuntime, subagentId, taskId, nextTaskDescription, turnStartedAt)
+    ? upsertSubagentTurn(
+      nextRuntime,
+      subagentId,
+      taskId,
+      nextTaskDescription,
+      turnStartedAt,
+      hasExplicitTaskDescription ? 'explicit' : 'fallback',
+    )
     : updateLatestSubagentTurnDescription(nextRuntime, subagentId, nextTaskDescription);
   return attachPendingTranscripts(withTurnDescription, subagentId);
 }
@@ -477,7 +500,10 @@ export function applySubagentTurn(
   taskDescription: string,
   startedAt: number,
 ): SubagentRuntime {
-  return attachPendingTranscripts(upsertSubagentTurn(runtime, subagentId, taskId, taskDescription, startedAt), subagentId);
+  return attachPendingTranscripts(
+    upsertSubagentTurn(runtime, subagentId, taskId, taskDescription, startedAt, 'explicit'),
+    subagentId,
+  );
 }
 
 export function applySubagentActivity(
@@ -498,6 +524,7 @@ export function applySubagentActivity(
         activity.task_id,
         next.subagentsById[activity.subagent_id]?.task_description ?? '',
         activity.at_ms,
+        'fallback',
       ),
       activity.subagent_id,
     );

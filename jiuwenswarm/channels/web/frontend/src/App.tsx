@@ -30,6 +30,7 @@ import {
   beginHistoryRestore,
   fetchHistoryPage,
   HISTORY_GET_METHOD,
+  mergeHistoryToolReplayItems,
   recoverSubagentToolHistory,
   type HistoryRestoreHandle,
   type HistoryHarnessReplayItem,
@@ -437,6 +438,7 @@ function AppContent() {
   const historyRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const subagentHistoryRestoreHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const subagentHistoryRestoreRevisionRef = useRef(new Map<string, string>());
+  const subagentToolReplayBySessionRef = useRef(new Map<string, HistoryToolReplayItem[]>());
   const historyPageHandlesRef = useRef(new Map<string, HistoryRestoreHandle>());
   const historyPagePromisesRef = useRef(new Map<string, Promise<LoadedHistoryPage | null>>());
   const historyPageCancelRef = useRef(new Map<string, () => void>());
@@ -729,6 +731,7 @@ function AppContent() {
           subagentHistoryRestoreRevisionRef.current.delete(key);
         }
       }
+      subagentToolReplayBySessionRef.current.delete(targetSid);
       for (const [key, handle] of Array.from(historyPageHandlesRef.current.entries())) {
         if (!key.startsWith(`${targetSid}:`)) continue;
         handle.dispose();
@@ -1046,11 +1049,25 @@ function AppContent() {
 
   const applyRecoveredSubagentToolHistory = useCallback((sid: string, items: HistoryToolReplayItem[]) => {
     const subagentStore = useSubagentStore.getState();
-    const recoveredItems = recoverSubagentToolHistory(items, sid);
+    const mergedToolReplay = mergeHistoryToolReplayItems(
+      subagentToolReplayBySessionRef.current.get(sid) ?? [],
+      items,
+    );
+    subagentToolReplayBySessionRef.current.set(sid, mergedToolReplay);
+    const recoveredItems = recoverSubagentToolHistory(mergedToolReplay, sid);
     for (const recovered of recoveredItems) {
       const event = normalizeSubagentStatusEvent({ ...recovered.subagent, session_id: sid });
       if (event && event.subagent.parent_session_id === sid) {
         subagentStore.applyHistoryEvent(sid, event);
+        if (event.subagent.status === 'closed') {
+          subagentStore.applyToolStatus(
+            sid,
+            event.subagent.subagent_id,
+            'closed',
+            event.subagent.updated_at,
+            event.subagent.task_description,
+          );
+        }
       }
       const recoveredSubagentId = typeof recovered.subagent.subagent_id === 'string'
         ? recovered.subagent.subagent_id.trim()

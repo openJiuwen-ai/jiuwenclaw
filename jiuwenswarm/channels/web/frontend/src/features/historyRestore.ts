@@ -52,6 +52,18 @@ export interface HistoryToolReplayItem {
   payload: Record<string, unknown>;
 }
 
+/** Merge tool replay pages before pairing calls with their results. */
+export function mergeHistoryToolReplayItems(
+  existing: HistoryToolReplayItem[],
+  incoming: HistoryToolReplayItem[],
+): HistoryToolReplayItem[] {
+  const merged = new Map<string, HistoryToolReplayItem>();
+  for (const item of [...existing, ...incoming]) {
+    merged.set(JSON.stringify(item), item);
+  }
+  return [...merged.values()];
+}
+
 export interface HistorySubagentRecovery {
   subagent: Record<string, unknown>;
   turns?: Array<{ task_id: string; task_description: string; started_at: number }>;

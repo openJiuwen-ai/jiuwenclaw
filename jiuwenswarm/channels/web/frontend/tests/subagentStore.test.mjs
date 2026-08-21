@@ -351,6 +351,35 @@ test('successful subagent tool results recover a running roster state without ch
   assert.equal(completed.subagentsById['agent-a'].status, 'idle');
 });
 
+test('successful close results recover a closed roster state without changing its revision', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(3, subagent({
+    status: 'idle',
+    turn_outcome: 'completed',
+    lifecycle: 'live',
+    can_send_input: true,
+    needs_resume: false,
+    updated_at: 3000,
+    revision: 3,
+  })));
+
+  const updates = normalizeSubagentToolStatusUpdates({
+    event_type: 'chat.tool_result',
+    session_id: sessionId,
+    tool_result: {
+      tool_name: 'subagent_close',
+      result: "success=True data={'subagent_id': 'agent-a', 'previous_status': 'completed'} error=None",
+    },
+  });
+  assert.deepEqual(updates, [{ subagent_id: 'agent-a', status: 'closed' }]);
+
+  const closed = applySubagentToolStatus(runtime, updates[0].subagent_id, updates[0].status, 4000);
+  assert.equal(closed.subagentsById['agent-a'].status, 'closed');
+  assert.equal(closed.subagentsById['agent-a'].revision, 3);
+  assert.equal(closed.subagentsById['agent-a'].lifecycle, 'closed');
+  assert.equal(closed.subagentsById['agent-a'].needs_resume, true);
+});
+
 test('successful subagent spawn results restore the live assignment and turn', () => {
   let runtime = createEmptySubagentRuntime(sessionId);
   runtime = applySubagentUpdated(runtime, event(1, subagent({
@@ -826,6 +855,52 @@ test('follow-up turns keep queries, activities, and final results separate', () 
   })), [
     { task_id: 'turn-1', task_description: 'Query today', activities: 1, result: 'Today result' },
     { task_id: 'turn-2', task_description: 'Query tomorrow', activities: 1, result: 'Tomorrow result' },
+  ]);
+});
+
+test('historical activity does not overwrite an existing turn assignment', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(3, subagent({
+    task_description: 'Query tomorrow',
+    updated_at: 3000,
+    revision: 3,
+  })));
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-1', 'Query today', 1000);
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-2', 'Query tomorrow', 2000);
+  runtime = applySubagentActivity(runtime, {
+    event_type: 'chat.subagent_activity',
+    session_id: sessionId,
+    activity: activity('turn-1-activity', 1, { task_id: 'turn-1', at_ms: 1100 }),
+  });
+
+  assert.deepEqual(selectSubagentTurns(runtime, 'agent-a').map(turn => ({
+    task_id: turn.task_id,
+    task_description: turn.task_description,
+  })), [
+    { task_id: 'turn-1', task_description: 'Query today' },
+    { task_id: 'turn-2', task_description: 'Query tomorrow' },
+  ]);
+});
+
+test('explicit turn assignment repairs a fallback created by early activity', () => {
+  let runtime = createEmptySubagentRuntime(sessionId);
+  runtime = applySubagentUpdated(runtime, event(1, subagent({
+    task_description: 'Query first',
+    updated_at: 1000,
+    revision: 1,
+  })));
+  runtime = applySubagentActivity(runtime, {
+    event_type: 'chat.subagent_activity',
+    session_id: sessionId,
+    activity: activity('turn-2-activity', 2, { task_id: 'turn-2', at_ms: 2100 }),
+  });
+  runtime = applySubagentTurn(runtime, 'agent-a', 'turn-2', 'Query second', 2000);
+
+  assert.deepEqual(selectSubagentTurns(runtime, 'agent-a').map(turn => ({
+    task_id: turn.task_id,
+    task_description: turn.task_description,
+  })), [
+    { task_id: 'turn-2', task_description: 'Query second' },
   ]);
 });
 

@@ -74,6 +74,8 @@ export interface SubagentResult {
 export interface SubagentTurn {
   task_id: string;
   task_description: string;
+  /** Only set when the description came from a roster-level fallback. */
+  description_source?: 'fallback';
   started_at: number;
   result?: SubagentResult;
 }

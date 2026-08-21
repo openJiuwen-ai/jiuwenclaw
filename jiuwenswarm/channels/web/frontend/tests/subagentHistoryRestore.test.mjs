@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  mergeHistoryToolReplayItems,
   parseSubagentHistoryReplay,
   recoverSubagentToolHistory,
   shouldProcessHistoryPayload,
@@ -258,6 +259,61 @@ test('parent tool history recovers roster and structured wait result without too
     content: 'RESTORED_RESULT',
     output_file: '/tmp/result.md',
   });
+});
+
+test('parent tool recovery pairs spawn calls and results across history pages', () => {
+  const pageWithLatestFollowUp = [
+    {
+      kind: 'tool_call',
+      at: '2026-08-21T01:56:15.000Z',
+      payload: {
+        tool_call: {
+          name: 'subagent_send_input',
+          arguments: JSON.stringify({ subagent_id: subagentId, query: 'Query tomorrow' }),
+        },
+      },
+    },
+    {
+      kind: 'tool_result',
+      at: '2026-08-21T01:56:16.000Z',
+      payload: {
+        tool_name: 'subagent_send_input',
+        result: `success=True data={'subagent_id': '${subagentId}', 'task_id': 'turn-2', 'status': 'running'} error=None`,
+      },
+    },
+  ];
+  const pageWithEarlierSpawn = [
+    {
+      kind: 'tool_call',
+      at: '2026-08-21T01:56:10.000Z',
+      payload: {
+        tool_call: {
+          name: 'subagent_spawn',
+          arguments: JSON.stringify({
+            subagent_type: 'general-purpose',
+            task_description: 'Query today',
+            display_name: 'Agent A',
+            role: 'Researcher',
+          }),
+        },
+      },
+    },
+    {
+      kind: 'tool_result',
+      at: '2026-08-21T01:56:11.000Z',
+      payload: {
+        tool_name: 'subagent_spawn',
+        result: `success=True data={'subagent_id': '${subagentId}', 'task_id': 'turn-1', 'status': 'running'} error=None`,
+      },
+    },
+  ];
+
+  const merged = mergeHistoryToolReplayItems(pageWithLatestFollowUp, pageWithEarlierSpawn);
+  const recovered = recoverSubagentToolHistory(merged, sessionId);
+  assert.deepEqual(recovered[0].turns, [
+    { task_id: 'turn-1', task_description: 'Query today', started_at: 1787277371000 },
+    { task_id: 'turn-2', task_description: 'Query tomorrow', started_at: 1787277375000 },
+  ]);
 });
 
 test('history recovery ignores unknown states and failed close calls', () => {
