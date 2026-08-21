@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -135,6 +137,14 @@ class _TestableScheduler(CronSchedulerService):
         """Expose _events for test assertions (G.CLS.11: access via subclass property)."""
         return self._events
 
+    @property
+    def boot_time(self):
+        return self._boot_time
+
+    @boot_time.setter
+    def boot_time(self, value):
+        self._boot_time = float(value)
+
 
 def _cron_published_content(msg) -> str | None:
     """Extract broadcast text from a cron push Message."""
@@ -255,12 +265,13 @@ async def _create_one_job(store, name="job", targets="tui"):
     )
 
 
-def _make_scheduler(store, handler=None, agent_client=None):
+def _make_scheduler(store, handler=None, agent_client=None, now_fn=None):
     """Build a _TestableScheduler with fake deps for testing."""
     return _TestableScheduler(
         store=store,
         agent_client=agent_client or FakeAgentClient(),
         message_handler=handler or FakeMessageHandler(),
+        **({"now_fn": now_fn} if now_fn is not None else {}),
     )
 
 
@@ -1679,3 +1690,147 @@ class TestExtractTextFromAgentPayload:
     def test_error_int_value_returns_empty_string(self):
         result = self._call({"error": 42})
         assert result == ""
+
+
+class TestCrashRecoveryGraceWindow:
+    """crash_recovery_skip 仅在进程启动 grace 窗口内启用。
+
+    背景：运行期 reload（其他任务 update_job 改 cron_jobs.json mtime 触发
+    _check_store_changed → reload → _events.clear()）会抹掉尚未到点/刚到点
+    的合法 wake 事件。重排时"existing is None + wake 刚过去"被误判为崩溃
+    残留而丢弃，导致一次性任务被静默吞掉。修复后用 _boot_time grace 窗口
+    区分真崩溃与运行期 reload。
+    """
+
+    @staticmethod
+    def _recent_oneshot_expr(seconds_ago: float = 3.0) -> str:
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.now(tz=tz) - timedelta(seconds=seconds_ago)
+        return (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+
+    @staticmethod
+    def _future_oneshot_expr(seconds_ahead: float = 30.0) -> str:
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.now(tz=tz) + timedelta(seconds=seconds_ahead)
+        return (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_runtime_reload_keeps_recently_due_wake_beyond_grace(self, tmp_path):
+        """运行期 reload（boot_time 已超 grace）：刚到点的 wake 不应被丢弃。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        # boot_time 远早于 grace 窗口 → 模拟运行期 reload
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 1
+        assert wake_events[0].job_id == job.id
+
+    @pytest.mark.asyncio
+    async def test_boot_grace_reload_skips_past_wake_as_crash_recovery(self, tmp_path):
+        """进程刚启动（boot_time 在 grace 内）：过去的 wake 视为崩溃残留，跳过。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        # boot_time 即现在 → 处于 grace 窗口内（模拟崩溃重启后的首次 reload）
+        svc.boot_time = time.time()
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_skip_survives_reload_after_grace(self, tmp_path):
+        """Later reloads must not revive a wake skipped during crash recovery."""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="drink",
+            # The wake is already due, but the push is still in the future, so
+            # the original AgentServer task could remain active past 60 seconds.
+            cron_expr=self._future_oneshot_expr(seconds_ahead=30),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=60,
+        )
+        svc = _make_scheduler(store)
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_skip_survives_reload_after_push_deadline(self, tmp_path):
+        """An orphaned remote task can outlive its push deadline."""
+        clock = [time.time()]
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="slow-drink",
+            cron_expr=self._future_oneshot_expr(seconds_ahead=30),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=60,
+        )
+        svc = _make_scheduler(store, now_fn=lambda: clock[0])
+        await svc.reload()
+
+        # The scheduled push time has passed but is still inside the missed
+        # trigger window, so reload would otherwise reconstruct the same run.
+        clock[0] += 31
+        svc.boot_time = clock[0] - 120
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+        # Simulate a later store-triggered reload after the boot grace window.
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+    @pytest.mark.asyncio
+    async def test_runtime_reload_recently_due_wake_executes_and_records_session(
+        self, tmp_path,
+    ):
+        """运行期 reload 后，刚到点的 wake 应被执行并写入 last_session_id。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 1
+        run_id = wake_events[0].run_id
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.last_session_id == "cron_agentserver_allocated"

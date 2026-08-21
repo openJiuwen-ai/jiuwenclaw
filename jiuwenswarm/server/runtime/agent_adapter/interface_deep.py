@@ -4606,10 +4606,41 @@ class JiuWenSwarmDeepAdapter:
 
         react_agent._railed_model_call 使用 self._config.model_name 作为 model= 参数，
         因此需要同时替换 _llm 和 _config 中的模型相关字段。
+
+        会话适配器在首个 chat 请求到来前就已创建，此时它只能使用配置默认
+        模型装配 DeepAgent 和其 subagent specs。若仅替换主 ReActAgent，后续
+        ``create_subagent`` 会继续从旧 spec 取模型，导致 cron/chat 选中的模型
+        没有传递到子智能体。这里同步更新“继承父模型”的 specs；显式配置为
+        其他模型的自定义 subagent 不会被覆盖。
         """
         react_agent = getattr(self._instance, "_react_agent", None)
         if react_agent is None:
             return
+
+        deep_config = getattr(self._instance, "_deep_config", None)
+        previous_model = getattr(deep_config, "model", None)
+        if deep_config is not None:
+            deep_config.model = model
+            inherited_subagents = 0
+            for spec in list(getattr(deep_config, "subagents", None) or []):
+                spec_model = getattr(spec, "model", None)
+                # Built-in subagents are assembled with the parent's model.
+                # A None model also means inheritance in DeepAgent.create_subagent.
+                if spec_model is None or spec_model is previous_model:
+                    try:
+                        spec.model = model
+                        inherited_subagents += 1
+                    except (AttributeError, TypeError):
+                        # A pre-built DeepAgent or an immutable third-party spec
+                        # owns its own model and must retain that configuration.
+                        continue
+            if inherited_subagents:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] synchronized %d inherited subagent "
+                    "model(s) with active request model %s",
+                    inherited_subagents,
+                    getattr(getattr(model, "model_config", None), "model_name", ""),
+                )
         if callable(getattr(react_agent, "set_llm", None)):
             react_agent.set_llm(model)
         config = getattr(react_agent, "_config", None)
@@ -10451,6 +10482,21 @@ class JiuWenSwarmDeepAdapter:
                 )
             async for chunk in interaction_stream:
                 if hasattr(chunk, "type") and hasattr(chunk, "payload"):
+                    # openjiuwen emits terminal model failures as an ``answer``
+                    # chunk whose error text is in ``payload.output`` and whose
+                    # ``result_type`` is ``error``.  Do not let that compatible
+                    # representation fall through as a successful empty unary
+                    # response (notably for cron runs).
+                    if (
+                        chunk.type == "answer"
+                        and isinstance(chunk.payload, dict)
+                        and chunk.payload.get("result_type") == "error"
+                    ):
+                        output = chunk.payload.get("output") or ""
+                        if isinstance(output, dict):
+                            output = output.get("output") or output.get("message") or ""
+                        error_text = str(output) if output else "task failed"
+                        continue
                     if chunk.type in ("llm_output", "answer"):
                         text = (
                             chunk.payload.get("content", "")
