@@ -841,21 +841,25 @@ _CONFIG_SET_ENV_MAP = {
     "model": "MODEL_NAME",
     "api_base": "API_BASE",
     "api_key": "API_KEY",
+    "endpoint_profile": "ENDPOINT_PROFILE",
     # video 模型
     "video_api_base": "VIDEO_API_BASE",
     "video_api_key": "VIDEO_API_KEY",
     "video_model": "VIDEO_MODEL_NAME",
     "video_provider": "VIDEO_PROVIDER",
+    "video_endpoint_profile": "VIDEO_ENDPOINT_PROFILE",
     # audio 模型
     "audio_api_base": "AUDIO_API_BASE",
     "audio_api_key": "AUDIO_API_KEY",
     "audio_model": "AUDIO_MODEL_NAME",
     "audio_provider": "AUDIO_PROVIDER",
+    "audio_endpoint_profile": "AUDIO_ENDPOINT_PROFILE",
     # vision 模型
     "vision_api_base": "VISION_API_BASE",
     "vision_api_key": "VISION_API_KEY",
     "vision_model": "VISION_MODEL_NAME",
     "vision_provider": "VISION_PROVIDER",
+    "vision_endpoint_profile": "VISION_ENDPOINT_PROFILE",
     # 其他
     "email_address": "EMAIL_ADDRESS",
     "email_token": "EMAIL_TOKEN",
@@ -2950,11 +2954,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         api_base = api_base.rstrip("/")
 
         verify_ssl = bool(params.get("verify_ssl", False))
+        endpoint_profile = str(params.get("endpoint_profile") or "").strip() or None
 
         model_config_obj = _resolve_model_config_obj_for_validate(model, params)
 
         reasoning_mcc = {
             "client_provider": model_provider,
+            "endpoint_profile": endpoint_profile,
             "api_base": api_base,
         }
         model_request_config = ModelRequestConfig(
@@ -2972,6 +2978,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         model_client_config = ModelClientConfig(
             client_id="config-validate",
             client_provider=model_provider,
+            endpoint_profile=endpoint_profile,
             api_key=api_key,
             api_base=api_base,
             timeout=25.0,
