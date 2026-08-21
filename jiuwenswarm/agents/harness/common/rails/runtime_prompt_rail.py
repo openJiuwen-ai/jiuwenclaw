@@ -525,8 +525,15 @@ class RuntimePromptRail(DeepAgentRail):
                 priority=98,
             ))
 
-        if self._channel in ("tui", "web"):
-            # Trusted directories policy for TUI and Web mode
+        # Directory / trusted-dirs policy: needed for any interactive channel that
+        # may bind project_dir (officeclaw included). Previously limited to tui/web,
+        # so officeclaw agents never saw the relay project path and wrote absolute
+        # paths under the agent_default workspace instead.
+        if (
+            self._channel in ("tui", "web", "officeclaw")
+            or self._project_dir
+            or self._cwd
+        ):
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
             # Prefer explicit per-agent workspace; enterprise uses multi-tenant paths.
             resolved_ws, config_dir = self._resolve_agent_workspace_and_config()
@@ -549,6 +556,15 @@ class RuntimePromptRail(DeepAgentRail):
                 other_dirs.append(path)
             cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
             en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
+            logger.info(
+                "[RuntimePromptRail] directory context: channel=%s project_dir=%s "
+                "cwd=%s agent_workspace=%s has_project=%s",
+                self._channel,
+                project_dir,
+                runtime_cwd,
+                agent_workspace_dir,
+                has_project,
+            )
 
             if not self._force_english and self._language == "cn":
                 if has_project:

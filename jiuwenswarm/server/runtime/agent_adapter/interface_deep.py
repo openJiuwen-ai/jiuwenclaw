@@ -8791,6 +8791,16 @@ class JiuWenSwarmDeepAdapter:
         )
         task_cwd = runtime_config.cwd or task_workspace
         self._seed_runtime_cwd(task_cwd, workspace=task_workspace)
+        # Persist paths on StreamEventRail so the interaction round task can
+        # rebind openjiuwen CwdState (request-task init_cwd does not propagate).
+        if self._stream_event_rail is not None:
+            self._stream_event_rail.set_runtime_cwd_paths(
+                cwd=task_cwd,
+                project_root=runtime_config.project_dir
+                or self._project_dir
+                or task_workspace,
+                workspace=task_workspace,
+            )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = (
             str(
@@ -8901,6 +8911,20 @@ class JiuWenSwarmDeepAdapter:
                 # （OfficeClaw 会话 HITL 能力恒为 True，否则未点引导模式也会走大纲审阅）。
                 meta["interactive_ask"] = bool(runtime_config.interactive_ask)
                 set_current_request_metadata(meta)
+                # Align with test/jiuwenclaw: also bind effective workspace ContextVar
+                # in the request task (skill_turbo / fork readers). Tool CwdState is
+                # rebound separately via StreamEventRail.set_runtime_cwd_paths.
+                try:
+                    from jiuwenswarm.agents.harness.common.tools.subagent_executor.context_vars import (
+                        set_effective_request_workspace_dir,
+                    )
+
+                    set_effective_request_workspace_dir(meta["effective_project_dir"])
+                except Exception:
+                    logger.debug(
+                        "[AgentServer] set_effective_request_workspace_dir failed",
+                        exc_info=True,
+                    )
                 # 同步副本到 StreamEventRail：工具在 harness 执行任务里运行，
                 # 本任务设置的 ContextVar 不跨任务传播，rail 会在 before_tool_call
                 # （工具执行上下文）重新绑定，否则 skill_turbo 的 HITL 断点会存到
