@@ -29,6 +29,7 @@ from jiuwenswarm.extensions.agentos.agentos_router.models import (
 from jiuwenswarm.extensions.agentos.agentos_router.router_client import (
     AgentOSRouterClient,
     resolve_agent_workspace,
+    _is_agent_network_error,
     _is_ws_connect_retryable,
 )
 from jiuwenswarm.extensions.yuanrong_frontend_client import SandboxInfo
@@ -1384,3 +1385,205 @@ async def test_agentos_extension_is_selected_independently(
     assert registry.third_agent is registered[0]
     assert registry.third_agent.get_third_agent() is registered[0].get_third_agent()
     await registered[0].shutdown()
+
+
+# ---------- network-failure cleanup (sandbox + registry instance) ----------
+
+
+class NeverReadyWsClient(FakeAgentWsClient):
+    """connect 永远抛 502：模拟 WS 连接重试耗尽（instance 不可达）."""
+
+    async def connect(self, uri: str) -> None:
+        raise _Http502("server rejected WebSocket connection: HTTP 502")
+
+
+class SendFailsWsClient(FakeAgentWsClient):
+    """connect 成功但 send 抛网络层错误：模拟请求阶段连接断开/超时."""
+
+    send_error: BaseException | None = None
+
+    async def send_request(
+        self, envelope: E2AEnvelope, *, timeout: float | None = None
+    ) -> AgentResponse:
+        assert self.send_error is not None
+        raise self.send_error
+
+    def send_request_stream(
+        self, envelope: E2AEnvelope
+    ) -> AsyncIterator[AgentResponseChunk]:
+        async def _gen():
+            assert self.send_error is not None
+            raise self.send_error
+            yield  # pragma: no cover - unreachable, makes this a generator
+
+        return _gen()
+
+
+def test_is_agent_network_error_classifies_transport_failures() -> None:
+    # 请求阶段被 WebSocketAgentServerClient 包装的网络错误
+    assert _is_agent_network_error(
+        RuntimeError("AgentServer WebSocket connection closed")
+    )
+    assert _is_agent_network_error(
+        RuntimeError("AgentServer 非流式请求超时 (request_id=r1, timeout=300s)")
+    )
+    # 连接阶段重试耗尽后的原始网络异常
+    assert _is_agent_network_error(_Http502("HTTP 502"))
+    assert _is_agent_network_error(ConnectionRefusedError())
+    assert _is_agent_network_error(asyncio.TimeoutError())
+    # 业务层错误不触发清理
+    assert not _is_agent_network_error(
+        RuntimeError("duplicate in-flight request_id='r1'; refusing to register queue")
+    )
+    assert not _is_agent_network_error(ValueError("bad port"))
+
+
+@pytest.mark.asyncio
+async def test_send_request_cleans_up_when_ws_connect_exhausted(monkeypatch) -> None:
+    """连接重试耗尽（instance 不可达）→ 删沙箱 + 注销注册中心 + 错误响应."""
+    import jiuwenswarm.extensions.agentos.agentos_router.router_client as router_mod
+
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_RETRY_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(router_mod, "_WS_CONNECT_READY_TIMEOUT_SECONDS", 0.05)
+
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = _router_client(
+        yuanrong,
+        registry,
+        agent_manager,
+        ws_client_factory=lambda: NeverReadyWsClient(yuanrong),
+    )
+    try:
+        response = await client.send_request(_envelope())
+        await asyncio.sleep(0.05)
+
+        assert not response.ok
+        assert "agent server unreachable" in str(response.payload.get("error"))
+        assert yuanrong.delete_calls == ["sbx-1"]
+        assert len(registry.unregistered) == 1
+        assert registry.unregistered[0]["agent_type"] == "jiuwenswarm"
+        agents = await agent_manager.list_user_agents("u1")
+        assert agents == []
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_send_request_cleans_up_on_network_error_during_send() -> None:
+    """请求阶段连接断开（connection closed）→ 强制清理沙箱与注册条目."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    shared: dict[str, SendFailsWsClient] = {}
+
+    def _factory() -> SendFailsWsClient:
+        ws_client = SendFailsWsClient(yuanrong)
+        ws_client.send_error = RuntimeError("AgentServer WebSocket connection closed")
+        shared["client"] = ws_client
+        return ws_client
+
+    client = _router_client(
+        yuanrong, registry, agent_manager, ws_client_factory=_factory
+    )
+    try:
+        response = await client.send_request(_envelope())
+        await asyncio.sleep(0.05)
+
+        assert not response.ok
+        assert "agent server request failed" in str(response.payload.get("error"))
+        # 强制清理：沙箱删除 + 注册中心注销 + 内存 runtime 移除
+        assert yuanrong.delete_calls == ["sbx-1"]
+        assert len(registry.unregistered) == 1
+        agents = await agent_manager.list_user_agents("u1")
+        assert agents == []
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_send_request_stream_cleans_up_on_unary_timeout() -> None:
+    """流式请求遇网络层超时 → 清理 + 产出错误 chunk（不裸抛）."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+
+    def _factory() -> SendFailsWsClient:
+        ws_client = SendFailsWsClient(yuanrong)
+        ws_client.send_error = RuntimeError(
+            "AgentServer 非流式请求超时 (request_id=req-1, timeout=300s)"
+        )
+        return ws_client
+
+    client = _router_client(
+        yuanrong, registry, agent_manager, ws_client_factory=_factory
+    )
+    try:
+        chunks = [chunk async for chunk in client.send_request_stream(_envelope())]
+        await asyncio.sleep(0.05)
+
+        assert len(chunks) == 1
+        assert chunks[0].is_complete
+        assert "agent server request failed" in str(chunks[0].payload.get("error"))
+        assert yuanrong.delete_calls == ["sbx-1"]
+        assert len(registry.unregistered) == 1
+        agents = await agent_manager.list_user_agents("u1")
+        assert agents == []
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_send_request_non_network_error_not_cleaned_up() -> None:
+    """业务层错误（非网络）原样抛出，不触发清理."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+
+    def _factory() -> SendFailsWsClient:
+        ws_client = SendFailsWsClient(yuanrong)
+        ws_client.send_error = RuntimeError(
+            "duplicate in-flight request_id='req-1'; refusing to register queue"
+        )
+        return ws_client
+
+    client = _router_client(
+        yuanrong, registry, agent_manager, ws_client_factory=_factory
+    )
+    try:
+        with pytest.raises(RuntimeError, match="duplicate in-flight"):
+            await client.send_request(_envelope())
+        await asyncio.sleep(0.05)
+
+        assert yuanrong.delete_calls == []
+        assert registry.unregistered == []
+        agents = await agent_manager.list_user_agents("u1")
+        assert len(agents) == 1
+    finally:
+        await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_register_agent_skips_when_runtime_already_cleaned() -> None:
+    """清理先于后台注册执行时，迟到的注册不得把僵尸条目写回注册中心."""
+    yuanrong = FakeYuanRongClient()
+    registry = FakeRegistryClient()
+    agent_manager = AgentManager()
+    client = _router_client(yuanrong, registry, agent_manager)
+    try:
+        response = await client.send_request(_envelope())
+        await asyncio.sleep(0.05)
+        assert response.ok
+        assert len(registry.registered) == 1
+
+        # 模拟网络失败清理（delete_agent 强制路径 pop 掉 runtime）
+        await client.delete_agent("u1", "jiuwenswarm")
+        assert registry.unregistered
+
+        # 迟到的后台注册任务：runtime 已不存在 → 跳过
+        late_info = registry.registered[0].copy()
+        await client._register_agent(late_info)
+        assert len(registry.registered) == 1  # 无新增
+    finally:
+        await client.shutdown()

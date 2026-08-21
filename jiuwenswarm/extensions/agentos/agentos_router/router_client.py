@@ -111,6 +111,46 @@ def _is_ws_connect_retryable(exc: BaseException) -> bool:
     return False
 
 
+# AgentServer 请求阶段网络层错误的文本特征：WebSocketAgentServerClient 将
+# 连接断开 / 收包失败 / unary 超时统一包装成 RuntimeError，只能按文本识别。
+_AGENT_NETWORK_ERROR_TEXT_TOKENS = (
+    "connection closed",
+    "connection refused",
+    "temporarily unavailable",
+    "http 502",
+    "http 503",
+    "http 504",
+    "unreachable",
+    "请求超时",
+    "connection reset",
+)
+
+
+def _is_agent_network_error(exc: BaseException) -> bool:
+    """True when *exc* indicates an AgentServer network-layer failure.
+
+    覆盖两类场景：
+    - 连接阶段：``_connect_ws_until_ready`` 重试耗尽后抛出的原始网络异常
+      （ConnectionError / Timeout / OSError / 502 等）；
+    - 请求阶段：WebSocketAgentServerClient 包装的 ``RuntimeError``（连接
+      断开、非流式请求超时）。
+
+    业务层错误（ValueError、duplicate request_id 等非网络 RuntimeError）
+    返回 False，交由原有路径处理。
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status in _WS_CONNECT_RETRYABLE_HTTP_STATUS:
+        return True
+    text = str(exc).lower()
+    for token in _AGENT_NETWORK_ERROR_TEXT_TOKENS:
+        # 部分中文 token 在 lower() 后不受影响，直接子串匹配
+        if token in text:
+            return True
+    return False
+
+
 class UnsupportedAgentType(ValueError):
     pass
 
@@ -916,6 +956,50 @@ class AgentOSRouterClient(AgentServerClient):
             except Exception:
                 logger.warning("[AgentOSRouter] close agent ws failed", exc_info=True)
 
+    @staticmethod
+    def _runtime_log_fields(runtime: AgentRuntime) -> dict[str, Any]:
+        info = runtime.info
+        sandbox_id = str(info.sandbox_id or "")
+        return {
+            "user_id": info.user_id,
+            "session_id": str(info.metadata.get("session_id") or ""),
+            "sandbox_id": sandbox_id,
+            "agent_type": info.agent_type,
+            "instance": sandbox_id,
+        }
+
+    @staticmethod
+    def _envelope_log_fields(envelope: E2AEnvelope) -> dict[str, Any]:
+        return {
+            "user_id": str(envelope.user_id or ""),
+            "session_id": str(envelope.session_id or ""),
+            "request_id": str(envelope.request_id or ""),
+            "channel": str(envelope.channel or ""),
+            "method": str(envelope.method or ""),
+        }
+
+    def _log_route(
+        self,
+        event: str,
+        envelope: E2AEnvelope,
+        runtime: AgentRuntime | None = None,
+        *,
+        level: int = logging.INFO,
+        error: str = "",
+    ) -> None:
+        """Emit a route-level log line with plain logger (no log_agentos)."""
+        fields = self._envelope_log_fields(envelope)
+        if runtime is not None:
+            fields.update(self._runtime_log_fields(runtime))
+            fields["user_id"] = fields["user_id"] or str(runtime.info.user_id or "")
+            fields["session_id"] = fields["session_id"] or str(
+                runtime.info.metadata.get("session_id") or ""
+            )
+        if error:
+            fields["error"] = error
+        details = " ".join(f"{key}={value}" for key, value in fields.items() if value)
+        logger.log(level, "[AgentOSRouter] route event=%s %s", event, details)
+
     async def send_request(
         self,
         envelope: E2AEnvelope,
@@ -938,7 +1022,31 @@ class AgentOSRouterClient(AgentServerClient):
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
                 return self._routing_error_response(envelope, str(exc))
-            return await ws_client.send_request(envelope, timeout=timeout)
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server unreachable: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                return self._routing_error_response(envelope, error)
+            self._log_route("route.unary", envelope, runtime)
+            try:
+                return await ws_client.send_request(envelope, timeout=timeout)
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server request failed: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                return self._routing_error_response(envelope, error)
         finally:
             await self._agent_manager.release(runtime.key)
 
@@ -959,8 +1067,34 @@ class AgentOSRouterClient(AgentServerClient):
             except ValueError as exc:
                 yield self._routing_error_chunk(envelope, str(exc))
                 return
-            async for chunk in ws_client.send_request_stream(envelope):
-                yield chunk
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server unreachable: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                yield self._routing_error_chunk(envelope, error)
+                return
+            self._log_route("route.stream", envelope, runtime)
+            try:
+                async for chunk in ws_client.send_request_stream(envelope):
+                    yield chunk
+            except Exception as exc:
+                if not _is_agent_network_error(exc):
+                    raise
+                error = f"agent server request failed: {exc}"
+                self._log_route(
+                    "route.error", envelope, runtime, level=logging.WARNING, error=error
+                )
+                await self._cleanup_agent_on_network_failure(
+                    runtime, reason=type(exc).__name__
+                )
+                yield self._routing_error_chunk(envelope, error)
+                return
         finally:
             await self._agent_manager.release(runtime.key)
 
@@ -1624,6 +1758,49 @@ class AgentOSRouterClient(AgentServerClient):
         await self._release_agent_resources(agent_info, best_effort=True)
         return True
 
+    async def _cleanup_agent_on_network_failure(
+        self,
+        runtime: AgentRuntime,
+        *,
+        reason: str,
+    ) -> None:
+        """AgentServer 网络层错误后的强制清理。
+
+        instance 已不可达（连接重试耗尽 / 请求超时 / 连接断开）时复用
+        :meth:`delete_agent` 的强制删除路径（不检查 task_count / idle）：
+        关闭 WS 直连 → 删除 YuanRong 沙箱 → 移除内存 runtime → 注销注册中心
+        instance 条目。后续请求会触发重新建沙箱，避免死沙箱与僵尸注册条目。
+        """
+        info = runtime.info
+        session_id = str(info.metadata.get("session_id") or "")
+        sandbox_id = str(info.sandbox_id or "")
+        logger.warning(
+            "[AgentOSRouter] sandbox cleanup on network failure: "
+            "user_id=%s session_id=%s sandbox_id=%s agent_type=%s reason=%s",
+            info.user_id,
+            session_id,
+            sandbox_id,
+            info.agent_type,
+            reason,
+        )
+        key_values: dict[str, Any] | None = None
+        if "session_id" in self._agent_manager.key_fields and session_id:
+            key_values = {"session_id": session_id}
+        try:
+            await self.delete_agent(
+                info.user_id,
+                info.agent_type,
+                key_values=key_values,
+            )
+        except Exception:  # noqa: BLE001 - cleanup must not mask the route error
+            logger.exception(
+                "[AgentOSRouter] network-failure cleanup failed: "
+                "user_id=%s agent_type=%s sandbox_id=%s",
+                info.user_id,
+                info.agent_type,
+                sandbox_id,
+            )
+
     async def _release_agent_resources(
         self,
         agent_info: AgentInfo,
@@ -1660,6 +1837,28 @@ class AgentOSRouterClient(AgentServerClient):
         )
 
     async def _register_agent(self, agent_info: AgentInfo) -> None:
+        # 网络失败清理（delete_agent 强制路径）可能先于本后台任务执行：注册前
+        # 确认内存 runtime 仍存在（强制删除会 pop 掉 runtime），避免清理注销后
+        # 又把僵尸 instance 条目写回注册中心。
+        session_id = str(agent_info.metadata.get("session_id") or "")
+        key_values: dict[str, Any] | None = None
+        if "session_id" in self._agent_manager.key_fields and session_id:
+            key_values = {"session_id": session_id}
+        live = await self._agent_manager.get_agent(
+            agent_info.user_id,
+            agent_info.agent_type,
+            key_values=key_values,
+        )
+        if live is None:
+            logger.info(
+                "[AgentOSRouter] registry register skipped (agent already "
+                "cleaned up): user_id=%s session_id=%s sandbox_id=%s agent_type=%s",
+                agent_info.user_id,
+                session_id,
+                str(agent_info.sandbox_id or ""),
+                agent_info.agent_type,
+            )
+            return
         try:
             await self._registry.register_agent(agent_info)
         except Exception:
