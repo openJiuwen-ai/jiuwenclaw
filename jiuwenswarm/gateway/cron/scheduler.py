@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from jiuwenswarm.gateway.routing.agent_client import AgentServerClient
+from jiuwenswarm.gateway.routing.agent_client import AgentServerClient, AgentServerUnaryTimeout
 from jiuwenswarm.gateway.cron.dingtalk_routing import (
     is_usable_dingtalk_staff_id,
     resolve_dingtalk_push_metadata,
@@ -323,11 +323,12 @@ class CronSchedulerService:
           的 asyncio Task 被 task.cancel() 取消，但这只终止了 gateway 端
           等待响应的协程。AgentServer 不知道请求已被取消，会继续执行 LLM
           调用。此方法主动发送中断请求，让后端也停止处理，彻底消灭"幽灵任务"。
-        - ``reason="timeout"``: unary 超时分支（_run_unary_cron_job）在
-          ``asyncio.wait_for`` 超时后仅取消了 gateway 端等待协程，若不
-          主动 cancel，AgentServer 端的 task 会继续跑到完成——飞书等渠道
-          会先收到"超时"文案，但任务实际仍在后台正常完成，结果到达 gateway
-          时已无人接收而被丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。
+        - ``reason="timeout"``: unary 超时分支（_run_unary_cron_job）将
+          ``timeout_seconds`` 透传给 ``send_request`` 作为唯一等待上限，
+          超时后仅取消了 gateway 端等待协程，若不主动 cancel，AgentServer
+          端的 task 会继续跑到完成——飞书等渠道会先收到"超时"文案，但任务
+          实际仍在后台正常完成，结果到达 gateway 时已无人接收而被丢弃
+          （用户反馈"超时但结果正常完成"的矛盾现象）。
 
         session_id 必须用真实执行会话 ``state.exec_session_id``（格式
         ``cron_{ts}_{job.id}``）。AgentServer 的 ``_stop_session_interrupt_work``
@@ -1167,9 +1168,11 @@ class CronSchedulerService:
         state: CronRunState,
     ) -> tuple[str, bool]:
         try:
-            resp = await asyncio.wait_for(
-                self._agent_client.send_request(envelope),
-                timeout=timeout_seconds,
+            # 把 cron job 自身的 timeout_seconds 直接作为 send_request 的等待上限，
+            # 覆盖客户端默认的 600s 内层超时——否则任何 >10min 的 cron 任务都会被
+            # 内层 600s 提前杀掉，cron 自己的超时与下方 cancel 收尾形同虚设。
+            resp = await self._agent_client.send_request(
+                envelope, timeout=timeout_seconds
             )
             text = _extract_text_from_agent_payload(resp.payload)
             ok = bool(resp.ok)
@@ -1187,14 +1190,14 @@ class CronSchedulerService:
                 )
                 return "[cron] 任务执行完成但未返回结果内容", False
             return text, ok
-        except asyncio.TimeoutError:
+        except AgentServerUnaryTimeout:
             timeout_min = max(1, int(timeout_seconds // 60))
             logger.warning(
                 "[Cron] unary request timed out after %ss request_id=%s",
                 timeout_seconds,
                 getattr(envelope, "request_id", ""),
             )
-            # asyncio.wait_for 超时仅取消 gateway 端等待协程，AgentServer 端
+            # send_request 超时仅取消 gateway 端等待协程，AgentServer 端
             # 的 task 不受影响会继续跑到完成——飞书等渠道会先收到"超时"文案，
             # 但任务实际仍在后台正常完成，结果回到 gateway 时已无人接收而被
             # 丢弃（用户反馈"超时但结果正常完成"的矛盾现象）。对齐 team 流式
