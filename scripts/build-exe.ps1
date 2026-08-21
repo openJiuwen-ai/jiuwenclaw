@@ -192,8 +192,8 @@ $BuildSetupFilename = [string]$BuildConfig.setup_filename
 Write-Host "Build identity: $BuildDisplayName $BuildVersion" -ForegroundColor Gray
 
 # 1. Install dependencies
-Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev --extra claude --extra codex)..." -ForegroundColor Yellow
-uv sync --extra dev --extra claude --extra codex
+Write-Host "[1/4] Installing Python dependencies (uv sync --extra dev)..." -ForegroundColor Yellow
+uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend
