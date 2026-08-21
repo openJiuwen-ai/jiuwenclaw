@@ -1275,18 +1275,20 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
   },
 
   updateSubtask: (sessionId, payload) => {
+    const progressStatus = payload.legacy_status ?? payload.status;
+
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
       const newSubtasks = new Map(runtime.activeSubtasks);
 
-      if (payload.status === 'completed' || payload.status === 'error') {
+      if (progressStatus === 'completed' || progressStatus === 'error') {
         newSubtasks.delete(payload.task_id);
       } else {
         newSubtasks.set(payload.task_id, {
           task_id: payload.task_id,
           description: payload.description,
-          status: payload.status,
+          status: progressStatus,
           index: payload.index,
           total: payload.total,
           tool_name: payload.tool_name,
@@ -1294,6 +1296,24 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
           message: payload.message,
           is_parallel: payload.is_parallel || false,
         });
+
+        // 新 subagent 加入批次时，把 batch total 同步给已存在的 sibling
+        const batchTotal = Math.max(
+          payload.total,
+          ...Array.from(newSubtasks.values()).map((s) => s.total),
+          newSubtasks.size,
+        );
+        if (batchTotal > 1 || payload.is_parallel) {
+          for (const [id, subtask] of newSubtasks) {
+            if (subtask.total < batchTotal || !subtask.is_parallel) {
+              newSubtasks.set(id, {
+                ...subtask,
+                total: batchTotal,
+                is_parallel: true,
+              });
+            }
+          }
+        }
       }
 
       return {
@@ -1318,15 +1338,15 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
 
     if (matchingTodo) {
       let activeForm = '';
-      if (payload.status === 'starting') {
+      if (progressStatus === 'starting') {
         activeForm = `正在${payload.description}...`;
-      } else if (payload.status === 'tool_call') {
+      } else if (progressStatus === 'tool_call') {
         activeForm = `正在调用 ${payload.tool_name}...`;
-      } else if (payload.status === 'completed') {
+      } else if (progressStatus === 'completed') {
         activeForm = '';
       }
 
-      if (activeForm || payload.status === 'completed') {
+      if (activeForm || progressStatus === 'completed') {
         const updatedTodos = todos.map((todo: TodoItem) =>
           todo.id === matchingTodo.id
             ? { ...todo, activeForm }
