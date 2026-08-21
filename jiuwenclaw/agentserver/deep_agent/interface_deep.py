@@ -218,7 +218,6 @@ from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, p
                                                      SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
-    get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
@@ -880,6 +879,7 @@ class JiuWenClawDeepAdapter:
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
+        self._subagent_executor: Any = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
@@ -2970,7 +2970,7 @@ class JiuWenClawDeepAdapter:
             from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 
             # Initialize the subagent executor with parent agent and model
-            init_subagent_executor(
+            self._subagent_executor = init_subagent_executor(
                 self._instance,
                 model=self._model,  # Pass the model instance
                 default_role_prompts=None,  # Can be customized later
@@ -3516,8 +3516,12 @@ class JiuWenClawDeepAdapter:
         from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
             set_effective_request_workspace_dir,
         )
+        from jiuwenclaw.agentserver.tools.subagent_executor import (
+            set_fork_agent_executor,
+        )
 
         set_effective_request_workspace_dir(resolved_workspace_dir)
+        set_fork_agent_executor(self._subagent_executor)
 
         # Sync the tool CWD layer to the client-provided workspace dir so that
         # relative file paths in tool calls resolve against the correct base.
