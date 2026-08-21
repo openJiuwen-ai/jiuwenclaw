@@ -251,7 +251,7 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
     endpoint = get_sandbox_endpoint()
     executor = str(endpoint.get("executor") or "docker").strip().lower() or "docker"
     workspace = _resolve_workspace_dir()
-    project = Path("~/project").expanduser().resolve()
+    project = Path("~/workspace").expanduser().resolve()
     if workspace is None:
         raise ValueError("yuanrong sandbox requires a resolvable workspace directory")
     real_workspace = None
@@ -259,7 +259,7 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
     user_dir = os.environ.get("JIUWENSWARM_USER_DIRECTORY", None)
     if user_dir:
         real_workspace = Path(user_dir) / ".jiuwenswarm" / "agent" / "workspace"
-        real_project = Path(user_dir) / "project"
+        real_project = Path(user_dir) / "workspace"
 
     workspace_str = str(workspace)
     project_str = str(project)
@@ -272,11 +272,17 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
     ]
 
     if real_project is not None:
-        mounts.append({
-            "source": str(real_project),
-            "target": project_str,
-            "readonly": False,
-        })
+        if project.is_dir():
+            mounts.append({
+                "source": str(real_project),
+                "target": project_str,
+                "readonly": False,
+            })
+        else:
+            logger.warning(
+                "[sysop_builder] project dir %s does not exist; skipping mount",
+                project,
+            )
 
     extra_params: dict[str, Any] = {
         "executor": executor,

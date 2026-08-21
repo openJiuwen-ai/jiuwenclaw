@@ -6,7 +6,7 @@ from __future__ import annotations
 import enum
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ def local_now() -> datetime:
     (local wall clock) with ``datetime.now(timezone.utc)`` makes ``started_at``
     look 8 hours earlier than ``created_at`` on CST hosts.
     """
-    return datetime.now().astimezone()
+    return datetime.now(timezone.utc).astimezone()
 
 
 SANDBOX_ID_MIN_LEN = 4

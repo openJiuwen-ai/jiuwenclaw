@@ -21,7 +21,11 @@ import yaml
 
 from jiuwenbox.bundled_configs import default_policy_path
 from jiuwenbox.models.policy import SecurityPolicy
-from jiuwenbox.models.sandbox import JOB_ID_FORMAT_MESSAGE, SANDBOX_ID_FORMAT_MESSAGE
+from jiuwenbox.models.sandbox import (
+    JOB_ID_FORMAT_MESSAGE,
+    SANDBOX_ID_FORMAT_MESSAGE,
+    local_now,
+)
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 
@@ -345,6 +349,28 @@ def _loopback_ingress_script(expect_success: bool) -> str:
     ])
 
 
+def _minimal_isolated_policy(**network_extra) -> dict:
+    """Smallest isolated-network policy that still boots a usable sandbox.
+
+    Shared by the policy-update test classes; ``network_extra`` overrides
+    individual ``network`` keys (typically ``egress`` / ``ingress``).
+    """
+    network = {
+        "mode": "isolated",
+        "egress": {"default": "allow"},
+        "ingress": {"default": "allow"},
+    }
+    network.update(network_extra)
+    return {
+        "name": "update-policy-test",
+        "filesystem_policy": {
+            "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+            "read_write": ["/tmp"],
+        },
+        "network": network,
+    }
+
+
 def _has_directory(directories: list, path: str) -> bool:
     for directory in directories:
         if isinstance(directory, str) and directory == path:
@@ -446,7 +472,7 @@ class TestSandboxCRUD:
         assert "workdir" not in data
         assert data["phase"] in ("provisioning", "ready", "error")
         created_at = datetime.fromisoformat(data["created_at"])
-        now = datetime.now().astimezone()
+        now = local_now()
         assert created_at.tzinfo is not None
         assert abs((created_at - now).total_seconds()) < 30
         if data.get("started_at"):
@@ -1301,26 +1327,9 @@ class TestUpdatePolicyAPI:
     """
 
     @staticmethod
-    def _minimal_isolated_policy(**network_extra) -> dict:
-        network = {
-            "mode": "isolated",
-            "egress": {"default": "allow"},
-            "ingress": {"default": "allow"},
-        }
-        network.update(network_extra)
-        return {
-            "name": "update-policy-test",
-            "filesystem_policy": {
-                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
-                "read_write": ["/tmp"],
-            },
-            "network": network,
-        }
-
-    @staticmethod
     def test_put_policy_override_round_trips(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         before = client.get(f"/api/v1/policies/{sandbox['id']}").json()
 
@@ -1362,7 +1371,7 @@ class TestUpdatePolicyAPI:
     @staticmethod
     def test_put_policy_append_merges_lists(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(
+            policy=_minimal_isolated_policy(
                 egress={
                     "default": "allow",
                     "allowed_domains": ["baidu.com"],
@@ -1410,7 +1419,7 @@ class TestUpdatePolicyAPI:
     ):
         blocked_ip = socket.gethostbyname("www.baidu.com")
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
 
         script = textwrap.dedent(
@@ -1460,7 +1469,7 @@ class TestUpdatePolicyAPI:
         create_sandbox_with_policy,
     ):
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(
+            policy=_minimal_isolated_policy(
                 ingress={
                     "default": "deny",
                     "allowed_ports": [18091],
@@ -1509,7 +1518,7 @@ class TestUpdatePolicyAPI:
     ):
         blocked_ip = socket.gethostbyname("www.baidu.com")
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
 
         stop_resp = client.post(f"/api/v1/sandboxes/{sandbox['id']}/stop")
@@ -1595,7 +1604,7 @@ class TestUpdatePolicyAPI:
     @staticmethod
     def test_put_policy_rejects_unsupported_fields(client, create_sandbox_with_policy):
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
 
         fs_resp = client.put(f"/api/v1/policies/{sandbox['id']}", json={
@@ -1665,10 +1674,10 @@ class TestUpdatePolicyAPI:
     ):
         blocked_ip = socket.gethostbyname("www.baidu.com")
         sb1 = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         sb2 = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
 
         put_resp = client.put("/api/v1/policies", json={
@@ -1720,7 +1729,7 @@ class TestUpdatePolicyAPI:
         create_sandbox_with_policy,
     ):
         isolated = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         host = create_sandbox_with_policy(
             policy={
@@ -1831,7 +1840,7 @@ class TestDefaultPolicyAPI:
         assert marker not in TestDefaultPolicyAPI._blocked_ips(before)
 
         create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         put_resp = client.put("/api/v1/policies", json={
             "policy_mode": "append",
@@ -1919,7 +1928,7 @@ class TestDefaultPolicyAPI:
         # ``policy_mode: override`` at create time replaces the base wholesale,
         # so the freshly rebased default must not leak into it.
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         effective = client.get(f"/api/v1/policies/{sandbox['id']}").json()
         assert marker not in TestDefaultPolicyAPI._blocked_ips(effective)
@@ -1977,11 +1986,14 @@ class TestDefaultPolicyAPI:
         client,
         create_sandbox_with_policy,
     ):
-        """``update_default_policy`` is batch-only; the per-sandbox endpoint
-        silently ignores it (pydantic drops unknown fields)."""
+        """``update_default_policy`` is batch-only.
+
+        The per-sandbox endpoint silently ignores the field, because pydantic
+        drops unknown keys instead of rejecting them.
+        """
         marker = TestDefaultPolicyAPI.MARKER_IP
         sandbox = create_sandbox_with_policy(
-            policy=TestUpdatePolicyAPI._minimal_isolated_policy(),
+            policy=_minimal_isolated_policy(),
         )
         before = client.get("/api/v1/policies").json()
 
