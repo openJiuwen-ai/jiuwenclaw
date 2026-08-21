@@ -1,89 +1,32 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, FileVideo, LoaderCircle, Mic, Monitor, Send, Square, Video, X } from 'lucide-react';
 import { webClient, webRequest } from '../../services/webClient';
-import { canPlayJoyAIResponse, JoyAIVoiceSession } from '../../utils/joyaiVoice';
-import { RealtimeDuplexSession } from '../../utils/realtimeDuplex';
-import { assistantSpeechText, groundedSearchAnswer } from '../../utils/searchPresentation';
 import {
   advanceMeaningfulVideoAgentVersion,
   collectVideoAgentTurns,
   VideoAgentSegment,
 } from '../../utils/videoAgentSegments';
+import { JoyAIProvider } from './joyaiProvider';
+import { createRealtimeProvider, RealtimeDuplexSession } from './realtimeProvider';
+import {
+  AgentAction,
+  ChatContextItem,
+  SearchJobPayload,
+  SearchJobState,
+  VideoSessionConfig,
+} from './types';
 import './VideoLivePanel.css';
 
 type VideoSource = 'camera' | 'file' | 'screen' | null;
 interface CapturedFrame {
   data_url: string;
   source_id: string;
-  source_label: string;
 }
 
 interface ScreenSource {
   id: string;
   name: string;
   stream: MediaStream;
-}
-
-interface ChatContextItem {
-  id: number;
-  role: 'user' | 'assistant' | 'tool';
-  text: string;
-}
-
-interface SearchJobPayload {
-  job_id?: string;
-  search_session_id?: string;
-  question?: string;
-  query?: string;
-  result?: string;
-  error?: string;
-  engine?: string;
-  status?: 'running' | 'completed' | 'failed';
-}
-
-interface SearchJobState {
-  id: string;
-  searchSessionId: string;
-  question: string;
-  query: string;
-  status: 'running' | 'queued' | 'failed';
-  frameDataUrl?: string;
-}
-
-interface AgentAction {
-  answer?: string;
-  current_task?: string;
-  tools_used?: string[];
-  search_job?: {
-    id?: string;
-    question?: string;
-    query?: string;
-    status?: string;
-    search_session_id?: string;
-  } | null;
-}
-
-interface VideoSessionConfig {
-  provider?: 'realtime' | 'joyai';
-  url?: string;
-  model: string;
-  ref_audio_base64?: string;
-}
-
-interface JoyAIFrameResult extends AgentAction {
-  decision?: 'silence' | 'response' | 'delegation';
-  response?: string;
-  delegation?: string;
-  joyai_session_id?: string;
-  latency_ms?: number;
-}
-
-interface TtsStreamPayload {
-  stream_id?: string;
-  audio_base64?: string;
-  sample_rate?: number;
-  error?: string;
-  first_chunk_ms?: number;
 }
 
 const FRAME_INTERVAL_MS = 500;
@@ -94,22 +37,12 @@ const SCREEN_PREVIEW_FRAME_RATE = 30;
 const FRAME_JPEG_QUALITY = 0.8;
 const AGENT_DEBOUNCE_MS = 700;
 const FIRST_FRAME_WAIT_MS = 3_000;
-const JOYAI_MONITOR_INTERVAL_MS = 1_000;
-const JOYAI_MONITOR_CLIENT_BUILD = 'joyai-official-prompt-lifecycle-v8';
 
 function cleanAssistantText(text: string): string {
   return text
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/?think>/gi, '')
     .trim();
-}
-
-function searchSummary(text: string): string {
-  const firstLine = text.split('\n', 1)[0];
-  const engine = firstLine.startsWith('Free search results (') && firstLine.includes(') for:')
-    ? firstLine.slice('Free search results ('.length).split(') for:', 1)[0]
-    : '';
-  return `${engine || '免费搜索'}搜索完成`;
 }
 
 export function VideoLivePanel() {
@@ -122,16 +55,7 @@ export function VideoLivePanel() {
   const fileUrlRef = useRef<string | null>(null);
   const framesRef = useRef<CapturedFrame[]>([]);
   const duplexRef = useRef<RealtimeDuplexSession | null>(null);
-  const joyaiVoiceRef = useRef<JoyAIVoiceSession | null>(null);
-  const joyaiActiveRef = useRef(false);
-  const joyaiSessionIdRef = useRef('');
-  const joyaiMonitorTimerRef = useRef<number | null>(null);
-  const joyaiRequestInFlightRef = useRef(false);
-  const joyaiRequestQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const joyaiQueuedRequestCountRef = useRef(0);
-  const joyaiSessionStartedAtRef = useRef(0);
-  const joyaiLastFrameTimeRef = useRef(0);
-  const answerRef = useRef('');
+  const joyaiProviderRef = useRef<JoyAIProvider | null>(null);
   const currentTaskRef = useRef('');
   const recentChatRef = useRef<ChatContextItem[]>([]);
   const startingRealtimeRef = useRef<Promise<void> | null>(null);
@@ -152,12 +76,6 @@ export function VideoLivePanel() {
   const searchJobsRef = useRef<Map<string, SearchJobState>>(new Map());
   const pollingSearchJobsRef = useRef<Set<string>>(new Set());
   const acceptedSearchJobIdsRef = useRef<Set<string>>(new Set());
-  const joyaiTtsGenerationRef = useRef(0);
-  const joyaiUserSpeechActiveRef = useRef(false);
-  const joyaiUserSpeechEpochRef = useRef(0);
-  const joyaiTtsQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const joyaiActiveTtsStreamRef = useRef('');
-  const joyaiSearchDeliveryQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const [source, setSource] = useState<VideoSource>(null);
   const [sourceName, setSourceName] = useState('');
@@ -196,32 +114,10 @@ export function VideoLivePanel() {
   const stopModelTransport = () => {
     duplexRef.current?.stop();
     duplexRef.current = null;
-    joyaiTtsGenerationRef.current += 1;
-    joyaiUserSpeechActiveRef.current = false;
-    joyaiUserSpeechEpochRef.current += 1;
-    const activeTtsStream = joyaiActiveTtsStreamRef.current;
-    joyaiActiveTtsStreamRef.current = '';
-    if (activeTtsStream) {
-      void webRequest('tts.stream.cancel', { stream_id: activeTtsStream }, { timeoutMs: 5_000 })
-        .catch(() => undefined);
-    }
-    joyaiVoiceRef.current?.stop();
-    joyaiVoiceRef.current = null;
-    joyaiTtsQueueRef.current = Promise.resolve();
-    joyaiSearchDeliveryQueueRef.current = Promise.resolve();
-    joyaiActiveRef.current = false;
-    joyaiSessionIdRef.current = '';
-    joyaiRequestInFlightRef.current = false;
-    joyaiSessionStartedAtRef.current = 0;
-    joyaiLastFrameTimeRef.current = 0;
-    if (joyaiMonitorTimerRef.current !== null) {
-      window.clearInterval(joyaiMonitorTimerRef.current);
-      joyaiMonitorTimerRef.current = null;
-    }
+    joyaiProviderRef.current?.stop();
   };
 
   const resetVisualContext = () => {
-    answerRef.current = '';
     handledAgentTurnsRef.current.clear();
     agentSegmentsRef.current = [];
     agentRequestVersionRef.current += 1;
@@ -260,171 +156,10 @@ export function VideoLivePanel() {
     setChatHistory(recentChatRef.current);
   };
 
-  const interruptJoyAITts = () => {
-    joyaiTtsGenerationRef.current += 1;
-    const activeTtsStream = joyaiActiveTtsStreamRef.current;
-    joyaiActiveTtsStreamRef.current = '';
-    joyaiVoiceRef.current?.interruptPlayback();
-    joyaiTtsQueueRef.current = Promise.resolve();
-    if (activeTtsStream) {
-      void webRequest('tts.stream.cancel', { stream_id: activeTtsStream }, { timeoutMs: 5_000 })
-        .catch(() => undefined);
-    }
-  };
-
-  const speakJoyAIText = (text: string, generation: number) => {
-    const voice = joyaiVoiceRef.current;
-    const spokenText = assistantSpeechText(text);
-    if (
-      !joyaiActiveRef.current
-      || !voice
-      || !spokenText
-      || !canPlayJoyAIResponse(
-        generation,
-        joyaiTtsGenerationRef.current,
-        joyaiUserSpeechActiveRef.current,
-      )
-    ) return;
-    const play = async () => {
-      if (
-        !canPlayJoyAIResponse(
-          generation,
-          joyaiTtsGenerationRef.current,
-          joyaiUserSpeechActiveRef.current,
-        )
-      ) return;
-      const streamId = typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `tts-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      let receivedStreamAudio = false;
-      let streamStarted = false;
-      const playback = voice.beginPcmStream(streamId);
-      joyaiActiveTtsStreamRef.current = streamId;
-      const unsubscribeChunk = webClient.on<TtsStreamPayload>('video.tts.chunk', ({ payload }) => {
-        if (
-          payload.stream_id !== streamId
-          || !canPlayJoyAIResponse(
-            generation,
-            joyaiTtsGenerationRef.current,
-            joyaiUserSpeechActiveRef.current,
-          )
-        ) return;
-        const audioBase64 = payload.audio_base64 || '';
-        if (!audioBase64) return;
-        receivedStreamAudio = true;
-        try {
-          voice.appendPcm16Chunk(streamId, audioBase64, payload.sample_rate || 24_000);
-        } catch (streamError) {
-          voice.failPcmStream(
-            streamId,
-            streamError instanceof Error ? streamError.message : 'JoyAI 音频分块解析失败',
-          );
-        }
-      });
-      const unsubscribeDone = webClient.on<TtsStreamPayload>('video.tts.done', ({ payload }) => {
-        if (payload.stream_id !== streamId) return;
-        voice.finishPcmStream(streamId);
-      });
-      const unsubscribeCancelled = webClient.on<TtsStreamPayload>(
-        'video.tts.cancelled',
-        ({ payload }) => {
-          if (payload.stream_id === streamId) voice.interruptPlayback();
-        },
-      );
-      const unsubscribeError = webClient.on<TtsStreamPayload>('video.tts.error', ({ payload }) => {
-        if (payload.stream_id !== streamId) return;
-        voice.failPcmStream(streamId, payload.error || 'JoyAI 语音流失败');
-      });
-      try {
-        reportRealtimeEvent('realtime_tts_synthesis_started', {
-          text_chars: spokenText.length,
-          stream_id: streamId,
-        });
-        await webRequest(
-          'tts.stream.start',
-          { text: spokenText, stream_id: streamId },
-          { timeoutMs: 10_000 },
-        );
-        streamStarted = true;
-        await playback;
-        if (
-          !canPlayJoyAIResponse(
-            generation,
-            joyaiTtsGenerationRef.current,
-            joyaiUserSpeechActiveRef.current,
-          )
-          || !joyaiActiveRef.current
-        ) return;
-        reportRealtimeEvent('realtime_tts_playback_completed', {
-          text_chars: spokenText.length,
-          stream_id: streamId,
-          streamed: true,
-        });
-      } catch (ttsError) {
-        if (
-          !canPlayJoyAIResponse(
-            generation,
-            joyaiTtsGenerationRef.current,
-            joyaiUserSpeechActiveRef.current,
-          )
-          || !joyaiActiveRef.current
-        ) return;
-        voice.interruptPlayback();
-        if (!streamStarted && !receivedStreamAudio) {
-          try {
-            const result = await webRequest<{
-              audio_base64?: string;
-              audio_mime?: string;
-            }>('tts.synthesize', { text: spokenText }, { timeoutMs: 60_000 });
-            if (
-              !canPlayJoyAIResponse(
-                generation,
-                joyaiTtsGenerationRef.current,
-                joyaiUserSpeechActiveRef.current,
-              )
-              || !joyaiActiveRef.current
-              || joyaiVoiceRef.current !== voice
-              || !result.audio_base64
-            ) return;
-            await voice.speak(
-              `data:${result.audio_mime || 'audio/wav'};base64,${result.audio_base64}`,
-            );
-            reportRealtimeEvent('realtime_tts_playback_completed', {
-              text_chars: spokenText.length,
-              stream_id: streamId,
-              streamed: false,
-            });
-            return;
-          } catch (fallbackError) {
-            ttsError = fallbackError;
-          }
-        }
-        const message = ttsError instanceof Error ? ttsError.message : 'JoyAI 语音合成失败';
-        reportRealtimeEvent('realtime_tts_failed', {
-          text_chars: spokenText.length,
-          stream_id: streamId,
-          message,
-        });
-        setError(message);
-      } finally {
-        unsubscribeChunk();
-        unsubscribeDone();
-        unsubscribeCancelled();
-        unsubscribeError();
-        if (joyaiActiveTtsStreamRef.current === streamId) {
-          joyaiActiveTtsStreamRef.current = '';
-        }
-      }
-    };
-    const queued = joyaiTtsQueueRef.current.then(play, play);
-    joyaiTtsQueueRef.current = queued.then(() => undefined, () => undefined);
-  };
-
   const commitAssistantAnswer = (
     text: string,
     toolJobId?: string,
     turnId?: string,
-    ttsGeneration = joyaiTtsGenerationRef.current,
   ) => {
     const normalized = cleanAssistantText(text);
     if (!normalized) return;
@@ -436,7 +171,6 @@ export function VideoLivePanel() {
         assistantAnswersByTurnRef.current.delete(oldest);
       }
     }
-    answerRef.current = normalized;
     streamingAnswerRef.current = '';
     streamingToolJobIdRef.current = undefined;
     streamingAnswerTurnIdRef.current = undefined;
@@ -452,22 +186,6 @@ export function VideoLivePanel() {
       searchJobsRef.current.delete(toolJobId);
       if (![...searchJobsRef.current.values()].some((job) => job.status !== 'failed')) {
         setToolStatus('');
-      }
-    }
-    if (joyaiActiveRef.current) {
-      if (!canPlayJoyAIResponse(
-        ttsGeneration,
-        joyaiTtsGenerationRef.current,
-        joyaiUserSpeechActiveRef.current,
-      )) {
-        reportRealtimeEvent('joyai_tts_suppressed_for_barge_in', {
-          user_speech_active: joyaiUserSpeechActiveRef.current,
-          response_generation: ttsGeneration,
-          current_generation: joyaiTtsGenerationRef.current,
-          text_chars: normalized.length,
-        });
-      } else {
-        void speakJoyAIText(normalized, ttsGeneration);
       }
     }
   };
@@ -508,137 +226,55 @@ export function VideoLivePanel() {
     setToolStatus('正在后台搜索，可继续提问…');
   };
 
-  const requestJoyAIFrame = async (
-    instruction: string,
-    originalQuestion = '',
-    options: {
-      skipIfBusy?: boolean;
-      toolJobId?: string;
-      frameDataUrl?: string;
-      required?: boolean;
-      joyaiSessionId?: string;
-      commitResponse?: boolean;
-      requestKind?: 'user' | 'monitor' | 'tool';
-      frameOnly?: boolean;
-    } = {},
-  ): Promise<JoyAIFrameResult | null> => {
-    if (!joyaiActiveRef.current) {
-      if (options.required) throw new Error('JoyAI 会话已停止，无法回填搜索结果');
-      return null;
-    }
-    const activeSessionId = joyaiSessionIdRef.current;
-    const sessionId = options.joyaiSessionId || activeSessionId;
-    const frameDataUrl = options.frameDataUrl || framesRef.current.at(-1)?.data_url || '';
-    if (!sessionId || !frameDataUrl) {
-      if (options.required) throw new Error('没有可用于搜索结果回填的 JoyAI 会话画面');
-      return null;
-    }
-    if (options.skipIfBusy && joyaiQueuedRequestCountRef.current > 0) return null;
-
-    const ttsGenerationAtRequest = joyaiTtsGenerationRef.current;
-    joyaiQueuedRequestCountRef.current += 1;
-    const execute = async (): Promise<JoyAIFrameResult | null> => {
-      if (!joyaiActiveRef.current || joyaiSessionIdRef.current !== activeSessionId) {
-        if (options.required) throw new Error('JoyAI 会话在搜索期间已结束或被替换');
-        return null;
-      }
-      joyaiRequestInFlightRef.current = true;
-      try {
-        const requestKind = options.requestKind || (originalQuestion ? 'user' : 'monitor');
-        const prompt = options.frameOnly ? '' : instruction.trim();
-        const sessionElapsedSeconds = joyaiSessionStartedAtRef.current > 0
-          ? Math.max(0, (performance.now() - joyaiSessionStartedAtRef.current) / 1_000)
-          : 0;
-        const frameRangeStart = Math.min(joyaiLastFrameTimeRef.current, sessionElapsedSeconds);
-        joyaiLastFrameTimeRef.current = sessionElapsedSeconds;
-        const frameTimeRange = `${frameRangeStart.toFixed(1)} seconds ~ ${sessionElapsedSeconds.toFixed(1)} seconds`;
-        const result = await webRequest<JoyAIFrameResult>('video.joyai.frame', {
-          frame_data_url: frameDataUrl,
-          instruction: prompt.slice(0, 2_000),
-          question: originalQuestion.slice(0, 500),
-          request_kind: requestKind,
-          joyai_session_id: sessionId,
-          search_session_id: searchSessionRef.current,
-          frame_time_range: frameTimeRange,
-        }, { timeoutMs: 60_000 });
-        if (!joyaiActiveRef.current || joyaiSessionIdRef.current !== activeSessionId) {
-          if (options.required) throw new Error('JoyAI 会话在搜索结果返回前已结束或被替换');
-          return null;
+  const getJoyAIProvider = (): JoyAIProvider => {
+    const callbacks = {
+      getLatestFrameDataUrl: () => framesRef.current.at(-1)?.data_url || '',
+      getFrameCount: () => framesRef.current.length,
+      getSearchSessionId: () => searchSessionRef.current,
+      hasPendingTranscriptions: () => pendingTranscriptionsRef.current > 0,
+      beginTranscription: () => {
+        pendingTranscriptionsRef.current += 1;
+        setIsAwaitingVoiceTranscript(true);
+      },
+      finishTranscription: () => {
+        pendingTranscriptionsRef.current = Math.max(0, pendingTranscriptionsRef.current - 1);
+        if (pendingTranscriptionsRef.current === 0) {
+          setIsAwaitingVoiceTranscript(false);
+          flushDeferredAssistantAnswers();
         }
-        const response = result.response?.trim() || '';
-        if (response && options.commitResponse !== false) {
-          commitAssistantAnswer(response, options.toolJobId, undefined, ttsGenerationAtRequest);
-        }
-        rememberSearchJob(result.search_job);
-        return result;
-      } finally {
-        joyaiRequestInFlightRef.current = false;
-      }
+      },
+      interruptAgentRequests: () => {
+        agentRequestVersionRef.current += 1;
+      },
+      appendChat,
+      applyCurrentTask,
+      commitAssistantAnswer: (text: string, toolJobId?: string) => {
+        commitAssistantAnswer(text, toolJobId);
+      },
+      rememberSearchJob,
+      updateSearchJob: (job: SearchJobState) => {
+        searchJobsRef.current.set(job.id, job);
+      },
+      setAwaitingVoiceTranscript: setIsAwaitingVoiceTranscript,
+      setError,
+      setToolStatus,
+      setRecording: setIsRecording,
+      setStatus: setRealtimeStatus,
+      setStarting: setIsRealtimeStarting,
+      report: reportRealtimeEvent,
     };
-    const queuedRequest = joyaiRequestQueueRef.current.then(execute, execute);
-    joyaiRequestQueueRef.current = queuedRequest.then(() => undefined, () => undefined);
-    try {
-      return await queuedRequest;
-    } finally {
-      joyaiQueuedRequestCountRef.current = Math.max(
-        0,
-        joyaiQueuedRequestCountRef.current - 1,
-      );
+    if (!joyaiProviderRef.current) {
+      joyaiProviderRef.current = new JoyAIProvider(callbacks);
+    } else {
+      joyaiProviderRef.current.updateCallbacks(callbacks);
     }
-  };
-
-  const startJoyAIMonitor = () => {
-    if (joyaiMonitorTimerRef.current !== null) return;
-    reportRealtimeEvent('joyai_monitor_started', {
-      client_build: JOYAI_MONITOR_CLIENT_BUILD,
-      frame_count: framesRef.current.length,
-    });
-    const sendLatestFrame = () => {
-      if (!joyaiActiveRef.current) return;
-      void requestJoyAIFrame('', '', {
-        skipIfBusy: true,
-        requestKind: 'monitor',
-        frameOnly: true,
-      }).catch((monitorError) => {
-        setError(monitorError instanceof Error ? monitorError.message : 'JoyAI 监控请求失败');
-      });
-    };
-    sendLatestFrame();
-    joyaiMonitorTimerRef.current = window.setInterval(
-      sendLatestFrame,
-      JOYAI_MONITOR_INTERVAL_MS,
-    );
-  };
-
-  const submitJoyAIUserInstruction = async (text: string): Promise<JoyAIFrameResult | null> => {
-    applyCurrentTask(text);
-    return requestJoyAIFrame(text, text, {
-      requestKind: 'user',
-    });
+    return joyaiProviderRef.current;
   };
 
   const recentChatForRouter = () => recentChatRef.current
     .slice(-8)
     .map((item) => `${item.role === 'user' ? '用户' : item.role === 'assistant' ? 'Realtime助手' : '工具'}：${item.text}`)
     .join('\n');
-
-  const waitForJoyAIAnswerSlot = async (sessionId: string): Promise<boolean> => {
-    while (joyaiActiveRef.current && joyaiSessionIdRef.current === sessionId) {
-      const requestBarrier = joyaiRequestQueueRef.current;
-      await requestBarrier;
-      const ttsBarrier = joyaiTtsQueueRef.current;
-      await ttsBarrier;
-      if (
-        pendingTranscriptionsRef.current === 0
-        && !joyaiUserSpeechActiveRef.current
-        && joyaiQueuedRequestCountRef.current === 0
-        && requestBarrier === joyaiRequestQueueRef.current
-        && ttsBarrier === joyaiTtsQueueRef.current
-      ) return true;
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-    }
-    return false;
-  };
 
   const acceptCompletedSearch = (payload: SearchJobPayload) => {
     if (!payload.job_id || payload.search_session_id !== searchSessionRef.current) return;
@@ -670,62 +306,7 @@ export function VideoLivePanel() {
     // Claim the job before asynchronous delivery starts: WebSocket completion and
     // status polling may report the same completed job in the same event loop turn.
     acceptedSearchJobIdsRef.current.add(payload.job_id);
-    if (joyaiActiveRef.current) {
-      const sessionId = joyaiSessionIdRef.current;
-      searchJobsRef.current.set(payload.job_id, {
-        id: payload.job_id,
-        searchSessionId: payload.search_session_id || existing?.searchSessionId || '',
-        question,
-        query: payload.query?.trim() || existing?.query || '',
-        status: 'queued',
-      });
-      const groundedAnswer = groundedSearchAnswer(result);
-      appendChat('tool', `${payload.engine || '免费搜索'}搜索完成`);
-      setToolStatus('搜索完成，等待当前回答结束后展示…');
-      reportRealtimeEvent('search_result_waiting_for_output_slot', {
-        job_id: payload.job_id,
-        message: 'Grounded search answer queued behind active user requests and speech',
-      });
-      const deliver = async () => {
-        if (!await waitForJoyAIAnswerSlot(sessionId)) return;
-        commitAssistantAnswer(groundedAnswer || result, payload.job_id);
-        setToolStatus('');
-        reportRealtimeEvent('search_result_answered', {
-          job_id: payload.job_id,
-          realtime_answer: groundedAnswer || result,
-          message: 'Displayed after earlier JoyAI requests and speech completed',
-        });
-        const groundedInstruction = [
-          '以下是搜索工具和主对话模型已经交付给用户的可靠资料。请记住这些资料供后续追问使用，不要再次回答。',
-          `原问题：${question}`,
-          `搜索结果：${result}`,
-        ].join('\n').slice(0, 2_000);
-        try {
-          await requestJoyAIFrame(groundedInstruction, question, {
-            frameDataUrl: existing?.frameDataUrl,
-            commitResponse: false,
-            requestKind: 'tool',
-          });
-          reportRealtimeEvent('search_result_dispatched', {
-            job_id: payload.job_id,
-            message: 'Grounded search context synchronized to JoyAI',
-          });
-        } catch (searchAnswerError) {
-          const message = searchAnswerError instanceof Error ? searchAnswerError.message : '请重试';
-          reportRealtimeEvent('search_result_response_empty', {
-            job_id: payload.job_id,
-            message: `Grounded answer displayed, but JoyAI context synchronization failed: ${message}`,
-          });
-        }
-        await joyaiTtsQueueRef.current;
-      };
-      const queuedDelivery = joyaiSearchDeliveryQueueRef.current.then(deliver, deliver);
-      joyaiSearchDeliveryQueueRef.current = queuedDelivery.then(
-        () => undefined,
-        () => undefined,
-      );
-      return;
-    }
+    if (getJoyAIProvider().handleCompletedSearch(payload, existing)) return;
     const queued = duplexRef.current?.enqueueToolResult({
       jobId: payload.job_id,
       question,
@@ -741,7 +322,7 @@ export function VideoLivePanel() {
     });
     if (queued) {
       appendChat('tool', result);
-      setToolStatus(`${payload.engine || '免费搜索'}完成，等待模型空闲后回答…`);
+      setToolStatus(`${payload.engine || '九问搜索 Agent'}完成，等待模型空闲后回答…`);
     } else {
       reportRealtimeEvent('search_result_queue_failed', {
         job_id: payload.job_id,
@@ -761,7 +342,7 @@ export function VideoLivePanel() {
       query: payload.query?.trim() || existing?.query || '',
       status: 'failed',
     });
-    setToolStatus(`${payload.engine || '九问免费搜索'}失败：${payload.error || '请重试'}`);
+    setToolStatus(`${payload.engine || '九问搜索 Agent'}失败：${payload.error || '请重试'}`);
   };
 
   const waitForRealtimeTurnAnswer = async (turnId: string, timeoutMs = 20_000): Promise<string> => {
@@ -789,7 +370,7 @@ export function VideoLivePanel() {
         status: 'running',
         frameDataUrl: framesRef.current.at(-1)?.data_url,
       });
-      setToolStatus(`正在使用${payload.engine || '九问免费搜索'}，可继续提问…`);
+      setToolStatus(`正在使用${payload.engine || '九问搜索 Agent'}，可继续提问…`);
     });
     const unsubscribeCompleted = webClient.on<SearchJobPayload>('video.search.completed', ({ payload }) => {
       if (belongsToCurrentSession(payload)) acceptCompletedSearch(payload);
@@ -893,7 +474,6 @@ export function VideoLivePanel() {
     const captureVideo = async (
       video: HTMLVideoElement,
       sourceId: string,
-      sourceLabel: string,
     ): Promise<CapturedFrame | null> => {
       const canvas = canvasRef.current;
       if (!canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
@@ -913,7 +493,6 @@ export function VideoLivePanel() {
       return {
         data_url: dataUrl,
         source_id: sourceId,
-        source_label: sourceLabel,
       };
     };
 
@@ -927,17 +506,13 @@ export function VideoLivePanel() {
             if (cancelled) break;
             const video = screenVideoRefs.current.get(screen.id);
             if (!video) continue;
-            const frame = await captureVideo(video, screen.id, screen.name);
+            const frame = await captureVideo(video, screen.id);
             if (frame) captured.push(frame);
           }
         } else {
           const video = videoRef.current;
           if (video) {
-            const frame = await captureVideo(
-              video,
-              source || 'video',
-              source === 'camera' ? '摄像头' : sourceName || '本地视频',
-            );
+            const frame = await captureVideo(video, source || 'video');
             if (frame) captured.push(frame);
           }
         }
@@ -958,7 +533,7 @@ export function VideoLivePanel() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [isPlaying, screens, source, sourceName]);
+  }, [isPlaying, screens, source]);
 
   const startCamera = async () => {
     stopModelTransport();
@@ -1102,7 +677,7 @@ export function VideoLivePanel() {
   };
 
   const startRealtime = async () => {
-    if (duplexRef.current || joyaiActiveRef.current) return;
+    if (duplexRef.current || joyaiProviderRef.current?.active) return;
     if (startingRealtimeRef.current) return startingRealtimeRef.current;
     const start = (async () => {
     setIsRealtimeStarting(true);
@@ -1149,120 +724,14 @@ export function VideoLivePanel() {
       setModel(config.model);
       if (config.provider === 'joyai') {
         applyCurrentTask('');
-        const sessionId = crypto.randomUUID();
-        joyaiSessionIdRef.current = sessionId;
-        joyaiActiveRef.current = true;
-        joyaiUserSpeechActiveRef.current = false;
-        joyaiUserSpeechEpochRef.current += 1;
-        joyaiSessionStartedAtRef.current = performance.now();
-        joyaiLastFrameTimeRef.current = 0;
-        // Visual monitoring is independent of microphone initialization. Start it
-        // immediately so a slow or unavailable microphone cannot stop frame flow.
-        startJoyAIMonitor();
-        const voice = new JoyAIVoiceSession({
-          onSpeechStart: () => {
-            joyaiUserSpeechActiveRef.current = true;
-            joyaiUserSpeechEpochRef.current += 1;
-            interruptJoyAITts();
-            agentRequestVersionRef.current += 1;
-            reportRealtimeEvent('joyai_barge_in_started', {
-              speech_epoch: joyaiUserSpeechEpochRef.current,
-              tts_generation: joyaiTtsGenerationRef.current,
-            });
-          },
-          onTurnAudio: (audioDataUrl, turnId) => {
-            if (handledAgentTurnsRef.current.has(turnId)) return;
-            handledAgentTurnsRef.current.add(turnId);
-            const speechEpochAtTurn = joyaiUserSpeechEpochRef.current;
-            let releasedForInstruction = false;
-            pendingTranscriptionsRef.current += 1;
-            setIsAwaitingVoiceTranscript(true);
-            void (async () => {
-              try {
-                const asr = await webRequest<{ transcript?: string }>('video.transcribe', {
-                  audio_data_url: audioDataUrl,
-                }, { timeoutMs: 45_000 });
-                if (!joyaiActiveRef.current || joyaiSessionIdRef.current !== sessionId) return;
-                const transcript = asr.transcript?.trim();
-                if (!transcript) return;
-                appendChat('user', transcript);
-                setIsAwaitingVoiceTranscript(false);
-                if (speechEpochAtTurn === joyaiUserSpeechEpochRef.current) {
-                  // Invalidate monitor/search responses created while the user was
-                  // speaking before allowing the new user request to produce audio.
-                  interruptJoyAITts();
-                  joyaiUserSpeechActiveRef.current = false;
-                  releasedForInstruction = true;
-                  reportRealtimeEvent('joyai_barge_in_released_for_instruction', {
-                    speech_epoch: speechEpochAtTurn,
-                    tts_generation: joyaiTtsGenerationRef.current,
-                    transcript_chars: transcript.length,
-                  });
-                }
-                await submitJoyAIUserInstruction(transcript);
-              } catch (voiceError) {
-                if (!joyaiActiveRef.current || joyaiSessionIdRef.current !== sessionId) return;
-                setError(voiceError instanceof Error ? voiceError.message : 'JoyAI 语音处理失败');
-              } finally {
-                if (
-                  !releasedForInstruction
-                  && speechEpochAtTurn === joyaiUserSpeechEpochRef.current
-                ) {
-                  interruptJoyAITts();
-                  joyaiUserSpeechActiveRef.current = false;
-                  reportRealtimeEvent('joyai_barge_in_released_without_instruction', {
-                    speech_epoch: speechEpochAtTurn,
-                    tts_generation: joyaiTtsGenerationRef.current,
-                  });
-                }
-                pendingTranscriptionsRef.current = Math.max(
-                  0,
-                  pendingTranscriptionsRef.current - 1,
-                );
-                if (pendingTranscriptionsRef.current === 0) {
-                  setIsAwaitingVoiceTranscript(false);
-                  flushDeferredAssistantAnswers();
-                }
-              }
-            })();
-          },
-          onState: (state) => {
-            if (state === 'closed') {
-              setIsRecording(false);
-              setRealtimeStatus('');
-              return;
-            }
-            setIsRecording(true);
-            setRealtimeStatus(state === 'connecting'
-              ? '正在申请麦克风权限…'
-              : state === 'speaking'
-                ? '模型正在回答…'
-                : '');
-            if (state === 'listening') setIsRealtimeStarting(false);
-          },
-          onError: setError,
-        });
-        joyaiVoiceRef.current = voice;
-        setRealtimeStatus('正在申请麦克风权限…');
-        await voice.start();
+        await getJoyAIProvider().start();
         return;
       }
-      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) {
-        reportRealtimeEvent('realtime_start_unsupported_browser');
-        throw new Error('当前浏览器不支持 Full-duplex 音频。');
-      }
-      if (!config.url) throw new Error('请配置 Full-duplex WebSocket 地址');
-      if (!config.ref_audio_base64) throw new Error('请配置 Full-duplex 参考音频');
-      const session = new RealtimeDuplexSession({
-        url: config.url,
-        model: config.model,
-        refAudio: `data:audio/wav;base64,${config.ref_audio_base64}`,
-      }, {
+      const session = createRealtimeProvider(config, {
         getVideoFrame: () => framesRef.current.at(-1)?.data_url.split(',', 2)[1] || null,
         onAssistantText: (text, final, toolJobId, turnId) => {
           const visibleText = cleanAssistantText(text);
           if (!visibleText) return;
-          answerRef.current = visibleText;
           if (!final) {
             streamingAnswerRef.current = visibleText;
             streamingToolJobIdRef.current = toolJobId;
@@ -1272,7 +741,6 @@ export function VideoLivePanel() {
             commitAssistantAnswer(visibleText, toolJobId, turnId);
           }
         },
-        onUserText: () => undefined,
         onUserActivity: () => {
           agentRequestVersionRef.current += 1;
           const interruptedAnswer = streamingAnswerRef.current;
@@ -1386,12 +854,12 @@ export function VideoLivePanel() {
         onDiagnostic: (event) => {
           void webRequest('video.realtime.telemetry', event, { timeoutMs: 5_000 }).catch(() => undefined);
         },
-      });
+      }, () => reportRealtimeEvent('realtime_start_unsupported_browser'));
       duplexRef.current = session;
       session.updateContext(currentTaskRef.current, recentChatRef.current);
       await session.start();
     } catch (realtimeError) {
-      const wasJoyAI = joyaiActiveRef.current;
+      const wasJoyAI = Boolean(joyaiProviderRef.current?.active);
       stopModelTransport();
       if (wasJoyAI) applyCurrentTask('');
       setIsRecording(false);
@@ -1412,7 +880,7 @@ export function VideoLivePanel() {
   };
 
   const stopRealtime = () => {
-    const wasJoyAI = joyaiActiveRef.current;
+    const wasJoyAI = Boolean(joyaiProviderRef.current?.active);
     stopModelTransport();
     if (wasJoyAI) applyCurrentTask('');
     searchSessionRef.current = '';
@@ -1427,15 +895,15 @@ export function VideoLivePanel() {
     event.preventDefault();
     const text = question.trim();
     if (!text) return;
-    if (!duplexRef.current && !joyaiActiveRef.current) await startRealtime();
-    if (!duplexRef.current && !joyaiActiveRef.current) return;
+    if (!duplexRef.current && !joyaiProviderRef.current?.active) await startRealtime();
+    if (!duplexRef.current && !joyaiProviderRef.current?.active) return;
     const version = ++agentRequestVersionRef.current;
     latestMeaningfulAgentVersionRef.current = version;
     try {
       appendChat('user', text);
       setQuestion('');
-      if (joyaiActiveRef.current) {
-        const result = await submitJoyAIUserInstruction(text);
+      if (joyaiProviderRef.current?.active) {
+        const result = await getJoyAIProvider().submitUserInstruction(text);
         if (!result) throw new Error('文字输入未进入 JoyAI 会话');
         return;
       }
@@ -1593,7 +1061,7 @@ export function VideoLivePanel() {
                 {chatHistory.map((item) => (
                   <div className={`video-live__chat-item is-${item.role}`} key={item.id}>
                     <strong>{item.role === 'user' ? '你' : item.role === 'tool' ? '九问搜索' : '助手'}</strong>
-                    <p>{item.role === 'tool' ? searchSummary(item.text) : item.text}</p>
+                    <p>{item.role === 'tool' ? '九问搜索 Agent 搜索完成' : item.text}</p>
                   </div>
                 ))}
                 {streamingAnswer && !isAwaitingVoiceTranscript && (

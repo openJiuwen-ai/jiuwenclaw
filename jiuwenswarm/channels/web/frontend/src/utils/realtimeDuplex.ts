@@ -13,7 +13,6 @@ export interface RealtimeToolResult {
 export interface RealtimeDuplexCallbacks {
   getVideoFrame: () => string | null;
   onAssistantText: (text: string, final: boolean, toolJobId?: string, turnId?: string) => void;
-  onUserText: (text: string, final: boolean) => void;
   onUserActivity: () => void;
   onTurnAudio: (wavDataUrl: string, turnId: string) => void;
   onState: (state: 'connecting' | 'listening' | 'speaking' | 'closed') => void;
@@ -106,7 +105,6 @@ export class RealtimeDuplexSession {
   private sessionReady = false;
   private responseId: string | null = null;
   private cancelledResponseIds = new Set<string>();
-  private injecting = false;
   private injectionQueue: Promise<void> = Promise.resolve();
   private pendingTextInputs: Array<{ text: string; turnId: string; isFresh: () => boolean }> = [];
   private pendingToolResults: RealtimeToolResult[] = [];
@@ -202,62 +200,60 @@ export class RealtimeDuplexSession {
       while (this.pendingSamples > maxPending && this.pending.length > 1) {
         this.pendingSamples -= this.pending.shift()?.length || 0;
       }
-      if (!this.injecting) {
-        const level = this.rms(pcm);
-        const frameMs = pcm.length * 1_000 / INPUT_RATE;
-        const assistantOutputActive = this.assistantPlaying || this.responseActive || this.bargeInCandidate;
-        const threshold = assistantOutputActive
-          ? Math.max(1_400, this.noiseFloor * 5)
-          : Math.max(700, this.noiseFloor * 3);
-        if (level > threshold) {
-          this.lastVoiceAt = Date.now();
-          this.lastInteractiveInputAt = this.lastVoiceAt;
-          this.userSpeechMs += frameMs;
-          this.userSilenceMs = 0;
-          if (assistantOutputActive && !this.userActivityActive) {
-            this.startBargeInCandidate(level, threshold);
+      const level = this.rms(pcm);
+      const frameMs = pcm.length * 1_000 / INPUT_RATE;
+      const assistantOutputActive = this.assistantPlaying || this.responseActive || this.bargeInCandidate;
+      const threshold = assistantOutputActive
+        ? Math.max(1_400, this.noiseFloor * 5)
+        : Math.max(700, this.noiseFloor * 3);
+      if (level > threshold) {
+        this.lastVoiceAt = Date.now();
+        this.lastInteractiveInputAt = this.lastVoiceAt;
+        this.userSpeechMs += frameMs;
+        this.userSilenceMs = 0;
+        if (assistantOutputActive && !this.userActivityActive) {
+          this.startBargeInCandidate(level, threshold);
+        }
+        const requiredSpeechMs = this.bargeInCandidate ? BARGE_IN_SPEECH_MS : LISTENING_SPEECH_MS;
+        if (!this.userActivityActive && this.userSpeechMs >= requiredSpeechMs) {
+          this.userActivityActive = true;
+          this.turnHasUserActivity = true;
+          // ASR only receives this utterance, not up to 20 seconds of old
+          // silence or assistant playback that encourages hallucinations.
+          this.turnAudio = this.turnAudio.slice(-1);
+          this.turnSamples = this.turnAudio.reduce((total, chunk) => total + chunk.length, 0);
+          if (this.bargeInCandidate) {
+            this.emitDiagnostic('barge_in_confirmed', {
+              level: Math.round(level),
+              peak_level: Math.round(this.bargeInPeakLevel),
+              threshold: Math.round(this.bargeInThreshold),
+              speech_ms: Math.round(this.userSpeechMs),
+            });
+            this.clearBargeInCandidate(false);
           }
-          const requiredSpeechMs = this.bargeInCandidate ? BARGE_IN_SPEECH_MS : LISTENING_SPEECH_MS;
-          if (!this.userActivityActive && this.userSpeechMs >= requiredSpeechMs) {
-            this.userActivityActive = true;
-            this.turnHasUserActivity = true;
-            // ASR only receives this utterance, not up to 20 seconds of old
-            // silence or assistant playback that encourages hallucinations.
-            this.turnAudio = this.turnAudio.slice(-1);
-            this.turnSamples = this.turnAudio.reduce((total, chunk) => total + chunk.length, 0);
-            if (this.bargeInCandidate) {
-              this.emitDiagnostic('barge_in_confirmed', {
-                level: Math.round(level),
-                peak_level: Math.round(this.bargeInPeakLevel),
-                threshold: Math.round(this.bargeInThreshold),
-                speech_ms: Math.round(this.userSpeechMs),
-              });
-              this.clearBargeInCandidate(false);
-            }
-            this.interruptForUserInput();
-            this.callbacks.onUserActivity();
-          }
-        } else {
-          this.userSilenceMs += frameMs;
-          if (this.bargeInCandidate && !this.userActivityActive) {
-            if (this.userSilenceMs >= BARGE_IN_SILENCE_TOLERANCE_MS) {
-              this.emitDiagnostic('barge_in_rejected', {
-                level: Math.round(level),
-                peak_level: Math.round(this.bargeInPeakLevel),
-                threshold: Math.round(this.bargeInThreshold),
-                speech_ms: Math.round(this.userSpeechMs),
-                reason: 'short_noise_or_echo',
-              });
-              this.clearBargeInCandidate(true);
-              this.userSpeechMs = 0;
-            }
-          } else if (!this.userActivityActive) {
+          this.interruptForUserInput();
+          this.callbacks.onUserActivity();
+        }
+      } else {
+        this.userSilenceMs += frameMs;
+        if (this.bargeInCandidate && !this.userActivityActive) {
+          if (this.userSilenceMs >= BARGE_IN_SILENCE_TOLERANCE_MS) {
+            this.emitDiagnostic('barge_in_rejected', {
+              level: Math.round(level),
+              peak_level: Math.round(this.bargeInPeakLevel),
+              threshold: Math.round(this.bargeInThreshold),
+              speech_ms: Math.round(this.userSpeechMs),
+              reason: 'short_noise_or_echo',
+            });
+            this.clearBargeInCandidate(true);
             this.userSpeechMs = 0;
           }
-          if (this.userSilenceMs >= USER_TURN_SILENCE_MS) this.userActivityActive = false;
+        } else if (!this.userActivityActive) {
+          this.userSpeechMs = 0;
         }
-        this.observeNoise(pcm);
+        if (this.userSilenceMs >= USER_TURN_SILENCE_MS) this.userActivityActive = false;
       }
+      this.observeNoise(pcm);
     };
     const silent = this.captureContext.createGain();
     silent.gain.value = 0;
@@ -306,12 +302,6 @@ export class RealtimeDuplexSession {
     this.clearBargeInCandidate(false);
     this.cancelledResponseIds.clear();
     this.callbacks.onState('closed');
-  }
-
-  async sendAudioDataUrl(dataUrl: string, isFresh: () => boolean = () => true): Promise<void> {
-    const queued = this.injectionQueue.then(() => this.injectAudioDataUrl(dataUrl, true, isFresh));
-    this.injectionQueue = queued.then(() => undefined, () => undefined);
-    await queued;
   }
 
   async sendTextTurn(text: string, isFresh: () => boolean = () => true): Promise<string | null> {
@@ -416,53 +406,6 @@ export class RealtimeDuplexSession {
       force_listen: true,
       max_slice_nums: 1,
     });
-  }
-
-  private async injectAudioDataUrl(
-    dataUrl: string,
-    interruptActive: boolean,
-    isFresh: () => boolean,
-  ): Promise<boolean> {
-    const context = this.captureContext || new AudioContext();
-    const pcm = await this.decodeDataUrl(dataUrl, context, INPUT_RATE);
-    if (!isFresh()) return false;
-    if (this.assistantPlaying || this.responseActive) {
-      if (!interruptActive) return false;
-      this.cancelActiveResponse();
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      if (!isFresh()) return false;
-    }
-    if (!interruptActive && (this.assistantPlaying || this.responseActive)) return false;
-    this.injecting = true;
-    this.turnAudio = [];
-    this.turnSamples = 0;
-    try {
-      const chunkSize = INPUT_RATE;
-      for (let offset = 0; offset < pcm.length; offset += chunkSize) {
-        if (!isFresh()) return false;
-        const chunk = pcm.subarray(offset, offset + chunkSize);
-        this.sendAudio(chunk, true);
-        await new Promise((resolve) => window.setTimeout(resolve, SEND_INTERVAL_MS));
-      }
-    } finally {
-      this.injecting = false;
-      this.flush();
-    }
-    return true;
-  }
-
-  private async decodeDataUrl(dataUrl: string, context: AudioContext, targetRate: number): Promise<Int16Array> {
-    const encoded = dataUrl.split(',', 2)[1];
-    if (!encoded) throw new Error('文字转语音没有返回有效音频');
-    const bytes = base64ToBytes(encoded);
-    const decoded = await context.decodeAudioData(Uint8Array.from(bytes).buffer);
-    const channel = decoded.getChannelData(0);
-    const source = new Int16Array(channel.length);
-    for (let index = 0; index < channel.length; index += 1) {
-      const sample = Math.max(-1, Math.min(1, channel[index]));
-      source[index] = sample < 0 ? sample * 32768 : sample * 32767;
-    }
-    return resample(source, decoded.sampleRate, targetRate);
   }
 
   private openSocket(): Promise<void> {
@@ -585,7 +528,7 @@ export class RealtimeDuplexSession {
   }
 
   private flush(): void {
-    if (this.injecting || this.pendingSamples < INPUT_RATE) return;
+    if (this.pendingSamples < INPUT_RATE) return;
     const outgoing = new Int16Array(INPUT_RATE);
     let written = 0;
     while (written < outgoing.length && this.pending.length > 0) {
@@ -688,7 +631,7 @@ export class RealtimeDuplexSession {
         this.activeToolJobId = toolResult.jobId;
       }
     }
-    const shouldSendVideo = this.hasActiveTask || this.injecting || Date.now() - this.lastVoiceAt < 2_500;
+    const shouldSendVideo = this.hasActiveTask || Date.now() - this.lastVoiceAt < 2_500;
     if (includeVideo && shouldSendVideo) {
       const frame = this.callbacks.getVideoFrame();
       if (frame) input.video_frames = [frame];
@@ -833,10 +776,6 @@ export class RealtimeDuplexSession {
       if (eventResponseId && this.cancelledResponseIds.has(eventResponseId)) return;
       this.assistantTranscript = String(event.transcript || this.assistantTranscript);
       this.finishAssistantText();
-    } else if (type === 'conversation.item.input_audio_transcription.delta') {
-      this.callbacks.onUserText(String(event.delta || ''), false);
-    } else if (type === 'conversation.item.input_audio_transcription.completed') {
-      this.callbacks.onUserText(String(event.transcript || ''), true);
     } else if (type === 'error') {
       this.callbacks.onError(readableError(event.error || event));
     }

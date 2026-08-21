@@ -18,7 +18,6 @@ function createSession(videoFrame = null) {
       onAssistantText: (text, final, toolJobId, turnId) => (
         assistantTexts.push({ text, final, toolJobId, turnId })
       ),
-      onUserText: () => undefined,
       onUserActivity: () => undefined,
       onTurnAudio: () => undefined,
       onState: (state) => states.push(state),
@@ -381,7 +380,6 @@ test('session.closed before session.created rejects startup with the backend rea
     {
       getVideoFrame: () => null,
       onAssistantText: () => undefined,
-      onUserText: () => undefined,
       onUserActivity: () => undefined,
       onTurnAudio: () => undefined,
       onState: () => undefined,

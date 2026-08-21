@@ -731,9 +731,19 @@ async def test_joyai_monitor_accepts_frame_only_request(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_joyai_delegation_starts_async_search_and_reuses_running_job(monkeypatch) -> None:
     channel = FakeChannel()
-    video_live.register_video_live_handler(channel)
     release_search = asyncio.Event()
-    search_calls = []
+    research_requests = []
+
+    class FakeAgentClient:
+        async def send_request(self, envelope):
+            research_requests.append(envelope)
+            await release_search.wait()
+            return SimpleNamespace(
+                ok=True,
+                payload={"answer": "JD.com current market summary", "sources": []},
+            )
+
+    video_live.register_video_live_handler(channel, agent_client=FakeAgentClient())
 
     async def fake_request(frame_data_url, instruction, joyai_session_id):
         return {
@@ -751,26 +761,7 @@ async def test_joyai_delegation_starts_async_search_and_reuses_running_job(monke
             "memory": {},
         }
 
-    async def fake_search(query):
-        search_calls.append(query)
-        await release_search.wait()
-        return (
-            "Free search results (DuckDuckGo) for: JD.com stock\n"
-            "1. Market result\n"
-            "   URL: https://example.com/jd\n"
-            "   Snippet: Current market data"
-        )
-
-    async def fake_fetch(sources):
-        return [{**sources[0], "content": "Current market body", "error": ""}]
-
-    async def fake_summary(question, query, search_result, evidence, trace_context):
-        return "九问检索摘要（主对话模型根据网页正文生成）\nMarket summary.[来源1]"
-
     monkeypatch.setattr(video_live, "_request_joyai_frame", fake_request)
-    monkeypatch.setattr(video_live, "_execute_free_search", fake_search)
-    monkeypatch.setattr(video_live, "_fetch_search_evidence", fake_fetch)
-    monkeypatch.setattr(video_live, "_summarize_search_evidence", fake_summary)
     monkeypatch.setattr(video_live, "_append_joyai_log", lambda event: None)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
 
@@ -789,16 +780,14 @@ async def test_joyai_delegation_starts_async_search_and_reuses_running_job(monke
     )
     second = channel.responses[-1][1]["payload"]
 
-    assert first["tools_used"] == ["mcp_free_search"]
+    assert first["tools_used"] == ["jiuwen_research"]
     assert first["search_job"]["status"] == "running"
     assert first["search_job"]["query"] == "JD.com current stock price"
     assert second["search_job"]["id"] == first["search_job"]["id"]
     assert second["search_job"]["reused"] is True
     await asyncio.sleep(0)
-    assert search_calls == [
-        "JD.com current stock price",
-        "JD.com current stock price 官方 最新 更新时间",
-    ]
+    assert len(research_requests) == 1
+    assert research_requests[0].params["query"] == "JD.com current stock price"
 
     release_search.set()
     for _ in range(100):
@@ -1227,40 +1216,59 @@ async def test_agent_router_receives_user_realtime_answer_and_current_task(monke
 
 
 @pytest.mark.asyncio
+async def test_agent_router_uses_jiuwen_research_action(monkeypatch) -> None:
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            del kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content='{"action":"jiuwen_research","query":"香港今天的天气"}'
+            ))])
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
+    monkeypatch.setattr(
+        video_live,
+        "_model_config",
+        lambda prefix: ("https://router.example/v1", "key", "router-model"),
+    )
+
+    answer, task, tools = await video_live._agent_answer(
+        "香港今天天气怎么样？", "我需要查询可靠来源。", "", "", None,
+    )
+
+    assert answer == "香港今天的天气"
+    assert task == ""
+    assert tools == ["jiuwen_research"]
+
+
+@pytest.mark.asyncio
 async def test_agent_search_returns_job_before_background_result(monkeypatch) -> None:
     channel = FakeChannel()
-    video_live.register_video_live_handler(channel)
     release_search = asyncio.Event()
 
+    class FakeAgentClient:
+        async def send_request(self, envelope):
+            assert envelope.params["question"] == "介绍一下这家公司"
+            assert envelope.params["query"] == "Luckin Coffee company profile"
+            await release_search.wait()
+            return SimpleNamespace(
+                ok=True,
+                payload={"answer": "瑞幸咖啡的官方资料。", "sources": []},
+            )
+
+    video_live.register_video_live_handler(channel, agent_client=FakeAgentClient())
+
     async def fake_agent(question, realtime_answer, current_task, recent_chat, trace_context):
-        return "Luckin Coffee company profile", "", ["mcp_free_search"]
-
-    async def fake_search(query):
-        assert query == "Luckin Coffee company profile"
-        await release_search.wait()
-        return (
-            "Free search results (DuckDuckGo) for: Luckin Coffee\n"
-            "1. Official result\n"
-            "   URL: https://example.com/official\n"
-            "   Snippet: Official company information"
-        )
-
-    async def fake_fetch(sources):
-        assert sources[0]["url"] == "https://example.com/official"
-        return [{**sources[0], "content": "URL: https://example.com/official\nContent:\nOfficial body", "error": ""}]
-
-    async def fake_summary(question, query, search_result, evidence, trace_context):
-        assert question == "介绍一下这家公司"
-        assert query == "Luckin Coffee company profile"
-        assert "Official result" in search_result
-        assert "Official body" in evidence[0]["content"]
-        assert trace_context["job_id"]
-        return "九问检索摘要（主对话模型根据网页正文生成）\n瑞幸咖啡的官方资料。[来源1]"
+        return "Luckin Coffee company profile", "", ["jiuwen_research"]
 
     monkeypatch.setattr(video_live, "_agent_answer", fake_agent)
-    monkeypatch.setattr(video_live, "_execute_free_search", fake_search)
-    monkeypatch.setattr(video_live, "_fetch_search_evidence", fake_fetch)
-    monkeypatch.setattr(video_live, "_summarize_search_evidence", fake_summary)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
 
     await channel.handlers["video.agent"](
@@ -1275,7 +1283,7 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
 
     payload = channel.responses[-1][1]["payload"]
     assert payload["answer"] == ""
-    assert payload["tools_used"] == ["mcp_free_search"]
+    assert payload["tools_used"] == ["jiuwen_research"]
     assert payload["search_job"]["status"] == "running"
     assert not any(event == "video.search.completed" for event, _ in channel.events)
 
@@ -1297,7 +1305,6 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
     assert completed["job_id"] == payload["search_job"]["id"]
     assert completed["search_session_id"] == "realtime-session-1"
     assert completed["question"] == "介绍一下这家公司"
-    assert "九问检索摘要" in completed["result"]
     assert "官方资料" in completed["result"]
 
     await channel.handlers["video.search.status"](
@@ -1313,7 +1320,7 @@ async def test_agent_search_returns_job_before_background_result(monkeypatch) ->
     recovered = channel.responses[-1][1]["payload"]
     assert recovered["status"] == "completed"
     assert recovered["job_id"] == payload["search_job"]["id"]
-    assert "九问检索摘要" in recovered["result"]
+    assert "官方资料" in recovered["result"]
 
 
 @pytest.mark.asyncio
@@ -1339,15 +1346,10 @@ async def test_video_search_uses_official_research_agent_rpc(monkeypatch) -> Non
     async def fake_agent(question, realtime_answer, current_task, recent_chat, trace_context):
         del question, current_task, recent_chat, trace_context
         assert realtime_answer == "瓶身品牌是 Luckin Coffee。"
-        return "Luckin Coffee company profile", "", ["mcp_free_search"]
+        return "Luckin Coffee company profile", "", ["jiuwen_research"]
 
     monkeypatch.setattr(video_live, "_agent_answer", fake_agent)
     monkeypatch.setattr(video_live, "_append_video_task_log", lambda event: None)
-    monkeypatch.setattr(
-        video_live,
-        "_execute_free_search",
-        lambda query: pytest.fail("official ResearchAgent result must bypass legacy search"),
-    )
 
     await channel.handlers["video.agent"](
         object(),
@@ -1384,7 +1386,7 @@ async def test_video_search_uses_official_research_agent_rpc(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_video_search_falls_back_when_official_research_fails(monkeypatch) -> None:
+async def test_video_search_returns_failure_when_official_research_fails(monkeypatch) -> None:
     channel = FakeChannel()
     task_logs = []
 
@@ -1400,64 +1402,33 @@ async def test_video_search_falls_back_when_official_research_fails(monkeypatch)
 
     async def fake_agent(question, realtime_answer, current_task, recent_chat, trace_context):
         del question, realtime_answer, current_task, recent_chat, trace_context
-        return "香港天气", "", ["mcp_free_search"]
-
-    async def fake_search(query):
-        assert query in {"香港天气", "香港天气 官方 最新 更新时间"}
-        return (
-            "Free search results (DuckDuckGo) for: 香港天气\n"
-            "1. 香港天文台\n"
-            "   URL: https://www.hko.gov.hk/weather\n"
-            "   Snippet: 官方实时天气"
-        )
-
-    async def fake_fetch(sources):
-        return [{
-            **sources[0],
-            "content": "URL: https://www.hko.gov.hk/weather\nContent:\n香港天气资料",
-            "error": "",
-        }]
-
-    async def fake_summary(question, query, search_result, evidence, trace_context):
-        del question, query, search_result, evidence, trace_context
-        return "香港天气资料。[来源1]"
+        return "香港天气", "", ["jiuwen_research"]
 
     monkeypatch.setattr(video_live, "_agent_answer", fake_agent)
-    monkeypatch.setattr(video_live, "_execute_free_search", fake_search)
-    async def fake_official_evidence(question, query):
-        del question, query
-        return []
-
-    monkeypatch.setattr(video_live, "_official_search_evidence", fake_official_evidence)
-    monkeypatch.setattr(video_live, "_fetch_search_evidence", fake_fetch)
-    monkeypatch.setattr(video_live, "_summarize_search_evidence", fake_summary)
     monkeypatch.setattr(video_live, "_append_video_task_log", task_logs.append)
 
     await channel.handlers["video.agent"](
         object(),
-        "official-search-fallback-request",
+        "official-search-failure-request",
         {
             "question": "今天香港天气怎么样？",
-            "search_session_id": "search-session-fallback",
+            "search_session_id": "search-session-failure",
         },
         "session",
     )
 
     for _ in range(100):
-        if any(event == "video.search.completed" for event, _ in channel.events):
+        if any(event == "video.search.failed" for event, _ in channel.events):
             break
         await asyncio.sleep(0.01)
 
-    completed = next(
-        payload for event, payload in channel.events if event == "video.search.completed"
+    failed = next(
+        payload for event, payload in channel.events if event == "video.search.failed"
     )
-    assert completed["engine"] == "DuckDuckGo"
-    assert completed["result"] == "香港天气资料。[来源1]"
-    assert "Max iterations reached" not in completed["result"]
-    assert any(
-        item["stage"] == "official_research_failed_fallback"
-        for item in task_logs
-    )
+    assert failed["engine"] == "Jiuwen ResearchAgent"
+    assert failed["error"] == "Max iterations reached without completion"
+    assert not any(event == "video.search.completed" for event, _ in channel.events)
+    assert any(item["stage"] == "search_failed" for item in task_logs)
 
 
 @pytest.mark.asyncio
@@ -1517,197 +1488,6 @@ async def test_joyai_delegation_uses_same_official_research_agent_rpc(monkeypatc
     assert requests[0].params["query"] == "农夫山泉品牌资料"
     assert requests[0].params["visual_context"] == "画面中的品牌是农夫山泉，我来查询它的资料。"
     assert any(event == "video.search.completed" for event, _ in channel.events)
-
-
-@pytest.mark.asyncio
-async def test_video_search_uses_full_supported_result_count(monkeypatch) -> None:
-    received = []
-
-    class FakeSearch:
-        async def invoke(self, arguments):
-            received.append(arguments)
-            return "result"
-
-    import jiuwenswarm.agents.harness.common.tools.search_tools as search_tools
-
-    monkeypatch.setattr(search_tools, "mcp_free_search", FakeSearch())
-
-    assert await video_live._execute_free_search("测试搜索") == "result"
-    assert received == [{
-        "query": "测试搜索",
-        "max_results": 20,
-        "timeout_seconds": 20,
-    }]
-
-
-def test_search_result_sources_parses_ranked_urls_and_deduplicates() -> None:
-    result = (
-        "Free search results (DuckDuckGo) for: 香港天气\n"
-        "1. 香港天文台\n"
-        "   URL: https://www.hko.gov.hk/weather\n"
-        "   Snippet: 官方实时天气\n"
-        "2. 重复结果\n"
-        "   URL: https://www.hko.gov.hk/weather\n"
-        "   Snippet: 重复\n"
-        "3. 其他来源\n"
-        "   URL: https://weather.example/current\n"
-        "   Snippet: 第三方天气"
-    )
-
-    assert video_live._search_result_sources(result) == [
-        {
-            "title": "香港天文台",
-            "url": "https://www.hko.gov.hk/weather",
-            "snippet": "官方实时天气",
-        },
-        {
-            "title": "其他来源",
-            "url": "https://weather.example/current",
-            "snippet": "第三方天气",
-        },
-    ]
-
-
-def test_search_queries_adds_official_supplement_for_time_sensitive_questions() -> None:
-    assert video_live._search_queries("今天香港天气怎么样", "香港天气") == [
-        "香港天气",
-        "香港天气 官方 最新 更新时间",
-    ]
-    assert video_live._search_queries("介绍一下农夫山泉", "农夫山泉") == ["农夫山泉"]
-
-
-def test_rank_search_sources_prioritizes_authoritative_domains() -> None:
-    sources = [
-        {"title": "第三方天气", "url": "https://weather.example/hk", "snippet": "香港天气"},
-        {"title": "香港天文台", "url": "https://www.hko.gov.hk/tc/index.html", "snippet": ""},
-        {"title": "百科", "url": "https://zh.wikipedia.org/wiki/Hong_Kong", "snippet": ""},
-    ]
-
-    ranked = video_live._rank_search_sources(sources, "香港天气")
-
-    assert ranked[0]["url"] == "https://www.hko.gov.hk/tc/index.html"
-    assert ranked[-1]["url"] == "https://zh.wikipedia.org/wiki/Hong_Kong"
-
-
-@pytest.mark.asyncio
-async def test_official_search_evidence_uses_hko_open_data_for_hong_kong_weather(monkeypatch) -> None:
-    requested = []
-
-    class FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"forecastDesc": "大致多云，有几阵骤雨", "updateTime": "2026-08-18T14:45:00+08:00"}
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            assert kwargs["timeout"] == 12.0
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        async def get(self, url):
-            requested.append(url)
-            return FakeResponse()
-
-    monkeypatch.setattr(video_live.httpx, "AsyncClient", FakeClient)
-
-    evidence = await video_live._official_search_evidence("今天香港天气怎么样", "香港天气")
-
-    assert len(requested) == 3
-    assert all("lang=sc" in url for url in requested)
-    assert len(evidence) == 3
-    assert all(item["content"] for item in evidence)
-    assert "大致多云" in evidence[0]["content"]
-    assert await video_live._official_search_evidence("介绍农夫山泉", "农夫山泉") == []
-
-
-@pytest.mark.asyncio
-async def test_fetch_search_evidence_fetches_page_bodies_and_keeps_failures(monkeypatch) -> None:
-    calls = []
-
-    class FakeFetch:
-        async def invoke(self, arguments):
-            calls.append(arguments)
-            if "failed" in arguments["url"]:
-                return "[ERROR]: failed to fetch webpage: timeout"
-            return f"URL: {arguments['url']}\nContent:\n正文"
-
-    import jiuwenswarm.agents.harness.common.tools.web_fetch_tools as web_fetch_tools
-
-    monkeypatch.setattr(web_fetch_tools, "mcp_fetch_webpage", FakeFetch())
-    sources = [
-        {"title": "成功", "url": "https://example.com/success", "snippet": ""},
-        {"title": "失败", "url": "https://example.com/failed", "snippet": ""},
-    ]
-
-    evidence = await video_live._fetch_search_evidence(sources)
-
-    assert len(calls) == 2
-    assert calls[0]["max_chars"] == 6_000
-    assert evidence[0]["content"].endswith("正文")
-    assert evidence[1]["content"] == ""
-    assert evidence[1]["error"].startswith("[ERROR]")
-
-
-@pytest.mark.asyncio
-async def test_search_summary_uses_main_model_and_only_fetched_evidence(monkeypatch) -> None:
-    calls = []
-    summary_logs = []
-
-    class FakeCompletions:
-        async def create(self, **kwargs):
-            calls.append(kwargs)
-            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-                content="香港大致多云，有骤雨。[来源1]"
-            ))])
-
-    class FakeClient:
-        def __init__(self, **kwargs):
-            self.chat = SimpleNamespace(completions=FakeCompletions())
-
-        async def close(self):
-            return None
-
-    monkeypatch.setattr(openai, "AsyncOpenAI", FakeClient)
-    monkeypatch.setattr(
-        video_live,
-        "_model_config",
-        lambda prefix: ("https://router.example/v1", "key", "router-model"),
-    )
-    monkeypatch.setattr(video_live, "_append_video_task_log", summary_logs.append)
-
-    result = await video_live._summarize_search_evidence(
-        "今天香港天气怎么样",
-        "香港今天天气",
-        "raw search snippets",
-        [{
-            "title": "香港天文台",
-            "url": "https://www.hko.gov.hk/current",
-            "snippet": "摘要",
-            "content": "URL: https://www.hko.gov.hk/current\nContent:\n大致多云，有骤雨。",
-            "error": "",
-        }],
-        {"job_id": "search-1"},
-    )
-
-    assert calls[0]["model"] == "router-model"
-    assert "只允许使用所给网页正文回答" in calls[0]["messages"][0]["content"]
-    assert "正文没有直接支持的结论一律不得输出" in calls[0]["messages"][0]["content"]
-    assert "过期内容不得表述为当前事实" in calls[0]["messages"][0]["content"]
-    assert "最终回答必须统一使用简体中文" in calls[0]["messages"][0]["content"]
-    assert "不得输出繁体中文" in calls[0]["messages"][0]["content"]
-    assert "直接用自然口语回答用户" in calls[0]["messages"][0]["content"]
-    assert "不要使用标题、项目符号、表格或单独的来源清单" in calls[0]["messages"][0]["content"]
-    assert "确实支持该事实" in calls[0]["messages"][0]["content"]
-    assert "大致多云，有骤雨" in calls[0]["messages"][1]["content"]
-    assert "香港大致多云，有骤雨。[来源1]" in result
-    assert "https://www.hko.gov.hk/current" in result
-    assert summary_logs[0]["stage"] == "search_summarized"
 
 
 @pytest.mark.asyncio

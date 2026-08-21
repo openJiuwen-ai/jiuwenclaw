@@ -23,9 +23,6 @@ import httpx
 
 _MAX_AUDIO_CHARS = 2_000_000
 _MAX_TTS_TEXT_CHARS = 800
-_MAX_FREE_SEARCH_RESULTS = 20
-_MAX_SEARCH_FETCH_PAGES = 8
-_MAX_SEARCH_PAGE_CHARS = 6_000
 _MAX_JOYAI_FRAME_CHARS = 4_000_000
 _MAX_JOYAI_INSTRUCTION_CHARS = 2_000
 _JOYAI_TTS_VOICE = "vivian"
@@ -43,7 +40,7 @@ _LOG_WRITE_LOCK = threading.Lock()
 _AGENT_ROUTER_SYSTEM_PROMPT = (
     "你是视频直播会话的意图路由器。输入包含用户原话、Realtime模型已经对用户说出的自然语言回答和已有任务。"
     "你只判断是否需要执行后台控制动作，必须返回JSON对象，不要重复回答用户。"
-    "action只能是none、set_current_task、stop_current_task、mcp_free_search。"
+    "action只能是none、set_current_task、stop_current_task、jiuwen_research。"
     "用户原话用于判断用户要求执行什么动作；Realtime回答代表视觉模型结合当前画面得到的事实，二者必须联合理解。"
     "Realtime回答不能凭空创造用户没有要求的任务或搜索。即使Realtime已经用白话确认操作，仍要输出对应后台动作。"
     "判断set_current_task的核心标准不是任务领域，而是完成请求是否需要继续接收后续画面、跨多个时刻观察，"
@@ -57,7 +54,7 @@ _AGENT_ROUTER_SYSTEM_PROMPT = (
     "已有任务时，用户修改目标、规则、频率或输出方式，返回set_current_task，并在task中给出合并修改后的完整任务；"
     "不要只返回修改片段。"
     "已有任务时，用户明确要求停止、暂停或取消监控或当前任务，返回stop_current_task。"
-    "凡用户问题需要当前画面、用户陈述和近期对话之外的外部事实或时效信息，返回mcp_free_search并提供query；"
+    "凡用户问题需要当前画面、用户陈述和近期对话之外的外部事实或时效信息，返回jiuwen_research并提供query；"
     "包括但不限于天气、新闻、价格、公司或品牌背景、人物资料、地点信息。"
     "不要因为Realtime已经给出猜测性答案或只说‘我帮你查一下’而返回none。生成query时，"
     "必须优先采用Realtime回答中从画面识别出的具体品牌、人物、地点、物品或文字，"
@@ -89,7 +86,6 @@ _REALTIME_TELEMETRY_EVENTS = {
     "realtime_websocket_error",
     "realtime_websocket_closed",
     "realtime_context_updated",
-    "realtime_task_session_restarting",
     "active_task_reminder_sent",
     "joyai_monitor_started",
     "realtime_answer_final",
@@ -736,7 +732,7 @@ async def _agent_answer(
             task = _task_text(decision.get("task") or decision.get("task_rule"))
             if task:
                 return f"好的，已设为当前任务：{task}", task, [action]
-        if action != "mcp_free_search":
+        if action != "jiuwen_research":
             return realtime_answer, "", []
         query = str(decision.get("query") or question).strip()[:500]
         return query or question, "", [action]
@@ -771,264 +767,6 @@ async def _synthesize_speech(text: str) -> tuple[bytes, str, str]:
     if not response.content:
         raise RuntimeError("TTS 没有返回音频")
     return response.content, "audio/mpeg", model
-
-
-async def _execute_free_search(query: str) -> Any:
-    from jiuwenswarm.agents.harness.common.tools.search_tools import mcp_free_search
-
-    return await mcp_free_search.invoke({
-        "query": query,
-        "max_results": _MAX_FREE_SEARCH_RESULTS,
-        "timeout_seconds": 20,
-    })
-
-
-def _search_queries(question: str, query: str) -> list[str]:
-    queries = [query]
-    combined = f"{question} {query}".casefold()
-    if re.search(
-        r"(?:今天|今日|现在|目前|当前|实时|最新|刚刚|本周|本月|天气|天氣|新闻|新聞|价格|價格|汇率|匯率|股价|股價)",
-        combined,
-    ):
-        supplemental = f"{query} 官方 最新 更新时间"
-        if supplemental != query:
-            queries.append(supplemental)
-    return queries
-
-
-def _rank_search_sources(
-    sources: list[dict[str, str]], query: str,
-) -> list[dict[str, str]]:
-    query_terms = {
-        term.casefold()
-        for term in re.findall(r"[\w\u3400-\u9fff]{2,}", query)
-        if len(term) >= 2
-    }
-
-    def _score(indexed_source: tuple[int, dict[str, str]]) -> tuple[int, int]:
-        index, source = indexed_source
-        title = source.get("title", "").casefold()
-        url = source.get("url", "").casefold()
-        snippet = source.get("snippet", "").casefold()
-        host = httpx.URL(url).host or ""
-        score = 0
-        if host.endswith((".gov", ".gov.cn", ".gov.hk", ".gov.tw")):
-            score += 80
-        if any(marker in title for marker in ("官方", "官網", "官网", "official")):
-            score += 45
-        if query_terms:
-            score += min(30, 6 * sum(
-                term in title or term in snippet or term in url
-                for term in query_terms
-            ))
-        if any(marker in host for marker in ("wikipedia.org", "baike.baidu.com")):
-            score -= 12
-        if any(marker in host for marker in ("taobao.com", "tmall.com", "douyin.com")):
-            score -= 25
-        return score, -index
-
-    return [
-        source
-        for _, source in sorted(
-            enumerate(sources), key=_score, reverse=True,
-        )
-    ]
-
-
-async def _official_search_evidence(
-    question: str, query: str,
-) -> list[dict[str, str]]:
-    combined = f"{question} {query}".casefold()
-    if "香港" not in combined or not re.search(r"(?:天气|天氣|气象|氣象)", combined):
-        return []
-
-    endpoints = (
-        (
-            "香港天文台本港地区天气预报开放数据",
-            "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=flw&lang=sc",
-        ),
-        (
-            "香港天文台实时天气开放数据",
-            "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=sc",
-        ),
-        (
-            "香港天文台九天天气预报开放数据",
-            "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=sc",
-        ),
-    )
-    verify_ssl = os.environ.get("FREE_SEARCH_SSL_VERIFY", "true").strip().casefold() not in {
-        "0", "false", "no", "off",
-    }
-
-    async with httpx.AsyncClient(timeout=12.0, verify=verify_ssl) as client:
-        async def _fetch(title: str, url: str) -> dict[str, str]:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                payload = response.json()
-                return {
-                    "title": title,
-                    "url": url,
-                    "snippet": "香港天文台官方开放数据",
-                    "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                    "error": "",
-                }
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "title": title,
-                    "url": url,
-                    "snippet": "香港天文台官方开放数据",
-                    "content": "",
-                    "error": str(exc).strip() or type(exc).__name__,
-                }
-
-        return list(await asyncio.gather(*(
-            _fetch(title, url) for title, url in endpoints
-        )))
-
-
-def _search_result_sources(search_result: str) -> list[dict[str, str]]:
-    matches = re.finditer(
-        r"(?ms)^\d+\.\s+([^\n]+)\n\s+URL:\s+(https?://\S+)"
-        r"(?:\n\s+Snippet:\s+(.*?))?(?=^\d+\.\s+|\Z)",
-        search_result,
-    )
-    sources: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
-    for match in matches:
-        url = match.group(2).strip()
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        sources.append({
-            "title": match.group(1).strip(),
-            "url": url,
-            "snippet": re.sub(r"\s+", " ", (match.group(3) or "")).strip(),
-        })
-    return sources
-
-
-async def _fetch_search_evidence(
-    sources: list[dict[str, str]],
-) -> list[dict[str, str]]:
-    from jiuwenswarm.agents.harness.common.tools.web_fetch_tools import mcp_fetch_webpage
-
-    selected = sources[:_MAX_SEARCH_FETCH_PAGES]
-
-    async def _fetch(source: dict[str, str]) -> dict[str, str]:
-        result = await mcp_fetch_webpage.invoke({
-            "url": source["url"],
-            "max_chars": _MAX_SEARCH_PAGE_CHARS,
-            "timeout_seconds": 15,
-        })
-        content = str(result or "").strip()
-        return {
-            **source,
-            "content": "" if content.startswith("[ERROR]") else content,
-            "error": content if content.startswith("[ERROR]") else "",
-        }
-
-    return list(await asyncio.gather(*(_fetch(source) for source in selected)))
-
-
-async def _summarize_search_evidence(
-    question: str,
-    query: str,
-    search_result: str,
-    evidence: list[dict[str, str]],
-    trace_context: dict[str, str] | None = None,
-) -> str:
-    from openai import AsyncOpenAI
-
-    del search_result
-    fetched = [source for source in evidence if source.get("content")]
-    if not fetched:
-        raise RuntimeError("搜索成功，但未能抓取任何结果页面正文")
-
-    api_base, api_key, model = _model_config("")
-    if not api_base or not api_key or not model:
-        raise RuntimeError("缺少主对话模型配置，无法总结搜索正文")
-
-    source_blocks = []
-    for index, source in enumerate(fetched, 1):
-        source_blocks.append(
-            f"[来源{index}]\n"
-            f"标题：{source['title']}\n"
-            f"URL：{source['url']}\n"
-            f"正文：\n{source['content']}"
-        )
-    fetched_urls = {source["url"] for source in fetched}
-    unfetched = [source for source in evidence if source["url"] not in fetched_urls]
-    failed_note = "\n".join(
-        f"- {source['title']}：{source.get('error') or '正文为空'}"
-        for source in unfetched
-    )
-    now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-    joined_sources = "\n\n".join(source_blocks)
-    user_content = (
-        f"当前时间：{now}\n"
-        f"用户问题：{question}\n"
-        f"搜索词：{query}\n\n"
-        f"{joined_sources}"
-    )
-    if failed_note:
-        user_content += f"\n\n[抓取失败的候选来源]\n{failed_note}"
-
-    client = AsyncOpenAI(api_key=api_key, base_url=api_base, timeout=60.0)
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是九问主对话模型的搜索证据总结器。只允许使用所给网页正文回答，"
-                        "不得使用模型记忆、搜索摘要片段或常识补充事实。先判断正文是否真正回答了用户问题；"
-                        "正文没有直接支持的结论一律不得输出，必须明确写明无法确认。"
-                        "优先采用政府、机构官网和第一方来源，"
-                        "对天气、新闻、价格等时效信息必须核对正文中的更新时间；"
-                        "过期内容不得表述为当前事实。材料冲突时明确指出冲突，材料不足时明确说无法确认。"
-                        "无论网页正文使用简体、繁体还是其他语言，最终回答必须统一使用简体中文，"
-                        "不得输出繁体中文。直接用自然口语回答用户，不要写‘根据资料’之类的开场，"
-                        "不要使用标题、项目符号、表格或单独的来源清单。默认回答2至4句，"
-                        "总长度尽量控制在120个中文字符以内，只保留对用户最有用的结论。"
-                        "每句话都必须紧跟一个确实支持该事实的[来源N]；"
-                        "引用正文未表达的事实、扩大原文结论或编造引用编号都不允许。"
-                    ),
-                },
-                {"role": "user", "content": user_content},
-            ],
-            max_tokens=1_200,
-            temperature=0,
-            extra_body={"enable_thinking": False},
-        )
-        summary = _clean_model_text(response.choices[0].message.content or "")
-        if not summary:
-            raise RuntimeError("主对话模型没有返回搜索摘要")
-        source_list = "\n".join(
-            f"[来源{index}] {source['title']} - {source['url']}"
-            for index, source in enumerate(fetched, 1)
-        )
-        grounded_result = (
-            "九问检索摘要（主对话模型根据网页正文生成）\n"
-            f"检索时间：{now}\n"
-            f"问题：{question}\n"
-            f"搜索词：{query}\n\n"
-            f"{summary}\n\n"
-            f"来源：\n{source_list}"
-        )
-        if trace_context is not None:
-            await asyncio.to_thread(_append_video_task_log, {
-                "stage": "search_summarized",
-                **trace_context,
-                "model": model,
-                "fetched_urls": [source["url"] for source in fetched],
-                "failed_urls": [source["url"] for source in unfetched],
-                "summary": summary,
-            })
-        return grounded_result
-    finally:
-        await client.close()
 
 
 async def _execute_official_research(
@@ -1097,6 +835,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             "search_session_id": search_session_id,
             "question": question,
             "query": query,
+            "engine": "Jiuwen ResearchAgent",
         }
         search_jobs[job_id] = {**base_payload, "status": "running"}
         await _send_search_event(ws, "video.search.started", {
@@ -1109,113 +848,29 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
         })
         try:
             async with search_semaphore:
-                official_result = None
-                if agent_client is not None:
-                    try:
-                        official_result = await _execute_official_research(
-                            agent_client,
-                            question=question,
-                            query=query,
-                            visual_context=visual_context,
-                            search_session_id=search_session_id,
-                        )
-                        await asyncio.to_thread(_append_video_task_log, {
-                            "stage": "official_research_completed",
-                            **base_payload,
-                            "sources": official_result.get("sources", []),
-                            "tools_used": official_result.get("tools_used", []),
-                            "model": official_result.get("model", ""),
-                            "original_answer_chars": official_result.get("original_answer_chars", 0),
-                            "answer_chars": official_result.get("answer_chars", 0),
-                        })
-                    except Exception as exc:  # noqa: BLE001
-                        await asyncio.to_thread(_append_video_task_log, {
-                            "stage": "official_research_failed_fallback",
-                            **base_payload,
-                            "error": str(exc) or "official ResearchAgent failed",
-                        })
-
-                if official_result is not None:
-                    answer = official_result["answer"]
-                    engine = "Jiuwen ResearchAgent"
-                else:
-                    queries = _search_queries(question, query)
-                    search_outputs = await asyncio.gather(
-                        *(_execute_free_search(item) for item in queries),
-                        return_exceptions=True,
-                    )
-                    successful_results: list[str] = []
-                    search_errors: list[dict[str, str]] = []
-                    for search_query, output in zip(queries, search_outputs, strict=True):
-                        if isinstance(output, BaseException):
-                            search_errors.append({"query": search_query, "error": str(output)})
-                            continue
-                        result_text = str(output).strip()
-                        if result_text.startswith("[ERROR]"):
-                            search_errors.append({
-                                "query": search_query,
-                                "error": result_text.removeprefix("[ERROR]:").strip(),
-                            })
-                            continue
-                        if result_text:
-                            successful_results.append(result_text)
-                    if not successful_results:
-                        details = " | ".join(
-                            f"{item['query']}: {item['error']}" for item in search_errors
-                        )
-                        raise RuntimeError(details or "free search failed")
-                    raw_result = "\n\n".join(successful_results)
-                    await asyncio.to_thread(_append_video_task_log, {
-                        "stage": "search_results_received",
-                        **base_payload,
-                        "queries": queries,
-                        "search_errors": search_errors,
-                        "raw_results": [result[:50_000] for result in successful_results],
-                    })
-                    sources = _rank_search_sources(
-                        _search_result_sources(raw_result), query,
-                    )
-                    if not sources:
-                        raise RuntimeError("搜索没有返回可抓取的网页来源")
-                    await asyncio.to_thread(_append_video_task_log, {
-                        "stage": "search_sources_selected",
-                        **base_payload,
-                        "sources": sources[:_MAX_SEARCH_FETCH_PAGES],
-                    })
-                    official_evidence, fetched_evidence = await asyncio.gather(
-                        _official_search_evidence(question, query),
-                        _fetch_search_evidence(sources),
-                    )
-                    evidence = [*official_evidence, *fetched_evidence]
-                    await asyncio.to_thread(_append_video_task_log, {
-                        "stage": "search_evidence_fetched",
-                        **base_payload,
-                        "evidence": [{
-                            "title": item.get("title", ""),
-                            "url": item.get("url", ""),
-                            "content_chars": len(item.get("content", "")),
-                            "error": item.get("error", ""),
-                        } for item in evidence],
-                    })
-                    answer = await _summarize_search_evidence(
-                        question,
-                        query,
-                        raw_result,
-                        evidence,
-                        {"job_id": job_id, "search_session_id": search_session_id},
-                    )
-                    first_line = raw_result.partition("\n")[0]
-                    engine = "免费搜索"
-                    prefix = "Free search results ("
-                    if first_line.startswith(prefix) and ") for:" in first_line:
-                        engine = first_line[len(prefix):].split(") for:", 1)[0]
+                official_result = await _execute_official_research(
+                    agent_client,
+                    question=question,
+                    query=query,
+                    visual_context=visual_context,
+                    search_session_id=search_session_id,
+                )
+                answer = official_result["answer"]
+                await asyncio.to_thread(_append_video_task_log, {
+                    "stage": "official_research_completed",
+                    **base_payload,
+                    "sources": official_result.get("sources", []),
+                    "tools_used": official_result.get("tools_used", []),
+                    "model": official_result.get("model", ""),
+                    "original_answer_chars": official_result.get("original_answer_chars", 0),
+                    "answer_chars": official_result.get("answer_chars", 0),
+                })
             if not answer:
-                raise RuntimeError("主对话模型没有生成搜索摘要")
+                raise RuntimeError("official ResearchAgent returned empty output")
             latency_ms = round((time.perf_counter() - started_at) * 1000)
             completed_payload = {
                 **base_payload,
                 "status": "completed",
-                "engine": engine,
                 "result": answer,
                 "latency_ms": latency_ms,
             }
@@ -1226,7 +881,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             })
             await _send_search_event(ws, "video.search.completed", completed_payload)
         except Exception as exc:  # noqa: BLE001
-            error = str(exc).strip() or "free search failed"
+            error = str(exc).strip() or "official ResearchAgent failed"
             latency_ms = round((time.perf_counter() - started_at) * 1000)
             failed_payload = {
                 **base_payload,
@@ -1472,7 +1127,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
                     search_session_id=search_session_id,
                     visual_context=str(result.get("response") or ""),
                 )
-            tools_used.append("mcp_free_search")
+            tools_used.append("jiuwen_research")
         result["tools_used"] = tools_used
         result["search_job"] = search_job
         await asyncio.to_thread(_append_joyai_log, {
@@ -1886,7 +1541,7 @@ def register_video_live_handler(channel: Any, *, agent_client: Any = None) -> No
             )
             return
         search_job = None
-        if "mcp_free_search" in tools_used:
+        if "jiuwen_research" in tools_used:
             query = answer or question
             search_job = _start_search_job(
                 ws,

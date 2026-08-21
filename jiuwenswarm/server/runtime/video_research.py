@@ -61,7 +61,7 @@ def _result_text(result: Any) -> str:
 
 
 def _result_error(result: Any) -> str:
-    """Return an agent failure message that must trigger the fallback search."""
+    """Return an agent failure message that must fail the search request."""
     answer = _result_text(result)
     if isinstance(result, dict):
         result_type = str(result.get("result_type") or "").strip().lower()
