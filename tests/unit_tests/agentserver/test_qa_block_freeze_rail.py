@@ -466,6 +466,28 @@ class TestQABlockFreezeRailFirstAskPlainQuery(unittest.IsolatedAsyncioTestCase):
 
         self.freeze_mock.assert_awaited_once()
 
+    async def test_after_invoke_keeps_usage_stream_open_until_freeze_persist_finishes(self) -> None:
+        ctx, context_engine, session = _make_freeze_ctx(query="请生成一个 skill")
+        session.write_stream = AsyncMock()
+        ctx.inputs.result = {"result_type": "answer", "output": "done"}
+        with patch.object(_module, "resolve_context_engine", return_value=context_engine), patch.object(
+            _module, "resolve_summarizer_model", return_value=None
+        ), patch.object(_module, "clear_assembly_committed_qa_id"), patch.object(
+            _module, "QABlockStore", return_value=MagicMock()
+        ), patch.object(_module, "post_agent_execute_for_session", new_callable=AsyncMock):
+            await self.rail.after_invoke(ctx)
+
+        freeze_kwargs = self.freeze_mock.await_args.kwargs
+        self.assertEqual(freeze_kwargs["persist_mode"], "sync")
+        usage_callback = freeze_kwargs["llm_usage_callback"]
+        await usage_callback(
+            SimpleNamespace(input_tokens=123, output_tokens=45, total_tokens=168)
+        )
+
+        usage_event = session.write_stream.await_args.args[0]
+        self.assertEqual(usage_event.type, "llm_usage")
+        self.assertEqual(usage_event.payload["usage_metadata"]["total_tokens"], 168)
+
     async def test_settled_result_with_stale_key_freezes_and_clears_key(self) -> None:
         """Explicit answer + leftover INTERRUPTION_KEY → freeze and clear (not mis-skip)."""
         stale = SimpleNamespace(original_query="stale")

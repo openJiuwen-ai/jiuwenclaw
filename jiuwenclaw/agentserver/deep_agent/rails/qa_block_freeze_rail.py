@@ -28,6 +28,7 @@ from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
 from jiuwenclaw.agentserver.deep_agent.rails.qa_block_assembly_rail import (
     clear_assembly_committed_qa_id,
 )
+from jiuwenclaw.agentserver.llm_usage import emit_llm_usage_to_session
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,11 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._config.enabled:
             return
-        await self._freeze_session(ctx, persist_mode="async")
+        # Keep the request stream alive until the L1 summarizer reports its
+        # usage. The answer chunk has already been emitted, but an async
+        # freeze would finish after Runner closes the stream and its tokens
+        # could no longer reach the adapter's usage accumulator.
+        await self._freeze_session(ctx, persist_mode="sync")
 
     async def freeze_current_qa_sync(
         self,
@@ -296,6 +301,11 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             status=status,
             persist_mode=persist_mode,
             summarizer_model=summarizer_model,
+            llm_usage_callback=(
+                (lambda usage: emit_llm_usage_to_session(actual_session, usage))
+                if persist_mode == "sync"
+                else None
+            ),
             post_commit=lambda commit, s=actual_session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is not None:
@@ -407,6 +417,11 @@ class JiuClawQABlockFreezeRail(DeepAgentRail):
             persist_mode=persist_mode,
             preloaded_qa_ids=preloaded if isinstance(preloaded, list) else None,
             summarizer_model=summarizer_model,
+            llm_usage_callback=(
+                (lambda usage: emit_llm_usage_to_session(session, usage))
+                if persist_mode == "sync"
+                else None
+            ),
             post_commit=lambda commit, s=session, c=context: self._on_freeze_commit(s, c, commit),
         )
         if entry is None:
