@@ -1180,7 +1180,17 @@ class WorkflowRunState(BaseModel):
         status with completion timestamp, finalizes running phases/agents to
         ``stopped``. No result/error text — a stop is a control decision, not a
         leader failure.
+
+        A session budget hit also arrives as WORKFLOW_STOPPED (terminal, not
+        recoverable by script edit) carrying budget fields + the exhausted scope;
+        preserve them so the frontend can render the exhausted layer.
         """
+        if progress.budget is not None:
+            self.budget = progress.budget
+        if progress.workflow_budget is not None:
+            self.workflow_budget = progress.workflow_budget
+        if progress.budget_exhausted_scope is not None:
+            self.budget_exhausted_scope = progress.budget_exhausted_scope
         return self._finalize_workflow(status="stopped")
 
     def _on_log(self, progress: WorkflowProgress) -> dict[str, Any]:

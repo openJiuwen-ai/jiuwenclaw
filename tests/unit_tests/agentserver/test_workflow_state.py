@@ -1129,3 +1129,27 @@ def test_resume_workflow_started_keeps_phase_tree():
     state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")]))
     state.apply(_make_progress("workflow_started", workflow_name="test", phases=[PhasePlan(title="调研")], relaunch_kind="resume"))
     assert [p.name for p in state.phases] == ["调研"]  # not duplicated
+
+
+def test_workflow_stopped_preserves_budget_and_scope():
+    """A session budget hit arrives as workflow_stopped carrying budget fields.
+
+    Unlike an explicit user stop (no budget), the session-budget stop must
+    preserve the budget snapshot + exhausted scope so the frontend can render
+    the exhausted layer and know it is session-scoped (not recoverable).
+    """
+    state = WorkflowRunState()
+    state.apply(_make_progress("workflow_started", workflow_name="test"))
+    budget = {"total": 500000, "spent": 500000, "remaining": 0, "scope": "session", "exhausted": True}
+    wf_budget = {"total": 100, "spent": 50, "remaining": 50, "scope": "workflow", "exhausted": False}
+    state.apply(_make_progress(
+        "workflow_stopped",
+        text="session token budget exhausted",
+        budget=budget,
+        workflow_budget=wf_budget,
+        budget_exhausted_scope="session",
+    ))
+    assert state.status == "stopped"
+    assert state.budget == budget
+    assert state.workflow_budget == wf_budget
+    assert state.budget_exhausted_scope == "session"
