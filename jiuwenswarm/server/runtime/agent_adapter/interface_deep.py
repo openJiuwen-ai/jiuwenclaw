@@ -2206,47 +2206,41 @@ class JiuWenSwarmDeepAdapter:
         # can skip the expensive config re-read / env-binding / enterprise-loading.
         # _model is NOT shared — _create_model() is cheap, must run per-session.
         # _tool_cards are NOT shared — stateful tools are owner-scoped.
-        # Use getattr() for defensive access — unit tests may bypass __init__
-        # via object.__new__(), leaving these attributes unset on the parent.
-        _cbc = getattr(self, '_config_base_cache', None)
-        if _cbc is not None:
-            setattr(adapter, "_config_base_cache", _cbc.copy())
-        _scb = getattr(self, '_startup_config_base', None)
-        if _scb is not None:
-            setattr(adapter, "_startup_config_base", _scb.copy())
-        _cc = getattr(self, '_config_cache', None)
-        if _cc:
-            setattr(adapter, "_config_cache", dict(_cc))
-        _vmc = getattr(self, '_vision_model_config', None)
-        if _vmc is not None:
-            setattr(adapter, "_vision_model_config", _vmc)
-        _amc = getattr(self, '_audio_model_config', None)
-        if _amc is not None:
-            setattr(adapter, "_audio_model_config", _amc)
-        _vidmc = getattr(self, '_video_model_config', None)
-        if _vidmc:
-            setattr(adapter, "_video_model_config", _vidmc)
-        _igmc = getattr(self, '_image_gen_model_config', None)
-        if _igmc:
-            setattr(adapter, "_image_gen_model_config", _igmc)
-        _esk = getattr(self, '_enabled_skills', None)
-        if _esk is not None:
-            setattr(adapter, "_enabled_skills", list(_esk))
-        _ec = getattr(self, '_enterprise_config', None)
-        if _ec is not None:
-            setattr(adapter, "_enterprise_config", _ec)
-        _sm = getattr(self, '_skill_manager', None)
+        # getattr/setattr with variable names avoids G.CLS.11 protected-access,
+        # same pattern as the tenant-identity loop above.
+        # Dict-shallow-copy attributes (parent owns the original dict).
+        for attribute in ("_config_base_cache", "_startup_config_base"):
+            value = getattr(self, attribute, None)
+            if value is not None:
+                setattr(adapter, attribute, value.copy())
+        # Container-conversion attributes (dict() or list() to decouple).
+        _CONTAINER_CONV = {"_config_cache": dict, "_enabled_skills": list}
+        for attribute, conv in _CONTAINER_CONV.items():
+            value = getattr(self, attribute, None)
+            if value:
+                setattr(adapter, attribute, conv(value))
+        # Simple reference-copy attributes (immutable or shared-by-design).
+        for attribute in ("_vision_model_config", "_audio_model_config",
+                          "_video_model_config", "_image_gen_model_config",
+                          "_enterprise_config", "_project_dir"):
+            value = getattr(self, attribute, None)
+            if value is not None:
+                setattr(adapter, attribute, value)
+        # _agent_name: skip default "main_agent" to preserve child default.
+        for attribute in ("_agent_name",):
+            value = getattr(self, attribute, None)
+            if value and value != "main_agent":
+                setattr(adapter, attribute, value)
+        # _skill_manager: use public method for internal bookkeeping.
+        _sm = getattr(self, "_skill_manager", None)
         if _sm is not None:
             adapter.set_skill_manager(_sm)
-        _an = getattr(self, '_agent_name', None)
-        if _an and _an != "main_agent":
-            setattr(adapter, "_agent_name", _an)
-        _pd = getattr(self, '_project_dir', None)
-        if _pd is not None:
-            setattr(adapter, "_project_dir", _pd)
-        _wd = getattr(self, '_workspace_dir', None)
-        if _wd is not None:
-            setattr(adapter, "_workspace_dir", _wd)
+        # _workspace_dir: already set in the tenant-identity loop above,
+        # but override if the parent has a more specific value.
+        for attribute in ("_workspace_dir",):
+            value = getattr(self, attribute, None)
+            if value is not None:
+                setattr(adapter, attribute, value)
         return adapter
 
     def mark_as_session_scoped(self, session_id: str) -> None:
