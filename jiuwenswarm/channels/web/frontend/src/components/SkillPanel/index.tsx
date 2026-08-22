@@ -1266,12 +1266,14 @@ export function SkillPanel({
       return (
         <button key={node.path} type="button"
           onClick={() => { if (previewable && selectedSkill) fetchFilePreview(selectedSkill.name, node.path); }}
+          data-testid="skill-panel-file-tree-node"
+          data-variant="file"
           className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm border ${selected ? 'bg-accent-subtle text-text border-[var(--color-border-accent)]' : previewable ? 'text-text-muted hover:bg-secondary/40 hover:text-text border-transparent' : 'text-text-muted/60 border-transparent cursor-not-allowed'}`}
           style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
           <span className="w-4 h-4" />
           <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3.75h7.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5h-10.5a1.5 1.5 0 01-1.5-1.5v-15a1.5 1.5 0 011.5-1.5zM14.25 3.75v4.5h4.5" /></svg>
           <span className="flex-1 min-w-0 truncate">{node.name}</span>
-          {!previewable ? <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">不可预览</span> : null}
+          {!previewable ? <span data-testid="skill-panel-file-tree-node-unpreviewable" className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">不可预览</span> : null}
         </button>
       );
     }
@@ -1281,6 +1283,8 @@ export function SkillPanel({
       <div key={node.path || 'root'}>
         {node.path !== '' ? (
           <button type="button" onClick={() => toggleFileFolder(node.path)}
+            data-testid="skill-panel-file-tree-node"
+            data-variant="directory"
             className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text"
             style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
             <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
@@ -1923,6 +1927,9 @@ export function SkillPanel({
                 if (isDisabled) return;
                 setSkillType(prev => prev === type ? null : type);
               }}
+              data-testid="skill-panel-skill-type-capsule"
+              data-variant={type}
+              aria-pressed={skillType === type}
               className={`h-7 px-4 rounded-[8px] text-sm whitespace-nowrap border ${
                 isDisabled
                   ? "border-border/50 text-text-muted/40 cursor-not-allowed bg-secondary/30"
@@ -2009,7 +2016,7 @@ export function SkillPanel({
   return (
     <>
       {message && messageType === "success" && (
-        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+        <div data-testid="skill-panel-toast" data-variant="success" className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
           <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
             <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
@@ -2019,6 +2026,7 @@ export function SkillPanel({
           <button
             type="button"
             onClick={() => setMessage(null)}
+            data-testid="skill-panel-toast-close"
             className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
           >
             <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2028,27 +2036,28 @@ export function SkillPanel({
         </div>
       )}
       {message && messageType === "loading" && (
-        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 bg-card border border-border" style={{ width: "564px", height: "40px" }}>
+        <div data-testid="skill-panel-toast" data-variant="loading" className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 bg-card border border-border" style={{ width: "564px", height: "40px" }}>
           <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin flex-shrink-0" />
           {cleanMessage}
         </div>
       )}
-      <div className="flex-1 flex flex-col min-w-0 min-h-0">
-        <div className="card flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div data-testid="skill-panel" className="flex-1 flex flex-col min-w-0 min-h-0">
+        <div data-testid="skill-panel-card" className="card flex-1 flex flex-col min-h-0 overflow-hidden">
           {!(activeTab === "my" && selectedSkill) && (
           <>
-          <div className="flex items-start justify-between">
+          <div data-testid="skill-panel-header" className="flex items-start justify-between">
           <div>
-            <h2 className="text-lg font-semibold">
+            <h2 data-testid="skill-panel-title" className="text-lg font-semibold">
               {t('skills.title')}
             </h2>
-            <p className="text-sm text-text-muted mt-1">
+            <p data-testid="skill-panel-subtitle" className="text-sm text-text-muted mt-1">
               {t('skills.subtitle')}
             </p>
           </div>
-          <div className="flex items-center">
+          <div data-testid="skill-panel-header-actions" className="flex items-center">
             <button
               onClick={() => setSourceModalOpen(true)}
+              data-testid="skill-panel-source-manager-btn"
               className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -2071,6 +2080,8 @@ export function SkillPanel({
                   fetchSkills(true);
                 }
               }}
+              data-testid="skill-panel-refresh-btn"
+              data-variant={activeTab === "graph" && graphReading ? "reading" : "idle"}
               className={`flex items-center gap-1.5 pl-[18px] pr-[24px] py-1.5 rounded-lg text-sm text-text-muted  ${
                 activeTab === "graph" && graphReading
                   ? "cursor-not-allowed opacity-70"
@@ -2087,10 +2098,12 @@ export function SkillPanel({
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+        <div data-testid="skill-panel-toolbar" className="mt-4 flex items-center justify-between gap-2">
+          <div data-testid="skill-panel-tabs" className="flex items-center gap-2">
             <button
               onClick={() => setActiveTab("marketplace")}
+              data-testid="skill-panel-tab"
+              data-variant="marketplace"
               className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "marketplace"
                   ? "text-text font-bold"
@@ -2102,6 +2115,8 @@ export function SkillPanel({
             </button>
             <button
               onClick={() => setActiveTab("my")}
+              data-testid="skill-panel-tab"
+              data-variant="my"
               className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "my"
                   ? "text-text font-bold"
@@ -2113,6 +2128,8 @@ export function SkillPanel({
             </button>
             <button
               onClick={() => setActiveTab("graph")}
+              data-testid="skill-panel-tab"
+              data-variant="graph"
               className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "graph"
                   ? "text-text font-bold"
@@ -2124,6 +2141,8 @@ export function SkillPanel({
             </button>
             <button
               onClick={() => setActiveTab("index")}
+              data-testid="skill-panel-tab"
+              data-variant="index"
               className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "index"
                   ? "text-text font-bold"
@@ -2134,13 +2153,15 @@ export function SkillPanel({
               {t('skills.tabs.skillIndex')}
             </button>
           </div>
-          <div className="flex items-center gap-3">
+          <div data-testid="skill-panel-toolbar-actions" className="flex items-center gap-3">
             {activeTab === "my" && (
               <>
                 {/* 已发布/未发布筛选 */}
-                <div className="relative" style={{ width: mySkillsPublishFilter === "all" ? '40px' : '55px' }}>
+                <div data-testid="skill-panel-my-publish-filter" className="relative" style={{ width: mySkillsPublishFilter === "all" ? '40px' : '55px' }}>
                   <button
                     onClick={() => { setPublishFilterOpen((v) => !v); setEnableFilterOpen(false); }}
+                    data-testid="skill-panel-my-filter-trigger"
+                    data-variant="publish"
                     className="flex items-center justify-between w-full h-[32px] text-xs text-text bg-transparent"
                   >
                     <span className="truncate">
@@ -2155,21 +2176,27 @@ export function SkillPanel({
                   {publishFilterOpen && (
                     <>
                       <div className="fixed inset-0 z-40" onClick={() => setPublishFilterOpen(false)} />
-                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                      <div data-testid="skill-panel-my-filter-menu" data-variant="publish" className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
                         <button
                           onClick={() => { setMySkillsPublishFilter("all"); setPublishFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="publish-all"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "all" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.publishFilter.all')}
                         </button>
                         <button
                           onClick={() => { setMySkillsPublishFilter("published"); setPublishFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="publish-published"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "published" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.publishFilter.published')}
                         </button>
                         <button
                           onClick={() => { setMySkillsPublishFilter("unpublished"); setPublishFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="publish-unpublished"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "unpublished" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.publishFilter.unpublished')}
@@ -2179,9 +2206,11 @@ export function SkillPanel({
                   )}
                 </div>
                 {/* 启用/禁用筛选 */}
-                <div className="relative" style={{ width: '40px' }}>
+                <div data-testid="skill-panel-my-enable-filter" className="relative" style={{ width: '40px' }}>
                   <button
                     onClick={() => { setEnableFilterOpen((v) => !v); setPublishFilterOpen(false); }}
+                    data-testid="skill-panel-my-filter-trigger"
+                    data-variant="enable"
                     className="flex items-center justify-between w-full h-[32px] text-xs text-text bg-transparent"
                   >
                     <span className="truncate">
@@ -2196,21 +2225,27 @@ export function SkillPanel({
                   {enableFilterOpen && (
                     <>
                       <div className="fixed inset-0 z-40" onClick={() => setEnableFilterOpen(false)} />
-                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                      <div data-testid="skill-panel-my-filter-menu" data-variant="enable" className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
                         <button
                           onClick={() => { setMySkillsSubTab("all"); setEnableFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="enable-all"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "all" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.mySkillsTabs.all')}
                         </button>
                         <button
                           onClick={() => { setMySkillsSubTab("enabled"); setEnableFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="enable-enabled"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "enabled" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.mySkillsTabs.enabled')}
                         </button>
                         <button
                           onClick={() => { setMySkillsSubTab("disabled"); setEnableFilterOpen(false); }}
+                          data-testid="skill-panel-my-filter-option"
+                          data-variant="enable-disabled"
                           className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "disabled" ? "text-[#1476ff]" : "text-text-muted"}`}
                         >
                           {t('skills.mySkillsTabs.disabled')}
@@ -2222,22 +2257,24 @@ export function SkillPanel({
               </>
             )}
             {(activeTab === "my" || activeTab === "marketplace") && (
-              <div className="relative" style={{ width: '360px' }}>
+              <div data-testid="skill-panel-search" className="relative" style={{ width: '360px' }}>
                 <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
                 </svg>
                 <input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
+                  data-testid="skill-panel-search-input"
                   placeholder={t('skills.searchPlaceholder')}
                   className="w-full pl-8 pr-3 py-1.5 rounded-[6px] border border-border text-sm text-text placeholder:text-text-muted"
                 />
               </div>
             )}
             {activeTab === "my" && (
-              <div className="relative">
+              <div data-testid="skill-panel-create-menu" className="relative">
                 <button
                   onClick={() => setCreateMenuOpen((v) => !v)}
+                  data-testid="skill-panel-create-menu-trigger"
                   className="flex items-center justify-center gap-1 h-8 w-[96px] rounded-[16px] text-sm text-text-inverse bg-[#191919] hover:opacity-80"
                 >
                   {t('skills.actions.create')}
@@ -2248,13 +2285,15 @@ export function SkillPanel({
                 {createMenuOpen && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setCreateMenuOpen(false)} />
-                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                    <div data-testid="skill-panel-create-menu-dropdown" className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
                       <button
                         onClick={() => {
                           setCreateMenuOpen(false);
                           setUploadSkillModalOpen(true);
                         }}
                         disabled={actionTarget === "import_local"}
+                        data-testid="skill-panel-create-menu-option"
+                        data-variant="upload-local-skill"
                         className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         {t('skills.actions.uploadLocalSkill')}
@@ -2264,6 +2303,8 @@ export function SkillPanel({
                           setCreateMenuOpen(false);
                           setDocToSkillModalOpen(true);
                         }}
+                        data-testid="skill-panel-create-menu-option"
+                        data-variant="doc-to-skill"
                         className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                       >
                         {t('skills.actions.documentToSkill')}
@@ -2273,6 +2314,8 @@ export function SkillPanel({
                           setCreateMenuOpen(false);
                           handleCreateViaChat();
                         }}
+                        data-testid="skill-panel-create-menu-option"
+                        data-variant="create-via-chat"
                         className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                       >
                         {t('skills.actions.createViaChat')}
@@ -2288,14 +2331,14 @@ export function SkillPanel({
           )}
 
         {activeTab === "index" ? (
-          <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
-            <div className="rounded-lg border border-border bg-panel p-4">
+          <div data-testid="skill-panel-index-view" className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
+            <div data-testid="skill-panel-retrieval-card" className="rounded-lg border border-border bg-panel p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-[220px]">
-                  <div className="text-sm font-medium text-text-strong">
+                <div data-testid="skill-panel-retrieval-info" className="min-w-[220px]">
+                  <div data-testid="skill-panel-retrieval-title" className="text-sm font-medium text-text-strong">
                     {t('skills.retrieval.title')}
                   </div>
-                  <div className="text-xs text-text-muted mt-1">
+                  <div data-testid="skill-panel-retrieval-summary" className="text-xs text-text-muted mt-1">
                     {retrievalStatusText}
                     {retrievalStatus?.indexed_count != null
                       ? ` · ${t('skills.retrieval.indexedCount', { count: retrievalStatus.indexed_count })}`
@@ -2307,14 +2350,16 @@ export function SkillPanel({
                       : ""}
                   </div>
                   {retrievalLastBuildMessage ? (
-                    <div className="mt-1 text-xs text-amber-600">
+                    <div data-testid="skill-panel-retrieval-last-build-hint" className="mt-1 text-xs text-amber-600">
                       {retrievalLastBuildMessage}
                     </div>
                   ) : null}
                 </div>
-                <div className="flex items-center gap-2">
+                <div data-testid="skill-panel-retrieval-actions" className="flex items-center gap-2">
                   <button
                     onClick={() => void handleBuildRetrievalIndex(false)}
+                    data-testid="skill-panel-retrieval-build-btn"
+                    data-variant={retrievalLoading === "build" || retrievalBuildRunning ? "building" : "idle"}
                     className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                   >
@@ -2325,6 +2370,7 @@ export function SkillPanel({
                   {retrievalStatus?.index_exists ? (
                     <button
                       onClick={() => void handleBuildRetrievalIndex(true)}
+                      data-testid="skill-panel-retrieval-full-rebuild-btn"
                       className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                     >
@@ -2336,6 +2382,7 @@ export function SkillPanel({
                   {retrievalBuildRunning ? (
                     <button
                       onClick={handleCancelRetrievalBuild}
+                      data-testid="skill-panel-retrieval-cancel-btn"
                       className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "cancel"}
                     >
@@ -2350,6 +2397,7 @@ export function SkillPanel({
                       void fetchRetrievalStatus();
                       void fetchRetrievalTree();
                     }}
+                    data-testid="skill-panel-retrieval-refresh-btn"
                     className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "tree" || retrievalLoading === "status"}
                   >
@@ -2368,14 +2416,14 @@ export function SkillPanel({
                 />
               ) : null}
             </div>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
-                <div className="mb-3 flex items-center justify-between gap-2">
+            <div data-testid="skill-panel-retrieval-grid" className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
+              <div data-testid="skill-panel-retrieval-tree-panel" className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
+                <div data-testid="skill-panel-retrieval-tree-header" className="mb-3 flex items-center justify-between gap-2">
                   <div>
-                    <div className="text-sm font-medium text-text-strong">
+                    <div data-testid="skill-panel-retrieval-tree-title" className="text-sm font-medium text-text-strong">
                       {t('skills.retrieval.treeTitle')}
                     </div>
-                    <div className="text-xs text-text-muted mt-1">
+                    <div data-testid="skill-panel-retrieval-tree-count" className="text-xs text-text-muted mt-1">
                       {retrievalTreeNodes.length > 0
                         ? t('skills.retrieval.treeCount', {
                             branches: retrievalTreeCounts.branches,
@@ -2387,7 +2435,7 @@ export function SkillPanel({
                     </div>
                   </div>
                 </div>
-                <div className="flex-1 min-h-[320px] overflow-auto rounded-md border border-border bg-secondary/40 p-2">
+                <div data-testid="skill-panel-retrieval-tree-content" className="flex-1 min-h-[320px] overflow-auto rounded-md border border-border bg-secondary/40 p-2">
                   {retrievalTreeNodes.length > 0 ? (
                     <SkillIndexTreeView
                       roots={retrievalTreeRoots}
@@ -2410,22 +2458,24 @@ export function SkillPanel({
                   )}
                 </div>
               </div>
-              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
-                <div className="text-sm font-medium text-text-strong mb-3">
+              <div data-testid="skill-panel-retrieval-detail-panel" className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
+                <div data-testid="skill-panel-retrieval-detail-title" className="text-sm font-medium text-text-strong mb-3">
                   {t('skills.retrieval.nodeDetails')}
                 </div>
                 {selectedTreeNode ? (
-                  <div className="flex-1 min-h-0 overflow-auto">
+                  <div data-testid="skill-panel-retrieval-detail-content" className="flex-1 min-h-0 overflow-auto">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div className="text-base font-semibold text-text-strong break-words">
+                        <div data-testid="skill-panel-retrieval-detail-node-title" className="text-base font-semibold text-text-strong break-words">
                           {getSkillIndexNodeLabel(selectedTreeNode)}
                         </div>
-                        <div className="mt-1 text-xs text-text-muted break-all">
+                        <div data-testid="skill-panel-retrieval-detail-node-cid" className="mt-1 text-xs text-text-muted break-all">
                           {selectedTreeNode.cid}
                         </div>
                       </div>
                       <span
+                        data-testid="skill-panel-retrieval-detail-node-type-badge"
+                        data-variant={selectedTreeNode.type}
                         className={`shrink-0 rounded border px-2 py-1 text-xs ${
                           selectedTreeNode.type === "leaf"
                             ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-600"
@@ -2438,49 +2488,49 @@ export function SkillPanel({
                       </span>
                     </div>
 
-                    <dl className="mt-4 space-y-3 text-sm">
+                    <dl data-testid="skill-panel-retrieval-detail-properties" className="mt-4 space-y-3 text-sm">
                       <div>
-                        <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDescription')}</dt>
+                        <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="description" className="text-xs text-text-muted">{t('skills.retrieval.nodeDescription')}</dt>
                         <dd className="mt-1 whitespace-pre-wrap text-text">
                           {selectedTreeNode.description || t('skills.noDescription')}
                         </dd>
                       </div>
                       {selectedTreeNode.select_when ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSelectWhen')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="select_when" className="text-xs text-text-muted">{t('skills.retrieval.nodeSelectWhen')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.select_when}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.dont_select_when ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDontSelectWhen')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="dont_select_when" className="text-xs text-text-muted">{t('skills.retrieval.nodeDontSelectWhen')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.dont_select_when}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.source_description ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSourceDescription')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="source_description" className="text-xs text-text-muted">{t('skills.retrieval.nodeSourceDescription')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.source_description}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.worker_id ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeWorkerId')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="worker_id" className="text-xs text-text-muted">{t('skills.retrieval.nodeWorkerId')}</dt>
                           <dd className="mt-1 break-all font-mono text-xs text-text">{selectedTreeNode.worker_id}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.category ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeCategory')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="category" className="text-xs text-text-muted">{t('skills.retrieval.nodeCategory')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.category}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.keywords?.length ? (
                         <div>
-                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeKeywords')}</dt>
+                          <dt data-testid="skill-panel-retrieval-detail-field-label" data-variant="keywords" className="text-xs text-text-muted">{t('skills.retrieval.nodeKeywords')}</dt>
                           <dd className="mt-2 flex flex-wrap gap-1.5">
                             {selectedTreeNode.keywords.slice(0, 24).map((keyword) => (
-                              <span key={keyword} className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-text-muted">
+                              <span key={keyword} data-testid="skill-panel-retrieval-detail-keyword-tag" className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-text-muted">
                                 {keyword}
                               </span>
                             ))}
@@ -2492,7 +2542,7 @@ export function SkillPanel({
                           <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeExamples')}</dt>
                           <dd className="mt-1 space-y-1">
                             {selectedTreeNode.examples.slice(0, 5).map((example) => (
-                              <div key={example} className="whitespace-pre-wrap rounded border border-border bg-secondary px-2 py-1 text-xs text-text">
+                              <div key={example} data-testid="skill-panel-retrieval-detail-example-item" className="whitespace-pre-wrap rounded border border-border bg-secondary px-2 py-1 text-xs text-text">
                                 {example}
                               </div>
                             ))}
@@ -2502,7 +2552,7 @@ export function SkillPanel({
                     </dl>
                   </div>
                 ) : (
-                  <div className="flex-1 min-h-[220px] rounded-md border border-dashed border-border bg-secondary/30 p-4 text-sm text-text-muted">
+                  <div data-testid="skill-panel-retrieval-detail-empty" className="flex-1 min-h-[220px] rounded-md border border-dashed border-border bg-secondary/30 p-4 text-sm text-text-muted">
                     {t('skills.retrieval.selectNodeHint')}
                   </div>
                 )}
@@ -2527,19 +2577,19 @@ export function SkillPanel({
                   </div>
                 </div>
                 {symphonySaveError ? (
-                  <p className="mt-1 text-xs leading-5 text-danger" role="alert">
+                  <p data-testid="skill-panel-graph-orchestration-error" className="mt-1 text-xs leading-5 text-danger" role="alert">
                     {symphonySaveError}
                   </p>
                 ) : null}
               </div>
               <div className="flex flex-shrink-0 items-center gap-2">
                 {symphonySaving ? (
-                  <>
+                  <div data-testid="skill-panel-graph-orchestration-saving" className="flex items-center gap-2">
                     <Loader2 size={16} className="animate-spin text-text-muted" aria-hidden="true" />
                     <span className="text-xs text-text-muted">
                       {t('skills.graph.orchestration.saving')}
                     </span>
-                  </>
+                  </div>
                 ) : null}
                 <Switch
                   checked={symphonyEnabledDraft}
@@ -2550,6 +2600,7 @@ export function SkillPanel({
                       ? 'skills.graph.orchestration.toggleLabel'
                       : 'skills.graph.orchestration.connectionRequired',
                   )}
+                  data-testid="skill-panel-switch-1"
                 />
               </div>
             </div>
@@ -2566,13 +2617,15 @@ export function SkillPanel({
 
         {activeTab === "marketplace" ? (
           <>
-            <div className="mt-4 flex items-center gap-2">
+            <div data-testid="skill-panel-marketplace-tabs-row" className="mt-4 flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => {
                   setMarketplaceSubTab("skillhub");
                   setSearchTrigger((prev) => prev + 1);
                 }}
+                data-testid="skill-panel-marketplace-tab"
+                data-variant="skillhub"
                 className={`px-4 text-sm font-medium ${
                   marketplaceSubTab === "skillhub"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
@@ -2588,6 +2641,8 @@ export function SkillPanel({
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
+                data-testid="skill-panel-marketplace-tab"
+                data-variant="swarmskills"
                 className={`px-4 text-sm font-medium ${
                   marketplaceSubTab === "swarmskills"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
@@ -2603,6 +2658,8 @@ export function SkillPanel({
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
+                data-testid="skill-panel-marketplace-tab"
+                data-variant="online"
                 className={`px-4 text-sm font-medium ${
                   marketplaceSubTab === "online"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
@@ -2615,12 +2672,14 @@ export function SkillPanel({
 
             {marketplaceSubTab === "skillhub" ? (
             <>
-            <div className="mt-3 flex items-center gap-2">
+            <div data-testid="skill-panel-skillhub-categories" className="mt-3 flex items-center gap-2">
               {MARKETPLACE_CATEGORIES.map((cat, idx) => (
                 <span key={cat} className="flex items-center gap-2">
                   {idx > 0 && <span className="text-text-muted/40">|</span>}
                   <button
                     onClick={() => setMarketplaceCategory(cat)}
+                    data-testid="skill-panel-skillhub-category"
+                    data-variant={cat}
                     className={`px-1 text-sm ${
                       marketplaceCategory === cat
                         ? "text-text font-bold"
@@ -2632,16 +2691,16 @@ export function SkillPanel({
                 </span>
               ))}
             </div>
-            <div className="mt-3 flex items-center gap-2">
+            <div data-testid="skill-panel-skillhub-type-capsules" className="mt-3 flex items-center gap-2">
               {renderSkillTypeCapsules()}
             </div>
 
-            <div className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
+            <div data-testid="skill-panel-skillhub-list" className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
                 {hubLoading && (
-                  <div className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
+                  <div data-testid="skill-panel-skillhub-loading" className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                 )}
                 {!hubLoading && hubSkills.length === 0 && (
-                  <div className="col-span-2 text-sm text-text-muted">{t('skills.noMatches')}</div>
+                  <div data-testid="skill-panel-skillhub-empty" className="col-span-2 text-sm text-text-muted">{t('skills.noMatches')}</div>
                 )}
                 {!hubLoading && hubSkills.length > 0 && (
                     hubSkills.map((skill) => {
@@ -2650,22 +2709,24 @@ export function SkillPanel({
                       return (
                         <div
                           key={skill.asset_id}
+                          data-testid="skill-panel-skillhub-skill-card"
+                          data-variant={skill.asset_id}
                           className="group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible"
                           style={{ height: "156px", width: '616px' }}
                         >
                           {/* 上盒子：头像 + 名称 + 来源 */}
                           <div className="flex items-center gap-3 flex-shrink-0">
-                            <div className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                            <div data-testid="skill-panel-skillhub-skill-avatar" className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5">
-                                <span className="text-sm font-semibold text-text-strong truncate leading-5">
+                                <span data-testid="skill-panel-skillhub-skill-name" className="text-sm font-semibold text-text-strong truncate leading-5">
                                   {displayName}
                                 </span>
                               </div>
                               <div className="mt-1">
-                                <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
+                                <span data-testid="skill-panel-skillhub-skill-source-badge" className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
                                   {t('skills.sourceLabel')}: SkillHub
                                 </span>
                               </div>
@@ -2683,6 +2744,7 @@ export function SkillPanel({
                                         setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                                       }}
                                       onMouseLeave={() => setGoTryTooltip(null)}
+                                      data-testid="skill-panel-skillhub-skill-go-try-btn"
                                       className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
                                     >
                                       <NewConversationIcon aria-hidden width="20" height="20" />
@@ -2692,6 +2754,7 @@ export function SkillPanel({
                                 return (
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleInstall(skill.name); }}
+                                    data-testid="skill-panel-skillhub-skill-install-btn"
                                     className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
                                   >
                                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -2703,7 +2766,7 @@ export function SkillPanel({
                             </div>
                           </div>
                           {/* 下盒子：描述 */}
-                          <div className="text-xs text-text-muted mt-4 line-clamp-2">
+                          <div data-testid="skill-panel-skillhub-skill-description" className="text-xs text-text-muted mt-4 line-clamp-2">
                             {skill.short_desc || skill.detail_desc || t('skills.noDescription')}
                           </div>
                         </div>
@@ -2715,7 +2778,7 @@ export function SkillPanel({
             ) : null}
 
             {marketplaceSubTab === "swarmskills" ? (
-              <div className="mt-4 h-full flex-1 min-h-0" key={`swarmskills-${searchTrigger}`}>
+              <div data-testid="skill-panel-swarmskills-view" className="mt-4 h-full flex-1 min-h-0" key={`swarmskills-${searchTrigger}`}>
                 <TeamSkillsHubModal
                   open={true}
                   embedded={true}
@@ -2731,7 +2794,7 @@ export function SkillPanel({
             ) : null}
 
             {marketplaceSubTab === "online" ? (
-              <div className="mt-4 h-full flex-1 min-h-0" key={`online-${searchTrigger}`}>
+              <div data-testid="skill-panel-online-view" className="mt-4 h-full flex-1 min-h-0" key={`online-${searchTrigger}`}>
                 <OnlineSkillSearchPanel
                   sessionId={sessionId}
                   externalSearchQuery={debouncedSearch}
@@ -2749,22 +2812,22 @@ export function SkillPanel({
         {activeTab === "my" ? (
           <>
             {message && messageType === "error" && (
-              <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+              <div data-testid="skill-panel-toast" data-variant="error" className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
                 {message}
               </div>
             )}
             {selectedSkill ? (
-              <div className="mt-4 flex-1 flex flex-col overflow-y-auto" style={{ paddingLeft: '96px', paddingRight: '96px' }}>
+              <div data-testid="skill-panel-my-detail-view" className="mt-4 flex-1 flex flex-col overflow-y-auto" style={{ paddingLeft: '96px', paddingRight: '96px' }}>
                 {/* 加载/错误状态 */}
                 {detailState === "loading" && (
-                  <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                  <div data-testid="skill-panel-my-detail-status" data-variant="loading" className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
                 )}
                 {detailState === "error" && (
-                  <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
+                  <div data-testid="skill-panel-my-detail-status" data-variant="error" className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
                 )}
 
                 {/* 面包屑 */}
-                <div className="flex items-center gap-1.5 text-sm text-text-muted mb-4">
+                <div data-testid="skill-panel-my-detail-breadcrumb" className="flex items-center gap-1.5 text-sm text-text-muted mb-4">
                   <span>{t('skills.title')}</span>
                   <span className="text-text-muted/40">/</span>
                   <span>{t('skills.tabs.mySkills')}</span>
@@ -2773,10 +2836,11 @@ export function SkillPanel({
                 </div>
 
                 {/* 顶部：返回按钮 + 头像/名称/演进icon + 来源tag + 操作按钮 */}
-                <div className="flex items-center justify-between gap-4 mb-6">
+                <div data-testid="skill-panel-my-detail-header" className="flex items-center justify-between gap-4 mb-6">
                   <div className="flex items-center gap-3 min-w-0">
                     <button
                       onClick={handleBackToList}
+                      data-testid="skill-panel-my-detail-back-btn"
                       className="flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-secondary/50"
                     >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -2784,12 +2848,12 @@ export function SkillPanel({
                         <path d="M19 12H5" />
                       </svg>
                     </button>
-                    <div className={`w-9 h-9 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                    <div data-testid="skill-panel-my-detail-avatar" className={`w-9 h-9 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                       {getSkillAvatar(selectedSkill.name).firstChar}
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-lg font-semibold text-text-strong truncate">
+                        <span data-testid="skill-panel-my-detail-name" className="text-lg font-semibold text-text-strong truncate">
                           {selectedSkill.name}
                         </span>
                         {selectedSkill.has_evolutions ? (
@@ -2798,6 +2862,7 @@ export function SkillPanel({
                               e.stopPropagation();
                               setDetailTab("experience");
                             }}
+                            data-testid="skill-panel-my-detail-evolution-entry-btn"
                             className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
                             title={t('skills.actions.viewEvolution')}
                           >
@@ -2807,11 +2872,11 @@ export function SkillPanel({
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                         {selectedSkill.skill_type === 'swarm_skill' ? (
-                          <span className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border text-xs text-text-link">
+                          <span data-testid="skill-panel-my-detail-type-badge" data-variant={selectedSkill.skill_type} className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border text-xs text-text-link">
                             团队技能
                           </span>
                         ) : selectedSkill.skill_type === 'multimodal_skill' ? (
-                          <span className="px-2 h-5 inline-flex items-center rounded border border-border text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
+                          <span data-testid="skill-panel-my-detail-type-badge" data-variant={selectedSkill.skill_type} className="px-2 h-5 inline-flex items-center rounded border border-border text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
                             多模态
                           </span>
                         ) : null}
@@ -2822,10 +2887,11 @@ export function SkillPanel({
                   {/* 右侧操作按钮 */}
                   <div className="flex items-center gap-6 flex-shrink-0">
                     {/* ... 菜单：编辑/卸载 */}
-                    <div className="relative">
+                    <div data-testid="skill-panel-my-detail-more-menu" className="relative">
                       <button
                         type="button"
                         onClick={() => setDetailMenuOpen((v) => !v)}
+                        data-testid="skill-panel-my-detail-more-menu-trigger"
                         className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
                       >
                         <MoreIcon aria-hidden />
@@ -2833,12 +2899,14 @@ export function SkillPanel({
                       {detailMenuOpen ? (
                         <>
                           <div className="fixed inset-0 z-40" onClick={() => setDetailMenuOpen(false)} />
-                          <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                          <div data-testid="skill-panel-my-detail-more-menu-dropdown" className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
                             <button
                               onClick={() => {
                                 setDetailMenuOpen(false);
                                 handleEditSkill(selectedSkill.name, selectedSkill.skill_type);
                               }}
+                              data-testid="skill-panel-my-detail-more-menu-option"
+                              data-variant="edit"
                               className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                             >
                               {t('skills.actions.edit')}
@@ -2849,6 +2917,8 @@ export function SkillPanel({
                                 const plugin = installedSkillMap.get(selectedSkill.name);
                                 handleUninstall(plugin?.plugin_name || selectedSkill.name);
                               }}
+                              data-testid="skill-panel-my-detail-more-menu-option"
+                              data-variant="uninstall"
                               className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                             >
                               {t('skills.actions.uninstall')}
@@ -2858,19 +2928,21 @@ export function SkillPanel({
                       ) : null}
                     </div>
                     {/* 启用开关 + 文字 */}
-                    <div className="flex items-center gap-2">
+                    <div data-testid="skill-panel-my-detail-enable-toggle" className="flex items-center gap-2">
                       <Switch
                         checked={selectedSkill.enabled !== false}
                         onChange={() => toggleSkillDisabled(selectedSkill.name)}
                         disabled={actionTarget === `toggle:${selectedSkill.name}`}
+                        data-testid="skill-panel-switch-2"
                       />
-                      <span className="text-sm text-text-muted whitespace-nowrap">
+                      <span data-testid="skill-panel-my-detail-enable-label" className="text-sm text-text-muted whitespace-nowrap">
                         {selectedSkill.enabled !== false ? t('skills.enable') : t('skills.disable')}
                       </span>
                     </div>
                     {/* 去试试 */}
                     <button
                       onClick={() => handleGoToChat(selectedSkill.name)}
+                      data-testid="skill-panel-my-detail-go-try-btn"
                       className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                       style={{ height: '32px', padding: '0 24px' }}
                     >
@@ -2879,6 +2951,7 @@ export function SkillPanel({
                     {/* 发布 */}
                     <button
                       onClick={() => setPublishDrawerOpen(true)}
+                      data-testid="skill-panel-my-detail-publish-btn"
                       className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                       style={{ height: '32px', padding: '0 24px' }}
                     >
@@ -2888,24 +2961,25 @@ export function SkillPanel({
                 </div>
 
                 {/* 基本信息 */}
-                <div className="mb-6">
-                  <div className="text-sm font-semibold text-text mb-2">
+                <div data-testid="skill-panel-my-detail-basic-info" className="mb-6">
+                  <div data-testid="skill-panel-my-detail-basic-info-title" className="text-sm font-semibold text-text mb-2">
                     {t('skills.detail.basicInfo')}
                   </div>
-                  <div className="text-sm text-text-muted">
+                  <div data-testid="skill-panel-my-detail-description" className="text-sm text-text-muted">
                     {selectedSkill.description || t('skills.noDescription')}
                   </div>
                 </div>
 
                 {/* 版本管理 */}
-                <div className="mb-6">
+                <div data-testid="skill-panel-my-detail-versions" className="mb-6">
                   <div className="flex items-center gap-2 mb-2">
-                    <div className="text-sm font-semibold text-text">
+                    <div data-testid="skill-panel-my-detail-versions-title" className="text-sm font-semibold text-text">
                       {t('skills.detail.versionManage')}
                     </div>
                     <button
                       onClick={() => fetchSkillVersions(selectedSkill.name)}
                       disabled={versionsLoadState === 'loading'}
+                      data-testid="skill-panel-my-detail-versions-refresh-btn"
                       className="flex items-center justify-center w-5 h-5 text-text-muted hover:text-text disabled:opacity-50"
                       title={t('common.refresh')}
                     >
@@ -2915,11 +2989,11 @@ export function SkillPanel({
                     </button>
                   </div>
                   {versionsLoadState === 'loading' ? (
-                    <div className="text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
+                    <div data-testid="skill-panel-my-detail-versions-status" data-variant="loading" className="text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
                   ) : versionsLoadState === 'error' ? (
-                    <div className="text-sm text-text-muted">{t('skills.detail.versionsLoadFailed', { defaultValue: '版本加载失败' })}</div>
+                    <div data-testid="skill-panel-my-detail-versions-status" data-variant="error" className="text-sm text-text-muted">{t('skills.detail.versionsLoadFailed', { defaultValue: '版本加载失败' })}</div>
                   ) : skillVersions.length === 0 ? (
-                    <div className="text-sm text-text-muted">
+                    <div data-testid="skill-panel-my-detail-versions-status" data-variant="empty" className="text-sm text-text-muted">
                       {selectedSkill.version ? `v${selectedSkill.version}` : (t('skills.detail.noVersions', { defaultValue: '暂无版本记录' }))}
                     </div>
                   ) : (
@@ -2930,6 +3004,7 @@ export function SkillPanel({
                           const ver = e.target.value;
                           if (ver) fetchSkillDetail(selectedSkill.name);
                         }}
+                        data-testid="skill-panel-my-detail-version-select"
                         className="appearance-none rounded-[6px] border border-border bg-panel text-sm text-text outline-none focus:outline-none focus:ring-0 focus:border-border"
                         style={{ width: '360px', height: '28px', paddingLeft: '12px', paddingRight: '12px' }}
                       >
@@ -2943,6 +3018,7 @@ export function SkillPanel({
                         <button
                           onClick={() => handleRebuild(selectedSkill.name, selectedSkill.version || null)}
                           disabled={rebuildLoading}
+                          data-testid="skill-panel-my-detail-rebuild-btn"
                           className="flex items-center justify-center rounded-[6px] text-xs text-text-muted border border-border hover:bg-secondary whitespace-nowrap disabled:opacity-50"
                           style={{ height: '28px', padding: '0 12px' }}
                         >
@@ -2954,11 +3030,13 @@ export function SkillPanel({
                 </div>
 
                 {/* 三个页签 */}
-                <div className="flex-1 flex flex-col min-h-0">
+                <div data-testid="skill-panel-my-detail-tabs" className="flex-1 flex flex-col min-h-0">
                   <div className="flex items-center mb-4 flex-shrink-0">
-                    <div className="flex items-center gap-8 flex-1 border-b border-border">
+                    <div data-testid="skill-panel-my-detail-tab-list" className="flex items-center gap-8 flex-1 border-b border-border">
                       <button
                         onClick={() => setDetailTab("content")}
+                        data-testid="skill-panel-my-detail-tab"
+                        data-variant="content"
                         className={`pb-2 text-sm ${
                           detailTab === "content"
                             ? "text-text font-semibold border-b-2 border-text"
@@ -2972,6 +3050,8 @@ export function SkillPanel({
                           setDetailTab("files");
                           fetchSkillFiles(selectedSkill.name);
                         }}
+                        data-testid="skill-panel-my-detail-tab"
+                        data-variant="files"
                         className={`pb-2 text-sm ${
                           detailTab === "files"
                             ? "text-text font-semibold border-b-2 border-text"
@@ -2983,6 +3063,8 @@ export function SkillPanel({
                       {selectedSkill.has_evolutions ? (
                         <button
                           onClick={() => setDetailTab("experience")}
+                          data-testid="skill-panel-my-detail-tab"
+                          data-variant="experience"
                           className={`pb-2 text-sm ${
                             detailTab === "experience"
                               ? "text-text font-semibold border-b-2 border-text"
@@ -3004,6 +3086,7 @@ export function SkillPanel({
                           setSynthesizeTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                         }}
                         onMouseLeave={() => setSynthesizeTooltip(null)}
+                        data-testid="skill-panel-my-detail-synthesize-btn"
                         className="mb-1 flex items-center justify-center rounded-[16px] text-xs font-medium text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap disabled:opacity-50"
                         style={{ width: '118px', height: '32px' }}
                       >
@@ -3014,53 +3097,53 @@ export function SkillPanel({
 
                   {/* 内容详情 */}
                   {detailTab === "content" && (
-                    <div className="flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
+                    <div data-testid="skill-panel-my-detail-content" className="flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
                       {selectedSkill.content ? (
                         <MarkdownRenderer content={transformSkillContentImages(selectedSkill.content, selectedSkill.file_path)} className="chat-text chat-markdown" />
                       ) : (
-                        t('skills.noContent')
+                        <span data-testid="skill-panel-my-detail-content-empty">{t('skills.noContent')}</span>
                       )}
                     </div>
                   )}
 
                   {/* 文件预览 */}
                   {detailTab === "files" && (
-                    <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-3">
-                      <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
-                        <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between">
-                          <span className="text-sm font-medium text-text">{t('skills.detail.fileTree', { defaultValue: '文件列表' })}</span>
+                    <div data-testid="skill-panel-my-detail-files" className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-3">
+                      <div data-testid="skill-panel-my-detail-files-tree" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+                        <div data-testid="skill-panel-my-detail-files-tree-header" className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between">
+                          <span data-testid="skill-panel-my-detail-files-tree-title" className="text-sm font-medium text-text">{t('skills.detail.fileTree', { defaultValue: '文件列表' })}</span>
                           <div className="flex items-center gap-2">
-                            <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{skillFiles.filter(f => f.type === 'file').length} 文件</span>
-                            <button type="button" onClick={() => selectedSkill && fetchSkillFiles(selectedSkill.name)} className="text-xs text-text-muted hover:text-text px-2 py-0.5 rounded border border-border hover:bg-secondary">{t('common.refresh', { defaultValue: '刷新' })}</button>
+                            <span data-testid="skill-panel-my-detail-files-tree-count" className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{skillFiles.filter(f => f.type === 'file').length} 文件</span>
+                            <button type="button" onClick={() => selectedSkill && fetchSkillFiles(selectedSkill.name)} data-testid="skill-panel-my-detail-files-refresh-btn" className="text-xs text-text-muted hover:text-text px-2 py-0.5 rounded border border-border hover:bg-secondary">{t('common.refresh', { defaultValue: '刷新' })}</button>
                           </div>
                         </div>
-                        <div className="flex-1 overflow-auto p-2">
+                        <div data-testid="skill-panel-my-detail-files-tree-nodes" className="flex-1 overflow-auto p-2">
                           {filesLoadState === 'loading' ? (
-                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
+                            <div data-testid="skill-panel-my-detail-files-tree-status" data-variant="loading" className="h-full flex items-center justify-center text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
                           ) : filesLoadState === 'error' ? (
-                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.filesLoadFailed', { defaultValue: '文件列表加载失败' })}</div>
+                            <div data-testid="skill-panel-my-detail-files-tree-status" data-variant="error" className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.filesLoadFailed', { defaultValue: '文件列表加载失败' })}</div>
                           ) : skillFiles.length === 0 ? (
-                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.noFiles', { defaultValue: '暂无文件' })}</div>
+                            <div data-testid="skill-panel-my-detail-files-tree-status" data-variant="empty" className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.noFiles', { defaultValue: '暂无文件' })}</div>
                           ) : (
                             <div className="space-y-0.5">{skillFileTree.children.map(child => renderFileTree(child, 0))}</div>
                           )}
                         </div>
                       </div>
-                      <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+                      <div data-testid="skill-panel-my-detail-file-preview" className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
                         {filePreview ? (
                           <>
                             <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between flex-shrink-0">
-                              <span className="text-sm font-medium text-text truncate">{filePreview.path.split('/').pop()}</span>
+                              <span data-testid="skill-panel-my-detail-file-preview-name" className="text-sm font-medium text-text truncate">{filePreview.path.split('/').pop()}</span>
                               <div className="flex items-center gap-2 flex-shrink-0">
-                                <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.mime_type || ''}</span>
-                                {filePreview.size != null ? <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.size > 1024 ? `${Math.ceil(filePreview.size / 1024)} KB` : `${filePreview.size} B`}</span> : null}
-                                {filePreview.download_url ? <a href={filePreview.download_url} download className="text-xs text-text-link hover:underline">{t('common.download', { defaultValue: '下载' })}</a> : null}
+                                <span data-testid="skill-panel-my-detail-file-preview-mime-badge" className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.mime_type || ''}</span>
+                                {filePreview.size != null ? <span data-testid="skill-panel-my-detail-file-preview-size-badge" className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.size > 1024 ? `${Math.ceil(filePreview.size / 1024)} KB` : `${filePreview.size} B`}</span> : null}
+                                {filePreview.download_url ? <a href={filePreview.download_url} download data-testid="skill-panel-my-detail-file-preview-download-link" className="text-xs text-text-link hover:underline">{t('common.download', { defaultValue: '下载' })}</a> : null}
                               </div>
                             </div>
                             {filePreview.content != null ? (
-                              <pre className="flex-1 min-h-0 overflow-auto text-xs text-text p-3 whitespace-pre-wrap font-mono">{filePreview.content}</pre>
+                              <pre data-testid="skill-panel-my-detail-file-preview-content" className="flex-1 min-h-0 overflow-auto text-xs text-text p-3 whitespace-pre-wrap font-mono">{filePreview.content}</pre>
                             ) : (
-                              <div className="flex-1 flex items-center justify-center text-sm text-text-muted">{filePreview.download_url ? (t('skills.detail.binaryFileDownload', { defaultValue: '此文件无法文本预览，请点击下载' })) : (t('skills.detail.noPreview', { defaultValue: '无法预览此文件' }))}</div>
+                              <div data-testid="skill-panel-my-detail-file-preview-empty" className="flex-1 flex items-center justify-center text-sm text-text-muted">{filePreview.download_url ? (t('skills.detail.binaryFileDownload', { defaultValue: '此文件无法文本预览，请点击下载' })) : (t('skills.detail.noPreview', { defaultValue: '无法预览此文件' }))}</div>
                             )}
                           </>
                         ) : (
@@ -3070,8 +3153,8 @@ export function SkillPanel({
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="h-6 w-6"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
                               </span>
                               <div>
-                                <h4 className="text-sm font-medium text-text">{t('skills.detail.contentPreview', { defaultValue: '内容预览' })}</h4>
-                                <p className="text-xs text-text-muted mt-0.5">{t('skills.detail.selectFileToPreview', { defaultValue: '请选择左侧文件进行预览' })}</p>
+                                <h4 data-testid="skill-panel-my-detail-file-preview-placeholder-title" className="text-sm font-medium text-text">{t('skills.detail.contentPreview', { defaultValue: '内容预览' })}</h4>
+                                <p data-testid="skill-panel-my-detail-file-preview-placeholder-hint" className="text-xs text-text-muted mt-0.5">{t('skills.detail.selectFileToPreview', { defaultValue: '请选择左侧文件进行预览' })}</p>
                               </div>
                             </div>
                             <div className="flex-1 min-h-0 flex items-center justify-center">
@@ -3085,9 +3168,11 @@ export function SkillPanel({
 
                   {/* 技能经验 */}
                   {detailTab === "experience" && selectedSkill.has_evolutions && (
-                    <div className="flex-1 min-h-0 overflow-y-auto">
+                    <div data-testid="skill-panel-my-detail-experience" className="flex-1 min-h-0 overflow-y-auto">
                       {evolutionMessage && (
                         <div
+                          data-testid="skill-panel-my-detail-experience-message"
+                          data-variant={evolutionMessageType}
                           className={`mb-3 px-3 py-2 rounded-md text-sm ${
                             evolutionMessageType === "error"
                               ? "bg-secondary text-danger"
@@ -3099,30 +3184,32 @@ export function SkillPanel({
                       )}
 
                       {evolutionFormatError && (
-                        <div className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+                        <div data-testid="skill-panel-my-detail-experience-format-error" className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
                           {evolutionFormatError}
                         </div>
                       )}
 
                       {evolutionListState === "loading" && (
-                        <div className="flex items-center justify-center text-text-muted">{t('common.loading')}</div>
+                        <div data-testid="skill-panel-my-detail-experience-status" data-variant="loading" className="flex items-center justify-center text-text-muted">{t('common.loading')}</div>
                       )}
                       {evolutionListState === "error" && (
-                        <div className="text-sm text-text-muted">
+                        <div data-testid="skill-panel-my-detail-experience-status" data-variant="error" className="text-sm text-text-muted">
                           {t('skills.evolution.errors.loadFailed')}
                         </div>
                       )}
                       {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length === 0 && (
-                        <div className="text-sm text-text-muted">
+                        <div data-testid="skill-panel-my-detail-experience-status" data-variant="empty" className="text-sm text-text-muted">
                           {t('skills.evolution.empty')}
                         </div>
                       )}
 
                       {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length > 0 && (
-                        <div className="space-y-4">
+                        <div data-testid="skill-panel-my-detail-experience-list" className="space-y-4">
                           {sortedEvolutionEntries.map((entry) => (
                             <div
                               key={entry.id}
+                              data-testid="skill-panel-my-detail-experience-item"
+                              data-variant={entry.id}
                               className="border border-border py-4 px-4"
                               style={{ backgroundColor: '#FAFAFA', borderRadius: '8px' }}
                             >
@@ -3130,15 +3217,15 @@ export function SkillPanel({
                               <div className="min-w-0 text-xs space-y-1 w-[90%]">
                                 <div className="grid grid-cols-3 gap-4">
                                   <div>
-                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.section')}:</span>
+                                    <span data-testid="skill-panel-my-detail-experience-item-field" data-variant="section" style={{ color: '#777777' }}>{t('skills.evolution.fields.section')}:</span>
                                     <span className="ml-1" style={{ color: '#191919' }}>{entry.change?.section || "-"}</span>
                                   </div>
                                   <div>
-                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.target')}:</span>
+                                    <span data-testid="skill-panel-my-detail-experience-item-field" data-variant="target" style={{ color: '#777777' }}>{t('skills.evolution.fields.target')}:</span>
                                     <span className="ml-1" style={{ color: '#191919' }}>{entry.change?.target || "-"}</span>
                                   </div>
                                   <div>
-                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.timestamp')}:</span>
+                                    <span data-testid="skill-panel-my-detail-experience-item-field" data-variant="timestamp" style={{ color: '#777777' }}>{t('skills.evolution.fields.timestamp')}:</span>
                                     <span className="ml-1" style={{ color: '#191919' }}>
                                       {entry.timestamp ? new Date(entry.timestamp).toLocaleString(i18n.language) : "-"}
                                     </span>
@@ -3148,6 +3235,7 @@ export function SkillPanel({
                                 <button
                                   type="button"
                                   onClick={() => handleEvolutionDeleteEntry(entry.id)}
+                                  data-testid="skill-panel-my-detail-experience-item-delete-btn"
                                   className="w-7 h-7 flex items-center justify-center rounded-lg hover:opacity-80"
                                   style={{ color: '#191919' }}
                                   title={t('skills.evolution.actions.delete')}
@@ -3162,6 +3250,7 @@ export function SkillPanel({
                                 <textarea
                                   value={entry.change?.content || ""}
                                   onChange={(event) => handleEvolutionContentChange(entry.id, event.target.value)}
+                                  data-testid="skill-panel-my-detail-experience-item-content-input"
                                   className="w-full min-h-28 px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"
                                 />
                               </div>
@@ -3174,24 +3263,24 @@ export function SkillPanel({
                 </div>
               </div>
             ) : (
-              <div className="mt-4 flex flex-col flex-1 min-h-0">
-                <div className="flex items-center gap-2 flex-shrink-0">
+              <div data-testid="skill-panel-my-list-view" className="mt-4 flex flex-col flex-1 min-h-0">
+                <div data-testid="skill-panel-my-list-type-capsules" className="flex items-center gap-2 flex-shrink-0">
                   {renderSkillTypeCapsules()}
                 </div>
 
                 {listState === "success" && getMySkillsFiltered().length === 0 ? (
-                  <div className="mt-4 text-sm text-text-muted">
+                  <div data-testid="skill-panel-my-list-empty" data-variant={mySkillsSubTab} className="mt-4 text-sm text-text-muted">
                     {mySkillsSubTab === "disabled" ? t('skills.noDisabledSkills') :
                      mySkillsSubTab === "enabled" ? t('skills.noEnabledSkills') :
                      t('skills.noMatches')}
                   </div>
                 ) : (
-                  <div className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
+                  <div data-testid="skill-panel-my-list" className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
                     {listState === "loading" && (
-                      <div className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
+                      <div data-testid="skill-panel-my-list-loading" className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
                     )}
                     {listState === "error" && (
-                      <div className="col-span-2 text-sm text-text-muted">
+                      <div data-testid="skill-panel-my-list-error" className="col-span-2 text-sm text-text-muted">
                         {t('skills.listError')}
                       </div>
                     )}
@@ -3208,17 +3297,19 @@ export function SkillPanel({
                         <div
                           key={listKey}
                           onClick={() => handleOpenSkill(skill.name)}
+                          data-testid="skill-panel-my-skill-card"
+                          data-variant={skill.name}
                           className="group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible"
                           style={{ height: "156px", width: '616px' }}
                         >
                           {/* 上盒子：头像 + 名称/演进 + 来源 + 悬浮按钮 */}
                           <div className="flex items-center gap-3 min-w-0">
-                            <div className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                            <div data-testid="skill-panel-my-skill-avatar" className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
                               {avatar.firstChar}
                             </div>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5">
-                                <span className="text-sm font-semibold text-text-strong truncate leading-5">
+                                <span data-testid="skill-panel-my-skill-name" className="text-sm font-semibold text-text-strong truncate leading-5">
                                   {skill.name}
                                 </span>
                                 {skill.has_evolutions ? (
@@ -3228,6 +3319,7 @@ export function SkillPanel({
                                       handleOpenSkill(skill.name);
                                       setDetailTab("experience");
                                     }}
+                                    data-testid="skill-panel-my-skill-evolution-entry-btn"
                                     className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
                                     title={t('skills.actions.viewEvolution')}
                                   >
@@ -3237,16 +3329,16 @@ export function SkillPanel({
                               </div>
                               <div className="mt-1 flex items-center gap-1.5 flex-wrap">
                                 {skill.skill_type === 'swarm_skill' ? (
-                                  <span className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border truncate text-xs text-text-link">
+                                  <span data-testid="skill-panel-my-skill-type-badge" data-variant={skill.skill_type} className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border truncate text-xs text-text-link">
                                     团队技能
                                   </span>
                                 ) : skill.skill_type === 'multimodal_skill' ? (
-                                  <span className="px-2 h-5 inline-flex items-center rounded border border-border truncate text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
+                                  <span data-testid="skill-panel-my-skill-type-badge" data-variant={skill.skill_type} className="px-2 h-5 inline-flex items-center rounded border border-border truncate text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
                                     多模态
                                   </span>
                                 ) : null}
                                 {activeTab === "my" ? (
-                                  <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
+                                  <span data-testid="skill-panel-my-skill-publish-badge" className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
                                     未发布
                                   </span>
                                 ) : null}
@@ -3262,6 +3354,7 @@ export function SkillPanel({
                                       e.stopPropagation();
                                       setOpenMenuSkillName(isMenuOpen ? null : skill.name);
                                     }}
+                                    data-testid="skill-panel-my-skill-more-menu-trigger"
                                     className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
                                   >
                                     <MoreIcon aria-hidden />
@@ -3276,6 +3369,9 @@ export function SkillPanel({
                                             togglePinSkill(skill.name);
                                             setOpenMenuSkillName(null);
                                           }}
+                                          data-testid="skill-panel-my-skill-more-menu-option"
+                                          data-variant="pin"
+                                          aria-pressed={isPinned}
                                           className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                                         >
                                           {isPinned
@@ -3289,6 +3385,8 @@ export function SkillPanel({
                                               setOpenMenuSkillName(null);
                                               handleEditSkill(skill.name, skill.skill_type);
                                             }}
+                                            data-testid="skill-panel-my-skill-more-menu-option"
+                                            data-variant="edit"
                                             className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                                           >
                                             {t('skills.actions.edit')}
@@ -3301,6 +3399,8 @@ export function SkillPanel({
                                             const plugin = installedSkillMap.get(skill.name);
                                             handleUninstall(plugin?.plugin_name || skill.name);
                                           }}
+                                          data-testid="skill-panel-my-skill-more-menu-option"
+                                          data-variant="uninstall"
                                           className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
                                         >
                                           {t('skills.actions.uninstall')}
@@ -3320,6 +3420,7 @@ export function SkillPanel({
                                     setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                                   }}
                                   onMouseLeave={() => setGoTryTooltip(null)}
+                                  data-testid="skill-panel-my-skill-go-try-btn"
                                   className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
                                 >
                                   <NewConversationIcon aria-hidden width="16" height="16" />
@@ -3329,11 +3430,12 @@ export function SkillPanel({
                                 checked={!isDisabled}
                                 onChange={() => toggleSkillDisabled(skill.name)}
                                 disabled={isToggling}
+                                data-testid="skill-panel-switch-3"
                               />
                             </div>
                           </div>
                           {/* 下盒子：描述 */}
-                          <div className="text-xs text-text-muted mt-4 line-clamp-2">
+                          <div data-testid="skill-panel-my-skill-description" className="text-xs text-text-muted mt-4 line-clamp-2">
                             {skill.description || t('skills.noDescription')}
                           </div>
                         </div>
@@ -3390,25 +3492,28 @@ export function SkillPanel({
       />
       {/* 上传技能弹窗 */}
       {uploadSkillModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div data-testid="skill-panel-upload-skill-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
+            data-testid="skill-panel-upload-skill-modal-overlay"
             className="absolute inset-0 bg-black/60"
             onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
             aria-label={t('skills.uploadSkillModal.cancel')}
           />
           <div
+            data-testid="skill-panel-upload-skill-modal-content"
             className="relative overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise flex flex-col"
             style={{ width: '550px' }}
           >
             {/* 头部 */}
-            <div className="flex items-center justify-between gap-3 px-5 py-3 bg-panel">
-              <span className="text-lg font-semibold text-text-strong">
+            <div data-testid="skill-panel-upload-skill-modal-header" className="flex items-center justify-between gap-3 px-5 py-3 bg-panel">
+              <span data-testid="skill-panel-upload-skill-modal-title" className="text-lg font-semibold text-text-strong">
                 {t('skills.uploadSkillModal.title')}
               </span>
               <button
                 type="button"
                 onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
+                data-testid="skill-panel-upload-skill-modal-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3417,7 +3522,7 @@ export function SkillPanel({
               </button>
             </div>
             {/* 提示行 */}
-            <div className="px-5 pt-3">
+            <div data-testid="skill-panel-upload-skill-modal-notice" className="px-5 pt-3">
               <div
                 className="flex items-start gap-1.5 rounded-[8px] px-3 py-2 text-xs text-text"
                 style={{ backgroundColor: '#DEECFF', width: '502px' }}
@@ -3426,7 +3531,7 @@ export function SkillPanel({
                   <circle cx="12" cy="12" r="10" />
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
                 </svg>
-                <span className="leading-4">{t('skills.uploadSkillModal.notice')}</span>
+                <span data-testid="skill-panel-upload-skill-modal-notice-text" className="leading-4">{t('skills.uploadSkillModal.notice')}</span>
               </div>
             </div>
             {/* 文件上传拖动框 */}
@@ -3442,13 +3547,14 @@ export function SkillPanel({
                     setUploadSkillPath(path);
                   }
                 }}
+                data-testid="skill-panel-upload-skill-modal-dropzone"
                 className="flex flex-col items-center justify-center gap-2 rounded-[12px] border border-dashed border-border cursor-pointer hover:bg-[#EEEEEE]"
                 style={{ width: '502px', height: '160px', backgroundColor: '#F5F5F5' }}
               >
                 <svg className="w-10 h-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                 </svg>
-                <span className="text-sm text-text-muted">
+                <span data-testid="skill-panel-upload-skill-modal-dropzone-text" className="text-sm text-text-muted">
                   {uploadSkillPath.trim()
                     ? uploadSkillPath
                     : t('skills.uploadSkillModal.dropHint')}
@@ -3467,10 +3573,11 @@ export function SkillPanel({
               </label>
             </div>
             {/* 底部按钮 */}
-            <div className="flex items-center justify-end gap-3 px-5 py-3 bg-panel">
+            <div data-testid="skill-panel-upload-skill-modal-footer" className="flex items-center justify-end gap-3 px-5 py-3 bg-panel">
               <button
                 type="button"
                 onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
+                data-testid="skill-panel-upload-skill-modal-cancel-btn"
                 className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                 style={{ height: '32px', padding: '0 32px' }}
               >
@@ -3485,6 +3592,7 @@ export function SkillPanel({
                   setUploadSkillPath("");
                   handleImportLocal(path);
                 }}
+                data-testid="skill-panel-upload-skill-modal-confirm-btn"
                 className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
                   !uploadSkillPath.trim() || actionTarget === "import_local"
                     ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'
@@ -3502,25 +3610,28 @@ export function SkillPanel({
       {docToSkillModalOpen && (() => {
         const isDocConfirmDisabled = docToSkillSource === "local" ? !docToSkillPath.trim() : !docToSkillLink.trim();
         return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div data-testid="skill-panel-doc-to-skill-modal" className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button
             type="button"
+            data-testid="skill-panel-doc-to-skill-modal-overlay"
             className="absolute inset-0 bg-black/60"
             onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
             aria-label={t('skills.docToSkillModal.cancel')}
           />
           <div
+            data-testid="skill-panel-doc-to-skill-modal-content"
             className="relative overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise flex flex-col"
             style={{ width: '550px' }}
           >
             {/* 头部 */}
-            <div className="flex items-center justify-between gap-3 px-5 pt-3 pb-0 bg-panel">
-              <span className="text-lg font-semibold text-text-strong">
+            <div data-testid="skill-panel-doc-to-skill-modal-header" className="flex items-center justify-between gap-3 px-5 pt-3 pb-0 bg-panel">
+              <span data-testid="skill-panel-doc-to-skill-modal-title" className="text-lg font-semibold text-text-strong">
                 {t('skills.docToSkillModal.title')}
               </span>
               <button
                 type="button"
                 onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
+                data-testid="skill-panel-doc-to-skill-modal-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3530,11 +3641,11 @@ export function SkillPanel({
             </div>
             {/* 副标题 */}
             <div className="px-5">
-              <span className="text-xs text-text-muted">{t('skills.docToSkillModal.subtitle')}</span>
+              <span data-testid="skill-panel-doc-to-skill-modal-subtitle" className="text-xs text-text-muted">{t('skills.docToSkillModal.subtitle')}</span>
             </div>
             {/* 来源 */}
             <div className="px-5 pt-4">
-              <span className="block text-sm font-medium text-text mb-2">
+              <span data-testid="skill-panel-doc-to-skill-modal-source-label" className="block text-sm font-medium text-text mb-2">
                 {t('skills.docToSkillModal.sourceLabel')}
               </span>
               <div className="flex items-center gap-4">
@@ -3543,6 +3654,8 @@ export function SkillPanel({
                     type="radio"
                     checked={docToSkillSource === "local"}
                     onChange={() => setDocToSkillSource("local")}
+                    data-testid="skill-panel-doc-to-skill-modal-source-radio"
+                    data-variant="local"
                     className="w-3.5 h-3.5 accent-[#1476ff]"
                   />
                   <span className="text-sm text-text">{t('skills.docToSkillModal.sourceLocal')}</span>
@@ -3552,6 +3665,8 @@ export function SkillPanel({
                     type="radio"
                     checked={docToSkillSource === "link"}
                     onChange={() => setDocToSkillSource("link")}
+                    data-testid="skill-panel-doc-to-skill-modal-source-radio"
+                    data-variant="link"
                     className="w-3.5 h-3.5 accent-[#1476ff]"
                   />
                   <span className="text-sm text-text">{t('skills.docToSkillModal.sourceLink')}</span>
@@ -3571,13 +3686,14 @@ export function SkillPanel({
                       setDocToSkillPath(path);
                     }
                   }}
+                  data-testid="skill-panel-doc-to-skill-modal-dropzone"
                   className="flex flex-col items-center justify-center gap-2 rounded-[12px] border border-dashed border-border cursor-pointer hover:bg-[#EEEEEE]"
                   style={{ width: '502px', height: '160px', backgroundColor: '#F5F5F5' }}
                 >
                   <svg className="w-10 h-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                   </svg>
-                  <span className="text-sm text-text-muted whitespace-pre-line text-center">
+                  <span data-testid="skill-panel-doc-to-skill-modal-dropzone-text" className="text-sm text-text-muted whitespace-pre-line text-center">
                     {docToSkillPath.trim()
                       ? docToSkillPath
                       : t('skills.docToSkillModal.dropHint')}
@@ -3600,7 +3716,7 @@ export function SkillPanel({
             {docToSkillSource === "link" && (
               <div className="px-5 pt-3">
                 <div className="flex items-center gap-1.5 mb-2">
-                  <span className="text-sm font-medium text-text">
+                  <span data-testid="skill-panel-doc-to-skill-modal-link-label" className="text-sm font-medium text-text">
                     {t('skills.docToSkillModal.linkLabel')}
                   </span>
                   <span
@@ -3609,6 +3725,7 @@ export function SkillPanel({
                       setDocToSkillTooltip({ left: rect.left + rect.width / 2, top: rect.top });
                     }}
                     onMouseLeave={() => setDocToSkillTooltip(null)}
+                    data-testid="skill-panel-doc-to-skill-modal-link-help-icon"
                     className="w-4 h-4 flex items-center justify-center text-text-muted cursor-help"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3621,6 +3738,7 @@ export function SkillPanel({
                   type="text"
                   value={docToSkillLink}
                   onChange={(e) => setDocToSkillLink(e.target.value)}
+                  data-testid="skill-panel-doc-to-skill-modal-link-input"
                   placeholder={t('skills.docToSkillModal.linkPlaceholder')}
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                   style={{ maxWidth: '502px' }}
@@ -3629,23 +3747,25 @@ export function SkillPanel({
             )}
             {/* 技能描述 */}
             <div className="px-5 pt-4">
-              <span className="block text-sm font-medium text-text mb-1.5">
+              <span data-testid="skill-panel-doc-to-skill-modal-desc-label" className="block text-sm font-medium text-text mb-1.5">
                 {t('skills.docToSkillModal.descLabel')}
               </span>
               <input
                 type="text"
                 value={docToSkillDesc}
                 onChange={(e) => setDocToSkillDesc(e.target.value)}
+                data-testid="skill-panel-doc-to-skill-modal-desc-input"
                 placeholder={t('skills.docToSkillModal.descPlaceholder')}
                 className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 style={{ maxWidth: '502px' }}
               />
             </div>
             {/* 底部按钮 */}
-            <div className="flex items-center justify-end gap-3 px-5 pt-4 pb-4 bg-panel">
+            <div data-testid="skill-panel-doc-to-skill-modal-footer" className="flex items-center justify-end gap-3 px-5 pt-4 pb-4 bg-panel">
               <button
                 type="button"
                 onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
+                data-testid="skill-panel-doc-to-skill-modal-cancel-btn"
                 className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                 style={{ height: '32px', padding: '0 32px' }}
               >
@@ -3662,6 +3782,7 @@ export function SkillPanel({
                   setDocToSkillDesc("");
                   handleImportLocal(path);
                 }}
+                data-testid="skill-panel-doc-to-skill-modal-confirm-btn"
                 className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
                   isDocConfirmDisabled
                     ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'
@@ -3678,6 +3799,8 @@ export function SkillPanel({
       })()}
       {synthesizeTooltip && (
         <div
+          data-testid="skill-panel-tooltip"
+          data-variant="synthesize"
           className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
           style={{
             left: synthesizeTooltip.left,
@@ -3690,6 +3813,8 @@ export function SkillPanel({
       )}
       {goTryTooltip && (
         <div
+          data-testid="skill-panel-tooltip"
+          data-variant="go-try"
           className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
           style={{
             left: goTryTooltip.left,
@@ -3702,6 +3827,8 @@ export function SkillPanel({
       )}
       {docToSkillTooltip && (
         <div
+          data-testid="skill-panel-tooltip"
+          data-variant="doc-link-help"
           className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
           style={{
             left: docToSkillTooltip.left,
@@ -3718,21 +3845,24 @@ export function SkillPanel({
         return (
         <>
           <div
+            data-testid="skill-panel-publish-drawer-overlay"
             className="fixed inset-0 z-[9998] bg-black/30"
             onClick={() => setPublishDrawerOpen(false)}
           />
           <div
+            data-testid="skill-panel-publish-drawer"
             className="fixed top-0 right-0 bottom-0 z-[9999] bg-panel border-l border-border shadow-2xl flex flex-col"
             style={{ width: '550px' }}
           >
             {/* 头部（无分割线） */}
-            <div className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
-              <span className="text-base font-semibold text-text-strong">
+            <div data-testid="skill-panel-publish-drawer-header" className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
+              <span data-testid="skill-panel-publish-drawer-title" className="text-base font-semibold text-text-strong">
                 {t('skills.publishForm.title')}
               </span>
               <button
                 type="button"
                 onClick={() => setPublishDrawerOpen(false)}
+                data-testid="skill-panel-publish-drawer-close-btn"
                 className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3743,6 +3873,7 @@ export function SkillPanel({
             {/* 提示行（标题下方，可关闭） */}
             {publishNoticeVisible && (
               <div
+                data-testid="skill-panel-publish-drawer-notice"
                 className="mx-6 mb-2 flex items-center gap-1.5 rounded-[6px] px-3 text-xs text-text flex-shrink-0"
                 style={{ backgroundColor: '#DEECFF', height: '34px' }}
               >
@@ -3750,11 +3881,12 @@ export function SkillPanel({
                   <circle cx="12" cy="12" r="10" />
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
                 </svg>
-                <span>{t('skills.publishForm.noticeText')}</span>
+                <span data-testid="skill-panel-publish-drawer-notice-text">{t('skills.publishForm.noticeText')}</span>
                 <a
                   href={t('skills.publishForm.noticeUrl')}
                   target="_blank"
                   rel="noopener noreferrer"
+                  data-testid="skill-panel-publish-drawer-notice-link"
                   className="flex items-center gap-0.5 text-[#1476FF] hover:underline"
                 >
                   {t('skills.publishForm.noticeView')}
@@ -3765,6 +3897,7 @@ export function SkillPanel({
                 <button
                   type="button"
                   onClick={() => setPublishNoticeVisible(false)}
+                  data-testid="skill-panel-publish-drawer-notice-close-btn"
                   className="ml-auto w-5 h-5 flex items-center justify-center rounded hover:bg-[#1476FF]/10 text-text-muted hover:text-text"
                 >
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
@@ -3774,15 +3907,16 @@ export function SkillPanel({
               </div>
             )}
             {/* 表单内容 */}
-            <div className="flex-1 overflow-y-auto px-6 py-2 space-y-4">
+            <div data-testid="skill-panel-publish-drawer-body" className="flex-1 overflow-y-auto px-6 py-2 space-y-4">
               {/* 名称（下拉框） */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-name">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="name" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.name')}
                 </label>
                 <select
                   value={publishName}
                   onChange={(e) => setPublishName(e.target.value)}
+                  data-testid="skill-panel-publish-drawer-name-select"
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 >
                   <option value="">{t('skills.publishForm.placeholderSelect')}</option>
@@ -3792,72 +3926,78 @@ export function SkillPanel({
                 </select>
               </div>
               {/* 技能名 */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-skill-name">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="skill-name" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.skillName')}
                 </label>
                 <input
                   type="text"
                   value={publishSkillName}
                   onChange={(e) => setPublishSkillName(e.target.value)}
+                  data-testid="skill-panel-publish-drawer-skill-name-input"
                   placeholder={t('skills.publishForm.placeholderSelect')}
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 />
               </div>
               {/* 版本号 */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-version">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="version" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.version')}
                 </label>
                 <input
                   type="text"
                   value={publishVersion}
                   onChange={(e) => setPublishVersion(e.target.value)}
+                  data-testid="skill-panel-publish-drawer-version-input"
                   placeholder={t('skills.publishForm.placeholderSelect')}
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 />
               </div>
               {/* 显示名 */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-display-name">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="display-name" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.displayName')}
                 </label>
                 <input
                   type="text"
                   value={publishDisplayName}
                   onChange={(e) => setPublishDisplayName(e.target.value)}
+                  data-testid="skill-panel-publish-drawer-display-name-input"
                   placeholder={t('skills.publishForm.placeholderSelect')}
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 />
               </div>
               {/* 描述（可选） */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-description">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="description" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.descriptionOptional')}
                 </label>
                 <textarea
                   defaultValue={selectedSkill.description || ""}
                   placeholder={t('skills.publishForm.placeholderSelect')}
+                  data-testid="skill-panel-publish-drawer-description-input"
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text min-h-[72px]"
                 />
               </div>
               {/* 标签（可选） */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-tags">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="tags" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.tagsOptional')}
                 </label>
                 <input
                   type="text"
                   defaultValue={coerceStringList(selectedSkill.tags).join(", ")}
+                  data-testid="skill-panel-publish-drawer-tags-input"
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
                 />
               </div>
               {/* Skill图标（可选）- 图片上传框 */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-icon">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="icon" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.skillIconOptional')}
                 </label>
                 <div
+                  data-testid="skill-panel-publish-drawer-icon-dropzone"
                   className="flex items-center justify-center rounded-[6px] border border-dashed border-border bg-secondary/30 cursor-pointer hover:bg-secondary/50"
                   style={{ width: '100px', height: '100px' }}
                 >
@@ -3865,38 +4005,41 @@ export function SkillPanel({
                     <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 3.75h16.5a1.5 1.5 0 011.5 1.5v13.5a1.5 1.5 0 01-1.5 1.5H3.75a1.5 1.5 0 01-1.5-1.5V5.25a1.5 1.5 0 011.5-1.5z" />
                   </svg>
                 </div>
-                <span className="block mt-1.5 text-xs text-text-muted">
+                <span data-testid="skill-panel-publish-drawer-icon-hint" className="block mt-1.5 text-xs text-text-muted">
                   {t('skills.publishForm.skillIconHint')}
                 </span>
               </div>
               {/* SHA-256 校验 */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-sha256">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="sha256" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.sha256')}
                 </label>
                 <input
                   type="text"
                   value={publishSha256}
                   onChange={(e) => setPublishSha256(e.target.value)}
+                  data-testid="skill-panel-publish-drawer-sha256-input"
                   placeholder={t('skills.publishForm.placeholderSha256')}
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text font-mono"
                 />
               </div>
               {/* 版本说明（Swarm Skill，可选） */}
-              <div>
-                <label className="block text-sm font-medium text-text mb-1.5">
+              <div data-testid="skill-panel-publish-drawer-field-version-note">
+                <label data-testid="skill-panel-publish-drawer-field-label" data-variant="version-note" className="block text-sm font-medium text-text mb-1.5">
                   {t('skills.publishForm.versionNoteOptional')}
                 </label>
                 <textarea
+                  data-testid="skill-panel-publish-drawer-version-note-input"
                   className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text min-h-[72px]"
                 />
               </div>
             </div>
             {/* 底部按钮 */}
-            <div className="flex items-center justify-end gap-3 px-6 pb-4 pt-2 flex-shrink-0">
+            <div data-testid="skill-panel-publish-drawer-footer" className="flex items-center justify-end gap-3 px-6 pb-4 pt-2 flex-shrink-0">
               <button
                 type="button"
                 onClick={() => setPublishDrawerOpen(false)}
+                data-testid="skill-panel-publish-drawer-cancel-btn"
                 className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
                 style={{ height: '32px', padding: '0 32px' }}
               >
@@ -3906,6 +4049,7 @@ export function SkillPanel({
                 type="button"
                 disabled={isPublishDisabled}
                 onClick={() => setPublishDrawerOpen(false)}
+                data-testid="skill-panel-publish-drawer-publish-btn"
                 className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
                   isPublishDisabled
                     ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'

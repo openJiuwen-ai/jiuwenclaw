@@ -1665,7 +1665,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
 
         <div data-testid="skill-graph-panel-filters" className="skill-graph-panel__filters">
           <label>
-            <span>{t('skills.graph.minConfidence', { percent: Math.round(minConfidence * 100) })}</span>
+            <span data-testid="skill-graph-panel-min-confidence-label">{t('skills.graph.minConfidence', { percent: Math.round(minConfidence * 100) })}</span>
             <input
               type="range"
               min={graphMinConfidence}
@@ -1838,7 +1838,7 @@ export const SkillGraphPanel = forwardRef<SkillGraphPanelHandle, SkillGraphPanel
             </div>
             {asString(selectedNode.properties.description) ? (
               <section data-testid="skill-graph-panel-detail-description" className="skill-graph-panel__description">
-                <h4 className="skill-graph-panel__detail-section-title">{t('skills.graph.description')}</h4>
+                <h4 data-testid="skill-graph-panel-detail-description-title" className="skill-graph-panel__detail-section-title">{t('skills.graph.description')}</h4>
                 <p data-testid="skill-graph-panel-detail-description-content" className="skill-graph-panel__description-content">
                   {asString(selectedNode.properties.description)}
                 </p>
