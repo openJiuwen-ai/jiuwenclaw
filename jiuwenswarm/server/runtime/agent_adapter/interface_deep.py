@@ -9224,10 +9224,32 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 request_metadata,
             )
 
+        # 专家团 mode 防御：已绑定专家团的会话只接受 team 系 mode，
+        # 显式报错、不静默改道（避免干扰 code.*/plan 组合语义）。
+        if mode not in ("team", "team.plan", "code.team"):
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            _expert_md = get_session_metadata(session_id)
+            if isinstance(_expert_md, dict) and str(
+                _expert_md.get("expert_type") or "agent"
+            ) == "team":
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "该会话已绑定专家团，请使用 team 模式发起对话",
+                        "code": "BAD_REQUEST",
+                    },
+                    is_complete=True,
+                )
+                return
+
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import process_team_message_stream
-
             resolved_model = self._resolve_model_for_request(request)
             self._apply_model_to_react_agent(
                 resolved_model,

@@ -1,0 +1,7 @@
+{
+  "name": "sample-expert-group",
+  "package_type": "agent_group",
+  "agents": ["leader", "member1", "member2"],
+  "instruction": "你们是一个协作专家团：主理人负责拆解任务并分派给合适的成员，成员专注完成子任务并向主理人汇报，最终由主理人汇总质检后输出。",
+  "skills": ["skill_name_1"]
+}

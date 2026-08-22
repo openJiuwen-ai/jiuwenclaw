@@ -25,6 +25,7 @@ from openjiuwen.core.common.logging import server_logger
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.rails import (
     SkillEvolutionRail,
+    SkillUseRail,
     TeamSkillCreateRail,
     TeamSkillEvolutionRail,
 )
@@ -219,6 +220,123 @@ async def _stop_team_messager(team_agent: Any, *, session_id: str) -> None:
         logger.info("[TeamManager] team messager stopped: session_id=%s", session_id)
     except Exception as exc:
         logger.warning("[TeamManager] team messager stop failed: session_id=%s error=%s", session_id, exc)
+
+
+def _collect_team_package_skill_dirs(agent_group_name: str) -> list[Path]:
+    """收集专家团包挂载到 member 的技能目录（去重保序），供退团时 member 级清理。
+
+    团包 skills 以绝对路径 SkillSpec 去重合并进各成员模板（共享 + 成员私有，
+    见 ``load_agent_group_package``），此处复用同一权威加载器还原"当初挂了
+    哪些目录"，与单专家 ``_collect_expert_skill_dirs`` 同思路。包缓存缺失
+    （如 LocalDir 源不落缓存）或解析失败时返回空列表——member 实例随 team
+    停止销毁、skills 随之 GC，跳过 purge 不造成功能问题。
+    """
+    from jiuwenswarm.server.runtime.expert.agent_group import load_agent_group_package
+    from jiuwenswarm.server.runtime.expert.expert_store import get_cached_expert_package_dir
+
+    package_dir = get_cached_expert_package_dir(agent_group_name)
+    if package_dir is None:
+        return []
+    try:
+        templates = load_agent_group_package(package_dir)
+    except Exception as exc:
+        logger.warning(
+            "[TeamManager] 解析专家团包技能目录失败（跳过 member skills purge）: "
+            "group=%s error=%s",
+            agent_group_name,
+            exc,
+        )
+        return []
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for template in templates.values():
+        for skill in getattr(template, "skills", None) or []:
+            directory = getattr(skill, "dir", None)
+            if not directory:
+                continue
+            resolved = Path(str(directory)).expanduser().resolve()
+            key = str(resolved)
+            if key not in seen:
+                seen.add(key)
+                dirs.append(resolved)
+    return dirs
+
+
+def _iter_local_member_runtimes(team_agent: Any) -> list[Any]:
+    """枚举 leader TeamAgent 下本进程可触达的 member runtime（leader 自身 + in-process teammate）。
+
+    subprocess/distributed teammate 的 skills 在其自有进程内，随进程停止消亡，
+    不在本进程清理范围；runtime 经 duck-typing 取用，缺任一节略过。
+    """
+    runtimes: list[Any] = []
+    leader_runtime = getattr(team_agent, "harness", None)
+    if leader_runtime is not None:
+        runtimes.append(leader_runtime)
+    spawn_manager = getattr(team_agent, "spawn_manager", None)
+    handles = getattr(spawn_manager, "spawned_handles", None) or {}
+    for handle in list(handles.values()):
+        member_agent = getattr(handle, "agent_ref", None)
+        runtime = getattr(member_agent, "harness", None) if member_agent is not None else None
+        if runtime is not None and runtime not in runtimes:
+            runtimes.append(runtime)
+    return runtimes
+
+
+async def _purge_runtime_skill_mounts(runtime: Any, skill_dirs: list[Path]) -> None:
+    """清一个 member runtime 的 SkillUseRail 上残留的团包 skills 挂载（幂等）。
+
+    member 级 ``_purge_expert_skill_mounts``：NativeHarness.stop/dispose 只
+    teardown per-agent tools、移除 sys_operation，不调 ``unload_extension``，
+    团包快照热挂的 skills 由此显式释放。清理语义与 agent-core 当前 ``_unbind``
+    SKILL 分支对齐（删 mount_root + 清 config.skills + 空 enabled 置 None +
+    重扫）；runtime 不带 find_rails（非 DeepAgent 系 runtime）时跳过。
+    """
+    finder = getattr(runtime, "find_rails", None)
+    if not callable(finder):
+        return
+    rails = finder(SkillUseRail)
+    if not rails:
+        return
+    config = getattr(runtime, "deep_config", None)
+    for leaf in skill_dirs:
+        if not leaf.exists():
+            continue
+        is_leaf = (leaf / "SKILL.md").is_file()
+        mount_root = str(leaf.parent) if is_leaf else str(leaf)
+        skill_name = leaf.name if is_leaf else ""
+        for rail in rails:
+            current = list(getattr(rail, "skills_dir", None) or [])
+            mounted = {str(Path(item).expanduser().resolve()) for item in current}
+            if mount_root not in mounted:
+                continue
+            rail.skills_dir = [
+                item
+                for item in current
+                if str(Path(item).expanduser().resolve()) != mount_root
+            ]
+            if skill_name and getattr(rail, "enabled_skills", None) is not None:
+                rail.enabled_skills.discard(skill_name)
+                if not rail.enabled_skills:
+                    # 空 set 在 agent-core _filter_skills 里 = 不过滤，
+                    # 必须置 None 才表示「无 enabled 限制」
+                    rail.enabled_skills = None
+            rail.enable_cache = False
+            rail.clear_skills()
+            if rail.skills_dir:
+                try:
+                    await rail.reload_skills()
+                except Exception as exc:
+                    logger.warning("[TeamManager] member skill purge reload failed: %s", exc)
+            break
+        # config.skills 同步摘除（与 agent-core _unbind SKILL 分支同规）
+        raw_config_skills = getattr(config, "skills", None)
+        if raw_config_skills:
+            values = [raw_config_skills] if isinstance(raw_config_skills, str) else list(raw_config_skills)
+            config.skills = [
+                item
+                for item in values
+                if str(Path(str(item)).expanduser().resolve()) != mount_root
+            ] or None
 
 
 def _runner_team_runtime_manager(runner: Any) -> Any:
@@ -692,6 +810,19 @@ class TeamManager:
         return spec, False
 
 
+    @staticmethod
+    def _resolve_session_agent_group(session_id: str) -> str | None:
+        """本会话绑定的专家团包名（expert_id），未绑定返回 None。
+
+        判定只读 session metadata（expert_type=="team" 且 expert_id 非空），
+        零磁盘零网络假设——包缓存缺失等异常由下游组装路径显式报错。
+        """
+        metadata = get_session_metadata(session_id, cache_bust=True)
+        if str(metadata.get("expert_type") or "agent") != "team":
+            return None
+        expert_id = str(metadata.get("expert_id") or "").strip()
+        return expert_id or None
+
     async def get_swarm_enriched_team_spec(
         self,
         session_id: str,
@@ -740,6 +871,7 @@ class TeamManager:
             request_id=request_id,
             channel_id=channel_id,
             request_metadata=request_metadata,
+            agent_group_name=self._resolve_session_agent_group(session_id),
         )
         self._apply_trace_context(spec, request_metadata=request_metadata)
         return spec
@@ -1695,6 +1827,7 @@ class TeamManager:
             token = set_session_id(session_id)
             try:
                 try:
+                    await self._purge_team_member_skill_mounts(session_id, team_agent)
                     cleaned = await team_agent.destroy_team(force=True)
                 finally:
                     await release_a2x_reservations_for_session(session_id, team_agent=team_agent)
@@ -1856,7 +1989,63 @@ class TeamManager:
             )
             return False
 
+    async def _purge_team_member_skill_mounts(
+        self, session_id: str, team_agent: TeamAgent | None = None
+    ) -> None:
+        """停 team 运行时前显式释放 member 快照挂载的团包 skills（幂等、best-effort）。
+
+        专家团版"单专家 _purge_expert_skill_mounts"：NativeHarness.stop/dispose
+        不调 unload_extension，团包快照热挂的 skills 仅靠实例 GC 释放，这里在
+        harness 还活着时补做显式清理（语义同 agent-core 当前 _unbind SKILL 分支）。
+
+        team_agent 传入时清该 leader 下的 member（legacy 内存路径）；为 None 时
+        经 Runner 的 TeamRuntimePool 按 session 枚举 leader（本地模式主路径——
+        本地 leader 由 Runner 的 pool 持有，见 _has_local_team_runtime）。
+        非专家团会话（metadata 无 team 绑定）/包缓存缺失/解析失败均为空操作。
+        """
+        try:
+            agent_group_name = self._resolve_session_agent_group(session_id)
+        except Exception:
+            agent_group_name = None
+        if not agent_group_name:
+            return
+        skill_dirs = _collect_team_package_skill_dirs(agent_group_name)
+        if not skill_dirs:
+            return
+        if team_agent is not None:
+            leaders: list[Any] = [team_agent]
+        else:
+            leaders = []
+            try:
+                manager = _runner_team_runtime_manager(Runner)
+                pool = getattr(manager, "pool", None)
+                if pool is not None:
+                    leaders = [
+                        entry.agent
+                        for entry in await pool.teams_for_session(session_id)
+                        if getattr(entry, "agent", None) is not None
+                    ]
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] 枚举 Runner pool team 失败（跳过 member skills purge）: "
+                    "session_id=%s error=%s",
+                    session_id,
+                    exc,
+                )
+                return
+        for leader in leaders:
+            for runtime in _iter_local_member_runtimes(leader):
+                try:
+                    await _purge_runtime_skill_mounts(runtime, skill_dirs)
+                except Exception as exc:
+                    logger.warning(
+                        "[TeamManager] purge member skill mounts failed: session_id=%s error=%s",
+                        session_id,
+                        exc,
+                    )
+
     async def _stop_local_team_runtime(self, session_id: str, team_agent: TeamAgent) -> bool:
+        await self._purge_team_member_skill_mounts(session_id, team_agent)
         stopped = False
         stop_coordination = getattr(team_agent, "stop_coordination", None) or getattr(
             team_agent,
@@ -2290,6 +2479,11 @@ class TeamManager:
             team_name = self._resolve_session_team_name(session_id)
 
             if team_name and stop_runner:
+                # 本地模式 leader/member 由 Runner 的 TeamRuntimePool 持有
+                # （_has_local_team_runtime 仅 distributed 为真）——stop 之前
+                # 先从 pool 取 leader 补做 member 级 skills 释放（幂等，
+                # 与 legacy 路径 _stop_local_team_runtime 内的清理重叠亦不冲突）。
+                await self._purge_team_member_skill_mounts(session_id)
                 try:
                     runner_stopped = await Runner.stop_agent_team(team_name=team_name, session_id=session_id)
                     stopped = runner_stopped or stopped

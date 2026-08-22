@@ -266,7 +266,13 @@ def _retrieval_enabled(config: dict[str, Any] | None = None) -> bool:
 
 def _normalize_skill_use_rails_for_agentic_retrieval(rails: list[RailSpec]) -> list[RailSpec]:
     """Normalize skill-use rails to auto-list mode and remove duplicates."""
-    skill_rail_types = {CORE_SKILL_USE, "skill_use", "SkillUseRail", registry.CODE_SKILL_USE}
+    skill_rail_types = {
+        CORE_SKILL_USE,
+        "skill_use",
+        "SkillUseRail",
+        registry.CODE_SKILL_USE,
+        registry.TEAM_SKILL_USE,
+    }
     has_skill_rail = False
     normalized: list[RailSpec] = []
     for rail in rails:
@@ -472,6 +478,14 @@ def _build_team_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _team_common_rail_names(role)
     ]
+    # 显式声明 member skill-use rail(ReconcilingSkillUseRail,baseline 双向对齐,
+    # 见 swarm.team_skill_use provider):issubclass 命中 agent-core factory 的
+    # _already_provided(SkillUseRail) 短路,抑制 enable_skill_discovery 自动注入
+    # 的普通 SkillUseRail;位置先于 retrieval 模式的 CORE_SKILL_USE,去重保留本 rail。
+    rails_specs.append(RailSpec(type=registry.TEAM_SKILL_USE))
+    # member 身份占位:params 由装配期 _apply_agent_group 渲染填入;
+    # 非专家团恒空,provider 返回 None 不挂载。
+    rails_specs.append(RailSpec(type=registry.TEAM_MEMBER_IDENTITY))
     if role == "leader":
         rails_specs.append(RailSpec(type=registry.STRUCTURED_ASK_USER))
 
@@ -578,6 +592,9 @@ def _build_code_capability_specs(
         RailSpec(type=name, params=_rail_params(name, config))
         for name in _CODE_SHARED_RAIL_NAMES
     )
+    # member 身份占位:params 由装配期 _apply_agent_group 渲染填入;
+    # 非专家团恒空,provider 返回 None 不挂载。
+    rails_specs.append(RailSpec(type=registry.TEAM_MEMBER_IDENTITY))
     rails_specs.extend(_role_evolution_rails(config, role))
 
     tool_specs: list[BuiltinToolSpec] = [

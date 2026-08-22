@@ -253,11 +253,40 @@ def _read_history_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _dedup_records_last_wins(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同 id 的 chat.final 记录保留最后一条（last-wins）。
+
+    一轮内 chat.final 会多次落盘（段落边界的 pending 草稿 + 逐段/累计快照），
+    id 均为 ``<request_id>:assistant``——不去重的话前端按 id 只能命中首条，
+    其余按内容匹配不上沦为独立消息，一轮内容按前缀逐段重复展示。
+    last-wins = 保留内容最全的最后一条；无 id 记录原样保留。
+
+    只收敛 event_type=="chat.final"：tool_call/tool_result 等记录合法共享
+    回合 rid（同 id 多条是正常形态），不能误收。
+    """
+    last_index_by_id: dict[str, int] = {}
+    for index, record in enumerate(records):
+        if str(record.get("event_type") or "") != "chat.final":
+            continue
+        record_id = str(record.get("id") or "").strip()
+        if record_id:
+            last_index_by_id[record_id] = index
+    if not last_index_by_id:
+        return records
+    return [
+        record
+        for index, record in enumerate(records)
+        if str(record.get("event_type") or "") != "chat.final"
+        or not str(record.get("id") or "").strip()
+        or last_index_by_id[str(record["id"])] == index
+    ]
+
+
 def load_history_records(session_id: str) -> list[dict[str, Any]]:
     path = get_read_history_path(session_id)
     if path.suffix.lower() == ".jsonl":
-        return _read_history_jsonl(path)
-    return _read_history(path)
+        return _dedup_records_last_wins(_read_history_jsonl(path))
+    return _dedup_records_last_wins(_read_history(path))
 
 
 def _write_records_to_path(path: Path, records: list[dict[str, Any]]) -> None:

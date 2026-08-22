@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from jiuwenswarm.common.config import resolve_env_vars
+from jiuwenswarm.common.config import _normalize_config
 from jiuwenswarm.agents.harness.team.config_loader import (
     TeamTemplateNotFoundError,
     get_team_template_snapshot,
@@ -19,6 +20,57 @@ from jiuwenswarm.agents.harness.team.config_loader import (
 
 def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
     return {"modes": {"team": team_mapping}}
+
+
+def test_load_team_spec_dict_tolerates_empty_custom_headers():
+    """CUSTOM_HEADERS 为空串时（resolve_env_vars 展开为 ''），team 模型自定义头
+    必须被兜底剔除，不能让 '' 流到 TeamAgentSpec 校验炸 dict_type。"""
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://example.test/v1",
+                        "api_key": "sk-test",
+                        "model_name": "gpt-test",
+                        "client_provider": "OpenAI",
+                        "custom_headers": "",
+                    },
+                    "model_config_obj": {},
+                },
+            ]
+        },
+        **_wrap_modes_team({"demo_team": {"team_name": "demo_team", "agents": {}}}),
+    }
+
+    spec_dict = load_team_spec_dict(config_base=config)
+
+    for role in ("leader", "teammate"):
+        mcc = spec_dict["agents"][role]["model"]["model_client_config"]
+        assert mcc.get("custom_headers") is None
+    # 关键回归：不再抛 dict_type 校验错误
+    TeamAgentSpec.model_validate(spec_dict)
+
+
+def test_normalize_config_walks_models_defaults_list():
+    """_normalize_config 必须覆盖 models.defaults 列表条目（此前只处理 dict 值，
+    列表里的 custom_headers 空串漏网）。"""
+    config = {
+        "models": {
+            "defaults": [
+                {"model_client_config": {"custom_headers": ""}},
+                {"model_client_config": {"custom_headers": '{"x-a": "1"}'}},
+            ]
+        }
+    }
+
+    _normalize_config(config)
+
+    defaults = config["models"]["defaults"]
+    assert defaults[0]["model_client_config"]["custom_headers"] is None
+    assert defaults[1]["model_client_config"]["custom_headers"] == {"x-a": "1"}
 
 
 def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkeypatch):
