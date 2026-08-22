@@ -1163,9 +1163,12 @@ async def _apply_rewound_context(
     )
 
     try:
+        react_config = getattr(react_agent, "config", None)
+        processors = getattr(react_config, "context_processors", None) or None
         await context_engine.create_context(
             session=session,
             history_messages=context_messages,
+            processors=processors,
         )
     except Exception as exc:
         logger.warning("rewind_session_context: create_context failed for %s: %s", session_id, exc)

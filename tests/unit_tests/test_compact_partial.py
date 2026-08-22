@@ -748,3 +748,108 @@ class TestRewindSessionContextLiveSession:
         assert kwargs["history_messages"] == []
         live_session.commit.assert_awaited()
         live_session.post_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rewind_forwards_context_processors(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        _write_history(
+            sessions_dir / "s_proc" / "history.jsonl",
+            [{"role": "user", "id": "u1", "request_id": "r1", "content": "q", "timestamp": 1.0}],
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        specs = [("DialogueCompressor", object())]
+        mock_context_engine = MagicMock()
+        mock_context_engine.get_context.return_value = None
+        mock_context_engine.clear_context = AsyncMock()
+        mock_context_engine.create_context = AsyncMock()
+        mock_context_engine.save_contexts = AsyncMock()
+
+        mock_react_agent = MagicMock()
+        mock_react_agent.context_engine = mock_context_engine
+        mock_react_agent.config.context_processors = specs
+
+        live_session = MagicMock()
+        live_session.get_session_id.return_value = "s_proc"
+        live_session.commit = AsyncMock()
+        live_session.update_state = MagicMock()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.react_agent = mock_react_agent
+        mock_deep_agent.card = MagicMock()
+        mock_deep_agent.save_state = MagicMock()
+        mock_deep_agent._interaction_session = live_session
+
+        from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session_context
+
+        result = await rewind_session_context(
+            deep_agent=mock_deep_agent,
+            session_id="s_proc",
+            turn_index=1,
+        )
+
+        assert result is True
+        _, kwargs = mock_context_engine.create_context.call_args
+        assert kwargs["processors"] is specs
+
+    @pytest.mark.asyncio
+    async def test_rewind_processors_none_when_config_missing(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        _write_history(
+            sessions_dir / "s_noconfig" / "history.jsonl",
+            [{"role": "user", "id": "u1", "request_id": "r1", "content": "q", "timestamp": 1.0}],
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.agents.harness.common.session_ops_service.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+        monkeypatch.setattr(
+            "jiuwenswarm.server.runtime.session.session_history.get_agent_sessions_dir",
+            lambda: sessions_dir,
+        )
+
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_context_engine = MagicMock()
+        mock_context_engine.get_context.return_value = None
+        mock_context_engine.clear_context = AsyncMock()
+        mock_context_engine.create_context = AsyncMock()
+        mock_context_engine.save_contexts = AsyncMock()
+
+        mock_react_agent = MagicMock()
+        mock_react_agent.context_engine = mock_context_engine
+        mock_react_agent.config = None
+
+        live_session = MagicMock()
+        live_session.get_session_id.return_value = "s_noconfig"
+        live_session.commit = AsyncMock()
+        live_session.update_state = MagicMock()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.react_agent = mock_react_agent
+        mock_deep_agent.card = MagicMock()
+        mock_deep_agent.save_state = MagicMock()
+        mock_deep_agent._interaction_session = live_session
+
+        from jiuwenswarm.agents.harness.common.session_ops_service import rewind_session_context
+
+        result = await rewind_session_context(
+            deep_agent=mock_deep_agent,
+            session_id="s_noconfig",
+            turn_index=1,
+        )
+
+        assert result is True
+        _, kwargs = mock_context_engine.create_context.call_args
+        assert kwargs.get("processors") is None
