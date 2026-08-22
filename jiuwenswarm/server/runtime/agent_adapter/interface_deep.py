@@ -2202,58 +2202,88 @@ class JiuWenSwarmDeepAdapter:
         # adapter defaults to default/default and would read placeholder .env
         # model credentials instead of the synced per-agent tip bag.
         adapter.copy_tenant_env_bindings_from(self)
-        # Inherit the parent's already-built heavy resources so the session adapter
-        # does not need to re-read config, rebuild Model, or reconstruct tool cards.
-        # The parent (root) adapter ran create_instance (which stops at
-        # _skip_own_instance_build) and populated these fields; the session adapter
-        # can reuse them directly — they are read-only after construction.
-        adapter.copy_resources_from(self)
+        # Inherit the parent's config-level resources so the session adapter
+        # can skip the expensive config re-read / env-binding / enterprise-loading.
+        # Values are extracted via self._xxx in the caller (same-class access),
+        # then passed as explicit kwargs to avoid cross-instance protected-access.
+        adapter.copy_resources_from(
+            config_base_cache=self._config_base_cache,
+            startup_config_base=self._startup_config_base,
+            config_cache=self._config_cache,
+            vision_model_config=self._vision_model_config,
+            audio_model_config=self._audio_model_config,
+            video_model_config=self._video_model_config,
+            image_gen_model_config=self._image_gen_model_config,
+            enabled_skills=self._enabled_skills,
+            enterprise_config=self._enterprise_config,
+            skill_manager=self._skill_manager,
+            agent_name=self._agent_name,
+            project_dir=self._project_dir,
+            workspace_dir=self._workspace_dir,
+        )
         return adapter
 
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
 
-    def copy_resources_from(self, parent: "JiuWenSwarmDeepAdapter") -> None:
+    # pylint: disable=too-many-arguments
+    def copy_resources_from(
+        self,
+        *,
+        config_base_cache: dict[str, Any] | None = None,
+        startup_config_base: dict[str, Any] | None = None,
+        config_cache: dict[str, Any] | None = None,
+        vision_model_config: Any | None = None,
+        audio_model_config: Any | None = None,
+        video_model_config: Any | None = None,
+        image_gen_model_config: Any | None = None,
+        enabled_skills: list[str] | None = None,
+        enterprise_config: Any | None = None,
+        skill_manager: Any | None = None,
+        agent_name: str | None = None,
+        project_dir: str | None = None,
+        workspace_dir: str | None = None,
+    ) -> None:
         """Inherit the parent's config-level resources so the session adapter
         can skip the expensive config re-read / env-binding / enterprise-loading.
 
         Called by _new_session_scoped_adapter before create_instance().
 
-        NOTE: _model is intentionally NOT copied — _create_model() is cheap
+        NOTE: _model is intentionally NOT accepted — _create_model() is cheap
         (no I/O) and must run per-session for proper Model initialization.
-        NOTE: _tool_cards is intentionally NOT copied — _get_tool_cards()
+        NOTE: _tool_cards is intentionally NOT accepted — _get_tool_cards()
         registers stateful tools by owner; sharing root-owned cards across
         sessions would cause state cross-contamination and cleanup failures.
         """
-        if parent._config_base_cache is not None:
-            self._config_base_cache = parent._config_base_cache.copy()
-        if parent._startup_config_base is not None:
-            self._startup_config_base = parent._startup_config_base.copy()
-        if parent._config_cache:
-            self._config_cache = dict(parent._config_cache)
-        # _model: NOT copied — _create_model() is cheap, must run per-session.
-        # _tool_cards: NOT copied — stateful tools are owner-scoped.
-        if parent._vision_model_config is not None:
-            self._vision_model_config = parent._vision_model_config
-        if parent._audio_model_config is not None:
-            self._audio_model_config = parent._audio_model_config
-        if parent._video_model_config:
-            self._video_model_config = parent._video_model_config
-        if parent._image_gen_model_config:
-            self._image_gen_model_config = parent._image_gen_model_config
-        if parent._enabled_skills is not None:
-            self._enabled_skills = list(parent._enabled_skills)
-        if parent._enterprise_config is not None:
-            self._enterprise_config = parent._enterprise_config
-        if parent._skill_manager is not None:
-            self.set_skill_manager(parent._skill_manager)
-        if parent._agent_name and parent._agent_name != "main_agent":
-            self._agent_name = parent._agent_name
-        if parent._project_dir is not None:
-            self._project_dir = parent._project_dir
-        if parent._workspace_dir is not None:
-            self._workspace_dir = parent._workspace_dir
+        if config_base_cache is not None:
+            self._config_base_cache = config_base_cache.copy()
+        if startup_config_base is not None:
+            self._startup_config_base = startup_config_base.copy()
+        if config_cache:
+            self._config_cache = dict(config_cache)
+        # _model: NOT accepted — _create_model() is cheap, must run per-session.
+        # _tool_cards: NOT accepted — stateful tools are owner-scoped.
+        if vision_model_config is not None:
+            self._vision_model_config = vision_model_config
+        if audio_model_config is not None:
+            self._audio_model_config = audio_model_config
+        if video_model_config:
+            self._video_model_config = video_model_config
+        if image_gen_model_config:
+            self._image_gen_model_config = image_gen_model_config
+        if enabled_skills is not None:
+            self._enabled_skills = list(enabled_skills)
+        if enterprise_config is not None:
+            self._enterprise_config = enterprise_config
+        if skill_manager is not None:
+            self.set_skill_manager(skill_manager)
+        if agent_name and agent_name != "main_agent":
+            self._agent_name = agent_name
+        if project_dir is not None:
+            self._project_dir = project_dir
+        if workspace_dir is not None:
+            self._workspace_dir = workspace_dir
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
