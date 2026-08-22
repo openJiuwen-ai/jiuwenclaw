@@ -302,10 +302,7 @@ def _terminal_interaction_status(value: Any) -> str:
 
 def _detail_query(query: str, user_input: Any) -> str:
     """Append the same detail requirement that the original Skill used."""
-    try:
-        response = _parse_response(user_input)
-    except AskUserResponseError:
-        return query
+    response = _parse_response(user_input)
     if response.status == "skipped" or not response.answers:
         return query
     answer = response.answers[0]
@@ -933,7 +930,26 @@ async def deepresearch_execute(query: str, file_name: str = "") -> dict[str, Any
         state = _persist(context, state, "wait_report_detail")
         return _detail_interaction(state)
     if phase == "wait_report_detail":
-        final_query = _detail_query(str(state.get("query") or query), context.user_input)
+        terminal_status = _terminal_interaction_status(context.user_input)
+        if terminal_status:
+            state = _persist(context, state, terminal_status)
+            content = (
+                "DeepResearch 任务已取消。"
+                if terminal_status == "cancelled"
+                else "报告详略度交互失败，DeepResearch 任务已停止。"
+            )
+            return _result(terminal_status, state, content=content)
+        try:
+            final_query = _detail_query(
+                str(state.get("query") or query), context.user_input
+            )
+        except AskUserResponseError as exc:
+            return _terminal_error(
+                context,
+                state,
+                error_code="interaction_invalid",
+                content=f"报告详略度结果无效：{exc}",
+            )
         state = _persist(context, state, "starting", query=final_query)
         outcome = await _call_sdk(
             context,

@@ -144,6 +144,47 @@ async def test_detail_answer_starts_sdk_and_preserves_sdk_questions():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["cancelled", "error"])
+async def test_terminal_report_detail_stops_without_starting_sdk(terminal_status):
+    state = {
+        "schema_version": 1,
+        "phase": "wait_report_detail",
+        "query": "研究智能家电竞争格局",
+        "file_name": "智能家电报告",
+        "revision": 1,
+    }
+
+    with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
+        result, saved = await _invoke(
+            state=state,
+            user_input={"status": terminal_status, "answers": []},
+        )
+
+    assert result["kind"] == terminal_status
+    assert saved[-1]["phase"] == terminal_status
+    stream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_report_detail_stops_without_starting_sdk():
+    state = {
+        "schema_version": 1,
+        "phase": "wait_report_detail",
+        "query": "研究智能家电竞争格局",
+        "file_name": "智能家电报告",
+        "revision": 1,
+    }
+
+    with patch.object(de, "_call_deepresearch_stream_impl", new=AsyncMock()) as stream:
+        result, saved = await _invoke(state=state, user_input="not-json")
+
+    assert result["kind"] == "error"
+    assert result["error_code"] == "interaction_invalid"
+    assert saved[-1]["phase"] == "error"
+    stream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_explicit_detail_query_starts_without_detail_card():
     completed = {
         "status": "completed",
