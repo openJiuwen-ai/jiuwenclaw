@@ -14,7 +14,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { AtSign, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Square, Target, X } from 'lucide-react';
+import { AtSign, CircleX, ClipboardList, FileText, Loader2, Plus, Square, Target, X } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -593,16 +593,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
-  const persistSessionDraft = useSessionStore(
-    (s) => s.runtimes[activeSessionId ?? '']?.persistSession ?? false,
-  );
-  const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
-    ? persistSessionDraft
-    : activeSession?.persist_session === true;
-  const canUsePersistSessionMenu = isAgentMode;
-  const persistSessionLocked = Boolean(
-    activeSessionId && activeSessionId !== NEW_CONVERSATION_ID,
-  );
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -2347,40 +2337,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
-                {canUsePersistSessionMenu && (
-                  <button
-                    type="button"
-                    className={clsx(
-                      'chat-mode-select__option',
-                      persistSessionEnabled && 'chat-mode-select__option--active',
-                    )}
-                    role="menuitemcheckbox"
-                    aria-checked={persistSessionEnabled}
-                    disabled={persistSessionLocked}
-                    title={persistSessionLocked ? t('persistSession.lockedHint') : undefined}
-                    onClick={() => {
-                      if (persistSessionLocked || !activeSessionId) return;
-                      useSessionStore
-                        .getState()
-                        .setPersistSession(activeSessionId, !persistSessionEnabled);
-                      setAttachMenuOpen(false);
-                    }}
-                  >
-                    <span className="chat-mode-select__option-main">
-                      <span className="chat-mode-select__icon" aria-hidden="true">
-                        <InfinityIcon className="w-4 h-4" />
-                      </span>
-                      <span className="chat-mode-select__label">
-                        {t('persistSession.toolbarTag')}
-                      </span>
-                    </span>
-                    {persistSessionEnabled && (
-                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
-                      </svg>
-                    )}
-                  </button>
-                )}
                 <button
                   ref={extensionMenuItemRef}
                   type="button"
