@@ -205,6 +205,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    DeepResearchExecutionRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
     ResponsePromptRail,
@@ -1210,6 +1211,10 @@ def build_progressive_tool_rail_from_config(
             lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
             _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
+        # This tool owns native multi-step HITL. It must execute directly;
+        # invoke_tool would hide the outer call from its lifecycle Rail.
+        if "deepresearch_execute" not in eager_tools:
+            eager_tools.insert(2, "deepresearch_execute")
 
     normalized_language = resolve_language(language)
     logger.info(
@@ -1932,6 +1937,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._progressive_tool_rail: ProgressiveToolRail | None = None
+        self._deepresearch_execution_rail: DeepResearchExecutionRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -6141,6 +6147,23 @@ class JiuWenSwarmDeepAdapter:
             stream_event_rail = None
         return stream_event_rail
 
+    def _build_deepresearch_execution_rail(
+        self,
+    ) -> DeepResearchExecutionRail | None:
+        """Build the native HITL bridge for deepresearch_execute."""
+        try:
+            rail = DeepResearchExecutionRail(model_provider=lambda: self._model)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create success"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create failed: %s",
+                exc,
+            )
+            return None
+
     @staticmethod
     def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
         """Build ContextOverflowRecoveryRail."""
@@ -6728,6 +6751,10 @@ class JiuWenSwarmDeepAdapter:
                 {
                     "enable_image_multimodal": self._resolve_enable_read_image_multimodal(config),
                 },
+            ),
+            _RailBuildInfo(
+                "_deepresearch_execution_rail",
+                self._build_deepresearch_execution_rail,
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             # an example to use extension rail (enterprise)

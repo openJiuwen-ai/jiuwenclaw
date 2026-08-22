@@ -1271,6 +1271,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        if (
+            str(getattr(tc, "name", "") or "").strip() == "deepresearch_execute"
+            and _extract_tool_interrupt(ctx.inputs.tool_result) is not None
+        ):
+            return
+
         normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
         self._symphony_stream_handler.request_force_finish(
