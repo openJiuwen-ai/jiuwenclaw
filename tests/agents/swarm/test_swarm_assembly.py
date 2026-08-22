@@ -1975,6 +1975,21 @@ def test_normal_team_plan_leader_uses_deepagent_plan_profile() -> None:
     assert registry.TEAM_PLAN_APPROVAL not in teammate_types
 
 
+def test_team_work_plan_leader_uses_deepagent_plan_profile() -> None:
+    """The new Team Plan canonical mounts the plan mechanics on the Leader."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs({}, "team.work.plan", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team.work.plan", "teammate")
+
+    leader_types = {spec.type for spec in leader_rails}
+    teammate_types = {spec.type for spec in teammate_rails}
+
+    assert registry.CODE_AGENT_MODE in leader_types
+    assert registry.TEAM_PLAN_APPROVAL in leader_types
+    assert registry.CODE_AGENT_MODE not in teammate_types
+    assert registry.TEAM_PLAN_APPROVAL not in teammate_types
+
+
 def test_normal_team_plan_agent_mode_provider_builds_work_rail() -> None:
     """The normal Team Plan leader receives WorkAgentModeRail with Team semantics."""
     register_swarm_providers()
@@ -2271,8 +2286,7 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
 
     team_config, code_config = captured_configs
     # team.plan.code leader goes through CodeAgentModeRail with the code
-    # profile prompts plus the team exit notification prompting Team Leader
-    # to use build_team.
+    # profile prompts plus a user-facing team execution notification.
     assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
     assert "plan_mode_attachment_note" not in team_config
     assert team_config["enter_plan_instructions"] == _code_enter_plan_instructions(
@@ -2280,7 +2294,13 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
     )
     assert team_config["exit_plan_notification"] == _TEAM_PLAN_EXIT_NOTIFICATION_EN
     assert "Team Leader" in team_config["exit_plan_notification"]
-    assert "build_team" in team_config["exit_plan_notification"]
+    for internal_name in (
+        "build_team",
+        "create_task",
+        "spawn_teammate",
+        "send_message",
+    ):
+        assert internal_name not in team_config["exit_plan_notification"]
     assert "ask_user" in team_config["allowed_tools"]
     # code.team leader stays on the code profile prompts with no exit
     # notification (only Team Plan leaders receive the Team Leader reminder).
