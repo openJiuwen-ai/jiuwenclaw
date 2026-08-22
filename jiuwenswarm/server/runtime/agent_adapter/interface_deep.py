@@ -2207,47 +2207,56 @@ class JiuWenSwarmDeepAdapter:
         # The parent (root) adapter ran create_instance (which stops at
         # _skip_own_instance_build) and populated these fields; the session adapter
         # can reuse them directly — they are read-only after construction.
-        if self._config_base_cache is not None:
-            adapter._config_base_cache = self._config_base_cache.copy()
-        if self._startup_config_base is not None:
-            adapter._startup_config_base = self._startup_config_base.copy()
-        if self._model is not None:
-            adapter._model = self._model
-            adapter._model_cache = dict(self._model_cache) if self._model_cache else {}
-            adapter._model_name_to_keys = dict(self._model_name_to_keys) if self._model_name_to_keys else {}
-            adapter._tier_model_cache = dict(self._tier_model_cache) if self._tier_model_cache else {}
-            adapter._default_model_name = self._default_model_name
-            adapter._model_client_config = self._model_client_config
-            adapter._model_request_config = self._model_request_config
-            adapter._last_models_config_fingerprint = self._last_models_config_fingerprint
-            adapter._model_config_source = self._model_config_source
-        if self._tool_cards is not None:
-            adapter._tool_cards = list(self._tool_cards)
-        if self._vision_model_config is not None:
-            adapter._vision_model_config = self._vision_model_config
-        if self._audio_model_config is not None:
-            adapter._audio_model_config = self._audio_model_config
-        if self._video_model_config:
-            adapter._video_model_config = self._video_model_config
-        if self._image_gen_model_config:
-            adapter._image_gen_model_config = self._image_gen_model_config
-        if self._enabled_skills is not None:
-            adapter._enabled_skills = list(self._enabled_skills)
-        if self._config_cache:
-            adapter._config_cache = dict(self._config_cache)
-        if self._skill_manager is not None:
-            adapter.set_skill_manager(self._skill_manager)
-        if self._agent_name and self._agent_name != "main_agent":
-            adapter._agent_name = self._agent_name
-        if self._project_dir is not None:
-            adapter._project_dir = self._project_dir
-        if self._workspace_dir is not None:
-            adapter._workspace_dir = self._workspace_dir
+        adapter.copy_resources_from(self)
         return adapter
 
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
+
+    def copy_resources_from(self, parent: "JiuWenSwarmDeepAdapter") -> None:
+        """Inherit the parent's already-built heavy resources.
+
+        Called by _new_session_scoped_adapter so the session adapter does not
+        need to re-read config, rebuild Model, or reconstruct tool cards.
+        All assignments are same-class self-access (no protected-access violation).
+        """
+        if parent._config_base_cache is not None:
+            self._config_base_cache = parent._config_base_cache.copy()
+        if parent._startup_config_base is not None:
+            self._startup_config_base = parent._startup_config_base.copy()
+        if parent._model is not None:
+            self._model = parent._model
+            self._model_cache = dict(parent._model_cache) if parent._model_cache else {}
+            self._model_name_to_keys = dict(parent._model_name_to_keys) if parent._model_name_to_keys else {}
+            self._tier_model_cache = dict(parent._tier_model_cache) if parent._tier_model_cache else {}
+            self._default_model_name = parent._default_model_name
+            self._model_client_config = parent._model_client_config
+            self._model_request_config = parent._model_request_config
+            self._last_models_config_fingerprint = parent._last_models_config_fingerprint
+            self._model_config_source = parent._model_config_source
+        if parent._tool_cards is not None:
+            self._tool_cards = list(parent._tool_cards)
+        if parent._vision_model_config is not None:
+            self._vision_model_config = parent._vision_model_config
+        if parent._audio_model_config is not None:
+            self._audio_model_config = parent._audio_model_config
+        if parent._video_model_config:
+            self._video_model_config = parent._video_model_config
+        if parent._image_gen_model_config:
+            self._image_gen_model_config = parent._image_gen_model_config
+        if parent._enabled_skills is not None:
+            self._enabled_skills = list(parent._enabled_skills)
+        if parent._config_cache:
+            self._config_cache = dict(parent._config_cache)
+        if parent._skill_manager is not None:
+            self.set_skill_manager(parent._skill_manager)
+        if parent._agent_name and parent._agent_name != "main_agent":
+            self._agent_name = parent._agent_name
+        if parent._project_dir is not None:
+            self._project_dir = parent._project_dir
+        if parent._workspace_dir is not None:
+            self._workspace_dir = parent._workspace_dir
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
