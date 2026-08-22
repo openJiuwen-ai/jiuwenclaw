@@ -1,14 +1,18 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""Web Pod 会话历史采集与查询（release 旧架构版：http.server + WS 代理）。
+"""会话历史采集与查询。
 
-职责：
-- ``ChatHistoryStore``：aiosqlite + WAL，落 sessions / messages 两表，幂等去重（由 ws loop 写）。
-- ``make_history_callback(store)``：产出 on_frame 回调——白名单过滤 +
-  pending（首条请求无 session_id 时暂存、final 回填）+ 调 store 落盘。
-- ``list_sessions_sync`` / ``get_session_detail_sync``：标准库 sqlite3 同步只读，
-  供 http.server 的 ``_SpaStaticHandler``（同步线程）调用；与 ws loop 的 aiosqlite 写共享同一 WAL db。
-- ``HistoryFrameRunner``：在同步 WS 代理线程中向后台 asyncio loop 投递采集任务。
+写路径可来自：
+- ``app_web`` WS 反代（``HistoryFrameRunner``）
+- Gateway ``WebChannel`` Listen（无 Pod 时的主路径）
+
+存储按库类型分支：
+- ``sqlite``：本地 ``web_history.db``（``WEB_HISTORY_SQLITE_PATH`` 可覆盖）
+- ``mysql``：独立库 ``web``（``WEB_DB_*``）；缺 ``WEB_DB_HOST`` 则不可用，不回退 SQLite
+- ``postgresql`` 等：暂不支持，明确不可用
+
+选型与 Gateway ``GATEWAY_DB_TYPE`` 对齐：``WEB_DB_TYPE`` → ``DB_TYPE`` →
+已配 ``WEB_DB_HOST`` 则视为 mysql → 默认 sqlite。
 """
 
 from __future__ import annotations
@@ -16,29 +20,75 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
-
-import aiosqlite
+from typing import Any, Awaitable, Callable, Literal
 
 logger = logging.getLogger("jiuwenswarm.web.history")
 
-# 用户对话请求白名单（其余 method 不采集）。
 _REQUEST_METHODS = frozenset({"chat.send", "chat.resume", "chat.user_answer"})
-# 终态回复事件（流式增量 / 工具调用等中间事件不采集）。
 _FINAL_EVENTS = frozenset({"chat.final", "chat.error"})
 
 _TITLE_LEN = 30
 _PREVIEW_LEN = 100
 _MAX_LIST_LIMIT = 100
 
-# on_frame 回调签名：(direction, raw, conn_id)
 FrameCallback = Callable[[str, str, "str | None"], Awaitable[None]]
+HistoryBackend = Literal["memory", "sqlite", "mysql"]
 
-_SCHEMA = """
+_DEFAULT_DB_NAME = "web"
+_DEFAULT_SQLITE_NAME = "web_history.db"
+
+_CREATE_DATABASE_SQL = (
+    "CREATE DATABASE IF NOT EXISTS `{db}` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+)
+
+_MYSQL_CREATE_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id     VARCHAR(128) NOT NULL,
+    user           VARCHAR(128) NOT NULL DEFAULT 'guest',
+    title          VARCHAR(255) NULL,
+    message_count  INT NOT NULL DEFAULT 0,
+    last_preview   TEXT NULL,
+    created_at     DOUBLE NOT NULL,
+    updated_at     DOUBLE NOT NULL,
+    PRIMARY KEY (session_id),
+    KEY idx_sessions_user_updated (user, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE IF NOT EXISTS messages (
+    id            BIGINT NOT NULL AUTO_INCREMENT,
+    session_id    VARCHAR(128) NOT NULL,
+    request_id    VARCHAR(128) NOT NULL,
+    role          VARCHAR(32) NOT NULL,
+    content       MEDIUMTEXT NOT NULL,
+    event_type    VARCHAR(64) NULL,
+    timestamp     DOUBLE NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_msg_sid_rid_role (session_id, request_id, role),
+    KEY idx_msg_session_ts (session_id, timestamp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+_MYSQL_INSERT_MESSAGE_SQL = (
+    "INSERT IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
+    "VALUES (%s, %s, %s, %s, %s, %s)"
+)
+
+_MYSQL_UPSERT_SESSION_SQL = """
+INSERT INTO sessions (session_id, user, title, message_count, last_preview, created_at, updated_at)
+VALUES (%s, %s, %s, 1, %s, %s, %s)
+ON DUPLICATE KEY UPDATE
+    message_count = message_count + 1,
+    last_preview  = VALUES(last_preview),
+    updated_at    = VALUES(updated_at),
+    title         = COALESCE(title, VALUES(title))
+"""
+
+_SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id     TEXT PRIMARY KEY,
     user           TEXT,
@@ -61,48 +111,376 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_msg_session_ts ON messages(session_id, timestamp);
 """
 
-_UPSERT_SESSION = """
+_SQLITE_INSERT_MESSAGE_SQL = (
+    "INSERT OR IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
+    "VALUES (?, ?, ?, ?, ?, ?)"
+)
+
+_SQLITE_UPSERT_SESSION_SQL = """
 INSERT INTO sessions (session_id, user, title, message_count, last_preview, created_at, updated_at)
 VALUES (?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT(session_id) DO UPDATE SET
     message_count = message_count + 1,
     last_preview  = excluded.last_preview,
-    updated_at    = excluded.updated_at
+    updated_at    = excluded.updated_at,
+    title         = COALESCE(sessions.title, excluded.title)
 """
 
 
+def _env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return default
+
+
+def resolve_history_db_type() -> str:
+    """解析 Web 会话历史库类型。
+
+    优先级：``WEB_DB_TYPE`` → ``DB_TYPE`` → 已配 ``WEB_DB_HOST`` 则 ``mysql`` → 默认 ``sqlite``。
+    """
+    explicit = _env("WEB_DB_TYPE") or _env("DB_TYPE")
+    if explicit:
+        return explicit.strip().lower()
+    if _env("WEB_DB_HOST"):
+        return "mysql"
+    return "sqlite"
+
+
+def default_history_sqlite_path() -> Path:
+    """SQLite 历史默认路径；``WEB_HISTORY_SQLITE_PATH`` 可覆盖。"""
+    override = _env("WEB_HISTORY_SQLITE_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    from jiuwenswarm.common.utils import (
+        get_multi_tenant_user_workspace_dir,
+        get_user_workspace_dir,
+    )
+
+    tenant_root = get_multi_tenant_user_workspace_dir("default", "default")
+    return (tenant_root or get_user_workspace_dir()) / _DEFAULT_SQLITE_NAME
+
+
+def default_enterprise_history_db_path() -> str:
+    """兼容旧调用：返回 sqlite 默认路径字符串。"""
+    return str(default_history_sqlite_path())
+
+
+@dataclass(frozen=True)
+class WebHistoryDbSettings:
+    """Web 历史库 MySQL 连接（独立 database ``web``）。"""
+
+    host: str
+    port: int
+    user: str
+    password: str
+    database: str = _DEFAULT_DB_NAME
+
+    @classmethod
+    def from_env(cls) -> WebHistoryDbSettings | None:
+        host = _env("WEB_DB_HOST")
+        if not host:
+            return None
+        port_raw = _env("WEB_DB_PORT", default="3306")
+        try:
+            port = int(port_raw)
+        except ValueError:
+            port = 3306
+        return cls(
+            host=host,
+            port=port,
+            user=_env("WEB_DB_USER", default="root"),
+            password=_env("WEB_DB_PASSWORD"),
+            database=_env("WEB_DB_NAME", default=_DEFAULT_DB_NAME) or _DEFAULT_DB_NAME,
+        )
+
+
+def _quote_ident(name: str) -> str:
+    cleaned = "".join(ch for ch in name if ch.isalnum() or ch in {"_", "$"})
+    return cleaned or _DEFAULT_DB_NAME
+
+
 class ChatHistoryStore:
-    """会话历史 SQLite 存储（aiosqlite + WAL，懒初始化，幂等）。"""
+    """会话历史存储：SQLite / MySQL；单测可用 memory=True。"""
 
-    def __init__(self, db_path: str | Path) -> None:
-        self._db_path = Path(db_path)
-        self._db: aiosqlite.Connection | None = None
-        self._init_lock: Any = None  # 懒建：首次用时创建（避免 import 时无 event loop）
+    def __init__(
+        self,
+        settings: WebHistoryDbSettings | str | Path | None = None,
+        *,
+        db_path: str | Path | None = None,
+        memory: bool = False,
+    ) -> None:
+        if isinstance(settings, (str, Path)):
+            db_path = settings
+            settings = None
+        self._settings = settings
+        self._db_path = Path(db_path) if db_path is not None else None
+        self._memory = memory
+        self._ready = False
+        self._init_lock = threading.Lock()
+        self._mem_lock = threading.Lock()
+        self._mem_sessions: dict[str, dict[str, Any]] = {}
+        self._mem_messages: list[dict[str, Any]] = []
 
-    async def _ensure(self) -> aiosqlite.Connection:
-        if self._db is not None:
-            return self._db
-        if self._init_lock is None:
-            self._init_lock = asyncio.Lock()
-        async with self._init_lock:
-            if self._db is not None:
-                return self._db
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = await aiosqlite.connect(str(self._db_path))
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA foreign_keys=ON")
-            await conn.executescript(_SCHEMA)
+    @classmethod
+    def for_db_type(cls, db_type: str) -> ChatHistoryStore:
+        normalized = str(db_type or "").strip().lower() or "sqlite"
+        if normalized in ("postgresql", "postgres", "pg"):
+            logger.warning(
+                "[history] Web 会话历史暂不支持 PostgreSQL（db_type=%s），历史不可用（不回退 SQLite）",
+                normalized,
+            )
+            return cls(settings=None, memory=False)
+        if normalized == "mysql":
+            return cls(settings=WebHistoryDbSettings.from_env(), memory=False)
+        if normalized == "sqlite":
+            return cls(db_path=default_history_sqlite_path(), memory=False)
+        logger.warning(
+            "[history] 不支持的历史库类型 %r，会话历史不可用（不回退 SQLite）",
+            normalized,
+        )
+        return cls(settings=None, memory=False)
+
+    @classmethod
+    def from_env(cls) -> ChatHistoryStore:
+        return cls.for_db_type(resolve_history_db_type())
+
+    @classmethod
+    def memory(cls) -> ChatHistoryStore:
+        return cls(settings=None, db_path=None, memory=True)
+
+    @property
+    def backend(self) -> HistoryBackend:
+        if self._memory:
+            return "memory"
+        if self._db_path is not None:
+            return "sqlite"
+        return "mysql"
+
+    @property
+    def db_path(self) -> Path | None:
+        return self._db_path
+
+    @property
+    def mysql_settings(self) -> WebHistoryDbSettings | None:
+        return self._settings
+
+    @property
+    def available(self) -> bool:
+        if self._memory:
+            return True
+        if self._db_path is not None:
+            return True
+        return self._settings is not None
+
+    def _connect_mysql(self, *, with_database: bool):
+        import pymysql
+
+        if self._settings is None:
+            raise RuntimeError("MySQL settings 未配置，无法建立连接")
+        kwargs: dict[str, Any] = {
+            "host": self._settings.host,
+            "port": self._settings.port,
+            "user": self._settings.user,
+            "password": self._settings.password,
+            "charset": "utf8mb4",
+            "autocommit": False,
+            "cursorclass": pymysql.cursors.DictCursor,
+        }
+        if with_database:
+            kwargs["database"] = self._settings.database
+        return pymysql.connect(**kwargs)
+
+    def _connect_sqlite(self) -> sqlite3.Connection:
+        if self._db_path is None:
+            raise RuntimeError("SQLite db_path 未配置，无法建立连接")
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> bool:
+        if self._memory:
+            return True
+        if self.backend == "sqlite":
+            return self._ensure_sqlite_schema()
+        return self._ensure_mysql_schema()
+
+    def _ensure_sqlite_schema(self) -> bool:
+        if self._db_path is None:
+            logger.error("[history] SQLite 未配置 db_path，会话历史不可用")
+            return False
+        if self._ready:
+            return True
+        with self._init_lock:
+            if self._ready:
+                return True
             try:
-                await conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT")
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
-                logger.debug("[history] sessions.user 列已存在，跳过 ALTER")
-            await conn.execute("UPDATE sessions SET user = 'guest' WHERE user IS NULL")
-            await conn.commit()
-            self._db = conn
-            logger.info("[history] store 初始化完成: db=%s", self._db_path)
-        return self._db
+                self._db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = self._connect_sqlite()
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    conn.executescript(_SQLITE_SCHEMA)
+                    try:
+                        conn.execute("ALTER TABLE sessions ADD COLUMN user TEXT")
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column" not in str(e).lower():
+                            raise
+                        logger.debug("[history] sessions.user 列已存在，跳过 ALTER")
+                    conn.execute("UPDATE sessions SET user = 'guest' WHERE user IS NULL")
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._ready = True
+                logger.info("[history] SQLite store 初始化完成 db=%s", self._db_path)
+                return True
+            except Exception:
+                logger.exception("[history] SQLite 初始化失败，会话历史暂不可用")
+                return False
+
+    def _ensure_mysql_schema(self) -> bool:
+        if self._settings is None:
+            logger.error("[history] MySQL 未配置（缺少 WEB_DB_HOST），会话历史不可用")
+            return False
+        if self._ready:
+            return True
+        with self._init_lock:
+            if self._ready:
+                return True
+            db_name = _quote_ident(self._settings.database)
+            try:
+                conn = self._connect_mysql(with_database=False)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(_CREATE_DATABASE_SQL.format(db=db_name))
+                    conn.commit()
+                finally:
+                    conn.close()
+                conn = self._connect_mysql(with_database=True)
+                try:
+                    with conn.cursor() as cur:
+                        for stmt in _MYSQL_CREATE_TABLES_SQL.split(";"):
+                            sql = stmt.strip()
+                            if sql:
+                                cur.execute(sql)
+                    conn.commit()
+                finally:
+                    conn.close()
+                self._ready = True
+                logger.info(
+                    "[history] MySQL store 初始化完成 %s:%s/%s",
+                    self._settings.host,
+                    self._settings.port,
+                    self._settings.database,
+                )
+                return True
+            except Exception:
+                logger.exception("[history] MySQL 初始化失败，会话历史暂不可用")
+                return False
+
+    def _run_write(self, fn: Callable[[Any], bool]) -> bool:
+        if self._memory:
+            return fn(None)
+        if not self._ensure_schema():
+            return False
+        try:
+            if self.backend == "sqlite":
+                conn = self._connect_sqlite()
+                try:
+                    inserted = fn(conn)
+                    conn.commit()
+                    return inserted
+                finally:
+                    conn.close()
+            conn = self._connect_mysql(with_database=True)
+            try:
+                inserted = fn(conn)
+                conn.commit()
+                return inserted
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("[history] %s 写入失败", self.backend.upper())
+            return False
+
+    async def _run_write_async(self, fn: Callable[[Any], bool]) -> bool:
+        return await asyncio.to_thread(self._run_write, fn)
+
+    def _insert_message_and_upsert_session(
+        self,
+        conn: Any,
+        *,
+        session_id: str,
+        request_id: str,
+        role: str,
+        content: str,
+        event_type: str | None,
+        ts: float,
+        user: str | None,
+        title: str | None,
+        preview: str,
+    ) -> bool:
+        if self._memory:
+            key = (session_id, request_id, role)
+            with self._mem_lock:
+                if any(
+                    (m["session_id"], m["request_id"], m["role"]) == key
+                    for m in self._mem_messages
+                ):
+                    return False
+                self._mem_messages.append({
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "role": role,
+                    "content": content,
+                    "event_type": event_type,
+                    "timestamp": ts,
+                })
+                existing = self._mem_sessions.get(session_id)
+                if existing is None:
+                    self._mem_sessions[session_id] = {
+                        "session_id": session_id,
+                        "user": user or "guest",
+                        "title": title,
+                        "message_count": 1,
+                        "last_preview": preview,
+                        "created_at": ts,
+                        "updated_at": ts,
+                    }
+                else:
+                    existing["message_count"] = int(existing.get("message_count") or 0) + 1
+                    existing["last_preview"] = preview
+                    existing["updated_at"] = ts
+                    if not existing.get("title") and title:
+                        existing["title"] = title
+            return True
+
+        if self.backend == "sqlite":
+            cur = conn.execute(
+                _SQLITE_INSERT_MESSAGE_SQL,
+                (session_id, request_id, role, content, event_type, ts),
+            )
+            inserted = cur.rowcount > 0
+            if inserted:
+                conn.execute(
+                    _SQLITE_UPSERT_SESSION_SQL,
+                    (session_id, user or "guest", title, preview, ts, ts),
+                )
+            return inserted
+
+        with conn.cursor() as cur:
+            cur.execute(
+                _MYSQL_INSERT_MESSAGE_SQL,
+                (session_id, request_id, role, content, event_type, ts),
+            )
+            inserted = cur.rowcount > 0
+            if inserted:
+                cur.execute(
+                    _MYSQL_UPSERT_SESSION_SQL,
+                    (session_id, user or "guest", title, preview, ts, ts),
+                )
+        return inserted
 
     async def record_user(
         self,
@@ -113,31 +491,28 @@ class ChatHistoryStore:
         ts: float,
         user: str | None = None,
     ) -> bool:
-        """落盘一条 user 消息。重发幂等（UNIQUE 命中则不增计数）。user 写 sessions.user（首条定）。"""
-        # 空 user 归一为默认身份 'guest'（与 _ensure 里的存量回填一致），
-        # 避免写入 NULL 而读取时不过滤 → 跨用户历史泄漏。
         if not user:
             user = "guest"
-        conn = await self._ensure()
-        cur = await conn.execute(
-            "INSERT OR IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
-            "VALUES (?, ?, 'user', ?, NULL, ?)",
-            (session_id, request_id, query, ts),
-        )
-        inserted = cur.rowcount > 0
-        if inserted:
-            await conn.execute(
-                _UPSERT_SESSION,
-                (session_id, user, query[:_TITLE_LEN], query[:_PREVIEW_LEN], ts, ts),
+        title = query[:_TITLE_LEN]
+        preview = query[:_PREVIEW_LEN]
+        inserted = await self._run_write_async(
+            lambda conn: self._insert_message_and_upsert_session(
+                conn,
+                session_id=session_id,
+                request_id=request_id,
+                role="user",
+                content=query,
+                event_type=None,
+                ts=ts,
+                user=user,
+                title=title,
+                preview=preview,
             )
-        await conn.commit()
+        )
         if inserted:
             logger.info(
                 "[history] 落盘 user: rid=%s sid=%s user=%s len=%d",
-                request_id,
-                session_id,
-                user,
-                len(query),
+                request_id, session_id, user, len(query),
             )
         return inserted
 
@@ -150,92 +525,161 @@ class ChatHistoryStore:
         event_type: str,
         ts: float,
     ) -> bool:
-        """落盘一条 assistant 终态消息（chat.final / chat.error）。重发幂等。"""
-        conn = await self._ensure()
-        cur = await conn.execute(
-            "INSERT OR IGNORE INTO messages (session_id, request_id, role, content, event_type, timestamp) "
-            "VALUES (?, ?, 'assistant', ?, ?, ?)",
-            (session_id, request_id, content, event_type, ts),
-        )
-        inserted = cur.rowcount > 0
-        if inserted:
-            await conn.execute(
-                _UPSERT_SESSION,
-                (session_id, None, None, content[:_PREVIEW_LEN], ts, ts),
+        preview = content[:_PREVIEW_LEN]
+        inserted = await self._run_write_async(
+            lambda conn: self._insert_message_and_upsert_session(
+                conn,
+                session_id=session_id,
+                request_id=request_id,
+                role="assistant",
+                content=content,
+                event_type=event_type,
+                ts=ts,
+                user="guest",
+                title=None,
+                preview=preview,
             )
-        await conn.commit()
+        )
         if inserted:
             logger.info(
                 "[history] 落盘 assistant: rid=%s sid=%s event=%s len=%d",
-                request_id,
-                session_id,
-                event_type,
-                len(content),
+                request_id, session_id, event_type, len(content),
             )
         return inserted
 
-    async def list_sessions(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
-        conn = await self._ensure()
+    def list_sessions_blocking(
+        self, *, limit: int, offset: int, user: str | None,
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(limit, _MAX_LIST_LIMIT))
         offset = max(0, offset)
-        cur = await conn.execute(
-            "SELECT session_id, title, message_count, last_preview, created_at, updated_at "
-            "FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+        if not user:
+            user = "guest"
+        if self._memory:
+            with self._mem_lock:
+                rows = [
+                    dict(s) for s in self._mem_sessions.values()
+                    if s.get("user") == user
+                ]
+            rows.sort(key=lambda r: float(r.get("updated_at") or 0), reverse=True)
+            return rows[offset:offset + limit]
+        if not self._ensure_schema():
+            return []
+        if self.backend == "sqlite":
+            try:
+                conn = self._connect_sqlite()
+                try:
+                    rows = conn.execute(
+                        "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                        "FROM sessions WHERE user = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                        (user, limit, offset),
+                    ).fetchall()
+                    return [dict(r) for r in rows]
+                finally:
+                    conn.close()
+            except Exception:
+                logger.exception("[history] SQLite 读取会话列表失败")
+                return []
+        try:
+            conn = self._connect_mysql(with_database=True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                        "FROM sessions WHERE user = %s ORDER BY updated_at DESC LIMIT %s OFFSET %s",
+                        (user, limit, offset),
+                    )
+                    return list(cur.fetchall() or [])
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("[history] MySQL 读取会话列表失败")
+            return []
+
+    def get_session_detail_blocking(
+        self, session_id: str, *, user: str | None,
+    ) -> dict[str, Any] | None:
+        if not user:
+            user = "guest"
+        if self._memory:
+            with self._mem_lock:
+                s = self._mem_sessions.get(session_id)
+                if s is None or s.get("user") != user:
+                    return None
+                msgs = [
+                    {
+                        "role": m["role"],
+                        "content": m["content"],
+                        "event_type": m["event_type"],
+                        "timestamp": m["timestamp"],
+                        "request_id": m["request_id"],
+                    }
+                    for m in self._mem_messages
+                    if m["session_id"] == session_id
+                ]
+            msgs.sort(key=lambda m: float(m.get("timestamp") or 0))
+            return {**s, "messages": msgs}
+        if not self._ensure_schema():
+            return None
+        if self.backend == "sqlite":
+            try:
+                conn = self._connect_sqlite()
+                try:
+                    s = conn.execute(
+                        "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                        "FROM sessions WHERE session_id = ? AND user = ?",
+                        (session_id, user),
+                    ).fetchone()
+                    if s is None:
+                        return None
+                    msgs = conn.execute(
+                        "SELECT role, content, event_type, timestamp, request_id "
+                        "FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
+                        (session_id,),
+                    ).fetchall()
+                    return {**dict(s), "messages": [dict(m) for m in msgs]}
+                finally:
+                    conn.close()
+            except Exception:
+                logger.exception("[history] SQLite 读取会话详情失败")
+                return None
+        try:
+            conn = self._connect_mysql(with_database=True)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
+                        "FROM sessions WHERE session_id = %s AND user = %s",
+                        (session_id, user),
+                    )
+                    s = cur.fetchone()
+                    if s is None:
+                        return None
+                    cur.execute(
+                        "SELECT role, content, event_type, timestamp, request_id "
+                        "FROM messages WHERE session_id = %s ORDER BY timestamp ASC",
+                        (session_id,),
+                    )
+                    msgs = list(cur.fetchall() or [])
+                    return {**s, "messages": msgs}
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("[history] MySQL 读取会话详情失败")
+            return None
+
+    async def list_sessions(self, *, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self.list_sessions_blocking, limit=limit, offset=offset, user=None,
         )
-        rows = await cur.fetchall()
-        return [
-            {
-                "session_id": r[0],
-                "title": r[1],
-                "message_count": r[2],
-                "last_preview": r[3],
-                "created_at": r[4],
-                "updated_at": r[5],
-            }
-            for r in rows
-        ]
 
     async def get_session_detail(self, session_id: str) -> dict[str, Any] | None:
-        conn = await self._ensure()
-        cur = await conn.execute(
-            "SELECT session_id, title, message_count, last_preview, created_at, updated_at "
-            "FROM sessions WHERE session_id = ?",
-            (session_id,),
+        return await asyncio.to_thread(
+            self.get_session_detail_blocking, session_id, user=None,
         )
-        s = await cur.fetchone()
-        if s is None:
-            return None
-        cur = await conn.execute(
-            "SELECT role, content, event_type, timestamp, request_id "
-            "FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
-            (session_id,),
-        )
-        msgs = await cur.fetchall()
-        return {
-            "session_id": s[0],
-            "title": s[1],
-            "message_count": s[2],
-            "last_preview": s[3],
-            "created_at": s[4],
-            "updated_at": s[5],
-            "messages": [
-                {
-                    "role": m[0],
-                    "content": m[1],
-                    "event_type": m[2],
-                    "timestamp": m[3],
-                    "request_id": m[4],
-                }
-                for m in msgs
-            ],
-        }
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
-            logger.info("[history] store 已关闭: db=%s", self._db_path)
+        self._ready = False
+        logger.info("[history] store 已关闭 backend=%s", self.backend)
 
 
 def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
@@ -257,25 +701,21 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         if not isinstance(request_id, str):
             return
         session_id = params.get("session_id")
-        user = params.get("user")
-        if not isinstance(user, str):
+        user = params.get("user") or params.get("user_id")
+        if not isinstance(user, str) or not user.strip():
             user = None
+        else:
+            user = user.strip()
         ts = time.time()
         if isinstance(session_id, str) and session_id:
             await store.record_user(
-                request_id=request_id,
-                session_id=session_id,
-                query=query,
-                ts=ts,
-                user=user,
+                request_id=request_id, session_id=session_id, query=query, ts=ts, user=user,
             )
         else:
             pending[request_id] = {"query": query, "ts": ts, "method": method, "user": user}
             logger.debug(
                 "[history] 暂存 pending user(无 sid): rid=%s method=%s pending=%d",
-                request_id,
-                method,
-                len(pending),
+                request_id, method, len(pending),
             )
 
     async def _handle_uplink(data: dict[str, Any]) -> None:
@@ -284,6 +724,10 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         event = data.get("event")
         payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
         request_id = data.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            payload_rid = payload.get("request_id")
+            if isinstance(payload_rid, str) and payload_rid:
+                request_id = payload_rid
 
         if event == "chat.delta" and isinstance(request_id, str):
             delta = payload.get("content")
@@ -297,8 +741,7 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         if not isinstance(session_id, str) or not session_id:
             logger.warning(
                 "[history] 终态帧缺 session_id，丢弃: event=%s rid=%s",
-                event,
-                request_id if isinstance(request_id, str) else "",
+                event, request_id if isinstance(request_id, str) else "",
             )
             return
         if event == "chat.final":
@@ -312,19 +755,13 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
         if isinstance(request_id, str) and request_id in pending:
             p = pending.pop(request_id)
             await store.record_user(
-                request_id=request_id,
-                session_id=session_id,
-                query=p["query"],
-                ts=p["ts"],
-                user=p.get("user"),
+                request_id=request_id, session_id=session_id,
+                query=p["query"], ts=p["ts"], user=p.get("user"),
             )
             logger.info("[history] pending 回填 user: rid=%s sid=%s", request_id, session_id)
         await store.record_assistant(
             request_id=request_id if isinstance(request_id, str) else "",
-            session_id=session_id,
-            content=content,
-            event_type=event,
-            ts=ts,
+            session_id=session_id, content=content, event_type=event, ts=ts,
         )
 
     async def cb(direction: str, raw: str, conn_id: str | None = None) -> None:  # noqa: ARG001
@@ -346,8 +783,87 @@ def make_history_callback(store: ChatHistoryStore) -> FrameCallback:
     return cb
 
 
+_default_store: ChatHistoryStore | None = None
+_default_store_lock = threading.Lock()
+
+
+def get_default_store() -> ChatHistoryStore:
+    """进程内单例，避免 HTTP 每次请求重建库。"""
+    global _default_store
+    with _default_store_lock:
+        if _default_store is None:
+            _default_store = ChatHistoryStore.from_env()
+        return _default_store
+
+
+def set_default_store(store: ChatHistoryStore) -> None:
+    global _default_store
+    with _default_store_lock:
+        _default_store = store
+
+
+def _coerce_store(store: ChatHistoryStore | str | Path | None) -> ChatHistoryStore | None:
+    if store is None:
+        st = get_default_store()
+        return st if st.available else None
+    if isinstance(store, ChatHistoryStore):
+        return store if store.available else None
+    path = Path(store)
+    if not path.exists():
+        return None
+    return ChatHistoryStore(db_path=path)
+
+
+def list_sessions_sync(
+    store: ChatHistoryStore | str | Path | None = None,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    user: str | None = None,
+) -> list[dict[str, Any]]:
+    """同步读会话列表（http.server 线程用）。库不可用返回空。"""
+    st = _coerce_store(store)
+    if st is None:
+        return []
+    return st.list_sessions_blocking(limit=limit, offset=offset, user=user)
+
+
+def _is_legacy_db_path_call(
+    session_id: str | Path,
+    store: ChatHistoryStore | str | Path | None,
+) -> bool:
+    if isinstance(session_id, Path):
+        return True
+    if store is None or isinstance(store, ChatHistoryStore):
+        return False
+    return isinstance(session_id, str) and session_id.endswith(".db")
+
+
+def get_session_detail_sync(
+    session_id: str | Path,
+    store: ChatHistoryStore | str | Path | None = None,
+    *,
+    user: str | None = None,
+) -> dict[str, Any] | None:
+    """同步读会话详情。兼容旧调用 ``(db_path, session_id)``。"""
+    if _is_legacy_db_path_call(session_id, store):
+        db_path, sid = session_id, str(store or "")
+        if not sid:
+            return None
+        st = _coerce_store(db_path)
+        if st is None:
+            return None
+        return st.get_session_detail_blocking(sid, user=user)
+    if not session_id:
+        return None
+    st = _coerce_store(store)
+    if st is None:
+        return None
+    return st.get_session_detail_blocking(str(session_id), user=user)
+
+
 class HistoryFrameRunner:
-    """Run async history callbacks from sync WS proxy threads."""
+    """Run async history callbacks from sync WS proxy / Listen enqueue threads."""
 
     def __init__(self, store: ChatHistoryStore) -> None:
         self._callback = make_history_callback(store)
@@ -373,86 +889,13 @@ class HistoryFrameRunner:
         except Exception:
             logger.warning("[history] submit frame failed dir=%s", direction, exc_info=True)
 
-
-def _open_readonly(db_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def list_sessions_sync(
-    db_path: str | Path,
-    *,
-    limit: int = 20,
-    offset: int = 0,
-    user: str | None = None,
-) -> list[dict[str, Any]]:
-    """同步读会话列表（http.server 线程用）。db 不存在或无表返回空。按 user 过滤（空归一为 'guest'）。"""
-    if not Path(db_path).exists():
-        return []
-    limit = max(1, min(limit, _MAX_LIST_LIMIT))
-    offset = max(0, offset)
-    if not user:
-        user = "guest"
-    conn = _open_readonly(db_path)
-    try:
-        if user:
-            rows = conn.execute(
-                "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
-                "FROM sessions WHERE user = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (user, limit, offset),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
-                "FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-        return [dict(r) for r in rows]
-    except sqlite3.OperationalError:
-        return []
-    finally:
-        conn.close()
-
-
-def get_session_detail_sync(
-    db_path: str | Path,
-    session_id: str,
-    *,
-    user: str | None = None,
-) -> dict[str, Any] | None:
-    """同步读会话详情。db 不存在 / 无表 / 会话不存在均返回 None。校验 user 归属（空归一为 'guest'）。"""
-    if not Path(db_path).exists():
-        return None
-    if not user:
-        user = "guest"
-    conn = _open_readonly(db_path)
-    try:
-        where = "WHERE session_id = ? AND user = ?"
-        params: tuple = (session_id, user)
-        s = conn.execute(
-            "SELECT session_id, user, title, message_count, last_preview, created_at, updated_at "
-            f"FROM sessions {where}",
-            params,
-        ).fetchone()
-        if s is None:
-            return None
-        msgs = conn.execute(
-            "SELECT role, content, event_type, timestamp, request_id "
-            "FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
-            (session_id,),
-        ).fetchall()
-        return {
-            "session_id": s["session_id"],
-            "user": s["user"],
-            "title": s["title"],
-            "message_count": s["message_count"],
-            "last_preview": s["last_preview"],
-            "created_at": s["created_at"],
-            "updated_at": s["updated_at"],
-            "messages": [dict(m) for m in msgs],
-        }
-    except sqlite3.OperationalError:
-        return None
-    finally:
-        conn.close()
+    def stop(self) -> None:
+        if not self._started:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        except Exception:  # noqa: BLE001
+            logger.debug("[history] stop loop failed", exc_info=True)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+        self._started = False

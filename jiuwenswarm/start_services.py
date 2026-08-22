@@ -640,9 +640,28 @@ def _wait_for_services_ready(
         if agent_port:
             targets.append(("AgentServer WebSocket", agent_port, f"ws://localhost:{agent_port}"))
         if gateway_port:
-            targets.append(("Gateway HTTP", gateway_port, f"http://localhost:{gateway_port}"))
+            targets.append(
+                ("Gateway WebSocket", gateway_port, f"ws://localhost:{gateway_port}/tui"),
+            )
         if web_port:
             targets.append(("WebChannel WebSocket", web_port, f"ws://localhost:{web_port}/ws"))
+            # Keep in sync with web_http_server.resolve_web_http_port (no heavy import).
+            web_http_port = web_port + 2
+            raw_http = os.environ.get("GATEWAY_WEB_HTTP_PORT", "").strip()
+            if raw_http:
+                try:
+                    web_http_port = int(raw_http)
+                except ValueError:
+                    pass
+            if web_http_port in (web_port, gateway_port):
+                web_http_port = max(web_port, gateway_port or 0) + 1
+            targets.append(
+                (
+                    "Web HTTP",
+                    web_http_port,
+                    f"http://localhost:{web_http_port}/api/v1",
+                ),
+            )
 
     frontend_alive = _proc_alive("web") or _proc_alive("web-dev")
     frontend_port = ports.get("frontend", 0)

@@ -615,6 +615,64 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
 
 
 @pytest.mark.asyncio
+async def test_models_save_remove_set_active_are_registered(monkeypatch):
+    channel = FakeWebChannel()
+    persisted: list[list[dict]] = []
+
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+        lambda: {"models": {"defaults": [
+            {
+                "model_client_config": {
+                    "model_name": "keep-me",
+                    "api_base": "",
+                    "api_key": "",
+                    "client_provider": "OpenAI",
+                },
+                "model_config_obj": {"temperature": 0.95},
+            }
+        ]}},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.update_default_models_in_config",
+        lambda models: persisted.append(list(models)),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.get_instance",
+        lambda: type(
+            "Registry",
+            (),
+            {"get_crypto_provider": lambda self: None},
+        )(),
+    )
+
+    async def on_config_saved(updated_keys, *, env_updates, config_payload, reload_options):
+        return True
+
+    _register_web_handlers(
+        WebHandlersBindParams(channel=channel, on_config_saved=on_config_saved)
+    )
+    assert "models.save" in channel.methods
+    assert "models.remove" in channel.methods
+    assert "models.set_active" in channel.methods
+
+    await channel.methods["models.save"](
+        object(),
+        "req-save",
+        {
+            "model_name": "new-model",
+            "api_base": "https://example.com/v1",
+            "api_key": "secret",
+            "model_provider": "OpenAI",
+        },
+        "sess-1",
+    )
+    assert channel.responses[-1]["ok"] is True
+    assert channel.responses[-1]["payload"]["action"] == "created"
+    assert persisted[-1][-1]["model_client_config"]["model_name"] == "new-model"
+
+
+@pytest.mark.asyncio
 async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
     channel = FakeWebChannel()
     recorded: list[dict] = []

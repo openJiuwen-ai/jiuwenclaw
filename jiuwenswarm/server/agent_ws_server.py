@@ -49,6 +49,7 @@ from jiuwenswarm.common.e2a.wire_codec import (
 )
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.request_ext import lift_from_metadata as _tp_lift, reset_ext as _tp_reset
 from jiuwenswarm.common.version import __version__
 from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_exception,
@@ -1470,6 +1471,7 @@ class AgentWebSocketServer:
                 preview_text(_request_query_text(request)),
             )
 
+        _ext_token = _tp_lift(request.metadata)
         try:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
@@ -1843,6 +1845,8 @@ class AgentWebSocketServer:
                     request.request_id,
                     send_err,
                 )
+        finally:
+            _tp_reset(_ext_token)
 
     @staticmethod
     async def _trigger_before_ws_server_start_hook() -> None:
