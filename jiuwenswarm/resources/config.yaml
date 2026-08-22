@@ -730,9 +730,10 @@ gateway:
     interval_seconds: ${GATEWAY_CONFIG_POLL_INTERVAL_SECONDS:-10}
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
+  # type: websocket（默认） | http（REST/SSE，须 Agent 已开 http_server） | yuanrong | agentos_router
+  # http 不探测、不回退 WS；AGENT_SERVER_URL 用 http://host:8766，不要打 WS :18092。
   agent_client:
-    type: websocket # websocket | yuanrong | agentos_router
+    type: websocket # websocket | http | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint:
     function_version_urn:
