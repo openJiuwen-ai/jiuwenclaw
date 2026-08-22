@@ -1889,16 +1889,39 @@ async def _call_method(method_table, method, params):
 
 
 class TestSessionGetMetadataHandler:
-    """session.get_metadata：按 session_id 返回单个会话元数据（只读出口）。"""
+    """session.get_metadata：Phase 2 迁移后由 AgentServer SessionAdapter 处理。
+
+    迁移说明：Web ``session.get_metadata`` 已改为 E2A 薄代理转发（决策 D2/D8），
+    行为判定（完整 metadata / BAD_REQUEST / NOT_FOUND / 单会话隔离）落在
+    AgentServer 侧 ``SessionAdapter``（``SESSION_GET_METADATA``），此处直接调用
+    适配器验证；``test_method_registered`` 保留验证 Web handler 仍注册。
+    """
+
+    @staticmethod
+    def _adapter_get_metadata(session_id: str):
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.gateway_adapter.session_adapter import (
+            SessionAdapter,
+        )
+
+        return SessionAdapter().handle(
+            AgentRequest(
+                request_id="req-1",
+                channel_id="web",
+                req_method=ReqMethod.SESSION_GET_METADATA,
+                params={"session_id": session_id},
+            )
+        )
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_returns_metadata_for_existing_session(registered_channel, sessions_dir):
         """存在的会话返回完整 metadata（含新字段）"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
+            _METADATA_QUEUE,
             init_session_metadata,
             update_session_metadata,
-            _METADATA_QUEUE,
         )
 
         init_session_metadata(
@@ -1916,12 +1939,10 @@ class TestSessionGetMetadataHandler:
         )
         _METADATA_QUEUE.join()
 
-        resp = await _call_method(
-            registered_channel, "session.get_metadata", {"session_id": "sess_x"}
-        )
+        resp = await TestSessionGetMetadataHandler._adapter_get_metadata("sess_x")
 
-        assert resp["ok"] is True
-        payload = resp["payload"]
+        assert resp.ok is True
+        payload = resp.payload
         assert payload["session_id"] == "sess_x"
         # 读路径惰性迁移：旧 canonical agent.plan → 新 canonical agent.work.plan
         assert payload["mode"] == "agent.work.plan"
@@ -1934,26 +1955,42 @@ class TestSessionGetMetadataHandler:
     @pytest.mark.asyncio
     async def test_missing_session_id_returns_bad_request(registered_channel):
         """session_id 缺失 → BAD_REQUEST"""
-        resp = await _call_method(
-            registered_channel, "session.get_metadata", {"session_id": ""}
+        from jiuwenswarm.common.schema.agent import AgentRequest
+        from jiuwenswarm.common.schema.message import ReqMethod
+        from jiuwenswarm.server.runtime.gateway_adapter.session_adapter import (
+            SessionAdapter,
         )
-        assert resp["ok"] is False
-        assert resp["code"] == "BAD_REQUEST"
+
+        resp = await SessionAdapter().handle(
+            AgentRequest(
+                request_id="req-1",
+                channel_id="web",
+                req_method=ReqMethod.SESSION_GET_METADATA,
+                params={"session_id": ""},
+            )
+        )
+        assert resp.ok is False
+        assert resp.payload["code"] == "BAD_REQUEST"
 
         # params 不是 dict
-        resp2 = await _call_method(registered_channel, "session.get_metadata", None)
-        assert resp2["ok"] is False
-        assert resp2["code"] == "BAD_REQUEST"
+        resp2 = await SessionAdapter().handle(
+            AgentRequest(
+                request_id="req-1",
+                channel_id="web",
+                req_method=ReqMethod.SESSION_GET_METADATA,
+                params=None,
+            )
+        )
+        assert resp2.ok is False
+        assert resp2.payload["code"] == "BAD_REQUEST"
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_nonexistent_session_returns_not_found(registered_channel):
         """不存在的会话 → NOT_FOUND"""
-        resp = await _call_method(
-            registered_channel, "session.get_metadata", {"session_id": "no_such_session"}
-        )
-        assert resp["ok"] is False
-        assert resp["code"] == "NOT_FOUND"
+        resp = await TestSessionGetMetadataHandler._adapter_get_metadata("no_such_session")
+        assert resp.ok is False
+        assert resp.payload["code"] == "NOT_FOUND"
 
     @staticmethod
     @pytest.mark.asyncio
@@ -1966,25 +2003,21 @@ class TestSessionGetMetadataHandler:
     async def test_single_session_isolation(registered_channel, sessions_dir):
         """单会话隔离：A 会话的查询不返回 B 会话的数据"""
         from jiuwenswarm.server.runtime.session.session_metadata import (
-            init_session_metadata,
             _METADATA_QUEUE,
+            init_session_metadata,
         )
 
         init_session_metadata(session_id="sess_A", model="modelA", project_dir="E:\\A")
         init_session_metadata(session_id="sess_B", model="modelB", project_dir="E:\\B")
         _METADATA_QUEUE.join()
 
-        resp_a = await _call_method(
-            registered_channel, "session.get_metadata", {"session_id": "sess_A"}
-        )
-        resp_b = await _call_method(
-            registered_channel, "session.get_metadata", {"session_id": "sess_B"}
-        )
+        resp_a = await TestSessionGetMetadataHandler._adapter_get_metadata("sess_A")
+        resp_b = await TestSessionGetMetadataHandler._adapter_get_metadata("sess_B")
 
-        assert resp_a["payload"]["model"] == "modelA"
-        assert resp_a["payload"]["project_dir"] == "E:\\A"
-        assert resp_b["payload"]["model"] == "modelB"
-        assert resp_b["payload"]["project_dir"] == "E:\\B"
+        assert resp_a.payload["model"] == "modelA"
+        assert resp_a.payload["project_dir"] == "E:\\A"
+        assert resp_b.payload["model"] == "modelB"
+        assert resp_b.payload["project_dir"] == "E:\\B"
 
 
 # ===========================================================================

@@ -1856,6 +1856,7 @@ async def process_team_message_stream(
             project_dir=request_metadata.get("project_dir"),
             trusted_dirs=_request_trusted_dirs(request),
             request_id=rid,
+            user_id=str(getattr(request, "user_id", "") or "").strip() or None,
             channel_id=channel_id,
             request_metadata=request_metadata,
             requested_model_name=requested_model_name,

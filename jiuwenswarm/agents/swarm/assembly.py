@@ -252,6 +252,7 @@ def enrich_team_spec_for_swarm(
     project_dir: str | None = None,
     trusted_dirs: list[str] | None = None,
     request_id: str | None = None,
+    user_id: str | None = None,
     channel_id: str | None = None,
     request_metadata: dict[str, Any] | None = None,
     agent_group_name: str | None = None,
@@ -269,6 +270,7 @@ def enrich_team_spec_for_swarm(
         project_dir: Resolved project directory, if any.
         trusted_dirs: Directories the client declared as trusted for this request.
         request_id: Originating request id, if any.
+        user_id: Authenticated request owner, if any.
         channel_id: Raw channel id from the request, if any.
         request_metadata: Request metadata mapping (carries ``mode`` etc.).
         agent_group_name: Optional AgentGroup package selected for this Team.
@@ -305,6 +307,7 @@ def enrich_team_spec_for_swarm(
     base = SwarmBuildContext(
         session_id=session_id,
         request_id=request_id,
+        user_id=user_id,
         channel_id=channel_id,
         channel=channel_id or "default",
         request_metadata=request_metadata,

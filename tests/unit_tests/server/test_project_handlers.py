@@ -37,6 +37,8 @@ class _FakeWebChannel:
 class _FakeSessionCreateAgentClient:
     """AgentServer boundary fake backed by the production binding helpers."""
 
+    server_ready = True
+
     def __init__(self) -> None:
         self.requests: list[object] = []
         self._sequence = 0
@@ -44,6 +46,51 @@ class _FakeSessionCreateAgentClient:
     async def send_request(self, request):
         self.requests.append(request)
         params = dict(request.params or {})
+
+        # Phase 2: session.pin 走 E2A 转发到 AgentServer(SessionAdapter SESSION_PIN)。
+        # fake 用生产 set_session_pinned 落盘,保持 Web handler 集成路径可验证。
+        if getattr(request, "method", None) == "session.pin":
+            return self._handle_session_pin(params)
+
+        if getattr(request, "method", None) in {
+            "project.info", "project.pinned_sessions", "project.pin",
+            "project.get_sessions",
+            "project.get_cron_sessions",
+            "project.list",
+            "project.create",
+            "project.rename",
+            "project.remove",
+            "project.restore",
+        }:
+            from jiuwenswarm.common.schema.agent import AgentRequest
+            from jiuwenswarm.common.schema.message import ReqMethod
+            from jiuwenswarm.server.runtime.gateway_adapter.project_adapter import (
+                ProjectAdapter,
+            )
+
+            method = {
+                "project.info": ReqMethod.PROJECT_INFO,
+                "project.pinned_sessions": ReqMethod.PROJECT_PINNED_SESSIONS,
+                "project.get_sessions": ReqMethod.PROJECT_GET_SESSIONS,
+                "project.get_cron_sessions": ReqMethod.PROJECT_GET_CRON_SESSIONS,
+                "project.list": ReqMethod.PROJECT_LIST,
+                "project.create": ReqMethod.PROJECT_CREATE,
+                "project.rename": ReqMethod.PROJECT_RENAME,
+                "project.pin": ReqMethod.PROJECT_PIN,
+                "project.remove": ReqMethod.PROJECT_REMOVE,
+                "project.restore": ReqMethod.PROJECT_RESTORE,
+            }[request.method]
+            response = await ProjectAdapter().handle(
+                AgentRequest(
+                    request_id=str(request.request_id or ""),
+                    channel_id=str(request.channel or "web"),
+                    session_id=request.session_id,
+                    req_method=method,
+                    params=params,
+                    user_id=str(request.user_id or ""),
+                )
+            )
+            return SimpleNamespace(ok=response.ok, payload=response.payload)
 
         from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE, is_default_project_id
         from jiuwenswarm.server.runtime.session import project_store
@@ -100,6 +147,26 @@ class _FakeSessionCreateAgentClient:
             },
         )
 
+    @staticmethod
+    def _handle_session_pin(params: dict):
+        from jiuwenswarm.server.runtime.session.session_metadata import set_session_pinned
+
+        sid = str(params.get("session_id") or "").strip()
+        raw_pinned = params.get("pinned")
+        if not sid or not isinstance(raw_pinned, bool):
+            return SimpleNamespace(
+                ok=False, payload={"error": "session_id required / pinned must be bool", "code": "BAD_REQUEST"},
+            )
+        result = set_session_pinned(sid, raw_pinned)
+        if result is None:
+            return SimpleNamespace(
+                ok=False, payload={"error": "session not found", "code": "NOT_FOUND"},
+            )
+        new_pinned, new_order = result
+        return SimpleNamespace(
+            ok=True, payload={"pinned": new_pinned, "pin_order": new_order},
+        )
+
 
 @pytest.fixture()
 def sessions_dir(tmp_path, monkeypatch):
@@ -107,11 +174,6 @@ def sessions_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
-        lambda: d,
-    )
-    # _session_create 等 handler 直接引用 app_web_handlers 模块内导入的副本,需一并 patch
-    monkeypatch.setattr(
-        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_agent_sessions_dir",
         lambda: d,
     )
     from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
@@ -395,6 +457,45 @@ class TestProjectGetSessions:
 
 
 # ===========================================================================
+# project.get_cron_sessions
+# ===========================================================================
+class TestProjectGetCronSessions:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_returns_only_matching_cron_sessions(registered_channel, tmp_path):
+        project_dir = _abspath(tmp_path, "cron-app")
+        project = _make_project("Cron", project_dir)
+        _make_session(
+            "cron-new", project_id=project.project_id, project_dir=project_dir,
+            cron_id="job-1", last_user_message_at=300.0,
+        )
+        _make_session(
+            "cron-old", project_id=project.project_id, project_dir=project_dir,
+            cron_id="job-2", last_user_message_at=100.0,
+        )
+        _make_session(
+            "ordinary", project_id=project.project_id, project_dir=project_dir,
+            last_user_message_at=400.0,
+        )
+        _make_session(
+            "pinned-cron", project_id=project.project_id, project_dir=project_dir,
+            cron_id="job-1", pinned=True, pin_order=1, last_user_message_at=500.0,
+        )
+
+        response = await _call(
+            registered_channel,
+            "project.get_cron_sessions",
+            {"project_id": project.project_id, "cron_id": "job-1"},
+        )
+
+        assert response["ok"] is True
+        assert response["payload"]["total"] == 1
+        assert [item["session_id"] for item in response["payload"]["sessions"]] == [
+            "cron-new"
+        ]
+
+
+# ===========================================================================
 # project.create
 # ===========================================================================
 class TestProjectCreate:
@@ -598,6 +699,46 @@ class TestProjectRename:
                 )
                 assert resp["ok"] is False, f"expected BAD_REQUEST for name={reserved!r}"
                 assert resp["code"] == "BAD_REQUEST", f"expected BAD_REQUEST for name={reserved!r}"
+
+
+# ===========================================================================
+# project.pin
+# ===========================================================================
+class TestProjectPin:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_pin_reindexes_and_unpin(registered_channel, tmp_path):
+        first = _make_project("First", _abspath(tmp_path, "first"))
+        second = _make_project("Second", _abspath(tmp_path, "second"))
+
+        response_first = await _call(
+            registered_channel, "project.pin", {"project_id": first.project_id, "pinned": True}
+        )
+        response_second = await _call(
+            registered_channel, "project.pin", {"project_id": second.project_id, "pinned": True}
+        )
+        response_unpin = await _call(
+            registered_channel, "project.pin", {"project_id": first.project_id, "pinned": False}
+        )
+
+        assert response_first["payload"] == {"pinned": True, "pin_order": 1}
+        assert response_second["payload"] == {"pinned": True, "pin_order": 1}
+        assert response_unpin["payload"] == {"pinned": False, "pin_order": 0}
+        from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
+        assert get_project_by_id(second.project_id, cache_bust=True).pin_order == 1
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_pin_rejects_default_and_bad_params(registered_channel, tmp_path):
+        project = _make_project("Project", _abspath(tmp_path, "app"))
+        default = await _call(
+            registered_channel, "project.pin", {"project_id": "default", "pinned": True}
+        )
+        invalid = await _call(
+            registered_channel, "project.pin", {"project_id": project.project_id, "pinned": "yes"}
+        )
+        assert default["code"] == "FORBIDDEN"
+        assert invalid["code"] == "BAD_REQUEST"
 
 
 # ===========================================================================

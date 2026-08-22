@@ -879,7 +879,7 @@ export function ConversationSidebar({
 
   useEffect(() => {
     for (const projectId of projectIdSnapshot.split('\0')) {
-      if (projectId && (expandedProjectIds[projectId] ?? true)) {
+      if (projectId && expandedProjectIds[projectId]) {
         void loadProjectSessions(projectId);
       }
     }
@@ -1177,7 +1177,7 @@ export function ConversationSidebar({
 
   function renderProject(project: ProjectInfo) {
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
-    const expanded = expandedProjectIds[project.project_id] ?? true;
+    const expanded = Boolean(expandedProjectIds[project.project_id]);
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
         <ProjectEntityRow

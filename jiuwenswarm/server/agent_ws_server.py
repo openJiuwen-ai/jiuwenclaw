@@ -137,8 +137,45 @@ from jiuwenswarm.server.personal_context.ws_handler import (
     handle_personal_context_request,
 )
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.server.runtime.gateway_adapter import (
+    AdapterRegistry,
+    ConfigAdapter,
+    HarmonyOSAdapter,
+    MemoryAdapter,
+    ProjectAdapter,
+    SessionAdapter,
+    WorkspaceFileAdapter,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# These handlers also perform AgentServer process-lifecycle cleanup that the
+# neutral adapters deliberately do not own.  Keep their established branches.
+_GATEWAY_ADAPTER_LEGACY_METHODS = frozenset({
+    ReqMethod.SESSION_DELETE,
+    ReqMethod.SESSION_RENAME,
+})
+
+
+def _parse_single_byte_range(
+    range_header: str, file_size: int
+) -> tuple[int, int] | None:
+    """Parse a single HTTP byte range for file-download bridge handlers."""
+    if file_size <= 0 or not range_header.startswith("bytes=") or "," in range_header:
+        return None
+    start_text, end_text = range_header[6:].split("-", 1) if "-" in range_header[6:] else ("", "")
+    if not start_text:
+        if not end_text.isdecimal() or int(end_text) <= 0:
+            return None
+        return max(0, file_size - int(end_text)), file_size - 1
+    if not start_text.isdecimal() or (end_text and not end_text.isdecimal()):
+        return None
+    start = int(start_text)
+    if start >= file_size:
+        return None
+    end = min(int(end_text), file_size - 1) if end_text else file_size - 1
+    return (start, end) if end >= start else None
 
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
 # task 完成后自动从集合移除(Python 官方推荐模式)。
@@ -949,6 +986,19 @@ class AgentWebSocketServer:
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
+        # Gateway user-business RPCs execute in the current AgentServer's
+        # injected data directory.  Register the adapters once per server;
+        # request dispatch occurs before the legacy handler chain below.
+        self._adapter_registry = AdapterRegistry()
+        for adapter in (
+            SessionAdapter(),
+            WorkspaceFileAdapter(),
+            MemoryAdapter(),
+            ProjectAdapter(),
+            HarmonyOSAdapter(),
+            ConfigAdapter(),
+        ):
+            self._adapter_registry.register(adapter)
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。
         self._stateless_fallback_agents: dict[str, Any] = {}
@@ -1527,6 +1577,97 @@ class AgentWebSocketServer:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             self._session_stream_tasks.clear()
 
+    async def _dispatch_gateway_adapter_request(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> bool:
+        """Dispatch migrated Gateway user-business RPCs to their adapters.
+
+        The registry is intentionally checked before the legacy handler chain:
+        AgentOS requests must operate on this process's injected user directory.
+        A small set of legacy handlers is retained when it owns runtime cleanup.
+        """
+        if request.req_method is None or request.req_method in _GATEWAY_ADAPTER_LEGACY_METHODS:
+            return False
+        registry = getattr(self, "_adapter_registry", None)
+        if registry is None:
+            return False
+        adapter = registry.get(request.req_method.value)
+        if adapter is None:
+            return False
+        try:
+            response = await adapter.handle(request)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[AgentWebSocketServer] Gateway adapter failed: request_id=%s method=%s",
+                request.request_id,
+                request.req_method.value,
+            )
+            response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc), "code": "INTERNAL_ERROR"},
+                metadata=request.metadata,
+            )
+        if getattr(response, "agent_ref", None) is None:
+            response.agent_ref = request.agent_ref
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+        return True
+
+    async def _handle_gateway_cron_callback(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> bool:
+        """Consume Gateway-owned cron callbacks without creating a chat turn."""
+        if request.req_method not in {
+            ReqMethod.CRON_JOBS_SYNC,
+            ReqMethod.CRON_COMMAND_ACK,
+            ReqMethod.CRON_RUN_NOW_ACK,
+        }:
+            return False
+
+        params = request.params if isinstance(request.params, dict) else {}
+        from jiuwenswarm.agents.harness.common.tools.cron.cron_tools import (
+            install_gateway_jobs_snapshot,
+            resolve_gateway_cron_command_ack,
+            resolve_gateway_run_ack,
+        )
+
+        if request.req_method == ReqMethod.CRON_JOBS_SYNC:
+            install_gateway_jobs_snapshot(
+                params.get("jobs", []), user_id=request.user_id
+            )
+        elif request.req_method == ReqMethod.CRON_COMMAND_ACK:
+            resolve_gateway_cron_command_ack(
+                str(params.get("command_id") or ""),
+                {"data": params.get("data")},
+            )
+        else:
+            resolve_gateway_run_ack(
+                str(params.get("ack_request_id") or ""),
+                str(params.get("run_id") or ""),
+            )
+
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload={"status": "ok"},
+            metadata=request.metadata,
+            agent_ref=request.agent_ref,
+        )
+        wire = encode_agent_response_for_wire(response, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+        return True
+
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
@@ -1623,6 +1764,12 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            if await self._handle_gateway_cron_callback(ws, request, send_lock):
+                return
+
+            if await self._dispatch_gateway_adapter_request(ws, request, send_lock):
+                return
 
             await self._trigger_before_chat_request_hook(request)
 
@@ -9048,7 +9195,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -9058,7 +9205,7 @@ class AgentWebSocketServer:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            return False
 
         try:
             wire = build_server_push_wire(msg)
@@ -9069,7 +9216,7 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
                     msg.get("channel_id", ""),
                 )
-                return
+                return False
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
@@ -9082,8 +9229,10 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 已发送(E2A wire): channel_id=%s",
                     msg.get("channel_id", ""),
                 )
+            return True
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
+            return False
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""
@@ -9353,6 +9502,26 @@ class AgentWebSocketServer:
                         find_or_create_code_project_for_tui_params,
                     )
 
+                    project = find_or_create_code_project_for_tui_params(params)
+                    if project is not None:
+                        params["project_id"] = project.project_id
+                        params["project_dir"] = project.project_dir
+                        params["work_mode"] = project.work_mode
+            # TUI 无显式 session_id（未带 --session）创建时：AgentServer 侧按
+            # cwd/project_dir 解析真实的 code 项目并写回，避免落到默认 default_code
+            # （AgentOS 迁移前由 TUI 本地解析，现收敛到 AgentServer 保证归属一致）。
+            if (
+                not external_tui_session
+                and channel_id.strip().lower() == "tui"
+            ):
+                from jiuwenswarm.server.runtime.session.project_store import (
+                    find_or_create_code_project_for_tui_params,
+                )
+
+                candidate_dir = str(
+                    params.get("project_dir") or params.get("cwd") or ""
+                ).strip()
+                if not str(params.get("project_id") or "").strip() and candidate_dir:
                     project = find_or_create_code_project_for_tui_params(params)
                     if project is not None:
                         params["project_id"] = project.project_id

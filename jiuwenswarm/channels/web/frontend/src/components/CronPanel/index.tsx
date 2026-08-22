@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronLeft, ChevronRight, Search, TrendingUp, Newspaper, Briefcase } from 'lucide-react';
 import { webRequest, webClient } from '../../services/webClient';
-import { resolveConfiguredModelName, useCronStore, useSessionStore } from '../../stores';
+import { useCronStore } from '../../stores';
 import { projectRegistryClient } from '../../features/workspace/projectRegistryClient';
 import type { ProjectInfo } from '../../features/workspace/projectTypes';
 import type { Session } from '../../types';
@@ -14,7 +14,6 @@ import StatusBadge, { BoldRingIcon, RunningIcon } from './StatusBadge';
 import ConfirmDialog from './ConfirmDialog';
 import CronTaskDrawer, { jobToForm, templateToForm, type CronTaskFormValue } from './CronTaskDrawer';
 import { resolveCronJobProjectName } from './cronProjectDisplay';
-import { isTeamCronModeValue } from './cronMode';
 import { useClickOutside } from './useClickOutside';
 import SimpleSelect from './SimpleSelect';
 import { hasXiaoyiPushApiId, isCronTargetOptionDisabled } from './xiaoyiCronTarget';
@@ -207,17 +206,19 @@ function cronJobToUI(job: CronJobDTO, projects: ProjectInfo[]): CronTaskUI {
   };
 }
 
-// isTeamCronModeValue 从 ./cronMode 引入（对齐后端 CRON_JOB_MODES / mode_matrix 的
-// TEAM_CANONICAL_MODES），cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——
-// 只有 'team' 这一类算集群，其余一律按单 Agent 处理。
-
-// 提交时把抽屉里选的模型（alias 或 model_name）归一成后端需要的 canonical model_name；
-// 单 Agent 与集群（team）任务统一处理——后端 scheduler 对 team 任务同样透传
-// job.model_name 给 chat.send（见 gateway/cron/scheduler.py _run_agent）。
-function resolveSubmittedCronModelName(value: CronTaskFormValue): string | null {
-  if (!value.modelName) return null;
-  const { availableModels } = useSessionStore.getState();
-  return resolveConfiguredModelName(availableModels, value.modelName) ?? value.modelName;
+// 后端 CronJob.mode 合法值集合（对齐 jiuwenswarm/gateway/cron/models.py 的 _TEAM_CRON_MODES）。
+// 用于 cronJobToUI 把后端的 mode 字段归一成 UI 的 AgentMode 二态——只有 'team' 这一类算集群，
+// 其余一律按单 Agent 处理。inline 在这里而不是放到 types/cron.ts 是因为它只服务于本文件的归一逻辑，
+// 跟 CronTaskUI.mode 这个已经归一过的 UI 字段语义不同。
+function isTeamCronModeValue(raw: string | undefined | null): boolean {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return (
+    value === 'team' ||
+    value === 'team.plan' ||
+    value === 'team.plan.normal' ||
+    value === 'team.plan.code' ||
+    value === 'code.team'
+  );
 }
 
 type StatusFilterKey = 'running' | 'paused' | 'expired';
@@ -525,7 +526,6 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   const expiredCount = useMemo(() => jobs.filter((j) => jobStatusKey(j) === 'expired').length, [jobs]);
 
   async function handleCreateSubmit(value: CronTaskFormValue) {
-    const modelName = resolveSubmittedCronModelName(value);
     try {
       await webRequest<{ job: CronJobDTO }>('cron.job.create', {
         name: value.name.trim(),
@@ -546,7 +546,10 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
         // 优先信任显式 project_id，只传 project_dir 需要多一层反查（见 CronTaskFormValue.projectId 注释）。
         // 未选项目（projectId 为 null）时不传这个 key，走 project_dir 空串的既有归默认项目逻辑。
         ...(value.projectId ? { project_id: value.projectId } : {}),
-        ...(modelName ? { model_name: modelName } : {}),
+        // 一并带上 work_mode：AgentOS 多用户下 Gateway 不再本地反查项目表，work_mode
+        // 需由前端（project.list 已含 work_mode）随 project_id 下发，保证归属/展示正确。
+        ...(value.projectId && value.workMode ? { work_mode: value.workMode } : {}),
+        ...(value.modelName ? { model_name: value.modelName } : {}),
         mode: value.mode,
         session_id: sessionId,
       });
@@ -572,7 +575,6 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
   }
 
   async function handleEditSubmit(jobId: string, value: CronTaskFormValue) {
-    const modelName = resolveSubmittedCronModelName(value);
     try {
       const isProactive = jobId === PROACTIVE_AUTO_JOB_ID;
       // proactive 自动维护 job 只允许改 cron_expr 和 timezone；enabled/mode/name/description/
@@ -588,7 +590,7 @@ export default function CronPanel({ sessionId, onCreateViaChat, onSelectSession 
             targets: value.targets.trim() || 'web',
             enabled: value.enabled,
             wake_offset_seconds: normalizeWakeOffsetSeconds(value.wakeOffsetSeconds),
-            ...(modelName ? { model_name: modelName } : {}),
+            ...(value.modelName ? { model_name: value.modelName } : {}),
             mode: value.mode,
           };
       await webRequest<{ job: CronJobDTO }>('cron.job.update', {

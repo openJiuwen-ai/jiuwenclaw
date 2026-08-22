@@ -7266,6 +7266,7 @@ class JiuWenSwarmDeepAdapter:
         request_id: str | None,
         mode: str | None,
         project_dir: str | None = None,
+        user_id: str | None = None,
     ) -> _RuntimeCronContextTokens:
         from openjiuwen.core.sys_operation.shell_process_registry import (
             set_shell_session_id,
@@ -7305,17 +7306,25 @@ class JiuWenSwarmDeepAdapter:
         # 注入 project_dir 供 cron tool 路由解析任务归属项目（设计文档 §5.1）
         if isinstance(project_dir, str) and project_dir.strip():
             normalized_metadata.setdefault("project_dir", project_dir.strip())
-        for key in ("project_id", "project_dir", "work_mode"):
+        for key in ("project_id", "project_dir", "work_mode", "model_name"):
             value = normalized_metadata.get(key)
             if isinstance(value, str) and value.strip():
                 continue
             session_value = session_metadata.get(key)
             if isinstance(session_value, str) and session_value.strip():
                 normalized_metadata[key] = session_value.strip()
-        # 提取 session metadata 中的 user_id，供 cron tool 透传给创建者标识。
-        # agent 内部调用 cron_create_job 时无 web 连接 user_id 来源，靠会话 metadata 兜底。
+        if not str(normalized_metadata.get("model_name") or "").strip():
+            session_model = session_metadata.get("model")
+            if isinstance(session_model, str) and session_model.strip():
+                normalized_metadata["model_name"] = session_model.strip()
+        # 提取创建者 user_id，供 cron tool 透传给创建者标识。
+        # agent 内部调用 cron_create_job 时无 web 连接 user_id 来源，优先取
+        # 请求/E2A 信封携带的 user_id（AgentOS 路由键），其次靠会话 metadata 兜底。
         cron_user_id: str | None = None
-        if isinstance(session_metadata, dict):
+        explicit_uid = str(user_id or "").strip() if user_id else ""
+        if explicit_uid:
+            cron_user_id = explicit_uid
+        elif isinstance(session_metadata, dict):
             sid_uid = str(session_metadata.get("user_id") or "").strip()
             if sid_uid:
                 cron_user_id = sid_uid
@@ -7718,6 +7727,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
                 )
                 for sf_tool in self._send_file_toolkit.get_tools():
@@ -7729,6 +7739,7 @@ class JiuWenSwarmDeepAdapter:
                     session_id=session_id,
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
+                    user_id=_CRON_TOOL_USER_ID.get(),
                     project_dir=self._project_dir,
                 )
 
@@ -10490,6 +10501,7 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            user_id=getattr(request, "user_id", None),
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
@@ -11113,6 +11125,7 @@ class JiuWenSwarmDeepAdapter:
             request_id=request.request_id,
             mode=mode,
             project_dir=(request.params.get("project_dir") if isinstance(request.params, dict) else None),
+            user_id=getattr(request, "user_id", None),
         )
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())

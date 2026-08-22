@@ -34,6 +34,7 @@ class SwarmBuildContext(BuildContext):
     Attributes:
         session_id: Active session id.
         request_id: Originating request id (may be None).
+        user_id: Authenticated request owner, used by user-routed tools.
         channel_id: Raw channel id from the request (may be None).
         channel: Resolved channel key for ``get_team_manager`` (``channel_id``
             or "default").
@@ -69,6 +70,7 @@ class SwarmBuildContext(BuildContext):
 
     session_id: str = ""
     request_id: str | None = None
+    user_id: str | None = None
     channel_id: str | None = None
     channel: str = "default"
     request_metadata: dict[str, Any] | None = None
@@ -132,6 +134,7 @@ class SwarmBuildContext(BuildContext):
         return {
             "session_id": self.session_id,
             "request_id": self.request_id,
+            "user_id": self.user_id,
             "channel_id": self.channel_id,
             "channel": self.channel,
             "request_metadata": self.request_metadata,
@@ -167,6 +170,7 @@ class SwarmBuildContext(BuildContext):
         return cls(
             session_id=seed.get("session_id", ""),
             request_id=seed.get("request_id"),
+            user_id=seed.get("user_id"),
             channel_id=seed.get("channel_id"),
             channel=seed.get("channel") or "default",
             request_metadata=seed.get("request_metadata"),

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jiuwenswarm.gateway.channel_manager.tui.harmonyos_project import (
+from jiuwenswarm.server.runtime.harmonyos.harmonyos_project import (
     HarmonyOSProjectError,
     inspect_harmonyos_project,
     persist_harmonyos_project_context,

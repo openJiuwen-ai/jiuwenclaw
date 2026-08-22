@@ -75,6 +75,7 @@ class SendFileToolkit:
         channel_id: str,
         *,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
     ) -> None:
@@ -90,6 +91,7 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
+        self._user_id = str(user_id or "").strip()
         self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
@@ -109,6 +111,7 @@ class SendFileToolkit:
         session_id: str,
         channel_id: str,
         metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
     ) -> None:
@@ -118,6 +121,7 @@ class SendFileToolkit:
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
+        self._user_id = str(user_id or "").strip()
         self._project_dir = str(Path(project_dir).resolve()) if project_dir else None
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
@@ -377,7 +381,7 @@ class SendFileToolkit:
                 for file_path in valid_files:
                     base_name = os.path.basename(file_path)
                     download_info = build_file_download_info(
-                        file_path, base_name, self.session_id
+                        file_path, base_name, self.session_id, user_id=self._user_id
                     )
                     files_payload.append({
                         "path": file_path,
