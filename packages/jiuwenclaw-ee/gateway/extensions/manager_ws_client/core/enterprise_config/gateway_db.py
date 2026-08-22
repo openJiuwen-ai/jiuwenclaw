@@ -106,12 +106,12 @@ class GatewayDb(Database):
             query["jiuwenclaw_id"] = self._jiuwenclaw_id
         return query
 
-    async def fetch_template_by_slot(
+    async def fetch_templates_by_slot(
         self,
         slot: str,
-        template_id: str,
-    ) -> dict[str, Any] | None:
-        """按 ``template_ref`` 槽位与 ``template_id`` 从 Gateway 库加载一条启用中的模板行。"""
+        template_ids: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """按槽位批量加载启用中的模板，返回 ``template_id -> row`` 映射。"""
         try:
             slot_key = TemplateRefSlot(slot)
         except ValueError as exc:
@@ -119,13 +119,23 @@ class GatewayDb(Database):
                 f"unknown template_ref slot {slot!r} "
                 f"(known: {[s.value for s in TemplateRefSlot]})"
             ) from exc
+
+        refs: list[str] = []
+        for raw in template_ids:
+            ref = str(raw or "").strip()
+            if ref and ref not in refs:
+                refs.append(ref)
+        if not refs:
+            return {}
+
         table = SLOT_ENTITY_TABLE[slot_key]
-        ref = str(template_id or "").strip()
-        if not ref:
-            return None
-        filters: dict[str, Any] = {"enabled": True, "template_id": ref}
+        filters: dict[str, Any] = {"enabled": True, "template_id": refs}
         rows = await self.list_records(table, filters=filters)
-        return rows[0] if rows else None
+        return {
+            str(row.get("template_id") or ""): row
+            for row in rows
+            if str(row.get("template_id") or "").strip()
+        }
 
     async def list_records(
         self,
