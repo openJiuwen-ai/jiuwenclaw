@@ -371,16 +371,6 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
         >
           {t('interactionPrompt.skip')}
         </button>
-        {!isSwarmflowHuman && (
-          <button
-            type="button"
-            className="ix-btn ix-btn--ghost"
-            onClick={handleSkip}
-            disabled={submitting}
-          >
-            {t('interactionPrompt.skip')}
-          </button>
-        )}
         <button
           type="button"
           className="ix-btn ix-btn--primary"
