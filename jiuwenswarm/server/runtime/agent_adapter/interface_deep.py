@@ -5639,19 +5639,16 @@ class JiuWenSwarmDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
+    @staticmethod
     def _build_subagent_rail(
-        self,
         config_base: dict[str, Any] | None = None,
     ) -> SubagentRail | None:
         """Build SubagentRail for subagent delegation."""
         try:
-            subagent_rail = BrowserTaskPromptRail(
-                enable_subagent_runtime=self._resolve_enable_subagent_runtime(config_base),
-            )
+            subagent_rail = BrowserTaskPromptRail()
             logger.info(
                 "[JiuWenSwarmDeepAdapter] SubagentRail create success "
-                "(subagent_runtime=%s)",
-                self._resolve_enable_subagent_runtime(config_base),
+                "(load-aware browser policy)",
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
@@ -8009,8 +8006,6 @@ class JiuWenSwarmDeepAdapter:
             self._runtime_prompt_rail.set_session_id(runtime_config.session_id)
         if self._response_prompt_rail:
             self._response_prompt_rail.set_channel(resolved_channel)
-        if isinstance(self._subagent_rail, BrowserTaskPromptRail):
-            self._subagent_rail.set_channel(resolved_channel)
         # PermissionInterruptRail: per-request trusted_dirs 注入，使 external_directory
         # 检查将这些子树视为 internal 而跳过 ask/deny（与 RuntimePromptRail 对齐）。
         # 用 getattr 兼容绕过 __init__ 的测试构造（_permission_rail 仅在 rail 构建流程赋值）。

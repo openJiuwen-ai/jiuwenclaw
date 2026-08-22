@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 from pathlib import Path
 
@@ -29,20 +28,13 @@ def test_deep_adapter_imports_core_personal_context_rail_only() -> None:
         / "agent_adapter"
         / "interface_deep.py"
     )
-    tree = ast.parse(_source(str(module)))
-    imports = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-    ]
-    imported_names = {
-        alias.name
-        for node in imports
-        for alias in (node.names if isinstance(node, ast.Import) else node.names)
-    }
+    source = _source(str(module))
 
-    assert "PersonalContextRail" in imported_names
-    assert "ProactiveContextRail" not in imported_names
+    assert (
+        "from openjiuwen.harness.rails.personal_context import PersonalContextRail"
+        in source.splitlines()
+    )
+    assert "ProactiveContextRail" not in source
 
 
 @pytest.mark.asyncio
