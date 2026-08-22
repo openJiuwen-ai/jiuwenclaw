@@ -747,6 +747,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         """
         # 固定 Rails — code 模式特有
         rail_infos = [
+            _RailBuildInfo("_model_routing_rail", self._build_model_routing, {"config": config_base}),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo(
                 "_eternal_conversation_rail", self._build_eternal_conversation_rail
