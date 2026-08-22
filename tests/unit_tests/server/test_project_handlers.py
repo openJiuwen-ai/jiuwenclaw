@@ -176,9 +176,15 @@ def sessions_dir(tmp_path, monkeypatch):
         "jiuwenswarm.server.runtime.session.session_metadata.get_agent_sessions_dir",
         lambda: d,
     )
-    from jiuwenswarm.server.runtime.session.session_metadata import _METADATA_CACHE
+    from jiuwenswarm.server.runtime.session.session_metadata import (
+        _METADATA_CACHE,
+        _METADATA_QUEUE,
+    )
     _METADATA_CACHE.clear()
-    return d
+    yield d
+    # 惰性 metadata 迁移会异步写盘；在 monkeypatch 撤销前排空队列，
+    # 避免慢环境中把当前用例的写入落到下一个用例的 sessions_dir。
+    _METADATA_QUEUE.join()
 
 
 @pytest.fixture()

@@ -1453,6 +1453,15 @@ class JiuWenSwarmDeepAdapter:
             adapter.set_skill_manager(self._skill_manager)
         return adapter
 
+    @staticmethod
+    def _session_instance_extra_create_kwargs() -> dict[str, Any]:
+        """Return subclass-specific arguments for deferred/session creation.
+
+        Base implementation returns an empty dict; subclasses override to
+        propagate instance-specific data.
+        """
+        return {}
+
     def mark_as_session_scoped(self, session_id: str) -> None:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
@@ -1964,6 +1973,7 @@ class JiuWenSwarmDeepAdapter:
                 config,
                 mode=self._session_instance_mode,
                 sub_mode=self._session_instance_sub_mode,
+                **self._session_instance_extra_create_kwargs(),
             )
             instance_ready_at = time.monotonic()
 
@@ -6858,6 +6868,7 @@ class JiuWenSwarmDeepAdapter:
                 self._session_instance_config,
                 mode=self._session_instance_mode or "agent",
                 sub_mode=self._session_instance_sub_mode,
+                **self._session_instance_extra_create_kwargs(),
             )
             return self._instance
 

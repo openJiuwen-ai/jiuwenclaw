@@ -1460,27 +1460,39 @@ async def test_deep_adapter_skill_retrieval_prompt_rail_sync_hot_toggles(monkeyp
     assert unregistered == [rail]
 
 
-def test_code_adapter_skill_retrieval_sync_respects_configured_tools(monkeypatch):
-    from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
+def test_code_adapter_skill_retrieval_sync_respects_spec_snapshot():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
 
     adapter = JiuwenSwarmCodeAdapter()
-    monkeypatch.setattr(
-        interface_module,
-        "is_skill_retrieval_enabled",
-        lambda: True,
-    )
 
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is False
     )
     assert (
         adapter._skill_retrieval_tools_enabled_for_runtime(
-            {"modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}}}
+            {
+                "modes": {"code": {"tools": ["skill_toolkit", "skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": True}},
+            }
         )
         is True
+    )
+    assert (
+        adapter._skill_retrieval_tools_enabled_for_runtime(
+            {
+                "modes": {"code": {"tools": ["skill_retrieval"]}},
+                "symphony": {"skill_retrieval": {"enabled": False}},
+            }
+        )
+        is False
     )
 
 

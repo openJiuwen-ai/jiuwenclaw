@@ -116,3 +116,22 @@ async def test_ensure_instance_preserves_the_configured_mode() -> None:
     await adapter.ensure_instance()
 
     assert calls == ["code"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_instance_forwards_subclass_create_arguments() -> None:
+    """Deferred construction must preserve subclass-owned startup inputs."""
+    adapter = _make_adapter(None)
+    sentinel = object()
+    captured: dict = {}
+
+    async def create_instance(config=None, *, mode="agent", sub_mode=None, **kwargs):
+        captured.update(kwargs)
+        adapter._instance = object()
+
+    adapter.create_instance = create_instance
+    adapter._session_instance_extra_create_kwargs = lambda: {"spec": sentinel}
+
+    await adapter.ensure_instance()
+
+    assert captured == {"spec": sentinel}
