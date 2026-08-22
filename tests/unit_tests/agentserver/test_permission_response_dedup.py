@@ -91,6 +91,16 @@ def test_permission_response_methods_are_eligible(req_method: ReqMethod) -> None
     assert interface_module._permission_response_key(request) == "permission-1"
 
 
+def test_ask_user_response_is_not_treated_as_permission_response() -> None:
+    request = _permission_request(
+        "shared-tool-call-id",
+        request_id="transport-ask-user",
+    )
+    request.params["source"] = "ask_user_interrupt"
+
+    assert interface_module._permission_response_key(request) is None
+
+
 def test_recent_permission_ledger_is_bounded() -> None:
     ledger = PermissionResponseLedger(max_recent_keys=2)
 
