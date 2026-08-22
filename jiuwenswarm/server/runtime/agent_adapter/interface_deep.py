@@ -778,10 +778,10 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     if not mcc_fields.get("client_provider"):
         mcc_fields["client_provider"] = "OpenAI"
 
-    # AgentOS 备份模型：mco 含内部标记 ``_source == "agentos"``（由
-    # ``get_default_models`` 注入）。其 ``context_window``（模型支持的上下文
-    # 总长度）经 ``build_reasoning_model_request_kwargs`` 摊开进入 kwargs，
-    # 进 core 的 ``ModelRequestConfig`` 供 core 人员取值。
+    # ``context_window``（模型支持的上下文总长度）可配在任意模型条目的 mco 里
+    # （defaults / agentos / video / audio / vision / image_gen 均可），经
+    # ``build_reasoning_model_request_kwargs`` 摊开进入 kwargs，进 core 的
+    # ``ModelRequestConfig`` 供 core 人员取值。
     # 是否在出口 pop 取决于 core 是否已把 context_window 加为 ModelRequestConfig
     # 正式字段（见 ``reasoning_injector.core_has_context_window_field``，自动适配）：
     # - core 未加字段（过渡期）：context_window 进 extra 会被
@@ -789,7 +789,10 @@ def build_model_from_entry(mcc: dict, mco: dict) -> Model:
     #   SDK 报 unexpected keyword argument -> reasoning_injector 公共出口 pop 防发厂商。
     # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
     #   ``self.model_config.context_window`` 可读 -> 不 pop，留给 core。
-    # defaults 不带 _source 标记，context_window 不会被 agentos 路径处理，行为不变。
+    # 出口 pop 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了
+    # context_window 同样过渡期 pop 防发厂商。agentos 条目的 mco 含内部标记
+    # ``_source == "agentos"``（由 ``get_default_models`` 注入），仅用于前端
+    # is_agentos 置灰只读展示，不再参与 context_window 出口判断。
     # 不再挂 ``_agentos_ctx_window`` 普通属性：旧机制是把 context_window 喂给
     # ``ContextEngineConfig.context_window_tokens``（压缩阈值）的桥接，已拆除
     # （见 ``_deep_agent_context_engine_config``）。

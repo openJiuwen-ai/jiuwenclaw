@@ -15,7 +15,8 @@ from jiuwenswarm.common.reasoning_config import (
 def core_has_context_window_field() -> bool:
     """core 的 ``ModelRequestConfig`` 是否已声明 ``context_window`` 正式字段。
 
-    用于决定 jiuwenswarm 是否需要在出口 pop 掉 agentos 的 ``context_window``：
+    用于决定 jiuwenswarm 是否需要在出口 pop 掉 ``context_window``
+    （任意模型条目的，含 defaults / agentos / video / audio / vision / image_gen）：
 
     - **False（过渡期，core 未加正式字段）**：``context_window`` 进
       ``ModelRequestConfig`` 的 extra，core 的
@@ -150,16 +151,18 @@ def _build_model_request_kwargs(
     # AsyncCompletions.create(**params) 时不认该 kwarg 会抛 "unexpected keyword
     # argument"。统一在此清理，覆盖 build_model_from_entry / config.validate_model
     # / image_modality_warmup 等所有走本函数的路径。
-    is_agentos = request_kwargs.get("_source") == "agentos"
     request_kwargs.pop("_source", None)
-    # agentos 的 context_window 是"模型支持的上下文总长度"配置，供 core 从
-    # ModelRequestConfig 取值。是否在出口 pop 取决于 core 是否已把 context_window
+    # context_window（模型支持的上下文总长度）可配在任意模型条目的 model_config_obj
+    # 里（defaults / agentos / video / audio / vision / image_gen 均可），供 core
+    # 从 ModelRequestConfig 取值。是否在出口 pop 取决于 core 是否已把 context_window
     # 加为 ModelRequestConfig 正式字段（见 core_has_context_window_field）：
     # - core 未加字段（过渡期）：context_window 进 extra，会被 base_model_client
     #   经 model_dump 透传给厂商 SDK 报 unexpected keyword argument -> 需 pop。
     # - core 已加字段：context_window 作正式字段，core 自行 exclude 不发厂商、
     #   self.model_config.context_window 可读 -> 不得 pop（否则切掉 core 想读的值）。
-    if is_agentos and not core_has_context_window_field():
+    # 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了 context_window
+    # 同样需要过渡期 pop 防发厂商。
+    if not core_has_context_window_field():
         request_kwargs.pop("context_window", None)
     request_kwargs["model"] = _resolve_model_name(model_name, model_config_obj)
     return request_kwargs
