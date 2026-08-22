@@ -799,6 +799,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
+    assert "Current channel: web" in rendered
     assert "Always respond in English" not in prompt
     assert "# Browser Tool Policy" not in prompt
     assert "## Browser Subagent Rules" not in prompt
@@ -1181,7 +1182,14 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     assert agent.ability_manager.get("list_skill") is None
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
 
     await rail.after_model_call(ctx)
 
@@ -1235,7 +1243,14 @@ async def test_skill_retrieval_prompt_hides_native_skill_prompt_after_skill_use_
     prompt = builder.build()
     assert "需要时先调用 list_skill 查看可用技能" not in prompt
     assert "# 技能" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
     assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
 
 
