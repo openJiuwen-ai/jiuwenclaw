@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import importlib
 import json
 import logging
 import math
@@ -13,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -127,6 +129,42 @@ from jiuwenswarm.common.schema.message import ReqMethod, EventType
 from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
+
+_INTERFACE_DEEP_MODULE = "jiuwenswarm.server.runtime.agent_adapter.interface_deep"
+_interface_deep_warmup_task: asyncio.Task[None] | None = None
+
+
+def _import_interface_deep_blocking() -> None:
+    if _INTERFACE_DEEP_MODULE not in sys.modules:
+        importlib.import_module(_INTERFACE_DEEP_MODULE)
+
+
+async def _warm_interface_deep_import() -> None:
+    if _INTERFACE_DEEP_MODULE in sys.modules:
+        logger.info("[AgentWebSocketServer] interface_deep_warmup cache=hit elapsed_ms=0.0")
+        return
+    t0 = time.perf_counter()
+    logger.info("[AgentWebSocketServer] interface_deep_warmup cache=miss starting background import")
+    try:
+        await asyncio.to_thread(_import_interface_deep_blocking)
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] interface_deep_warmup failed elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[AgentWebSocketServer] interface_deep_warmup cache=miss ok elapsed_ms=%.1f",
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def _start_interface_deep_warmup() -> None:
+    global _interface_deep_warmup_task
+    if _interface_deep_warmup_task is not None and not _interface_deep_warmup_task.done():
+        return
+    _interface_deep_warmup_task = asyncio.get_running_loop().create_task(_warm_interface_deep_import())
 
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
 
@@ -1027,6 +1065,7 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+        _start_interface_deep_warmup()
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
