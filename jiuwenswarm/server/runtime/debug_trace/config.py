@@ -44,12 +44,16 @@ class DebugTraceSettings:
     redact_completions: bool = False
 
 
-def _load_debug_trace_config() -> dict[str, Any]:
+def _load_debug_trace_config(
+    config_base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Best-effort read of the ``debug_trace`` config block."""
     try:
-        from jiuwenswarm.common.config import get_config
+        if config_base is None:
+            from jiuwenswarm.common.config import get_config
 
-        cfg = get_config().get("debug_trace", {})
+            config_base = get_config()
+        cfg = config_base.get("debug_trace", {})
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
@@ -68,12 +72,21 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
-def resolve_debug_trace_settings(*, mode: str, request_debug: bool) -> DebugTraceSettings:
+def resolve_debug_trace_settings(
+    *,
+    mode: str,
+    request_debug: bool,
+    config_base: dict[str, Any] | None = None,
+) -> DebugTraceSettings:
     """Resolve effective settings for *mode* given the request-level flag.
 
     Merges request-level ``/debug`` with the ``debug_trace`` config block.
     """
-    cfg = _load_debug_trace_config()
+    cfg = (
+        _load_debug_trace_config()
+        if config_base is None
+        else _load_debug_trace_config(config_base)
+    )
     mode_cfg = cfg.get(_mode_key(mode), {})
     if not isinstance(mode_cfg, dict):
         mode_cfg = {}

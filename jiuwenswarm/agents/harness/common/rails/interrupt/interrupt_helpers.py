@@ -376,8 +376,17 @@ def build_permission_rail(
         # skill_turbo 启用时使用子类，定制 skill_acceleration_exec 审批消息
         rail_cls = PermissionInterruptRail
         try:
-            from jiuwenswarm.common.config import get_config as _get_cfg
-            _cfg = _get_cfg()
+            # ``config`` is the already resolved catalog snapshot handed to
+            # this session Adapter.  Re-reading the global config here added a
+            # highly variable 0.4--2.0 s to every new session and could observe
+            # a different generation during hot reload.  Fall back only for
+            # legacy callers that do not pass a mapping.
+            if isinstance(config, dict):
+                _cfg = config
+            else:
+                from jiuwenswarm.common.config import get_config as _get_cfg
+
+                _cfg = _get_cfg()
             _react = _cfg.get("react", {}) if isinstance(_cfg, dict) else {}
             _st = _react.get("skill_turbo", {}) if isinstance(_react, dict) else {}
             if _st.get("enabled", False):

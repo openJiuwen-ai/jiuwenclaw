@@ -218,7 +218,7 @@ class TaskExecutionRail(DeepAgentRail):
                     "failed to get session_id",
                     exc_info=True,
                 )
-        logger.info(
+        logger.debug(
             "[TaskExecutionRail] before_invoke reset tracking: "
             "session_id=%s prev_todo_map_size=%d prev_active_tasks=%s",
             session_id,

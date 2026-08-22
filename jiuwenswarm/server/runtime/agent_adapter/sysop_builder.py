@@ -720,7 +720,7 @@ def create_sandbox_sysop_card(
 
 def create_local_sysop_card() -> SysOperationCard:
     """构造本地模式 SysOperationCard."""
-    logger.info("[sysop_builder] local SysOperationCard created (mode=LOCAL)")
+    logger.debug("[sysop_builder] local SysOperationCard created (mode=LOCAL)")
     return SysOperationCard(
         mode=OperationMode.LOCAL,
         work_config=LocalWorkConfig(shell_allowlist=None),

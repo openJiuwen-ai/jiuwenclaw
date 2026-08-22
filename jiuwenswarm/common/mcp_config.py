@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import json
 import os
 import re
 import sys
+import threading
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -652,6 +655,67 @@ _OFFICE_CLAW_MCP_ENV_KEYS = frozenset(
     }
 )
 
+_OFFICE_CLAW_MCP_SCHEMA_CACHE_ENV = "JIUWENSWARM_MCP_SCHEMA_CACHE"
+_OFFICE_CLAW_MCP_SCHEMA_CACHE_OFF = frozenset({"0", "false", "no", "off"})
+_office_claw_mcp_schema_cache: dict[str, list[dict[str, Any]]] = {}
+_office_claw_mcp_schema_inflight: dict[tuple[int, int, str], asyncio.Task[list[dict[str, Any]]]] = {}
+_office_claw_mcp_schema_cache_lock = threading.Lock()
+_office_claw_mcp_schema_generation = 0
+
+
+def _office_claw_mcp_schema_cache_enabled() -> bool:
+    return str(os.environ.get(_OFFICE_CLAW_MCP_SCHEMA_CACHE_ENV, "") or "").strip().lower() \
+        not in _OFFICE_CLAW_MCP_SCHEMA_CACHE_OFF
+
+
+def _office_claw_mcp_build_fingerprint(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    fingerprints: list[dict[str, Any]] = []
+    candidates = [params.get("command"), *(params.get("args") or [])]
+    for candidate in candidates:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser().resolve(strict=False)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if path.is_file():
+            fingerprints.append(
+                {
+                    "path": _normalized_path(str(path)),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+    return fingerprints
+
+
+def _office_claw_mcp_schema_cache_key(params: Mapping[str, Any]) -> str:
+    raw_excluded = str((params.get("env") or {}).get("OFFICE_CLAW_MCP_EXCLUDED_TOOLS") or "")
+    payload = {
+        "command": _normalized_path(str(params.get("command") or "")),
+        "args": [str(value) for value in params.get("args") or []],
+        "cwd": _normalized_path(str(params.get("cwd") or "")),
+        "excluded_tools": sorted({item.strip() for item in raw_excluded.split(",") if item.strip()}),
+        "build_files": _office_claw_mcp_build_fingerprint(params),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def invalidate_office_claw_mcp_schema_cache() -> None:
+    global _office_claw_mcp_schema_generation
+    with _office_claw_mcp_schema_cache_lock:
+        _office_claw_mcp_schema_generation += 1
+        _office_claw_mcp_schema_cache.clear()
+        _office_claw_mcp_schema_inflight.clear()
+
+
+def _clear_office_claw_mcp_schema_cache_for_tests() -> None:
+    invalidate_office_claw_mcp_schema_cache()
+
 
 @dataclass(frozen=True)
 class OfficeClawMcpRegistration:
@@ -759,7 +823,7 @@ def _stdio_server_parameters(params: Mapping[str, Any]):
     )
 
 
-async def list_office_claw_mcp_tools(
+async def _list_office_claw_mcp_tools_uncached(
     params: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Start OfficeClaw MCP once, collect its tool schemas, then stop it."""
@@ -787,6 +851,53 @@ async def list_office_claw_mcp_tools(
         ]
     finally:
         await stack.aclose()
+
+
+async def list_office_claw_mcp_tools(
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Return immutable OfficeClaw tool schemas, coalescing identical discovery."""
+
+    if not _office_claw_mcp_schema_cache_enabled():
+        return await _list_office_claw_mcp_tools_uncached(params)
+
+    cache_key = _office_claw_mcp_schema_cache_key(params)
+    with _office_claw_mcp_schema_cache_lock:
+        generation = _office_claw_mcp_schema_generation
+        loop_key = (id(asyncio.get_running_loop()), generation, cache_key)
+        cached = _office_claw_mcp_schema_cache.get(cache_key)
+        if cached is not None:
+            logger.debug("OfficeClaw MCP schema cache hit: key=%s", cache_key[:12])
+            return copy.deepcopy(cached)
+        task = _office_claw_mcp_schema_inflight.get(loop_key)
+        owner = task is None
+        if task is None:
+            task = asyncio.create_task(
+                _list_office_claw_mcp_tools_uncached(params),
+                name=f"office-claw-mcp-schema-{cache_key[:12]}",
+            )
+            _office_claw_mcp_schema_inflight[loop_key] = task
+
+    started_at = time.monotonic()
+    try:
+        tools = await asyncio.shield(task)
+        if owner:
+            frozen = copy.deepcopy(tools)
+            with _office_claw_mcp_schema_cache_lock:
+                if generation == _office_claw_mcp_schema_generation:
+                    _office_claw_mcp_schema_cache[cache_key] = frozen
+            logger.info(
+                "OfficeClaw MCP schema cache filled: key=%s tools=%s duration_ms=%.1f",
+                cache_key[:12],
+                len(frozen),
+                (time.monotonic() - started_at) * 1000,
+            )
+        return copy.deepcopy(tools)
+    finally:
+        if owner:
+            with _office_claw_mcp_schema_cache_lock:
+                if _office_claw_mcp_schema_inflight.get(loop_key) is task:
+                    _office_claw_mcp_schema_inflight.pop(loop_key, None)
 
 
 class RequestScopedOfficeClawMcpTool(Tool):
@@ -838,6 +949,7 @@ __all__ = [
     "create_mcp_tool",
     "extract_enabled_mcp_server_entries",
     "extract_office_claw_mcp",
+    "invalidate_office_claw_mcp_schema_cache",
     "list_office_claw_mcp_tools",
     "preflight_mcp_server_reachable",
     "validate_office_claw_mcp_config",

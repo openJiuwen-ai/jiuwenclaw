@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -26,8 +27,8 @@ from jiuwenswarm.common.kv_cache_affinity_config import (
 from jiuwenswarm.common.local_env_config import (
     SPAWN_ENV_KEYS,
     get_bound_agent_env_ns,
+    get_task_env_overlay,
     get_local_config,
-    is_task_env_overlay_bound,
 )
 from jiuwenswarm.common.utils import (
     get_config_dir,
@@ -229,41 +230,91 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
 
 
 _ConfigNsKey = tuple[str, str] | None
-_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
+_ConfigCacheKey = tuple[_ConfigNsKey, str | None]
+_ConfigSourceStamp = tuple[tuple[int, int] | None, tuple[int, int] | None]
+_resolved_config_by_ns: dict[
+    _ConfigCacheKey,
+    tuple[float, _ConfigSourceStamp, dict[str, Any]],
+] = {}
 _CONFIG_CACHE_TTL_SECONDS: float = 20.0
 _config_lock = threading.Lock()
 _config_version: int = 0
 
 
+def _task_overlay_cache_digest() -> str | None:
+    """Return a non-secret cache identity for the sealed request environment.
+
+    Request overlays are immutable snapshots for the lifetime of an invocation.
+    Hashing their complete serialized content lets equal snapshots reuse the
+    resolved config while distinct credentials or runtime settings never share
+    an entry. The digest itself contains no environment values.
+    """
+    overlay = get_task_env_overlay()
+    if overlay is None:
+        return None
+    serialized = json.dumps(
+        overlay,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=repr,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _config_source_stamp() -> _ConfigSourceStamp:
+    """Return the cheap on-disk identity of both config inputs.
+
+    A sealed task overlay is immutable, so its resolved config does not need a
+    time-based refresh. The two file stamps keep direct edits observable while
+    avoiding a periodic deep-copy/merge/resolve of the large effective config.
+    Catalog and managed config updates also call :func:`clear_config_cache`.
+    """
+    return (
+        _yaml_file_stamp(resolve_shipped_template_config_path()),
+        _yaml_file_stamp(_current_config_yaml_path()),
+    )
+
+
 def get_config():
-    """Return merged, env-var-resolved config with per-ns TTL cache.
+    """Return merged, env-var-resolved config with per-namespace caching.
 
     Results are cached per bound ``(service_id, agent_id)`` from
-    ``bind_agent_env_ns``. When a task env overlay is sealed, the cache is
-    bypassed so overlay values are always visible.
+    ``bind_agent_env_ns`` and per immutable task-overlay digest. Bound overlays
+    remain cached until their source files change or an explicit invalidation
+    occurs; unbound callers retain the short TTL for legacy live-env behavior.
     """
     global _config_version
     ns: _ConfigNsKey = get_bound_agent_env_ns()
-    skip_cache = is_task_env_overlay_bound()
+    overlay_digest = _task_overlay_cache_digest()
+    cache_key: _ConfigCacheKey = (ns, overlay_digest)
+    source_stamp = _config_source_stamp()
     now = time.monotonic()
 
-    if not skip_cache:
-        with _config_lock:
-            entry = _resolved_config_by_ns.get(ns)
-            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
-                return entry[1]
-            read_version = _config_version
-    else:
-        read_version = -1
+    with _config_lock:
+        entry = _resolved_config_by_ns.get(cache_key)
+        if (
+            entry is not None
+            and entry[1] == source_stamp
+            and (
+                overlay_digest is not None
+                or (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS
+            )
+        ):
+            return entry[2]
+        read_version = _config_version
 
     config_base = get_merged_config_dict()
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
-    if not skip_cache:
-        with _config_lock:
-            if _config_version == read_version:
-                _resolved_config_by_ns[ns] = (time.monotonic(), config_base)
+    with _config_lock:
+        if _config_version == read_version:
+            _resolved_config_by_ns[cache_key] = (
+                time.monotonic(),
+                source_stamp,
+                config_base,
+            )
 
     return config_base
 
@@ -283,9 +334,12 @@ def clear_config_cache(
 
         sid = normalize_env_ns_id(service_id, default="default")
         aid = normalize_env_ns_id(agent_id, default="default")
-        _resolved_config_by_ns.pop((sid, aid), None)
+        target_namespaces: set[_ConfigNsKey] = {(sid, aid)}
         if sid == "default" and aid == "default":
-            _resolved_config_by_ns.pop(None, None)
+            target_namespaces.add(None)
+        for key in list(_resolved_config_by_ns):
+            if key[0] in target_namespaces:
+                _resolved_config_by_ns.pop(key, None)
 
 
 def get_config_raw():

@@ -18,7 +18,6 @@ import operator
 import os
 import platform
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -27,10 +26,10 @@ from collections import Counter
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from pathlib import Path
-from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
 from urllib.parse import quote_plus
 
+import orjson
 import yaml
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
@@ -44,6 +43,7 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.sys_operation import (
     SysOperation,
@@ -104,6 +104,11 @@ from openjiuwen.harness.schema.interaction import (
 )
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+
+from jiuwenswarm.server.runtime.static_assembly_cache import (
+    StaticAssemblyCachedSkillUseRail,
+    static_assembly_cache_enabled,
+)
 
 from jiuwenswarm.agents.harness.common.tools.deepresearch import (
     get_deepresearch_tools,
@@ -690,6 +695,40 @@ def _extract_iteration_from_chunk(chunk: Any) -> int | None:
     return _extract_iteration_from_obj(payload)
 
 
+def _perf_timing_log_enabled() -> bool:
+    return os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _chunk_has_visible_model_token(chunk: Any) -> bool:
+    """Return whether a model chunk carries visible answer or reasoning text."""
+
+    def _has_text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    if isinstance(chunk, dict):
+        if any(_has_text(chunk.get(key)) for key in ("content", "reasoning_content", "reasoning")):
+            return True
+        payload = chunk.get("payload")
+    else:
+        if any(
+            _has_text(getattr(chunk, key, None))
+            for key in ("content", "reasoning_content", "reasoning")
+        ):
+            return True
+        payload = getattr(chunk, "payload", None)
+    if isinstance(payload, dict):
+        return any(
+            _has_text(payload.get(key))
+            for key in ("content", "reasoning_content", "reasoning")
+        )
+    return False
+
+
 def _apply_llm_io_trace_patch() -> None:
     """Monkey Patch Model.invoke/stream 添加 LLM IO trace 日志."""
     global _LLM_IO_TRACE_PATCH_APPLIED
@@ -764,6 +803,11 @@ def _apply_llm_io_trace_patch() -> None:
                 _extract_iteration_from_obj(kwargs) if trace_iter is None else trace_iter
             )
             _ev_token = begin_llm_trace_event()
+            perf_timing_enabled = _perf_timing_log_enabled()
+            perf_call_id = uuid.uuid4().hex[:12] if perf_timing_enabled else ""
+            model_stream_started_at = time.perf_counter()
+            first_model_frame_logged = False
+            first_visible_model_token_logged = False
             try:
                 try:
                     log_stream_input(
@@ -801,9 +845,50 @@ def _apply_llm_io_trace_patch() -> None:
                         logger.debug("[llm_trace] log_reasoning_delta failed", exc_info=True)
                     reasoning_trace_pending.clear()
 
+                if perf_timing_enabled:
+                    server_logger.info(
+                        "[TTFT] model stream started: call_id=%s session_id=%s request_id=%s "
+                        "model_name=%s epoch_ms=%.3f message_count=%d tool_count=%d",
+                        perf_call_id,
+                        trace_sid,
+                        trace_rid,
+                        model_name,
+                        time.time_ns() / 1_000_000,
+                        len(messages),
+                        len(tools or []),
+                    )
                 async for chunk in original_stream(
                     self, messages, tools=tools, model=model, **kwargs
                 ):
+                    model_elapsed_ms = (time.perf_counter() - model_stream_started_at) * 1000
+                    if perf_timing_enabled and not first_model_frame_logged:
+                        first_model_frame_logged = True
+                        server_logger.info(
+                            "[TTFT] model first frame: call_id=%s session_id=%s request_id=%s "
+                            "model_name=%s epoch_ms=%.3f model_wait_ms=%.1f",
+                            perf_call_id,
+                            trace_sid,
+                            trace_rid,
+                            model_name,
+                            time.time_ns() / 1_000_000,
+                            model_elapsed_ms,
+                        )
+                    if (
+                        perf_timing_enabled
+                        and not first_visible_model_token_logged
+                        and _chunk_has_visible_model_token(chunk)
+                    ):
+                        first_visible_model_token_logged = True
+                        server_logger.info(
+                            "[TTFT] model first visible token: call_id=%s session_id=%s request_id=%s "
+                            "model_name=%s epoch_ms=%.3f model_visible_wait_ms=%.1f",
+                            perf_call_id,
+                            trace_sid,
+                            trace_rid,
+                            model_name,
+                            time.time_ns() / 1_000_000,
+                            model_elapsed_ms,
+                        )
                     if accumulated is None:
                         accumulated = chunk
                     else:
@@ -925,130 +1010,6 @@ def _stage_breakdown_logger(total_ms: float, threshold_ms: float) -> Callable[..
                 override,
             )
     return server_logger.info if total_ms >= threshold_ms else server_logger.debug
-
-
-@dataclass(frozen=True)
-class _GitSnapshot:
-    """Git state as of a conversation's first turn, held for its whole life.
-
-    Attributes:
-        head: Raw ``HEAD`` file contents when the snapshot was taken. Checking
-            it costs a file read rather than a subprocess, which is what makes
-            it affordable to verify on every turn.
-        branch: Current branch name, or "HEAD" when detached.
-        status: ``git status --short`` output, capped at 50 lines.
-        recent_commits: ``git log --oneline -5`` output.
-    """
-
-    head: str
-    branch: str
-    status: str
-    recent_commits: str
-
-
-def _read_git_head(head_file: str) -> str:
-    """Read the HEAD pointer directly, without spawning git.
-
-    Changes whenever the checkout moves — switching branches rewrites the
-    symbolic ref, and a detached checkout writes a different commit id — while
-    staying untouched by ordinary edits to the working tree. That makes it a
-    cheap way to tell "the conversation moved to a different checkout" apart
-    from "the user edited a file", which need opposite treatment: the former
-    must invalidate the snapshot, the latter must not.
-
-    Args:
-        head_file: Absolute path to the git directory's HEAD file.
-
-    Returns:
-        Stripped file contents, or an empty string when it cannot be read —
-        in which case the caller degrades to holding the snapshot as-is.
-    """
-    if not head_file:
-        return ""
-    try:
-        return Path(head_file).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-@dataclass(frozen=True)
-class _StableGitFacts:
-    """Git facts about a project that do not change between turns of a chat.
-
-    Attributes:
-        is_repo: Whether the directory is inside a git work tree.
-        user_name: ``user.name`` from git config; empty when unset.
-        main_branch: First of origin/main, origin/master, main, master that
-            resolves; empty when none do.
-        head_file: Absolute path to the git directory's HEAD file. Resolved via
-            git so it is correct for a subdirectory, a worktree or a submodule,
-            where it is nowhere near ``<project_dir>/.git/HEAD``.
-    """
-
-    is_repo: bool
-    user_name: str
-    main_branch: str
-    head_file: str
-
-
-_STABLE_GIT_FACTS: dict[str, _StableGitFacts] = {}
-_STABLE_GIT_FACTS_LOCK = threading.Lock()
-
-
-def _resolve_stable_git_facts(
-    git_bin: str,
-    project_dir: str,
-    run_git: Callable[[list[str]], str],
-) -> _StableGitFacts:
-    """Resolve the per-project git facts once and reuse them afterwards.
-
-    ``_write_runtime_state`` runs on every turn and used to spawn up to nine git
-    subprocesses each time. Six of them answered questions whose answers cannot
-    change while a conversation is in progress — whether the directory is a repo,
-    who the committer is, and which of the four candidate names the main branch
-    goes by — so they are resolved once per project directory. Branch, status and
-    recent commits stay live, because those are exactly what changes while the
-    user works.
-
-    Args:
-        git_bin: Resolved git executable, part of the cache key so a toolchain
-            switch is not served a stale answer.
-        project_dir: Directory the git commands run in.
-        run_git: Callable running git in ``project_dir`` and returning stripped
-            stdout, or an empty string on failure.
-
-    Returns:
-        The cached facts for this project directory.
-    """
-    cache_key = f"{git_bin}\0{project_dir}"
-    with _STABLE_GIT_FACTS_LOCK:
-        cached = _STABLE_GIT_FACTS.get(cache_key)
-    if cached is not None:
-        return cached
-
-    is_repo = run_git(["rev-parse", "--is-inside-work-tree"]) == "true"
-    user_name = ""
-    main_branch = ""
-    head_file = ""
-    if is_repo:
-        user_name = run_git(["config", "user.name"])
-        for candidate in ("origin/main", "origin/master", "main", "master"):
-            if run_git(["rev-parse", "--verify", "--quiet", candidate]):
-                main_branch = candidate
-                break
-        git_dir = run_git(["rev-parse", "--absolute-git-dir"])
-        if git_dir:
-            head_file = str(Path(git_dir) / "HEAD")
-
-    facts = _StableGitFacts(
-        is_repo=is_repo,
-        user_name=user_name,
-        main_branch=main_branch,
-        head_file=head_file,
-    )
-    with _STABLE_GIT_FACTS_LOCK:
-        _STABLE_GIT_FACTS[cache_key] = facts
-    return facts
 
 
 @dataclass
@@ -1212,7 +1173,7 @@ def build_progressive_tool_rail_from_config(
         )
 
     normalized_language = resolve_language(language)
-    logger.info(
+    logger.debug(
         "[ProgressiveToolRail] enabled profile=%s kind=%s eager_tools=%s "
         "agent_id=%s agent_card_id=%s enable_for_models=%s",
         normalized_profile,
@@ -1300,6 +1261,27 @@ def _resolve_instance_config_base(config_base: dict[str, Any] | None) -> dict[st
     return resolve_env_vars(fill_template_defaults(config_base, template))
 
 
+def _clone_stable_config_base(config_base: dict[str, Any]) -> dict[str, Any]:
+    """Clone a resolved, JSON-shaped catalog config without sharing mutations.
+
+    OfficeClaw catalog configs are plain JSON data and can be around 1.5 MB.
+    ``copy.deepcopy`` walks every Python object in that tree and was measured at
+    1.3--1.6 seconds on the Windows hot path.  orjson performs the same
+    independent tree clone in native code.  The equality guard is intentional:
+    if a future configuration contains a tuple, custom object, non-string key,
+    or any other value whose JSON round-trip is not lossless, we retain the
+    original deepcopy behavior.
+    """
+
+    try:
+        cloned = orjson.loads(orjson.dumps(config_base))
+        if isinstance(cloned, dict) and cloned == config_base:
+            return cloned
+    except (TypeError, ValueError, orjson.JSONEncodeError, orjson.JSONDecodeError):
+        pass
+    return copy.deepcopy(config_base)
+
+
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
@@ -1370,7 +1352,7 @@ def _build_context_assemble_rail() -> ContextAssembleRail | None:
     """Build ContextAssembleRail."""
     try:
         context_assemble_rail = ContextAssembleRail()
-        logger.info("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
+        logger.debug("[JiuWenSwarmDeepAdapter] ContextAssembleRail create success")
     except Exception as exc:
         logger.warning("[JiuWenSwarmDeepAdapter] ContextAssembleRail create failed: %s", exc)
         context_assemble_rail = None
@@ -1439,7 +1421,7 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
             preset=True,
             session_memory=session_memory_cfg,
         )
-        logger.info(
+        logger.debug(
             "[JiuWenSwarmDeepAdapter] ContextProcessorRail create success for agent mode, "
             "user_processors=%s session_memory=%s",
             [p[0] for p in user_processors] if user_processors else "none",
@@ -2059,7 +2041,6 @@ class JiuWenSwarmDeepAdapter:
         # first turn. Held on the adapter rather than module-globally so it is
         # reclaimed with the session instead of accumulating for the life of
         # the process.
-        self._session_git_snapshots: dict[str, _GitSnapshot] = {}
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
@@ -2080,6 +2061,10 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
         self._runtime_state_write_task: asyncio.Task[None] | None = None
+        # Signature of session-stable runtime setup completed by exact prewarm.
+        # Request-bound metadata/tools are intentionally excluded and continue
+        # to refresh on every invocation.
+        self._stable_runtime_signature: tuple[Any, ...] | None = None
 
     def _schedule_runtime_state_write(
         self,
@@ -3061,7 +3046,7 @@ class JiuWenSwarmDeepAdapter:
                 self._a2x_blank_service_id = str(registration.get("service_id") or "").strip()
                 self._a2x_blank_dataset = str(registration.get("dataset") or "").strip()
             self._sync_a2x_runtime_state()
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] A2X Client %s: role=%s base_url=%s",
                 "reinitialized on reload" if reload else "initialized successfully",
                 self._a2x_config.get("role", "teammate"),
@@ -3125,10 +3110,11 @@ class JiuWenSwarmDeepAdapter:
             return channel
         return "web"
 
-    @staticmethod
-    def _resolve_prompt_language() -> str:
+    def _resolve_prompt_language(self) -> str:
         """Resolve configured prompt language for builder input."""
-        config_base = get_config()
+        config_base = getattr(self, "_config_base_cache", None)
+        if not isinstance(config_base, dict):
+            config_base = get_config()
         return str(config_base.get("preferred_language", "zh")).strip().lower()
 
     def _resolve_runtime_language(self) -> str:
@@ -3141,57 +3127,6 @@ class JiuWenSwarmDeepAdapter:
             return self._model_request_config.model_name or "unknown"
         return "unknown"
 
-    def _resolve_session_git_snapshot(
-        self,
-        project_dir: str,
-        session_id: str | None,
-        head_file: str,
-        run_git: Callable[[list[str]], str],
-    ) -> _GitSnapshot:
-        """Return this conversation's git snapshot, re-taking it if HEAD moved.
-
-        The prompt these values feed states plainly that it is "the git status
-        at the start of the conversation" which "will not update during the
-        conversation" — but they used to be re-read on every turn, so editing a
-        single file rewrote the system prompt mid-conversation. That breaks the
-        prompt's own contract and, because the text sits in the cached prefix,
-        invalidates the model's KV cache for every later turn.
-
-        Working-tree edits therefore do not refresh it: the agent either made
-        them itself (and has them in its history) or can run git on demand.
-        Moving the checkout is different — a branch switch changes which
-        branch a commit would land on, and invalidates status and recent
-        commits wholesale — so HEAD is checked each turn and a move re-takes
-        the snapshot. That check is a file read, not a subprocess, which is why
-        it can run on the hot path at all.
-
-        Args:
-            project_dir: Directory the git commands run in.
-            session_id: Conversation the snapshot belongs to; a new session
-                takes a fresh one.
-            head_file: Absolute path to the git directory's HEAD file.
-            run_git: Callable running git in ``project_dir`` and returning
-                stripped stdout, or an empty string on failure.
-
-        Returns:
-            The snapshot for this conversation and checkout.
-        """
-        cache_key = f"{project_dir}\0{session_id or ''}"
-        head = _read_git_head(head_file)
-        cached = self._session_git_snapshots.get(cache_key)
-        if cached is not None and cached.head == head:
-            return cached
-
-        status_lines = run_git(["status", "--short"]).splitlines()
-        snapshot = _GitSnapshot(
-            head=head,
-            branch=run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "HEAD",
-            status="\n".join(status_lines[:50]),
-            recent_commits=run_git(["log", "--oneline", "-5"]),
-        )
-        self._session_git_snapshots[cache_key] = snapshot
-        return snapshot
-
     def _write_runtime_state(
         self,
         mode: str,
@@ -3203,42 +3138,6 @@ class JiuWenSwarmDeepAdapter:
     ) -> None:
         """将当前运行时状态写入 config 目录下按 session 隔离的 runtime_state 文件。"""
         try:
-            git_branch = "N/A"
-            git_main_branch = ""
-            git_status = ""
-            git_recent_commits = ""
-            git_user = ""
-
-            git_bin = which("git")
-            if git_bin and project_dir and os.path.isdir(project_dir):
-
-                def _run_git(args: list[str]) -> str:
-                    result = subprocess.run(
-                        [git_bin, *args],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                        cwd=project_dir,
-                    )
-                    return result.stdout.strip() if result.returncode == 0 else ""
-
-                try:
-                    stable_facts = _resolve_stable_git_facts(git_bin, project_dir, _run_git)
-                    if stable_facts.is_repo:
-                        git_user = stable_facts.user_name
-                        git_main_branch = stable_facts.main_branch
-                        snapshot = self._resolve_session_git_snapshot(
-                            project_dir,
-                            session_id,
-                            stable_facts.head_file,
-                            _run_git,
-                        )
-                        git_branch = snapshot.branch
-                        git_status = snapshot.status
-                        git_recent_commits = snapshot.recent_commits
-                except Exception:
-                    pass
-
             mode_display = _MODE_DISPLAY_MAP.get(mode, {}).get(language, mode)
 
             state = {
@@ -3250,11 +3149,6 @@ class JiuWenSwarmDeepAdapter:
                 "agent": self._agent_name,
                 "platform": f"{platform.system()} {platform.machine()}",
                 "python": platform.python_version(),
-                "git_branch": git_branch,
-                "git_main_branch": git_main_branch,
-                "git_status": git_status,
-                "git_recent_commits": git_recent_commits,
-                "git_user": git_user,
             }
             path = get_runtime_state_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -3354,7 +3248,7 @@ class JiuWenSwarmDeepAdapter:
         else:
             os.environ.pop("BROWSER_MANAGED_BINARY", None)
 
-        logger.info(
+        logger.debug(
             "[%s] browser runtime config: headless=%s, chrome_path=%s",
             type(self).__name__,
             headless,
@@ -3462,7 +3356,7 @@ class JiuWenSwarmDeepAdapter:
             and isinstance(browser_agent_cfg, dict)
             and browser_agent_cfg
         ):
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] browser_agent config detected but browser runtime is not enabled; "
                 "skipping browser subagent registration"
             )
@@ -3614,7 +3508,7 @@ class JiuWenSwarmDeepAdapter:
                 tool_ids=tuple(tool_ids),
                 tool_names=tuple(tool_names),
             )
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] request-scoped OfficeClaw MCP registered: "
                 "request_id=%s tools=%s",
                 request.request_id,
@@ -3770,7 +3664,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> VisionModelConfig | None:
         """Build DeepAgent vision config from service config/env mapping."""
         if not dedicated_multimodal_model_configured(config_base, "vision"):
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] vision tools skipped: models.vision has no dedicated "
                 "api_key in config.yaml"
             )
@@ -3780,7 +3674,7 @@ class JiuWenSwarmDeepAdapter:
         base_url = str(read_env("VISION_BASE_URL") or read_env("VISION_API_BASE") or "").strip()
         model_name = str(read_env("VISION_MODEL") or read_env("VISION_MODEL_NAME") or "").strip()
         if not api_key or not base_url or not model_name:
-            logger.info("[JiuWenSwarmDeepAdapter] vision tools skipped: incomplete config")
+            logger.debug("[JiuWenSwarmDeepAdapter] vision tools skipped: incomplete config")
             return None
         return VisionModelConfig(
             api_key=api_key,
@@ -3795,7 +3689,7 @@ class JiuWenSwarmDeepAdapter:
     ) -> AudioModelConfig | None:
         """Build DeepAgent audio config from service config/env mapping."""
         if not complete_multimodal_model_configured(config_base, "audio"):
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] audio tools skipped: models.audio requires "
                 "api_key, api_base, and model_name in config.yaml"
             )
@@ -3804,7 +3698,7 @@ class JiuWenSwarmDeepAdapter:
         api_key = str(read_env("AUDIO_API_KEY", "")).strip()
         base_url = str(read_env("AUDIO_BASE_URL") or read_env("AUDIO_API_BASE") or "").strip()
         if not api_key or not base_url:
-            logger.info("[JiuWenSwarmDeepAdapter] audio tools skipped: incomplete config")
+            logger.debug("[JiuWenSwarmDeepAdapter] audio tools skipped: incomplete config")
             return None
         transcription_model = str(
             read_env("AUDIO_TRANSCRIPTION_MODEL") or read_env("AUDIO_MODEL_NAME") or ""
@@ -3853,7 +3747,7 @@ class JiuWenSwarmDeepAdapter:
         video_api_base = str(read_env("VIDEO_API_BASE", "")).strip()
         video_model_name = str(read_env("VIDEO_MODEL_NAME", "")).strip()
         if not video_api_key or not video_api_base or not video_model_name:
-            logger.info("[JiuWenSwarmDeepAdapter] video tools skipped: incomplete config")
+            logger.debug("[JiuWenSwarmDeepAdapter] video tools skipped: incomplete config")
             return False
         return True
 
@@ -3864,7 +3758,7 @@ class JiuWenSwarmDeepAdapter:
         """Build DeepAgent image generation config from service config/env mapping."""
         apply_image_gen_model_config_from_yaml(config_base)
         if not read_env("IMAGE_GEN_API_KEY"):
-            logger.info("[JiuWenSwarmDeepAdapter] image_gen tool skipped: incomplete config")
+            logger.debug("[JiuWenSwarmDeepAdapter] image_gen tool skipped: incomplete config")
             return False
         return True
 
@@ -3972,10 +3866,12 @@ class JiuWenSwarmDeepAdapter:
         return "; ".join(f"{key}={_fmt_value(key, fields[key])}" for key in order)
 
     def _log_active_model_on_startup(self, *, phase: str = "create_instance") -> None:
+        fields = self._collect_default_model_log_fields()
         logger.info(
-            "[JiuWenSwarmDeepAdapter] Agent 已启动(%s)，当前使用模型: %s",
+            "[JiuWenSwarmDeepAdapter] Agent model ready: phase=%s model_id=%s provider=%s",
             phase,
-            self._format_active_model_startup_log(),
+            fields.get("model_id") or "(empty)",
+            fields.get("provider") or "(empty)",
         )
 
     def _merge_enterprise_models_into_config(
@@ -5253,7 +5149,7 @@ class JiuWenSwarmDeepAdapter:
         """Build ResponsePromptRail so message rules keep priority ordering."""
         try:
             rail = ResponsePromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] ResponsePromptRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] ResponsePromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] ResponsePromptRail create failed: %s", exc)
             rail = None
@@ -5681,7 +5577,7 @@ class JiuWenSwarmDeepAdapter:
         """Build SysOperationRail."""
         try:
             fs_rail = SysOperationRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SysOperationRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] SysOperationRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SysOperationRail create failed: %s", exc)
             fs_rail = None
@@ -5852,12 +5748,17 @@ class JiuWenSwarmDeepAdapter:
             )
             if enabled_skills is not None:
                 skill_rail_kwargs["enabled_skills"] = enabled_skills
+            rail_type = (
+                StaticAssemblyCachedSkillUseRail
+                if static_assembly_cache_enabled()
+                else SkillUseRail
+            )
             try:
-                skill_rail = SkillUseRail(**skill_rail_kwargs)
+                skill_rail = rail_type(**skill_rail_kwargs)
             except TypeError:
                 skill_rail_kwargs.pop("enabled_skills", None)
-                skill_rail = SkillUseRail(**skill_rail_kwargs)
-            logger.info(
+                skill_rail = rail_type(**skill_rail_kwargs)
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] SkillUseRail create success skills_dirs=%s enabled=%s",
                 skills_dirs,
                 enabled_skills,
@@ -6135,7 +6036,7 @@ class JiuWenSwarmDeepAdapter:
         """Build JiuSwarmStreamEventRail."""
         try:
             stream_event_rail = JiuSwarmStreamEventRail()
-            logger.info("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create failed: %s", exc)
             stream_event_rail = None
@@ -6146,7 +6047,7 @@ class JiuWenSwarmDeepAdapter:
         """Build ContextOverflowRecoveryRail."""
         try:
             recovery_rail = ContextOverflowRecoveryRail(max_recovery_attempts=3)
-            logger.info("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create success")
+            logger.debug("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] ContextOverflowRecoveryRail create failed: %s", exc)
             recovery_rail = None
@@ -6157,7 +6058,7 @@ class JiuWenSwarmDeepAdapter:
         """Build TaskExecutionRail for task.start/complete/update lifecycle events."""
         try:
             task_rail = TaskExecutionRail()
-            logger.info("[JiuWenSwarmDeepAdapter] TaskExecutionRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] TaskExecutionRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] TaskExecutionRail create failed: %s", exc)
             task_rail = None
@@ -6171,7 +6072,7 @@ class JiuWenSwarmDeepAdapter:
 
             # Parent adapter owns finalize; rail only records llm/tool events.
             rail = RequestSummaryRail(record_only=True)
-            logger.info("[JiuWenSwarmDeepAdapter] RequestSummaryRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] RequestSummaryRail create success")
         except Exception as exc:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] RequestSummaryRail create failed: %s",
@@ -6250,7 +6151,7 @@ class JiuWenSwarmDeepAdapter:
             multimodal_image_rail = MultimodalImageRail(
                 enable_image_multimodal=enable_image_multimodal,
             )
-            logger.info("[JiuWenSwarmDeepAdapter] MultimodalImageRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] MultimodalImageRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] MultimodalImageRail create failed: %s", exc)
             multimodal_image_rail = None
@@ -6271,7 +6172,7 @@ class JiuWenSwarmDeepAdapter:
             react_cfg = config if config is not None else self._config_cache
             rail_kwargs = resolve_task_planning_rail_kwargs(react_cfg)
             task_planning_rail = TaskPlanningRail(**rail_kwargs)
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] TaskPlanningRail create success "
                 "enable_progress_repeat=%s list_tool_call_interval=%s",
                 task_planning_rail.enable_progress_repeat,
@@ -6287,7 +6188,7 @@ class JiuWenSwarmDeepAdapter:
         """Build SubagentRail for subagent delegation."""
         try:
             subagent_rail = SubagentRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SubagentRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] SubagentRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SubagentRail create failed: %s", exc)
             subagent_rail = None
@@ -6306,7 +6207,7 @@ class JiuWenSwarmDeepAdapter:
         """Build SecurityPromptRail."""
         try:
             security_prompt_rail = SecurityRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SecurityPromptRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] SecurityPromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SecurityPromptRail create failed: %s", exc)
             security_prompt_rail = None
@@ -6452,20 +6353,19 @@ class JiuWenSwarmDeepAdapter:
         """Build HeartbeatRail."""
         try:
             heartbeat_rail = HeartbeatRail()
-            logger.info("[JiuWenSwarmDeepAdapter] HeartbeatRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] HeartbeatRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] HeartbeatRail create failed: %s", exc)
             heartbeat_rail = None
         return heartbeat_rail
 
-    @staticmethod
-    def _build_avatar_rail() -> Any | None:
+    def _build_avatar_rail(self) -> Any | None:
         """Build AvatarPromptRail for digital avatar mode."""
         try:
             from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 
-            rail = AvatarPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] AvatarPromptRail create success")
+            rail = AvatarPromptRail(config_provider=lambda: self._config_base_cache)
+            logger.debug("[JiuWenSwarmDeepAdapter] AvatarPromptRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] AvatarPromptRail create failed: %s", exc)
@@ -6489,7 +6389,7 @@ class JiuWenSwarmDeepAdapter:
                 repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
                 single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
             )
-            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
@@ -6497,7 +6397,10 @@ class JiuWenSwarmDeepAdapter:
 
     def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
         try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
+            config_base = getattr(self, "_config_base_cache", None)
+            if not isinstance(config_base, dict):
+                config_base = get_config()
+            guard_cfg = (config_base or {}).get("execution_guard") or {}
             cb_cfg = guard_cfg.get("circuit_breaker") or {}
             if cb_cfg.get("enabled", False) is not True:
                 logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
@@ -6514,7 +6417,7 @@ class JiuWenSwarmDeepAdapter:
                 ),
             )
             rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
-            logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] CircuitBreakerRail create failed: %s", exc)
@@ -6534,7 +6437,7 @@ class JiuWenSwarmDeepAdapter:
                 agent_id=self._agent_id,
                 service_id=self._service_id,
             )
-            logger.info("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] RuntimePromptRail create failed: %s", exc)
             rail = None
@@ -7112,19 +7015,27 @@ class JiuWenSwarmDeepAdapter:
 
     def _register_deepresearch_tool_cards(self, tool_cards: list[Any]) -> None:
         """Register the formal DeepResearch surface as process-shared tools."""
+        config_base = getattr(self, "_config_base_cache", None)
+        deepresearch_tools = (
+            get_deepresearch_tools(config_base)
+            if config_base is not None
+            else get_deepresearch_tools()
+        )
         registered_cards = [
             self._register_shared_tool(tool).card
-            for tool in get_deepresearch_tools()
+            for tool in deepresearch_tools
         ]
         tool_cards.extend(registered_cards)
 
     async def _get_tool_cards(self, agent_id: str):
         """Get tool cards."""
+        stage_timer = StageTimer()
         tool_cards = []
 
         for wtool in [wiki_ingest, wiki_query, wiki_lint]:
             registered = self._register_shared_tool(wtool)
             tool_cards.append(registered.card)
+        stage_timer.mark("wiki")
 
         for tool_instance in build_jiuwen_harness_named_web_tools(
             agent_id=agent_id,
@@ -7132,6 +7043,7 @@ class JiuWenSwarmDeepAdapter:
         ):
             registered = self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(registered.card)
+        stage_timer.mark("named_web")
 
         self._vision_tools = []
         self._vision_tools_registered = False
@@ -7152,6 +7064,7 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] vision tools registration failed: %s",
                     exc,
                 )
+        stage_timer.mark("vision")
 
         self._audio_tools = []
         self._audio_tools_registered = False
@@ -7168,6 +7081,7 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] audio tools registration failed: %s",
                 exc,
             )
+        stage_timer.mark("audio")
 
         self._video_tool_registered = False
         if self._video_model_config:
@@ -7180,6 +7094,7 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] video tool registration failed: %s",
                     exc,
                 )
+        stage_timer.mark("video")
 
         # generate_image tool: use dedicated image_gen model config
         self._image_gen_tool_registered = False
@@ -7193,9 +7108,10 @@ class JiuWenSwarmDeepAdapter:
                     "[JiuWenSwarmDeepAdapter] generate_image tool registration failed: %s",
                     exc,
                 )
+        stage_timer.mark("image_gen")
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
-        config_base = get_config()
+        config_base = self._config_base_cache or get_config()
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -7241,6 +7157,7 @@ class JiuWenSwarmDeepAdapter:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] xiaoyi phone tools registration failed: %s", exc
                 )
+        stage_timer.mark("xiaoyi")
 
         try:
             skill_toolkit = SkillToolkit(
@@ -7254,12 +7171,13 @@ class JiuWenSwarmDeepAdapter:
                 registered = self._register_shared_tool(tool)
                 tool_cards.append(registered.card)
                 skill_tool_names.append(registered.card.name)
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] SkillToolkit registered: tools=%s",
                 skill_tool_names,
             )
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] skill tools registration failed: %s", exc)
+        stage_timer.mark("skill_toolkit")
 
         if is_skill_retrieval_enabled():
             try:
@@ -7281,7 +7199,8 @@ class JiuWenSwarmDeepAdapter:
         else:
             self._skill_retrieval_tools = []
             self._skill_retrieval_tools_registered = False
-            logger.info("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
+            logger.debug("[JiuWenSwarmDeepAdapter] SkillRetrievalToolkit skipped: disabled")
+        stage_timer.mark("skill_retrieval")
 
         try:
             symphony_toolkit = SymphonyToolkit()
@@ -7293,7 +7212,7 @@ class JiuWenSwarmDeepAdapter:
                 symphony_tool_names.append(registered.card.name)
             self._symphony_tools = list(symphony_tools)
             self._symphony_tools_registered = bool(symphony_tools)
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] SymphonyToolkit registered: tools=%s",
                 symphony_tool_names,
             )
@@ -7304,18 +7223,29 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] orchestration tools registration failed: %s",
                 exc,
             )
+        stage_timer.mark("symphony")
 
         # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
         try:
-            acp_cfg = get_config().get("acp_agents")
+            acp_cfg = config_base.get("acp_agents")
             if isinstance(acp_cfg, dict) and acp_cfg:
                 registered = self._register_shared_tool(acp_chat)
                 tool_cards.append(registered.card)
-                logger.info("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
+                logger.debug("[JiuWenSwarmDeepAdapter] acp_chat tool registered")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] acp_chat registration failed: %s", exc)
+        stage_timer.mark("acp")
 
         self._register_deepresearch_tool_cards(tool_cards)
+        stage_timer.mark("deepresearch")
+
+        server_logger.info(
+            "[AgentServer] tool cards assembled: session_id=%s count=%d total_ms=%.1f %s",
+            self._parent_session_id,
+            len(tool_cards),
+            stage_timer.total_ms(),
+            stage_timer.render(slowest_first=True),
+        )
 
         return tool_cards
 
@@ -7402,12 +7332,25 @@ class JiuWenSwarmDeepAdapter:
             mode: 实例化模式，默认 "agent"，使用 create_deep_agent。
             sub_mode: 子模式
         """
+        create_started_at = time.monotonic()
+        stage_started_at = create_started_at
+        stage_timings: list[tuple[str, float]] = []
+        stable_config_reused = False
+
+        def mark_stage(name: str) -> None:
+            nonlocal stage_started_at
+            now = time.monotonic()
+            stage_timings.append((name, (now - stage_started_at) * 1000))
+            stage_started_at = now
+
+        self._stable_runtime_signature = None
         self._session_instance_config = dict(config or {}) if isinstance(config, dict) else None
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
 
         await self.set_checkpoint()
         await asyncio.sleep(0)
+        mark_stage("checkpoint")
 
         self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
@@ -7416,14 +7359,28 @@ class JiuWenSwarmDeepAdapter:
         # (your-model-name) instead of the synced office tip bag.
         ns_token, overlay_token = self._bind_request_env_overlay()
         try:
-            load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
-            config_base = _resolve_instance_config_base(config_base)
             # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
             bootstrap_request = self._instance_overrides.pop("request", None)
-            if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
-                await self._load_enterprise_config(bootstrap_request)
-            config_base = merge_memory_config_into_config(config_base)
-            config_base = self._merge_enterprise_models_into_config(config_base)
+            stable_config_reused = bool(
+                static_assembly_cache_enabled()
+                and self._is_session_scoped_adapter
+                and config_base is not None
+                and bootstrap_request is None
+            )
+            if stable_config_reused:
+                # The parent already resolved dotenv, memory and tenant model
+                # overlays for this catalog generation.  Keep ownership local:
+                # only an independent, lossless clone crosses into the session
+                # adapter.  Catalog configs are JSON-shaped, so the native
+                # clone avoids a 1.3--1.6 s Python deepcopy on every new chat.
+                config_base = _clone_stable_config_base(config_base)
+            else:
+                load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
+                config_base = _resolve_instance_config_base(config_base)
+                if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+                    await self._load_enterprise_config(bootstrap_request)
+                config_base = merge_memory_config_into_config(config_base)
+                config_base = self._merge_enterprise_models_into_config(config_base)
             self._config_base_cache = config_base.copy()
             self._startup_config_base = config_base.copy()
             self._refresh_multimodal_configs(config_base)
@@ -7466,6 +7423,7 @@ class JiuWenSwarmDeepAdapter:
                 self._workspace_dir = configured_workspace
             self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
             self._prompt_attachment_loader.ensure_layout()
+            mark_stage("config")
 
             if self._skip_own_instance_build():
                 return
@@ -7480,19 +7438,23 @@ class JiuWenSwarmDeepAdapter:
                     exc,
                 )
                 raise
+            mark_stage("model")
             if self._is_session_scoped_adapter:
                 await self._try_init_a2x_client(config_base)
+            mark_stage("a2x")
             agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
             tool_cards = await self._get_tool_cards(self._tool_owner_id())
             self._tool_cards = tool_cards
-            logger.info("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
+            logger.debug("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
             await asyncio.sleep(0)
+            mark_stage("tool_cards")
 
             # 权限护栏由 openjiuwen PermissionInterruptRail + ToolPermissionHost 接管；
             # 无需初始化 jiuwenswarm 内置 PermissionEngine（已弃用）。
 
             rails_list = self._build_agent_rails(config, config_base, mode=mode)
+            mark_stage("rails")
 
             sys_operation = self._create_sys_operation()
             if sys_operation is None:
@@ -7505,6 +7467,7 @@ class JiuWenSwarmDeepAdapter:
             should_enable_general_agent = should_add_general_agent and (
                 sub_mode == "plan" or (isinstance(mode, str) and mode.startswith("agent"))
             )
+            mark_stage("sysop_subagents")
             common_kwargs = dict(
                 model=model,
                 card=agent_card,
@@ -7540,44 +7503,58 @@ class JiuWenSwarmDeepAdapter:
                 completion_timeout=config.get("completion_timeout", 21600.0),
             )
             self._bind_subagent_model_resolver()
+            mark_stage("create_deep_agent")
 
             _apply_llm_io_trace_patch()
 
             await asyncio.sleep(0)
             await self._instance.ensure_initialized()
+            mark_stage("ensure_initialized")
             initial_runtime_workspace = self._project_dir or str(
                 get_default_project_session_workspace_dir()
             )
-            await asyncio.to_thread(
-                self._ensure_project_gitignore_agent_history,
-                initial_runtime_workspace,
-            )
             self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
             setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
+            mark_stage("runtime_cwd")
 
             self._sync_a2x_runtime_state()
             # Cron tools belong to the agent's standing toolset, not to any one
             # request; build them here so the first turn does not pay for it either.
             self._ensure_cron_tools_registered(self._parent_session_id)
+            mark_stage("cron_tools")
             self._registered_mcp_server_ids.clear()
             self._registered_mcp_servers.clear()
             await self._register_mcp_servers_from_config(config_base, tag=f"agent.{mode}")
-            logger.info(
+            mark_stage("mcp_servers")
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
             )
 
             # 加载已激活的 packages（skills, rails, tools）
             await self._load_active_packages()
             await asyncio.sleep(0)
+            mark_stage("active_packages")
 
             self._sync_preinstance_runtime_tools_to_ability_manager()
             self._sync_multimodal_tools_for_runtime()
+            mark_stage("runtime_tools")
             await asyncio.to_thread(self._init_skill_turbo_tool)
+            mark_stage("skill_turbo")
 
             # 动态加载用户自定义的 Rail 扩展
             await self.load_user_rails()
             self._register_extension_tools()
+            mark_stage("user_extensions")
         finally:
+            server_logger.info(
+                "[AgentServer] create instance stages: session_id=%s mode=%s total_ms=%.1f"
+                " stable_config_reused=%s %s",
+                self._parent_session_id,
+                mode,
+                (time.monotonic() - create_started_at) * 1000,
+                stable_config_reused,
+                " ".join(f"{name}={duration_ms:.1f}" for name, duration_ms in stage_timings),
+            )
             self._reset_request_env_bindings(ns_token, overlay_token)
 
     def _register_extension_tools(self) -> None:
@@ -7622,86 +7599,6 @@ class JiuWenSwarmDeepAdapter:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] ExtensionRegistry unavailable, skip extension tools"
             )
-
-    @staticmethod
-    def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
-        """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
-        if not project_dir:
-            return
-        try:
-            repo_probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if repo_probe.returncode != 0:
-            return
-
-        repo_root_text = repo_probe.stdout.strip()
-        if not repo_root_text:
-            return
-        gitignore_path = Path(repo_root_text) / ".gitignore"
-        try:
-            existing_bytes = gitignore_path.read_bytes() if gitignore_path.exists() else b""
-        except OSError as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] read .gitignore for agent history rule failed: %s",
-                exc,
-            )
-            return
-
-        if JiuWenSwarmDeepAdapter._gitignore_covers_agent_history(existing_bytes):
-            return
-
-        existing = existing_bytes.decode("utf-8", errors="replace")
-        prefix = "" if not existing else ("\n" if existing.endswith(("\n", "\r")) else "\n\n")
-        addition = (
-            f"{prefix}# JiuwenSwarm runtime file operation logs\n.agent_history/\n"
-        ).encode("utf-8")
-        try:
-            gitignore_path.write_bytes(existing_bytes + addition)
-        except OSError as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] ensure .agent_history gitignore failed: %s",
-                exc,
-            )
-
-    @staticmethod
-    def _gitignore_covers_agent_history(content: bytes) -> bool:
-        """Return True if .gitignore content already ignores .agent_history/.
-
-        Recognizes equivalent forms such as ``.agent_history``,
-        ``.agent_history/``, ``.agent_history/*``, ``.agent_history/**``,
-        ``.agent_history/**/*``, ``**/.agent_history`` and combinations
-        thereof, so that the rule is idempotent across pre-existing project
-        configurations.
-        """
-        text = content.decode("utf-8", errors="replace")
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # Skip negation rules; they re-include paths rather than ignore
-            # the directory.
-            if line.startswith("!"):
-                continue
-            # Strip leading glob prefix like `**/`.
-            if line.startswith("**/"):
-                line = line[3:]
-            # Split into segments. The rule covers `.agent_history` if the
-            # first segment matches and any following segments are wildcards
-            # that target the directory contents.
-            segments = [seg for seg in line.split("/") if seg]
-            if not segments or segments[0] != ".agent_history":
-                continue
-            if all(seg in ("*", "**") for seg in segments[1:]):
-                return True
-        return False
 
     async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
         """Hot-load prompt attachment files for the current request.
@@ -7903,6 +7800,11 @@ class JiuWenSwarmDeepAdapter:
                 self._pending_reload = None
         elif _force_apply:
             self._pending_reload = None
+
+        # Any applied config reload can change the Rail set or stable mode
+        # products.  A deferred reload keeps the old signature until it is
+        # actually drained through this point.
+        self._stable_runtime_signature = None
 
         if os.getenv("AGENT_RUNTIME", "").strip():
             try:
@@ -8386,7 +8288,7 @@ class JiuWenSwarmDeepAdapter:
             if isinstance(request_metadata, dict)
             else {}
         )
-        logger.info(
+        logger.debug(
             "[ACP] _acp_runtime_tools_enabled: metadata_keys=%s caps=%s",
             list((request_metadata or {}).keys()),
             caps,
@@ -8456,7 +8358,7 @@ class JiuWenSwarmDeepAdapter:
                 if getattr(existing, "name", "") in _CRON_TOOL_NAMES:
                     self._instance.ability_manager.remove(existing.name)
             self._cron_tools_registered_language = None
-            logger.info(
+            logger.debug(
                 "[JiuWenSwarmDeepAdapter] skip cron tool registration: disabled by env"
             )
             return
@@ -8507,7 +8409,16 @@ class JiuWenSwarmDeepAdapter:
         # send_file 工具：由 channels.<channel>.send_file_allowed 控制。
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar
         # （含专用 send_file_request_context）。
-        config_base = get_config()
+        # The adapter snapshot is refreshed by the existing config-reload path.
+        # Re-reading and parsing the complete config here cost roughly 0.5s on
+        # every first message even after exact-session prewarm.  Only the
+        # immutable channel policy comes from this snapshot; request/session
+        # ids and callback metadata below remain request-scoped.
+        config_base = (
+            self._config_base_cache
+            if isinstance(self._config_base_cache, dict)
+            else get_config()
+        )
         channel = (
             str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         )
@@ -8810,6 +8721,21 @@ class JiuWenSwarmDeepAdapter:
             ).strip()
             or "web"
         )
+        stable_signature = (
+            id(self._instance),
+            str(runtime_config.session_id or ""),
+            str(runtime_config.mode or ""),
+            resolved_language,
+            resolved_channel,
+            os.path.normcase(os.path.abspath(str(task_workspace))),
+            os.path.normcase(os.path.abspath(str(task_cwd))),
+            bool(runtime_config.supports_user_interaction),
+        )
+        stable_runtime_hit = (
+            bind_request
+            and static_assembly_cache_enabled()
+            and self._stable_runtime_signature == stable_signature
+        )
         stage_timer.mark("cwd_seed")
 
         if self._runtime_prompt_rail:
@@ -8859,7 +8785,14 @@ class JiuWenSwarmDeepAdapter:
         )
         stage_timer.mark("runtime_state")
 
-        await self._update_rails_for_mode(runtime_config.mode)
+        if stable_runtime_hit:
+            logger.debug(
+                "[AgentServer] stable runtime cache hit: session_id=%s mode=%s",
+                runtime_config.session_id,
+                runtime_config.mode,
+            )
+        else:
+            await self._update_rails_for_mode(runtime_config.mode)
         stage_timer.mark("rails_for_mode")
 
         await self._set_user_interaction_enabled(runtime_config.supports_user_interaction)
@@ -8998,6 +8931,8 @@ class JiuWenSwarmDeepAdapter:
                 except ImportError:
                     pass
         stage_timer.mark("memory_tools")
+        if not bind_request:
+            self._stable_runtime_signature = stable_signature
 
     @staticmethod
     def _should_register_acp_runtime_tools(
@@ -9059,6 +8994,107 @@ class JiuWenSwarmDeepAdapter:
             channel_id=channel_id,
             mode=mode,
             project_dir=project_dir,
+        )
+        runtime_rail = getattr(adapter, "_runtime_prompt_rail", None)
+        prewarm_runtime_state = getattr(runtime_rail, "prewarm_runtime_state", None)
+        if callable(prewarm_runtime_state):
+            prewarm_runtime_state()
+        await adapter.prewarm_static_assembly(session_id=session_id)
+        await adapter.prewarm_react_context(session_id=session_id)
+
+    async def prewarm_react_context(self, *, session_id: str) -> None:
+        """Create the session context and model wrapper before the first input.
+
+        ``ReActAgent._init_context`` is idempotent: the real invocation calls it
+        again and reloads the current Session state, so history and dynamic
+        request data are not snapshotted here.  This only moves context
+        processor/tokenizer construction and the local model wrapper off the
+        click-to-first-token path.
+        """
+
+        instance = self._instance
+        react_agent = getattr(instance, "react_agent", None)
+        session = getattr(instance, "_interaction_session", None)
+        init_context = getattr(react_agent, "_init_context", None)
+        if session is None or not callable(init_context):
+            return
+
+        started_at = time.monotonic()
+        await init_context(session)
+        context_ready_at = time.monotonic()
+        get_llm = getattr(react_agent, "_get_llm", None)
+        if callable(get_llm):
+            get_llm()
+        server_logger.info(
+            "[AgentServer] react context prewarmed: session_id=%s total_ms=%.1f "
+            "context_ms=%.1f model_wrapper_ms=%.1f",
+            session_id,
+            (time.monotonic() - started_at) * 1000,
+            (context_ready_at - started_at) * 1000,
+            (time.monotonic() - context_ready_at) * 1000,
+        )
+
+    async def prewarm_static_assembly(self, *, session_id: str) -> None:
+        """Populate immutable Rail products before the first user message.
+
+        This calls the same SkillUseRail preparation code used by
+        ``before_invoke``.  The actual hook still executes on every request and
+        still refreshes dynamic evolution/session state.
+        """
+
+        if not static_assembly_cache_enabled():
+            return
+        rail = self._skill_rail
+        prepare = getattr(rail, "_prepare_skills", None) if rail is not None else None
+        if not callable(prepare):
+            return
+
+        started_at = time.monotonic()
+        await prepare()
+        skills_ready_at = time.monotonic()
+
+        # Evolution descriptions are session-independent disk projections, but
+        # EvolutionStore deliberately re-reads them on every hook so changes
+        # remain visible immediately.  Prime the exact same read path while the
+        # new session is being prepared: BEFORE_INVOKE still executes and still
+        # refreshes the records, but its first filesystem pass is no longer on
+        # the user's click-to-token critical path.
+        fetch_evolution = getattr(rail, "_fetch_evolution_texts", None)
+        if callable(fetch_evolution):
+            await fetch_evolution()
+        evolution_ready_at = time.monotonic()
+
+        # The first BEFORE_INVOKE persists an immutable per-session snapshot of
+        # the visible skill metadata.  The interaction Session already exists
+        # during exact prewarm, so seed that same baseline now.  The hook keeps
+        # running on the real request and becomes an idempotent state check;
+        # mutable history and request data are not touched here.
+        session = getattr(self._instance, "_interaction_session", None)
+        ensure_baseline = getattr(rail, "_ensure_session_baseline", None)
+        if session is not None and callable(ensure_baseline):
+            ensure_baseline(
+                AgentCallbackContext(
+                    agent=self._instance,
+                    inputs=None,
+                    session=session,
+                )
+            )
+        baseline_ready_at = time.monotonic()
+
+        build_signature = getattr(rail, "_build_skills_snapshot_signature", None)
+        if callable(build_signature):
+            rail._skills_snapshot_signature = build_signature()
+        server_logger.info(
+            "[AgentServer] static assembly prewarmed: session_id=%s skills=%s "
+            "duration_ms=%.1f skill_prepare_ms=%.1f evolution_prime_ms=%.1f "
+            "session_baseline_ms=%.1f signature_ms=%.1f",
+            session_id,
+            len(getattr(rail, "skills", []) or []),
+            (time.monotonic() - started_at) * 1000,
+            (skills_ready_at - started_at) * 1000,
+            (evolution_ready_at - skills_ready_at) * 1000,
+            (baseline_ready_at - evolution_ready_at) * 1000,
+            (time.monotonic() - baseline_ready_at) * 1000,
         )
 
     @staticmethod
@@ -9140,7 +9176,9 @@ class JiuWenSwarmDeepAdapter:
         if self._instance is None:
             return
         try:
-            config_base = get_config()
+            config_base = getattr(self, "_config_base_cache", None)
+            if not isinstance(config_base, dict):
+                config_base = get_config()
             react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
             skill_turbo_config = react_config.get("skill_turbo", {}) if isinstance(react_config, dict) else {}
             enabled = skill_turbo_config.get("enabled", False) if isinstance(skill_turbo_config, dict) else False
@@ -9166,7 +9204,7 @@ class JiuWenSwarmDeepAdapter:
                 if self._checkpointer is not None:
                     self._stream_event_rail.set_checkpointer(self._checkpointer)
 
-            logger.info("[JiuWenSwarmDeepAdapter] skill_turbo tool initialized")
+            logger.debug("[JiuWenSwarmDeepAdapter] skill_turbo tool initialized")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] Failed to initialize skill_turbo tool: %s", exc)
 
@@ -9178,20 +9216,21 @@ class JiuWenSwarmDeepAdapter:
                 SkillProtocolPromptRail,
             )
             rail = SkillProtocolPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillProtocolPromptRail create failed: %s", exc)
             return None
 
-    @staticmethod
-    def _build_skill_turbo_prompt_rail() -> Any | None:
+    def _build_skill_turbo_prompt_rail(self) -> Any | None:
         """构建 SkillTurboPromptRail: 注入 skill_acceleration_exec 使用指南。
 
         仅在 config.react.skill_turbo.enabled = true 时创建，否则返回 None。
         """
         try:
-            config_base = get_config()
+            config_base = getattr(self, "_config_base_cache", None)
+            if not isinstance(config_base, dict):
+                config_base = get_config()
             react_config = config_base.get("react", {}) if isinstance(config_base, dict) else {}
             skill_turbo_config = react_config.get("skill_turbo", {}) if isinstance(react_config, dict) else {}
             enabled = skill_turbo_config.get("enabled", False) if isinstance(skill_turbo_config, dict) else False
@@ -9200,7 +9239,7 @@ class JiuWenSwarmDeepAdapter:
 
             from jiuwenswarm.server.runtime.skill_turbo.rails.skill_prompt_rail import SkillTurboPromptRail
             rail = SkillTurboPromptRail()
-            logger.info("[JiuWenSwarmDeepAdapter] SkillTurboPromptRail create success")
+            logger.debug("[JiuWenSwarmDeepAdapter] SkillTurboPromptRail create success")
             return rail
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillTurboPromptRail create failed: %s", exc)
@@ -13274,7 +13313,7 @@ class JiuWenSwarmDeepAdapter:
                 open_agent_run_span,
                 sync_agent_observability,
             )
-            sync_agent_observability()
+            sync_agent_observability(config_base=self._config_base_cache)
             _run_span = open_agent_run_span(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -14162,7 +14201,9 @@ class JiuWenSwarmDeepAdapter:
                 resolve_debug_trace_settings,
             )
             _dbg_settings = resolve_debug_trace_settings(
-                mode=mode, request_debug=bool(inputs.get("_request_debug"))
+                mode=mode,
+                request_debug=bool(inputs.get("_request_debug")),
+                config_base=self._config_base_cache,
             )
             # Sync single-agent / coding-agent observability with current config
             # before running.
@@ -14171,7 +14212,10 @@ class JiuWenSwarmDeepAdapter:
                 open_agent_run_span,
                 sync_agent_observability,
             )
-            sync_agent_observability(force=_dbg_settings.otel_enabled)
+            sync_agent_observability(
+                force=_dbg_settings.otel_enabled,
+                config_base=self._config_base_cache,
+            )
             _run_span = open_agent_run_span(
                 session_id=session_id,
                 request_id=rid,
@@ -14355,12 +14399,12 @@ class JiuWenSwarmDeepAdapter:
                 # single-agent interaction (interrupt / HITL resume).
                 server_logger.info(
                     "[AgentServer] message entering runner interaction inject: session_id=%s"
-                    " request_id=%s channel_id=%s mode=%s query=%s",
+                    " request_id=%s channel_id=%s mode=%s query_chars=%d",
                     session_id,
                     rid,
                     cid,
                     mode,
-                    preview_text(inputs.get("query", "")),
+                    len(str(inputs.get("query", ""))),
                 )
                 await self._instance.send_input(
                     SendInputRequest(
@@ -14384,16 +14428,18 @@ class JiuWenSwarmDeepAdapter:
                 # Last stop before the message enters the single-agent runner
                 # streaming path. ``prepare_ms`` covers everything this adapter
                 # did with the turn before handing it over.
-                server_logger.info(
+                server_logger.debug(
                     "[AgentServer] message entering runner streaming: session_id=%s request_id=%s"
-                    " channel_id=%s mode=%s prepare_ms=%.1f query=%s",
+                    " channel_id=%s mode=%s epoch_ms=%.3f prepare_ms=%.1f query_chars=%d",
                     session_id,
                     rid,
                     cid,
                     mode,
+                    time.time_ns() / 1_000_000,
                     (time.monotonic() - stream_impl_started_at) * 1000,
-                    preview_text(inputs.get("query", "")),
+                    len(str(inputs.get("query", ""))),
                 )
+                runner_handoff_started_at = time.monotonic()
                 await self._instance.send_input(
                     SendInputRequest(
                         request_id=rid,
@@ -14401,6 +14447,17 @@ class JiuWenSwarmDeepAdapter:
                         mode=self._resolve_input_dispatch_mode(request.params),
                     )
                 )
+                if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                    "1", "true", "yes", "on",
+                }:
+                    server_logger.debug(
+                        "[TTFT] runner input accepted: session_id=%s request_id=%s "
+                        "epoch_ms=%.3f handoff_ms=%.1f",
+                        session_id,
+                        rid,
+                        time.time_ns() / 1_000_000,
+                        (time.monotonic() - runner_handoff_started_at) * 1000,
+                    )
             run_failure: tuple[str, str] | None = None
             # HITL 暂停标志：本轮有 ask_user 卡片发出时置位，收尾据此发
             # chat.invocation_paused 终结帧（而非普通完成帧），避免前端把"等待用户

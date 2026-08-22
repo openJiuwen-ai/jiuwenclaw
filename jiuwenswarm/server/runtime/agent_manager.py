@@ -505,7 +505,7 @@ class AgentManager:
                 config = dict(config or {})
                 config["project_dir"] = project_dir
             agent_cache_key = cache_key or _make_agent_cache_key(mode_key, sub_mode_key, project_dir)
-            logger.info(
+            logger.debug(
                 "[AgentManager] Creating %s agent (mode=%s, sub_mode=%s, project_dir=%s)",
                 channel_key,
                 mode_key,
@@ -541,7 +541,7 @@ class AgentManager:
                 "config": dict(config or {}),
                 "cache_key": agent_cache_key,
             }
-            logger.info("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
+            logger.debug("[AgentManager] %s agent created cache_key=%s", channel_key, agent_cache_key)
             return agent
         finally:
             if overlay_token is not None:
@@ -786,6 +786,38 @@ class AgentManager:
     async def wait_for_session_prewarm(self, session_id: str | None) -> None:
         if session_id:
             await self.warm_pool.wait_for_session(session_id)
+
+    async def prepare_known_session(
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+        mode: str,
+        project_id: str,
+        project_dir: str | None,
+        catalog_revision: str = "",
+    ) -> str:
+        """Prepare the exact session Relay will use for its first chat message."""
+
+        normalized_mode = str(mode or "agent").strip().lower()
+        key = self.warm_pool.make_key(
+            channel_id=channel_id,
+            project_id=project_id,
+            project_dir=project_dir,
+            work_mode="code" if normalized_mode.startswith("code") else "work",
+            is_swarm=normalized_mode in {"team", "team.plan", "code.team"},
+        )
+        return await self.warm_pool.prepare_known_session(
+            key,
+            session_id=session_id,
+            mode=normalized_mode,
+            config=self._latest_effective_config or self._latest_config_base or get_config(),
+            env=self._latest_env_overrides,
+            catalog_revision=catalog_revision,
+        )
+
+    async def invalidate_known_session_prewarms(self) -> None:
+        await self.warm_pool.invalidate_known_sessions()
 
     async def begin_foreground_chat(self) -> None:
         await self.warm_pool.begin_foreground()
@@ -1524,7 +1556,10 @@ class AgentManager:
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = self._resolve_request_mode(request, params)
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            # Relay chat.send and agent.session.prepare both carry project_dir.
+            # Keep workspace_dir as a legacy alias, but use the same canonical
+            # value as exact-session prewarm so get_agent hits the prepared root.
+            workspace_dir = params.get("project_dir") or params.get("workspace_dir")
 
             agent = await self.get_agent(
                 channel_id=channel_id,
@@ -1548,24 +1583,46 @@ class AgentManager:
         Yields:
             AgentResponseChunk 对象
         """
+        stream_started_at = time.monotonic()
         try:
             await self.wait_for_session_prewarm(getattr(request, "session_id", None))
+            prewarm_ready_at = time.monotonic()
             channel_id = getattr(request, "channel_id", "")
             params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
             mode_full = self._resolve_request_mode(request, params)
             mode = str(mode_full).split(".")[0] if mode_full else "agent"
-            workspace_dir = params.get("workspace_dir")
+            # See process_message(): a mismatched field here creates a second
+            # Adapter for the same session after the exact prewarm completed.
+            workspace_dir = params.get("project_dir") or params.get("workspace_dir")
 
             agent = await self.get_agent(
                 channel_id=channel_id,
                 mode=mode,
                 project_dir=workspace_dir,
             )
+            agent_ready_at = time.monotonic()
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
 
             # 流式处理
+            first_chunk = True
             async for chunk in agent.process_message_stream(request):
+                if first_chunk:
+                    first_chunk = False
+                    if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                        "1", "true", "yes", "on",
+                    }:
+                        logger.debug(
+                            "[TTFT] agent manager first chunk: session_id=%s request_id=%s "
+                            "epoch_ms=%.3f prewarm_wait_ms=%.1f get_agent_ms=%.1f "
+                            "agent_to_chunk_ms=%.1f",
+                            getattr(request, "session_id", None),
+                            getattr(request, "request_id", None),
+                            time.time_ns() / 1_000_000,
+                            (prewarm_ready_at - stream_started_at) * 1000,
+                            (agent_ready_at - prewarm_ready_at) * 1000,
+                            (time.monotonic() - agent_ready_at) * 1000,
+                        )
                 yield chunk
         except Exception as e:
             logger.error(f"[AgentManager] Error in process_message_stream: {e}", exc_info=True)

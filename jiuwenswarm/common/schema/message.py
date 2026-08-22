@@ -68,6 +68,7 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
     SYNC_AGENTS_CONFIGS = "sync_agents_configs"
     AGENT_PREWARM_SYNC = "agent.prewarm.sync"
+    AGENT_SESSION_PREPARE = "agent.session.prepare"
     LOGGING_SET = "logging.set"
 
     MEMORY_COMPUTE = "memory.compute"
@@ -270,6 +271,7 @@ class EventType(Enum):
     HISTORY_GET = "history.message"
     PROACTIVE_RECOMMENDATION = "proactive_recommendation"
     SYNC_AGENTS_CONFIGS_RESULT = "sync_agents_configs.result"
+    AGENT_SESSION_PREPARE_RESULT = "agent.session.prepare.result"
 
 
 class Mode(Enum):

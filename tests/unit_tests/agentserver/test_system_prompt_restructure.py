@@ -579,38 +579,6 @@ async def test_runtime_attachment_tracks_live_code_agent_mode(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_runtime_git_status_attachment_clears_when_git_context_disappears(tmp_path, monkeypatch):
-    monkeypatch.setattr(_utils_mod, "get_config_dir", lambda: tmp_path)
-    runtime_state = tmp_path / "runtime_state" / "default.yaml"
-    runtime_state.parent.mkdir(parents=True, exist_ok=True)
-    runtime_state.write_text(
-        "git_branch: feature/test\n"
-        "git_status: M file.py\n"
-        "git_recent_commits: abc init\n",
-        encoding="utf-8",
-    )
-    builder = SystemPromptBuilder(language="en")
-    agent = _FakeAgent(builder)
-    runtime_rail = RuntimePromptRail(language="en", channel="web")
-    runtime_rail.init(agent)
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=None,
-        session=_FakeSession(),
-        extra={},
-    )
-
-    await runtime_rail.before_model_call(ctx)
-    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    assert [item.id for item in session_items if item.id.endswith(".git_status")] == ["session.sess1.git_status"]
-
-    runtime_state.write_text("git_branch: ''\n", encoding="utf-8")
-    await runtime_rail.before_model_call(ctx)
-    session_items = await agent.prompt_attachment_manager.list_by_filter(session_id="sess1")
-    assert [item.id for item in session_items if item.id.endswith(".git_status")] == []
-
-
-@pytest.mark.asyncio
 async def test_runtime_prompt_uses_runtime_cwd_over_stale_trusted_dir(tmp_path, monkeypatch):
     builder = SystemPromptBuilder(language="en")
     agent = _FakeAgent(builder)

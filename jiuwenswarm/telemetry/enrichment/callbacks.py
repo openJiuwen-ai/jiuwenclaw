@@ -117,6 +117,7 @@ class _CallState:
     channel_id: str = ""
     agent_name: str = ""
     context_tokens: ContextTokenBreakdown | None = None
+    context_tokens_task: asyncio.Task[None] | None = None
     ttft_seconds: float | None = None
     sequence: int = 0
     tool_name: str = ""
@@ -602,6 +603,13 @@ class RichTelemetryCallbacks:
             else:
                 pending_error = error
         state = state or span_state
+
+        # The input hook intentionally overlaps this observational count with
+        # provider execution.  Settle it only after the streamed model output
+        # is complete, before final telemetry attributes are emitted.
+        if state is not None and state.context_tokens_task is not None:
+            await state.context_tokens_task
+            state.context_tokens_task = None
 
         observation = result
         usage = UsageBreakdown()
@@ -1329,43 +1337,26 @@ class RichTelemetryCallbacks:
         messages = kwargs.get("messages") or []
         tools = kwargs.get("tools") or []
         try:
-            try:
-                state.context_tokens = await asyncio.wait_for(
-                    asyncio.to_thread(count_context_tokens, messages, tools),
-                    timeout=float(
-                        getattr(self._config, "token_count_timeout_seconds", 0.5)
-                    ),
+            # Context-token telemetry is observational and must not serialize
+            # the 34K prompt before the provider request can begin.  Preserve
+            # the exact calculation and metrics, but overlap it with the model
+            # network request.  The output callback settles this bounded task
+            # before it writes the final span attributes.
+            state.context_tokens_task = asyncio.create_task(
+                self._populate_context_token_telemetry(
+                    state,
+                    messages,
+                    tools,
+                    warning=warning,
                 )
-            except Exception:
-                _LOGGER.warning(warning, exc_info=True)
-                state.context_tokens = None
-            if state.context_tokens is not None:
-                for tool_name, tokens in state.context_tokens.per_tool_tokens:
-                    if tokens:
-                        self._metric_add(
-                            "gen_ai.tool.token.usage",
-                            tokens,
-                            self._filtered_metric_attributes(
-                                {
-                                    GEN_AI_TOOL_NAME: tool_name,
-                                    GEN_AI_REQUEST_MODEL: state.model,
-                                    JIUWENCLAW_CHANNEL_ID: state.channel_id,
-                                }
-                            ),
-                        )
-                for skill_name, tokens in state.context_tokens.per_skill_tokens:
-                    if tokens:
-                        self._metric_add(
-                            "gen_ai.skill.token.usage",
-                            tokens,
-                            self._filtered_metric_attributes(
-                                {
-                                    GEN_AI_SKILL_NAME: skill_name,
-                                    GEN_AI_REQUEST_MODEL: state.model,
-                                    JIUWENCLAW_CHANNEL_ID: state.channel_id,
-                                }
-                            ),
-                        )
+            )
+            # Preserve the callback's control-error contract for work that
+            # fails immediately, while never waiting for a real token-count
+            # thread on the provider hot path.
+            await asyncio.sleep(0)
+            if state.context_tokens_task.done():
+                await state.context_tokens_task
+                state.context_tokens_task = None
             if span is None or not span.is_recording():
                 return
             state.span_key = self._span_key(span)
@@ -1495,6 +1486,54 @@ class RichTelemetryCallbacks:
                 if state.span_key is not None:
                     self._span_state.pop(state.span_key)
             raise
+
+    async def _populate_context_token_telemetry(
+        self,
+        state: _CallState,
+        messages: Any,
+        tools: Any,
+        *,
+        warning: str,
+    ) -> None:
+        """Count prompt/tool tokens without blocking model dispatch."""
+        try:
+            state.context_tokens = await asyncio.wait_for(
+                asyncio.to_thread(count_context_tokens, messages, tools),
+                timeout=float(
+                    getattr(self._config, "token_count_timeout_seconds", 0.5)
+                ),
+            )
+        except Exception:
+            _LOGGER.warning(warning, exc_info=True)
+            state.context_tokens = None
+            return
+
+        for tool_name, tokens in state.context_tokens.per_tool_tokens:
+            if tokens:
+                self._metric_add(
+                    "gen_ai.tool.token.usage",
+                    tokens,
+                    self._filtered_metric_attributes(
+                        {
+                            GEN_AI_TOOL_NAME: tool_name,
+                            GEN_AI_REQUEST_MODEL: state.model,
+                            JIUWENCLAW_CHANNEL_ID: state.channel_id,
+                        }
+                    ),
+                )
+        for skill_name, tokens in state.context_tokens.per_skill_tokens:
+            if tokens:
+                self._metric_add(
+                    "gen_ai.skill.token.usage",
+                    tokens,
+                    self._filtered_metric_attributes(
+                        {
+                            GEN_AI_SKILL_NAME: skill_name,
+                            GEN_AI_REQUEST_MODEL: state.model,
+                            JIUWENCLAW_CHANNEL_ID: state.channel_id,
+                        }
+                    ),
+                )
 
     async def _report_llm_control_error(
         self,

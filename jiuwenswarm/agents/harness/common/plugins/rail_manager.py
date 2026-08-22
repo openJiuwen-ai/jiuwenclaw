@@ -378,7 +378,7 @@ class RailManager:
     def set_agent_instance(self, agent_instance: Any) -> None:
         """设置 DeepAgent 实例，用于热更新 rail."""
         self._agent_instance = agent_instance
-        logger.info("[RailManager] DeepAgent 实例已设置")
+        logger.debug("[RailManager] DeepAgent 实例已设置")
 
     async def hot_reload_rail(self, name: str, enabled: bool) -> None:
         """热更新 rail：根据 enabled 状态注册或注销 rail 实例.

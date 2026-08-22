@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -124,7 +125,6 @@ from jiuwenswarm.agents.harness.code.prompt.plan_approval import (
     PLAN_MODE_EXITED_EVENT_TYPE,
 )
 from jiuwenswarm.common.schema.message import ReqMethod, EventType
-from jiuwenswarm.common.log_preview import preview_text
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,43 @@ def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
     if masked_params == params:
         return data
     return {**data, "params": masked_params}
+
+
+def _bounded_inbound_payload_for_log(
+    data: dict[str, Any], raw: str | bytes
+) -> dict[str, Any]:
+    """Return a small structural summary without request/config/token bodies."""
+
+    method = str(data.get("req_method") or data.get("method") or "")
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    summary: dict[str, Any] = {
+        "request_id": data.get("request_id"),
+        "channel_id": data.get("channel_id"),
+        "session_id": data.get("session_id") or params.get("session_id"),
+        "agent_id": data.get("agent_id") or params.get("agent_id"),
+        "service_id": data.get("service_id") or params.get("service_id"),
+        "req_method": method,
+        "payload_bytes": len(raw if isinstance(raw, bytes) else raw.encode("utf-8")),
+        "param_keys": sorted(str(key) for key in params),
+    }
+    query = params.get("query")
+    if isinstance(query, str):
+        summary["query_chars"] = len(query)
+    mcp = params.get("office_claw_mcp")
+    if isinstance(mcp, dict):
+        summary["mcp_config_present"] = True
+        summary["mcp_arg_count"] = len(mcp.get("args") or [])
+
+    if method != ReqMethod.SYNC_AGENTS_CONFIGS.value:
+        return summary
+    agents = params.get("agents") if isinstance(params.get("agents"), list) else []
+    shared_env = params.get("shared_env") if isinstance(params.get("shared_env"), dict) else {}
+    summary.update(
+        revision=params.get("revision"),
+        agent_count=len(agents),
+        shared_env_key_count=len(shared_env),
+    )
+    return summary
 
 
 # 后台权限重载任务引用集合,防止 fire-and-forget 任务被 GC 提前回收。
@@ -1422,9 +1459,9 @@ class AgentWebSocketServer:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
-            logger.info(
+            logger.debug(
                 "[AgentWebSocketServer] Inbound raw payload: %s",
-                _mask_query_for_log(data),
+                _bounded_inbound_payload_for_log(data, raw),
                 extra={'user_visible': 'critical'}
             )
         except json.JSONDecodeError as e:
@@ -1467,7 +1504,7 @@ class AgentWebSocketServer:
                     raise ValueError("legacy_agent_request missing or not a dict")
                 request = _payload_to_request(legacy)
             else:
-                logger.info(
+                logger.debug(
                     "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
                     env.request_id,
                     env.channel,
@@ -1495,7 +1532,10 @@ class AgentWebSocketServer:
                         await send_wire_payload(ws, wire)
                     return
 
-        logger.info(
+        chat_received_at = (
+            time.monotonic() if request.req_method == ReqMethod.CHAT_SEND else None
+        )
+        logger.debug(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
             request.request_id,
             request.channel_id,
@@ -1506,11 +1546,11 @@ class AgentWebSocketServer:
         # agent-core logging system so it lands in the unified agent log stream.
         if request.req_method == ReqMethod.CHAT_SEND:
             server_logger.info(
-                "[AgentServer] chat input received: request_id=%s session_id=%s channel_id=%s query=%s",
+                "[AgentServer] chat input received: request_id=%s session_id=%s channel_id=%s query_chars=%d",
                 request.request_id,
                 request.session_id,
                 request.channel_id,
-                preview_text(_request_query_text(request)),
+                len(_request_query_text(request)),
             )
 
         try:
@@ -1524,6 +1564,19 @@ class AgentWebSocketServer:
                 request.metadata = metadata
 
             await self._trigger_before_chat_request_hook(request)
+            if (
+                chat_received_at is not None
+                and os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            ):
+                server_logger.debug(
+                    "[TTFT] before chat hook complete: session_id=%s request_id=%s "
+                    "epoch_ms=%.3f hook_ms=%.1f",
+                    request.session_id,
+                    request.request_id,
+                    time.time_ns() / 1_000_000,
+                    (time.monotonic() - chat_received_at) * 1000,
+                )
 
             if request.req_method == ReqMethod.SESSION_LIST:
                 await self._handle_session_list(ws, request, send_lock)
@@ -1660,6 +1713,9 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.AGENT_PREWARM_SYNC:
                 await self._handle_agent_prewarm_sync(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.AGENT_SESSION_PREPARE:
+                await self._handle_agent_session_prepare(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.EXTENSIONS_LIST:
                 await self._handle_extensions_list(ws, request, send_lock)
@@ -1822,7 +1878,21 @@ class AgentWebSocketServer:
                             async with send_lock:
                                 await send_wire_payload(ws, wire)
                 return
+            dispatch_started_at = time.monotonic()
             await self._ensure_auto_team_binding_for_chat(request)
+            if (
+                chat_received_at is not None
+                and os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            ):
+                server_logger.debug(
+                    "[TTFT] chat dispatch ready: session_id=%s request_id=%s "
+                    "epoch_ms=%.3f dispatch_ms=%.1f",
+                    request.session_id,
+                    request.request_id,
+                    time.time_ns() / 1_000_000,
+                    (time.monotonic() - dispatch_started_at) * 1000,
+                )
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
             else:
@@ -2660,10 +2730,12 @@ class AgentWebSocketServer:
         self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
+        stream_impl_started_at = time.monotonic()
         # 兜底确保 checkpointer 就绪 (见 _handle_unary 同名注释)。
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
         await ensure_persistent_checkpointer()
+        checkpointer_ready_at = time.monotonic()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
@@ -2672,6 +2744,7 @@ class AgentWebSocketServer:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         if self._uses_tenant_pool(request):
+            metadata_sync_started_at = time.monotonic()
             if request.req_method in _CODE_MODE_SYNC_METHODS:
                 params = request.params if isinstance(request.params, dict) else {}
                 _raw_mode = params.get("mode")
@@ -2693,9 +2766,34 @@ class AgentWebSocketServer:
                     request.params["project_dir"] = locked.strip()
                     request.metadata = dict(request.metadata or {})
                     request.metadata["project_dir"] = locked.strip()
+            if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }:
+                server_logger.debug(
+                    "[TTFT] session metadata synced: session_id=%s request_id=%s "
+                    "epoch_ms=%.3f metadata_ms=%.1f",
+                    request.session_id,
+                    request.request_id,
+                    time.time_ns() / 1_000_000,
+                    (time.monotonic() - metadata_sync_started_at) * 1000,
+                )
             chunk_count = 0
             async for chunk in self._tenant_pool().process_message_stream(request):
                 chunk_count += 1
+                if (
+                    chunk_count == 1
+                    and os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower()
+                    in {"1", "true", "yes", "on"}
+                ):
+                    server_logger.info(
+                        "[TTFT] websocket stream first chunk: session_id=%s request_id=%s "
+                        "epoch_ms=%.3f checkpointer_ms=%.1f downstream_ms=%.1f",
+                        request.session_id,
+                        request.request_id,
+                        time.time_ns() / 1_000_000,
+                        (checkpointer_ready_at - stream_impl_started_at) * 1000,
+                        (time.monotonic() - checkpointer_ready_at) * 1000,
+                    )
                 if chunk.agent_ref is None:
                     chunk.agent_ref = request.agent_ref
                 wire = encode_agent_chunk_for_wire(
@@ -3287,6 +3385,18 @@ class AgentWebSocketServer:
         if not session_id:
             return None
 
+        # A normal Relay request always carries an explicit canonical mode.
+        # When that mode is not a team mode, no persisted session value can
+        # turn this request into a team request (explicit mode wins in the
+        # metadata synchronizer below).  Avoid a cache-busting metadata read on
+        # every ordinary chat turn; team requests retain the complete legacy
+        # binding path unchanged.
+        raw_mode = params.get("mode")
+        if isinstance(raw_mode, str) and raw_mode.strip():
+            _, _, explicit_mode = resolve_agent_request_mode(raw_mode)
+            if not self._is_team_metadata_mode({"mode": explicit_mode}):
+                return None
+
         from jiuwenswarm.server.runtime.session.session_metadata import (
             get_session_metadata,
             update_session_metadata,
@@ -3299,7 +3409,6 @@ class AgentWebSocketServer:
             cache_bust=True,
             sessions_root=sessions_root,
         )
-        raw_mode = params.get("mode")
         effective_mode = (
             raw_mode
             if isinstance(raw_mode, str) and raw_mode.strip()
@@ -7753,6 +7862,54 @@ class AgentWebSocketServer:
                 channel_id=request.channel_id,
                 ok=True,
                 payload=stats,
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_agent_session_prepare(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Acknowledge exact-session preparation after scheduling it."""
+
+        params = dict(request.params) if isinstance(request.params, dict) else {}
+        params.setdefault("agent_id", getattr(request, "agent_id", None))
+        params.setdefault("service_id", getattr(request, "service_id", None))
+        params.setdefault("channel_id", request.channel_id)
+        started_at = time.monotonic()
+        try:
+            payload = await self._tenant_pool().prepare_session(params)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "event_type": EventType.AGENT_SESSION_PREPARE_RESULT.value,
+                    **payload,
+                    "schedule_ms": round((time.monotonic() - started_at) * 1000, 1),
+                },
+            )
+        except ValueError as exc:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "event_type": EventType.AGENT_SESSION_PREPARE_RESULT.value,
+                    "error": str(exc),
+                    "code": "BAD_REQUEST",
+                },
+            )
+        except Exception as exc:
+            logger.exception("[AgentWebSocketServer] agent.session.prepare failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "event_type": EventType.AGENT_SESSION_PREPARE_RESULT.value,
+                    "error": str(exc),
+                },
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:

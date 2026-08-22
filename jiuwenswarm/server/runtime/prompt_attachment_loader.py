@@ -585,7 +585,7 @@ class PromptAttachmentLoader:
         except Exception as exc:
             logger.warning("[PromptAttachmentLoader] failed to load prompt attachment directory: %s", exc)
             return
-        logger.info(
+        logger.debug(
             "[PromptAttachmentLoader] sync prompt attachments: session_id=%s session=%d",
             session_id,
             len(session_attachments),

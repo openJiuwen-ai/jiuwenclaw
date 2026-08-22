@@ -170,3 +170,31 @@ async def test_session_child_reuses_authoritative_config_snapshot() -> None:
 
     assert await adapter._get_or_create_session_adapter("sess_a") is child
     assert calls == [tenant_config]
+
+
+@pytest.mark.asyncio
+async def test_react_context_prewarm_is_content_free_and_idempotent() -> None:
+    """Session prewarm initializes local wrappers without admitting a user turn."""
+    adapter = _make_adapter("sess_a")
+    session = object()
+    calls: list[object] = []
+
+    class FakeReactAgent:
+        async def _init_context(self, actual_session):
+            calls.append(actual_session)
+            return object()
+
+        def _get_llm(self):
+            calls.append("model")
+            return object()
+
+    class FakeDeepAgent:
+        react_agent = FakeReactAgent()
+        _interaction_session = session
+
+    adapter._instance = FakeDeepAgent()
+
+    await adapter.prewarm_react_context(session_id="sess_a")
+    await adapter.prewarm_react_context(session_id="sess_a")
+
+    assert calls == [session, "model", session, "model"]

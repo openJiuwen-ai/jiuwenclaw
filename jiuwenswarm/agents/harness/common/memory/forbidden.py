@@ -6,11 +6,14 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def _get_memory_forbidden_config() -> Dict[str, Any]:
+def _get_memory_forbidden_config(config: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """从 config.yaml 读取 memory.forbidden_memory_definition 配置."""
     try:
-        from jiuwenswarm.agents.harness.common.memory.config import get_memory_section
-        memory_config = get_memory_section()
+        if isinstance(config, dict):
+            memory_config = config.get("memory", {})
+        else:
+            from jiuwenswarm.agents.harness.common.memory.config import get_memory_section
+            memory_config = get_memory_section()
         forbidden_config = memory_config.get("forbidden_memory_definition", {})
         return {
             "enabled": forbidden_config.get("enabled", False),
@@ -26,7 +29,10 @@ def _get_memory_forbidden_config() -> Dict[str, Any]:
         return {"enabled": False, "patterns": [], "description": {}}
 
 
-def get_forbidden_memory_prompt(language: str) -> str:
+def get_forbidden_memory_prompt(
+    language: str,
+    config: Dict[str, Any] | None = None,
+) -> str:
     """读取 config.yaml 的 memory.forbidden_memory_definition，
     返回格式化的限制提示词。enabled=false 时返回空字符串。
 
@@ -36,7 +42,7 @@ def get_forbidden_memory_prompt(language: str) -> str:
     Returns:
         格式化的禁止记忆提示词，或空字符串
     """
-    config = _get_memory_forbidden_config()
+    config = _get_memory_forbidden_config(config)
 
     if not config.get("enabled", False):
         return ""

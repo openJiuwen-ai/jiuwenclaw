@@ -11,9 +11,12 @@ import pytest
 
 from jiuwenswarm.common.mcp_config import (
     OfficeClawMcpRegistration,
+    _clear_office_claw_mcp_schema_cache_for_tests,
     extract_office_claw_mcp,
+    list_office_claw_mcp_tools,
     validate_office_claw_mcp_config,
 )
+from jiuwenswarm.common import mcp_config
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
@@ -51,6 +54,13 @@ def _startup_env() -> dict[str, str]:
         "OFFICE_CLAW_MCP_ARGS_JSON": r'["E:\\relay\\packages\\mcp-server\\dist\\index.js"]',
         "OFFICE_CLAW_MCP_CWD": r"E:\relay",
     }
+
+
+@pytest.fixture(autouse=True)
+def _clear_schema_cache() -> None:
+    _clear_office_claw_mcp_schema_cache_for_tests()
+    yield
+    _clear_office_claw_mcp_schema_cache_for_tests()
 
 
 class _AbilityManager:
@@ -115,6 +125,44 @@ def test_validation_pins_process_identity_to_relay_startup() -> None:
     changed["args"] = [r"E:\attacker\script.js"]
     with pytest.raises(ValueError, match="args do not match"):
         validate_office_claw_mcp_config(changed, environ=_startup_env())
+
+
+@pytest.mark.asyncio
+async def test_schema_cache_ignores_request_tokens_and_returns_isolated_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discover = AsyncMock(
+        return_value=[{"name": "office_claw_list_tasks", "description": "list", "input_params": {"type": "object"}}]
+    )
+    monkeypatch.setattr(mcp_config, "_list_office_claw_mcp_tools_uncached", discover)
+    monkeypatch.setenv("JIUWENSWARM_MCP_SCHEMA_CACHE", "1")
+    first = _valid_config()
+    second = _valid_config()
+    second["env"] = {**second["env"], "OFFICE_CLAW_CALLBACK_TOKEN": "another-secret"}
+
+    first_result = await list_office_claw_mcp_tools(first)
+    first_result[0]["description"] = "mutated"
+    second_result = await list_office_claw_mcp_tools(second)
+
+    assert discover.await_count == 1
+    assert second_result[0]["description"] == "list"
+
+
+@pytest.mark.asyncio
+async def test_schema_cache_key_includes_excluded_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    discover = AsyncMock(return_value=[])
+    monkeypatch.setattr(mcp_config, "_list_office_claw_mcp_tools_uncached", discover)
+    monkeypatch.setenv("JIUWENSWARM_MCP_SCHEMA_CACHE", "1")
+    first = _valid_config()
+    second = _valid_config()
+    second["env"] = {**second["env"], "OFFICE_CLAW_MCP_EXCLUDED_TOOLS": "another_tool"}
+
+    await list_office_claw_mcp_tools(first)
+    await list_office_claw_mcp_tools(second)
+
+    assert discover.await_count == 2
 
 
 @pytest.mark.asyncio

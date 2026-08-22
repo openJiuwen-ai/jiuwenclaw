@@ -9,6 +9,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
@@ -36,9 +39,10 @@ class AvatarPromptRail(DeepAgentRail):
 
     priority: int = 85
 
-    def __init__(self) -> None:
+    def __init__(self, config_provider: Callable[[], dict[str, Any]] | None = None) -> None:
         super().__init__()
         self._injected_sections: set[str] = set()
+        self._config_provider = config_provider
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         builder = getattr(
@@ -56,10 +60,11 @@ class AvatarPromptRail(DeepAgentRail):
         language = getattr(builder, "language", "cn") or "cn"
 
         # forbidden_memory — engine=none 或自定义 forbidden 配置时注入，不依赖数字分身功能
-        engine_disabled = not is_builtin_memory_allowed(get_config())
+        config = self._config_provider() if self._config_provider is not None else get_config()
+        engine_disabled = not is_builtin_memory_allowed(config)
         try:
             from jiuwenswarm.agents.harness.common.memory.forbidden import get_forbidden_memory_prompt
-            forbidden = get_forbidden_memory_prompt(language) or ""
+            forbidden = get_forbidden_memory_prompt(language, config) or ""
         except Exception as e:
             logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
             forbidden = ""

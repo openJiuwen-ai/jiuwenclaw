@@ -116,6 +116,8 @@ class AgentWarmPool:
     """Own a bounded set of unclaimed, initialized Agent sessions."""
 
     EXCLUDED_CHANNELS = frozenset({"acp", "a2a"})
+    _EXPLICIT_GLOBAL_LIMIT = 4
+    _explicit_global_reservations: set[tuple[int, str]] = set()
 
     def __init__(
         self,
@@ -143,6 +145,10 @@ class AgentWarmPool:
         self._promoted_sessions: set[str] = set()
         self._claimed_pins: dict[str, "JiuWenSwarm"] = {}
         self._pin_release_tasks: set[asyncio.Task[None]] = set()
+        self._explicit_sessions: dict[str, WarmKey] = {}
+        self._explicit_agents: dict[str, "JiuWenSwarm"] = {}
+        self._explicit_revisions: dict[str, str] = {}
+        self._explicit_cleanup_tasks: dict[str, asyncio.Task[None]] = {}
         self._failed: dict[WarmKey, str] = {}
         self._lock = asyncio.Lock()
         # OpenJiuwen registers tools and resources in process-global managers.
@@ -391,10 +397,17 @@ class AgentWarmPool:
         *,
         session_id: str | None = None,
         keep_as_slot: bool = True,
+        prepare_mode: str | None = None,
     ) -> tuple[str, asyncio.Task[None]]:
         sid = session_id or self._new_session_id(key.channel_id)
         task = asyncio.create_task(
-            self._prepare(key, sid, revision, keep_as_slot=keep_as_slot),
+            self._prepare(
+                key,
+                sid,
+                revision,
+                keep_as_slot=keep_as_slot,
+                prepare_mode=prepare_mode,
+            ),
             name=f"agent-prewarm-{sid}",
         )
         if keep_as_slot:
@@ -468,7 +481,7 @@ class AgentWarmPool:
                 if not task.done():
                     task.cancel()
                     cancelled += 1
-            logger.info(
+            logger.debug(
                 "Agent prewarm background paused: foreground=%s pending=%s cancelled=%s",
                 self._foreground_count,
                 len(self._pending),
@@ -486,7 +499,7 @@ class AgentWarmPool:
             if self._foreground_count == 0:
                 self._foreground_idle.set()
                 self._schedule_background_pump_locked()
-                logger.info(
+                logger.debug(
                     "Agent prewarm background resumed: pending=%s",
                     len(self._pending),
                 )
@@ -498,10 +511,12 @@ class AgentWarmPool:
         revision: WarmRevision,
         *,
         keep_as_slot: bool,
+        prepare_mode: str | None = None,
     ) -> None:
         agent: "JiuWenSwarm | None" = None
         pinned = False
         published = False
+        prepared = False
         cancelled = False
         foreground_registered = False
         if keep_as_slot:
@@ -535,9 +550,10 @@ class AgentWarmPool:
                     await agent.prepare_session(
                         session_id=session_id,
                         channel_id=key.channel_id,
-                        mode=("code.normal" if key.work_mode == "code" else "agent"),
+                        mode=prepare_mode or ("code.normal" if key.work_mode == "code" else "agent"),
                         project_dir=key.project_dir or None,
                     )
+                    prepared = True
             logger.info(
                 "Agent prepare completed: session_id=%s foreground=%s duration_ms=%.1f",
                 session_id,
@@ -545,6 +561,14 @@ class AgentWarmPool:
                 (time.monotonic() - started_at) * 1000,
             )
             if not keep_as_slot:
+                async with self._lock:
+                    if session_id in self._explicit_sessions:
+                        self._explicit_agents[session_id] = agent
+                        cleanup_task = asyncio.create_task(
+                            self._expire_explicit_session(session_id, 300),
+                            name=f"agent-session-prepare-expire-{session_id}",
+                        )
+                        self._explicit_cleanup_tasks[session_id] = cleanup_task
                 return
             async with self._lock:
                 promoted = session_id in self._promoted_sessions
@@ -612,6 +636,8 @@ class AgentWarmPool:
                     self._task_session_ids.pop(key, None)
                 if self._session_tasks.get(session_id) is current_task:
                     self._session_tasks.pop(session_id, None)
+                if not keep_as_slot and not prepared:
+                    self._release_explicit_locked(session_id)
                 self._promoted_sessions.discard(session_id)
                 if cancelled and keep_as_slot:
                     fingerprint_matches = (
@@ -625,6 +651,128 @@ class AgentWarmPool:
                     self._schedule_background_pump_locked()
             if foreground_registered:
                 await self.end_foreground()
+
+    def _release_explicit_locked(self, session_id: str) -> tuple[WarmKey | None, "JiuWenSwarm | None"]:
+        sid = str(session_id)
+        key = self._explicit_sessions.pop(sid, None)
+        agent = self._explicit_agents.pop(sid, None)
+        self._explicit_revisions.pop(sid, None)
+        cleanup_task = self._explicit_cleanup_tasks.pop(sid, None)
+        if cleanup_task is not None and cleanup_task is not asyncio.current_task():
+            cleanup_task.cancel()
+        self._explicit_global_reservations.discard((id(self), sid))
+        return key, agent
+
+    async def _expire_explicit_session(self, session_id: str, delay_seconds: float) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            async with self._lock:
+                key, agent = self._release_explicit_locked(session_id)
+            if key is not None and agent is not None:
+                await self._dispose_runtime(
+                    agent,
+                    key.channel_id,
+                    str(session_id),
+                    pinned=False,
+                )
+                logger.info(
+                    "Unused prepared session expired: session_id=%s",
+                    session_id,
+                )
+        except asyncio.CancelledError:
+            return
+
+    async def prepare_known_session(
+        self,
+        key: WarmKey,
+        *,
+        session_id: str,
+        mode: str,
+        config: Any,
+        env: Any = None,
+        catalog_revision: str = "",
+    ) -> str:
+        """Schedule one exact Relay session without changing its identity."""
+
+        sid = str(session_id or "").strip()
+        if not self._enabled or key.is_swarm or not sid:
+            return "bypassed"
+        fingerprint = self.config_fingerprint(
+            {"config": config, "catalog_revision": str(catalog_revision or "")},
+            env,
+        )
+        stale_agents: list[tuple[WarmKey, str, "JiuWenSwarm"]] = []
+        async with self._lock:
+            if self._closed:
+                return "bypassed"
+            if sid in self._explicit_sessions:
+                return "ready" if sid in self._explicit_agents else "scheduled"
+
+            for old_sid, old_fingerprint in list(self._explicit_revisions.items()):
+                if old_fingerprint == fingerprint:
+                    continue
+                old_task = self._session_tasks.get(old_sid)
+                if old_task is not None and not old_task.done():
+                    old_task.cancel()
+                old_key, old_agent = self._release_explicit_locked(old_sid)
+                if old_key is not None and old_agent is not None:
+                    stale_agents.append((old_key, old_sid, old_agent))
+
+            if self._explicit_sessions:
+                return "bypassed"
+            reservation = (id(self), sid)
+            if len(self._explicit_global_reservations) >= self._EXPLICIT_GLOBAL_LIMIT:
+                return "bypassed"
+            self._explicit_global_reservations.add(reservation)
+            self._explicit_sessions[sid] = key
+            self._explicit_revisions[sid] = fingerprint
+            revision = self._next_revision(
+                {"config": config, "catalog_revision": str(catalog_revision or "")},
+                env,
+            )
+            self._schedule_prepare_locked(
+                key,
+                revision,
+                session_id=sid,
+                keep_as_slot=False,
+                prepare_mode=str(mode or "agent"),
+            )
+
+        for stale_key, stale_sid, stale_agent in stale_agents:
+            asyncio.create_task(
+                self._dispose_runtime(
+                    stale_agent,
+                    stale_key.channel_id,
+                    stale_sid,
+                    pinned=False,
+                ),
+                name=f"agent-session-prepare-stale-{stale_sid}",
+            )
+        return "scheduled"
+
+    async def invalidate_known_sessions(self) -> None:
+        """Drop every unclaimed exact-session preparation after catalog changes."""
+
+        async with self._lock:
+            tasks: list[asyncio.Task[None]] = []
+            ready: list[tuple[WarmKey, str, "JiuWenSwarm"]] = []
+            for session_id in list(self._explicit_sessions):
+                task = self._session_tasks.get(session_id)
+                if task is not None and not task.done():
+                    task.cancel()
+                    tasks.append(task)
+                key, agent = self._release_explicit_locked(session_id)
+                if key is not None and agent is not None:
+                    ready.append((key, session_id, agent))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for key, session_id, agent in ready:
+            await self._dispose_runtime(
+                agent,
+                key.channel_id,
+                session_id,
+                pinned=False,
+            )
 
     async def claim(self, key: WarmKey) -> WarmClaim:
         if not self._enabled or key.is_swarm:
@@ -683,6 +831,7 @@ class AgentWarmPool:
         finally:
             async with self._lock:
                 pinned_agent = self._claimed_pins.pop(str(session_id), None)
+                self._release_explicit_locked(str(session_id))
             if pinned_agent is not None:
                 self._manager.unpin_agent(pinned_agent)
 
@@ -740,6 +889,7 @@ class AgentWarmPool:
                     *self._tasks.values(),
                     *self._session_tasks.values(),
                     *self._pin_release_tasks,
+                    *self._explicit_cleanup_tasks.values(),
                     *(
                         [self._background_pump_task]
                         if self._background_pump_task is not None
@@ -749,6 +899,11 @@ class AgentWarmPool:
             )
             slots = list(self._slots.values())
             claimed_agents = list(self._claimed_pins.values())
+            explicit_agents = [
+                (self._explicit_sessions[sid], sid, agent)
+                for sid, agent in self._explicit_agents.items()
+                if sid in self._explicit_sessions
+            ]
             self._tasks.clear()
             self._task_revisions.clear()
             self._task_session_ids.clear()
@@ -759,6 +914,11 @@ class AgentWarmPool:
             self._slots.clear()
             self._claimed_pins.clear()
             self._pin_release_tasks.clear()
+            for sid in list(self._explicit_sessions):
+                self._release_explicit_locked(sid)
+            self._explicit_agents.clear()
+            self._explicit_revisions.clear()
+            self._explicit_cleanup_tasks.clear()
             self._background_pump_task = None
         for task in tasks:
             task.cancel()
@@ -768,3 +928,10 @@ class AgentWarmPool:
             await self._dispose_slot(slot)
         for agent in claimed_agents:
             self._manager.unpin_agent(agent)
+        for key, session_id, agent in explicit_agents:
+            await self._dispose_runtime(
+                agent,
+                key.channel_id,
+                session_id,
+                pinned=False,
+            )

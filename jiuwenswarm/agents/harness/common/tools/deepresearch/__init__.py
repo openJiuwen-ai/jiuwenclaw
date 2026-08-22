@@ -11,18 +11,21 @@ from .tools import (
 )
 
 
-def enable_deepresearch() -> bool:
+def enable_deepresearch(config: dict[str, Any] | None = None) -> bool:
     """Enable only for a missing/default or explicit boolean true setting."""
     try:
-        configured = get_config().get("enable_deepresearch", True)
+        configured = (config if isinstance(config, dict) else get_config()).get(
+            "enable_deepresearch", True
+        )
     except Exception:
         return False
     return configured if isinstance(configured, bool) else False
 
 
-def get_deepresearch_tools() -> list[Any]:
+def get_deepresearch_tools(config: dict[str, Any] | None = None) -> list[Any]:
     """Return exactly the supported formal tools without probing the SDK."""
-    if not enable_deepresearch():
+    enabled = enable_deepresearch(config) if config is not None else enable_deepresearch()
+    if not enabled:
         return []
     from .rewrite_tools import (
         deepresearch_commit_rewrite,

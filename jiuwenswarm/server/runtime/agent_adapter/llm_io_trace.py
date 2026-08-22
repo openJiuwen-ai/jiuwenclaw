@@ -1,7 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """LLM request/reasoning/response tracing for debugging.
 
-Tracing runs only when ``jiuwenswarm.common.utils`` logger is at **DEBUG** (e.g. ``LOG_LEVEL=DEBUG``).
+Tracing runs only when ``JIUWENSWARM_LLM_IO_TRACE=1`` and the
+``jiuwenswarm.common.utils`` logger is at **DEBUG** (e.g. ``LOG_LEVEL=DEBUG``).
 Lines use ``logger.debug``. Payloads may contain secrets.
 
 Line length:
@@ -83,8 +84,14 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _llm_trace_active() -> bool:
-    """Emit trace when DEBUG is on for jiuwenswarm logger."""
-    return logger.isEnabledFor(logging.DEBUG)
+    """Emit full request/response bodies only after an explicit opt-in."""
+    enabled = (os.getenv("JIUWENSWARM_LLM_IO_TRACE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    return enabled and logger.isEnabledFor(logging.DEBUG)
 
 
 def _serialize_one(msg: Any) -> Any:

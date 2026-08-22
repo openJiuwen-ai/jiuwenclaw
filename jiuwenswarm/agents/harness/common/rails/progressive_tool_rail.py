@@ -108,6 +108,8 @@ class ProgressiveToolRail(DeepAgentRail):
         self._owned_tool_ids: set[str] = set()
         self._cached_all_tool_infos: list[Any] = []
         self._cached_deferred_tool_infos: list[Any] = []
+        self._cached_navigation_signature: tuple[tuple[str, str], ...] = ()
+        self._cached_navigation_section: PromptSection | None = None
 
     @contextmanager
     def _bind_deepresearch_context(self, tool_name: str) -> Iterator[None]:
@@ -258,6 +260,8 @@ class ProgressiveToolRail(DeepAgentRail):
         """Clear deferred tool caches (after agent rebind or reload)."""
         self._cached_all_tool_infos = []
         self._cached_deferred_tool_infos = []
+        self._cached_navigation_signature = ()
+        self._cached_navigation_section = None
 
     def _resolve_runtime_agent(
         self,
@@ -423,7 +427,7 @@ class ProgressiveToolRail(DeepAgentRail):
 
         await self._refresh_deferred_tool_cache()
 
-        logger.info(
+        logger.debug(
             "%s invoke total=%s eager=%s deferred=%s",
             _LOG_PREFIX,
             len(self._cached_all_tool_infos),
@@ -464,7 +468,7 @@ class ProgressiveToolRail(DeepAgentRail):
             for tool in filtered_tools
         ))
 
-        logger.info(
+        logger.debug(
             "%s filter tools %s -> %s removed=%s",
             _LOG_PREFIX,
             original_count,
@@ -496,10 +500,20 @@ class ProgressiveToolRail(DeepAgentRail):
         if not self._cached_deferred_tool_infos:
             return None
 
+        signature = tuple(sorted(
+            (
+                str(getattr(tool, "name", "") or ""),
+                str(getattr(tool, "description", "") or ""),
+            )
+            for tool in self._cached_deferred_tool_infos
+        ))
+        if signature == self._cached_navigation_signature and self._cached_navigation_section is not None:
+            return self._cached_navigation_section
+
         entries_cn = await self._build_navigation_entries(language="cn")
         entries_en = await self._build_navigation_entries(language="en")
 
-        return PromptSection(
+        section = PromptSection(
             name=SectionName.TOOL_NAVIGATION,
             content={
                 "cn": self._build_navigation_prompt(entries_cn, language="cn"),
@@ -507,6 +521,9 @@ class ProgressiveToolRail(DeepAgentRail):
             },
             priority=70,
         )
+        self._cached_navigation_signature = signature
+        self._cached_navigation_section = section
+        return section
 
     async def _build_navigation_entries(
         self,

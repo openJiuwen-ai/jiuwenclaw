@@ -187,7 +187,11 @@ _runtime_managed_agent_observability: bool = False
 _force_ever_enabled: bool = False
 
 
-def sync_agent_observability(*, force: bool = False) -> None:
+def sync_agent_observability(
+    *,
+    force: bool = False,
+    config_base: dict[str, Any] | None = None,
+) -> None:
     """Synchronize single-agent observability state with current config.
 
     Called before each ``Runner.run_agent_streaming`` / ``Runner.run_agent`` so
@@ -224,7 +228,9 @@ def sync_agent_observability(*, force: bool = False) -> None:
         _agent_observability_active = False
         _runtime_managed_agent_observability = False
 
-    cfg = get_config().get("agent_observability", {}) or {}
+    if config_base is None:
+        config_base = get_config()
+    cfg = config_base.get("agent_observability", {}) or {}
     want_enabled = bool(cfg.get("enabled", False)) or force
 
     if want_enabled and not _agent_observability_active:
@@ -474,7 +480,7 @@ def open_agent_run_span(
                 logger.debug(
                     "[AgentObservability] trace attribute binding failed: %s", exc
                 )
-        logger.info("[AgentObservability] root span opened: name=%s", name)
+        logger.debug("[AgentObservability] root span opened: name=%s", name)
         return AgentRunSpanHandle(
             root_span=span,
             binding=binding,

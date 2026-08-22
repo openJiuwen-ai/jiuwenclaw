@@ -184,6 +184,113 @@ async def test_code_prewarm_uses_same_manager_cache_identity_as_code_chat(
 
 
 @pytest.mark.asyncio
+async def test_known_session_prepare_reuses_exact_id_and_is_consumed_once(
+    isolated_pool,
+) -> None:
+    agent = _FakeRootAgent()
+    pool = isolated_pool(agent)
+    key = pool.make_key(
+        channel_id="officeclaw",
+        project_id="thread-1",
+        project_dir="/tmp/project",
+        work_mode="work",
+    )
+
+    status = await pool.prepare_known_session(
+        key,
+        session_id="officeclaw_exact",
+        mode="agent.plan",
+        config={"model": "a"},
+        catalog_revision="rev-1",
+    )
+    await _wait_until(lambda: agent.prepared == ["officeclaw_exact"])
+    duplicate = await pool.prepare_known_session(
+        key,
+        session_id="officeclaw_exact",
+        mode="agent.plan",
+        config={"model": "a"},
+        catalog_revision="rev-1",
+    )
+    await pool.wait_for_session("officeclaw_exact")
+
+    assert status == "scheduled"
+    assert duplicate == "ready"
+    assert agent.prepared == ["officeclaw_exact"]
+    assert not pool._explicit_sessions
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_known_session_prepare_coalesces_with_foreground_wait(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.agent_warm_pool.get_agent_sessions_dir",
+        lambda: tmp_path,
+    )
+    agent = _ControlledRootAgent()
+    pool = AgentWarmPool(_FakeManager(agent), enabled=True)
+    key = pool.make_key(
+        channel_id="officeclaw",
+        project_id="thread-1",
+        project_dir="",
+        work_mode="work",
+    )
+    await pool.prepare_known_session(
+        key,
+        session_id="officeclaw_exact",
+        mode="agent",
+        config={"model": "a"},
+        catalog_revision="rev-1",
+    )
+    await _wait_until(lambda: agent.started == ["officeclaw_exact"])
+
+    waiting = asyncio.create_task(pool.wait_for_session("officeclaw_exact"))
+    await asyncio.sleep(0)
+    agent.gates["officeclaw_exact"].set()
+    await waiting
+
+    assert agent.prepared == ["officeclaw_exact"]
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_catalog_invalidation_releases_exact_session_reservation(
+    isolated_pool,
+) -> None:
+    agent = _FakeRootAgent()
+    pool = isolated_pool(agent)
+    key = pool.make_key(
+        channel_id="officeclaw",
+        project_id="thread-1",
+        project_dir="/tmp/project",
+        work_mode="work",
+    )
+    await pool.prepare_known_session(
+        key,
+        session_id="officeclaw_old",
+        mode="agent.plan",
+        config={"model": "old"},
+        catalog_revision="rev-1",
+    )
+    await _wait_until(lambda: agent.prepared == ["officeclaw_old"])
+
+    await pool.invalidate_known_sessions()
+    status = await pool.prepare_known_session(
+        key,
+        session_id="officeclaw_new",
+        mode="agent.plan",
+        config={"model": "new"},
+        catalog_revision="rev-2",
+    )
+    await _wait_until(lambda: agent.prepared[-1:] == ["officeclaw_new"])
+
+    assert status == "scheduled"
+    assert "officeclaw_old" in agent.cleaned
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_pool_keeps_one_ready_slot_total_and_claim_is_atomic(isolated_pool) -> None:
     agent = _FakeRootAgent()
     pool = isolated_pool(agent)
