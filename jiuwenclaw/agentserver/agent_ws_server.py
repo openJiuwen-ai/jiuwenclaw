@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import math
+import time
 import uuid
 import os
 import re
@@ -93,6 +95,42 @@ logger = logging.getLogger(__name__)
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+_INTERFACE_DEEP_MODULE = "jiuwenclaw.agentserver.deep_agent.interface_deep"
+_interface_deep_warmup_task: asyncio.Task[None] | None = None
+
+
+def _import_interface_deep_blocking() -> None:
+    if _INTERFACE_DEEP_MODULE not in sys.modules:
+        importlib.import_module(_INTERFACE_DEEP_MODULE)
+
+
+async def _warm_interface_deep_import() -> None:
+    if _INTERFACE_DEEP_MODULE in sys.modules:
+        logger.info("[AgentWebSocketServer] interface_deep_warmup cache=hit elapsed_ms=0.0")
+        return
+    t0 = time.perf_counter()
+    logger.info("[AgentWebSocketServer] interface_deep_warmup cache=miss starting background import")
+    try:
+        await asyncio.to_thread(_import_interface_deep_blocking)
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] interface_deep_warmup failed elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[AgentWebSocketServer] interface_deep_warmup cache=miss ok elapsed_ms=%.1f",
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def _start_interface_deep_warmup() -> None:
+    global _interface_deep_warmup_task
+    if _interface_deep_warmup_task is not None and not _interface_deep_warmup_task.done():
+        return
+    _interface_deep_warmup_task = asyncio.get_running_loop().create_task(_warm_interface_deep_import())
 
 _SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
 
@@ -504,6 +542,7 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
             extra={'user_visible': 'critical'},
         )
+        _start_interface_deep_warmup()
         # 按 config.yaml::sandbox.startup_mode 自动拉起 jiuwenbox 子进程 (internal 模式)。
         await self._bootstrap_internal_jiuwenbox()
 
