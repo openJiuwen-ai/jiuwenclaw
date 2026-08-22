@@ -2398,6 +2398,16 @@ class JiuWenSwarm:
             )
             durable_final_content = pending_text
 
+        async def _prepare_rewind_for_error():
+            try:
+                _get_sa = getattr(adapter, "_get_or_create_session_adapter", None)
+                _sa = await _get_sa(session_id) if callable(_get_sa) else adapter
+                _prep = getattr(_sa, "_prepare_rewind_session_for_next_invoke", None)
+                if callable(_prep):
+                    await _prep(session_id, reason="stream_error")
+            except Exception as _rewind_err:
+                logger.warning("[JiuWenSwarm] chat.error 后预置 rewind session 失败: %s", _rewind_err)
+
         async def run_stream_task():
             nonlocal producer_cancellation
             logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
@@ -2424,6 +2434,14 @@ class JiuWenSwarm:
                 raise
             except Exception as exc:
                 logger.exception("[JiuWenSwarm] 流式任务异常: %s", exc)
+                try:
+                    _get_sa = getattr(adapter, "_get_or_create_session_adapter", None)
+                    _sa = await _get_sa(session_id) if callable(_get_sa) else adapter
+                    _prep_rewind = getattr(_sa, "_prepare_rewind_session_for_next_invoke", None)
+                    if callable(_prep_rewind):
+                        await _prep_rewind(session_id, reason="stream_error")
+                except Exception as _prep_err:
+                    logger.warning("[JiuWenSwarm] 错误后预置 rewind session 失败: %s", _prep_err)
                 try:
                     await stream_queue.put(("error", exc))
                 except asyncio.CancelledError as cancel_exc:
@@ -2501,6 +2519,7 @@ class JiuWenSwarm:
                     )
 
                 if event_type == "error":
+                    await _prepare_rewind_for_error()
                     if isinstance(data, asyncio.CancelledError):
                         logger.info("[JiuWenSwarm] 流式处理被中断: request_id=%s", rid)
                         raise data
@@ -2543,6 +2562,8 @@ class JiuWenSwarm:
                             should_record = et.startswith("chat.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
+                            if et == "chat.error":
+                                await _prepare_rewind_for_error()
                             if et == "context.compression_state":
                                 _append_compact_history_from_payload(
                                     payload=data.payload,

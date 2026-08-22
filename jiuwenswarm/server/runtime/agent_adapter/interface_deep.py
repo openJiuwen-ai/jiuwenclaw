@@ -187,7 +187,7 @@ from jiuwenswarm.agents.harness.common.channel_runtime_context import (
     CURRENT_SESSION_ID,
 )
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
-from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records, flush_history_writes
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.expert_capability import (
     ExpertCapabilityMixin,
@@ -6791,6 +6791,7 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         try:
             if self._instance is not None and getattr(self._instance, "react_agent", None) is not None:
                 ctx_eng = self._instance.react_agent.context_engine
+                flush_history_writes()
                 records = load_history_records(session_id)
                 rebuilt = self._build_messages_for_model(records)
                 if rebuilt:
@@ -6806,10 +6807,44 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                             _presess.update_state({_SESSION_STATE_KEY: None})
                         except Exception:
                             pass
-                        await ctx_eng.create_context(
+                        _rewind_ctx = await ctx_eng.create_context(
                             session=_presess, history_messages=rebuilt,
                         )
+                        # ``create_context`` 命中 ``_context_pool`` 中同 session 的
+                        # 缓存 context 时，会走 ``_load_state_from_session``；但上面刚把
+                        # ``context`` state 清成 None，导致该函数提前 return，``history_messages``
+                        # 并没有真正写入缓存 context。这里显式兜底，把重建好的历史写入
+                        # context，否则下一轮模型拿到的仍是 stale 上下文（丢失失败轮的 query）。
+                        if _rewind_ctx is not None and hasattr(_rewind_ctx, "load_state") and hasattr(_rewind_ctx, "context_id"):
+                            try:
+                                _rewind_ctx.load_state({_rewind_ctx.context_id(): {"messages": rebuilt}})
+                            except Exception as _load_err:
+                                logger.warning(
+                                    "[JiuWenSwarmDeepAdapter] %s: 兜底写入 rewind context 失败 session=%s: %s",
+                                    reason, session_id, _load_err,
+                                )
                         await ctx_eng.save_contexts(_presess)
+                        # 关键修复：DeepAgent 的 task-loop controller 是持久绑定到原始
+                        # session 的，rewind 预置的 ``_presess`` 并不会被 react_agent 真正
+                        # 使用（下一轮 invoke 仍复用 controller 绑定的原始 session）。所以必须
+                        # 把重建好的上下文也写回原始 session 的 state，否则下一轮 create_context
+                        # 从原始 session 的 stale state 重新加载，仍会丢失败轮 query。
+                        _orig_session = (
+                            getattr(self._instance, "_interaction_session", None)
+                            or getattr(self._instance, "_loop_session", None)
+                        )
+                        if _orig_session is not None and _orig_session is not _presess:
+                            try:
+                                await ctx_eng.save_contexts(_orig_session)
+                                logger.info(
+                                    "[JiuWenSwarmDeepAdapter] %s: rewind 上下文同步到原始 session=%s orig_id=%s history=%d",
+                                    reason, session_id, id(_orig_session), len(rebuilt),
+                                )
+                            except Exception as _orig_err:
+                                logger.warning(
+                                    "[JiuWenSwarmDeepAdapter] %s: rewind 上下文同步原始 session 失败 session=%s: %s",
+                                    reason, session_id, _orig_err,
+                                )
                         try:
                             self._instance.save_state(_presess)
                         except Exception:
@@ -9453,11 +9488,6 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             _runner_session = self._rewind_session.pop(
                 self._resolve_interrupt_session_id(session_id), None
             )
-            if _runner_session is not None:
-                logger.info(
-                    "[JiuWenSwarmDeepAdapter] DIAG deep_invoke_use_rewind_session session=%s",
-                    session_id,
-                )
             inputs = self._prepare_multimodal_image_inputs(
                 request,
                 inputs,
