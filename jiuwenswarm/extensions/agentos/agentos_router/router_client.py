@@ -916,7 +916,12 @@ class AgentOSRouterClient(AgentServerClient):
             except Exception:
                 logger.warning("[AgentOSRouter] close agent ws failed", exc_info=True)
 
-    async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
+    async def send_request(
+        self,
+        envelope: E2AEnvelope,
+        *,
+        timeout: float | None = None,
+    ) -> AgentResponse:
         # 3rdagent.list / 3rdagent.switch are handled by Gateway ThirdAgent
         # (TUI local_handler), not via E2A send_request.
         if self._is_ssh_relay_request(envelope):
@@ -933,7 +938,7 @@ class AgentOSRouterClient(AgentServerClient):
                 ws_client = await self._get_ws_client(runtime)
             except ValueError as exc:
                 return self._routing_error_response(envelope, str(exc))
-            return await ws_client.send_request(envelope)
+            return await ws_client.send_request(envelope, timeout=timeout)
         finally:
             await self._agent_manager.release(runtime.key)
 

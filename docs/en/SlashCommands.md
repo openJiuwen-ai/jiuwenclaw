@@ -494,7 +494,7 @@ Manage cron jobs via RPC calls to the backend `CronController`, sharing the same
 | `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, `dingtalk`, or `feishu_enterprise:<app_id>`. With `targets=tui`, results broadcast to all connected TUI windows; see [Scheduled tasks — Push to TUI](ScheduledTasks.md#push-to-tui-channel) |
 | `timezone` | No | IANA timezone, default `Asia/Shanghai` |
 | `mode` | No | Execution mode, default `agent.fast`. Options: `agent`, `agent.fast`, `agent.plan`, `plan`, `team`, `team.plan`, `code.team`. Team modes use streaming multi-agent execution; see [Scheduled tasks — Team mode](ScheduledTasks.md#team-mode-and-swarmflow-multi-agent-scheduled-jobs) |
-| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 600 for normal modes, 1200 for team modes |
+| `timeout_seconds` | No | Per-run timeout in seconds (60–259200). Default 3600 (1 hour) for both normal and team modes |
 | `wake_offset_seconds` | No | Wake-up offset in seconds, default 0 |
 | `delete_after_run` | No | Auto-delete after one run, default false |
 

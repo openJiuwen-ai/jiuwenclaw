@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -130,10 +133,23 @@ class _TestableScheduler(CronSchedulerService):
     async def on_wake(self, job, run_id):
         return await self._on_wake(job, run_id)
 
+    async def run_unary_cron_job(self, *, envelope, timeout_seconds, state):
+        return await self._run_unary_cron_job(
+            envelope=envelope, timeout_seconds=timeout_seconds, state=state
+        )
+
     @property
     def events(self):
         """Expose _events for test assertions (G.CLS.11: access via subclass property)."""
         return self._events
+
+    @property
+    def boot_time(self):
+        return self._boot_time
+
+    @boot_time.setter
+    def boot_time(self, value):
+        self._boot_time = float(value)
 
 
 def _cron_published_content(msg) -> str | None:
@@ -255,12 +271,13 @@ async def _create_one_job(store, name="job", targets="tui"):
     )
 
 
-def _make_scheduler(store, handler=None, agent_client=None):
+def _make_scheduler(store, handler=None, agent_client=None, now_fn=None):
     """Build a _TestableScheduler with fake deps for testing."""
     return _TestableScheduler(
         store=store,
         agent_client=agent_client or FakeAgentClient(),
         message_handler=handler or FakeMessageHandler(),
+        **({"now_fn": now_fn} if now_fn is not None else {}),
     )
 
 
@@ -1479,6 +1496,145 @@ def _create_many_jobs_in_thread(path: Path, prefix: str, n: int) -> None:
     asyncio.run(_run())
 
 
+class TestUnaryCronJobTimeoutOverride:
+    """cron 的 timeout_seconds 应作为 send_request 等待上限真正生效。
+
+    之前 _run_unary_cron_job 用外层 asyncio.wait_for(timeout=timeout_seconds)
+    包住 send_request，但 send_request 内部还有一个写死的 600s 内层超时；
+    当 cron 配置的超时 >600s（默认 3600s）时，内层 600s 先触发并抛 RuntimeError，
+    既绕过了 cron 自己的超时文案、也跳过了 cancel 后端的收尾。改造后 timeout
+    直接透传给 send_request，由其作为唯一等待上限。
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_passed_through_and_cancel_invoked(self, tmp_path):
+        from jiuwenswarm.gateway.routing.agent_client import AgentServerUnaryTimeout
+
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store, targets="web")
+
+        class TimeoutAgentClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, float | None]] = []
+
+            async def send_request(self, envelope, *, timeout=None, **kw):
+                method = getattr(envelope, "method", "")
+                self.calls.append((method, timeout))
+                if method == "chat.send":
+                    # 模拟 AgentServer 在 cron 超时阈值内未响应
+                    raise AgentServerUnaryTimeout(
+                        getattr(envelope, "request_id", "rid"),
+                        float(timeout or 0),
+                    )
+                # CHAT_CANCEL 中断请求：返回 ok，不阻断收尾
+                return AgentResponse(
+                    request_id=getattr(envelope, "request_id", "") or "",
+                    channel_id=getattr(envelope, "channel", "") or "",
+                    ok=True,
+                    payload={},
+                )
+
+            async def send_request_stream(self, envelope):  # pragma: no cover
+                raise RuntimeError("not used")
+
+        client = TimeoutAgentClient()
+        handler = FakeMessageHandler()
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=client,
+            message_handler=handler,
+        )
+
+        envelope = SimpleNamespace(
+            request_id="cron-job-1:1",
+            method="chat.send",
+            channel="__cron__",
+        )
+        state = CronRunState(
+            run_id="job-1:1",
+            job_id=job.id,
+            wake_at_iso="2026-08-21T10:17:25+08:00",
+            push_at_iso="2026-08-21T10:17:25+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+        )
+
+        text, ok = await svc.run_unary_cron_job(
+            envelope=envelope, timeout_seconds=120.0, state=state
+        )
+
+        # 1. cron 的 timeout_seconds 被透传给 send_request（覆盖默认 600s）
+        assert client.calls[0] == ("chat.send", 120.0)
+        # 2. 超时后主动发 CHAT_CANCEL 收尾（第二次 send_request 调用）
+        assert len(client.calls) == 2
+        assert client.calls[1][1] is None  # cancel 不带 timeout
+        # 3. 文案用 cron 自己的超时文案，而非裸 "AgentServer 非流式请求超时"
+        assert ok is False
+        assert text == "[cron] 任务执行超时（>2min）"
+        assert "非流式请求超时" not in text
+
+    @pytest.mark.asyncio
+    async def test_slow_but_within_timeout_succeeds(self, tmp_path):
+        """任务耗时超过旧 600s 硬顶但低于 cron 自定义超时时应成功，而非被截断。"""
+
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store, targets="web")
+
+        class SlowThenOkAgentClient:
+            def __init__(self) -> None:
+                self.received_timeout = None
+
+            async def send_request(self, envelope, *, timeout=None, **kw):
+                self.received_timeout = timeout
+                return AgentResponse(
+                    request_id=getattr(envelope, "request_id", "") or "",
+                    channel_id=getattr(envelope, "channel", "") or "",
+                    ok=True,
+                    payload={"content": {"output": "done", "result_type": "answer"}},
+                )
+
+            async def send_request_stream(self, envelope):  # pragma: no cover
+                raise RuntimeError("not used")
+
+        client = SlowThenOkAgentClient()
+        handler = FakeMessageHandler()
+        svc = _TestableScheduler(
+            store=store,
+            agent_client=client,
+            message_handler=handler,
+        )
+
+        envelope = SimpleNamespace(
+            request_id="cron-job-2:1",
+            method="chat.send",
+            channel="__cron__",
+        )
+        state = CronRunState(
+            run_id="job-2:1",
+            job_id=job.id,
+            wake_at_iso="2026-08-21T10:17:25+08:00",
+            push_at_iso="2026-08-21T10:17:25+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+        )
+
+        # 给一个远大于旧 600s 硬顶的自定义超时；改造前会被 600s 截断，
+        # 改造后 send_request 用此值，任务（立即返回 ok）正常成功。
+        text, ok = await svc.run_unary_cron_job(
+            envelope=envelope, timeout_seconds=3600.0, state=state
+        )
+
+        assert client.received_timeout == 3600.0
+        assert ok is True
+        assert text == "done"
+
+
 class TestCronJobStoreFileLock:
     """验证 portalocker 伴生锁包住 read-modify-write，避免多实例 lost update。"""
 
@@ -1679,3 +1835,147 @@ class TestExtractTextFromAgentPayload:
     def test_error_int_value_returns_empty_string(self):
         result = self._call({"error": 42})
         assert result == ""
+
+
+class TestCrashRecoveryGraceWindow:
+    """crash_recovery_skip 仅在进程启动 grace 窗口内启用。
+
+    背景：运行期 reload（其他任务 update_job 改 cron_jobs.json mtime 触发
+    _check_store_changed → reload → _events.clear()）会抹掉尚未到点/刚到点
+    的合法 wake 事件。重排时"existing is None + wake 刚过去"被误判为崩溃
+    残留而丢弃，导致一次性任务被静默吞掉。修复后用 _boot_time grace 窗口
+    区分真崩溃与运行期 reload。
+    """
+
+    @staticmethod
+    def _recent_oneshot_expr(seconds_ago: float = 3.0) -> str:
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.now(tz=tz) - timedelta(seconds=seconds_ago)
+        return (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+
+    @staticmethod
+    def _future_oneshot_expr(seconds_ahead: float = 30.0) -> str:
+        tz = ZoneInfo("Asia/Shanghai")
+        run_dt = datetime.now(tz=tz) + timedelta(seconds=seconds_ahead)
+        return (
+            f"{run_dt.second} {run_dt.minute} {run_dt.hour} "
+            f"{run_dt.day} {run_dt.month} ? {run_dt.year}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_runtime_reload_keeps_recently_due_wake_beyond_grace(self, tmp_path):
+        """运行期 reload（boot_time 已超 grace）：刚到点的 wake 不应被丢弃。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        # boot_time 远早于 grace 窗口 → 模拟运行期 reload
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 1
+        assert wake_events[0].job_id == job.id
+
+    @pytest.mark.asyncio
+    async def test_boot_grace_reload_skips_past_wake_as_crash_recovery(self, tmp_path):
+        """进程刚启动（boot_time 在 grace 内）：过去的 wake 视为崩溃残留，跳过。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        # boot_time 即现在 → 处于 grace 窗口内（模拟崩溃重启后的首次 reload）
+        svc.boot_time = time.time()
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_skip_survives_reload_after_grace(self, tmp_path):
+        """Later reloads must not revive a wake skipped during crash recovery."""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="drink",
+            # The wake is already due, but the push is still in the future, so
+            # the original AgentServer task could remain active past 60 seconds.
+            cron_expr=self._future_oneshot_expr(seconds_ahead=30),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=60,
+        )
+        svc = _make_scheduler(store)
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_skip_survives_reload_after_push_deadline(self, tmp_path):
+        """An orphaned remote task can outlive its push deadline."""
+        clock = [time.time()]
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        await store.create_job(
+            name="slow-drink",
+            cron_expr=self._future_oneshot_expr(seconds_ahead=30),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=60,
+        )
+        svc = _make_scheduler(store, now_fn=lambda: clock[0])
+        await svc.reload()
+
+        # The scheduled push time has passed but is still inside the missed
+        # trigger window, so reload would otherwise reconstruct the same run.
+        clock[0] += 31
+        svc.boot_time = clock[0] - 120
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+        # Simulate a later store-triggered reload after the boot grace window.
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+        assert not [ev for _, _, ev in svc.events if ev.kind in ("wake", "push")]
+
+    @pytest.mark.asyncio
+    async def test_runtime_reload_recently_due_wake_executes_and_records_session(
+        self, tmp_path,
+    ):
+        """运行期 reload 后，刚到点的 wake 应被执行并写入 last_session_id。"""
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await store.create_job(
+            name="drink",
+            cron_expr=self._recent_oneshot_expr(seconds_ago=3),
+            timezone="Asia/Shanghai",
+            description="reminder",
+            targets="tui",
+            wake_offset_seconds=0,
+        )
+        svc = _make_scheduler(store)
+        svc.boot_time = time.time() - 120
+        await svc.reload()
+
+        wake_events = [ev for _, _, ev in svc.events if ev.kind == "wake"]
+        assert len(wake_events) == 1
+        run_id = wake_events[0].run_id
+        await svc.on_wake(job, run_id)
+        await svc.run_tasks[run_id]
+
+        stored = await store.get_job(job.id)
+        assert stored is not None
+        assert stored.last_session_id == "cron_agentserver_allocated"

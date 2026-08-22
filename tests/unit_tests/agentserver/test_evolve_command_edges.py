@@ -613,6 +613,38 @@ async def test_stream_error_answer_aborts_active_round_without_debug_logger(monk
 
 
 @pytest.mark.anyio
+async def test_non_stream_error_answer_returns_failure_instead_of_empty_success(monkeypatch):
+    """openjiuwen's terminal ``answer/result_type:error`` must reach cron callers."""
+    adapter = _adapter_ready_for_followup_execution(monkeypatch)
+    seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(
+            type="answer",
+            payload={
+                "output": "Error code: 401 - model access denied",
+                "result_type": "error",
+            },
+        ),
+        seen_inputs=seen_inputs,
+    )
+
+    response = await adapter.process_message_impl(
+        AgentRequest(
+            request_id="req-model-error",
+            channel_id="__cron__",
+            session_id="cron-session",
+            params={"query": "run task", "mode": "agent"},
+        ),
+        {"query": "run task"},
+    )
+
+    assert response.ok is False
+    assert response.payload == {"error": "Error code: 401 - model access denied"}
+    assert seen_inputs == [{"query": "run task"}]
+
+
+@pytest.mark.anyio
 async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch):
     adapter = _adapter_ready_for_followup_execution(monkeypatch)
     seen_inputs: list[dict] = []
