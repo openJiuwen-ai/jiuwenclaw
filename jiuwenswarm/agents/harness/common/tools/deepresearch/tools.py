@@ -2077,13 +2077,16 @@ async def _consume_stream(
         if not isinstance(chunk, dict):
             continue
         status_value = chunk.get("__deepsearch_status__") or chunk.get("status")
-        if (
-            first_sdk_node_ns is None
-            and status_value not in {"completed", "interrupted", "error", "cancelled"}
-            and str(chunk.get("agent") or "") in _TIMED_SDK_NODES
-            and chunk.get("event") != "done"
-        ):
-            first_sdk_node_ns = time.monotonic_ns()
+        is_terminal = status_value in {
+            "completed",
+            "interrupted",
+            "error",
+            "cancelled",
+        }
+        if first_sdk_node_ns is None and not is_terminal:
+            is_timed_node = str(chunk.get("agent") or "") in _TIMED_SDK_NODES
+            if is_timed_node and chunk.get("event") != "done":
+                first_sdk_node_ns = time.monotonic_ns()
         if status_value in {"started", "resuming"}:
             outcome_cid = str(chunk.get("conversation_id") or outcome_cid)
             stage = 1

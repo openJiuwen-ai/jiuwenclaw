@@ -331,14 +331,19 @@ def build_permission_rail(
             # ConfirmPayload by the permission rail.  Keep first-pass and
             # explicit permission responses on the normal permission path.
             workflow_input = inp.user_input
-            if (
+            is_deepresearch_workflow = (
                 inp.normalized_tool_name == "deepresearch_execute"
                 and isinstance(workflow_input, dict)
-                and workflow_input.get("status")
-                in {"answered", "skipped", "cancelled", "error"}
-                and isinstance(workflow_input.get("answers"), list)
-            ):
-                return ("approve",)
+            )
+            if is_deepresearch_workflow:
+                status = workflow_input.get("status")
+                if status in {
+                    "answered",
+                    "skipped",
+                    "cancelled",
+                    "error",
+                } and isinstance(workflow_input.get("answers"), list):
+                    return ("approve",)
 
             if perm_ctx is None:
                 return None

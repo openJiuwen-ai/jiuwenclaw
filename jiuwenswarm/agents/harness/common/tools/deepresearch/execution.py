@@ -171,16 +171,15 @@ def _sanitize_timing(value: Any) -> dict[str, Any] | None:
             ended_ms = _nonnegative_int(span.get("ended_ms"))
             duration_ms = _nonnegative_int(span.get("duration_ms"))
             completed = span.get("completed")
-            if (
-                not agent
-                or len(agent) > 128
-                or not section_idx.isdecimal()
-                or len(section_idx) > 10
-                or started_ms is None
-                or ended_ms is None
-                or duration_ms is None
-                or not isinstance(completed, bool)
-            ):
+            invalid_agent = not agent or len(agent) > 128
+            invalid_section = not section_idx.isdecimal() or len(section_idx) > 10
+            invalid_duration = (
+                started_ms is None or ended_ms is None or duration_ms is None
+            )
+            if invalid_agent or invalid_section or invalid_duration:
+                safe_spans = []
+                break
+            if not isinstance(completed, bool):
                 safe_spans = []
                 break
             safe_spans.append(
@@ -238,11 +237,11 @@ def _append_timing_window(
     if current is None:
         return state
     existing = state.get("timing_windows")
-    windows = [
-        sanitized
-        for item in (existing if isinstance(existing, list) else [])
-        if (sanitized := _sanitize_timing_window(item)) is not None
-    ]
+    windows = []
+    for item in existing if isinstance(existing, list) else []:
+        sanitized = _sanitize_timing_window(item)
+        if sanitized is not None:
+            windows.append(sanitized)
     next_state = dict(state)
     next_state["timing_windows"] = [*windows, current][-_MAX_TIMING_WINDOWS:]
     return next_state
@@ -465,7 +464,9 @@ def _parse_option_payload(raw: str, count: int) -> list[list[dict[str, str]]] | 
             if not isinstance(label, str):
                 return None
             label = label.strip()
-            if not label or len(label) > 50 or label in _OTHER_LABELS or label in labels:
+            if not label or len(label) > 50:
+                return None
+            if label in _OTHER_LABELS or label in labels:
                 return None
             labels.add(label)
             normalized_option = {"label": label}
