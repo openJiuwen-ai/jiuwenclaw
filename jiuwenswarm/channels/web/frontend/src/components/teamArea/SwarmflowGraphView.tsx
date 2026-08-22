@@ -116,7 +116,11 @@ const RunGraphNode = ({ data }: NodeProps) => {
   const { t } = useTranslation();
   const run = data.run as WorkflowRun;
   const completed = (run.phases ?? []).reduce(
-    (s, p) => s + (p.agents ?? []).filter((a) => a.status === 'completed').length,
+    (s, p) =>
+      s +
+      (p.agents ?? []).filter(
+        (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+      ).length,
     0,
   );
   const total =
@@ -196,7 +200,9 @@ const PhaseGraphNode = ({ data }: NodeProps) => {
   // to counting direct agents when the fields are absent.
   const completed =
     phase.completed_agent_count ??
-    (phase.agents ?? []).filter((a) => a.status === 'completed').length;
+    (phase.agents ?? []).filter(
+      (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+    ).length;
   const total = phase.agent_count ?? phase.agents?.length ?? 0;
 
   return (
