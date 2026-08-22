@@ -2227,7 +2227,7 @@ class JiuWenSwarmDeepAdapter:
         self._is_session_scoped_adapter = True
         self._parent_session_id = session_id
 
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-arguments,protected-access
     def copy_resources_from(
         self,
         *,
