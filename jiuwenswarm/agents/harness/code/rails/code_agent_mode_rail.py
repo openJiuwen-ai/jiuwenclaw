@@ -33,6 +33,7 @@ _NON_GIT_WRITE_RE = re.compile(
     r"|>>"
 )
 
+
 class CodeAgentModeRail(AgentModeRail):
     """AgentModeRail variant for jiuwenswarm code mode.
 

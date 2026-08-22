@@ -2260,7 +2260,7 @@ class AgentWebSocketServer:
         agent_id, service_id = pool.resolve_control_rpc_tenant(
             request, agent_id, service_id
         )
-        return await pool._ensure_agent_manager(agent_id, service_id, workspace_key)
+        return await pool.get_agent_manager(agent_id, service_id, workspace_key)
 
     async def _prepare_tenant_code_mode_chat_turn(
         self,

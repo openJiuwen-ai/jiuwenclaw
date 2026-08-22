@@ -14008,10 +14008,13 @@ class JiuWenSwarmDeepAdapter:
             nonlocal had_assistant_output, emitted_terminal_chat_final
             nonlocal saw_approved_plan_exit_result
             event_type = payload.get("event_type")
+            is_plan_exit_result = (
+                event_type == "chat.tool_result"
+                and str(payload.get("tool_name") or "") == "exit_plan_mode"
+            )
             if (
                 approved_plan_exit_tool_call_id
-                and event_type == "chat.tool_result"
-                and str(payload.get("tool_name") or "") == "exit_plan_mode"
+                and is_plan_exit_result
                 and str(payload.get("tool_call_id") or "")
                 == approved_plan_exit_tool_call_id
             ):
