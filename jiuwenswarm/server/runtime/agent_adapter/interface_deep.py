@@ -2215,33 +2215,25 @@ class JiuWenSwarmDeepAdapter:
         self._parent_session_id = session_id
 
     def copy_resources_from(self, parent: "JiuWenSwarmDeepAdapter") -> None:
-        """Inherit the parent's already-built heavy resources.
+        """Inherit the parent's config-level resources so the session adapter
+        can skip the expensive config re-read / env-binding / enterprise-loading.
 
-        Called by _new_session_scoped_adapter so the session adapter does not
-        need to re-read config, rebuild Model, or reconstruct tool cards.
-        All assignments are same-class self-access (no protected-access violation).
+        Called by _new_session_scoped_adapter before create_instance().
 
+        NOTE: _model is intentionally NOT copied — _create_model() is cheap
+        (no I/O) and must run per-session for proper Model initialization.
         NOTE: _tool_cards is intentionally NOT copied — _get_tool_cards()
         registers stateful tools by owner; sharing root-owned cards across
         sessions would cause state cross-contamination and cleanup failures.
-        The session adapter must call _get_tool_cards() with its own owner id.
         """
         if parent._config_base_cache is not None:
             self._config_base_cache = parent._config_base_cache.copy()
         if parent._startup_config_base is not None:
             self._startup_config_base = parent._startup_config_base.copy()
-        if parent._model is not None:
-            self._model = parent._model
-            self._model_cache = dict(parent._model_cache) if parent._model_cache else {}
-            self._model_name_to_keys = dict(parent._model_name_to_keys) if parent._model_name_to_keys else {}
-            self._tier_model_cache = dict(parent._tier_model_cache) if parent._tier_model_cache else {}
-            self._default_model_name = parent._default_model_name
-            self._model_client_config = parent._model_client_config
-            self._model_request_config = parent._model_request_config
-            self._last_models_config_fingerprint = parent._last_models_config_fingerprint
-            self._model_config_source = parent._model_config_source
-        # _tool_cards: NOT copied — stateful tools are owner-scoped;
-        # session adapter must re-register via _get_tool_cards(self._tool_owner_id()).
+        if parent._config_cache:
+            self._config_cache = dict(parent._config_cache)
+        # _model: NOT copied — _create_model() is cheap, must run per-session.
+        # _tool_cards: NOT copied — stateful tools are owner-scoped.
         if parent._vision_model_config is not None:
             self._vision_model_config = parent._vision_model_config
         if parent._audio_model_config is not None:
@@ -2252,8 +2244,6 @@ class JiuWenSwarmDeepAdapter:
             self._image_gen_model_config = parent._image_gen_model_config
         if parent._enabled_skills is not None:
             self._enabled_skills = list(parent._enabled_skills)
-        if parent._config_cache:
-            self._config_cache = dict(parent._config_cache)
         if parent._enterprise_config is not None:
             self._enterprise_config = parent._enterprise_config
         if parent._skill_manager is not None:
@@ -7471,23 +7461,32 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
 
         # ── Session-scoped short-circuit ──────────────────────────────────
-        # When the session adapter has already inherited config_base and Model
-        # from its parent (see _new_session_scoped_adapter / copy_resources_from),
-        # skip the expensive re-read / re-build and jump straight to tool_cards
-        # assembly and DeepAgent construction.
-        # NOTE: _tool_cards is NOT inherited — stateful tools are owner-scoped
-        # and must be registered per session via _get_tool_cards().
+        # When the session adapter has already inherited config_base from its
+        # parent (see _new_session_scoped_adapter / copy_resources_from),
+        # skip the expensive config re-read / env-binding / enterprise-loading
+        # and build Model from the cached config instead.
+        # NOTE: _tool_cards is NOT inherited — stateful tools are owner-scoped.
+        # NOTE: Model is NOT inherited — _create_model() is cheap (no I/O)
+        # and must run per-session for proper initialization.
         if (
             self._is_session_scoped_adapter
-            and self._model is not None
             and self._config_base_cache is not None
         ):
             config_base = self._config_base_cache
             config = self._config_cache or config_base.get("react", {}).copy()
-            model = self._model
+            self._log_active_model_on_startup(phase=f"create_instance:{mode}")
+            try:
+                model = self._create_model(config_base)
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenSwarmDeepAdapter] create_instance 模型初始化失败(%s): %s",
+                    mode,
+                    exc,
+                )
+                raise
             logger.info(
-                "[JiuWenSwarmDeepAdapter] session adapter reuses parent resources: "
-                "mode=%s sub_mode=%s (skipped config/model rebuild)",
+                "[JiuWenSwarmDeepAdapter] session adapter reuses parent config: "
+                "mode=%s sub_mode=%s (skipped config/env rebuild)",
                 mode,
                 sub_mode,
             )
