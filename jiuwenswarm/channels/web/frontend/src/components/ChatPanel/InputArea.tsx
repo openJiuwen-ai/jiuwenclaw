@@ -2397,7 +2397,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       if (isProcessing) return;
                       usePlanStore.getState().setActive(activeSessionId, false);
                     }
-                    setAttachMenuOpen(false);
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
                   };
                   return (
                     <div
@@ -2448,7 +2448,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                       }
                       useGoalStore.getState().setArmed(activeSessionId, false);
                     }
-                    setAttachMenuOpen(false);
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
                   };
                   return (
                     <div
