@@ -755,14 +755,16 @@ function RunNode({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
   const [runDetail, setRunDetail] = useState<AgentModalState | null>(null);
-  const completedCount = (run.phases ?? []).reduce(
-    (sum, p) =>
-      sum +
-      (p.agents ?? []).filter(
-        (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
-      ).length,
-    0,
-  );
+  const completedCount =
+    run.completed_agent_count ??
+    (run.phases ?? []).reduce(
+      (sum, p) =>
+        sum +
+        (p.agents ?? []).filter(
+          (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+        ).length,
+      0,
+    );
   const totalCount =
     run.agent_count ??
     (run.phases ?? []).reduce((sum, p) => sum + (p.agents ?? []).length, 0);

@@ -115,14 +115,16 @@ function statusDotColor(status: WorkflowStatus): string {
 const RunGraphNode = ({ data }: NodeProps) => {
   const { t } = useTranslation();
   const run = data.run as WorkflowRun;
-  const completed = (run.phases ?? []).reduce(
-    (s, p) =>
-      s +
-      (p.agents ?? []).filter(
-        (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
-      ).length,
-    0,
-  );
+  const completed =
+    run.completed_agent_count ??
+    (run.phases ?? []).reduce(
+      (s, p) =>
+        s +
+        (p.agents ?? []).filter(
+          (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+        ).length,
+      0,
+    );
   const total =
     run.agent_count ??
     (run.phases ?? []).reduce((s, p) => s + (p.agents ?? []).length, 0);
