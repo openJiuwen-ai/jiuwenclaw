@@ -2779,7 +2779,9 @@ function App() {
 
 /**
  * 鉴权外壳: 进入前探测 cookie 是否携带有效 access_token + 是否一体机模式。
- * - GET /api/web-config: 本地端点, 拿 {remote: bool}(一体机模式 → 显示登出按钮)
+ * - GET /api/web-config: 本地端点, 拿 {remote: bool, iam_enabled: bool}
+ *   - iam_enabled=false: 未配置 IAM, 无鉴权, 直接渲染主 App
+ *   - iam_enabled=true: 配置了 IAM, 继续探测登录态
  * - GET /auth-api/v1/auth/permissions (同源, 浏览器自动带 HttpOnly cookie)
  *   - 200 -> 已登录, 渲染主 App (+ 一体机模式时浮 LogoutButton)
  *   - 401/其他 -> 未登录, 渲染 LoginPage
@@ -2787,29 +2789,49 @@ function App() {
  * 会从 jw_token cookie 取 token 注入头, 故前端只需同源请求。
  */
 function AppWithAuth() {
-  const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn'>('checking');
+  const [authStatus, setAuthStatus] = useState<'checking' | 'loggedOut' | 'loggedIn' | 'noIam'>('checking');
   const [remote, setRemote] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    // 并行: 一体机模式标志(本地端点, 永远 200) + 登录态探测
+    // 先拿 web-config: 如果 iam_enabled=false, 直接跳过鉴权探测
     fetch('/api/web-config', { credentials: 'same-origin' })
       .then((r) => r.json())
       .then((cfg) => {
-        if (!cancelled && cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
-      })
-      .catch(() => {});
-    fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
-      .then((resp) => {
         if (cancelled) return;
-        if (resp.ok) {
-          setAuthStatus('loggedIn');
-        } else {
-          setAuthStatus('loggedOut');
+        if (cfg && typeof cfg.remote === 'boolean') setRemote(cfg.remote);
+        if (cfg && cfg.iam_enabled === false) {
+          setAuthStatus('noIam');
+          return;
         }
+        // IAM 已配置, 探测登录态
+        fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
+          .then((resp) => {
+            if (cancelled) return;
+            if (resp.ok) {
+              setAuthStatus('loggedIn');
+            } else {
+              setAuthStatus('loggedOut');
+            }
+          })
+          .catch(() => {
+            if (!cancelled) setAuthStatus('loggedOut');
+          });
       })
       .catch(() => {
-        if (!cancelled) setAuthStatus('loggedOut');
+        // web-config 获取失败, 回退到探测登录态
+        fetch('/auth-api/v1/auth/permissions', { credentials: 'same-origin' })
+          .then((resp) => {
+            if (cancelled) return;
+            if (resp.ok) {
+              setAuthStatus('loggedIn');
+            } else {
+              setAuthStatus('loggedOut');
+            }
+          })
+          .catch(() => {
+            if (!cancelled) setAuthStatus('loggedOut');
+          });
       });
     return () => {
       cancelled = true;
