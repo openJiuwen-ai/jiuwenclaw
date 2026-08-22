@@ -2214,8 +2214,8 @@ class JiuWenSwarmDeepAdapter:
             if value is not None:
                 setattr(adapter, attribute, value.copy())
         # Container-conversion attributes (dict() or list() to decouple).
-        _CONTAINER_CONV = {"_config_cache": dict, "_enabled_skills": list}
-        for attribute, conv in _CONTAINER_CONV.items():
+        _container_conv = {"_config_cache": dict, "_enabled_skills": list}
+        for attribute, conv in _container_conv.items():
             value = getattr(self, attribute, None)
             if value:
                 setattr(adapter, attribute, conv(value))
