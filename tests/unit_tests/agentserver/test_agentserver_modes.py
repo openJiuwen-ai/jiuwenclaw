@@ -57,7 +57,7 @@ def test_progressive_defaults_expose_registered_ask_user_tool():
 
 def test_progressive_runtime_config_exposes_registered_ask_user_tool():
     config_path = Path(__file__).parents[3] / "jiuwenswarm/resources/config.yaml"
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     eager_tools = config["react"]["tool_lazy_load"]["eager_tools"]
 
     assert "ask_user" in eager_tools
@@ -255,7 +255,19 @@ def test_resolve_request_project_dir_prefers_params_project_dir():
     assert agent_ws_server_module.resolve_request_project_dir(request) == "/tmp/project"
 
 
-def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients():
+def test_resolve_request_project_dir_falls_back_to_workspace_dir() -> None:
+    request = AgentRequest(
+        request_id="req-e2a",
+        channel_id="officeclaw",
+        params={"workspace_dir": "E:/workspace/demo-project"},
+    )
+
+    assert agent_ws_server_module.resolve_request_project_dir(request) == (
+        "E:/workspace/demo-project"
+    )
+
+
+def test_resolve_request_project_dir_falls_back_to_cwd_for_legacy_clients() -> None:
     request = AgentRequest(
         request_id="req-chat",
         channel_id="tui",

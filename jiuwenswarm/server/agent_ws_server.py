@@ -495,6 +495,9 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
     if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
         return metadata_project_dir.strip()
+    workspace_dir = params.get("workspace_dir")
+    if isinstance(workspace_dir, str) and workspace_dir.strip():
+        return workspace_dir.strip()
     cwd = params.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
         return cwd.strip()
@@ -2114,7 +2117,8 @@ class AgentWebSocketServer:
     def _is_explicit_plan_entry_request(request: AgentRequest) -> bool:
         if not isinstance(request.params, dict):
             return False
-        return request.params.get("plan_entry_source") == "slash_command"
+        source = str(request.params.get("plan_entry_source") or "").strip().lower()
+        return source in {"slash_command", "e2a"}
 
     @staticmethod
     def _session_mode_sync_lock(session_id: str) -> asyncio.Lock:
@@ -2249,12 +2253,49 @@ class AgentWebSocketServer:
         self._stateless_fallback_agents[channel_id] = agent
         return agent
 
+    async def _get_tenant_agent_manager(self, request: AgentRequest) -> Any:
+        """Resolve the tenant-pool AgentManager for an officeclaw/E2A request."""
+        pool = self._tenant_pool()
+        agent_id, service_id, workspace_key = pool.extract_ids(request)
+        agent_id, service_id = pool.resolve_control_rpc_tenant(
+            request, agent_id, service_id
+        )
+        return await pool._ensure_agent_manager(agent_id, service_id, workspace_key)
+
+    async def _prepare_tenant_code_mode_chat_turn(
+        self,
+        request: AgentRequest,
+        channel_id: str,
+    ) -> tuple[str, str | None, Any] | None:
+        """Run the same code.plan sync as the default WS path on tenant-pool chats.
+
+        officeclaw previously skipped ``_ensure_code_mode_state``, so
+        ``mode=code.plan`` never switched durable plan_mode.
+        """
+        if request.req_method not in _CODE_MODE_SYNC_METHODS:
+            return None
+        if self._is_readonly_goal_get_request(request):
+            return None
+        manager = await self._get_tenant_agent_manager(request)
+        mode, sub_mode, agent = await self._prepare_code_mode_chat_turn(
+            request,
+            channel_id,
+            agent_manager=manager,
+        )
+        restored_plan = await self._ensure_code_mode_state(
+            request, mode, sub_mode, agent
+        )
+        if restored_plan:
+            await self._push_plan_mode_exited(request)
+        return mode, sub_mode, agent
+
     async def _prepare_code_mode_chat_turn(
         self,
         request: AgentRequest,
         channel_id: str,
         *,
         sync_metadata: bool = True,
+        agent_manager: Any | None = None,
     ) -> tuple[str, str | None, Any]:
         """Mode resolution and correct agent instance selection."""
         # [新增] 在 _apply_resolved_mode_to_request 把 canonical mode 写回 params 之前，
@@ -2267,20 +2308,47 @@ class AgentWebSocketServer:
         params = request.params if isinstance(request.params, dict) else {}
         _raw_mode = params.get("mode")
         explicit_mode_provided = isinstance(_raw_mode, str) and bool(_raw_mode.strip())
+        source = str(params.get("source") or "").strip()
+        is_interrupt_continuation = (
+            source
+            in {"permission_interrupt", "confirm_interrupt", "ask_user_interrupt"}
+            and isinstance(params.get("answers"), list)
+            and bool(str(params.get("request_id") or "").strip())
+        )
         runtime_work_mode = None
         sid = str(request.session_id or "").strip()
         sessions_root = _sessions_dir_for_request(request)
+        session_metadata: dict[str, Any] = {}
         if sid:
             from jiuwenswarm.server.runtime.session.session_metadata import (
                 get_session_metadata,
             )
 
-            session_metadata = get_session_metadata(
+            loaded_metadata = get_session_metadata(
                 sid,
                 cache_bust=True,
                 enable_writeback=False,
                 sessions_root=sessions_root,
             )
+            if isinstance(loaded_metadata, dict):
+                session_metadata = loaded_metadata
+
+            # Control continuations normally contain only answers + the interrupted
+            # tool_call id.  Restore the original canonical mode before applying
+            # defaults; otherwise the request is irreversibly rewritten to
+            # ``agent`` and the tenant pool creates a different adapter instance.
+            if is_interrupt_continuation and not explicit_mode_provided:
+                stored_mode = str(session_metadata.get("mode") or "").strip()
+                if stored_mode and stored_mode.lower() != "unknown":
+                    params["mode"] = stored_mode
+                    _raw_mode = stored_mode
+                    logger.info(
+                        "[AgentWebSocketServer] interrupt continuation routing "
+                        "restored: session_id=%s mode=%s source=%s",
+                        sid,
+                        stored_mode,
+                        source,
+                    )
             stored_work_mode = (
                 session_metadata.get("work_mode")
                 if isinstance(session_metadata, dict)
@@ -2300,9 +2368,16 @@ class AgentWebSocketServer:
                 runtime_work_mode = request_work_mode.strip().lower()
         if runtime_work_mode is not None:
             params["work_mode"] = runtime_work_mode
+        # An explicit/hydrated concrete mode is the stronger routing identity.
+        # A stale session work_mode (OfficeClaw historically initialized it as
+        # ``work``) must not turn an explicit ``code.normal`` request into agent.
+        mode_work_mode = runtime_work_mode
+        concrete_mode = str(_raw_mode or "").strip().lower()
+        if concrete_mode.startswith(("code.", "team")) or concrete_mode == "code":
+            mode_work_mode = None
         mode, sub_mode = _apply_resolved_mode_to_request(
             request,
-            work_mode=runtime_work_mode,
+            work_mode=mode_work_mode,
         )
         agent_mode = "agent" if mode == "auto_harness" else mode
         requested_project_dir = resolve_request_project_dir(request)
@@ -2344,8 +2419,9 @@ class AgentWebSocketServer:
             request.metadata = dict(request.metadata or {})
             request.metadata["project_dir"] = project_dir
 
-        await self._agent_manager.wait_for_session_prewarm(request.session_id)
-        agent = await self._agent_manager.get_agent(
+        manager = agent_manager or self._agent_manager
+        await manager.wait_for_session_prewarm(request.session_id)
+        agent = await manager.get_agent(
             channel_id=channel_id,
             mode=agent_mode,
             project_dir=project_dir,
@@ -2524,33 +2600,17 @@ class AgentWebSocketServer:
             return
 
         if self._uses_tenant_pool(request):
-            if request.req_method in _CODE_MODE_SYNC_METHODS:
-                params = request.params if isinstance(request.params, dict) else {}
-                _raw_mode = params.get("mode")
-                explicit_mode_provided = (
-                    isinstance(_raw_mode, str) and bool(_raw_mode.strip())
-                )
-                mode_for_sync = (
-                    _raw_mode.strip()
-                    if explicit_mode_provided
-                    else str(_raw_mode or "agent")
-                )
-                locked = _sync_chat_request_metadata(
-                    request,
-                    resolve_request_project_dir(request),
-                    mode_for_sync,
-                    explicit_mode_provided=explicit_mode_provided,
-                )
-                if isinstance(locked, str) and locked.strip():
-                    request.params["project_dir"] = locked.strip()
-                    request.metadata = dict(request.metadata or {})
-                    request.metadata["project_dir"] = locked.strip()
-            resp = await self._tenant_pool().process_message(request)
-            if getattr(resp, "agent_ref", None) is None:
-                resp.agent_ref = request.agent_ref
-            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await send_wire_payload(ws, wire)
+            prepared = await self._prepare_tenant_code_mode_chat_turn(request, channel_id)
+            try:
+                resp = await self._tenant_pool().process_message(request)
+                if getattr(resp, "agent_ref", None) is None:
+                    resp.agent_ref = request.agent_ref
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+            finally:
+                if prepared is not None:
+                    await self._check_post_process_plan_exit(request, prepared[2])
             logger.info(
                 "[AgentWebSocketServer] 非流式响应已发送 (tenant pool): request_id=%s",
                 request.request_id,
@@ -2672,41 +2732,25 @@ class AgentWebSocketServer:
             self._session_stream_tasks.setdefault(session_id, {})[current_task] = stream_stop_event
 
         if self._uses_tenant_pool(request):
-            if request.req_method in _CODE_MODE_SYNC_METHODS:
-                params = request.params if isinstance(request.params, dict) else {}
-                _raw_mode = params.get("mode")
-                explicit_mode_provided = (
-                    isinstance(_raw_mode, str) and bool(_raw_mode.strip())
-                )
-                mode_for_sync = (
-                    _raw_mode.strip()
-                    if explicit_mode_provided
-                    else str(_raw_mode or "agent")
-                )
-                locked = _sync_chat_request_metadata(
-                    request,
-                    resolve_request_project_dir(request),
-                    mode_for_sync,
-                    explicit_mode_provided=explicit_mode_provided,
-                )
-                if isinstance(locked, str) and locked.strip():
-                    request.params["project_dir"] = locked.strip()
-                    request.metadata = dict(request.metadata or {})
-                    request.metadata["project_dir"] = locked.strip()
+            prepared = await self._prepare_tenant_code_mode_chat_turn(request, channel_id)
             chunk_count = 0
-            async for chunk in self._tenant_pool().process_message_stream(request):
-                chunk_count += 1
-                if chunk.agent_ref is None:
-                    chunk.agent_ref = request.agent_ref
-                wire = encode_agent_chunk_for_wire(
-                    chunk,
-                    response_id=request.request_id,
-                    sequence=chunk_count - 1,
-                )
-                async with send_lock:
-                    sent_original = await send_wire_payload(ws, wire)
-                if not sent_original:
-                    return
+            try:
+                async for chunk in self._tenant_pool().process_message_stream(request):
+                    chunk_count += 1
+                    if chunk.agent_ref is None:
+                        chunk.agent_ref = request.agent_ref
+                    wire = encode_agent_chunk_for_wire(
+                        chunk,
+                        response_id=request.request_id,
+                        sequence=chunk_count - 1,
+                    )
+                    async with send_lock:
+                        sent_original = await send_wire_payload(ws, wire)
+                    if not sent_original:
+                        return
+            finally:
+                if prepared is not None:
+                    await self._check_post_process_plan_exit(request, prepared[2])
             logger.info(
                 "[AgentWebSocketServer] 流式响应完成 (tenant pool): request_id=%s chunks=%s",
                 request.request_id,

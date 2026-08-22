@@ -136,6 +136,8 @@ ERROR_EVENT_TYPE = _ERROR_EVENT.value
 # 与 skill_turbo/executor.STREAM_SOURCE_ID_FIELD 一致：并发节点用它标识 source，
 # 前端据其路由到 subagent 行。adapter 转发 llm_reasoning / llm_output 时须原样透传。
 STREAM_SOURCE_ID_FIELD = "stream_source_id"
+_INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT = 20
+_INTERRUPT_OUTPUT_ATTACH_RETRY_INTERVAL_SECONDS = 0.05
 
 
 def _propagate_stream_source_id(
@@ -9983,6 +9985,61 @@ class JiuWenSwarmDeepAdapter:
         return not self._goal_record_is_active()
 
     @staticmethod
+    def _approved_plan_exit_resume_tool_call_id(params: Any) -> str:
+        """返回已批准 plan-exit resume 对应的工具调用 ID。
+
+        Confirm interrupt 恢复后，运行时可能在模型已经给出结论的情况下只向
+        输出流暴露工具事件。这一标记让流末尾能为该极窄路径补一个用户可见的
+        完成消息；其他 confirm / permission resume 不受影响。
+        """
+        if not isinstance(params, dict):
+            return ""
+        if str(params.get("source") or "").strip() != "confirm_interrupt":
+            return ""
+        tool_call_id = str(params.get("request_id") or "").strip()
+        answers = params.get("answers")
+        if not tool_call_id or not isinstance(answers, list) or not answers:
+            return ""
+        answer = answers[0]
+        if not isinstance(answer, dict):
+            return ""
+        options = answer.get("selected_options")
+        if not isinstance(options, list) or not options:
+            return ""
+        approved_values = {"approve", "本次允许", "批准", "proceed", "开始执行"}
+        selected = str(options[0] or "").strip().lower()
+        return tool_call_id if selected in approved_values else ""
+
+    def _plan_exit_fallback_content(self) -> str:
+        if self._resolve_runtime_language() == "en":
+            return "Plan approved. Exited plan mode and switched to code.normal mode."
+        return "计划已获批准，已退出 plan 模式，当前处于 code.normal 模式。"
+
+    async def _reattach_interrupt_output(self, session_id: str) -> Any | None:
+        """Briefly wait for the interrupted consumer to release its output lease."""
+        started = time.monotonic()
+        for attempt in range(1, _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT + 1):
+            await asyncio.sleep(_INTERRUPT_OUTPUT_ATTACH_RETRY_INTERVAL_SECONDS)
+            interaction_stream = await self._instance.attach_output()
+            if interaction_stream is not None:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] interrupt output reattached: "
+                    "session_id=%s attempts=%s elapsed_ms=%.1f",
+                    session_id,
+                    attempt,
+                    (time.monotonic() - started) * 1000,
+                )
+                return interaction_stream
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] interrupt output still leased; returning ACK: "
+            "session_id=%s attempts=%s elapsed_ms=%.1f",
+            session_id,
+            _INTERRUPT_OUTPUT_ATTACH_RETRY_COUNT,
+            (time.monotonic() - started) * 1000,
+        )
+        return None
+
+    @staticmethod
     def _resolve_input_dispatch_mode(params: Any) -> InputDispatchMode | None:
         """Map host ``input_mode`` / ``runtime_mode`` onto OpenJiuwen dispatch mode.
 
@@ -13912,6 +13969,10 @@ class JiuWenSwarmDeepAdapter:
             "total_cost": 0.0,
         }
         emitted_ask_user_request_ids: set[str] = set()
+        approved_plan_exit_tool_call_id = self._approved_plan_exit_resume_tool_call_id(
+            request.params
+        )
+        saw_approved_plan_exit_result = False
 
         def should_skip_duplicate_ask_user(parsed: dict | None) -> bool:
             if not isinstance(parsed, dict):
@@ -13945,7 +14006,16 @@ class JiuWenSwarmDeepAdapter:
 
         def note_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal had_assistant_output, emitted_terminal_chat_final
+            nonlocal saw_approved_plan_exit_result
             event_type = payload.get("event_type")
+            if (
+                approved_plan_exit_tool_call_id
+                and event_type == "chat.tool_result"
+                and str(payload.get("tool_name") or "") == "exit_plan_mode"
+                and str(payload.get("tool_call_id") or "")
+                == approved_plan_exit_tool_call_id
+            ):
+                saw_approved_plan_exit_result = True
             # first_byte: first history-visible assistant event (matches history.jsonl).
             if event_type in (
                 "chat.delta",
@@ -14370,6 +14440,18 @@ class JiuWenSwarmDeepAdapter:
                     )
                 )
                 if interaction_stream is None:
+                    # The interrupted chat.send consumer releases its output
+                    # lease asynchronously.  A resume arriving in that tiny
+                    # window used to receive only runtime.accepted, while the
+                    # original consumer had already emitted its complete frame;
+                    # no client then remained to relay the resumed final reply.
+                    # Give that predecessor a bounded chance to unwind before
+                    # falling back to the ACK-only path for genuinely busy
+                    # sessions owned by another consumer.
+                    interaction_stream = await self._reattach_interrupt_output(
+                        request.session_id or "default"
+                    )
+                if interaction_stream is None:
                     async for chunk in _yield_runtime_accepted():
                         yield chunk
                     interaction_stream_abort = False
@@ -14741,12 +14823,15 @@ class JiuWenSwarmDeepAdapter:
                 emitted_terminal_chat_final=emitted_terminal_chat_final,
             ):
                 self._stream_content_run_kind = None
+                fallback_content = ""
+                if saw_approved_plan_exit_result and not had_assistant_output:
+                    fallback_content = self._plan_exit_fallback_content()
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
                     payload=note_chat_payload({
                         "event_type": "chat.final",
-                        "content": "",
+                        "content": fallback_content,
                     }),
                     is_complete=False,
                 )

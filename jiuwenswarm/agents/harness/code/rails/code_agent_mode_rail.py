@@ -18,6 +18,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
+from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
+    extract_tool_interrupt,
+)
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -28,7 +32,6 @@ _NON_GIT_WRITE_RE = re.compile(
     r"|>\s*\S"
     r"|>>"
 )
-
 
 class CodeAgentModeRail(AgentModeRail):
     """AgentModeRail variant for jiuwenswarm code mode.
@@ -100,10 +103,24 @@ class CodeAgentModeRail(AgentModeRail):
         ``_skip_tool`` from ``ctx.extra`` before ``after_tool_call`` runs.
         ``PlanApprovalInterruptRail`` sets ``_plan_rejected`` which persists
         through the pop.
+
+        The ``@rail`` decorator fires ``AFTER_TOOL_CALL`` from a ``finally``
+        block, so this hook also runs when ``PlanApprovalInterruptRail``
+        suspends the call for approval.  In that case the tool has not
+        executed yet and the user has answered nothing, so plan mode must
+        stay untouched until the resumed call runs.
         """
         tool_name = ctx.inputs.tool_name
         agent = self._agent
         rejected = ctx.extra.get("_plan_rejected", False)
+
+        if self._is_pending_user_interrupt(ctx):
+            logger.info(
+                "[CodeAgentModeRail] '%s' suspended for user approval; "
+                "keeping plan mode until the resumed call executes",
+                tool_name,
+            )
+            return
 
         # Segment 1: register / unregister task_tool (same as parent)
         if tool_name == "enter_plan_mode" and not rejected:
@@ -130,6 +147,17 @@ class CodeAgentModeRail(AgentModeRail):
                     logger.warning(
                         "[CodeAgentModeRail] Failed to restore mode: %s", exc
                     )
+
+    @staticmethod
+    def _is_pending_user_interrupt(ctx: AgentCallbackContext) -> bool:
+        """Whether this tool call ended by suspending for user input.
+
+        ``ToolCallResilienceRail.on_tool_exception`` fills ``tool_result``
+        with a failure placeholder before ``AFTER_TOOL_CALL`` runs, so a
+        ``tool_result is not None`` check cannot tell a suspended call apart
+        from an executed one — the pending interrupt on ``ctx.exception`` can.
+        """
+        return extract_tool_interrupt(getattr(ctx, "exception", None)) is not None
 
     @staticmethod
     def _parse_switch_mode_target(ctx: AgentCallbackContext) -> str:

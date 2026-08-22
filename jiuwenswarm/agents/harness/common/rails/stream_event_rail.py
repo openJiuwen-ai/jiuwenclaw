@@ -123,19 +123,34 @@ def _parse_tool_call_arguments(tool_call: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_tool_interrupt(value: Any) -> Any | None:
-    if value is None:
-        return None
-    if value.__class__.__name__ == "ToolInterruptException" and hasattr(value, "request"):
-        return value
+def extract_tool_interrupt(value: Any) -> Any | None:
+    """Find a tool interrupt in wrapped exception chains without looping.
 
-    for attr_name in ("cause", "__cause__"):
-        cause = getattr(value, attr_name, None)
-        if cause is not None and cause is not value:
-            interrupt = _extract_tool_interrupt(cause)
-            if interrupt is not None:
-                return interrupt
+    Class-name matching intentionally supports exceptions crossing duplicated
+    SDK import boundaries, where ``isinstance`` can be false for equivalent
+    ToolInterruptException classes.
+    """
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if (
+            current.__class__.__name__ == "ToolInterruptException"
+            and hasattr(current, "request")
+        ):
+            return current
+        for attr_name in ("cause", "__cause__"):
+            cause = getattr(current, attr_name, None)
+            if cause is not None and cause is not current:
+                pending.append(cause)
     return None
+
+
+# Backward-compatible private alias for existing tests/imports.
+_extract_tool_interrupt = extract_tool_interrupt
 
 
 def _normalize_ask_user_interrupt_value(value_obj: Any, tool_args: dict[str, Any]) -> Any:
@@ -1272,12 +1287,18 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 )
 
         normalize_read_file_tool_outcome(ctx)
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
+        # A call suspended for user input (approval card, ask_user) has no
+        # result yet: ToolCallResilienceRail only left a failure placeholder
+        # on ctx.inputs.tool_result.  Emitting it would show the tool as
+        # failed before the user has answered; the resumed call emits the
+        # real result.
+        if _extract_tool_interrupt(ctx.exception) is None:
+            await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+            self._symphony_stream_handler.request_force_finish(
+                ctx,
+                tc,
+                ctx.inputs.tool_result,
+            )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
