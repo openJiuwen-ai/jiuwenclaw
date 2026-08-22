@@ -163,12 +163,16 @@ class WorkflowMonitorHandler(BaseMonitorHandler):
     def _persist(self) -> None:
         try:
             from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
-                persist_session_budget,
                 persist_workflow_runs,
             )
-            persist_workflow_runs(self._runs, self._session_id)
-            if self._session_budget is not None:
-                persist_session_budget(self._session_id, self._session_budget)
+            # runs + session_budget must land in ONE read-modify-write: two
+            # separate persists each cache_bust-read the disk before the
+            # other's queued write is flushed, and the second full-file
+            # replace reverts the first's workflow_runs (lost update that
+            # froze the checkpoint at a stale pre-terminal state).
+            persist_workflow_runs(
+                self._runs, self._session_id, session_budget=self._session_budget
+            )
         except Exception as e:
             logger.warning("[WorkflowMonitorHandler] checkpoint persist failed: %s", e)
 

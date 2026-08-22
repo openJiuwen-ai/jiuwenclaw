@@ -505,8 +505,20 @@ def sync_team_identity_metadata(
     )
 
 
-def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) -> None:
-    """Persist WorkflowRunState dict to session metadata (file-based store)."""
+def persist_workflow_runs(
+    runs: dict[str, WorkflowRunState],
+    session_id: str,
+    session_budget: dict | None = None,
+) -> None:
+    """Persist WorkflowRunState dict (and optionally the session budget) to session metadata.
+
+    ``session_budget`` MUST ride on the same read-modify-write as the runs:
+    persisting them via two separate calls makes each one ``cache_bust``-read
+    the disk before the other's async-queued write is flushed, so the second
+    write replaces the whole file carrying the FIRST one's stale runs — a
+    lost update that freezes ``workflow_runs`` on the checkpoint (observed
+    as a stopped workflow restoring as still-running).
+    """
     from jiuwenswarm.server.runtime.session.session_metadata import _read_metadata, _enqueue_write
     runs_data = {run_id: run_state.model_dump() for run_id, run_state in runs.items()}
     metadata = _read_metadata(session_id, cache_bust=True)
@@ -521,6 +533,8 @@ def persist_workflow_runs(runs: dict[str, WorkflowRunState], session_id: str) ->
         )
         return
     metadata[_WORKFLOW_RUNS_STATE_KEY] = runs_data
+    if session_budget is not None:
+        metadata[_SESSION_BUDGET_STATE_KEY] = session_budget
     _enqueue_write(session_id, metadata)
 
 
