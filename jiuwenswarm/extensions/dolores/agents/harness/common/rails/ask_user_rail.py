@@ -33,6 +33,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails.interrupt.ask_user_rail import (
     AskUserPayload,
     AskUserRail,
+    AskUserRequest,
 )
 from openjiuwen.harness.rails.interrupt.interrupt_base import (
     InterruptDecision,
@@ -281,7 +282,19 @@ class StructuredAskUserRail(AskUserRail):
         For plain query: delegate to parent class behavior (AskUserPayload).
         """
         if user_input is None:
-            return self.interrupt(self._build_ask_request(tool_call))
+            # First-time interrupt: build the request and surface it. If
+            # building the request ever raises (e.g. a future schema/wiring
+            # regression), fall back to a minimal request so ask_user still
+            # interrupts loudly — never let the failure be swallowed by the
+            # callback framework's generic except and silently complete.
+            try:
+                return self.interrupt(self._build_ask_request(tool_call))
+            except Exception:
+                logger.exception(
+                    "[StructuredAskUserRail] interrupt build failed; "
+                    "falling back to minimal AskUserRequest"
+                )
+                return self.interrupt(AskUserRequest())
 
         # Detect if this was a structured questions call by checking tool_args
         questions_data = self.extract_questions(tool_call)
@@ -352,12 +365,42 @@ class StructuredAskUserRail(AskUserRail):
         )
 
     def _build_ask_request(self, tool_call: Optional[ToolCall]) -> InterruptRequest:
-        """Build interrupt request. For structured questions, the questions data
-        flows through ToolCallInterruptRequest.tool_args (preserved by the
-        interrupt handler). No need to attach questions to InterruptRequest
-        itself since from_tool_call() doesn't copy extra fields."""
-        request = super()._build_ask_request(tool_call)
-        return request
+        """Build an AskUserRequest, normalizing the ``questions`` field.
+
+        The model/transport occasionally serializes the nested ``questions``
+        array as a JSON *string* inside ``tool_call.arguments``. Upstream
+        ``_parse_tool_args`` only shallow-parses the outer arguments, so
+        ``questions`` can arrive here as a ``str``. But
+        ``AskUserRequest.questions`` is typed ``List[dict]`` and would raise a
+        Pydantic ValidationError on a str value — which the callback framework
+        then swallows, turning the interrupt into a silent ``{}`` completion.
+        Coerce ``questions`` to a proper list first so the interrupt builds
+        cleanly. The questions data also flows through
+        ``ToolCallInterruptRequest.tool_args`` for the frontend renderer.
+        """
+        args = self._parse_tool_args(tool_call)
+        questions = self._coerce_questions(args.get("questions", []))
+        return AskUserRequest(
+            message="",
+            payload_schema=AskUserPayload.to_schema(),
+            questions=questions,
+        )
+
+    @staticmethod
+    def _coerce_questions(questions: Any) -> list[dict]:
+        """Normalize the ``questions`` argument to ``list[dict]``.
+
+        Tolerates the JSON-stringified form emitted by some model/transport
+        layers; anything that still isn't a list of dicts becomes ``[]``.
+        """
+        if isinstance(questions, str):
+            try:
+                questions = json.loads(questions)
+            except (ValueError, TypeError):
+                return []
+        if not isinstance(questions, list):
+            return []
+        return [q for q in questions if isinstance(q, dict)]
 
     def extract_questions(
         self, tool_call: Optional[ToolCall]
