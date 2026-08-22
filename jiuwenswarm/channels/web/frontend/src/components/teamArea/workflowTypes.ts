@@ -241,7 +241,16 @@ export function sessionMembersInPhase(
       isSessionNode(agent) &&
       (nodeType === undefined || agent.node_type === nodeType),
   );
-  return sortWorkflowAgentsByTurn(members);
+  // Deduplicate by turn (correlation_id): a session agent may emit multiple
+  // agent_started events with different agent_id (e.g. a retry after a failed
+  // structured-output attempt). Only the last agent for each turn survives —
+  // earlier retries are stale and would render duplicate "turn 0" rows.
+  const byTurn = new Map<string, WorkflowAgent>();
+  for (const m of members) {
+    const turn = m.correlation_id ?? m.id;
+    byTurn.set(turn, m); // last wins (phaseAgents is in emission order)
+  }
+  return sortWorkflowAgentsByTurn([...byTurn.values()]);
 }
 
 export function phaseLocalTurnNumber(

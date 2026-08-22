@@ -182,7 +182,9 @@ function AgentLoopNode({
   const [expanded, setExpanded] = useState(true);
   const [selectedIdx, setSelectedIdx] = useState(() => findActiveIterationIndex(members));
   const loopStatus = useMemo(() => computeLoopStatus(members), [members]);
-  const completedCount = members.filter((m) => m.status === 'completed').length;
+  const completedCount = members.filter(
+    (m) => m.status === 'completed' || m.status === 'failed' || m.status === 'stopped',
+  ).length;
 
   return (
     <div>
@@ -272,7 +274,9 @@ function PhaseLoopNode({
   const [expanded, setExpanded] = useState(true);
   const [selectedIdx, setSelectedIdx] = useState(() => findActiveIterationIndex(members));
   const loopStatus = useMemo(() => computeLoopStatus(members), [members]);
-  const completedCount = members.filter((m) => m.status === 'completed').length;
+  const completedCount = members.filter(
+    (m) => m.status === 'completed' || m.status === 'failed' || m.status === 'stopped',
+  ).length;
 
   return (
     <div>
@@ -328,7 +332,12 @@ function PhaseLoopNode({
                 </span>
                 <span className="text-xs text-text-muted/70 shrink-0">
                   {phase.completed_agent_count ??
-                    (phase.agents ?? []).filter((a) => a.status === 'completed').length}/
+                    (phase.agents ?? []).filter(
+                      (a) =>
+                        a.status === 'completed' ||
+                        a.status === 'failed' ||
+                        a.status === 'stopped',
+                    ).length}/
                   {phase.agent_count ?? (phase.agents ?? []).length}
                 </span>
               </div>
@@ -622,7 +631,9 @@ function PhaseNode({
   // to counting direct agents when the fields are absent.
   const completedCount =
     phase.completed_agent_count ??
-    (phase.agents ?? []).filter((a) => a.status === 'completed').length;
+    (phase.agents ?? []).filter(
+      (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+    ).length;
   const totalCount = phase.agent_count ?? phase.agents?.length ?? 0;
   const hasChildren =
     sessions.length > 0 || uniqueAgents.length > 0 || agentLoops.length > 0 || childPhases.length > 0;
@@ -745,7 +756,11 @@ function RunNode({
   const [expanded, setExpanded] = useState(true);
   const [runDetail, setRunDetail] = useState<AgentModalState | null>(null);
   const completedCount = (run.phases ?? []).reduce(
-    (sum, p) => sum + (p.agents ?? []).filter((a) => a.status === 'completed').length,
+    (sum, p) =>
+      sum +
+      (p.agents ?? []).filter(
+        (a) => a.status === 'completed' || a.status === 'failed' || a.status === 'stopped',
+      ).length,
     0,
   );
   const totalCount =
