@@ -2206,32 +2206,47 @@ class JiuWenSwarmDeepAdapter:
         # can skip the expensive config re-read / env-binding / enterprise-loading.
         # _model is NOT shared — _create_model() is cheap, must run per-session.
         # _tool_cards are NOT shared — stateful tools are owner-scoped.
-        if self._config_base_cache is not None:
-            adapter._config_base_cache = self._config_base_cache.copy()  # noqa: protected-access
-        if self._startup_config_base is not None:
-            adapter._startup_config_base = self._startup_config_base.copy()  # noqa: protected-access
-        if self._config_cache:
-            adapter._config_cache = dict(self._config_cache)  # noqa: protected-access
-        if self._vision_model_config is not None:
-            adapter._vision_model_config = self._vision_model_config  # noqa: protected-access
-        if self._audio_model_config is not None:
-            adapter._audio_model_config = self._audio_model_config  # noqa: protected-access
-        if self._video_model_config:
-            adapter._video_model_config = self._video_model_config  # noqa: protected-access
-        if self._image_gen_model_config:
-            adapter._image_gen_model_config = self._image_gen_model_config  # noqa: protected-access
-        if self._enabled_skills is not None:
-            adapter._enabled_skills = list(self._enabled_skills)  # noqa: protected-access
-        if self._enterprise_config is not None:
-            adapter._enterprise_config = self._enterprise_config  # noqa: protected-access
-        if self._skill_manager is not None:
-            adapter.set_skill_manager(self._skill_manager)
-        if self._agent_name and self._agent_name != "main_agent":
-            adapter._agent_name = self._agent_name  # noqa: protected-access
-        if self._project_dir is not None:
-            adapter._project_dir = self._project_dir  # noqa: protected-access
-        if self._workspace_dir is not None:
-            adapter._workspace_dir = self._workspace_dir  # noqa: protected-access
+        # Use getattr() for defensive access — unit tests may bypass __init__
+        # via object.__new__(), leaving these attributes unset on the parent.
+        _cbc = getattr(self, '_config_base_cache', None)
+        if _cbc is not None:
+            adapter._config_base_cache = _cbc.copy()  # noqa: protected-access
+        _scb = getattr(self, '_startup_config_base', None)
+        if _scb is not None:
+            adapter._startup_config_base = _scb.copy()  # noqa: protected-access
+        _cc = getattr(self, '_config_cache', None)
+        if _cc:
+            adapter._config_cache = dict(_cc)  # noqa: protected-access
+        _vmc = getattr(self, '_vision_model_config', None)
+        if _vmc is not None:
+            adapter._vision_model_config = _vmc  # noqa: protected-access
+        _amc = getattr(self, '_audio_model_config', None)
+        if _amc is not None:
+            adapter._audio_model_config = _amc  # noqa: protected-access
+        _vidmc = getattr(self, '_video_model_config', None)
+        if _vidmc:
+            adapter._video_model_config = _vidmc  # noqa: protected-access
+        _igmc = getattr(self, '_image_gen_model_config', None)
+        if _igmc:
+            adapter._image_gen_model_config = _igmc  # noqa: protected-access
+        _esk = getattr(self, '_enabled_skills', None)
+        if _esk is not None:
+            adapter._enabled_skills = list(_esk)  # noqa: protected-access
+        _ec = getattr(self, '_enterprise_config', None)
+        if _ec is not None:
+            adapter._enterprise_config = _ec  # noqa: protected-access
+        _sm = getattr(self, '_skill_manager', None)
+        if _sm is not None:
+            adapter.set_skill_manager(_sm)
+        _an = getattr(self, '_agent_name', None)
+        if _an and _an != "main_agent":
+            adapter._agent_name = _an  # noqa: protected-access
+        _pd = getattr(self, '_project_dir', None)
+        if _pd is not None:
+            adapter._project_dir = _pd  # noqa: protected-access
+        _wd = getattr(self, '_workspace_dir', None)
+        if _wd is not None:
+            adapter._workspace_dir = _wd  # noqa: protected-access
         return adapter
 
     def mark_as_session_scoped(self, session_id: str) -> None:
@@ -9762,8 +9777,9 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_reload_failures.clear()
         else:
             # 取消后台初始化任务（如果仍在运行）
-            if self._bg_init_task is not None and not self._bg_init_task.done():
-                self._bg_init_task.cancel()
+            _bg = getattr(self, '_bg_init_task', None)
+            if _bg is not None and not _bg.done():
+                _bg.cancel()
             try:
                 await self.stop_interaction()
             except Exception as exc:
@@ -13082,8 +13098,9 @@ class JiuWenSwarmDeepAdapter:
             )
 
         # 等待后台初始化完成（首条消息触发 create_instance 时后台任务已启动）
-        if self._bg_init_task is not None and not self._bg_init_task.done():
-            await self._bg_init_task
+        _bg = getattr(self, '_bg_init_task', None)
+        if _bg is not None and not _bg.done():
+            await _bg
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
@@ -13660,8 +13677,9 @@ class JiuWenSwarmDeepAdapter:
             return
 
         # 等待后台初始化完成（首条消息触发 create_instance 时后台任务已启动）
-        if self._bg_init_task is not None and not self._bg_init_task.done():
-            await self._bg_init_task
+        _bg = getattr(self, '_bg_init_task', None)
+        if _bg is not None and not _bg.done():
+            await _bg
 
         if self._instance is None:
             raise RuntimeError("JiuWenSwarmDeepAdapter 未初始化，请先调用 create_instance()")
