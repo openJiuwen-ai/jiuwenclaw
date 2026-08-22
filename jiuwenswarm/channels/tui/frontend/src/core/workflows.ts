@@ -19,9 +19,12 @@ export interface WorkflowBudget {
   total: number | null;
   spent: number;
   remaining: number | null;
-  scope: "leader";
+  /** ``leader`` is the legacy spelling for the session-shared budget. */
+  scope: "leader" | "session" | "workflow";
   exhausted: boolean;
 }
+
+export type WorkflowBudgetExhaustedScope = "session" | "workflow";
 
 export interface WorkflowAgent {
   id: string;
@@ -75,8 +78,12 @@ export interface WorkflowRun {
   token_count?: number | null;
   duration_ms?: number | null;
   estimated_token_count?: number | null;
-  /** Leader-shared budget snapshot. This is deliberately not a per-run budget. */
+  /** Team/session-shared budget snapshot. */
   budget?: WorkflowBudget | null;
+  /** Current top-level run's budget snapshot; null means no run limit is configured. */
+  workflow_budget?: WorkflowBudget | null;
+  /** Structured terminal failure cause. Its presence suppresses legacy error-text inference. */
+  budget_exhausted_scope?: WorkflowBudgetExhaustedScope | null;
   phases: WorkflowPhase[];
   /** List summary only — full detail not yet fetched via ``action=get``. */
   detail_pending?: boolean;
@@ -119,11 +126,58 @@ export function isWorkflowBudgetLow(budget?: WorkflowBudget | null): boolean {
   );
 }
 
+export function workflowBudgetExhaustedScope(
+  workflow: Pick<
+    WorkflowRun,
+    "status" | "budget" | "workflow_budget" | "budget_exhausted_scope" | "error"
+  >,
+): WorkflowBudgetExhaustedScope | null {
+  if (Object.prototype.hasOwnProperty.call(workflow, "budget_exhausted_scope")) {
+    return workflow.budget_exhausted_scope === "session" ||
+      workflow.budget_exhausted_scope === "workflow"
+      ? workflow.budget_exhausted_scope
+      : null;
+  }
+
+  // Compatibility with the single-budget backend. Its only budget was the
+  // Team/session ledger, so the old snapshot/error signal always maps there.
+  if (workflow.status === "failed" && workflow.budget?.exhausted === true) return "session";
+  return workflow.error && /budget exhausted/i.test(workflow.error) ? "session" : null;
+}
+
+/** Whether the Team/session meter itself has reached its ceiling. */
 export function isWorkflowBudgetExhausted(
-  workflow: Pick<WorkflowRun, "status" | "budget" | "error">,
+  workflow: Pick<
+    WorkflowRun,
+    "status" | "budget" | "workflow_budget" | "budget_exhausted_scope" | "error"
+  >,
 ): boolean {
-  if (workflow.status === "failed" && workflow.budget?.exhausted === true) return true;
-  return Boolean(workflow.error && /budget exhausted/i.test(workflow.error));
+  return (
+    workflow.budget?.exhausted === true || workflowBudgetExhaustedScope(workflow) === "session"
+  );
+}
+
+/** Whether the current run meter itself has reached its ceiling. */
+export function isWorkflowRunBudgetExhausted(
+  workflow: Pick<
+    WorkflowRun,
+    "status" | "budget" | "workflow_budget" | "budget_exhausted_scope" | "error"
+  >,
+): boolean {
+  return (
+    workflow.workflow_budget?.exhausted === true ||
+    workflowBudgetExhaustedScope(workflow) === "workflow"
+  );
+}
+
+/** Whether this workflow ended because either budget layer blocked it. */
+export function isWorkflowBudgetFailure(
+  workflow: Pick<
+    WorkflowRun,
+    "status" | "budget" | "workflow_budget" | "budget_exhausted_scope" | "error"
+  >,
+): boolean {
+  return workflowBudgetExhaustedScope(workflow) !== null;
 }
 
 export function formatWorkflowBudgetInline(budget?: WorkflowBudget | null): string | null {
@@ -142,6 +196,24 @@ export function formatWorkflowBudgetDetail(budget?: WorkflowBudget | null): stri
   if (!total) return `Team budget spent ${spent} (unbounded)`;
   const percent = workflowBudgetUsedPercent(budget);
   return `Team budget ${spent}/${total}${percent === null ? "" : ` (${percent}%)`}`;
+}
+
+export function formatWorkflowRunBudgetInline(budget?: WorkflowBudget | null): string | null {
+  if (!budget) return null;
+  const spent = formatTokenCount(budget.spent);
+  if (!spent) return null;
+  const total = formatTokenCount(budget.total);
+  return total ? `run ${spent}/${total}` : `run spent ${spent} · unbounded`;
+}
+
+export function formatRunTokensDetail(budget?: WorkflowBudget | null): string | null {
+  if (!budget) return null;
+  const spent = formatTokenCount(budget.spent);
+  if (!spent) return null;
+  const total = formatTokenCount(budget.total);
+  if (!total) return `Run tokens spent ${spent} (unbounded)`;
+  const percent = workflowBudgetUsedPercent(budget);
+  return `Run tokens ${spent}/${total}${percent === null ? "" : ` (${percent}%)`}`;
 }
 
 /** Single-width “human waiting” marker (text symbol — not emoji 👤/🧑). */
@@ -442,6 +514,15 @@ function mergeWorkflowPhase(
   };
 }
 
+function preserveMonotonicBudget(
+  existing: WorkflowBudget | null | undefined,
+  incoming: WorkflowBudget | null | undefined,
+): WorkflowBudget | null | undefined {
+  if (!existing || !incoming) return incoming;
+  if (!Number.isFinite(existing.spent) || !Number.isFinite(incoming.spent)) return incoming;
+  return incoming.spent < existing.spent ? existing : incoming;
+}
+
 export function mergeWorkflowRun(
   existing: WorkflowRun | undefined,
   incoming: WorkflowRun,
@@ -491,6 +572,20 @@ export function mergeWorkflowRun(
   }
   if (Object.prototype.hasOwnProperty.call(incoming, "detail_pending")) {
     merged.detail_pending = incoming.detail_pending;
+  }
+
+  // Budget ledgers only increase within their respective lifetimes. Reject a
+  // stale snapshot without discarding newer non-budget fields from the delta.
+  // Missing keeps the existing value via object spread; explicit null still
+  // clears it according to the wire contract.
+  if (Object.prototype.hasOwnProperty.call(incoming, "budget")) {
+    merged.budget = preserveMonotonicBudget(existing?.budget, incoming.budget);
+  }
+  if (Object.prototype.hasOwnProperty.call(incoming, "workflow_budget")) {
+    merged.workflow_budget = preserveMonotonicBudget(
+      existing?.workflow_budget,
+      incoming.workflow_budget,
+    );
   }
 
   return merged;

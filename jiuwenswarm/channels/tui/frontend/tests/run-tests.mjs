@@ -27,17 +27,22 @@ import { buildAppScreenLines } from "../dist/ui/screen-layout.js";
 import { buildWelcomeLines } from "../dist/ui/welcome.js";
 import {
   canOpenSessionHistory,
+  formatRunTokensDetail,
   formatTokenCount,
   formatWorkflowBudgetDetail,
   formatWorkflowBudgetInline,
+  formatWorkflowRunBudgetInline,
   groupWorkflowAgentsByName,
+  isWorkflowBudgetFailure,
   isWorkflowBudgetExhausted,
   isWorkflowBudgetLow,
+  isWorkflowRunBudgetExhausted,
   isSessionNode,
   mergeWorkflowRun,
   shouldShowSessionTree,
   shouldShowTurnInDetailOrReply,
   sessionTurnLabelNumber,
+  workflowBudgetExhaustedScope,
   workflowBudgetUsedPercent,
 } from "../dist/core/workflows.js";
 import { CommandKind } from "../dist/core/commands/types.js";
@@ -1091,6 +1096,19 @@ assert.equal(workflowBudgetUsedPercent(lowBudget), 82);
 assert.equal(isWorkflowBudgetLow(lowBudget), true);
 assert.equal(formatWorkflowBudgetInline(lowBudget), "team 412.3k/500k");
 assert.equal(formatWorkflowBudgetDetail(lowBudget), "Team budget 412.3k/500k (82%)");
+const lowRunBudget = { ...lowBudget, scope: "workflow" };
+assert.equal(formatWorkflowRunBudgetInline(lowRunBudget), "run 412.3k/500k");
+assert.equal(formatRunTokensDetail(lowRunBudget), "Run tokens 412.3k/500k (82%)");
+assert.equal(
+  formatRunTokensDetail({
+    total: 50_000,
+    spent: 64_000,
+    remaining: 0,
+    scope: "workflow",
+    exhausted: true,
+  }),
+  "Run tokens 64k/50k (128%)",
+);
 assert.equal(
   formatWorkflowBudgetInline({
     total: null,
@@ -1111,6 +1129,71 @@ assert.equal(
 assert.equal(
   isWorkflowBudgetExhausted({ status: "stopped", error: "Token budget exhausted: 5/5" }),
   true,
+);
+assert.equal(
+  workflowBudgetExhaustedScope({
+    status: "failed",
+    budget: lowBudget,
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: "workflow",
+    error: "Workflow token budget exhausted",
+  }),
+  "workflow",
+);
+assert.equal(
+  isWorkflowBudgetExhausted({
+    status: "failed",
+    budget: lowBudget,
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: "workflow",
+    error: "Workflow token budget exhausted",
+  }),
+  false,
+);
+assert.equal(
+  isWorkflowRunBudgetExhausted({
+    status: "failed",
+    budget: lowBudget,
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: "workflow",
+  }),
+  true,
+);
+assert.equal(
+  workflowBudgetExhaustedScope({
+    status: "failed",
+    budget: { ...lowBudget, exhausted: true, remaining: 0 },
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: "session",
+  }),
+  "session",
+);
+assert.equal(
+  isWorkflowBudgetFailure({
+    status: "completed",
+    budget: lowBudget,
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: null,
+  }),
+  false,
+);
+assert.equal(
+  isWorkflowRunBudgetExhausted({
+    status: "completed",
+    budget: lowBudget,
+    workflow_budget: { ...lowRunBudget, exhausted: true, remaining: 0 },
+    budget_exhausted_scope: null,
+  }),
+  true,
+);
+assert.equal(
+  workflowBudgetExhaustedScope({
+    status: "failed",
+    budget: lowBudget,
+    budget_exhausted_scope: null,
+    error: "Token budget exhausted: stale text must not override structured null",
+  }),
+  null,
 );
 
 const mergedWorkflowUsage = mergeWorkflowRun(
@@ -1144,6 +1227,51 @@ assert.deepEqual(mergedWorkflowUsage.budget, lowBudget);
 assert.equal(mergedWorkflowUsage.token_count, 12_700);
 assert.equal(mergedWorkflowUsage.phases[0]?.phase_type, "child");
 assert.equal(mergedWorkflowUsage.phases[0]?.parent_phase, "parent");
+
+const mergedWorkflowBudgetMissing = mergeWorkflowRun(
+  {
+    id: "wf_budget_merge",
+    name: "budget merge",
+    summary: "",
+    status: "running",
+    budget: lowBudget,
+    workflow_budget: lowRunBudget,
+    budget_exhausted_scope: null,
+    phases: [],
+  },
+  {
+    id: "wf_budget_merge",
+    name: "budget merge",
+    summary: "",
+    status: "running",
+    phases: [],
+  },
+);
+assert.deepEqual(mergedWorkflowBudgetMissing.workflow_budget, lowRunBudget);
+assert.equal(mergedWorkflowBudgetMissing.budget_exhausted_scope, null);
+
+const mergedWorkflowBudgetNull = mergeWorkflowRun(mergedWorkflowBudgetMissing, {
+  id: "wf_budget_merge",
+  name: "budget merge",
+  summary: "",
+  status: "running",
+  workflow_budget: null,
+  phases: [],
+});
+assert.equal(mergedWorkflowBudgetNull.workflow_budget, null);
+
+const mergedStaleBudgets = mergeWorkflowRun(mergedWorkflowBudgetMissing, {
+  id: "wf_budget_merge",
+  name: "budget merge",
+  summary: "",
+  status: "completed",
+  budget: { ...lowBudget, spent: lowBudget.spent - 1 },
+  workflow_budget: { ...lowRunBudget, spent: lowRunBudget.spent - 1 },
+  phases: [],
+});
+assert.deepEqual(mergedStaleBudgets.budget, lowBudget);
+assert.deepEqual(mergedStaleBudgets.workflow_budget, lowRunBudget);
+assert.equal(mergedStaleBudgets.status, "completed");
 
 assert.deepEqual(
   planSwarmflowToggle({ target: "on", currentEnabled: true, mode: "team.work.normal" }),

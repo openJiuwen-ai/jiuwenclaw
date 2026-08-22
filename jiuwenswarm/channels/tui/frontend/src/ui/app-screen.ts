@@ -65,17 +65,21 @@ import {
   canOpenSessionHistory,
   isSessionNode,
   findWorkflowAgent,
+  formatRunTokensDetail,
   formatTokenCount,
   formatWorkflowBudgetDetail,
   formatWorkflowBudgetInline,
+  formatWorkflowRunBudgetInline,
   formatWorkflowAgentKindLabel,
   formatWorkflowTimingText,
   groupWorkflowAgentsByName,
   HUMAN_TURN_CACHED_ANSWER,
   HUMAN_TURN_CACHED_QUESTION,
   isHumanTurnCached,
+  isWorkflowBudgetFailure,
   isWorkflowBudgetExhausted,
   isWorkflowBudgetLow,
+  isWorkflowRunBudgetExhausted,
   pendingHumanViewHint,
   pendingInputsBannerText,
   runningWorkflowsBannerText,
@@ -84,6 +88,7 @@ import {
   workflowStatusBannerText,
   workflowStatusIcon,
   workflowBudgetUsedPercent,
+  workflowBudgetExhaustedScope,
   workflowPhaseSelectEntries,
   type WorkflowAgent,
   type WorkflowNodeType,
@@ -5659,32 +5664,66 @@ export class AppScreen implements Component, Focusable {
   }
 
   private workflowBudgetViewerContent(workflow: WorkflowRun): string {
-    const budget = workflow.budget;
-    if (!budget) return "Budget data unavailable";
+    const appendBudget = (
+      lines: string[],
+      title: string,
+      scope: string,
+      budget: NonNullable<WorkflowRun["budget"]>,
+    ): void => {
+      const spent = formatTokenCount(budget.spent) ?? "—";
+      const total = formatTokenCount(budget.total);
+      const remaining = formatTokenCount(budget.remaining);
+      const usedPercent = workflowBudgetUsedPercent(budget);
+      const low = isWorkflowBudgetLow(budget);
+      lines.push(
+        title,
+        "",
+        `Scope       ${scope}`,
+        `Spent       ${spent}`,
+        total ? `Total       ${total}` : "Limit       Unbounded",
+      );
+      if (total) {
+        const remainingLine = `Remaining   ${remaining ?? "—"}`;
+        const usedLine = `Used        ${usedPercent === null ? "—" : `${usedPercent}%`}`;
+        lines.push(low ? palette.status.warning(`⚠ ${remainingLine}`) : remainingLine);
+        lines.push(low ? palette.status.warning(`⚠ ${usedLine}`) : usedLine);
+      }
+      if (budget.exhausted) {
+        lines.push(palette.status.error("Status      Exhausted (soft ceiling)"));
+      }
+    };
 
-    const spent = formatTokenCount(budget.spent) ?? "—";
-    const total = formatTokenCount(budget.total);
-    const remaining = formatTokenCount(budget.remaining);
-    const usedPercent = workflowBudgetUsedPercent(budget);
-    const low = isWorkflowBudgetLow(budget);
-    const lines = [
-      "Team budget",
-      "",
-      "Scope       Leader shared",
-      `Spent       ${spent}`,
-      total ? `Total       ${total}` : "Limit       Unbounded",
-    ];
-    if (total) {
-      const remainingLine = `Remaining   ${remaining ?? "—"}`;
-      const usedLine = `Used        ${usedPercent === null ? "—" : `${usedPercent}%`}`;
-      lines.push(low ? palette.status.warning(`⚠ ${remainingLine}`) : remainingLine);
-      lines.push(low ? palette.status.warning(`⚠ ${usedLine}`) : usedLine);
+    const lines: string[] = [];
+    if (workflow.workflow_budget) {
+      appendBudget(lines, "Run budget", "Current run", workflow.workflow_budget);
+    } else {
+      lines.push(
+        "Run tokens",
+        "",
+        "Scope       Current run",
+        `Spent       ${formatTokenCount(workflow.token_count) ?? "—"}`,
+        "Limit       Not configured",
+      );
     }
-    if (isWorkflowBudgetExhausted(workflow)) {
+    lines.push("", "────────────────────────", "");
+    if (workflow.budget) {
+      appendBudget(lines, "Team budget", "Team session shared", workflow.budget);
+    } else {
+      lines.push("Team budget", "", "Budget data unavailable");
+    }
+
+    const exhaustedScope = workflowBudgetExhaustedScope(workflow);
+    if (exhaustedScope === "workflow") {
+      lines.push(
+        "",
+        palette.status.error("Run budget exhausted"),
+        palette.status.error("Reduce workflow token usage, then start a new run."),
+      );
+    } else if (exhaustedScope === "session") {
       lines.push(
         "",
         palette.status.error("Team budget exhausted"),
-        palette.status.error("This workflow cannot be resumed."),
+        palette.status.error("Increase the Team budget, then use /new to start a new session."),
       );
     }
     return lines.join("\n");
@@ -5695,7 +5734,10 @@ export class AppScreen implements Component, Focusable {
   ): Promise<void> {
     if (!workflowId) return;
     let workflow = this.state.getSnapshot().workflowRuns.find((item) => item.id === workflowId);
-    if (workflow && !workflow.budget) {
+    if (
+      workflow &&
+      (workflow.budget === undefined || workflow.workflow_budget === undefined)
+    ) {
       try {
         await this.state.loadWorkflowDetail(workflowId);
       } catch {
@@ -5706,7 +5748,7 @@ export class AppScreen implements Component, Focusable {
     if (!workflow) return;
     this.enterFileViewer(
       this.workflowBudgetViewerContent(workflow),
-      `Team budget - ${workflow.name}`,
+      `Budgets - ${workflow.name}`,
       workflow.name,
     );
   }
@@ -5717,13 +5759,14 @@ export class AppScreen implements Component, Focusable {
     const workflow = this.state
       .getSnapshot()
       .workflowRuns.find((item) => item.id === state.workflowId);
-    if (!workflow || !isWorkflowBudgetExhausted(workflow)) return;
+    if (!workflow || !isWorkflowBudgetFailure(workflow)) return;
     const key = `${this.workflowUiSessionId}:${workflow.id}`;
     if (this.shownBudgetExhaustedWorkflowKeys.has(key)) return;
     this.shownBudgetExhaustedWorkflowKeys.add(key);
+    const scope = workflowBudgetExhaustedScope(workflow);
     this.enterFileViewer(
       this.workflowBudgetViewerContent(workflow),
-      `Team budget exhausted - ${workflow.name}`,
+      `${scope === "workflow" ? "Run" : "Team"} budget exhausted - ${workflow.name}`,
       workflow.name,
     );
   }
@@ -5984,9 +6027,20 @@ export class AppScreen implements Component, Focusable {
       const completed = workflow.completed_agent_count ?? 0;
       const progress = workflow.status === "running" ? `${completed}/${total}` : `${total}`;
       const tokens = formatTokenCount(workflow.token_count);
+      const runBudget = formatWorkflowRunBudgetInline(workflow.workflow_budget);
       const budget = formatWorkflowBudgetInline(workflow.budget);
       const description = [`${progress} agents`];
-      if (tokens) description.push(`${tokens} tok`);
+      if (runBudget) {
+        description.push(
+          isWorkflowRunBudgetExhausted(workflow)
+            ? palette.status.error(runBudget)
+            : isWorkflowBudgetLow(workflow.workflow_budget)
+              ? palette.status.warning(runBudget)
+              : runBudget,
+        );
+      } else if (tokens) {
+        description.push(`${tokens} tok`);
+      }
       if (budget) {
         description.push(
           isWorkflowBudgetExhausted(workflow)
@@ -7008,10 +7062,21 @@ export class AppScreen implements Component, Focusable {
         : "";
     const workflowSummary = workflow.summary.trim();
     const budgetKey = this.swarmActionKeyLabel("swarm:budget");
-    const runTokens = formatTokenCount(workflow.token_count);
+    const fallbackRunTokens = formatTokenCount(workflow.token_count);
+    const runTokensDetail =
+      formatRunTokensDetail(workflow.workflow_budget) ??
+      (fallbackRunTokens !== null ? `Run tokens ${fallbackRunTokens}` : null);
     const budgetDetail = formatWorkflowBudgetDetail(workflow.budget);
     const usageParts: string[] = [];
-    if (runTokens) usageParts.push(`Run tokens ${runTokens}`);
+    if (runTokensDetail) {
+      usageParts.push(
+        isWorkflowRunBudgetExhausted(workflow)
+          ? palette.status.error(runTokensDetail)
+          : isWorkflowBudgetLow(workflow.workflow_budget)
+            ? palette.status.warning(runTokensDetail)
+            : runTokensDetail,
+      );
+    }
     if (budgetDetail) {
       usageParts.push(
         isWorkflowBudgetExhausted(workflow)
@@ -7053,12 +7118,25 @@ export class AppScreen implements Component, Focusable {
             padToWidth(palette.status.error(line), width),
           )
         : []),
-      ...(isWorkflowBudgetExhausted(workflow)
+      ...(workflowBudgetExhaustedScope(workflow) === "workflow"
         ? [
-            padToWidth(palette.status.error("Team budget exhausted"), width),
-            padToWidth(palette.status.error("This workflow cannot be resumed."), width),
+            padToWidth(palette.status.error("Run budget exhausted"), width),
+            padToWidth(
+              palette.status.error("Reduce workflow token usage, then start a new run."),
+              width,
+            ),
           ]
-        : []),
+        : workflowBudgetExhaustedScope(workflow) === "session"
+          ? [
+              padToWidth(palette.status.error("Team budget exhausted"), width),
+              padToWidth(
+                palette.status.error(
+                  "Increase the Team budget, then use /new to start a new session.",
+                ),
+                width,
+              ),
+            ]
+          : []),
       ...(statusBanner
         ? [padToWidth(workflowStatusTone(workflow.status)(statusBanner), width)]
         : []),
