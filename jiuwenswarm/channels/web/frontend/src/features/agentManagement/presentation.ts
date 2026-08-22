@@ -1,23 +1,14 @@
 import type { AgentCatalogItem } from './types';
 
-// The low-fidelity marketplace exports use these illustrated avatars. Keep the
-// mapping at the presentation seam so the DTO/canonical model stays faithful
-// to the backend contract. A real avatar returned by show/list always wins.
-const FIXTURE_AVATARS: Record<string, string> = {
-  'workplace-slim-coach': '/agent-management/avatar-yellow.svg',
-  'content-creator': '/agent-management/avatar-green.svg',
-  'python-code-reviewer': '/agent-management/avatar-pink.svg',
-  'market-research-analyst': '/agent-management/avatar-cyan.svg',
-  'legal-assistant': '/agent-management/avatar-red.svg',
-  'meeting-assistant': '/agent-management/avatar-orange.svg',
-  'business-assistant': '/agent-management/avatar-yellow.svg',
-  'ppt-expert': '/agent-management/avatar-purple.svg',
-  'research-assistant': '/agent-management/avatar-pink.svg',
-  'document-expert': '/agent-management/avatar-cyan.svg',
-  'architecture-expert': '/agent-management/avatar-cyan.svg',
-  'operations-expert': '/agent-management/avatar-cyan.svg',
+// The current backend catalog does not provide avatar URLs for built-ins.
+// Keep the high-fidelity illustrated avatars at the presentation seam until
+// the backend supplies an authoritative asset for each template.
+const DESIGN_AVATARS: Record<string, string> = {
+  'health-life-advisor': '/agent-management/avatar-cyan.svg',
+  'personal-finance-expert': '/agent-management/avatar-pink.svg',
+  'system-architect': '/agent-management/avatar-yellow.svg',
 };
 
 export function getAgentAvatarUrl(item: Pick<AgentCatalogItem, 'id' | 'avatarUrl'>): string | null {
-  return item.avatarUrl || FIXTURE_AVATARS[item.id] || null;
+  return item.avatarUrl || DESIGN_AVATARS[item.id] || null;
 }

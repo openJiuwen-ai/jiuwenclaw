@@ -1,3 +1,5 @@
+import type { AgentConnectionState } from './types';
+
 export type RawLocalizedText = {
   zh?: string;
   en?: string;
@@ -10,6 +12,7 @@ export type RawAgentTemplateListItem = {
   category?: string;
   source?: string;
   installed?: boolean;
+  connection_state?: AgentConnectionState;
   enabled?: boolean;
   updateAvailable?: boolean;
   tags?: RawAgentTag[];
@@ -36,6 +39,7 @@ export type RawAgentTemplateDetail = RawAgentTemplateListItem & {
   rails?: RawAgentCapability[];
   mcps?: RawAgentCapability[];
   quickInputs?: RawLocalizedText[];
+  pending_connectors?: string[];
 };
 
 export type RawAgentListPayload = {

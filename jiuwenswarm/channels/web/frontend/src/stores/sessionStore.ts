@@ -25,6 +25,46 @@ import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode'
 
 const MODE_STORAGE_KEY = 'jiuwenclaw_mode';
 const MODEL_STORAGE_KEY = 'jiuwenclaw_selected_model';
+const AGENT_SELECTION_STORAGE_KEY = 'jiuwenclaw_agent_selection';
+
+function loadAgentSelectionIntent(sessionId: string): AgentSelectionIntent {
+  if (typeof localStorage === 'undefined') return { kind: 'keep' };
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    if (!stored) return { kind: 'keep' };
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'keep' };
+    const selectedId = (parsed as Record<string, unknown>)[sessionId];
+    return typeof selectedId === 'string' && selectedId.trim()
+      ? { kind: 'select', id: selectedId }
+      : { kind: 'keep' };
+  } catch {
+    return { kind: 'keep' };
+  }
+}
+
+function saveAgentSelectionIntent(sessionId: string, intent: AgentSelectionIntent) {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const stored = localStorage.getItem(AGENT_SELECTION_STORAGE_KEY);
+    const parsed: unknown = stored ? JSON.parse(stored) : {};
+    const selections = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : {};
+    if (intent.kind === 'select' && intent.id.trim()) {
+      selections[sessionId] = intent.id;
+    } else {
+      delete selections[sessionId];
+    }
+    if (Object.keys(selections).length === 0) {
+      localStorage.removeItem(AGENT_SELECTION_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AGENT_SELECTION_STORAGE_KEY, JSON.stringify(selections));
+    }
+  } catch {
+    // Browser storage can be unavailable in private/restricted contexts.
+  }
+}
 
 function loadModeFromStorage(): AgentMode {
   if (typeof localStorage === 'undefined') return DEFAULT_MODE;
@@ -347,7 +387,7 @@ export interface SessionRuntime {
   enabledMcps: string[];
 }
 
-function createEmptyRuntime(): SessionRuntime {
+function createEmptyRuntime(sessionId?: string): SessionRuntime {
   return {
     mode: loadModeFromStorage(),
     selectedModelName: (() => {
@@ -370,7 +410,7 @@ function createEmptyRuntime(): SessionRuntime {
     teamHistoryMessages: [],
     selectedSkills: [],
     metadata: undefined,
-    agentSelectionIntent: { kind: 'keep' },
+    agentSelectionIntent: sessionId ? loadAgentSelectionIntent(sessionId) : { kind: 'keep' },
     enabledPlugins: [],
     enabledMcps: [],
   };
@@ -488,7 +528,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   ensureRuntime: (sessionId) => {
     const existing = get().runtimes[sessionId];
     if (existing) return existing;
-    const runtime = createEmptyRuntime();
+    const runtime = createEmptyRuntime(sessionId);
     set((state) => ({
       runtimes: { ...state.runtimes, [sessionId]: runtime },
     }));
@@ -538,7 +578,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
       const sessionId = normalizedSession.session_id;
       const existingRuntime = state.runtimes[sessionId];
-      const baseRuntime = existingRuntime || createEmptyRuntime();
+      const baseRuntime = existingRuntime || createEmptyRuntime(sessionId);
       const nextRuntime: SessionRuntime = {
         ...baseRuntime,
         mode: normalizedSession.mode || baseRuntime.mode,
@@ -1003,8 +1043,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setAgentSelectionIntent: (sessionId, intent) => {
+    saveAgentSelectionIntent(sessionId, intent);
     set((state) => {
-      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime(sessionId);
       return {
         runtimes: {
           ...state.runtimes,
@@ -1018,6 +1059,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime || runtime.agentSelectionIntent.kind === 'keep') return state;
+      // A selected Agent is a session-level attachment, not a one-shot input hint.
+      // Keep the visible selection after a successful send; only a clear intent is
+      // consumed after the server has applied the detach request.
+      if (runtime.agentSelectionIntent.kind === 'select') return state;
       return {
         runtimes: {
           ...state.runtimes,

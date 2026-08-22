@@ -1,4 +1,4 @@
-import type { AgentCapability, AgentCatalogItem, AgentDetail, AgentFileContent, AgentSource, DefinitionFileEntry, SkillOption } from './types';
+import type { AgentCapability, AgentCatalogItem, AgentConnectionState, AgentDetail, AgentFileContent, AgentSource, DefinitionFileEntry, SkillOption } from './types';
 import type {
   RawAgentCapability,
   RawAgentFileEntry,
@@ -24,6 +24,10 @@ export function resolveLocalizedText(value: string | RawLocalizedText | undefine
 
 export function normalizeAgentSource(source: string | undefined): AgentSource {
   return source === 'built-in' || source === 'builtin-in' || source === 'builtin' ? 'builtin' : 'local';
+}
+
+export function normalizeAgentConnectionState(state: string | undefined): AgentConnectionState {
+  return state === 'connected' || state === 'connecting' ? state : 'disconnected';
 }
 
 export function isPreviewableFile(relativePath: string): boolean {
@@ -59,6 +63,7 @@ export function normalizeAgentTemplateListItem(raw: RawAgentTemplateListItem, lo
     category: raw.category || '',
     source: normalizeAgentSource(raw.source),
     installed: raw.installed === true,
+    connectionState: normalizeAgentConnectionState(raw.connection_state),
     ...(typeof raw.enabled === 'boolean' ? { enabled: raw.enabled } : {}),
     ...(typeof raw.updateAvailable === 'boolean' ? { updateAvailable: raw.updateAvailable } : {}),
     tags: normalizeTags(raw.tags, locale),
@@ -77,6 +82,7 @@ export function normalizeAgentTemplateDetail(raw: RawAgentTemplateDetail, locale
     rails: (raw.rails || []).map(item => normalizeCapability(item, locale)),
     mcps: (raw.mcps || []).map(item => normalizeCapability(item, locale)),
     suggestedPrompts: (raw.quickInputs || []).map(item => resolveLocalizedText(item, locale)).filter(item => item.length > 0),
+    pendingConnectors: Array.isArray(raw.pending_connectors) ? raw.pending_connectors.filter(item => typeof item === 'string' && item.length > 0) : [],
   };
 }
 

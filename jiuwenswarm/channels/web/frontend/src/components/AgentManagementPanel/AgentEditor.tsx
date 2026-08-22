@@ -1,12 +1,16 @@
-import { ArrowLeft, Check, Plus, Upload } from 'lucide-react';
-import { useMemo, useState, type FormEvent } from 'react';
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Minus, Plus, Search, Trash2, Upload } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { AgentDraft, RequestStatus, SkillOption } from '../../features/agentManagement';
+import ReactMarkdown from 'react-markdown';
+import type { AgentDraft, McpOption, RequestStatus, SkillOption } from '../../features/agentManagement';
 
 type AgentEditorProps = {
   draft: AgentDraft;
   skillOptions: SkillOption[];
   skillsStatus: RequestStatus;
+  mcpOptions: McpOption[];
+  mcpStatus: RequestStatus;
   saving: boolean;
   error: string | null;
   onChange: (draft: AgentDraft) => void;
@@ -16,40 +20,99 @@ type AgentEditorProps = {
 };
 
 const TAG_OPTIONS = [
-  { id: 'code-delivery', labelKey: 'agentManagement.form.tagOptions.codeDelivery' },
-  { id: 'code-review', labelKey: 'agentManagement.form.tagOptions.codeReview' },
-  { id: 'bug-fix', labelKey: 'agentManagement.form.tagOptions.bugFix' },
+  { id: 'product-development', labelKey: 'agentManagement.categories.ProductDevelopment' },
+  { id: 'marketing', labelKey: 'agentManagement.categories.Marketing' },
+  { id: 'efficiency', labelKey: 'agentManagement.categories.Efficiency' },
+  { id: 'data-analysis', labelKey: 'agentManagement.categories.DataAnalysis' },
+  { id: 'content-creation', labelKey: 'agentManagement.categories.ContentCreation' },
+  { id: 'safety-compliance', labelKey: 'agentManagement.categories.SafetyCompliance' },
+  { id: 'communication', labelKey: 'agentManagement.categories.Communication' },
 ] as const;
 
-export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, onChange, onReloadSkills, onCancel, onSave }: AgentEditorProps) {
+export function AgentEditor({
+  draft,
+  skillOptions,
+  skillsStatus,
+  mcpOptions,
+  mcpStatus,
+  saving,
+  error,
+  onChange,
+  onReloadSkills,
+  onCancel,
+  onSave,
+}: AgentEditorProps) {
   const { t } = useTranslation();
   const [touched, setTouched] = useState(false);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(true);
+  const [skillsOpen, setSkillsOpen] = useState(true);
+  const [promptsOpen, setPromptsOpen] = useState(true);
+  const [personaEditing, setPersonaEditing] = useState(false);
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false);
+  const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
+  const [skillQuery, setSkillQuery] = useState('');
+  const [mcpQuery, setMcpQuery] = useState('');
+  const [mcpTab, setMcpTab] = useState<'mine' | 'market'>('market');
+  const [skillDraft, setSkillDraft] = useState<string[]>(draft.skillRefs);
+  const [mcpDraft, setMcpDraft] = useState<string[]>(draft.mcpRefs);
+  const tagPickerRef = useRef<HTMLDivElement>(null);
+  const personaSurfaceRef = useRef<HTMLDivElement>(null);
+
   const errors = useMemo(
     () => ({
-      id: !draft.id.trim()
-        ? t('agentManagement.form.errors.idRequired')
-        : !/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,49}$/.test(draft.id)
-          ? t('agentManagement.form.errors.idInvalid')
-          : '',
       name: !draft.name.trim() ? t('agentManagement.form.errors.nameRequired') : '',
       description: !draft.description.trim() ? t('agentManagement.form.errors.descriptionRequired') : '',
       persona: !draft.persona.trim() ? t('agentManagement.form.errors.personaRequired') : '',
     }),
-    [draft, t],
+    [draft.description, draft.name, draft.persona, t],
   );
   const hasErrors = Object.values(errors).some(Boolean);
+  const selectedSkills = skillOptions.filter(skill => draft.skillRefs.includes(skill.id));
+  const selectedMcps = mcpOptions.filter(mcp => draft.mcpRefs.includes(mcp.id));
+  const filteredSkills = skillOptions.filter(skill => `${skill.name} ${skill.description}`.toLocaleLowerCase().includes(skillQuery.trim().toLocaleLowerCase()));
+  const filteredMcps = mcpOptions.filter(mcp => {
+    const matchesTab = mcpTab === 'mine' ? mcp.source === 'customize' : mcp.source === 'built_in';
+    const matchesQuery = `${mcp.name} ${mcp.description}`.toLocaleLowerCase().includes(mcpQuery.trim().toLocaleLowerCase());
+    return matchesTab && matchesQuery;
+  });
+
+  useEffect(() => {
+    if (!tagMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!tagPickerRef.current?.contains(event.target as Node)) setTagMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [tagMenuOpen]);
+
+  useEffect(() => {
+    if (!personaEditing) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!personaSurfaceRef.current?.contains(event.target as Node)) setPersonaEditing(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, [personaEditing]);
 
   const update = (patch: Partial<AgentDraft>) => onChange({ ...draft, ...patch });
-
-  const toggleSkill = (skillId: string) => {
-    const skillRefs = draft.skillRefs.includes(skillId) ? draft.skillRefs.filter(item => item !== skillId) : [...draft.skillRefs, skillId];
-    update({ skillRefs });
-  };
 
   const toggleTag = (tagId: string) => {
     const tagIds = draft.tagIds.includes(tagId) ? draft.tagIds.filter(item => item !== tagId) : [...draft.tagIds, tagId];
     update({ tagIds });
+  };
+
+  const openSkillDialog = () => {
+    setSkillDraft(draft.skillRefs);
+    setSkillQuery('');
+    setSkillDialogOpen(true);
+  };
+
+  const openMcpDialog = () => {
+    setMcpDraft(draft.mcpRefs);
+    setMcpQuery('');
+    setMcpTab('market');
+    setMcpDialogOpen(true);
   };
 
   const updatePrompt = (index: number, value: string) => {
@@ -57,7 +120,10 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
     update({ suggestedPrompts });
   };
 
-  const addPrompt = () => update({ suggestedPrompts: [...draft.suggestedPrompts, ''] });
+  const addPrompt = () => {
+    if (draft.suggestedPrompts.some(prompt => prompt.trim().length === 0)) return;
+    update({ suggestedPrompts: [...draft.suggestedPrompts, ''] });
+  };
 
   const removePrompt = (index: number) => update({ suggestedPrompts: draft.suggestedPrompts.filter((_, promptIndex) => promptIndex !== index) });
 
@@ -80,12 +146,6 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
           <span className="is-active" role="tab" aria-selected="true">
             {t('agentManagement.form.createAgentTab')}
           </span>
-          <span className="is-disabled" role="tab" aria-selected="false" aria-disabled="true">
-            {t('agentManagement.form.createTeamTab')}
-          </span>
-          <span className="is-disabled" role="tab" aria-selected="false" aria-disabled="true">
-            {t('agentManagement.tabs.mine')}
-          </span>
         </div>
       </header>
 
@@ -95,22 +155,16 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
           <span className="agent-management-avatar-placeholder" aria-hidden="true">
             <img src="/agent-management/avatar-yellow.svg" alt="" />
           </span>
-          <span className="agent-management-avatar-placeholder__upload" aria-hidden="true">
+          <span
+            className="agent-management-avatar-placeholder__upload agent-management-avatar-placeholder__upload--unavailable"
+            aria-disabled="true"
+            title={t('agentManagement.form.avatarUnavailable')}
+          >
             <Upload size={14} aria-hidden="true" />
           </span>
           <p>{t('agentManagement.form.avatarHint')}</p>
         </div>
         <div className="agent-management-form-grid">
-          <label className="agent-management-form-field--wide agent-management-form-field--runtime-id">
-            <span>{t('agentManagement.form.idLabel')}</span>
-            <input
-              value={draft.id}
-              onChange={event => update({ id: event.target.value })}
-              placeholder={t('agentManagement.form.idPlaceholder')}
-              aria-invalid={Boolean(touched && errors.id)}
-            />
-            {touched && errors.id ? <small className="agent-management-field-error">{errors.id}</small> : null}
-          </label>
           <label className="agent-management-form-field--wide">
             <span>{t('agentManagement.form.nameLabel')}</span>
             <input
@@ -134,7 +188,7 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
             <small className="agent-management-field-count">{draft.description.length}/226</small>
             {touched && errors.description ? <small className="agent-management-field-error">{errors.description}</small> : null}
           </label>
-          <div className="agent-management-form-field--wide agent-management-form-field--tag-picker">
+          <div className="agent-management-form-field--wide agent-management-form-field--tag-picker" ref={tagPickerRef}>
             <span>{t('agentManagement.form.tagLabel')}</span>
             <div className="agent-management-tag-picker">
               <button
@@ -149,19 +203,26 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
                     draft.tagIds.map(tagId => {
                       const option = TAG_OPTIONS.find(item => item.id === tagId);
                       return option ? (
-                        <span key={tagId} className="agent-management-tag agent-management-tag--selected">
+                        <button
+                          key={tagId}
+                          type="button"
+                          className="agent-management-tag agent-management-tag--selected"
+                          aria-label={t('agentManagement.form.removeTag', { name: t(option.labelKey) })}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleTag(tagId);
+                          }}
+                        >
                           {t(option.labelKey)}
                           <span aria-hidden="true">×</span>
-                        </span>
+                        </button>
                       ) : null;
                     })
                   ) : (
                     <span className="agent-management-form-placeholder">{t('agentManagement.form.tagPlaceholder')}</span>
                   )}
                 </span>
-                <span className="agent-management-tag-picker__chevron" aria-hidden="true">
-                  ⌄
-                </span>
+                <span className="agent-management-tag-picker__chevron" aria-hidden="true">⌄</span>
               </button>
               {tagMenuOpen ? (
                 <div className="agent-management-tag-picker__options" role="listbox" aria-label={t('agentManagement.form.tagLabel')}>
@@ -176,7 +237,8 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
                         className={selected ? 'is-selected' : ''}
                         onClick={() => toggleTag(option.id)}
                       >
-                        {t(option.labelKey)}
+                        <span>{t(option.labelKey)}</span>
+                        {selected ? <Check size={14} aria-hidden="true" /> : null}
                       </button>
                     );
                   })}
@@ -184,105 +246,183 @@ export function AgentEditor({ draft, skillOptions, skillsStatus, saving, error, 
               ) : null}
             </div>
           </div>
-          <label className="agent-management-form-field--wide">
+          <div className="agent-management-form-field--wide agent-management-persona-field">
             <span>{t('agentManagement.form.personaLabel')}</span>
-            <textarea
-              className="agent-management-persona"
-              rows={12}
-              value={draft.persona}
-              onChange={event => update({ persona: event.target.value })}
-              placeholder={t('agentManagement.form.personaPlaceholder')}
-              aria-invalid={Boolean(touched && errors.persona)}
-            />
+            <div className="agent-management-persona-surface" ref={personaSurfaceRef}>
+              {personaEditing ? (
+              <textarea
+                className="agent-management-persona"
+                rows={12}
+                value={draft.persona}
+                onChange={event => update({ persona: event.target.value })}
+                placeholder={t('agentManagement.form.personaPlaceholder')}
+                aria-invalid={Boolean(touched && errors.persona)}
+                aria-label={t('agentManagement.form.personaLabel')}
+                onBlur={() => setPersonaEditing(false)}
+              />
+              ) : (
+                <div
+                  className="agent-management-persona-rendered"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t('agentManagement.form.personaPreview')}
+                  onClick={() => setPersonaEditing(true)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setPersonaEditing(true);
+                    }
+                  }}
+                >
+                  {draft.persona.trim() ? <div className="agent-management-markdown"><ReactMarkdown>{draft.persona}</ReactMarkdown></div> : <span className="agent-management-persona-placeholder">{t('agentManagement.form.personaPlaceholder')}</span>}
+                </div>
+              )}
+            </div>
             {touched && errors.persona ? <small className="agent-management-field-error">{errors.persona}</small> : null}
-          </label>
+          </div>
         </div>
+      </section>
+
+      <section className="agent-management-form-section agent-management-form-section--mcp">
+        <div className="agent-management-form-section__header">
+          <div className="agent-management-form-section__heading">
+            <button type="button" className="agent-management-section-toggle" aria-expanded={mcpOpen} aria-label={t('agentManagement.form.mcpToggle')} onClick={() => setMcpOpen(open => !open)}>
+              {mcpOpen ? <ChevronUp size={18} aria-hidden="true" /> : <ChevronDown size={18} aria-hidden="true" />}
+            </button>
+            <div><h2>{t('agentManagement.form.mcpLabel')}</h2><p>{t('agentManagement.form.mcpHint')}</p></div>
+          </div>
+          <button type="button" className="agent-management-inline-action" onClick={openMcpDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addMcp')}</button>
+        </div>
+        {mcpOpen ? (
+          selectedMcps.length > 0 ? (
+            <div className="agent-management-selected-capabilities">
+              {selectedMcps.map(mcp => (
+                <article className="agent-management-capability-card" key={mcp.id}>
+                  <span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span>
+                  <span><strong>{mcp.name}</strong><small>{mcp.description}</small></span>
+                  <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeMcp', { name: mcp.name })} onClick={() => update({ mcpRefs: draft.mcpRefs.filter(id => id !== mcp.id) })}>
+                    <Trash2 size={16} aria-hidden="true" />
+                  </button>
+                </article>
+              ))}
+            </div>
+          ) : mcpStatus === 'success' ? <p className="agent-management-form-muted agent-management-form-empty-state">{t('agentManagement.form.mcpEmpty')}</p> : null
+        ) : null}
       </section>
 
       <section className="agent-management-form-section agent-management-form-section--skills">
         <div className="agent-management-form-section__header">
-          <div>
-            <h2>{t('agentManagement.form.skillsLabel')}</h2>
-            <p>{t('agentManagement.form.skillsHint')}</p>
-          </div>
-          <button type="button" className="agent-management-inline-action" onClick={onReloadSkills}>
-            <Plus size={14} aria-hidden="true" />
-            {t('agentManagement.form.refreshSkills')}
-          </button>
-        </div>
-        {skillsStatus === 'loading' ? <p className="agent-management-form-muted">{t('common.loading')}</p> : null}
-        {skillsStatus === 'error' ? (
-          <div className="agent-management-form-error">
-            <span>{t('agentManagement.form.skillsError')}</span>
-            <button type="button" onClick={onReloadSkills}>
-              {t('common.retry')}
+          <div className="agent-management-form-section__heading">
+            <button type="button" className="agent-management-section-toggle" aria-expanded={skillsOpen} aria-label={t('agentManagement.form.skillsToggle')} onClick={() => setSkillsOpen(open => !open)}>
+              {skillsOpen ? <ChevronUp size={18} aria-hidden="true" /> : <ChevronDown size={18} aria-hidden="true" />}
             </button>
+            <div><h2>{t('agentManagement.form.skillsLabel')}</h2><p>{t('agentManagement.form.skillsHint')}</p></div>
           </div>
-        ) : null}
-        {skillsStatus === 'success' && skillOptions.length === 0 ? (
-          <p className="agent-management-form-muted">{t('agentManagement.form.skillsEmpty')}</p>
-        ) : null}
-        {skillsStatus === 'success' ? (
-          <div className="agent-management-skill-options">
-            {skillOptions.map(skill => {
-              const checked = draft.skillRefs.includes(skill.id);
-              return (
-                <button
-                  key={skill.id}
-                  type="button"
-                  className={`agent-management-skill-option${checked ? ' is-selected' : ''}`}
-                  onClick={() => toggleSkill(skill.id)}
-                  aria-pressed={checked}
-                >
-                  <span className="agent-management-skill-option__icon">
-                    {checked ? <Check size={14} aria-hidden="true" /> : <Plus size={14} aria-hidden="true" />}
-                  </span>
-                  <span>
-                    <strong>{skill.name}</strong>
-                    <small>{skill.description}</small>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <button type="button" className="agent-management-inline-action" onClick={openSkillDialog}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addSkill')}</button>
+        </div>
+        {skillsOpen ? (
+          <>
+            {skillsStatus === 'loading' ? <p className="agent-management-form-muted">{t('common.loading')}</p> : null}
+            {skillsStatus === 'error' ? <div className="agent-management-form-error"><span>{t('agentManagement.form.skillsError')}</span><button type="button" onClick={onReloadSkills}>{t('common.retry')}</button></div> : null}
+            {skillsStatus === 'success' && selectedSkills.length === 0 ? <p className="agent-management-form-muted agent-management-form-empty-state">{t('agentManagement.form.skillsEmpty')}</p> : null}
+            {selectedSkills.length > 0 ? (
+              <div className="agent-management-selected-capabilities">
+                {selectedSkills.map(skill => (
+                  <article className="agent-management-capability-card" key={skill.id}>
+                    <span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span>
+                    <span><strong>{skill.name}</strong><small>{skill.description}</small></span>
+                    <button type="button" className="agent-management-capability-card__remove" aria-label={t('agentManagement.form.removeSkill', { name: skill.name })} onClick={() => update({ skillRefs: draft.skillRefs.filter(id => id !== skill.id) })}><Trash2 size={16} aria-hidden="true" /></button>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </>
         ) : null}
       </section>
 
       <section className="agent-management-form-section agent-management-form-section--prompts">
         <div className="agent-management-form-section__header">
-          <div>
+          <div className="agent-management-form-section__heading">
+            <button type="button" className="agent-management-section-toggle" aria-expanded={promptsOpen} aria-label={t('agentManagement.form.promptsToggle')} onClick={() => setPromptsOpen(open => !open)}>
+              {promptsOpen ? <ChevronUp size={18} aria-hidden="true" /> : <ChevronDown size={18} aria-hidden="true" />}
+            </button>
             <h2>{t('agentManagement.form.promptsLabel')}</h2>
           </div>
-          <button type="button" className="agent-management-inline-action" onClick={addPrompt}>
-            <Plus size={14} aria-hidden="true" />
-            {t('agentManagement.form.addPrompt')}
-          </button>
+          <button type="button" className="agent-management-inline-action" onClick={addPrompt}><Plus size={14} aria-hidden="true" />{t('agentManagement.form.addPrompt')}</button>
         </div>
-        <div className="agent-management-prompt-editor-list">
-          {draft.suggestedPrompts.map((prompt, index) => (
-            <div className="agent-management-prompt-editor" key={index}>
-              <input value={prompt} onChange={event => updatePrompt(index, event.target.value)} placeholder={t('agentManagement.form.promptPlaceholder')} />
-              <button type="button" onClick={() => removePrompt(index)} aria-label={t('agentManagement.form.removePrompt')}>
-                ×
-              </button>
+        {promptsOpen ? (
+          draft.suggestedPrompts.length > 0 ? (
+            <div className="agent-management-prompt-editor-list">
+              {draft.suggestedPrompts.map((prompt, index) => (
+                <div className="agent-management-prompt-editor" key={index}>
+                  <input value={prompt} onChange={event => updatePrompt(index, event.target.value)} placeholder={t('agentManagement.form.promptPlaceholder')} />
+                  <button type="button" onClick={() => removePrompt(index)} aria-label={t('agentManagement.form.removePrompt')}><Minus size={16} aria-hidden="true" /></button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          ) : <p className="agent-management-form-muted agent-management-form-empty-state">{t('agentManagement.form.promptsEmpty')}</p>
+        ) : null}
       </section>
 
-      {error ? (
-        <div className="agent-management-form-error agent-management-form-error--submit" role="alert">
-          {error}
-        </div>
-      ) : null}
+      {error ? <div className="agent-management-form-error agent-management-form-error--submit" role="alert">{error}</div> : null}
       <footer className="agent-management-editor__footer">
-        <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onCancel} disabled={saving}>
-          {t('common.cancel')}
-        </button>
-        <button type="submit" className="agent-management-button agent-management-button--primary" disabled={saving}>
-          {saving ? t('common.saving') : t('common.confirm')}
-        </button>
+        <button type="button" className="agent-management-button agent-management-button--secondary" onClick={onCancel} disabled={saving}>{t('common.cancel')}</button>
+        <button type="submit" className="agent-management-button agent-management-button--primary" disabled={saving}>{saving ? t('common.saving') : t('common.confirm')}</button>
       </footer>
+
+      {skillDialogOpen ? createPortal(
+        <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSkillDialogOpen(false); }}>
+          <section className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-skill-dialog-title">
+            <header><h2 id="agent-skill-dialog-title">{t('agentManagement.form.selectSkill')}</h2><button type="button" onClick={() => setSkillDialogOpen(false)} aria-label={t('common.cancel')}>×</button></header>
+            <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectSkill')}>
+              <button type="button" className="agent-management-selection-tab is-active" role="tab" aria-selected="true">{t('agentManagement.form.mySkills')}</button>
+              <span className="agent-management-selection-tab" role="tab" aria-selected="false" aria-disabled="true">{t('agentManagement.form.skillMarket')}</span>
+            </div>
+            <label className="agent-management-selection-search">
+              <Search size={16} aria-hidden="true" />
+              <input type="search" value={skillQuery} onChange={event => setSkillQuery(event.target.value)} placeholder={t('agentManagement.form.selectionSearchPlaceholder')} />
+            </label>
+            <div className="agent-management-selection-dialog__body">
+              {skillsStatus === 'loading' ? <p className="agent-management-form-muted">{t('common.loading')}</p> : null}
+              {skillsStatus === 'error' ? <div className="agent-management-form-error"><span>{t('agentManagement.form.skillsError')}</span><button type="button" onClick={onReloadSkills}>{t('common.retry')}</button></div> : null}
+              {skillsStatus === 'success' && filteredSkills.length === 0 ? <p className="agent-management-form-muted">{t('agentManagement.form.skillsEmpty')}</p> : null}
+              {skillsStatus === 'success' && filteredSkills.length > 0 ? <div className="agent-management-selection-grid">{filteredSkills.map(skill => {
+                const selected = skillDraft.includes(skill.id);
+                return <button key={skill.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setSkillDraft(current => selected ? current.filter(id => id !== skill.id) : [...current, skill.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{skill.name.slice(0, 1).toUpperCase()}</span><span><strong>{skill.name}</strong><small>{skill.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <Minus size={16} /> : <Plus size={16} />}</span></button>;
+              })}</div> : null}
+            </div>
+            <footer><span>{t('agentManagement.form.selectedCount', { count: skillDraft.length })}</span><div><button type="button" className="agent-management-button agent-management-button--secondary" onClick={() => setSkillDialogOpen(false)}>{t('common.cancel')}</button><button type="button" className="agent-management-button agent-management-button--primary" onClick={() => { update({ skillRefs: skillDraft }); setSkillDialogOpen(false); }}>{t('common.confirm')}</button></div></footer>
+          </section>
+        </div>,
+        document.body,
+      ) : null}
+
+      {mcpDialogOpen ? createPortal(
+        <div className="agent-management-selection-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setMcpDialogOpen(false); }}>
+          <section className="agent-management-selection-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-mcp-dialog-title">
+            <header><h2 id="agent-mcp-dialog-title">{t('agentManagement.form.selectMcp')}</h2><button type="button" onClick={() => setMcpDialogOpen(false)} aria-label={t('common.cancel')}>×</button></header>
+            <div className="agent-management-selection-tabs" role="tablist" aria-label={t('agentManagement.form.selectMcp')}>
+              <button type="button" className={`agent-management-selection-tab${mcpTab === 'mine' ? ' is-active' : ''}`} role="tab" aria-selected={mcpTab === 'mine'} onClick={() => setMcpTab('mine')}>{t('agentManagement.form.myMcp')}</button>
+              <button type="button" className={`agent-management-selection-tab${mcpTab === 'market' ? ' is-active' : ''}`} role="tab" aria-selected={mcpTab === 'market'} onClick={() => setMcpTab('market')}>{t('agentManagement.form.mcpMarket')}</button>
+            </div>
+            <label className="agent-management-selection-search">
+              <Search size={16} aria-hidden="true" />
+              <input type="search" value={mcpQuery} onChange={event => setMcpQuery(event.target.value)} placeholder={t('agentManagement.form.selectionSearchPlaceholder')} />
+            </label>
+            <div className="agent-management-selection-dialog__body">
+              {mcpStatus === 'loading' ? <p className="agent-management-form-muted">{t('common.loading')}</p> : null}
+              {mcpStatus === 'error' ? <p className="agent-management-form-muted">{t('agentManagement.form.mcpError')}</p> : null}
+              {mcpStatus === 'success' && filteredMcps.length === 0 ? <p className="agent-management-form-muted">{t('agentManagement.form.mcpEmpty')}</p> : null}
+              {mcpStatus === 'success' && filteredMcps.length > 0 ? <div className="agent-management-selection-grid">{filteredMcps.map(mcp => {
+                const selected = mcpDraft.includes(mcp.id);
+                return <button key={mcp.id} type="button" className={`agent-management-selection-card${selected ? ' is-selected' : ''}`} onClick={() => setMcpDraft(current => selected ? current.filter(id => id !== mcp.id) : [...current, mcp.id])} aria-pressed={selected}><span className="agent-management-capability-card__icon">{mcp.name.slice(0, 1).toUpperCase()}</span><span><strong>{mcp.name}</strong><small>{mcp.description}</small></span><span className="agent-management-selection-card__action" aria-hidden="true">{selected ? <Minus size={16} /> : <Plus size={16} />}</span></button>;
+              })}</div> : null}
+            </div>
+            <footer><span>{t('agentManagement.form.selectedCount', { count: mcpDraft.length })}</span><div><button type="button" className="agent-management-button agent-management-button--secondary" onClick={() => setMcpDialogOpen(false)}>{t('common.cancel')}</button><button type="button" className="agent-management-button agent-management-button--primary" onClick={() => { update({ mcpRefs: mcpDraft }); setMcpDialogOpen(false); }}>{t('common.confirm')}</button></div></footer>
+          </section>
+        </div>,
+        document.body,
+      ) : null}
     </form>
   );
 }

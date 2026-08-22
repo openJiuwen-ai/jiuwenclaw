@@ -8,6 +8,7 @@ type DefinitionCardProps = {
   busy: boolean;
   onOpen: (id: string) => void;
   onUse: (id: string) => void;
+  onReconnect: (id: string) => void;
   onInstall: (id: string) => void;
   onUninstall: (id: string) => void;
 };
@@ -16,10 +17,11 @@ function getAvatarLetter(name: string): string {
   return name.trim().slice(0, 1).toUpperCase() || '?';
 }
 
-export function DefinitionCard({ item, scope, busy, onOpen, onUse, onInstall, onUninstall }: DefinitionCardProps) {
+export function DefinitionCard({ item, scope, busy, onOpen, onUse, onReconnect, onInstall, onUninstall }: DefinitionCardProps) {
   const { t } = useTranslation();
   const canInstall = !item.installed;
-  const canUse = item.installed && item.enabled !== false;
+  const canUse = item.installed && item.connectionState === 'connected' && item.enabled !== false;
+  const needsConnection = item.installed && item.connectionState !== 'connected';
   const avatarUrl = getAgentAvatarUrl(item);
 
   return (
@@ -67,15 +69,17 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onInstall, on
         <span className="agent-management-card__description">{item.description || t('agentManagement.unknownDescription')}</span>
       </button>
       <div className="agent-management-card__actions" aria-label={t('agentManagement.card.actions', { name: item.displayName })}>
-        <button
-          type="button"
-          className="agent-management-button agent-management-button--secondary agent-management-card-action--use"
-          disabled={!canUse || busy}
-          aria-disabled={!canUse}
-          onClick={() => onUse(item.id)}
-        >
-          {t('agentManagement.actions.use')}
-        </button>
+        {item.installed ? (
+          <button
+            type="button"
+            className="agent-management-button agent-management-button--secondary agent-management-card-action--use"
+            disabled={!canUse || busy}
+            aria-disabled={!canUse}
+            onClick={() => onUse(item.id)}
+          >
+            {t('agentManagement.actions.use')}
+          </button>
+        ) : null}
         {canInstall ? (
           <button
             type="button"
@@ -86,10 +90,20 @@ export function DefinitionCard({ item, scope, busy, onOpen, onUse, onInstall, on
           >
             {busy ? t('agentManagement.actions.installing') : t('agentManagement.actions.install')}
           </button>
-        ) : (
+        ) : needsConnection ? (
           <button
             type="button"
             className="agent-management-button agent-management-button--secondary"
+            disabled={busy}
+            aria-busy={busy}
+            onClick={() => onReconnect(item.id)}
+          >
+            {busy ? t('agentManagement.actions.connecting') : t('agentManagement.actions.connect')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="agent-management-button agent-management-button--primary"
             disabled={busy}
             aria-busy={busy}
             onClick={() => onUninstall(item.id)}

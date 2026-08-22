@@ -22,6 +22,7 @@ type CatalogPageProps = {
   onRetry: () => void;
   onOpen: (id: string) => void;
   onUse: (id: string) => void;
+  onReconnect: (id: string) => void;
   onInstall: (id: string) => void;
   onUninstall: (id: string) => void;
   onCreate: () => void;
@@ -47,6 +48,7 @@ export function CatalogPage({
   onRetry,
   onOpen,
   onUse,
+  onReconnect,
   onInstall,
   onUninstall,
   onCreate,
@@ -85,20 +87,9 @@ export function CatalogPage({
               ))}
             </>
           ) : (
-            <>
-              <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
-                {t('agentManagement.tabs.agent')}
-              </span>
-              <span
-                className="agent-management-category agent-management-category--subtab is-disabled"
-                role="tab"
-                aria-selected="false"
-                aria-disabled="true"
-                title={t('agentManagement.states.teamUnavailable')}
-              >
-                {t('agentManagement.tabs.teamMine')}
-              </span>
-            </>
+            <span className="agent-management-category agent-management-category--subtab is-active" role="tab" aria-selected="true">
+              {t('agentManagement.tabs.agent')}
+            </span>
           )}
         </div>
       </div>
@@ -139,6 +130,7 @@ export function CatalogPage({
                 busy={busyId === item.id}
                 onOpen={onOpen}
                 onUse={onUse}
+                onReconnect={onReconnect}
                 onInstall={onInstall}
                 onUninstall={onUninstall}
               />

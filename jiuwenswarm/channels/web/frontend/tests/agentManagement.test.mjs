@@ -9,7 +9,6 @@ import {
   normalizeAgentFileTree,
 } from '../node_modules/.cache/agent-management/adapter.js';
 import { buildDefinitionSelectionPayload } from '../node_modules/.cache/agent-management/port.js';
-import { FixtureAgentManagementClient } from '../node_modules/.cache/agent-management/fixture.js';
 import { agentManagementReducer, initialAgentManagementState } from '../node_modules/.cache/agent-management/state.js';
 import { buildCatalogViewModel, findFirstPreviewableFile, mergeAgentDetailWithCatalog } from '../node_modules/.cache/agent-management/viewModel.js';
 
@@ -38,6 +37,7 @@ test('normalizes interface source variants and bilingual display fields', () => 
     category: 'Engineering',
     source: 'builtin',
     installed: true,
+    connectionState: 'disconnected',
     enabled: true,
     tags: [],
     avatarUrl: null,
@@ -82,6 +82,7 @@ test('detail merges authoritative install state from list when show omits it', (
     category: 'Engineering',
     source: 'builtin',
     installed: true,
+    connectionState: 'connected',
     tags: [],
     avatarUrl: null,
   });
@@ -127,11 +128,21 @@ test('normalizes package file tree and keeps preview policy extension-based', ()
   assert.equal(tree[1].previewable, true);
 });
 
-test('initial file selection skips hidden previewable files', async () => {
-  const client = new FixtureAgentManagementClient();
-  const files = await client.getDefinitionFiles('content-creator');
+test('initial file selection skips hidden previewable files', () => {
+  const files = normalizeAgentFileTree([
+    {
+      path: 'assets/',
+      type: 'dir',
+      children: [{ path: 'assets/hidden.md', type: 'file', visible: false }],
+    },
+    {
+      path: 'persona/',
+      type: 'dir',
+      children: [{ path: 'persona/SKILL.md', type: 'file' }],
+    },
+  ]);
 
-  assert.equal(findFirstPreviewableFile(files), '文件/SKILL.md');
+  assert.equal(findFirstPreviewableFile(files), 'persona/SKILL.md');
 });
 
 test('selection payload preserves keep, clear and select semantics', () => {
@@ -142,84 +153,10 @@ test('selection payload preserves keep, clear and select semantics', () => {
   });
 });
 
-test('fixture writes refresh authoritative list state instead of optimistic UI state', async () => {
-  const client = new FixtureAgentManagementClient();
-  const before = await client.listCatalog();
-  assert.equal(before.find(item => item.id === 'python-code-reviewer')?.installed, false);
-
-  const result = await client.installDefinition('python-code-reviewer');
-  assert.deepEqual(result, { kind: 'ok' });
-  const afterInstall = await client.listCatalog();
-  assert.equal(afterInstall.find(item => item.id === 'python-code-reviewer')?.installed, true);
-
-  await client.uninstallDefinition('python-code-reviewer');
-  const afterUninstall = await client.listCatalog();
-  assert.equal(afterUninstall.find(item => item.id === 'python-code-reviewer')?.installed, false);
-});
-
-test('fixture fault controls expose deterministic request error states', async () => {
-  const client = new FixtureAgentManagementClient({ faults: { list: 'Fixture list failed' } });
-  await assert.rejects(() => client.listCatalog(), /Fixture list failed/);
-});
-
-test('fixture projects the active locale through list and detail adapters', async () => {
-  const client = new FixtureAgentManagementClient({ locale: () => 'en' });
-  const catalog = await client.listCatalog();
-  assert.equal(catalog.find(item => item.id === 'content-creator')?.displayName, 'Software Engineer');
-  assert.deepEqual(
-    catalog.find(item => item.id === 'content-creator')?.tags.map(tag => tag.label),
-    ['Efficiency', 'Content Creation'],
-  );
-
-  const detail = await client.getDefinition('content-creator');
-  assert.equal(detail.displayName, 'Software Engineer');
-  assert.match(detail.details, /Software Engineer/);
-  assert.deepEqual(detail.suggestedPrompts, [
-    '"A null pointer exception occurs during login. Analyze the traceback and fix it in the sandbox."',
-    '"Add a PDF invoice export feature, including the API, backend logic, and automated tests."',
-    '"Refactor the order processing module for efficiency and readability with a cross-file change plan."',
-  ]);
-});
-
-test('fixture create adds a local definition and its file source remains addressable', async () => {
-  const client = new FixtureAgentManagementClient();
-  await client.createAgent({
-    id: 'custom-agent',
-    name: '自定义专家',
-    description: '用于测试创建流程',
-    persona: '你是一个测试专家。',
-    tagIds: ['code-delivery'],
-    skillRefs: [],
-    suggestedPrompts: ['请帮我测试创建流程'],
-  });
-
-  const created = (await client.listCatalog()).find(item => item.id === 'custom-agent');
-  assert.equal(created?.source, 'local');
-  assert.equal(created?.installed, false);
-  assert.deepEqual(created?.tags, [{ id: 'code-delivery', label: '代码交付' }]);
-
-  const files = await client.getDefinitionFiles('custom-agent');
-  assert.equal(
-    files.some(entry => entry.relativePath === 'README.md'),
-    true,
-  );
-  assert.equal(
-    files.some(entry => entry.relativePath === 'rails/' && entry.children?.some(child => child.relativePath === 'rails/slim_reminder_rail.py')),
-    true,
-  );
-  const content = await client.getDefinitionFile('custom-agent', 'README.md');
-  assert.match(content.content, /自定义专家/);
-
-  const createdDetail = await client.getDefinition('custom-agent');
-  assert.deepEqual(createdDetail.suggestedPrompts, ['请帮我测试创建流程']);
-  assert.deepEqual(createdDetail.tags, [{ id: 'code-delivery', label: '代码交付' }]);
-  assert.match(createdDetail.details, /你是一个测试专家/);
-});
-
 test('catalog view model filters mine/search and clamps pages deterministically', () => {
   const catalog = [
-    { id: 'a', displayName: '甲', description: '市场', category: 'Design', source: 'local', installed: true, tags: [], avatarUrl: null },
-    { id: 'b', displayName: '乙', description: '工程', category: 'Engineering', source: 'builtin', installed: false, tags: [], avatarUrl: null },
+    { id: 'a', displayName: '甲', description: '市场', category: 'Design', source: 'local', installed: true, connectionState: 'connected', tags: [], avatarUrl: null },
+    { id: 'b', displayName: '乙', description: '工程', category: 'Engineering', source: 'builtin', installed: false, connectionState: 'disconnected', tags: [], avatarUrl: null },
   ];
   const view = buildCatalogViewModel(catalog, {
     scope: 'mine',
@@ -237,7 +174,7 @@ test('catalog view model filters mine/search and clamps pages deterministically'
   );
 
   const installedBuiltin = buildCatalogViewModel(
-    [{ id: 'builtin', displayName: '官方', description: '', category: '', source: 'builtin', installed: true, tags: [], avatarUrl: null }],
+    [{ id: 'builtin', displayName: '官方', description: '', category: '', source: 'builtin', installed: true, connectionState: 'connected', tags: [], avatarUrl: null }],
     { scope: 'mine', category: '', query: '', page: 1, pageSize: 6 },
   );
   assert.deepEqual(

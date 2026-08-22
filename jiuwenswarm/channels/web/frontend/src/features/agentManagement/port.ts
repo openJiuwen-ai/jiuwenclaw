@@ -7,6 +7,7 @@ import type {
   AgentManagementSource,
   AgentSelectionIntent,
   DefinitionFileEntry,
+  McpOption,
   SkillOption,
 } from './types';
 
@@ -24,12 +25,24 @@ export type AgentInstallResult =
 export class AgentManagementError extends Error implements AgentManagementErrorShape {
   code: string;
   retriable: boolean;
+  payload?: unknown;
 
-  constructor(message: string, code = 'agent_management_request_failed', retriable = true) {
+  constructor(message: string, code = 'agent_management_request_failed', retriable = true, payload?: unknown) {
     super(message);
     this.name = 'AgentManagementError';
     this.code = code;
     this.retriable = retriable;
+    this.payload = payload;
+  }
+}
+
+export class AgentInstallPendingError extends AgentManagementError {
+  pendingConnectors: string[];
+
+  constructor(message: string, pendingConnectors: string[]) {
+    super(message, 'agent_install_pending', true);
+    this.name = 'AgentInstallPendingError';
+    this.pendingConnectors = pendingConnectors;
   }
 }
 
@@ -40,9 +53,11 @@ export interface AgentManagementClient {
   getDefinitionFiles(id: string): Promise<DefinitionFileEntry[]>;
   getDefinitionFile(id: string, relativePath: string): Promise<AgentFileContent>;
   listSkillOptions(): Promise<SkillOption[]>;
+  listMcpOptions(): Promise<McpOption[]>;
   createAgent(draft: AgentDraft): Promise<void>;
+  importAgentTemplate(file: File): Promise<{ id: string }>;
   installDefinition(id: string): Promise<AgentInstallResult>;
-  uninstallDefinition(id: string): Promise<void>;
+  uninstallDefinition(id: string): Promise<{ notice?: string }>;
 }
 
 export function buildDefinitionSelectionPayload(intent: AgentSelectionIntent): Record<string, string> {

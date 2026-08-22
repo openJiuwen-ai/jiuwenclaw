@@ -1,5 +1,6 @@
+import { connectorApi } from '../../services/connectorApi';
 import { webRequest } from '../../services/webClient';
-import { AgentManagementError, type AgentManagementClient } from './port';
+import { AgentInstallPendingError, AgentManagementError, type AgentManagementClient } from './port';
 import { getAgentManagementLocale } from './locale';
 import {
   normalizeAgentFileContent,
@@ -24,9 +25,58 @@ function rethrowAgentError(error: unknown): never {
     throw error;
   }
   if (error instanceof Error) {
-    throw new AgentManagementError(error.message);
+    const webError = error as Error & { code?: string; retriable?: boolean; payload?: unknown };
+    throw new AgentManagementError(
+      error.message,
+      webError.code || 'agent_management_request_failed',
+      webError.retriable ?? true,
+      webError.payload,
+    );
   }
   throw new AgentManagementError(String(error));
+}
+
+function extractPendingConnectors(error: unknown): string[] | undefined {
+  const payload = error instanceof AgentManagementError ? error.payload : undefined;
+  if (!payload || typeof payload !== 'object') return undefined;
+  const pending = (payload as { pending_connectors?: unknown }).pending_connectors;
+  return Array.isArray(pending) && pending.every(item => typeof item === 'string') && pending.length > 0 ? pending : undefined;
+}
+
+async function enrichCatalogTags(items: ReturnType<typeof normalizeAgentTemplateListItem>[]) {
+  const missingTags = items.filter(item => item.tags.length === 0);
+  if (missingTags.length === 0) return items;
+
+  const enriched = await Promise.all(
+    missingTags.map(async item => {
+      const payload = await webRequest<RawAgentDetailPayload>('agent_templates.show', { id: item.id });
+      if (!payload.template) {
+        throw new AgentManagementError('Agent detail is empty', 'agent_detail_empty', false);
+      }
+      return {
+        id: item.id,
+        tags: normalizeAgentTemplateDetail(payload.template, getAgentManagementLocale()).tags,
+      };
+    }),
+  );
+  const tagsById = new Map<string, ReturnType<typeof normalizeAgentTemplateListItem>['tags']>();
+  enriched.forEach(({ id, tags }) => {
+    if (tags.length > 0) tagsById.set(id, tags);
+  });
+  return items.map(item => {
+    const tags = tagsById.get(item.id);
+    return tags ? { ...item, tags } : item;
+  });
+}
+
+async function encodeFile(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
 }
 
 export function createLiveAgentManagementClient(): AgentManagementClient {
@@ -35,7 +85,9 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
     async listCatalog() {
       try {
         const payload = await webRequest<RawAgentListPayload>('agent_templates.list', {});
-        return (payload.templates || []).map((item) => normalizeAgentTemplateListItem(item, getAgentManagementLocale()));
+        return enrichCatalogTags(
+          (payload.templates || []).map((item) => normalizeAgentTemplateListItem(item, getAgentManagementLocale())),
+        );
       } catch (error) {
         return rethrowAgentError(error);
       }
@@ -78,6 +130,24 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
         return rethrowAgentError(error);
       }
     },
+    async listMcpOptions() {
+      try {
+        const [builtin, local] = await Promise.all([connectorApi.list('builtin'), connectorApi.list('local')]);
+        const byName = new Map<string, typeof builtin[number]>();
+        [...builtin, ...local].forEach(item => byName.set(item.name, item));
+        return [...byName.values()]
+          .map(item => ({
+            id: item.name,
+            name: item.displayName || item.name,
+            description: item.description || '',
+            connectionState: item.connectionState,
+            source: item.source,
+          }))
+          .filter(item => item.id.length > 0);
+      } catch (error) {
+        return rethrowAgentError(error);
+      }
+    },
     async createAgent(draft) {
       try {
         await webRequest('agent_templates.create', {
@@ -86,8 +156,20 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
           description: draft.description,
           persona: draft.persona,
           skills: draft.skillRefs,
-          generate: false,
+          mcps: draft.mcpRefs,
         });
+      } catch (error) {
+        return rethrowAgentError(error);
+      }
+    },
+    async importAgentTemplate(file) {
+      try {
+        const payload = await webRequest<{ id?: string }>('agent_templates.import_upload', {
+          file_name: file.name,
+          file_content: await encodeFile(file),
+        });
+        if (!payload?.id) throw new AgentManagementError('Imported Agent id is empty', 'agent_import_empty', false);
+        return { id: payload.id };
       } catch (error) {
         return rethrowAgentError(error);
       }
@@ -97,15 +179,26 @@ export function createLiveAgentManagementClient(): AgentManagementClient {
         await webRequest('agent_templates.install', { id });
         return { kind: 'ok' };
       } catch (error) {
+        const pendingConnectors = extractPendingConnectors(error);
+        if (pendingConnectors) {
+          throw new AgentInstallPendingError(
+            error instanceof Error ? error.message : String(error),
+            pendingConnectors,
+          );
+        }
         return rethrowAgentError(error);
       }
     },
     async uninstallDefinition(id) {
       try {
-        await webRequest('agent_templates.uninstall', { id });
+        return (await webRequest<{ notice?: string }>('agent_templates.uninstall', { id })) || {};
       } catch (error) {
         return rethrowAgentError(error);
       }
     },
   };
+}
+
+export function createAgentManagementClient(): AgentManagementClient {
+  return createLiveAgentManagementClient();
 }

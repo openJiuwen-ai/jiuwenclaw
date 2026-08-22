@@ -34,6 +34,7 @@ export function mergeAgentDetailWithCatalog(detail: AgentDetail, catalogItem: Ag
     category: catalogItem.category,
     source: catalogItem.source,
     installed: catalogItem.installed,
+    connectionState: catalogItem.connectionState,
     ...(catalogItem.enabled !== undefined ? { enabled: catalogItem.enabled } : {}),
     ...(catalogItem.updateAvailable !== undefined ? { updateAvailable: catalogItem.updateAvailable } : {}),
     tags: detail.tags.length > 0 ? detail.tags : catalogItem.tags,

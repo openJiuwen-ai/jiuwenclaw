@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { AtSign, Bot, ChevronRight, CircleX, ClipboardList, FileText, Infinity as InfinityIcon, Loader2, Plus, Search, Square, Target, X } from 'lucide-react';
+import { MoreHorizontal } from 'lucide-react';
 import { useSpeechRecognition } from '../../hooks';
 
 // import { stopAllTts } from '../../utils';
@@ -648,7 +649,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const setAgentSelectionIntent = useSessionStore((s) => s.setAgentSelectionIntent);
   const selectedAgent = agentOptions.find((item) => item.id === selectedAgentId) ?? null;
   const installedAgentOptions = useMemo(
-    () => agentOptions.filter((item) => item.installed && item.enabled !== false),
+    () => agentOptions.filter((item) => item.installed && item.connectionState === 'connected' && item.enabled !== false),
     [agentOptions],
   );
   const filteredAgentOptions = useMemo(() => {
@@ -667,7 +668,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       .then((items) => {
         if (cancelled) return;
         const selectedItem = selectedAgentId ? items.find((item) => item.id === selectedAgentId) : null;
-        if (selectedItem?.enabled === false) {
+        if (selectedItem?.enabled === false || selectedItem?.connectionState !== 'connected') {
           setAgentSelectionIntent(activeSessionId, { kind: 'clear' });
         }
         setAgentOptions(items);
@@ -723,6 +724,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const isAutoHarnessMode = mode === 'auto_harness';
   const isWorkContextLocked = Boolean(activeSessionId && activeSessionId !== NEW_CONVERSATION_ID);
   const showWorkContextRow = activeSessionId === NEW_CONVERSATION_ID;
+  const persistSessionEnabled = activeSessionId === NEW_CONVERSATION_ID
+    ? persistSessionDraft
+    : activeSession?.persist_session === true;
+  const persistSessionLocked = Boolean(
+    activeSessionId && activeSessionId !== NEW_CONVERSATION_ID,
+  );
   /** Goal 入口是否适用于当前上下文（agent 模式 + 已接入 onSetGoal，如欢迎页新会话就不适用） */
   const canUseGoalMenu = isAgentMode && Boolean(onSetGoal);
   // 只跟 armed 挂钩：这个 tag 是"下一条消息将用于设置目标"的过渡态指示，发送后 armed 变 false
@@ -2782,9 +2789,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                   >
                     <div className="chat-agent-picker__tabs" role="tablist" aria-label={t('agentManagement.detail.tabsLabel')}>
                       <span className="is-active" role="tab" aria-selected="true">{t('chat.agent')}</span>
-                      <span role="tab" aria-selected="false" aria-disabled="true" title={t('chat.agentTeamUnavailable')}>
-                        {t('chat.agentTeamTab')}
-                      </span>
                     </div>
                     <label className="chat-agent-picker__search">
                       <Search size={14} aria-hidden="true" />
@@ -2841,6 +2845,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                           onNavigateToAgents?.();
                         }}
                       >
+                        <MoreHorizontal size={14} aria-hidden="true" />
                         {t('chat.agentMore')}
                       </button>
                     </div>

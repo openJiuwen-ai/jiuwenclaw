@@ -1,6 +1,8 @@
 export type AgentSource = 'builtin' | 'local';
 
-export type AgentManagementSource = 'fixture' | 'live';
+export type AgentConnectionState = 'connected' | 'disconnected' | 'connecting';
+
+export type AgentManagementSource = 'live';
 
 export type RequestStatus = 'idle' | 'loading' | 'success' | 'error';
 
@@ -11,6 +13,7 @@ export type AgentCatalogItem = {
   category: string;
   source: AgentSource;
   installed: boolean;
+  connectionState: AgentConnectionState;
   enabled?: boolean;
   updateAvailable?: boolean;
   tags: Array<{ id: string; label: string }>;
@@ -31,6 +34,7 @@ export type AgentDetail = AgentCatalogItem & {
   rails: AgentCapability[];
   mcps: AgentCapability[];
   suggestedPrompts: string[];
+  pendingConnectors: string[];
 };
 
 export type DefinitionFileEntry = {
@@ -53,6 +57,14 @@ export type SkillOption = {
   description: string;
 };
 
+export type McpOption = {
+  id: string;
+  name: string;
+  description: string;
+  connectionState: string;
+  source: string;
+};
+
 export type AgentDraft = {
   id: string;
   name: string;
@@ -60,6 +72,7 @@ export type AgentDraft = {
   persona: string;
   tagIds: string[];
   skillRefs: string[];
+  mcpRefs: string[];
   suggestedPrompts: string[];
 };
 
@@ -69,4 +82,5 @@ export type AgentManagementErrorShape = {
   code: string;
   message: string;
   retriable: boolean;
+  payload?: unknown;
 };

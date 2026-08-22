@@ -17,6 +17,7 @@ type DefinitionDetailPageProps = {
   fileStatus: RequestStatus;
   fileError: string | null;
   actionError: string | null;
+  actionNotice: string | null;
   busy: boolean;
   onBack: () => void;
   onRetry: () => void;
@@ -25,6 +26,7 @@ type DefinitionDetailPageProps = {
   onSelectFile: (path: string) => void;
   onUse: (id: string) => void;
   onUsePrompt?: (id: string, prompt: string) => void;
+  onReconnect: (id: string) => void;
   onInstall: (id: string) => void;
   onUninstall: (id: string) => void;
 };
@@ -66,6 +68,7 @@ export function DefinitionDetailPage({
   fileStatus,
   fileError,
   actionError,
+  actionNotice,
   busy,
   onBack,
   onRetry,
@@ -74,6 +77,7 @@ export function DefinitionDetailPage({
   onSelectFile,
   onUse,
   onUsePrompt,
+  onReconnect,
   onInstall,
   onUninstall,
 }: DefinitionDetailPageProps) {
@@ -106,7 +110,8 @@ export function DefinitionDetailPage({
   }
 
   const avatarUrl = getAgentAvatarUrl(detail);
-  const canUse = detail.installed && detail.enabled !== false;
+  const canUse = detail.installed && detail.connectionState === 'connected' && detail.enabled !== false;
+  const needsConnection = detail.installed && detail.connectionState !== 'connected';
   const skillItems = [...detail.skills, ...detail.tools, ...detail.rails];
 
   return (
@@ -144,16 +149,29 @@ export function DefinitionDetailPage({
             {t('agentManagement.actions.use')}
           </button>
           {detail.installed ? (
-            <button
-              type="button"
-              className="agent-management-detail-action agent-management-detail-action--uninstall"
-              disabled={busy}
-              aria-busy={busy}
-              onClick={() => onUninstall(detail.id)}
-            >
-              <Trash2 size={15} aria-hidden="true" />
-              {busy ? t('agentManagement.actions.uninstalling') : t('agentManagement.actions.uninstall')}
-            </button>
+            <>
+              {needsConnection ? (
+                <button
+                  type="button"
+                  className="agent-management-button agent-management-button--secondary"
+                  disabled={busy}
+                  aria-busy={busy}
+                  onClick={() => onReconnect(detail.id)}
+                >
+                  {busy ? t('agentManagement.actions.connecting') : t('agentManagement.actions.connect')}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="agent-management-detail-action agent-management-detail-action--uninstall"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={() => onUninstall(detail.id)}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+                {busy ? t('agentManagement.actions.uninstalling') : t('agentManagement.actions.uninstall')}
+              </button>
+            </>
           ) : (
             <button
               type="button"
@@ -171,6 +189,18 @@ export function DefinitionDetailPage({
       {actionError ? (
         <div className="agent-management-inline-error" role="alert">
           {actionError}
+        </div>
+      ) : null}
+
+      {actionNotice ? (
+        <div className="agent-management-inline-notice" role="status">
+          {actionNotice}
+        </div>
+      ) : null}
+
+      {needsConnection ? (
+        <div className="agent-management-connection-warning" role="status">
+          {t('agentManagement.states.connectionUnavailable')}
         </div>
       ) : null}
 
@@ -221,6 +251,9 @@ export function DefinitionDetailPage({
           role="tab"
           aria-selected={detailTab === 'files'}
           className={detailTab === 'files' ? 'is-active' : ''}
+          disabled={!detail.installed}
+          aria-disabled={!detail.installed}
+          title={!detail.installed ? t('agentManagement.detail.filesRequiresInstall') : undefined}
           onClick={() => onTabChange('files')}
         >
           {t('agentManagement.detail.filesTab')}
