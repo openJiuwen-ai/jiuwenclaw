@@ -151,6 +151,13 @@ def resolve_base_python() -> Path:
             return candidate
         raise RuntimeError(f"JIUWENCLAW_BASE_PYTHON does not exist: {candidate}")
 
+    claw_home = (os.environ.get("CLAW_PYTHON_HOME") or "").strip()
+    if claw_home:
+        name = "python.exe" if os.name == "nt" else "python"
+        candidate = Path(claw_home).expanduser() / name
+        if candidate.is_file():
+            return candidate.resolve()
+
     executable = Path(sys.executable).resolve()
     if _is_python_executable(executable) and executable.is_file():
         return executable

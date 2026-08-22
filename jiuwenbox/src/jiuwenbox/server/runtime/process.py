@@ -150,11 +150,13 @@ def _derive_protect_ports_from_listen() -> tuple[int, ...]:
 _SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "supervisor"
 LANDLOCK_LAUNCHER_SOURCE = _SUPERVISOR_DIR / "landlock_launcher.py"
 SANDBOX_DAEMON_SOURCE = _SUPERVISOR_DIR / "sandbox_daemon.py"
-# Read the launcher and daemon source once at module load so we do not pay
-# the I/O cost on every sandbox creation; bytes are immutable so sharing is
-# safe across sandboxes.
-_LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
-_SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
+# Windows 冻包里这些脚本只在 PYZ 中, 不能按磁盘路径 read_bytes。
+if sys.platform == "win32":
+    _LANDLOCK_LAUNCHER_BYTES = b""
+    _SANDBOX_DAEMON_BYTES = b""
+else:
+    _LANDLOCK_LAUNCHER_BYTES = LANDLOCK_LAUNCHER_SOURCE.read_bytes()
+    _SANDBOX_DAEMON_BYTES = SANDBOX_DAEMON_SOURCE.read_bytes()
 PYTHON_EXECUTABLE = "python3"
 
 
@@ -3030,15 +3032,27 @@ class ProcessRuntime(RuntimeAdapter):
         venv_dir = (os.environ.get("JIUWENBOX_VENV_DIR") or "").strip()
         if venv_dir:
             allow_write_paths.append(venv_dir)
-        # 业务产物路径 (read_write / bind_mounts 的 sandbox_path): agent-server 把 output_dir 等业务可写目录放这里.
-        # 这些路径通常 owner=当前用户, 运行时改 DACL 不会 WinError 5 (区别于工具目录需 install 预装). 未列入则受限 token 写不了.
+        # 业务产物路径 (read_write / bind_mounts): rw 才进 allow_write;
+        # WRITE ACE 不含 FILE_READ_DATA, rw 路径同时进 allow_read.
+        # mode=ro (如 config.yaml) 只授读. 不授权 claw-desktop 等父目录.
         for _rw in (policy.filesystem_policy.read_write or []):
             if _rw and _rw not in allow_write_paths:
                 allow_write_paths.append(_rw)
+            if _rw and _rw not in allow_read_paths:
+                allow_read_paths.append(_rw)
         for _mount in (policy.filesystem_policy.bind_mounts or []):
             _sp = getattr(_mount, "sandbox_path", None)
-            if _sp and _sp not in allow_write_paths:
+            if not _sp:
+                continue
+            _mode = str(getattr(_mount, "mode", "ro") or "ro").strip().lower()
+            if _mode != "rw":
+                if _sp not in allow_read_paths:
+                    allow_read_paths.append(_sp)
+                continue
+            if _sp not in allow_write_paths:
                 allow_write_paths.append(_sp)
+            if _sp not in allow_read_paths:
+                allow_read_paths.append(_sp)
         # read_write/bind_mounts 路径可能尚未创建 (如 pptx-craft output_dir 由 skill generate-timestamp-dir 创建).
         # apply_sandbox_acl 对不存在路径会跳过 → 受限 token 写不了, 这里先 makedirs ensure 存在.
         for _p in allow_write_paths:
@@ -3178,6 +3192,52 @@ class ProcessRuntime(RuntimeAdapter):
             sandbox_user_sid=sandbox_user_sid,
             preinstalled_read_paths=_preinstalled,
         )
+        desktop_data_dir = (os.environ.get("JIUWENBOX_DESKTOP_DATA_DIR") or "").strip()
+        if not desktop_data_dir:
+            _swarm_data = (os.environ.get("JIUWENSWARM_DATA_DIR") or "").strip()
+            if _swarm_data:
+                try:
+                    _swarm_parent = Path(_swarm_data).expanduser().resolve().parent
+                    if _swarm_parent.name.lower() == "claw-desktop":
+                        desktop_data_dir = str(_swarm_parent)
+                except OSError:
+                    pass
+        if desktop_data_dir:
+            try:
+                _desktop_acl = win_acl.apply_desktop_data_rw(
+                    desktop_data_dir,
+                    sandbox_user_sid=sandbox_user_sid,
+                    preserve_write_roots=allow_write_paths,
+                )
+                if _desktop_acl:
+                    acl_paths = list(acl_paths or []) + _desktop_acl
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[SandboxWin] %s apply_desktop_data_rw 失败 dir=%s",
+                    sandbox_id, desktop_data_dir, exc_info=True,
+                )
+        if sandbox_user_sid:
+            _traverse_targets = []
+            if desktop_data_dir:
+                _traverse_targets.append(desktop_data_dir)
+            _traverse_targets.append(workspace)
+            _traverse_targets.extend(allow_write_paths)
+            _seen_traverse: set[str] = set()
+            for _tp in _traverse_targets:
+                if not _tp:
+                    continue
+                _tk = os.path.normcase(os.path.abspath(_tp))
+                if _tk in _seen_traverse:
+                    continue
+                _seen_traverse.add(_tk)
+                try:
+                    win_acl.grant_parent_traverse(_tp, sandbox_user_sid)
+                    win_acl.grant_parent_traverse(_tp, win_acl.get_synthetic_write_sid())
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "[SandboxWin] %s grant_parent_traverse 失败 path=%s",
+                        sandbox_id, _tp, exc_info=True,
+                    )
         _t_acl1 = time.perf_counter()
         # apply_sandbox_acl 整体耗时打点
         logger.info(

@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.31",  # CVE-2026-42561 MultipartParser DoS
     "mcp>=1.28.1,<2",
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
