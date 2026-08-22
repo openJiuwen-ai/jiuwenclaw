@@ -2220,6 +2220,11 @@ class JiuWenSwarmDeepAdapter:
         Called by _new_session_scoped_adapter so the session adapter does not
         need to re-read config, rebuild Model, or reconstruct tool cards.
         All assignments are same-class self-access (no protected-access violation).
+
+        NOTE: _tool_cards is intentionally NOT copied — _get_tool_cards()
+        registers stateful tools by owner; sharing root-owned cards across
+        sessions would cause state cross-contamination and cleanup failures.
+        The session adapter must call _get_tool_cards() with its own owner id.
         """
         if parent._config_base_cache is not None:
             self._config_base_cache = parent._config_base_cache.copy()
@@ -2235,8 +2240,8 @@ class JiuWenSwarmDeepAdapter:
             self._model_request_config = parent._model_request_config
             self._last_models_config_fingerprint = parent._last_models_config_fingerprint
             self._model_config_source = parent._model_config_source
-        if parent._tool_cards is not None:
-            self._tool_cards = list(parent._tool_cards)
+        # _tool_cards: NOT copied — stateful tools are owner-scoped;
+        # session adapter must re-register via _get_tool_cards(self._tool_owner_id()).
         if parent._vision_model_config is not None:
             self._vision_model_config = parent._vision_model_config
         if parent._audio_model_config is not None:
@@ -2249,6 +2254,8 @@ class JiuWenSwarmDeepAdapter:
             self._enabled_skills = list(parent._enabled_skills)
         if parent._config_cache:
             self._config_cache = dict(parent._config_cache)
+        if parent._enterprise_config is not None:
+            self._enterprise_config = parent._enterprise_config
         if parent._skill_manager is not None:
             self.set_skill_manager(parent._skill_manager)
         if parent._agent_name and parent._agent_name != "main_agent":
@@ -7464,12 +7471,12 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
 
         # ── Session-scoped short-circuit ──────────────────────────────────
-        # When the session adapter has already inherited config_base, Model,
-        # and tool_cards from its parent (see _new_session_scoped_adapter),
-        # skip the expensive re-read / re-build and jump straight to
-        # DeepAgent construction.  This saves 1-3 s on the first chat turn
-        # by avoiding redundant config parsing, Model cache construction,
-        # and tool card assembly.
+        # When the session adapter has already inherited config_base and Model
+        # from its parent (see _new_session_scoped_adapter / copy_resources_from),
+        # skip the expensive re-read / re-build and jump straight to tool_cards
+        # assembly and DeepAgent construction.
+        # NOTE: _tool_cards is NOT inherited — stateful tools are owner-scoped
+        # and must be registered per session via _get_tool_cards().
         if (
             self._is_session_scoped_adapter
             and self._model is not None
@@ -7480,7 +7487,7 @@ class JiuWenSwarmDeepAdapter:
             model = self._model
             logger.info(
                 "[JiuWenSwarmDeepAdapter] session adapter reuses parent resources: "
-                "mode=%s sub_mode=%s (skipped config/model/tool rebuild)",
+                "mode=%s sub_mode=%s (skipped config/model rebuild)",
                 mode,
                 sub_mode,
             )
@@ -7559,11 +7566,11 @@ class JiuWenSwarmDeepAdapter:
         # ── End session-scoped short-circuit ──────────────────────────────
         agent_card = AgentCard(name=self._agent_name, id=self._runtime_agent_scope_id())
 
-        if self._tool_cards is not None:
-            tool_cards = self._tool_cards
-        else:
-            tool_cards = await self._get_tool_cards(self._tool_owner_id())
-            self._tool_cards = tool_cards
+        # tool_cards must always be assembled per-adapter: stateful tools
+        # are owner-scoped (_root vs session), sharing root-owned cards
+        # would cause state cross-contamination and cleanup failures.
+        tool_cards = await self._get_tool_cards(self._tool_owner_id())
+        self._tool_cards = tool_cards
         logger.info("[JiuWenSwarmDeepAdapter] Agent card id: %s", agent_card.id)
         await asyncio.sleep(0)
 
