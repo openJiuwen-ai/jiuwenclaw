@@ -239,6 +239,85 @@ def create_memory_config_repository(
     return MemoryConfigRepository(store, codec, instance_id=instance_id)
 
 
+def _require_personal_config_store(edition: str, store_name: str) -> None:
+    """heartbeat / browser / preferred_language / a2ui 无企业同构表。"""
+    from jiuwenswarm.gateway.edition import EDITION_ENTERPRISE
+
+    if edition == EDITION_ENTERPRISE:
+        raise ValueError(
+            f"{store_name} is personal-only (YAML overlay); "
+            "no enterprise DB table"
+        )
+
+
+def create_heartbeat_config_repository(
+    store: PersistentStore,
+    edition: str,
+    *,
+    instance_id: str = "",
+):
+    from jiuwenswarm.gateway.config.heartbeat import (
+        HeartbeatConfigRepository,
+        YamlSectionCodec,
+    )
+
+    _require_personal_config_store(edition, "heartbeat_config")
+    return HeartbeatConfigRepository(
+        store, YamlSectionCodec(), instance_id=instance_id
+    )
+
+
+def create_browser_config_repository(
+    store: PersistentStore,
+    edition: str,
+    *,
+    instance_id: str = "",
+):
+    from jiuwenswarm.gateway.config.browser import (
+        BrowserConfigRepository,
+        YamlSectionCodec,
+    )
+
+    _require_personal_config_store(edition, "browser_config")
+    return BrowserConfigRepository(
+        store, YamlSectionCodec(), instance_id=instance_id
+    )
+
+
+def create_preferred_language_config_repository(
+    store: PersistentStore,
+    edition: str,
+    *,
+    instance_id: str = "",
+):
+    from jiuwenswarm.gateway.config.locale import (
+        PreferredLanguageConfigRepository,
+        YamlSectionCodec,
+    )
+
+    _require_personal_config_store(edition, "preferred_language_config")
+    return PreferredLanguageConfigRepository(
+        store, YamlSectionCodec(), instance_id=instance_id
+    )
+
+
+def create_a2ui_config_repository(
+    store: PersistentStore,
+    edition: str,
+    *,
+    instance_id: str = "",
+):
+    from jiuwenswarm.gateway.config.a2ui import (
+        A2uiConfigRepository,
+        YamlSectionCodec,
+    )
+
+    _require_personal_config_store(edition, "a2ui_config")
+    return A2uiConfigRepository(
+        store, YamlSectionCodec(), instance_id=instance_id
+    )
+
+
 def create_config_record_repository(
     store: PersistentStore,
     store_name: str,
@@ -278,13 +357,17 @@ def create_enterprise_config_record_repositories(
 
 
 __all__ = [
+    "create_a2ui_config_repository",
+    "create_browser_config_repository",
     "create_channel_config_repository",
     "create_config_record_repository",
     "create_enterprise_config_record_repositories",
     "create_gateway_storage_context",
+    "create_heartbeat_config_repository",
     "create_logging_config_repository",
     "create_memory_config_repository",
     "create_permissions_config_repository",
+    "create_preferred_language_config_repository",
     "create_session_map_repository",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
