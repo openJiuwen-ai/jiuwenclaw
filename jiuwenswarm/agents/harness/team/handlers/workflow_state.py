@@ -885,6 +885,16 @@ class WorkflowRunState(BaseModel):
         # merging" (resume / fresh). Not persisted on the run state.
         if relaunch_kind:
             delta["relaunch_kind"] = relaunch_kind
+        # On a relaunch, explicitly null out the terminal leftovers so the
+        # frontend's incremental merge clears the stale error / exhausted pill
+        # from the prior run (these fields are only in _build_terminal_delta,
+        # so _build_top_level_delta omits them and the merge keeps the old value).
+        if relaunch_kind == "relaunch":
+            delta["error"] = None
+            delta["result"] = None
+            delta["budget_exhausted_scope"] = None
+            delta["completed_at"] = None
+            delta["duration_ms"] = None
         return delta
 
     def _find_child_phase_by_name(self, name: str):
