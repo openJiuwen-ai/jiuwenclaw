@@ -324,6 +324,11 @@ class FilePersistentBackend:
                 _inject_map_key(layout, str(map_key), value)
                 for map_key, value in node.items()
             ]
+        scalar_field = str(layout.yaml_scalar_field or "").strip()
+        if scalar_field:
+            if isinstance(node, dict):
+                return [_plain(node)]
+            return [{scalar_field: _plain(node)}]
         if isinstance(node, dict):
             return [_plain(node)]
         if isinstance(node, list):
@@ -356,7 +361,13 @@ class FilePersistentBackend:
             else:
                 root = CommentedMap()
         elif len(records) == 1:
-            root = self._set_yaml_node(root, parts, records[0])
+            scalar_field = str(layout.yaml_scalar_field or "").strip()
+            if scalar_field:
+                root = self._set_yaml_node(
+                    root, parts, records[0].get(scalar_field)
+                )
+            else:
+                root = self._set_yaml_node(root, parts, records[0])
         else:
             seq = CommentedSeq(records)
             root = self._set_yaml_node(root, parts, seq)

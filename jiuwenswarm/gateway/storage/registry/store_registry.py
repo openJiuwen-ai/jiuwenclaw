@@ -60,6 +60,8 @@ class FileLayout:
     shape: Literal["map", "list"] = "map"  # JSON only; YAML ignores this
     yaml_pointer: str = ""  # YAML only; JSON ignores this. fragment path e.g. "/channels"
     key_fields: tuple[str, ...] = ()  # record primary key; first field is map key. empty = single document
+    # YAML only：片段是标量时，用该字段名包装/解包为单字段 record（如 preferred_language）
+    yaml_scalar_field: str = ""
 
 
 @dataclass(frozen=True)
