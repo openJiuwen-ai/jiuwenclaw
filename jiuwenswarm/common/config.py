@@ -1274,9 +1274,10 @@ def get_agentos_models(config: dict[str, Any] | None = None) -> list[dict[str, A
     与 ``get_default_models`` 的 defaults 条目并列、同等可选可切换，但：
     - ``is_default`` 始终为 ``False``：绝不抢启动主对话默认（``_create_model``
       选默认时只取 ``is_default=True`` 的条目作为 ``self._model``）。
-    - ``model_config_obj._source = "agentos"``：供 ``build_model_from_entry`` 识别，
-      把 ``context_window``（模型支持的上下文总长度）放进 core 的
-      ``ModelRequestConfig``，供 core 人员取值。是否在 jiuwenswarm 出口 pop 由
+    - ``model_config_obj._source = "agentos"``：仅供前端 ``is_agentos`` 置灰只读
+      展示用。``context_window``（模型支持的上下文总长度）每个模型条目均可配
+      （defaults / agentos / video / audio / vision / image_gen 均可），放进 core 的
+      ``ModelRequestConfig`` 供 core 人员取值。是否在 jiuwenswarm 出口 pop 由
       ``reasoning_injector.core_has_context_window_field`` 自动适配 core 字段状态：
       core 未加 context_window 正式字段时 pop 防发厂商，加字段后停止 pop 留给 core。
 
@@ -1300,14 +1301,13 @@ def get_agentos_models(config: dict[str, Any] | None = None) -> list[dict[str, A
             continue
         agentos_entry = deepcopy(agentos_block)
         agentos_entry["is_default"] = False
-        # _source 注入到 model_config_obj 内部，使其经
-        # build_reasoning_model_request_kwargs -> _model_config_to_dict
-        # 展开后进入 kwargs，供 build_model_from_entry 识别该条目为 agentos。
-        # context_window（模型支持的上下文总长度）随之进入 kwargs，是否由
-        # reasoning_injector._build_model_request_kwargs 公共出口 pop 取决于
-        # core 是否已把 context_window 加为 ModelRequestConfig 正式字段
-        # （core_has_context_window_field 自动适配）：core 未加字段时 pop 防发厂商，
-        # 加字段后停止 pop，context_window 留在 ModelRequestConfig 供 core 读取。
+        # _source 注入到 model_config_obj 内部，仅供前端 is_agentos 置灰只读展示
+        # （不再参与 context_window 出口判断——所有条目一视同仁）。context_window
+        # 每个模型条目均可配，随之进入 kwargs，是否由 reasoning_injector
+        # _build_model_request_kwargs 公共出口 pop 取决于 core 是否已把 context_window
+        # 加为 ModelRequestConfig 正式字段（core_has_context_window_field 自动适配）：
+        # core 未加字段时 pop 防发厂商，加字段后停止 pop，context_window 留在
+        # ModelRequestConfig 供 core 读取。
         agentos_mco = agentos_entry.setdefault("model_config_obj", {})
         if isinstance(agentos_mco, dict):
             agentos_mco["_source"] = "agentos"

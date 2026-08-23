@@ -258,6 +258,19 @@ models:
         custom_headers: {}
       model_config_obj:
         temperature: 0.95
+        # 模型支持的上下文总长度（tokens）。每个模型条目均可配（与 timeout 一样，
+        # defaults / agentos / video / audio / vision / image_gen 均可填）。
+        # 经 _build_model_from_entry 放进 core 的 ModelRequestConfig，供 core 从
+        # ModelRequestConfig 取值（core 侧加 context_window 正式字段后读取）。
+        # "模型侧不会感知" = 不发往厂商，由 jiuwenswarm 出口按 core 字段状态自动适配
+        # （reasoning_injector.core_has_context_window_field）：core 未把 context_window
+        # 加为 ModelRequestConfig 正式字段时，它进 extra 会被 base_model_client 经
+        # model_dump 透传给厂商 SDK 报 unexpected keyword argument，故此时 jiuwenswarm
+        # 公共出口对 context_window 统一 pop 防发厂商；core 加正式字段后
+        # （届时 core 自行 exclude 不发厂商、self.model_config.context_window 可读），
+        # jiuwenswarm 自动停止 pop，把值留给 core。无需人工同步。
+        # 不填 = core 按模型名查表 / 兜底 200000。
+        context_window: 131072
       is_default: true
   video:
       model_client_config:
@@ -311,15 +324,16 @@ models:
   # 可配多条备份模型。填写约束：(model_name, api_base, api_key) 三元组唯一，
   # 即不存在完全相同的两条；同名（base 或 key 不同）可共存，靠缓存
   # {model_name}#{index} 区分。
-  # context_window：模型支持的上下文总长度（tokens）。仅作用于 agentos 条目，
-  #   不影响 defaults。经 get_default_models 打 _source=="agentos" 标记后，
-  #   _build_model_from_entry 把它放进 core 的 ModelRequestConfig，供 core 人员
-  #   从 ModelRequestConfig 取值。
+  # context_window：模型支持的上下文总长度（tokens）。每个模型条目均可配
+  #   （defaults / agentos / video / audio / vision / image_gen 均可填，
+  #   放在各自 model_config_obj 段下，与 timeout 同为每模型可配项）。
+  #   经 _build_model_from_entry 放进 core 的 ModelRequestConfig，供 core 人员
+  #   从 ModelRequestConfig 取值（core 侧加 context_window 正式字段后读取）。
   #   "模型侧不会感知" = 不发往厂商，由 jiuwenswarm 出口按 core 字段状态自动适配
   #   （reasoning_injector.core_has_context_window_field）：core 未把 context_window
   #   加为 ModelRequestConfig 正式字段时，它进 extra 会被 base_model_client 经
   #   model_dump 透传给厂商 SDK 报 unexpected keyword argument，故此时 jiuwenswarm
-  #   公共出口对 agentos 的 context_window 统一 pop 防发厂商；core 加正式字段后
+  #   公共出口对 context_window 统一 pop 防发厂商；core 加正式字段后
   #   （届时 core 自行 exclude 不发厂商、self.model_config.context_window 可读），
   #   jiuwenswarm 自动停止 pop，把值留给 core。无需人工同步。
   #   不填 = core 按模型名查表 / 兜底 200000。

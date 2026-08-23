@@ -2207,9 +2207,9 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 obj = entry.get("model_config_obj")
                 if isinstance(obj, dict):
                     model_config_obj = dict(obj)
-                # AgentOS 备份模型的 mco 含 _source=="agentos" 标记（由
-                # get_default_models 注入）。其 context_window 是"模型上下文总
-                # 长度"配置，供 core 从 ModelRequestConfig 取值。是否在出口
+                # context_window（模型支持的上下文总长度）可配在任意模型条目的
+                # model_config_obj 里（defaults / agentos / video / audio / vision /
+                # image_gen 均可），供 core 从 ModelRequestConfig 取值。是否在出口
                 # 清掉取决于 core 是否已把 context_window 加为 ModelRequestConfig
                 # 正式字段（见 reasoning_injector.core_has_context_window_field）：
                 # - core 未加字段（过渡期）：context_window 进 extra 会被
@@ -2217,10 +2217,11 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
                 #   keyword argument -> 需清。
                 # - core 已加字段：context_window 作正式字段，core 自行 exclude
                 #   不发厂商、可读 -> 不清（否则切掉 core 想读的值）。
-                # _source 标记本身由 reasoning_injector._build_model_request_kwargs
-                # 统一 pop；此处与公共出口同口径，覆盖绕过 build_model_from_entry
-                # 的 validate 路径。
-                if model_config_obj.get("_source") == "agentos" and not core_has_context_window_field():
+                # 不再守 _source=="agentos"：所有条目一视同仁，defaults 配了
+                # context_window 同样需要过渡期清防发厂商。_source 标记本身由
+                # reasoning_injector._build_model_request_kwargs 统一 pop；此处与
+                # 公共出口同口径，覆盖绕过 build_model_from_entry 的 validate 路径。
+                if not core_has_context_window_field():
                     model_config_obj.pop("context_window", None)
                 logger.info(
                     "[config.validate_model] loaded model_config_obj for '%s' "
