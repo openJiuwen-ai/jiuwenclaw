@@ -14,6 +14,9 @@ from typing import Any
 
 import pytest
 
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import (
+    reviewer_metadata as reviewer_metadata_module,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_reviewer import (
     AUTO_REVIEW_REASON_SUMMARY_LIMIT,
     AutoReviewer,
@@ -778,6 +781,251 @@ async def test_isolated_model_client_rejects_non_string_content(
 
     assert assessment.outcome == ReviewerOutcome.MANUAL
     assert assessment.fallback_reason == "invalid_json"
+
+
+def test_reviewer_ui_metadata_removes_manual_only_fields_from_approved(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    monkeypatch.setattr(
+        reviewer_metadata_module,
+        "_configured_reviewer_display_language",
+        lambda: "zh",
+    )
+
+    metadata = reviewer_metadata_module._reviewer_ui_metadata(
+        descriptor,
+        reason="reviewer_allow_once",
+        metadata={
+            "decision_source": "auto_reviewer",
+            "final_reviewer_status": "approved",
+            "reviewer_outcome": "allow_once",
+            "reviewer_reason_summary": "操作符合用户意图。",
+            "manual_reason_code": "stale_manual",
+            "manual_reason_summary": "需要人工审批。",
+            "user_review_hint": "请人工批准。",
+            "user_authorization": "unknown",
+        },
+    )
+
+    assert metadata["evidence_summary"] == "操作符合用户意图。"
+    assert "manual_reason_code" not in metadata
+    assert "manual_reason_summary" not in metadata
+    assert "reviewer_user_review_hint" not in metadata
+    assert "user_review_hint" not in metadata
+    assert "user_authorization" not in metadata
+
+
+def test_reviewer_ui_metadata_localizes_unverified_execution_provider(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    monkeypatch.setattr(
+        reviewer_metadata_module,
+        "_configured_reviewer_display_language",
+        lambda: "zh",
+    )
+
+    metadata = reviewer_metadata_module._reviewer_ui_metadata(
+        descriptor,
+        reason="execution_provider_contract_unverified",
+        metadata={
+            "decision_source": "execution_provider_contract",
+            "final_reviewer_status": "manual",
+            "reviewer_outcome": "manual",
+            "manual_reason_code": "execution_provider_contract_unverified",
+        },
+    )
+
+    assert "无法验证当前工具的执行 provider 合同" in metadata["manual_reason_summary"]
+    assert "人工允许不会改变工具的实际执行环境" in metadata["manual_reason_summary"]
+    assert "JiuwenBox" not in metadata["manual_reason_summary"]
+    assert "没有沙箱" not in metadata["manual_reason_summary"]
+
+
+def test_reviewer_ui_metadata_prefers_precise_host_reason_for_downgraded_allow(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    monkeypatch.setattr(
+        reviewer_metadata_module,
+        "_configured_reviewer_display_language",
+        lambda: "zh",
+    )
+
+    metadata = reviewer_metadata_module._reviewer_ui_metadata(
+        descriptor,
+        reason="reviewer_outcome_not_allowed",
+        metadata={
+            "decision_source": "auto_reviewer",
+            "final_reviewer_status": "manual",
+            "reviewer_reason_code": "reviewer_outcome_not_allowed",
+            "reviewer_reason_summary": "AutoReviewer requested allow_once.",
+            "host_manual_reason_code": "original_user_intent_missing",
+            "host_manual_reason_summary": (
+                "写入目标位于工作区之外，且可信用户意图未明确指定该路径，因此需要人工审批。"
+            ),
+        },
+    )
+
+    assert metadata["manual_reason_code"] == "reviewer_outcome_not_allowed"
+    assert metadata["host_manual_reason_code"] == (
+        "original_user_intent_missing"
+    )
+    assert metadata["evidence_summary"] == metadata["host_manual_reason_summary"]
+    assert metadata["manual_reason_summary"] == metadata["host_manual_reason_summary"]
+    assert "结论超出宿主策略允许范围" not in metadata["manual_reason_summary"]
+
+
+def test_host_owned_manual_display_uses_current_host_candidate_reason(
+    tmp_path: Path,
+) -> None:
+    descriptor, candidate = _manual_only_candidate(tmp_path)
+    metadata, display_reason = (
+        reviewer_metadata_module._with_host_owned_manual_review_display(
+            descriptor,
+            candidate,
+            {
+                "decision_source": "auto_reviewer",
+                "reviewer_outcome": "manual",
+                "reviewer_reason_summary": (
+                    "The requested destination is not explicit in the user instruction."
+                ),
+                "manual_reason_summary": (
+                    "The requested destination is not explicit in the user instruction."
+                ),
+                "user_review_hint": "Verify the destination before approving.",
+            },
+        )
+    )
+
+    assert display_reason == metadata["host_manual_reason_summary"]
+    assert metadata["manual_reason_summary"] == display_reason
+    assert display_reason != (
+        "The requested destination is not explicit in the user instruction."
+    )
+    assert metadata["host_manual_reason_code"] == "original_user_intent_missing"
+    assert metadata["user_review_hint"]
+
+
+def test_reviewer_ui_metadata_localizes_generic_deterministic_reason(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    monkeypatch.setattr(
+        reviewer_metadata_module,
+        "_configured_reviewer_display_language",
+        lambda: "en",
+    )
+
+    metadata = reviewer_metadata_module._reviewer_ui_metadata(
+        descriptor,
+        reason="deterministic_scope",
+        metadata={
+            "decision_source": "deterministic_sandbox_scope",
+            "final_reviewer_status": "deterministic_allow",
+            "reviewer_outcome": "allow_once",
+            "reviewer_reason_code": "deterministic_scope",
+            "evidence_summary": "stale hard-coded text",
+        },
+    )
+
+    assert metadata["evidence_summary"] == (
+        "Host permission rules verified that this operation meets automatic "
+        "execution conditions."
+    )
+    assert "manual_reason_summary" not in metadata
+    assert "user_review_hint" not in metadata
+
+
+def test_reviewer_ui_metadata_localizes_host_fallback_reasons(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    cases = (
+        (
+            "timed_out",
+            "reviewer_fallback",
+            "reviewer_timeout",
+            "自动审批审查超时",
+            "AutoReviewer timed out",
+        ),
+        (
+            "manual",
+            "reviewer_fallback",
+            "invalid_json",
+            "自动审批响应无法通过宿主校验",
+            "did not pass host validation",
+        ),
+        (
+            "manual",
+            "reviewer_fallback",
+            "low_confidence",
+            "置信度低于当前阈值",
+            "confidence was below",
+        ),
+        (
+            "manual",
+            "reviewer_outcome_not_allowed",
+            "",
+            "结论超出宿主策略允许范围",
+            "outside the host policy allowance",
+        ),
+    )
+    for status, reason_code, fallback_reason, zh_text, en_text in cases:
+        metadata_input = {
+            "decision_source": "auto_reviewer",
+            "final_reviewer_status": status,
+            "reviewer_reason_code": reason_code,
+            "reviewer_reason_summary": fallback_reason or reason_code,
+            "fallback_reason": fallback_reason,
+        }
+        for language, expected in (("zh", zh_text), ("en", en_text)):
+            monkeypatch.setattr(
+                reviewer_metadata_module,
+                "_configured_reviewer_display_language",
+                lambda value=language: value,
+            )
+            metadata = reviewer_metadata_module._reviewer_ui_metadata(
+                descriptor,
+                reason=reason_code,
+                metadata=metadata_input,
+            )
+
+            assert expected in metadata["evidence_summary"]
+            assert metadata["manual_reason_summary"] == metadata["evidence_summary"]
+            if fallback_reason:
+                assert fallback_reason not in metadata["evidence_summary"]
+
+
+def test_reviewer_ui_metadata_terminal_status_drops_historical_manual_fields(
+    tmp_path: Path,
+) -> None:
+    descriptor, _ = _candidate(tmp_path)
+    for final_status in ("approved", "denied"):
+        metadata = reviewer_metadata_module._reviewer_ui_metadata(
+            descriptor,
+            reason="terminal",
+            metadata={
+                "decision_source": "auto_reviewer",
+                "final_reviewer_status": final_status,
+                "reviewer_outcome": "manual",
+                "reviewer_raw_outcome": "manual",
+                "manual_reason_code": "historical_manual",
+                "manual_reason_summary": "Historical manual reason.",
+                "user_review_hint": "Review this manually.",
+            },
+        )
+
+        assert "manual_reason_code" not in metadata
+        assert "manual_reason_summary" not in metadata
+        assert "reviewer_user_review_hint" not in metadata
+        assert "user_review_hint" not in metadata
 
 
 async def test_auto_review_request_binds_allowed_outcomes(
