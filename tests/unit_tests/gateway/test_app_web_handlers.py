@@ -3,6 +3,10 @@
 import asyncio
 import importlib
 import json
+
+# TEST ONLY: URL literals use reserved domains and are passed to local handler
+# mocks; no external request is performed.
+
 import threading
 import time
 from pathlib import Path
@@ -808,7 +812,7 @@ async def test_config_set_applies_scoped_reload_before_responding(monkeypatch, t
     task = asyncio.create_task(channel.methods["config.set"](
         object(),
         "req-1",
-        {"api_base": "https://example.com/one"},
+        {"api_base": "https://example.invalid/one"},
         "sess-1",
     ))
 
@@ -852,7 +856,7 @@ async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypat
     await channel.methods["config.set"](
         object(),
         "req-hot-reload-failed",
-        {"api_base": "https://example.com/one"},
+        {"api_base": "https://example.invalid/one"},
         "sess-1",
     )
 
@@ -996,7 +1000,7 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
             "models": [
                 {
                     "model_name": "model-one",
-                    "api_base": "https://example.com/v1",
+                    "api_base": "https://example.invalid/v1",
                     "api_key": "secret",
                     "model_provider": "OpenAI",
                     "is_default": True,
@@ -2856,7 +2860,7 @@ async def test_config_save_all_kvc_failure_does_not_persist_permission_profile(m
             "models": [
                 {
                     "model_name": "model-one",
-                    "api_base": "https://example.com/v1",
+                    "api_base": "https://example.invalid/v1",
                     "api_key": "secret",
                     "model_provider": "OpenAI",
                     "is_default": True,

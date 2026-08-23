@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use reserved domains or blocked security-test addresses;
+# runtime calls are mocked and never reach external endpoints.
+
 import shutil
 import subprocess
 import textwrap
@@ -82,10 +85,10 @@ def test_current_official_capability_argument_receives_owned_guard() -> None:
         (["-y", "@playwright/mcp@latest", "--extension"], None),
         (["-y", "@playwright/mcp@latest", "--config", "custom.json"], None),
         (["-y", "@playwright/mcp@latest", "--init-page", "custom.js"], None),
-        (["-y", "@playwright/mcp@latest", "--proxy-server=http://proxy"], None),
+        (["-y", "@playwright/mcp@latest", "--proxy-server=http://proxy.invalid"], None),
         (
             ["-y", "@playwright/mcp@latest"],
-            {"PLAYWRIGHT_MCP_CDP_ENDPOINT": "http://127.0.0.1:9222"},
+            {"PLAYWRIGHT_MCP_CDP_ENDPOINT": "http://browser.invalid:9222"},
         ),
     ],
 )
@@ -163,8 +166,8 @@ def test_owned_guard_routes_navigation_redirects_and_subresources() -> None:
         (async () => {{
           await guard.default({{ page }});
           assert.equal(routes[0][0], "**/*");
-          for (const url of ["https://example.com/page", "https://cdn.example.com/app.js", "about:blank", "data:text/plain,ok"]) assert.equal(await decision(url), "continue");
-          for (const url of ["http://example.com", "https://127.0.0.1", "https://169.254.169.254/latest", "https://metadata.google.internal", "https://service.internal", "https://home.arpa", "https://router.home.arpa", "https://localhost", "https://foo.localhost", "https://[::1]"]) assert.equal(await decision(url), "abort:blockedbyclient");
+          for (const url of ["https://example.invalid/page", "https://cdn.example.invalid/app.js", "about:blank", "data:text/plain,ok"]) assert.equal(await decision(url), "continue");
+          for (const url of ["http://example.invalid", "https://127.0.0.1", "https://169.254.169.254/latest", "https://metadata.google.internal", "https://service.internal", "https://home.arpa", "https://router.home.arpa", "https://localhost", "https://foo.localhost", "https://[::1]"]) assert.equal(await decision(url), "abort:blockedbyclient");
         }})().catch((error) => {{ console.error(error); process.exit(1); }});
         """
     )

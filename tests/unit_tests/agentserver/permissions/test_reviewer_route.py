@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use reserved domains and are evaluated as plain policy
+# data without external network I/O.
+
 from pathlib import Path
 
 import pytest
@@ -129,7 +132,7 @@ def test_domain_route_sets_reviewer_ceiling(
 
 
 def test_exact_and_recent_fetch_routes(tmp_path: Path) -> None:
-    url = "https://docs.python.org/3/"
+    url = "https://docs.example.invalid/3/"
     facts = _facts("mcp_fetch_webpage", {"url": url}, tmp_path)
     explicit = OriginalUserIntentEvidence(
         source=UserIntentSource.HOST_USER_MESSAGE,
@@ -142,7 +145,7 @@ def test_exact_and_recent_fetch_routes(tmp_path: Path) -> None:
     recent = (
         RecentUrlSource(
             url=url,
-            host="docs.python.org",
+            host="docs.example.invalid",
             source_tool="mcp_free_search",
             trusted=True,
         ),

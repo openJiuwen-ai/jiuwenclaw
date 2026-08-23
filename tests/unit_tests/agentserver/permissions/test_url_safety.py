@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use reserved domains or blocked security-test addresses;
+# policy evaluation rejects or parses them without external network I/O.
+
 from pathlib import Path
 
 import pytest
@@ -39,7 +42,7 @@ def _facts(tool_name: str, args: dict[str, object], *, workspace_root: Path):
 
 
 def test_reviewable_url_scope_accepts_explicit_user_url(tmp_path: Path) -> None:
-    url = "https://example.com/docs?a=1"
+    url = "https://example.invalid/docs?a=1"
     facts = _facts(
         "mcp_fetch_webpage", {"url": url}, workspace_root=tmp_path
     )
@@ -156,11 +159,11 @@ def test_safe_url_with_empty_host_intent_stays_manual_only(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("url", "reason"),
     (
-        ("http://example.com", "network_scheme_not_https"),
+        ("http://example.invalid", "network_scheme_not_https"),
         ("https://169.254.169.254/latest", "network_metadata_host"),
         ("https://example.local/path", "network_internal_hostname"),
-        ("https://user:password@example.com", "network_url_userinfo"),
-        ("https://example.com/?api_key=secret", "network_secret_query"),
+        ("https://user:password@example.invalid", "network_url_userinfo"),
+        ("https://example.invalid/?api_key=secret", "network_secret_query"),
     ),
 )
 def test_reviewable_url_scope_hard_blocks_unsafe_urls(
@@ -183,9 +186,9 @@ def test_reviewable_url_scope_hard_blocks_unsafe_urls(
 
 
 def test_normalize_url_for_match_dedupes_host_case_only() -> None:
-    assert normalize_url_for_match("HTTPS://Example.COM/a?q=1") == (
-        "https://example.com/a?q=1"
+    assert normalize_url_for_match("HTTPS://Example.INVALID/a?q=1") == (
+        "https://example.invalid/a?q=1"
     )
-    assert normalize_url_for_match("https://example.com/a?q=2") != (
-        normalize_url_for_match("https://example.com/a?q=1")
+    assert normalize_url_for_match("https://example.invalid/a?q=2") != (
+        normalize_url_for_match("https://example.invalid/a?q=1")
     )

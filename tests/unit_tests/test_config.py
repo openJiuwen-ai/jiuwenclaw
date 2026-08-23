@@ -5,6 +5,9 @@
 import math
 from pathlib import Path
 
+# TEST ONLY: URL literals use reserved domains and are configuration fixtures;
+# these tests parse values without opening sockets or contacting endpoints.
+
 import pytest
 import yaml
 
@@ -32,8 +35,8 @@ from jiuwenswarm.common.config import (
         (None, False),
         ({}, False),
         ({"type": "jiuwenbox"}, False),
-        ({"type": "jiuwenbox", "url": "http://127.0.0.1:8321"}, False),
-        ({"url": "http://127.0.0.1:8321", "control_token_path": "/tmp/token"}, False),
+        ({"type": "jiuwenbox", "url": "http://sandbox.invalid:8321"}, False),
+        ({"url": "http://sandbox.invalid:8321", "control_token_path": "/tmp/token"}, False),
         ({"type": "jiuwenbox", "control_token_path": "/tmp/token"}, False),
         (
             {
@@ -46,7 +49,7 @@ from jiuwenswarm.common.config import (
         (
             {
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": "   ",
             },
             False,
@@ -54,7 +57,7 @@ from jiuwenswarm.common.config import (
         (
             {
                 "type": " JiuWenBox ",
-                "url": " http://127.0.0.1:8321 ",
+                "url": " http://sandbox.invalid:8321 ",
                 "control_token_path": " ~/.jiuwenbox/token ",
             },
             True,
@@ -62,7 +65,7 @@ from jiuwenswarm.common.config import (
         (
             {
                 "type": "yuanrong",
-                "url": "http://yuanrong.local",
+                "url": "http://yuanrong.invalid",
                 "control_token_path": "/tmp/token",
             },
             False,
@@ -70,7 +73,7 @@ from jiuwenswarm.common.config import (
         (
             {
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": "/tmp/token",
                 "enabled": False,
             },
@@ -81,7 +84,7 @@ from jiuwenswarm.common.config import (
             {
                 "runtime": {"enabled": True},
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": None,
             },
             False,
@@ -98,7 +101,7 @@ def test_resolve_sandbox_enabled_uses_provisioned_jiuwenbox_shape(
 def test_resolve_sandbox_enabled_does_not_mutate_input() -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
 
@@ -111,7 +114,7 @@ def test_get_sandbox_runtime_derives_enabled_without_persisting(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
     monkeypatch.setattr(
@@ -130,7 +133,7 @@ def test_get_sandbox_runtime_preserves_explicit_false(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
         "enabled": False,
     }
@@ -146,7 +149,7 @@ def test_update_sandbox_runtime_does_not_persist_derived_enabled(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
     persisted = {"sandbox": sandbox}

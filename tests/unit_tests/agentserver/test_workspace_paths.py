@@ -3,6 +3,9 @@
 from pathlib import Path, PureWindowsPath
 from time import monotonic
 
+# TEST ONLY: URL and credential-shaped strings are synthetic redaction inputs on
+# reserved domains; this module performs no external network I/O.
+
 import jiuwenswarm.agents.harness.common.workspace_paths as workspace_paths
 from jiuwenswarm.agents.harness.common.workspace_paths import (
     STALE_SANDBOX_ARTIFACT_PATH,
@@ -130,7 +133,7 @@ def test_sanitize_review_ui_value_relativizes_workspace_paths_and_preserves_othe
         "path": str(current_path),
         "summary": (
             f"created {current_path} then checked "
-            "/home/chengkun/.jiuwenswarm/agent/workspace"
+            "/home/test-user/.jiuwenswarm/agent/workspace"
         ),
         "stale": str(stale_path),
         "similarly_named_external": str(similarly_named_external_path),
@@ -141,7 +144,7 @@ def test_sanitize_review_ui_value_relativizes_workspace_paths_and_preserves_othe
     assert sanitized["path"] == "reports/out.pptx"
     assert sanitized["summary"] == (
         "created reports/out.pptx then checked "
-        "/home/chengkun/.jiuwenswarm/agent/workspace"
+        "/home/test-user/.jiuwenswarm/agent/workspace"
     )
     assert sanitized["stale"] == str(stale_path)
     assert sanitized["similarly_named_external"] == str(similarly_named_external_path)
@@ -150,12 +153,14 @@ def test_sanitize_review_ui_value_relativizes_workspace_paths_and_preserves_othe
 def test_sanitize_review_ui_value_preserves_secrets_redaction(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     current_path = workspace_root / "reports" / "out.pptx"
+    synthetic_bearer = "Bearer " + ("A" * 16)
+    synthetic_provider_token = "sk-" + ("T" * 26)
     value = {
         "cmd": (
-            f"AUTHORIZATION=Bearer abcdefghijklmnop save {current_path} "
-            "https://example.com/?token=secret"
+            f"AUTHORIZATION={synthetic_bearer} save {current_path} "
+            "https://example.invalid/?token=TEST_ONLY_TOKEN"
         ),
-        "token": "sk-abcdefghijklmnopqrstuvwxyz",
+        "token": synthetic_provider_token,
     }
 
     sanitized = sanitize_review_ui_value(value, workspace_root)
@@ -163,7 +168,8 @@ def test_sanitize_review_ui_value_preserves_secrets_redaction(tmp_path: Path) ->
     assert "AUTHORIZATION=[redacted]" in sanitized["cmd"]
     assert "token=[redacted]" in sanitized["cmd"]
     assert "reports/out.pptx" in sanitized["cmd"]
-    assert "abcdefghijklmnop" not in sanitized["cmd"]
+    assert synthetic_bearer not in sanitized["cmd"]
+    assert synthetic_provider_token not in str(sanitized)
     assert sanitized["token"] == "[redacted]"
 
 

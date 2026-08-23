@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use reserved domains or security-test addresses; all
+# request paths are stubbed or rejected before external network I/O.
+
 from urllib.parse import quote
 
 import pytest
@@ -33,11 +36,11 @@ class _Response:
 
 def test_fetch_normalization_preserves_approved_ddg_redirect_url() -> None:
     target = "https://untrusted.example.test/path"
-    approved = f"https://duckduckgo.com/l/?uddg={quote(target)}"
+    approved = f"https://search.example.invalid/l/?uddg={quote(target)}"
 
     assert web_fetch_tools._normalize_url(approved) == approved
-    assert web_fetch_tools._normalize_url("example.com/page") == (
-        "https://example.com/page"
+    assert web_fetch_tools._normalize_url("example.invalid/page") == (
+        "https://example.invalid/page"
     )
 
 
@@ -45,17 +48,17 @@ def test_safe_fetch_validates_same_domain_redirect_hops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     responses = {
-        "https://example.com/start": _Response(
-            "https://example.com/start",
+        "https://example.invalid/start": _Response(
+            "https://example.invalid/start",
             status_code=302,
             location="/middle",
         ),
-        "https://example.com/middle": _Response(
-            "https://example.com/middle",
+        "https://example.invalid/middle": _Response(
+            "https://example.invalid/middle",
             status_code=307,
-            location="https://docs.example.com/end",
+            location="https://docs.example.invalid/end",
         ),
-        "https://docs.example.com/end": _Response("https://docs.example.com/end"),
+        "https://docs.example.invalid/end": _Response("https://docs.example.invalid/end"),
     }
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -66,10 +69,10 @@ def test_safe_fetch_validates_same_domain_redirect_hops(
     monkeypatch.setattr(web_fetch_tools, "_http_get", fake_get)
 
     response = web_fetch_tools._safe_http_get(
-        "https://example.com/start", timeout_seconds=9
+        "https://example.invalid/start", timeout_seconds=9
     )
 
-    assert response.url == "https://docs.example.com/end"
+    assert response.url == "https://docs.example.invalid/end"
     assert [url for url, _kwargs in calls] == list(responses)
     assert all(kwargs["allow_redirects"] is False for _url, kwargs in calls)
 
@@ -90,16 +93,16 @@ def test_safe_fetch_rejects_cross_domain_redirect_before_request(
     monkeypatch.setattr(web_fetch_tools, "_http_get", fake_get)
 
     with pytest.raises(ValueError, match="network_redirect_domain_mismatch"):
-        web_fetch_tools._safe_http_get("https://example.com/start", timeout_seconds=9)
+        web_fetch_tools._safe_http_get("https://example.invalid/start", timeout_seconds=9)
 
-    assert calls == ["https://example.com/start"]
+    assert calls == ["https://example.invalid/start"]
 
 
 def test_safe_fetch_requests_ddg_url_before_rejecting_decoded_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = "https://untrusted.example.test/path"
-    approved = f"https://duckduckgo.com/l/?uddg={quote(target)}"
+    approved = f"https://search.example.invalid/l/?uddg={quote(target)}"
     calls: list[str] = []
 
     def fake_get(url: str, **_kwargs: object) -> _Response:
@@ -116,11 +119,11 @@ def test_safe_fetch_requests_ddg_url_before_rejecting_decoded_target(
 
 def test_safe_fetch_rejects_redirect_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = {
-        "https://example.com/a": _Response(
-            "https://example.com/a", status_code=302, location="/b"
+        "https://example.invalid/a": _Response(
+            "https://example.invalid/a", status_code=302, location="/b"
         ),
-        "https://example.com/b": _Response(
-            "https://example.com/b", status_code=302, location="/a"
+        "https://example.invalid/b": _Response(
+            "https://example.invalid/b", status_code=302, location="/a"
         ),
     }
     calls: list[str] = []
@@ -132,21 +135,21 @@ def test_safe_fetch_rejects_redirect_loop(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(web_fetch_tools, "_http_get", fake_get)
 
     with pytest.raises(ValueError, match="network_redirect_loop"):
-        web_fetch_tools._safe_http_get("https://example.com/a", timeout_seconds=9)
+        web_fetch_tools._safe_http_get("https://example.invalid/a", timeout_seconds=9)
 
-    assert calls == ["https://example.com/a", "https://example.com/b"]
+    assert calls == ["https://example.invalid/a", "https://example.invalid/b"]
 
 
 @pytest.mark.parametrize(
     ("url", "reason"),
     [
-        ("http://example.com/plain", "network_scheme_not_https"),
+        ("http://example.invalid/plain", "network_scheme_not_https"),
         ("https://127.0.0.1/private", "network_host_not_public"),
         ("https://169.254.169.254/latest", "network_metadata_host"),
         ("https://metadata.google.internal/latest", "network_metadata_host"),
         ("https://service.internal/data", "network_internal_hostname"),
-        ("https://user:pass@example.com/data", "network_url_userinfo"),
-        ("https://example.com/data?access_token=secret", "network_secret_query"),
+        ("https://user:pass@example.invalid/data", "network_url_userinfo"),
+        ("https://example.invalid/data?access_token=secret", "network_secret_query"),
     ],
 )
 def test_safe_fetch_rejects_unsafe_initial_url_without_network(
@@ -177,10 +180,10 @@ def test_fetch_failure_does_not_invoke_implicit_jina_fallback(
 
     with pytest.raises(requests.HTTPError, match="status=403"):
         web_fetch_tools._fetch_webpage_sync(
-            "https://example.com/protected", timeout_seconds=9
+            "https://example.invalid/protected", timeout_seconds=9
         )
 
-    assert calls == ["https://example.com/protected"]
+    assert calls == ["https://example.invalid/protected"]
 
 
 def test_proxy_retry_preserves_redirect_disable(
@@ -210,7 +213,7 @@ def test_proxy_retry_preserves_redirect_disable(
     monkeypatch.setattr(web_fetch_tools.requests, "get", direct_get)
     monkeypatch.setattr(web_fetch_tools.requests, "Session", Session)
 
-    response = web_fetch_tools._http_get("https://example.com", allow_redirects=False)
+    response = web_fetch_tools._http_get("https://example.invalid", allow_redirects=False)
 
     assert response.status_code == 200
     assert direct_calls[0]["allow_redirects"] is False

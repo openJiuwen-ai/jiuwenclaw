@@ -1,5 +1,9 @@
 import asyncio
 import json
+
+# TEST ONLY: URL literals use reserved domains and are consumed by mocks; these
+# tests do not open a socket or contact a running endpoint.
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -104,7 +108,7 @@ async def test_internal_jiuwenbox_bootstrap_does_not_persist_enabled(
         agent_ws_server_module,
         "get_sandbox_endpoint",
         lambda: {
-            "url": "http://127.0.0.1:8321",
+            "url": "http://sandbox.invalid:8321",
             "type": "jiuwenbox",
             "policy_file": "policy.yaml",
         },
@@ -140,7 +144,7 @@ async def test_internal_jiuwenbox_bootstrap_does_not_persist_enabled(
 
     assert endpoint_updates == [
         (
-            ("http://127.0.0.1:8321", "jiuwenbox"),
+            ("http://sandbox.invalid:8321", "jiuwenbox"),
             {
                 "startup_mode": "internal",
                 "policy_file": "policy.yaml",

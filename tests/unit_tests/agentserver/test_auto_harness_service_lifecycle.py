@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use the reserved .test domain and remain inside mocked
+# model/service objects; no external request is performed.
+
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace

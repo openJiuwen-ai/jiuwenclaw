@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use reserved domains and are only passed to test doubles;
+# this support module performs no external network I/O.
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -117,7 +120,7 @@ def _jiuwenbox_sys_operation() -> tuple[object, object]:
             }
 
     class Provider:
-        endpoint = SimpleNamespace(base_url="http://sandbox.local")
+        endpoint = SimpleNamespace(base_url="http://sandbox.invalid")
         actual_id = "sandbox-a"
         client = Client()
 

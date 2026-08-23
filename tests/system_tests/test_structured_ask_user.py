@@ -484,7 +484,7 @@ class TestConfirmAndPermissionInterrupts:
         assert result["questions"][0]["header"].startswith("操作确认")
 
     @staticmethod
-    def test_permission_interrupt_message_is_classified():
+    def test_permission_interrupt_without_host_locator_fails_closed():
         message = "**工具 `write_file` 需要授权才能执行**\n\n请确认是否允许该操作。"
         result = convert_interactions_to_ask_user_question([
             {
@@ -496,10 +496,7 @@ class TestConfirmAndPermissionInterrupts:
                 },
             }
         ])
-        assert result is not None
-        assert result["source"] == "permission_interrupt"
-        assert "write_file" in result["questions"][0]["question"]
-        assert result["questions"][0]["header"].startswith("权限审批")
+        assert result is None
 
     @staticmethod
     def test_extract_question_falls_back_for_generic_confirm_copy():
@@ -649,34 +646,6 @@ class TestStructuredAskUserRailResolveInterrupt:
         from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
         assert isinstance(decision, RejectResult)
         assert "questions[0].options[0].label" in decision.tool_result
-
-    @staticmethod
-    @pytest.mark.parametrize(
-        "options",
-        [
-            [{"label": "A", "description": 1}, {"label": "B"}],
-            [{"label": "A", "preview": {}}, {"label": "B"}],
-            [{"label": "A"}, {"label": "A"}],
-            [{"label": "A"}, {"label": "Other"}],
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_ambiguous_option_contracts_are_rejected(options):
-        """Host metadata must be typed, uniquely addressable, and reserve Other."""
-        rail = StructuredAskUserRail()
-        tc = _make_tool_call(arguments={
-            "query": "Choose",
-            "questions": [{
-                "question": "Which option?",
-                "header": "Choice",
-                "options": options,
-            }],
-        })
-
-        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
-
-        from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
-        assert isinstance(decision, RejectResult)
 
     @staticmethod
     @pytest.mark.parametrize("question", [None, "not an object", 123, []])

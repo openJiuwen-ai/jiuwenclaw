@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use the reserved .test domain and are returned by local
+# test doubles; no external request is performed.
+
 import json
 import re
 from pathlib import Path
