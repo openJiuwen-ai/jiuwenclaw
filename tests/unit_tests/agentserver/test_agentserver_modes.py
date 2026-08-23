@@ -56,6 +56,7 @@ def _is_regular_skill_evolution_rail(rail):
         ("team.plan", ("team", "plan", "team.plan.normal")),
         ("team.plan.normal", ("team", "plan", "team.plan.normal")),
         ("team.plan.code", ("code", "team", "team.plan.code")),
+        ("auto_harness", ("auto_harness", "auto_harness", "auto_harness")),
         (None, ("agent", None, "agent")),
     ],
 )
@@ -81,6 +82,15 @@ def test_resolve_agent_request_mode_aligns_single_agent_with_work_mode(
         raw_mode,
         work_mode=work_mode,
     ) == expected
+
+
+def test_auto_harness_uses_distinct_agent_cache_identity():
+    from jiuwenswarm.server.runtime.agent_manager import _make_agent_cache_key
+
+    regular = _make_agent_cache_key("agent", None, None)
+    harness = _make_agent_cache_key("agent", "auto_harness", None)
+
+    assert regular != harness
 
 
 def test_team_plan_params_are_team_mode():
@@ -377,6 +387,73 @@ def test_build_inputs_maps_skill_evolution_interrupt_answers_to_actions(monkeypa
         assert interactive_input is not None
         assert interactive_input.user_inputs["call_123"] == {"action": expected_action}
         assert "approved" not in interactive_input.user_inputs["call_123"]
+
+
+@pytest.mark.parametrize(
+    ("selected_option", "expected_payload"),
+    [
+        (
+            "本次允许",
+            {"approved": True, "auto_confirm": False, "feedback": ""},
+        ),
+        (
+            "会话内记住",
+            {
+                "approved": True,
+                "auto_confirm": True,
+                "persist_allow": False,
+                "feedback": "",
+            },
+        ),
+        (
+            "永久记住",
+            {
+                "approved": True,
+                "auto_confirm": True,
+                "persist_allow": True,
+                "feedback": "",
+            },
+        ),
+        (
+            "拒绝",
+            {"approved": False, "auto_confirm": False, "feedback": "用户拒绝"},
+        ),
+    ],
+)
+def test_build_inputs_maps_paired_develop_permission_scopes(
+    monkeypatch,
+    selected_option: str,
+    expected_payload: dict[str, object],
+) -> None:
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    request = AgentRequest(
+        request_id="req-permission-answer",
+        channel_id="shared-transport",
+        session_id="permission-session",
+        params={
+            "query": "",
+            "request_id": "tool-call-17",
+            "answers": [
+                {
+                    "selected_options": [selected_option],
+                    "custom_input": "",
+                    "card_id": "tool-invocation-17",
+                }
+            ],
+            "source": "permission_interrupt",
+        },
+    )
+
+    inputs, _, _ = interface_module.JiuWenSwarm().build_inputs(request)
+
+    assert isinstance(inputs["query"], InteractiveInput)
+    assert inputs["query"].user_inputs == {
+        "tool-invocation-17": expected_payload
+    }
 
 
 @pytest.mark.parametrize(
