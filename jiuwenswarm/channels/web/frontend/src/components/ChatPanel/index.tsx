@@ -80,7 +80,11 @@ interface ChatPanelProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
-  onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
+  onUserAnswer: (
+    requestId: string,
+    answers: UserAnswer[],
+    source?: string,
+  ) => Promise<boolean>;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
   canExportShare?: boolean;
