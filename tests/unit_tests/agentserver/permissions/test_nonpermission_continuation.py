@@ -1,13 +1,19 @@
-"""Base permission rail respects Host-admitted non-Permission continuations."""
+"""Permission rails respect Host-admitted non-Permission continuations."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openjiuwen.harness.rails.security.tool_security_rail import (
     PermissionInterruptRail,
 )
 
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import (
+    before_tool,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.before_tool import (
+    AutoPermissionBeforeToolMixin,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.permission_interrupt_rail import (
     JiuwenSwarmPermissionInterruptRail,
 )
@@ -29,6 +35,42 @@ def _marked_context() -> SimpleNamespace:
         ),
     )
     return ctx
+
+
+@pytest.mark.asyncio
+async def test_auto_permission_does_not_consume_nonpermission_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = _marked_context()
+    invocation = SimpleNamespace(ctx=ctx, tool_name="exit_plan_mode")
+    resolve_user_input = MagicMock(
+        return_value={"approved": True, "auto_confirm": True}
+    )
+    facts = MagicMock()
+    clear_no_host = MagicMock()
+    clear_send = MagicMock()
+    clear_search = MagicMock()
+    monkeypatch.setattr(
+        before_tool, "_extract_invocation", lambda args, kwargs: invocation
+    )
+    monkeypatch.setattr(before_tool, "_resolve_user_input", resolve_user_input)
+    monkeypatch.setattr(before_tool, "build_tool_decision_facts", facts)
+    monkeypatch.setattr(before_tool, "clear_no_host_fallback", clear_no_host)
+    monkeypatch.setattr(before_tool, "clear_send_file_execution_grant", clear_send)
+    monkeypatch.setattr(before_tool, "clear_trusted_search_producer", clear_search)
+    rail = SimpleNamespace(
+        _call_base_rail=AsyncMock(),
+    )
+
+    result = await AutoPermissionBeforeToolMixin._before_tool_call_impl(rail)
+
+    assert result is None
+    resolve_user_input.assert_not_called()
+    facts.assert_not_called()
+    rail._call_base_rail.assert_not_awaited()
+    clear_no_host.assert_called_once_with()
+    clear_send.assert_called_once_with()
+    clear_search.assert_called_once_with()
 
 
 @pytest.mark.asyncio
