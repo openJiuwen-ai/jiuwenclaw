@@ -1279,6 +1279,11 @@ class JiuWenSwarmDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._model_name_to_keys: dict[str, list[str]] = {}
+        # 全局列表下标 → cache_key。通道侧（Web）用全局 origin_index 拼请求 key，
+        # 与后端 per-name 的 cache_key 序号语义分叉；此映射在 _resolve_model_by_name
+        # 回退分支把通道传入的全局序号换算成真实 cache_key，避免同名条目
+        # （如 agentos 第 2+ 个同名模型）被静默解析到 defaults 的同名首条目。
+        self._global_index_to_cache_key: dict[int, str] = {}
         # Cache system prompt to avoid re-building on every btw/recap call.
         # The system prompt is derived from project context (CLAUDE.md, skills, etc.)
         # which doesn't change within a session, so caching is safe.
@@ -3256,11 +3261,17 @@ class JiuWenSwarmDeepAdapter:
         self,
         entry: dict[str, Any],
         name_counter: dict[str, int],
-    ) -> None:
-        """Register one model entry into the request-selectable model cache."""
+    ) -> str | None:
+        """Register one model entry into the request-selectable model cache.
+
+        Returns the cache_key (``{model_name}#{per_name_idx}``) on success, or
+        ``None`` when the entry is skipped (missing model_name or build failure).
+        The caller pairs this return value with the entry's global list index
+        to populate ``_global_index_to_cache_key``.
+        """
         mcc = entry.get("model_client_config") or {}
         if not mcc.get("model_name"):
-            return
+            return None
         model_name = mcc["model_name"]
         idx = name_counter.get(model_name, 0)
         name_counter[model_name] = idx + 1
@@ -3276,7 +3287,7 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] 跳过无效模型条目 %s: %s",
                 model_name, exc,
             )
-            return
+            return None
         if model_name not in self._model_name_to_keys:
             self._model_name_to_keys[model_name] = []
         self._model_name_to_keys[model_name].append(cache_key)
@@ -3289,17 +3300,24 @@ class JiuWenSwarmDeepAdapter:
         if alias and alias != model_name and alias not in self._model_cache:
             self._model_cache[alias] = self._model_cache[cache_key]
 
+        return cache_key
+
     def _build_model_cache_from_defaults(self, config: dict) -> None:
         """从 models.defaults 列表构建模型缓存。
 
         key 使用 {model_name}#{index} 格式以支持同名模型共存。
-        同时记录 _model_name_to_keys 映射以便按 model_name 查找。
+        同时记录 _model_name_to_keys 映射以便按 model_name 查找，
+        以及 _global_index_to_cache_key 映射以便在 _resolve_model_by_name
+        回退分支把通道侧的全局 origin_index 换算成真实 cache_key。
         """
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         name_counter: dict[str, int] = {}
 
-        for entry in get_default_models(config):
-            self._register_model_cache_entry(entry, name_counter)
+        for global_idx, entry in enumerate(get_default_models(config)):
+            cache_key = self._register_model_cache_entry(entry, name_counter)
+            if cache_key is not None:
+                self._global_index_to_cache_key[global_idx] = cache_key
 
     def _build_model_cache_legacy(self, config: dict) -> None:
         """回退到旧格式（models.default / react 段）构建单条目缓存。"""
@@ -3349,6 +3367,7 @@ class JiuWenSwarmDeepAdapter:
 
         self._model_cache.clear()
         self._model_name_to_keys.clear()
+        self._global_index_to_cache_key.clear()
         self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
@@ -3410,13 +3429,15 @@ class JiuWenSwarmDeepAdapter:
         2. ``{model_name}#{index}`` whose ``#index`` matches the backend
            ``name_counter`` scheme — returned directly from ``_model_cache``.
         3. ``{model_name}#{index}`` whose ``#index`` was minted by the channel
-           with its own numbering (and so is absent from ``_model_cache``) —
-           the bare ``model_name`` is split off and looked up in
-           ``_model_name_to_keys``; the channel-supplied index is used to pick
-           a slot when in range, otherwise the first registered slot is used as
-           a tolerant fallback. Without this step, any non-default model whose
-           channel index did not coincide with the backend index silently fell
-           back to the default model.
+           with its own (global) numbering and so is absent from
+           ``_model_cache`` — the channel-supplied index is read as a global
+           list position and converted to the real cache_key via
+           ``_global_index_to_cache_key``; if no entry is registered at that
+           global position (out of range) or the mapped key has since been
+           evicted, a warning is logged and the default model is returned
+           rather than silently falling back to the first same-name entry
+           (which would mis-resolve an agentos same-name entry to the defaults
+           entry and send the wrong api_base/api_key).
         """
         requested = (requested_model_name or "").strip()
         if not requested:
@@ -3430,24 +3451,32 @@ class JiuWenSwarmDeepAdapter:
             resolved = self._model_cache.get(keys[0])
             if resolved is not None:
                 return resolved
-        # 通道侧用各自的序号体系拼出的 {model_name}#{index}（与后端 name_counter
-        # 序号不一致时，上面两步均不命中）。拆出纯名按通道序号容错选择条目，
-        # 否则非默认模型会被静默 fallback 到默认模型。
+        # 通道侧用全局 origin_index 拼出的 {model_name}#{index}，与后端 per-name
+        # cache_key 序号语义不一致，上面两步均不命中。用 _global_index_to_cache_key
+        # 把通道传入的全局序号换算成真实 cache_key；换算失败时记日志并回退默认模型，
+        # 绝不静默取同名组首个条目（否则会把 agentos 同名第 2+ 个条目误解析成
+        # defaults 的同名首条目，api_base/api_key 全错且无任何告警）。
         if "#" in requested:
             bare_name, _, index_part = requested.rpartition("#")
-            bare_keys = self._model_name_to_keys.get(bare_name)
-            if bare_keys:
-                try:
-                    slot = int(index_part)
-                except ValueError:
-                    slot = 0
-                if 0 <= slot < len(bare_keys):
-                    cache_key = bare_keys[slot]
-                else:
-                    cache_key = bare_keys[0]
-                resolved = self._model_cache.get(cache_key)
-                if resolved is not None:
-                    return resolved
+            if not bare_name:
+                return self._model
+            try:
+                global_idx = int(index_part)
+            except ValueError:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: requested %r has "
+                    "non-integer index, falling back to default model", requested,
+                )
+                return self._model
+            cache_key = self._global_index_to_cache_key.get(global_idx)
+            if cache_key is None or cache_key not in self._model_cache:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] model resolve: global index %d "
+                    "for %r not in cache map (mapped_key=%s), falling back to "
+                    "default model", global_idx, requested, cache_key,
+                )
+                return self._model
+            return self._model_cache[cache_key]
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
