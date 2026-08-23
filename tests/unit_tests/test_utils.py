@@ -2,6 +2,9 @@
 
 """Unit tests for utils module."""
 
+# TEST ONLY: credential-shaped values are constructed synthetic fixtures and
+# URL literals use RFC-reserved domains; no external request is performed.
+
 import importlib
 import os
 from pathlib import Path
@@ -173,7 +176,7 @@ class TestSourceRecordMasking:
     - idempotency.
     """
 
-    PLAINTEXT_KEY = "sk-epignnbeppwjigp932ngefebnof"
+    PLAINTEXT_KEY = "sk-" + ("T" * 28)
 
     @staticmethod
     def _capture_logger(name):
@@ -226,11 +229,13 @@ class TestSourceRecordMasking:
 
             lg, buf = self._capture_logger("openjiuwen.harness.security")
             key = self.PLAINTEXT_KEY
-            lg.info("config: api_key=%s, base=https://x.com", key)
+            lg.info("config: api_key=%s, base=https://log.example.invalid", key)
             out = buf.getvalue()
             assert key not in out, "plaintext api_key leaked from third-party logger"
             assert "******" in out, "api_key not masked"
-            assert "https://x.com" in out, "non-sensitive api_base should be preserved"
+            assert "https://log.example.invalid" in out, (
+                "non-sensitive api_base should be preserved"
+            )
         finally:
             self._restore_state(state)
 

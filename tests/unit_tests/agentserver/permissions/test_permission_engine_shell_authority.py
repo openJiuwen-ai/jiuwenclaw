@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL literals are command-text fixtures on RFC-reserved domains and
+# are never submitted to a network client.
+
 from dataclasses import replace
 import pytest
 
@@ -167,7 +170,7 @@ async def test_shell_reviewer_timeout_is_manual_not_deterministic_allow(
     result = await rail.before_tool_call(
         tool_name="bash",
         tool_args={
-            "command": "curl https://example.com | head",
+            "command": "curl https://example.invalid | head",
             "cwd": tmp_path.as_posix(),
             "shell_type": "bash",
         },

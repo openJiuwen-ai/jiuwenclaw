@@ -1,6 +1,10 @@
 import asyncio
 import contextlib
 import json
+
+# TEST ONLY: model URLs use RFC-reserved domains and API-key values are synthetic
+# configuration fixtures; all model clients are patched and no network I/O occurs.
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -787,7 +791,10 @@ async def test_deep_adapter_global_reload_marks_sessions_stale_without_fanout(mo
 
 def _fake_deep_reload_model():
     return SimpleNamespace(
-        model_client_config={"api_base": "https://example.test/v1", "api_key": "secret"},
+        model_client_config={
+            "api_base": "https://example.test/v1",
+            "api_key": "TEST_ONLY_API_KEY",
+        },
         model_config={"model_name": "glm-5", "temperature": 0.95},
     )
 
@@ -894,13 +901,20 @@ async def _reload_deep_adapter_config_for_test(previous_config, deep_config_fact
     return adapter, configured_fields
 
 
-def test_deep_adapter_rejects_invalid_default_model_even_when_other_cached_model_is_valid():
-    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-        JiuWenSwarmDeepAdapter,
+def test_deep_adapter_rejects_invalid_default_model_even_when_other_cached_model_is_valid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+
+    monkeypatch.setattr(
+        interface_deep,
+        "is_placeholder_api_base",
+        lambda value: value == "https://api.example.invalid/v1",
     )
+    JiuWenSwarmDeepAdapter = interface_deep.JiuWenSwarmDeepAdapter
 
     adapter = JiuWenSwarmDeepAdapter()
-    invalid_default = _real_deep_reload_model("https://api.example.com/v1", "bad-default")
+    invalid_default = _real_deep_reload_model("https://api.example.invalid/v1", "bad-default")
     valid_other = _real_deep_reload_model("https://real.provider.test/v1", "good-model")
     adapter._model = invalid_default
     adapter._model_cache = {
@@ -939,7 +953,7 @@ def test_deep_adapter_resolve_model_for_request_falls_back_to_session_metadata()
     )
 
     adapter = JiuWenSwarmDeepAdapter()
-    default_model = _real_deep_reload_model("https://api.example.com/v1", "default-model")
+    default_model = _real_deep_reload_model("https://api.example.invalid/v1", "default-model")
     session_model = _real_deep_reload_model("https://real.provider.test/v1", "session-model")
     adapter._model = default_model
     adapter._model_cache = {
@@ -972,7 +986,7 @@ def test_deep_adapter_apply_model_updates_deep_config_for_goal_assessor():
     )
 
     adapter = JiuWenSwarmDeepAdapter()
-    default_model = _real_deep_reload_model("https://api.example.com/v1", "default-model")
+    default_model = _real_deep_reload_model("https://api.example.invalid/v1", "default-model")
     session_model = _real_deep_reload_model("https://real.provider.test/v1", "session-model")
     react_config = SimpleNamespace(
         model_name="default-model",
@@ -1003,7 +1017,7 @@ def test_deep_adapter_model_config_fingerprint_includes_legacy_react_model_field
         "react": {
             "model_client_config": {
                 "api_base": "https://real.provider.test/v1",
-                "api_key": "secret",
+                "api_key": "TEST_ONLY_API_KEY",
             },
             "model_name": "old-model",
             "model_config_obj": {"temperature": 0.1},
@@ -1013,7 +1027,7 @@ def test_deep_adapter_model_config_fingerprint_includes_legacy_react_model_field
         "react": {
             "model_client_config": {
                 "api_base": "https://real.provider.test/v1",
-                "api_key": "secret",
+                "api_key": "TEST_ONLY_API_KEY",
             },
             "model_name": "new-model",
             "model_config_obj": {"temperature": 0.9},

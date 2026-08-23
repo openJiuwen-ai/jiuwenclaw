@@ -1846,7 +1846,8 @@ await devInitCommand.action({
             name: "harmonyos_developer_knowledge",
             enabled: true,
             transport: "sse",
-            url: "https://example.com/other",
+            // Reserved test-only host: this URL must never reach a live service.
+            url: "https://example.invalid/other",
           },
         ],
       };

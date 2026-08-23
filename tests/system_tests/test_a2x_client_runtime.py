@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TEST ONLY: model endpoint literals use RFC-reserved domains and are consumed by
+# patched clients; no external request is performed.
+
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -76,7 +79,7 @@ def _make_config(role: str, *, dataset: str = "", endpoint: str = "") -> dict:
             "enable_task_loop": True,
             "max_iterations": 3,
             "a2x_registry": {
-                "base_url": "http://fake-a2x.local",
+                "base_url": "http://a2x.invalid",
                 "timeout": 5.0,
                 "api_key": "",
                 "ownership_file": False,
@@ -90,7 +93,7 @@ def _make_config(role: str, *, dataset: str = "", endpoint: str = "") -> dict:
             "default": {
                 "model_client_config": {
                     "api_key": "system-test-key",
-                    "api_base": "http://fake-a2x.local/v1",
+                    "api_base": "http://a2x.invalid/v1",
                 }
             }
         },
@@ -123,8 +126,8 @@ def _make_fake_model() -> MagicMock:
     """Create a fake Model with a valid ModelClientConfig for testing."""
     fake_mcc = ModelClientConfig(
         client_provider="OpenAI",
-        api_key="system-test-key",
-        api_base="http://fake-a2x.local/v1",
+        api_key="TEST_ONLY_SYSTEM_KEY",
+        api_base="http://a2x.invalid/v1",
     )
     fake_model = MagicMock()
     fake_model.model_client_config = fake_mcc

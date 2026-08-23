@@ -9,6 +9,9 @@ from pathlib import Path
 from urllib.parse import quote
 from unittest.mock import patch
 
+# TEST ONLY: loopback URLs bind ephemeral local servers; no external network
+# access occurs.
+
 import pytest
 
 from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (

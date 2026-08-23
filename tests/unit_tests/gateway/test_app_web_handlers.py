@@ -3,6 +3,10 @@
 import asyncio
 import importlib
 import json
+
+# TEST ONLY: URL literals are configuration payloads on RFC-reserved domains or
+# known provider strings consumed by local handler doubles; no network I/O occurs.
+
 import threading
 import time
 from pathlib import Path
@@ -749,8 +753,9 @@ async def test_models_list_returns_exact_vendor_identity(monkeypatch) -> None:
         lambda _config: [{
             "model_client_config": {
                 "model_name": "qwen3.8-max",
-                "api_base": "https://example.com/v1",
-                "api_key": "secret",
+                # Reserved test-only endpoint and synthetic credential.
+                "api_base": "https://example.invalid/v1",
+                "api_key": "TEST_ONLY_API_KEY",
                 "client_provider": "OpenAI",
                 "vendor_key": "alibaba",
                 "plan": "token_plan",
@@ -1010,7 +1015,7 @@ async def test_config_set_applies_scoped_reload_before_responding(monkeypatch, t
     task = asyncio.create_task(channel.methods["config.set"](
         object(),
         "req-1",
-        {"api_base": "https://example.com/one"},
+        {"api_base": "https://example.invalid/one"},
         "sess-1",
     ))
 
@@ -1054,7 +1059,7 @@ async def test_config_set_reports_saved_when_hot_reload_callback_fails(monkeypat
     await channel.methods["config.set"](
         object(),
         "req-hot-reload-failed",
-        {"api_base": "https://example.com/one"},
+        {"api_base": "https://example.invalid/one"},
         "sess-1",
     )
 
@@ -1369,8 +1374,8 @@ async def test_config_save_all_kvc_failure_does_not_persist_permission_profile(
             "models": [
                 {
                     "model_name": "model-one",
-                    "api_base": "https://example.com/v1",
-                    "api_key": "secret",
+                    "api_base": "https://example.invalid/v1",
+                    "api_key": "TEST_ONLY_API_KEY",
                     "model_provider": "OpenAI",
                     "is_default": True,
                 }
@@ -1433,8 +1438,8 @@ async def test_models_replace_all_applies_scoped_reload_before_responding(monkey
             "models": [
                 {
                     "model_name": "model-one",
-                    "api_base": "https://example.com/v1",
-                    "api_key": "secret",
+                    "api_base": "https://example.invalid/v1",
+                    "api_key": "TEST_ONLY_API_KEY",
                     "model_provider": "OpenAI",
                     "is_default": True,
                     "vendor_key": "alibaba",
@@ -1480,8 +1485,9 @@ async def test_models_replace_all_rejects_invalid_vendor_identity(vendor_key, pl
         {
             "models": [{
                 "model_name": "model-one",
-                "api_base": "https://example.com/v1",
-                "api_key": "secret",
+                # Reserved test-only endpoint and synthetic credential.
+                "api_base": "https://example.invalid/v1",
+                "api_key": "TEST_ONLY_API_KEY",
                 "model_provider": "OpenAI",
                 "is_default": True,
                 "vendor_key": vendor_key,

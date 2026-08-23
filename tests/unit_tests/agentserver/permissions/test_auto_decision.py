@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use RFC-reserved domains or blocked security-test
+# addresses; these policy tests perform no external network I/O.
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,7 +42,7 @@ def test_generic_mcp_uri_risks_are_evidence_not_terminal_authority(tmp_path: Pat
         "mcp_untrusted_provider_call",
         {
             "callback_url": "custom://127.0.0.1/private",
-            "archive": "ftp://files.example.com/archive",
+            "archive": "ftp://files.example.invalid/archive",
         },
         tmp_path,
     )
@@ -89,7 +92,7 @@ def test_closed_internal_actions_are_terminal_allows(
     [
         ("session_list", {"unexpected": True}),
         ("todo_insert", {"idx": 1}),
-        ("browser_probe_cards", {"target": "ftp://files.example.com/archive"}),
+        ("browser_probe_cards", {"target": "ftp://files.example.invalid/archive"}),
     ],
 )
 def test_open_or_legacy_internal_shapes_are_not_terminal_allows(
@@ -116,7 +119,7 @@ def test_search_skill_secret_guard_remains_terminal(tmp_path: Path) -> None:
 
 
 def test_browser_navigation_requires_runtime_network_guard(tmp_path: Path) -> None:
-    url = "https://example.com/docs"
+    url = "https://example.invalid/docs"
     facts = _facts("browser_navigate", {"url": url}, tmp_path)
     intent = OriginalUserIntentEvidence(
         source=UserIntentSource.HOST_USER_MESSAGE,

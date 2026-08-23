@@ -7,6 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+# TEST ONLY: new URL fixtures use RFC-reserved domains; provider URLs are compared
+# only as configuration strings. These tests do not open sockets.
+
 import pytest
 import yaml
 
@@ -137,8 +140,8 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
         (None, False),
         ({}, False),
         ({"type": "jiuwenbox"}, False),
-        ({"type": "jiuwenbox", "url": "http://127.0.0.1:8321"}, False),
-        ({"url": "http://127.0.0.1:8321", "control_token_path": "/tmp/token"}, False),
+        ({"type": "jiuwenbox", "url": "http://sandbox.invalid:8321"}, False),
+        ({"url": "http://sandbox.invalid:8321", "control_token_path": "/tmp/token"}, False),
         ({"type": "jiuwenbox", "control_token_path": "/tmp/token"}, False),
         (
             {
@@ -151,7 +154,7 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
         (
             {
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": "   ",
             },
             False,
@@ -159,7 +162,7 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
         (
             {
                 "type": " JiuWenBox ",
-                "url": " http://127.0.0.1:8321 ",
+                "url": " http://sandbox.invalid:8321 ",
                 "control_token_path": " ~/.jiuwenbox/token ",
             },
             True,
@@ -167,7 +170,7 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
         (
             {
                 "type": "yuanrong",
-                "url": "http://yuanrong.local",
+                "url": "http://yuanrong.invalid",
                 "control_token_path": "/tmp/token",
             },
             False,
@@ -175,7 +178,7 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
         (
             {
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": "/tmp/token",
                 "enabled": False,
             },
@@ -186,7 +189,7 @@ def test_reset_external_cli_agents_does_not_write_when_config_is_absent(
             {
                 "runtime": {"enabled": True},
                 "type": "jiuwenbox",
-                "url": "http://127.0.0.1:8321",
+                "url": "http://sandbox.invalid:8321",
                 "control_token_path": None,
             },
             False,
@@ -203,7 +206,7 @@ def test_resolve_sandbox_enabled_uses_provisioned_jiuwenbox_shape(
 def test_resolve_sandbox_enabled_does_not_mutate_input() -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
 
@@ -216,7 +219,7 @@ def test_get_sandbox_runtime_derives_enabled_without_persisting(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
     monkeypatch.setattr(
@@ -235,7 +238,7 @@ def test_get_sandbox_runtime_preserves_explicit_false(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
         "enabled": False,
     }
@@ -251,7 +254,7 @@ def test_update_sandbox_runtime_does_not_persist_derived_enabled(
 ) -> None:
     sandbox = {
         "type": "jiuwenbox",
-        "url": "http://127.0.0.1:8321",
+        "url": "http://sandbox.invalid:8321",
         "control_token_path": "/tmp/token",
     }
     persisted = {"sandbox": sandbox}
@@ -402,7 +405,7 @@ class TestResolveEnvVars:
 
     @staticmethod
     def test_resolve_nested_structure(monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("HOST", "example.com")
+        monkeypatch.setenv("HOST", "example.invalid")
         input_dict = {
             "server": {
                 "host": "${HOST}",
@@ -413,7 +416,7 @@ class TestResolveEnvVars:
         result = resolve_env_vars(input_dict)
         assert result == {
             "server": {
-                "host": "example.com",
+                "host": "example.invalid",
                 "port": "8080",
             },
             "features": ["default_a", "feature_b"],
@@ -422,9 +425,9 @@ class TestResolveEnvVars:
     @staticmethod
     def test_resolve_multiple_vars_in_string(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("USER", "john")
-        monkeypatch.setenv("DOMAIN", "example.com")
+        monkeypatch.setenv("DOMAIN", "example.invalid")
         result = resolve_env_vars("${USER}@${DOMAIN}")
-        assert result == "john@example.com"
+        assert result == "john@example.invalid"
 
     @staticmethod
     def test_resolve_non_string_types():
@@ -517,7 +520,7 @@ class TestResolveEnvVars:
         lookalike = {
             "transport": "streamable-http",
             "name": "some-service",
-            "url": "https://example.com/svc",
+            "url": "https://example.invalid/svc",
             "api_key": "${SVC_API_KEY}",
         }
         # Has no headers/env/staticHeaders — is_mcp_server_entry keys only on

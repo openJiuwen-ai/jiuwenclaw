@@ -8728,7 +8728,8 @@ class AgentWebSocketServer:
                 ok=True,
                 payload={
                     "session_id": session_id,
-                    "remote_url": f"https://example.com/session/{session_id}",
+                    # Reserved test-only host for this mock command handler.
+                    "remote_url": f"https://example.invalid/session/{session_id}",
                     "qr_text": f"session:{session_id}",
                 },
             )

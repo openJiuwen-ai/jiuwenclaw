@@ -18,6 +18,9 @@ touching a real LLM, the network, or a live ``DeepAgent``:
 
 from __future__ import annotations
 
+# TEST ONLY: endpoint literals use RFC-reserved domains and are configuration
+# values only; the assembly suite never performs network I/O.
+
 import inspect
 import json
 import logging
@@ -1816,12 +1819,12 @@ def test_vision_model_config_params_gating(monkeypatch: pytest.MonkeyPatch) -> N
     )
     monkeypatch.setattr(tools, "apply_vision_model_config_from_yaml", lambda cfg: None)
     monkeypatch.setenv("VISION_API_KEY", "key")
-    monkeypatch.setenv("VISION_BASE_URL", "https://vision.example")
+    monkeypatch.setenv("VISION_BASE_URL", "https://vision.invalid")
     monkeypatch.setenv("VISION_MODEL", "vlm-1")
 
     params = tools.vision_model_config_params({})
     assert params["api_key"] == "key"
-    assert params["base_url"] == "https://vision.example"
+    assert params["base_url"] == "https://vision.invalid"
     assert params["model"] == "vlm-1"
 
 
@@ -2834,7 +2837,7 @@ def test_code_member_builds_declaratively_without_post_processing(
         model=TeamModelConfig(
             model_client_config=ModelClientConfig(
                 client_provider="OpenAI",
-                api_key="test-key",
+                api_key="TEST_ONLY_MODEL_KEY",
                 api_base="https://example.test/v1",
                 verify_ssl=False,
             )

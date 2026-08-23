@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use RFC-reserved domains and stay inside mocked search
+# adapters; no external request is performed.
+
 import ast
 import inspect
 from pathlib import Path
@@ -135,13 +138,13 @@ async def test_free_adapter_runs_normally_without_provenance_lease(
         "run_free_search_structured",
         lambda query, max_results, timeout_seconds: (
             "duckduckgo",
-            [{"title": "Result", "url": "https://example.com/a", "snippet": ""}],
+            [{"title": "Result", "url": "https://example.invalid/a", "snippet": ""}],
         ),
     )
 
     result = await mcp_free_search.invoke({"query": "news"})
 
-    assert "https://example.com/a" in result
+    assert "https://example.invalid/a" in result
 
 
 @pytest.mark.asyncio
@@ -155,7 +158,7 @@ async def test_free_adapter_commits_structured_urls_before_render(
         tool_name="mcp_free_search",
         max_results=8,
     )
-    url = "https://example.com/a"
+    url = "https://example.invalid/a"
     monkeypatch.setattr(
         trusted_search_tool_adapter,
         "run_free_search_structured",
@@ -190,7 +193,7 @@ async def test_paid_adapter_commits_only_structured_provider_urls(
         tool_name="mcp_paid_search",
         max_results=3,
     )
-    urls = ["https://example.com/a", "https://example.com/b"]
+    urls = ["https://example.invalid/a", "https://example.invalid/b"]
 
     async def run_paid(**kwargs: object) -> tuple[str, str, list[str]]:
         return "bocha", "Answer", urls
@@ -203,7 +206,7 @@ async def test_paid_adapter_commits_only_structured_provider_urls(
 
     assert result == (
         "Paid search provider: bocha\nAnswer:\nAnswer\nURLs:\n"
-        "1. https://example.com/a\n2. https://example.com/b"
+        "1. https://example.invalid/a\n2. https://example.invalid/b"
     )
     assert all(ledger.contains(root_session_id="session-1", url=url) for url in urls)
     clear_trusted_search_producer()

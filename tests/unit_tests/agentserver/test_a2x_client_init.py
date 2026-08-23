@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# TEST ONLY: model endpoint literals use RFC-reserved domains and are consumed
+# only by patched clients; no external request is performed.
+
 import importlib
 import sys
 from types import ModuleType, SimpleNamespace
@@ -544,8 +547,8 @@ def test_make_deep_agent_config_disables_read_image_multimodal_with_vision_model
 ) -> None:
     adapter = JiuWenSwarmDeepAdapter()
     adapter._vision_model_config = interface_module.VisionModelConfig(
-        api_key="vision-key",
-        base_url="https://vision.example/v1",
+        api_key="TEST_ONLY_VISION_KEY",
+        base_url="https://vision.invalid/v1",
         model="vision-model",
     )
     config_base = _make_config("teamleader")

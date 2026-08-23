@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL and credential fixtures are synthetic reserved-domain data and
+# are projected only into reviewer doubles; no external request is made.
+
 import asyncio
 import json
 from collections.abc import Mapping
@@ -181,7 +184,7 @@ def _candidate(tmp_path: Path) -> tuple[object, object]:
 def _manual_only_candidate(tmp_path: Path) -> tuple[object, object]:
     descriptor = build_facts(
         "mcp_fetch_webpage",
-        {"url": "https://example.com/task-result"},
+        {"url": "https://example.invalid/task-result"},
         workspace_root=tmp_path,
     )
     candidate = reviewer_route(
@@ -198,7 +201,7 @@ def _manual_only_candidate(tmp_path: Path) -> tuple[object, object]:
 
 
 def _readonly_fetch_request(tmp_path: Path) -> object:
-    url = "https://hn.algolia.com/api/v1/search?query=agent+safety"
+    url = "https://search.example.invalid/api/v1/search?query=agent+safety"
     intent_text = f"Fetch {url} and summarize the results."
     descriptor = build_facts(
         "mcp_fetch_webpage",

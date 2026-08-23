@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: URL fixtures use RFC-reserved domains and exercise an in-memory
+# ledger; this module performs no external network I/O.
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -52,18 +55,18 @@ def test_successful_host_callback_records_canonical_urls_across_requests() -> No
         tool_name="mcp_free_search",
         success=True,
         urls=(
-            "HTTPS://Example.COM/news?id=1",
-            "https://example.com/news?id=1",
-            "http://example.com/unsafe",
+            "HTTPS://Example.INVALID/news?id=1",
+            "https://example.invalid/news?id=1",
+            "http://example.invalid/unsafe",
         ),
     )
 
     assert (accepted, dropped) == (1, 0)
     assert ledger.contains(
-        root_session_id="session-1", url="https://example.com/news?id=1"
+        root_session_id="session-1", url="https://example.invalid/news?id=1"
     )
     assert not ledger.contains(
-        root_session_id="session-2", url="https://example.com/news?id=1"
+        root_session_id="session-2", url="https://example.invalid/news?id=1"
     )
 
 
@@ -79,17 +82,17 @@ def test_callback_requires_exact_host_tool_binding_and_is_one_shot() -> None:
     assert complete_trusted_search_producer(
         tool_name=" mcp_free_search ",
         success=True,
-        urls=("https://example.com/a",),
+        urls=("https://example.invalid/a",),
     ) == (0, 0)
     assert complete_trusted_search_producer(
         tool_name="mcp_free_search",
         success=True,
-        urls=("https://example.com/a",),
+        urls=("https://example.invalid/a",),
     ) == (1, 0)
     assert complete_trusted_search_producer(
         tool_name="mcp_free_search",
         success=True,
-        urls=("https://example.com/b",),
+        urls=("https://example.invalid/b",),
     ) == (0, 0)
     assert len(ledger) == 1
 
@@ -109,7 +112,7 @@ def test_concurrent_success_and_failure_have_one_terminal_winner() -> None:
         return complete_trusted_search_producer(
             tool_name="mcp_free_search",
             success=success,
-            urls=("https://example.com/winner",),
+            urls=("https://example.invalid/winner",),
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -125,7 +128,7 @@ def test_concurrent_success_and_failure_have_one_terminal_winner() -> None:
     assert complete_trusted_search_producer(
         tool_name="mcp_free_search",
         success=True,
-        urls=("https://example.com/late",),
+        urls=("https://example.invalid/late",),
     ) == (0, 0)
 
 
@@ -144,7 +147,7 @@ def test_failed_completion_consumes_lease_without_recording() -> None:
     assert complete_trusted_search_producer(
         tool_name="mcp_free_search",
         success=True,
-        urls=("https://example.com/late",),
+        urls=("https://example.invalid/late",),
     ) == (0, 0)
     assert len(ledger) == 0
 
@@ -163,7 +166,7 @@ def test_copied_context_cannot_complete_revoked_lease() -> None:
         return complete_trusted_search_producer(
             tool_name="mcp_free_search",
             success=True,
-            urls=("https://example.com/late",),
+            urls=("https://example.invalid/late",),
         )
 
     async def scenario() -> tuple[int, int]:
@@ -178,7 +181,7 @@ def test_copied_context_cannot_complete_revoked_lease() -> None:
 def test_invocation_cap_is_twenty_and_session_capacity_partially_accepts() -> None:
     ledger = SessionTrustedSearchUrls("session-1")
     first = tuple(
-        f"https://example.com/item/{index}"
+        f"https://example.invalid/item/{index}"
         for index in range(MAX_TRUSTED_SEARCH_URLS_PER_SESSION - 5)
     )
     assert ledger.record_batch(key=_key(), urls=first, max_results=500) == (
@@ -187,7 +190,7 @@ def test_invocation_cap_is_twenty_and_session_capacity_partially_accepts() -> No
     )
     for batch_index in range(1, 25):
         urls = tuple(
-            f"https://example.com/batch/{batch_index}/{index}" for index in range(20)
+            f"https://example.invalid/batch/{batch_index}/{index}" for index in range(20)
         )
         ledger.record_batch(
             key=_key(invocation_id=f"invoke-{batch_index + 1}"),
@@ -198,7 +201,7 @@ def test_invocation_cap_is_twenty_and_session_capacity_partially_accepts() -> No
 
     accepted, dropped = ledger.record_batch(
         key=_key(invocation_id="invoke-capacity"),
-        urls=tuple(f"https://example.com/overflow/{index}" for index in range(20)),
+        urls=tuple(f"https://example.invalid/overflow/{index}" for index in range(20)),
         max_results=20,
     )
     assert (accepted, dropped) == (0, 20)
@@ -206,7 +209,7 @@ def test_invocation_cap_is_twenty_and_session_capacity_partially_accepts() -> No
 
 def test_ledger_respects_requested_limit_and_zero_disables_recording() -> None:
     ledger = SessionTrustedSearchUrls("session-1")
-    urls = tuple(f"https://example.com/result/{index}" for index in range(25))
+    urls = tuple(f"https://example.invalid/result/{index}" for index in range(25))
 
     assert ledger.record_batch(key=_key(), urls=urls, max_results=3) == (3, 0)
     assert ledger.record_batch(
@@ -228,49 +231,49 @@ def test_remaining_capacity_accepts_prefix_in_producer_order() -> None:
         ledger.record_batch(
             key=_key(invocation_id=f"invoke-{batch_index}"),
             urls=tuple(
-                f"https://example.com/{batch_index}/{index}" for index in range(20)
+                f"https://example.invalid/{batch_index}/{index}" for index in range(20)
             ),
             max_results=20,
         )
     assert len(ledger) == 480
     ledger.record_batch(
         key=_key(invocation_id="invoke-481"),
-        urls=tuple(f"https://example.com/fill/{index}" for index in range(15)),
+        urls=tuple(f"https://example.invalid/fill/{index}" for index in range(15)),
         max_results=20,
     )
     assert len(ledger) == 495
 
     accepted, dropped = ledger.record_batch(
         key=_key(invocation_id="invoke-final"),
-        urls=tuple(f"https://example.com/final/{index}" for index in range(20)),
+        urls=tuple(f"https://example.invalid/final/{index}" for index in range(20)),
         max_results=20,
     )
 
     assert (accepted, dropped) == (5, 15)
     assert ledger.contains(
-        root_session_id="session-1", url="https://example.com/final/4"
+        root_session_id="session-1", url="https://example.invalid/final/4"
     )
     assert not ledger.contains(
-        root_session_id="session-1", url="https://example.com/final/5"
+        root_session_id="session-1", url="https://example.invalid/final/5"
     )
 
 
 def test_dispose_closes_session_ledger_permanently() -> None:
     ledger = SessionTrustedSearchUrls("session-1")
     ledger.record_batch(
-        key=_key(), urls=("https://example.com/result",), max_results=20
+        key=_key(), urls=("https://example.invalid/result",), max_results=20
     )
     ledger.dispose()
     clear_trusted_search_producer()
 
     assert len(ledger) == 0
     assert not ledger.contains(
-        root_session_id="session-1", url="https://example.com/result"
+        root_session_id="session-1", url="https://example.invalid/result"
     )
     assert ledger.sources(root_session_id="session-1") == ()
     assert ledger.record_batch(
         key=_key(invocation_id="invoke-after-dispose"),
-        urls=("https://example.com/late",),
+        urls=("https://example.invalid/late",),
         max_results=20,
     ) == (0, 0)
     with pytest.raises(ValueError, match="trusted_search_session_closed"):
@@ -291,7 +294,7 @@ def test_dispose_prevents_copied_lease_from_recording_late_success() -> None:
         return complete_trusted_search_producer(
             tool_name="mcp_free_search",
             success=True,
-            urls=("https://example.com/late",),
+            urls=("https://example.invalid/late",),
         )
 
     async def scenario() -> tuple[int, int]:
@@ -306,18 +309,18 @@ def test_dispose_prevents_copied_lease_from_recording_late_success() -> None:
 def test_success_before_dispose_is_removed_and_new_session_is_independent() -> None:
     old_ledger = SessionTrustedSearchUrls("session-1")
     assert old_ledger.record_batch(
-        key=_key(), urls=("https://example.com/old",), max_results=20
+        key=_key(), urls=("https://example.invalid/old",), max_results=20
     ) == (1, 0)
 
     old_ledger.dispose()
     new_ledger = SessionTrustedSearchUrls("session-2")
     assert new_ledger.record_batch(
         key=_key(session_id="session-2", invocation_id="invoke-new"),
-        urls=("https://example.com/new",),
+        urls=("https://example.invalid/new",),
         max_results=20,
     ) == (1, 0)
 
     assert len(old_ledger) == 0
     assert new_ledger.contains(
-        root_session_id="session-2", url="https://example.com/new"
+        root_session_id="session-2", url="https://example.invalid/new"
     )
