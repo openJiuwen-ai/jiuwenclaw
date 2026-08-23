@@ -8625,7 +8625,10 @@ class JiuWenSwarmDeepAdapter:
     ) -> bool:
         if not handoff.lock.locked():
             raise RootPermissionQueueError("permission_dispatch_mutex_missing")
-        if not self._root_permission_queue.begin_cutover(
+        root_permission_queue = getattr(self, "_root_permission_queue", None)
+        if root_permission_queue is None:
+            return False
+        if not root_permission_queue.begin_cutover(
             root_session_id=handoff.root_session_id
         ):
             return False

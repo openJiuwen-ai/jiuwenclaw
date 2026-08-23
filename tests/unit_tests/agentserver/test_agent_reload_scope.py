@@ -977,6 +977,38 @@ async def test_deep_adapter_existing_session_lazy_reload_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_session_admission_reservation_does_not_double_active_count():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    parent = JiuWenSwarmDeepAdapter()
+    child = JiuWenSwarmDeepAdapter()
+    child._is_session_scoped_adapter = True
+    child._parent_session_id = "session-a"
+    parent._session_adapters = {"session-a": child}
+
+    resolved = await parent._get_or_create_session_adapter(
+        "session-a",
+        reserve_activity=True,
+    )
+    assert resolved is child
+    assert child._active_session_ids.get("session-a", 0) == 0
+    assert child._is_session_active("session-a") is True
+
+    child._mark_session_active("session-a")
+    try:
+        assert child._active_session_ids["session-a"] == 1
+        assert child._should_defer_goal_objective_history("session-a") is False
+    finally:
+        child._unmark_session_active("session-a")
+        child._unregister_session_agent_task("session-a")
+
+    assert child._active_session_ids.get("session-a", 0) == 0
+    assert child._is_session_active("session-a") is False
+
+
+@pytest.mark.asyncio
 async def test_deep_adapter_failed_lazy_reload_is_not_retried_immediately(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         JiuWenSwarmDeepAdapter,
