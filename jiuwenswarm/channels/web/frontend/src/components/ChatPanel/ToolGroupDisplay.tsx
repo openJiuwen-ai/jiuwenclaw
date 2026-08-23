@@ -7,6 +7,7 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { SkillTreePath } from './SkillTreePath';
 import { BeamSearchTree } from './BeamSearchTree';
 import { classifyToolCall, describeToolCall, type ToolCategory } from './toolCategory';
+import { AutoReviewerDetails, AutoReviewerStatusBadge } from './AutoReviewerStatus';
 
 interface ToolGroupDisplayProps {
   executions: ToolExecution[];
@@ -157,6 +158,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const resultSuccess = Boolean(result) && !failed;
   const hasArguments = Object.keys(toolCall.arguments).length > 0;
   const toolNameLabel = toolCall.name?.trim() || result?.toolName || 'tool';
+  const reviewer = result?.reviewer ?? toolCall.reviewer;
 
   return (
     <div className="tool-tree-item__detail" data-testid="chat-panel-tool-execution-details">
@@ -168,7 +170,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
           {toolNameLabel}
         </pre>
       </div>
-
+      <AutoReviewerDetails reviewer={reviewer} />
       {hasArguments && (
         <div className="tool-tree-item__detail-block" data-testid="chat-panel-tool-execution-details-arguments">
           <div className="tool-tree-item__detail-label">
@@ -411,6 +413,12 @@ export function ToolGroupDisplay({
                     >
                       {line.text}
                     </span>
+                    <AutoReviewerStatusBadge
+                      reviewer={
+                        line.executions[0]?.result?.reviewer ??
+                        line.executions[0]?.toolCall.reviewer
+                      }
+                    />
                     <span
                       className={clsx('tool-tree-item__disclosure', open && 'is-open')}
                       aria-hidden="true"

@@ -73,6 +73,7 @@ import { resolveNewConversationProjectDir } from './multi-session/state/newConve
 import { toDisplaySessionTitle } from './utils/documentMessage';
 import { createConversationSession } from './multi-session/state/createConversationSession';
 import { useTranslation } from 'react-i18next';
+import { applyConfiguredLanguage } from './i18n/configuredLanguage';
 import {
   normalizeA2UIEnabled,
   setA2UIFeatureEnabled,
@@ -174,6 +175,7 @@ type ConfigSaveResult = {
   applied_without_restart?: boolean;
   models_count?: number | null;
   codex_dependency_install?: CodexDependencyInstallStatus;
+  canonical_config?: Record<string, string>;
 };
 
 type CodexDependencyInstallStatus = {
@@ -721,6 +723,7 @@ function AppContent() {
             formatted_args: n.formatted_args,
             display_name: n.display_name,
             memberName: n.memberName,
+            reviewer: n.reviewer,
           },
           { startedAt: item.at }
         );
@@ -737,6 +740,7 @@ function AppContent() {
             skillTree: n.skillTree,
             ...(n.timedOut ? { timedOut: true } : {}),
             ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
+            reviewer: n.reviewer,
           },
           { updatedAt: item.at }
         );
@@ -1149,9 +1153,14 @@ function AppContent() {
           Object.entries(updates).filter(([key]) => !EXTERNAL_CLI_AGENT_CONFIG_KEYS.has(key)),
         )
       : updates;
+    const canonicalConfig = payload.canonical_config ?? {};
     setServerConfig((prev) => {
-      if (!prev) return effectiveUpdates;
-      const next: Record<string, unknown> = { ...prev, ...effectiveUpdates };
+      if (!prev) return { ...effectiveUpdates, ...canonicalConfig };
+      const next: Record<string, unknown> = {
+        ...prev,
+        ...effectiveUpdates,
+        ...canonicalConfig,
+      };
       // Keep the bilingual memory_forbidden_description dictionary structure.
       if (typeof prev?.memory_forbidden_description === 'object' && prev.memory_forbidden_description !== null
           && !Array.isArray(prev.memory_forbidden_description) && effectiveUpdates.memory_forbidden_description !== undefined) {
@@ -1192,10 +1201,11 @@ function AppContent() {
 
   const savePermissionSilent = useCallback(async (updates: Record<string, string>) => {
     try {
-      await request<{ updated?: string[]; applied_without_restart?: boolean }>('config.set', updates);
+      const payload = await request<ConfigSaveResult>('config.set', updates);
       setServerConfig((prev) => {
-        if (!prev) return updates;
-        return { ...prev, ...updates };
+        const canonical = payload?.canonical_config ?? {};
+        if (!prev) return { ...updates, ...canonical };
+        return { ...prev, ...updates, ...canonical };
       });
     } catch (error) {
       console.error('Failed to save permission:', error);
@@ -1324,6 +1334,7 @@ function AppContent() {
           };
         }
       }
+      Object.assign(next, result.canonical_config ?? {});
       if (payload.agents !== undefined || payload.team !== undefined) {
         const agents = payload.agents || {};
         const team = payload.team || [];
@@ -1444,14 +1455,10 @@ function AppContent() {
   // 连接成功后从 config.yaml 同步 preferred_language 到前端显示
   useEffect(() => {
     if (!isConnected) return;
-    void webRequest<{ preferred_language?: string }>('locale.get_conf')
-      .then((payload) => {
-        const lang = payload?.preferred_language;
-        if (lang === 'zh' || lang === 'en') {
-          i18n.changeLanguage(lang);
-        }
-      })
-      .catch(() => {});
+    void applyConfiguredLanguage(
+      () => webRequest<{ preferred_language?: string }>('locale.get_conf'),
+      (language) => i18n.changeLanguage(language),
+    );
   }, [isConnected]);
 
   // 当会话 ID 变化或页面加载时，自动加载历史会话
@@ -1557,6 +1564,7 @@ function AppContent() {
                 formatted_args: n.formatted_args,
                 display_name: n.display_name,
                 memberName: n.memberName,
+                reviewer: n.reviewer,
               },
               { startedAt: item.at }
             );
@@ -1573,6 +1581,7 @@ function AppContent() {
                 skillTree: n.skillTree,
                 ...(n.timedOut ? { timedOut: true } : {}),
                 ...(n.beamSearch ? { beamSearch: n.beamSearch } : {}),
+                reviewer: n.reviewer,
               },
               { updatedAt: item.at }
             );
@@ -2441,7 +2450,13 @@ function AppContent() {
                       onNavigateToSkills={() => handleNavigate('skills')}
                       onToggleTeamArea={handleToggleDetailPanel}
                       onOpenCodeReview={handleOpenCodeReview}
-                      permissionsEnabled={serverConfig?.permissions_enabled !== 'false'}
+                      permissionProfile={
+                        serverConfig?.permissions_profile === 'automatic'
+                          ? 'automatic'
+                          : serverConfig?.permissions_enabled === 'false'
+                            ? 'full_access'
+                            : 'default'
+                      }
                       onSavePermission={savePermissionSilent}
                       historyPager={chatHistoryPager}
                       isHistoryRestoring={isRestoringHistorySession}

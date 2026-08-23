@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { ToolCall, ToolResult } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import clsx from 'clsx';
+import { AutoReviewerDetails, AutoReviewerStatusBadge } from './AutoReviewerStatus';
 
 interface ToolCallDisplayProps {
   toolCall?: ToolCall;
@@ -43,6 +44,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
               </svg>
             </span>
             <span className="font-mono text-sm font-medium text-text" data-testid="chat-panel-tool-call-card-title">{displayTitle}</span>
+            <AutoReviewerStatusBadge reviewer={toolCall.reviewer} />
             <span className="text-text-muted text-sm">
               {isExpanded ? '▼' : '▶'}
             </span>
@@ -58,6 +60,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap">
               {formatToolArguments(toolCall.arguments)}
             </pre>
+            <AutoReviewerDetails reviewer={toolCall.reviewer} />
           </div>
         )}
       </div>
@@ -102,6 +105,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             )} data-testid="chat-panel-tool-call-card-summary">
               {displaySummary}
             </span>
+            <AutoReviewerStatusBadge reviewer={toolResult.reviewer} />
             <span className="text-text-muted text-sm ml-auto">
               {isExpanded ? '▼' : '▶'}
             </span>
@@ -112,6 +116,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
             <pre className="font-mono text-sm text-text overflow-x-auto whitespace-pre-wrap max-h-60">
               {formatToolResult(toolResult.result)}
             </pre>
+            <AutoReviewerDetails reviewer={toolResult.reviewer} />
           </div>
         )}
       </div>

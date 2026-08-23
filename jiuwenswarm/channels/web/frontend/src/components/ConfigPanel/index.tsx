@@ -492,6 +492,7 @@ const PROACTIVE_KEYS = new Set([
 ]);
 // ConfigPanel 暂不展示这些配置；保留后端下发值，并在比较/提交时跳过。
 const HIDDEN_FROM_UI_CONFIG_KEYS = new Set([
+  "permissions_profile",
   "proactive_recommendation_tick_interval_minutes",
   "kv_cache_release_enabled",
   "kv_cache_affinity_enabled",
