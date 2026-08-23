@@ -326,6 +326,8 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
         max_iterations=9,
     )
     owner_ids: list[str] = []
+    security_events: list[str] = []
+    security_profile = object()
 
     async def ensure_initialized() -> None:
         return None
@@ -333,6 +335,8 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
     captured: dict = {}
 
     def build(spec, context):
+        assert security_events == ["prepared"]
+        assert adapter._browser_runtime_security_profile is security_profile
         captured["spec"] = spec
         captured["context"] = context
         return SimpleNamespace(
@@ -349,6 +353,13 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
 
     adapter = interface_code.JiuwenSwarmCodeAdapter()
     create_model = MagicMock(side_effect=AssertionError("config model must not build"))
+
+    def prepare_browser_runtime_security(model, config):
+        assert model.model_client_config == custom_model.model_client_config
+        assert model.model_config == custom_model.model_config
+        assert config is config_base
+        security_events.append("prepared")
+        adapter._browser_runtime_security_profile = security_profile
 
     def create_sys_operation():
         adapter._sys_operation_card = SysOperationCard(
@@ -369,6 +380,11 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
     monkeypatch.setattr(adapter, "_skip_own_instance_build", lambda: False)
     monkeypatch.setattr(adapter, "_refresh_multimodal_configs", MagicMock())
     monkeypatch.setattr(adapter, "_create_model", create_model)
+    monkeypatch.setattr(
+        adapter,
+        "_prepare_browser_runtime_security",
+        prepare_browser_runtime_security,
+    )
     monkeypatch.setattr(adapter, "_create_sys_operation", create_sys_operation)
     monkeypatch.setattr(adapter, "_seed_runtime_cwd", MagicMock())
     monkeypatch.setattr(adapter, "_ensure_cron_tools_registered", MagicMock())
@@ -393,6 +409,7 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
     assert effective_spec is not custom_spec
     assert effective_spec.system_prompt == "caller supplied prompt"
     assert effective_spec.max_iterations == 9
+    assert effective_spec.rails is None
     assert effective_spec.sys_operation.id == "caller-spec-sysop"
     assert isinstance(context, code_spec_module.CodeBuildContext)
     assert context.adapter is adapter
@@ -403,6 +420,7 @@ async def test_code_adapter_builds_caller_supplied_spec_directly(
     assert adapter._agent_name == "caller-spec-agent"
     assert owner_ids == [adapter._tool_owner_id()]
     assert adapter._default_model_name == "test-model"
+    assert security_events == ["prepared"]
     create_model.assert_not_called()
     convert_config.assert_not_called()
 

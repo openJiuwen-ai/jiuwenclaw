@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
+    RootPermissionQueueError,
+)
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
@@ -52,7 +55,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 
     agent = MagicMock()
     manager = MagicMock()
-    manager.get_agent = AsyncMock(return_value=agent)
+    manager.get_agent_for_request = AsyncMock(return_value=agent)
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -68,7 +71,7 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
     assert mode == "code"
     assert sub_mode == "plan"
     assert resolved_agent is agent
-    manager.get_agent.assert_awaited_once()
+    manager.get_agent_for_request.assert_awaited_once()
     manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
 
 
@@ -76,7 +79,12 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> None:
     agent = MagicMock()
     manager = MagicMock()
-    manager.get_agent = AsyncMock(return_value=agent)
+
+    async def dispatch(_request, **kwargs):
+        kwargs["admit_request"]()
+        return agent
+
+    manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -101,11 +109,11 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
 
     assert (mode, sub_mode, resolved_agent) == ("code", "normal", agent)
     assert request.params["mode"] == "code.normal"
-    manager.get_agent.assert_awaited_once_with(
-        channel_id="web",
+    manager.get_agent_for_request.assert_awaited_once_with(
+        request,
         mode="code",
-        project_dir="/tmp/code-project",
         sub_mode="normal",
+        admit_request=ANY,
     )
 
 
@@ -271,7 +279,13 @@ async def test_prepare_chat_without_mode_restores_locked_work_session_on_tui() -
 async def test_prepare_chat_uses_locked_persist_session_metadata() -> None:
     agent = MagicMock()
     manager = MagicMock()
-    manager.get_agent = AsyncMock(return_value=agent)
+
+    async def dispatch(_request, **kwargs):
+        kwargs["admit_request"]()
+        return agent
+
+    manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
+
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = manager
@@ -300,6 +314,31 @@ async def test_prepare_chat_uses_locked_persist_session_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_rejects_auto_root_change_before_metadata_sync() -> None:
+    manager = MagicMock()
+
+    async def reject(_request, **_kwargs):
+        raise RootPermissionQueueError("workspace_changed")
+
+    manager.get_agent_for_request = AsyncMock(side_effect=reject)
+    manager.wait_for_session_prewarm = AsyncMock()
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
+    request = _chat_request(
+        "sess_auto_root",
+        mode="agent",
+        extra_params={"work_mode": "work", "project_dir": "/tmp/other"},
+    )
+
+    with patch.object(agent_ws_server_module, "_sync_chat_request_metadata") as sync:
+        with pytest.raises(RootPermissionQueueError, match="workspace_changed"):
+            await server._prepare_code_mode_chat_turn(request, "web")
+
+    sync.assert_not_called()
+    manager.get_agent_for_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """The session-locked project dir reaches TeamSpec request metadata.
 
@@ -309,7 +348,12 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     """
     agent = MagicMock()
     manager = MagicMock()
-    manager.get_agent = AsyncMock(return_value=agent)
+
+    async def dispatch(_request, **kwargs):
+        kwargs["admit_request"]()
+        return agent
+
+    manager.get_agent_for_request = AsyncMock(side_effect=dispatch)
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -334,11 +378,11 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
         "member_name": "reviewer",
         "project_dir": "/tmp/locked-project",
     }
-    manager.get_agent.assert_awaited_once_with(
-        channel_id="web",
+    manager.get_agent_for_request.assert_awaited_once_with(
+        request,
         mode="team",
-        project_dir="/tmp/locked-project",
         sub_mode=None,
+        admit_request=ANY,
     )
     manager.wait_for_session_prewarm.assert_awaited_once_with("sess_team_project")
 
@@ -740,7 +784,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
 
     agent = MagicMock()
     manager = MagicMock()
-    manager.get_agent = AsyncMock(return_value=agent)
+    manager.get_agent_for_request = AsyncMock(return_value=agent)
     manager.wait_for_session_prewarm = AsyncMock()
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
@@ -762,7 +806,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
 
     assert mode == "code"
     assert sub_mode == "plan"
-    manager.get_agent.assert_awaited_once()
+    manager.get_agent_for_request.assert_awaited_once()
     manager.wait_for_session_prewarm.assert_awaited_once_with(session_id)
 
 
