@@ -22,6 +22,9 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ToolCallInputs,
 )
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    build_permission_rail,
+)
 from jiuwenswarm.agents.harness.common.rails.permissions.auto_permission_rail import (
     AutoPermissionInterruptRail,
 )
@@ -97,6 +100,28 @@ async def test_task_tool_ask_is_control_silent_after_engine(tmp_path) -> None:
     assert len(policy.calls) == 1
     assert reviewer.requests == []
     assert base.calls == []
+
+
+async def test_real_engine_deny_precedes_task_tool_control_silent(tmp_path) -> None:
+    rail = build_permission_rail(
+        {
+            "permissions": {
+                "enabled": True,
+                "mode": "auto",
+                "tools": {"task_tool": "deny"},
+            }
+        },
+        enable_auto_permission=True,
+        workspace_root=tmp_path,
+    )
+
+    result = await rail.before_tool_call(
+        tool_name="task_tool",
+        tool_args={"action": "status"},
+        session_id="session-a",
+    )
+
+    assert classify_permission_result(result) == "denied"
 
 
 async def test_engine_fail_closed_has_zero_reviewer_or_base_effect(tmp_path) -> None:
