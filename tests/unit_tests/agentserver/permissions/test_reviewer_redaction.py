@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+# TEST ONLY: credential-shaped values are synthetic redaction fixtures. URLs use
+# reserved domains and are only parsed; no external request is performed.
+
 import json
 
 from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_redaction import (
@@ -19,26 +22,30 @@ from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_redaction impo
 
 
 def test_redact_text_removes_auth_values_before_assignment_redaction() -> None:
+    bearer_value = "A" * 36
+    basic_value = "B" * 32
     redacted = redact_text(
-        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789 "
-        "authorization=Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+        f"Authorization: Bearer {bearer_value} "
+        f"authorization=Basic {basic_value}"
     )
 
-    assert "abcdefghijklmnopqrstuvwxyz0123456789" not in redacted
-    assert "QWxhZGRpbjpvcGVuIHNlc2FtZQ" not in redacted
+    assert bearer_value not in redacted
+    assert basic_value not in redacted
     assert "[redacted]" in redacted
 
 
 def test_redact_text_removes_private_key_assignment_blocks() -> None:
+    key_kind = "PRIVATE " + "KEY"
+    key_payload = "TEST_ONLY_" + ("K" * 24)
     redacted = redact_text(
-        "private_key: -----BEGIN PRIVATE KEY----- "
-        "MIIEvAIBADANBgkqhkiG9w0BAQEFAASC "
-        "-----END PRIVATE KEY-----"
+        f"private_key: -----BEGIN {key_kind}----- "
+        f"{key_payload} "
+        f"-----END {key_kind}-----"
     )
 
-    assert "BEGIN PRIVATE KEY" not in redacted
-    assert "MIIEvAIB" not in redacted
-    assert "END PRIVATE KEY" not in redacted
+    assert f"BEGIN {key_kind}" not in redacted
+    assert key_payload not in redacted
+    assert f"END {key_kind}" not in redacted
     assert "[redacted]" in redacted
 
 
@@ -54,24 +61,23 @@ def test_redact_text_preserves_task_relevance_words() -> None:
 
 
 def test_redact_text_removes_long_sk_tokens() -> None:
-    redacted = redact_text(
-        "api token sk-abcdefghijklmnopqrstuvwxyz0123456789 is present"
-    )
+    provider_token = "sk-" + ("T" * 36)
+    redacted = redact_text(f"api token {provider_token} is present")
 
-    assert "sk-abcdefghijklmnopqrstuvwxyz0123456789" not in redacted
+    assert provider_token not in redacted
     assert "[redacted]" in redacted
 
 
 def test_redact_text_removes_cross_platform_user_local_paths() -> None:
     redacted = redact_text(
-        r"/home/alice/.ssh/id_rsa ~/.aws/credentials "
-        r"C:\Users\Alice\.aws\credentials C:/Users/Alice/Documents/report.md"
+        r"/home/test-user/.ssh/id_rsa ~/.aws/credentials "
+        r"C:\Users\TestUser\.aws\credentials C:/Users/TestUser/Documents/report.md"
     )
 
-    assert "/home/alice" not in redacted
+    assert "/home/test-user" not in redacted
     assert "~/.aws" not in redacted
-    assert r"C:\Users\Alice" not in redacted
-    assert "C:/Users/Alice" not in redacted
+    assert r"C:\Users\TestUser" not in redacted
+    assert "C:/Users/TestUser" not in redacted
     assert redacted.count("[path]") == 4
 
 
@@ -114,15 +120,15 @@ def test_redact_reviewable_payload_text_preserves_non_file_slashes() -> None:
 
 def test_redact_reviewable_payload_text_covers_shell_path_shapes() -> None:
     redacted = redact_reviewable_payload_text(
-        'cat "/Users/alice/My Secrets/.env" '
-        r"/Users/alice/My\ Secrets/token.txt "
+        'cat "/Users/test-user/My Secrets/.env" '
+        r"/Users/test-user/My\ Secrets/token.txt "
         'python "scripts/create_ppt.py --out outputs/report.pptx',
         redact_relative_paths=True,
     )
 
     assert redacted.count("[path]") == 4
     for fragment in (
-        "/Users/alice",
+        "/Users/test-user",
         "My Secrets",
         ".env",
         "token.txt",
@@ -134,18 +140,18 @@ def test_redact_reviewable_payload_text_covers_shell_path_shapes() -> None:
 
 def test_redact_url_removes_userinfo_and_sensitive_query_values() -> None:
     redacted = redact_url(
-        "https://alice:secret@example.com/docs/open?safe=topic"
-        "&oauth_token=tok_123&signature=sig_123&code=oauth_code"
-        "#token=fragment-secret"
+        "https://test-user:TEST_ONLY_PASSWORD@example.invalid/docs/open?safe=topic"
+        "&oauth_token=TEST_ONLY_TOKEN&signature=TEST_ONLY_SIGNATURE"
+        "&code=TEST_ONLY_CODE#token=TEST_ONLY_FRAGMENT"
     )
 
-    assert redacted.startswith("https://example.com/docs/open?")
-    assert "alice" not in redacted
-    assert "secret" not in redacted
-    assert "tok_123" not in redacted
-    assert "sig_123" not in redacted
-    assert "oauth_code" not in redacted
-    assert "fragment-secret" not in redacted
+    assert redacted.startswith("https://example.invalid/docs/open?")
+    assert "test-user" not in redacted
+    assert "TEST_ONLY_PASSWORD" not in redacted
+    assert "TEST_ONLY_TOKEN" not in redacted
+    assert "TEST_ONLY_SIGNATURE" not in redacted
+    assert "TEST_ONLY_CODE" not in redacted
+    assert "TEST_ONLY_FRAGMENT" not in redacted
     assert "safe=topic" in redacted
     assert "#token=[redacted]" in redacted
     assert "[redacted]" in redacted
@@ -180,8 +186,9 @@ def test_redact_json_value_preserves_url_safe_query_after_redaction() -> None:
     value = {
         "target_urls": [
             (
-                "https://alice:secret@example.com/docs/open?"
-                "oauth_token=tok_123&signature=sig_123&safe=topic"
+                "https://test-user:TEST_ONLY_PASSWORD@example.invalid/docs/open?"
+                "oauth_token=TEST_ONLY_TOKEN"
+                "&signature=TEST_ONLY_SIGNATURE&safe=topic"
             )
         ]
     }
@@ -191,7 +198,7 @@ def test_redact_json_value_preserves_url_safe_query_after_redaction() -> None:
     assert redacted == {
         "target_urls": [
             (
-                "https://example.com/docs/open?"
+                "https://example.invalid/docs/open?"
                 "oauth_token=[redacted]&signature=[redacted]&safe=topic"
             )
         ]
@@ -199,24 +206,40 @@ def test_redact_json_value_preserves_url_safe_query_after_redaction() -> None:
 
 
 def test_permission_ui_payload_redacts_secret_key_variants_recursively() -> None:
+    synthetic_values = {
+        "db_password": "TEST_ONLY_DB_PASSWORD",
+        "dbPassword": "TEST_ONLY_DB_PASSWORD_CAMEL",
+        "x-api-key": "TEST_ONLY_API_KEY",
+        "x-auth-token": "TEST_ONLY_AUTH_TOKEN",
+        "authHeader": "TEST_ONLY_AUTH_HEADER",
+        "proxyAuth": "TEST_ONLY_PROXY_AUTH_SHORT",
+        "clientSecret": "TEST_ONLY_CLIENT_SECRET",
+        "accessKey": "TEST_ONLY_ACCESS_KEY",
+        "awsAccessKeyId": "TEST_ONLY_AWS_ACCESS_KEY",
+        "signingKey": "TEST_ONLY_SIGNING_KEY",
+        "Authorization": "TEST_ONLY_AUTHORIZATION",
+        "proxy-authorization": "TEST_ONLY_PROXY_AUTHORIZATION",
+        "cookie": "TEST_ONLY_COOKIE",
+        "set-cookie": "TEST_ONLY_SET_COOKIE",
+    }
     payload = {
-        "db_password": "hunter2",
-        "dbPassword": "hunter3",
-        "x-api-key": "plain-api-key",
-        "x-auth-token": "plain-auth-token",
-        "authHeader": "plain-auth-header",
-        "proxyAuth": "plain-proxy-auth-short",
-        "clientSecret": "plain-client-secret",
-        "accessKey": "plain-access-key",
-        "awsAccessKeyId": "plain-aws-access-key",
-        "signingKey": "plain-signing-key",
+        "db_password": synthetic_values["db_password"],
+        "dbPassword": synthetic_values["dbPassword"],
+        "x-api-key": synthetic_values["x-api-key"],
+        "x-auth-token": synthetic_values["x-auth-token"],
+        "authHeader": synthetic_values["authHeader"],
+        "proxyAuth": synthetic_values["proxyAuth"],
+        "clientSecret": synthetic_values["clientSecret"],
+        "accessKey": synthetic_values["accessKey"],
+        "awsAccessKeyId": synthetic_values["awsAccessKeyId"],
+        "signingKey": synthetic_values["signingKey"],
         "headers": {
-            "Authorization": "plain-authorization",
-            "proxy-authorization": "plain-proxy-auth",
-            "cookie": "session=plain-cookie",
-            "set-cookie": "session=plain-set-cookie",
+            "Authorization": synthetic_values["Authorization"],
+            "proxy-authorization": synthetic_values["proxy-authorization"],
+            "cookie": synthetic_values["cookie"],
+            "set-cookie": synthetic_values["set-cookie"],
         },
-        "nested": {"credentials": {"username": "alice", "value": "plain"}},
+        "nested": {"credentials": {"username": "test-user", "value": "plain"}},
         "query": "public search terms",
     }
 
@@ -236,22 +259,7 @@ def test_permission_ui_payload_redacts_secret_key_variants_recursively() -> None
     assert set(redacted["headers"].values()) == {PERMISSION_UI_REDACTED}
     assert redacted["nested"]["credentials"] == PERMISSION_UI_REDACTED
     serialized = json.dumps(redacted)
-    for secret in (
-        "hunter2",
-        "hunter3",
-        "plain-api-key",
-        "plain-auth-token",
-        "plain-auth-header",
-        "plain-proxy-auth-short",
-        "plain-client-secret",
-        "plain-access-key",
-        "plain-aws-access-key",
-        "plain-signing-key",
-        "plain-authorization",
-        "plain-proxy-auth",
-        "plain-cookie",
-        "plain-set-cookie",
-    ):
+    for secret in synthetic_values.values():
         assert secret not in serialized
 
 
@@ -259,17 +267,17 @@ def test_permission_ui_payload_redacts_url_credentials_and_query_secrets() -> No
     redacted = sanitize_permission_ui_payload(
         {
             "url": (
-                "https://alice:secret@example.com/open?safe=topic"
-                "&access_token=plain-token&signature=plain-signature"
+                "https://test-user:TEST_ONLY_PASSWORD@example.invalid/open?safe=topic"
+                "&access_token=TEST_ONLY_TOKEN&signature=TEST_ONLY_SIGNATURE"
             )
         }
     )
 
-    assert redacted["url"].startswith("https://example.com/open?")
+    assert redacted["url"].startswith("https://example.invalid/open?")
     assert "safe=topic" in redacted["url"]
-    assert "alice" not in redacted["url"]
-    assert "plain-token" not in redacted["url"]
-    assert "plain-signature" not in redacted["url"]
+    assert "test-user" not in redacted["url"]
+    assert "TEST_ONLY_TOKEN" not in redacted["url"]
+    assert "TEST_ONLY_SIGNATURE" not in redacted["url"]
     assert PERMISSION_UI_REDACTED in redacted["url"]
 
 
