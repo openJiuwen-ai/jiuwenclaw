@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, AsyncIterator, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Callable, Protocol, runtime_checkable
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 
@@ -35,6 +35,20 @@ class AgentAdapter(Protocol):
 
         Called once on startup and again after skill install/uninstall.
         """
+        ...
+
+    def set_permissions_changed_notifier(
+        self,
+        notifier: Callable[[], None] | None,
+    ) -> None:
+        """Install the host callback for persisted permission changes."""
+        ...
+
+    def set_permissions_external_input_context_builder(
+        self,
+        builder: Callable[..., Any] | None,
+    ) -> None:
+        """Install the host builder for fresh permission input contexts."""
         ...
 
     async def reload_agent_config(

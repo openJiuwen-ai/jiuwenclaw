@@ -2649,6 +2649,7 @@ class AgentWebSocketServer:
         canonical_mode = (
             request.params.get("mode") if isinstance(request.params, dict) else None
         )
+
         def admit_request() -> str | None:
             if sync_metadata:
                 project_dir = _sync_chat_request_metadata(

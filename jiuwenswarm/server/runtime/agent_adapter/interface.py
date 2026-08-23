@@ -942,14 +942,12 @@ class JiuWenSwarm:
             self._adapter = create_adapter(self._sdk_name, mode=mode)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
-            if hasattr(self._adapter, "set_permissions_changed_notifier"):
-                self._adapter.set_permissions_changed_notifier(
-                    self._permissions_changed_notifier
-                )
-            if hasattr(self._adapter, "set_permissions_external_input_context_builder"):
-                self._adapter.set_permissions_external_input_context_builder(
-                    self._permissions_external_input_context_builder
-                )
+            self._adapter.set_permissions_changed_notifier(
+                self._permissions_changed_notifier
+            )
+            self._adapter.set_permissions_external_input_context_builder(
+                self._permissions_external_input_context_builder
+            )
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
@@ -962,9 +960,7 @@ class JiuWenSwarm:
     ) -> None:
         """Inject the host composition callback for persisted permission changes."""
         self._permissions_changed_notifier = notifier
-        if self._adapter is not None and hasattr(
-            self._adapter, "set_permissions_changed_notifier"
-        ):
+        if self._adapter is not None:
             self._adapter.set_permissions_changed_notifier(notifier)
 
     def set_permissions_external_input_context_builder(
@@ -973,9 +969,7 @@ class JiuWenSwarm:
     ) -> None:
         """Inject the Host external-input permission publication context."""
         self._permissions_external_input_context_builder = builder
-        if self._adapter is not None and hasattr(
-            self._adapter, "set_permissions_external_input_context_builder"
-        ):
+        if self._adapter is not None:
             self._adapter.set_permissions_external_input_context_builder(builder)
 
     @staticmethod
@@ -1215,12 +1209,12 @@ class JiuWenSwarm:
                     answers,
                     source,
                 )
-                if (
+                has_ask_user_context = (
                     source == "ask_user_interrupt"
-                    and original_request
+                    and bool(original_request)
                     and interactive_input is not None
-                    and str(request_id or "").strip()
-                ):
+                )
+                if has_ask_user_context and str(request_id or "").strip():
                     bound_id = str(request_id).strip()
                     bound_payload = interactive_input.user_inputs.get(bound_id)
                     if isinstance(bound_payload, dict) and isinstance(

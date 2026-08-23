@@ -23,6 +23,16 @@ class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
         await self._handle_stream(ws, request, send_lock)
 
 
+class _PermissionAdapterContractStub:
+    """Minimal permission composition contract for adapter test doubles."""
+
+    def set_permissions_changed_notifier(self, notifier) -> None:
+        self.permissions_changed_notifier = notifier
+
+    def set_permissions_external_input_context_builder(self, builder) -> None:
+        self.permissions_external_input_context_builder = builder
+
+
 def fake_encode_agent_chunk_for_wire(chunk, response_id, sequence):
     return {
         "response_id": response_id,
@@ -251,7 +261,7 @@ def test_build_inputs_keeps_stable_project_dir_and_dynamic_cwd(monkeypatch):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -702,7 +712,7 @@ def test_build_inputs_drops_bare_other_without_custom_input(monkeypatch):
 def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         requests = []
 
         async def handle_user_answer(self, request):
@@ -759,7 +769,7 @@ def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follo
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -845,7 +855,7 @@ def test_process_message_stream_routes_web_evolution_interrupt_without_user_hist
         async def submit_task(_session_id, task_factory):
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -917,7 +927,7 @@ def test_process_message_stream_keeps_passive_evolution_approval_as_user_history
         async def submit_task(_session_id, task_factory):
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -1048,7 +1058,7 @@ def test_process_message_stream_treats_team_plan_confirm_resume_as_team_follow_u
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -1160,7 +1170,7 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
             cls.submit_task_calls.append(session_id)
             await task_factory()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         seen_inputs = None
 
         @staticmethod
@@ -1258,7 +1268,7 @@ def test_process_message_stream_treats_plain_team_query_as_first_request_after_r
 def test_team_plan_answer_routing(monkeypatch, params):
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def handle_user_answer(self, request):
             return AgentResponse(
                 request_id=request.request_id,
@@ -1885,7 +1895,7 @@ def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -1960,7 +1970,7 @@ def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
         async def submit_and_wait(self, _session_id, task_func):
             return await task_func()
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.seen_inputs = None
             self.skill_manager = None
@@ -2172,7 +2182,7 @@ def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def create_instance(self, config=None, *, mode="agent", sub_mode=None):
             calls.append(
                 {
@@ -2223,7 +2233,7 @@ def test_agent_manager_creates_deep_adapter_for_team_plan_alias(monkeypatch):
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         async def create_instance(self, config=None, *, mode="agent", sub_mode=None):
             calls.append(
                 {
@@ -2277,7 +2287,7 @@ def test_agent_manager_uses_project_dir_in_cache_identity(monkeypatch, tmp_path)
     class FakeSessionManager:
         pass
 
-    class FakeAdapter:
+    class FakeAdapter(_PermissionAdapterContractStub):
         def __init__(self):
             self.config = {}
             self.mode = "agent"

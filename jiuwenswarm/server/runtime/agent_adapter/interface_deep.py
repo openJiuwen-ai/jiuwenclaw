@@ -1557,6 +1557,8 @@ class JiuWenSwarmDeepAdapter:
     ) -> None:
         """Install the Host context used to publish external-input config."""
         self._permissions_external_input_context_builder = builder
+        for adapter in self._session_adapters.values():
+            adapter.set_permissions_external_input_context_builder(builder)
 
     @staticmethod
     def _session_adapter_key(session_id: str | None) -> str:
@@ -1570,6 +1572,9 @@ class JiuWenSwarmDeepAdapter:
         if self._skill_manager is not None:
             adapter.set_skill_manager(self._skill_manager)
         adapter.set_permissions_changed_notifier(self._permissions_changed_notifier)
+        adapter.set_permissions_external_input_context_builder(
+            self._permissions_external_input_context_builder
+        )
         return adapter
 
     def mark_as_session_scoped(self, session_id: str) -> None:
@@ -1623,7 +1628,10 @@ class JiuWenSwarmDeepAdapter:
             else self._get_cached_session_adapter(request.session_id)
         )
         if target is not None:
-            target._validate_auto_permission_workspace_request(request)
+            if target is self:
+                self._validate_auto_permission_workspace_request(request)
+            else:
+                target.validate_auto_permission_workspace_request(request)
 
     def has_auto_permission_session(self, session_id: str | None) -> bool:
         target = (
@@ -1631,7 +1639,11 @@ class JiuWenSwarmDeepAdapter:
             if self._is_session_scoped_adapter
             else self._get_cached_session_adapter(session_id)
         )
-        return bool(target is not None and target._enable_auto_permission)
+        return bool(target is not None and target.auto_permission_enabled())
+
+    def auto_permission_enabled(self) -> bool:
+        """Return whether this concrete adapter owns an automatic permission rail."""
+        return self._enable_auto_permission
 
     def _get_cached_session_adapter(self, session_id: str | None) -> "JiuWenSwarmDeepAdapter | None":
         sid = self._session_adapter_key(session_id)
@@ -1709,7 +1721,7 @@ class JiuWenSwarmDeepAdapter:
             self._session_adapter_versions[session_id] = current_version
             self._session_adapter_reload_failures.pop(session_id, None)
             return
-        permission_delta = adapter._has_permission_config_delta(config_base)
+        permission_delta = adapter.has_permission_config_delta(config_base)
         if permission_delta and not host_external_input:
             # Ordinary lookup is also used by approval resumes, internal
             # dispatches and structured control APIs. Only a Host-verified
@@ -1734,7 +1746,7 @@ class JiuWenSwarmDeepAdapter:
                 if permission_delta:
                     raise RuntimeError("permission_session_reload_retry_suppressed")
                 return
-        if adapter._should_defer_permission_reload(
+        if adapter.should_defer_permission_reload(
             config_base,
             session_id=session_id,
             known_permission_delta=permission_delta,
@@ -1790,7 +1802,7 @@ class JiuWenSwarmDeepAdapter:
 
         if self._session_adapters.get(session_id) is not adapter:
             return
-        if adapter._has_live_root_permission_owner(session_id):
+        if adapter.has_live_root_permission_owner(session_id):
             raise RuntimeError("permission_session_evict_deferred_live_owner")
         self._drop_session_adapter_cache_entry(
             session_id,
@@ -1822,7 +1834,7 @@ class JiuWenSwarmDeepAdapter:
             adapter = self._session_adapters.get(session_id)
             if adapter is None:
                 return
-            if adapter._should_defer_permission_reload(
+            if adapter.should_defer_permission_reload(
                 config_base,
                 session_id=session_id,
             ):
@@ -1919,17 +1931,10 @@ class JiuWenSwarmDeepAdapter:
                 self._session_adapter_reload_failures.pop(sid, None)
                 remove_lock_after_release = True
             else:
-                has_live_permission_owner = getattr(
-                    adapter,
-                    "_has_live_root_permission_owner",
-                    None,
-                )
-                if (
-                    callable(has_live_permission_owner)
-                    and has_live_permission_owner(sid)
-                    or adapter.is_session_active(sid)
-                    or adapter.is_deep_agent_executing_for_session(sid)
-                ):
+                has_live_permission_owner = adapter.has_live_root_permission_owner(sid)
+                session_active = adapter.is_session_active(sid)
+                session_executing = adapter.is_deep_agent_executing_for_session(sid)
+                if has_live_permission_owner or session_active or session_executing:
                     return False
                 try:
                     await adapter.cleanup()
@@ -2060,7 +2065,7 @@ class JiuWenSwarmDeepAdapter:
                 )
                 self._touch_session_adapter(sid)
                 if reserve_activity:
-                    existing._register_session_agent_task(sid)
+                    existing.register_session_agent_task(sid)
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
@@ -2124,7 +2129,7 @@ class JiuWenSwarmDeepAdapter:
                 (time.monotonic() - create_started_at) * 1000,
             )
             if reserve_activity:
-                adapter._register_session_agent_task(sid)
+                adapter.register_session_agent_task(sid)
             return adapter
 
     def _should_defer_permission_reload(
@@ -2146,6 +2151,20 @@ class JiuWenSwarmDeepAdapter:
         if self._has_live_root_permission_owner(session_id):
             return True
         return self._is_session_live(session_id)
+
+    def should_defer_permission_reload(
+        self,
+        config_base: dict[str, Any],
+        *,
+        session_id: str,
+        known_permission_delta: bool | None = None,
+    ) -> bool:
+        """Expose the concrete child reload-admission contract to its owner."""
+        return self._should_defer_permission_reload(
+            config_base,
+            session_id=session_id,
+            known_permission_delta=known_permission_delta,
+        )
 
     def _has_live_root_permission_owner(
         self,
@@ -2170,6 +2189,13 @@ class JiuWenSwarmDeepAdapter:
             and (root_session_id is None or handoff.root_session_id == root_session_id)
         )
 
+    def has_live_root_permission_owner(
+        self,
+        session_id: str | None = None,
+    ) -> bool:
+        """Expose child permission ownership to the session-adapter owner."""
+        return self._has_live_root_permission_owner(session_id)
+
     def _has_permission_config_delta(self, config_base: dict[str, Any]) -> bool:
         """Return whether the candidate changes the installed permission config."""
 
@@ -2188,6 +2214,10 @@ class JiuWenSwarmDeepAdapter:
         )
         return current_snapshot != candidate_snapshot
 
+    def has_permission_config_delta(self, config_base: dict[str, Any]) -> bool:
+        """Expose the child permission-delta check to its session owner."""
+        return self._has_permission_config_delta(config_base)
+
     def _permission_delta_for_reload_preflight(
         self,
         config_base: dict[str, Any] | None,
@@ -2202,12 +2232,14 @@ class JiuWenSwarmDeepAdapter:
         if not isinstance(resolved, dict):
             raise TypeError("resolved config_base must be a dict")
         permission_config = candidate.get("permissions")
-        if (
-            isinstance(env_overrides, dict)
-            and env_overrides
-            and isinstance(permission_config, dict)
+        has_environment_overrides = isinstance(env_overrides, dict) and bool(
+            env_overrides
+        )
+        has_environment_permissions = (
+            isinstance(permission_config, dict)
             and "${" in repr(permission_config)
-        ):
+        )
+        if has_environment_overrides and has_environment_permissions:
             # Never mutate process env merely to compare a built root. An
             # env-backed Permission value is conservatively restart-required.
             return True
@@ -2479,31 +2511,30 @@ class JiuWenSwarmDeepAdapter:
                 else None
             )
             messages = list(context.get_messages() or []) if context is not None else []
-            assistant_index = next(
-                (
-                    index
-                    for index in range(len(messages) - 1, -1, -1)
-                    if getattr(messages[index], "tool_calls", None)
-                ),
-                -1,
-            )
+            assistant_index = -1
+            for index in range(len(messages) - 1, -1, -1):
+                if getattr(messages[index], "tool_calls", None):
+                    assistant_index = index
+                    break
             if assistant_index < 0:
                 return False
-            context_signature = [
-                (
-                    str(getattr(call, "id", "") or ""),
-                    str(getattr(call, "name", "") or ""),
+            context_signature = []
+            context_tool_calls = list(
+                getattr(messages[assistant_index], "tool_calls", None) or []
+            )
+            for call in context_tool_calls:
+                context_signature.append(
+                    (
+                        str(getattr(call, "id", "") or ""),
+                        str(getattr(call, "name", "") or ""),
+                    )
                 )
-                for call in list(
-                    getattr(messages[assistant_index], "tool_calls", None) or []
-                )
-            ]
             if context_signature != state_signature:
                 return False
             pending_id_set = set(pending_tool_ids)
             completed_ids = all_tool_ids - pending_id_set
             tail_ids: list[str] = []
-            for message in messages[assistant_index + 1 :]:
+            for message in messages[assistant_index + 1:]:
                 tool_call_id = str(getattr(message, "tool_call_id", "") or "")
                 if (
                     getattr(message, "role", None) != "tool"
@@ -2659,6 +2690,10 @@ class JiuWenSwarmDeepAdapter:
         sid = self._resolve_interrupt_session_id(session_id)
         self._session_agent_tasks.setdefault(sid, set()).add(task)
 
+    def register_session_agent_task(self, session_id: str) -> None:
+        """Register the current task with a concrete session adapter."""
+        self._register_session_agent_task(session_id)
+
     def _unregister_session_agent_task(self, session_id: str) -> None:
         task = asyncio.current_task()
         if task is None:
@@ -2670,6 +2705,10 @@ class JiuWenSwarmDeepAdapter:
         bucket.discard(task)
         if not bucket:
             self._session_agent_tasks.pop(sid, None)
+
+    def unregister_session_agent_task(self, session_id: str) -> None:
+        """Unregister the current task from a concrete session adapter."""
+        self._unregister_session_agent_task(session_id)
 
     async def _cancel_session_agent_tasks(self, session_id: str) -> int:
         sid = self._resolve_interrupt_session_id(session_id)
@@ -3182,16 +3221,15 @@ class JiuWenSwarmDeepAdapter:
         )
         if reload and not self._general_purpose_rail_snapshot and not add_general:
             return subagents
-        excluded = {
-            id(rail)
-            for rail in (
-                self._root_permission_queue_rail,
-                self._root_context_rail,
-                self._permission_rail,
-                self._root_permission_completion_rail,
-            )
-            if rail is not None
-        }
+        excluded: set[int] = set()
+        for rail in (
+            self._root_permission_queue_rail,
+            self._root_context_rail,
+            self._permission_rail,
+            self._root_permission_completion_rail,
+        ):
+            if rail is not None:
+                excluded.add(id(rail))
         stream = self._stream_event_rail
         if (
             getattr(stream, "_root_permission_queue", None)
@@ -5913,8 +5951,8 @@ class JiuWenSwarmDeepAdapter:
             rails.append(rail)
         return rails
 
+    @staticmethod
     def _append_optional_agent_rails(
-        self,
         rails: list[Any],
         config_base: dict[str, Any],
     ) -> list[Any]:
@@ -8637,12 +8675,12 @@ class JiuWenSwarmDeepAdapter:
         ):
             return False
         previous = getattr(self, "_root_permission_handoff", None)
-        if (
+        previous_matches = (
             isinstance(previous, _RootPermissionDispatchHandoff)
             and previous.root_session_id == handoff.root_session_id
             and previous.accepted
-            and isinstance(previous.answer, RootPermissionAnswer)
-        ):
+        )
+        if previous_matches and isinstance(previous.answer, RootPermissionAnswer):
             handoff.superseded_answer = previous.answer
         return True
 
@@ -8706,12 +8744,12 @@ class JiuWenSwarmDeepAdapter:
         handoff: _RootPermissionDispatchHandoff,
     ) -> None:
         """Dispose the exact old permission continuation before a fresh root turn."""
-        if (
+        continuation_input = (
             isinstance(inputs.get("query"), InteractiveInput)
             or self._wants_attach_goal(request.params)
             or self._should_inject_into_existing_interaction(request.params)
-            or not self._is_host_permission_update_input(request)
-        ):
+        )
+        if continuation_input or not self._is_host_permission_update_input(request):
             return
         if not self._publish_root_permission_cutover(handoff):
             return
@@ -8799,7 +8837,7 @@ class JiuWenSwarmDeepAdapter:
             if self._root_permission_queue.has_live(root_session_id=root_session_id):
                 raise RootPermissionQueueError(
                     "nonpermission_resume_permission_conflict"
-                )
+                ) from exc
             return self._prepare_nonpermission_resume(
                 loop_session,
                 inputs,
@@ -10780,7 +10818,7 @@ class JiuWenSwarmDeepAdapter:
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
-                session_adapter._unregister_session_agent_task(session_id)
+                session_adapter.unregister_session_agent_task(session_id)
                 await self._evict_idle_session_adapters()
 
         if self._instance is None:
@@ -11152,7 +11190,7 @@ class JiuWenSwarmDeepAdapter:
                         yield chunk
                 return
             finally:
-                session_adapter._unregister_session_agent_task(session_id)
+                session_adapter.unregister_session_agent_task(session_id)
                 await self._evict_idle_session_adapters()
 
         if self._instance is None:
@@ -14019,8 +14057,6 @@ def _agent_def_to_subagent_config(
             才采纳 ``spec.sys_operation``，所以 workspace 也要一并写进 spec；否则子
             agent 会拿到一个受 ``restrict_to_sandbox`` 约束的新 LOCAL SysOperation。
     """
-    from openjiuwen.harness.schema.config import SubAgentConfig
-
     # Resolve model: if agent_def specifies a model name, look it up in cache
     resolved_model = model
     if agent_def.model and isinstance(model_cache, dict):

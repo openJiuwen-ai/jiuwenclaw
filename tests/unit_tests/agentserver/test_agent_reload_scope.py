@@ -64,8 +64,24 @@ class FakeAgent:
         _ = session_id
         return False
 
+    def should_defer_permission_reload(
+        self,
+        config_base,
+        *,
+        session_id: str,
+        **kwargs,
+    ) -> bool:
+        return self._should_defer_permission_reload(
+            config_base,
+            session_id=session_id,
+            **kwargs,
+        )
+
     def _has_permission_config_delta(self, *_args, **_kwargs) -> bool:
         return False
+
+    def has_permission_config_delta(self, *args, **kwargs) -> bool:
+        return self._has_permission_config_delta(*args, **kwargs)
 
 
 class FailingReloadAgent(FakeAgent):
@@ -98,6 +114,38 @@ async def test_permission_change_notification_uses_existing_global_reload() -> N
         reload_scopes={"permissions"},
     )
     assert manager._permissions_reload_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_agent_creation_injects_permission_reload_notifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface
+
+    class StubSwarm:
+        def __init__(self) -> None:
+            self.notifier = None
+            self.fresh_context_builder = None
+
+        def set_permissions_changed_notifier(self, notifier) -> None:
+            self.notifier = notifier
+
+        def set_permissions_external_input_context_builder(self, builder) -> None:
+            self.fresh_context_builder = builder
+
+        async def create_instance(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(interface, "JiuWenSwarm", StubSwarm)
+    manager = agent_manager_module.AgentManager()
+
+    agent = await manager._create_agent("web")
+
+    assert agent.notifier == manager.schedule_permissions_reload
+    assert (
+        agent.fresh_context_builder
+        == manager.build_permissions_external_input_context
+    )
 
 
 @pytest.mark.asyncio

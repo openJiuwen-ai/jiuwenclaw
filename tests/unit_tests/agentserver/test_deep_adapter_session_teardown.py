@@ -37,6 +37,9 @@ class _IdleChildAdapter:
     def _has_live_root_permission_owner(self, session_id: str) -> bool:
         return self._root_permission_queue.has_live(root_session_id=session_id)
 
+    def has_live_root_permission_owner(self, session_id: str) -> bool:
+        return self._has_live_root_permission_owner(session_id)
+
     async def cleanup(self) -> None:
         self.cleaned = True
 

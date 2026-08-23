@@ -441,6 +441,9 @@ class _SessionChild:
     def _unregister_session_agent_task(self, _session_id: str) -> None:
         self.request_reserved = False
 
+    def unregister_session_agent_task(self, session_id: str) -> None:
+        self._unregister_session_agent_task(session_id)
+
     async def process_message_impl(
         self,
         request: AgentRequest,
