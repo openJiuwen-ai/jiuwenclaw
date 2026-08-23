@@ -512,6 +512,62 @@ react:
         assert get_evolution_auto_save_enabled(migrated) is True
 
     @staticmethod
+    @pytest.mark.parametrize(
+        ("user_permissions", "expected_mode", "changed"),
+        [
+            (
+                {
+                    "enabled": True,
+                    "mode": "auto",
+                    "defaults": {"*": "deny"},
+                },
+                "auto",
+                False,
+            ),
+            (
+                {
+                    "enabled": True,
+                    "defaults": {"*": "deny"},
+                },
+                "manual",
+                True,
+            ),
+        ],
+    )
+    def test_migrate_config_preserves_smart_approval_mode(
+        tmp_path: Path,
+        user_permissions: dict,
+        expected_mode: str,
+        changed: bool,
+    ):
+        template_path = tmp_path / "template.yaml"
+        user_config_path = tmp_path / "config.yaml"
+        template_path.write_text(
+            """
+permissions:
+  enabled: false
+  mode: manual
+  defaults:
+    "*": allow
+""",
+            encoding="utf-8",
+        )
+        user_config_path.write_text(
+            yaml.safe_dump({"permissions": user_permissions}, sort_keys=False),
+            encoding="utf-8",
+        )
+
+        assert migrate_config_from_template(template_path, user_config_path) is changed
+
+        migrated = yaml.safe_load(user_config_path.read_text(encoding="utf-8"))
+        assert migrated["permissions"] == {
+            "enabled": True,
+            "mode": expected_mode,
+            "defaults": {"*": "deny"},
+        }
+        assert migrate_config_from_template(template_path, user_config_path) is False
+
+    @staticmethod
     def test_ensure_config_migrated_from_template_adds_missing_keys(
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
