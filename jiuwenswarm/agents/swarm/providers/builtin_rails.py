@@ -26,6 +26,9 @@ from openjiuwen.agent_teams.harness.manifest import (
 )
 
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.identity_context_rail import (
+    IdentityContextRail,
+)
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import (
     ResponsePromptRail,
 )
@@ -37,6 +40,7 @@ from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
 RESPONSE_PROMPT = "swarm.response_prompt"
 STREAM_EVENT = "swarm.stream_event"
 AVATAR_PROMPT = "swarm.avatar_prompt"
+IDENTITY_CONTEXT = "swarm.identity_context"
 
 
 class ResponsePromptInput(ConstructionInput):
@@ -76,9 +80,16 @@ harness_element(
     description="Injects per-request digital-avatar prompt sections.",
     builder=AvatarPromptRail,
 )
+harness_element(
+    kind=ElementKind.RAIL,
+    name=IDENTITY_CONTEXT,
+    description="Injects SOUL.md/IDENTITY.md/USER.md persona files per model call.",
+    builder=IdentityContextRail,
+)
 
 __all__ = [
     "RESPONSE_PROMPT",
     "STREAM_EVENT",
     "AVATAR_PROMPT",
+    "IDENTITY_CONTEXT",
 ]

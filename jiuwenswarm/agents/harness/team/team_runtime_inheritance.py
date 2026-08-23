@@ -28,6 +28,7 @@ from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
+from jiuwenswarm.agents.harness.common.rails.identity_context_rail import IdentityContextRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuSwarmStreamEventRail
@@ -79,6 +80,7 @@ RAIL_WHITELIST = frozenset({
     "SecurityRail",
     "HeartbeatRail",
     "AvatarPromptRail",
+    "IdentityContextRail",
     "StructuredAskUserRail",
     "FileSystemRail",
     "SysOperationRail",
@@ -238,6 +240,13 @@ def build_member_rails(
         logger.info("[TeamRuntime] AvatarPromptRail created")
     except Exception as exc:
         logger.warning("[TeamRuntime] AvatarPromptRail failed: %s", exc)
+
+    try:
+        rail = IdentityContextRail(language=language)
+        rails_list.append(rail)
+        logger.info("[TeamRuntime] IdentityContextRail created")
+    except Exception as exc:
+        logger.warning("[TeamRuntime] IdentityContextRail failed: %s", exc)
 
     if team_ws_root:
         try:

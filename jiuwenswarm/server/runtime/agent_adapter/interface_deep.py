@@ -141,8 +141,11 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
     install_todo_modify_compat_patch,
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import (
-    build_agent_conventions_section,
     build_agent_persona_text,
+    build_work_overlay_sections,
+)
+from jiuwenswarm.agents.harness.common.prompt.workbuddy_scaffold import (
+    build_scaffold_sections,
 )
 from jiuwenswarm.agents.harness.common.rails import (
     JiuSwarmStreamEventRail,
@@ -4064,16 +4067,20 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
         """prompt_builder 被重建后（create_deep_agent / configure 热重配）补回动态 section。
 
         core 只会从 system_prompt 字符串重建 identity + prompt_attachments
-        两个 section（deep_agent._hot_reload_system_prompt），conventions 必须
-        由宿主补挂，否则专家替换 identity 时规则会被连带覆盖。
+        两个 section（deep_agent._hot_reload_system_prompt），scaffold + work
+        overlay 必须由宿主补挂，否则专家替换 identity 时规则会被连带覆盖。
         """
         instance = self._instance
         builder = getattr(instance, "system_prompt_builder", None)
         if builder is None:
             return
-        builder.add_section(
-            build_agent_conventions_section(self._resolve_prompt_language())
-        )
+        language = self._resolve_prompt_language()
+        # Shared WorkBuddy-style scaffold (15 sections, bilingual).
+        for section in build_scaffold_sections():
+            builder.add_section(section)
+        # Work-specific overlays (9 sections incl. work.task_principles).
+        for section in build_work_overlay_sections(language):
+            builder.add_section(section)
         instance.apply_prompt_builder_to_react_agent()
 
     @property
@@ -4559,6 +4566,23 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             return None
 
     @staticmethod
+    def _build_identity_context_rail(language: str = "cn") -> Any | None:
+        """Build IdentityContextRail to inject SOUL/IDENTITY/USER.md persona files."""
+        try:
+            from jiuwenswarm.agents.harness.common.rails.identity_context_rail import (
+                IdentityContextRail,
+            )
+
+            rail = IdentityContextRail(language=language)
+            logger.info("[JiuWenSwarmDeepAdapter] IdentityContextRail create success")
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] IdentityContextRail create failed: %s", exc
+            )
+            return None
+
+    @staticmethod
     def _build_memory_forbidden_rail() -> Any | None:
         """Build the execution-time sensitive-memory write guard."""
         try:
@@ -4847,6 +4871,10 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
             _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
             _RailBuildInfo("_cspl_sentinel_rail", self._build_cspl_sentinel_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
+            _RailBuildInfo(
+                "_identity_context_rail",
+                lambda: self._build_identity_context_rail(self._resolve_runtime_language()),
+            ),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(
