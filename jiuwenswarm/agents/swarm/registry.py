@@ -128,6 +128,7 @@ MULTIMODAL_IMAGE = _builtin_rails.MULTIMODAL_IMAGE
 # Opt-in governance rails (declared in ``governance_rails``). Mounted by
 # ``config_specs`` only when the team config enables them, so default assembly
 # is unchanged.
+QUALITY_GATE = _governance_rails.QUALITY_GATE
 USAGE_REPORT = _governance_rails.USAGE_REPORT
 
 # Generic rails provided + registered by openjiuwen (referenced by bare name).
@@ -218,6 +219,7 @@ __all__ = [
     "TEAM_SKILL_CREATE",
     "MEMBER_SKILL_EVOLUTION",
     "RESPONSE_PROMPT",
+    "QUALITY_GATE",
     "USAGE_REPORT",
     "SYS_OPERATION",
     "STREAM_EVENT",

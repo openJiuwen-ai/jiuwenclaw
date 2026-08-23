@@ -542,6 +542,19 @@ def _governance_rails(config: dict[str, Any]) -> list[RailSpec]:
                 },
             )
         )
+
+    gate = _config_section(config, "quality_gate")
+    if gate.get("enabled"):
+        specs.append(
+            RailSpec(
+                type=registry.QUALITY_GATE,
+                params={
+                    key: gate[key]
+                    for key in ("scorer", "threshold", "max_retries", "on_fail", "gate_name", "log_path")
+                    if key in gate
+                },
+            )
+        )
     return specs
 
 
