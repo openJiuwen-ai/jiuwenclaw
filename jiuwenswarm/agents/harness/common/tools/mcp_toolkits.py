@@ -8,18 +8,23 @@ import os
 from openjiuwen.core.foundation.tool import Tool
 
 from jiuwenswarm.agents.harness.common.tools.command_tools import mcp_exec_command
-from jiuwenswarm.agents.harness.common.tools.search_tools import mcp_free_search, mcp_paid_search
+from jiuwenswarm.agents.harness.common.tools.trusted_search_tool_adapter import (
+    mcp_free_search,
+    mcp_paid_search,
+)
 from jiuwenswarm.agents.harness.common.tools.web_fetch_tools import mcp_fetch_webpage
 
 
 def _has_paid_search_api_key() -> bool:
     """Check if any paid search API key is configured."""
-    return any([
-        os.environ.get("BOCHA_API_KEY"),
-        os.environ.get("PERPLEXITY_API_KEY"),
-        os.environ.get("SERPER_API_KEY"),
-        os.environ.get("JINA_API_KEY"),
-    ])
+    return any(
+        [
+            os.environ.get("BOCHA_API_KEY"),
+            os.environ.get("PERPLEXITY_API_KEY"),
+            os.environ.get("SERPER_API_KEY"),
+            os.environ.get("JINA_API_KEY"),
+        ]
+    )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -30,9 +35,8 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _is_free_search_enabled() -> bool:
-    return (
-        _env_flag("FREE_SEARCH_DDG_ENABLED", default=False)
-        or _env_flag("FREE_SEARCH_BING_ENABLED", default=False)
+    return _env_flag("FREE_SEARCH_DDG_ENABLED", default=False) or _env_flag(
+        "FREE_SEARCH_BING_ENABLED", default=False
     )
 
 
