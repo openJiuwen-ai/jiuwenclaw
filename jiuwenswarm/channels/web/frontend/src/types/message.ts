@@ -40,6 +40,28 @@ export interface FileDownloadItem {
   path?: string;
 }
 
+export type AutoReviewerStatus =
+  | 'in_progress'
+  | 'approved'
+  | 'deterministic_allow'
+  | 'manual'
+  | 'denied'
+  | 'blocked'
+  | 'fallback'
+  | 'host_revalidation_failed'
+  | 'timed_out'
+  | 'aborted';
+
+export interface AutoReviewerMetadata {
+  reviewer_status?: AutoReviewerStatus;
+  final_reviewer_status?: AutoReviewerStatus;
+  decision_source?: string;
+  risk_level?: string;
+  evidence_summary?: string;
+  manual_reason_summary?: string;
+  user_review_hint?: string;
+}
+
 export interface ContextCompressionRuntime {
   status: 'running' | 'completed' | 'unchanged' | 'failed';
   summary: string;
@@ -114,10 +136,11 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
-  description?: string;  // 操作描述，如 "创建 3 个任务"
-  formatted_args?: string;  // 格式化参数摘要
-  display_name?: string;  // 后端下发的可读展示名，前端优先直接展示
+  description?: string; // 操作描述，如 "创建 3 个任务"
+  formatted_args?: string; // 格式化参数摘要
+  display_name?: string; // 后端下发的可读展示名，前端优先直接展示
   memberName?: string;
+  reviewer?: AutoReviewerMetadata;
 }
 
 export interface ToolResult {
@@ -133,6 +156,7 @@ export interface ToolResult {
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
+  reviewer?: AutoReviewerMetadata;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';
