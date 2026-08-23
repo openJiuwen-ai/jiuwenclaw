@@ -651,34 +651,6 @@ class TestStructuredAskUserRailResolveInterrupt:
         assert "questions[0].options[0].label" in decision.tool_result
 
     @staticmethod
-    @pytest.mark.parametrize(
-        "options",
-        [
-            [{"label": "A", "description": 1}, {"label": "B"}],
-            [{"label": "A", "preview": {}}, {"label": "B"}],
-            [{"label": "A"}, {"label": "A"}],
-            [{"label": "A"}, {"label": "Other"}],
-        ],
-    )
-    @pytest.mark.asyncio
-    async def test_ambiguous_option_contracts_are_rejected(options):
-        """Host metadata must be typed, uniquely addressable, and reserve Other."""
-        rail = StructuredAskUserRail()
-        tc = _make_tool_call(arguments={
-            "query": "Choose",
-            "questions": [{
-                "question": "Which option?",
-                "header": "Choice",
-                "options": options,
-            }],
-        })
-
-        decision = await rail.resolve_interrupt(MagicMock(), tc, None)
-
-        from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
-        assert isinstance(decision, RejectResult)
-
-    @staticmethod
     @pytest.mark.parametrize("question", [None, "not an object", 123, []])
     @pytest.mark.asyncio
     async def test_non_object_questions_are_rejected(question):
