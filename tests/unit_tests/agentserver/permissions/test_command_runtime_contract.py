@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission import (
+    invocation_context,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions._auto_permission.models import (
+    ToolInvocation,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_decision_facts import (
+    build_tool_decision_facts,
+)
 from jiuwenswarm.agents.harness.common.tools.command_runtime import (
     CommandRuntimePaths,
     current_command_runtime_paths,
@@ -77,3 +87,110 @@ def test_rejects_invalid_or_external_workdir(
 
     with pytest.raises(ValueError):
         resolve_command_workdir(workdir, runtime_paths=paths)
+
+
+def test_freezes_effective_workdir_into_host_execution_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    tool_call = SimpleNamespace(
+        name="mcp_exec_command",
+        arguments={"command": "pwd", "workdir": "outputs"},
+    )
+    inputs = SimpleNamespace(
+        tool_call=tool_call,
+        tool_name="mcp_exec_command",
+        tool_args=tool_call.arguments,
+    )
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=inputs),
+        tool_call=tool_call,
+        tool_name="mcp_exec_command",
+        tool_args={
+            "command": "pwd",
+            "workdir": "outputs",
+            "call_goal": "display only",
+        },
+    )
+    kwargs = {"tool_args": invocation.tool_args}
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        kwargs,
+    )
+
+    expected = {
+        "command": "pwd",
+        "workdir": str(paths.current_cwd / "outputs"),
+    }
+    assert error == ""
+    assert frozen.tool_args == expected
+    assert tool_call.arguments == expected
+    assert inputs.tool_args == expected
+    assert kwargs["tool_args"] == expected
+    facts = build_tool_decision_facts(
+        frozen.tool_name,
+        frozen.tool_args,
+        workspace_root=paths.workspace_root,
+        original_args_were_valid_object=True,
+    )
+    assert dict(facts.untrusted_args) == expected
+    assert facts.command == "pwd"
+
+
+def test_rejects_non_authoritative_cwd_field(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=None),
+        tool_call=SimpleNamespace(arguments={}),
+        tool_name="mcp_exec_command",
+        tool_args={"command": "pwd", "cwd": str(paths.current_cwd)},
+    )
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        {},
+    )
+
+    assert frozen is invocation
+    assert error == "command_workdir_contract_invalid"
+
+
+def test_writeback_failure_does_not_publish_frozen_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    invocation = ToolInvocation(
+        ctx=SimpleNamespace(inputs=None),
+        tool_call=MappingProxyType({"arguments": {"command": "pwd"}}),
+        tool_name="mcp_exec_command",
+        tool_args={"command": "pwd"},
+    )
+    monkeypatch.setattr(
+        invocation_context,
+        "current_command_runtime_paths",
+        lambda **_kwargs: paths,
+    )
+
+    frozen, error = invocation_context._normalize_command_invocation_for_execution(
+        invocation,
+        {},
+    )
+
+    assert frozen is invocation
+    assert error == "command_workdir_writeback_failed"
