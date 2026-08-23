@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    InvokeInputs,
+    RunContext,
+    ToolCallInputs,
+)
 
 from jiuwenswarm.agents.harness.common.rails.permissions.root_ask_user import (
     ASK_USER_CONTINUATION_METADATA_KEY,
+    ASK_USER_RESUME_DTO_KEY,
     apply_ask_user_resume,
     ask_user_continuation,
     build_ask_user_metadata,
@@ -30,6 +38,12 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
     put_root_decision_context_in_inputs,
     reset_root_decision_context,
     root_decision_context_from_extra,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_context_rail import (
+    RootContextRail,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
+    RootPermissionQueue,
 )
 
 
@@ -151,6 +165,89 @@ def test_ordinary_ask_missing_or_foreign_answer_fails_closed() -> None:
     foreign.update("ask-2", {"answers": {"Continue?": "yes"}})
     assert prepare_ask_user_resume(continuation=continuation, user_input=missing) is None
     assert prepare_ask_user_resume(continuation=continuation, user_input=foreign) is None
+
+
+@pytest.mark.asyncio
+async def test_ordinary_ask_resume_reaches_next_inner_tool_callback() -> None:
+    context = _context("Search the selected project")
+    raw = build_ask_user_metadata(
+        context=context,
+        tool_name="ask_user",
+        tool_call_id="ask-1",
+        tool_args={"query": "Which project?"},
+    )
+    assert raw is not None
+    continuation = ask_user_continuation(
+        {ASK_USER_CONTINUATION_METADATA_KEY: raw},
+        expected_tool_call_id="ask-1",
+    )
+    assert continuation is not None
+    incoming = InteractiveInput()
+    incoming.update("ask-1", {"answers": {"Which project?": "JiuwenSwarm"}})
+    prepared = prepare_ask_user_resume(
+        continuation=continuation,
+        user_input=incoming,
+    )
+    assert prepared is not None
+
+    extra = {
+        ROOT_CONTEXT_KEY: context.to_mapping(),
+        ASK_USER_RESUME_DTO_KEY: prepared,
+    }
+    run_context = RunContext(extra=extra)
+    outer_callback = AgentCallbackContext(
+        agent=SimpleNamespace(),
+        inputs=InvokeInputs(query=incoming, run_context=run_context),
+        session=SimpleNamespace(session_id="session-1"),
+    )
+    rail = RootContextRail(
+        root_permission_queue=RootPermissionQueue(),
+        expected_agent_id="root-agent",
+        sys_operation=object(),
+        sandboxed=False,
+    )
+
+    await rail.before_invoke(outer_callback)
+    ask_call = SimpleNamespace(id="ask-1", name="ask_user", arguments={})
+    inner_extra = {"run_context": run_context}
+    ask_callback = AgentCallbackContext(
+        agent=SimpleNamespace(),
+        inputs=ToolCallInputs(
+            tool_call=ask_call,
+            tool_name="ask_user",
+            tool_args={},
+        ),
+        session=outer_callback.session,
+        extra=inner_extra,
+    )
+    await rail.before_tool_call(ask_callback)
+    persisted = root_decision_context_from_extra(extra)
+    assert persisted.trusted_turns[-1].clarifications[0].answers == ("JiuwenSwarm",)
+
+    # Core executes each tool callback in its own task. The next callback may
+    # inherit the parent task's original ContextVar value, so the shared Host
+    # RunContext is the cross-callback source of truth.
+    bind_root_decision_context(context)
+    search_call = SimpleNamespace(
+        id="search-1",
+        name="free_search",
+        arguments={"query": "JiuwenSwarm"},
+    )
+    search_callback = AgentCallbackContext(
+        agent=SimpleNamespace(),
+        inputs=ToolCallInputs(
+            tool_call=search_call,
+            tool_name="free_search",
+            tool_args=search_call.arguments,
+        ),
+        session=outer_callback.session,
+        extra=inner_extra,
+    )
+    await rail.before_tool_call(search_callback)
+    resumed = current_root_decision_context()
+    assert resumed is not None
+    assert resumed.trusted_turns[-1].clarifications[0].answers == ("JiuwenSwarm",)
+    await rail.after_invoke(outer_callback)
 
 
 @pytest.mark.asyncio
