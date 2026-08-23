@@ -7,7 +7,8 @@
    仅 model_name 非空时追加）。支持多个条目（同名/异名皆可）；填写约束为
    (model_name, api_base, api_key) 三元组唯一，故不存在完全相同的两条。
    agentos 只认 list 格式。
-2. context_window（模型支持的上下文总长度）字段：
+2. context_window（模型支持的上下文总长度）字段，**每个模型条目均可配**
+   （defaults / agentos / video / audio / vision / image_gen，放各自 model_config_obj）：
    - 目标落点是 core 的 ModelRequestConfig（供 core 人员加正式字段后从
      self.model_config.context_window 取值）。
    - 是否在 jiuwenswarm 出口 pop 由 reasoning_injector.core_has_context_window_field
@@ -17,9 +18,10 @@
        argument -> 公共出口 pop 防发厂商，ModelRequestConfig 不含它。
      * core 已加正式字段：context_window 作正式字段，core 自行 exclude 不发厂商、
        self.model_config.context_window 可读 -> 不 pop，值留给 core。
+   - 出口 pop 不再守 _source=="agentos"：所有条目（含 defaults）一视同仁，
+     过渡期都 pop 防发厂商，core 加字段后都停止 pop。
    - 不再挂 _agentos_ctx_window 普通属性：旧机制是把该值喂给
      ContextEngineConfig.context_window_tokens（压缩阈值）的桥接，已拆除（见第 3 类）。
-   - 只对 agentos 生效（_source=="agentos" 守卫），defaults 不带该标记，行为不变。
 3. 压缩阈值桥接已拆除：_deep_agent_context_engine_config 不再做 agentos per-model 覆盖，
    context_window_tokens 只取全局 react.context_engine_config 值（或 None 由 core 兜底），
    与 defaults 行为一致；签名简化为只接受 react_cfg。
@@ -204,8 +206,8 @@ class TestContextWindowPopAdaptsToCoreField:
         assert getattr(model, "_agentos_ctx_window", None) is None
 
     @staticmethod
-    def test_defaults_context_window_not_popped():
-        # defaults 不带 _source 标记 -> reasoning_injector 不经 agentos 路径 pop
+    def test_defaults_context_window_also_popped_when_core_lacks_field():
+        # 守卫不再守 is_agentos：defaults 配的 context_window 过渡期同样被 pop 防发厂商
         entries = get_default_models(_config(agentos=[_agentos_block()]))
         defaults = next(e for e in entries
                         if e.get("model_config_obj", {}).get("_source") != "agentos")
@@ -213,10 +215,28 @@ class TestContextWindowPopAdaptsToCoreField:
         assert "_source" not in mco
         kwargs = build_reasoning_model_request_kwargs(
             model_client_config={"client_provider": "OpenAI", "api_base": "http://x"},
-            model_config_obj={**mco, "context_window": 999999},  # 模拟 defaults 误配
+            model_config_obj={**mco, "context_window": 999999},  # 模拟 defaults 配 context_window
             model_name="gpt-main",
         )
-        # 无 _source 标记 -> agentos 路径不介入，context_window 留在 kwargs（defaults 自行负责）
+        # defaults 无 _source 标记，但守卫已不依赖它 -> 过渡期同样 pop
+        assert "context_window" not in kwargs
+
+    @staticmethod
+    def test_defaults_context_window_kept_when_core_has_field(monkeypatch):
+        # core 加字段后，defaults 的 context_window 也停止 pop，留给 core
+        monkeypatch.setattr(
+            "jiuwenswarm.common.reasoning_injector.core_has_context_window_field",
+            lambda: True,
+        )
+        entries = get_default_models(_config(agentos=[_agentos_block()]))
+        defaults = next(e for e in entries
+                        if e.get("model_config_obj", {}).get("_source") != "agentos")
+        mco = defaults["model_config_obj"]
+        kwargs = build_reasoning_model_request_kwargs(
+            model_client_config={"client_provider": "OpenAI", "api_base": "http://x"},
+            model_config_obj={**mco, "context_window": 999999},
+            model_name="gpt-main",
+        )
         assert kwargs.get("context_window") == 999999
 
     @staticmethod
