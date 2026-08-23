@@ -74,6 +74,8 @@ def test_search_result_limit_has_no_permission_side_duplicate() -> None:
         "jiuwenswarm/agents/harness/common/tools/trusted_search_tool_adapter.py",
         "jiuwenswarm/server/runtime/agent_adapter/trusted_web_search.py",
         "jiuwenswarm/agents/harness/common/rails/permissions/trusted_search_urls.py",
+        "jiuwenswarm/agents/harness/common/rails/permissions/"
+        "_auto_permission/before_tool.py",
     )
     production = "\n".join(
         (root / path).read_text(encoding="utf-8") for path in production_paths
