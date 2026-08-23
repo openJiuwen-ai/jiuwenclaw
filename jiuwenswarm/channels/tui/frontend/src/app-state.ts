@@ -22,6 +22,7 @@ import {
 } from "./core/history-parser.js";
 import { getToolGroupIds } from "./core/transcript-timeline.js";
 import {
+  bindPermissionCardAnswer,
   handleIncomingFrame,
   type AppEventDelegate,
   type PendingQuestion,
@@ -2268,6 +2269,10 @@ export class CliPiAppState {
       return;
     }
     const source = this.pendingQuestion.source;
+    const outboundAnswers =
+      source === "permission_interrupt"
+        ? bindPermissionCardAnswer(answers, this.pendingQuestion.questions)
+        : answers;
     const approvalTransport =
       this.pendingQuestion.evolutionMeta &&
       typeof this.pendingQuestion.evolutionMeta.approval_transport === "string"
@@ -2295,7 +2300,7 @@ export class CliPiAppState {
         {
           query: "",
           request_id: this.pendingQuestion.requestId,
-          answers,
+          answers: outboundAnswers,
           source,
           mode: resumeMode,
           ...structuredPlanPayload,

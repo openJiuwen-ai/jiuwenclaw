@@ -13,6 +13,7 @@ import asyncio
 import copy
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, List, Optional
 
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -27,15 +28,35 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+    build_verified_permission_ask_user_question,
     convert_interactions_to_ask_user_question,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.reviewer_stream_metadata import (
+    consume_reviewer_tool_result_metadata,
+    peek_reviewer_tool_result_metadata,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.permission_interaction import (
+    PERMISSION_RUNTIME_QUARANTINED_KEY,
+    contains_permission_interaction,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
+    root_decision_context_from_extra,
 )
 from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue import (
     RootPermissionQueue,
+    RootPermissionQueueError,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_invocation_key import (
+    ToolInvocationKeyV1,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_rail import (
+    is_marked_permission_interrupt,
 )
 from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
     strip_image_content_from_model_context,
@@ -52,6 +73,7 @@ from jiuwenswarm.common.utils import logger
 from jiuwenswarm.common.todo_snapshot import format_todos_for_frontend
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
+_TERMINAL_PROJECTION_STATE_ATTRIBUTE = "_jiuwenswarm_terminal_projection_v1"
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -218,7 +240,43 @@ def _infer_tool_result_error(value: Any) -> bool | None:
         )
         if exit_match:
             return int(exit_match.group(1)) != 0
+
+    success = getattr(value, "success", None)
+    if type(success) is bool:
+        return not success
     return None
+
+
+def _trusted_reviewer_denied(
+    reviewer_metadata: Mapping[str, Any],
+) -> bool:
+    status = str(reviewer_metadata.get("final_reviewer_status") or "").strip().lower()
+    if not status:
+        status = str(reviewer_metadata.get("reviewer_status") or "").strip().lower()
+    return status == "denied"
+
+
+def _enrich_trusted_reviewer_result(
+    payload: dict[str, Any],
+    raw_output: Any | None,
+    reviewer_metadata: Mapping[str, Any] | None,
+) -> None:
+    if not reviewer_metadata:
+        return
+    metadata = dict(reviewer_metadata)
+    payload["reviewer_metadata"] = metadata
+    if not _trusted_reviewer_denied(metadata):
+        return
+    payload["permission_decision"] = "deny"
+    payload["permission_status"] = "denied"
+    payload["status"] = "denied"
+    if not isinstance(raw_output, Mapping):
+        return
+    for key in ("result", "error"):
+        value = raw_output.get(key)
+        if isinstance(value, str):
+            payload["result"] = value[:60000]
+            return
 
 
 class JiuSwarmStreamEventRail(DeepAgentRail):
@@ -264,6 +322,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # Store cancelled tool info for interrupt response (per-session to avoid
         # cross-session leakage in concurrent collect→get→clear sequences).
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
+        self._quarantined_sessions: set[str] = set()
         self._symphony_stream_handler = SymphonyToolStreamHandler()
 
     def init(self, agent: Any) -> None:
@@ -501,6 +560,34 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
 
+    def quarantine_session(
+        self, session_id: str, session: Session | None = None
+    ) -> None:
+        """Permanently block a damaged runtime until its owning session is destroyed."""
+
+        sid = session_id or "default"
+        self._quarantined_sessions.add(sid)
+        if session is not None:
+            session.update_state({PERMISSION_RUNTIME_QUARANTINED_KEY: True})
+        self.abort(sid)
+
+    def raise_if_quarantined(
+        self,
+        session_id: str,
+        session: Session | None = None,
+    ) -> None:
+        """Reject new work after fail-closed interruption cleanup failed."""
+
+        sid = session_id or "default"
+        persisted = (
+            session.get_state(PERMISSION_RUNTIME_QUARANTINED_KEY)
+            if session is not None
+            else False
+        )
+        if sid in self._quarantined_sessions or persisted is True:
+            self._quarantined_sessions.add(sid)
+            raise RuntimeError("session_runtime_quarantined")
+
     def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
 
@@ -532,12 +619,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             tc = info.get("tool_call")
             if tc is None:
                 continue
-            bucket.append({
+            payload = {
                 "tool_name": getattr(tc, "name", ""),
                 "tool_call_id": tc_id,
                 "result": "[Interrupted] Tool execution cancelled by user.",
                 "status": "error",
-            })
+            }
+            bucket.append(payload)
             self._inflight_tool_calls.pop(tc_id, None)
         logger.info(
             "[StreamEventRail] collected %d cancelled tools for session=%s",
@@ -564,6 +652,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         # "default" would trigger _emit_todo_updated with a bogus session key.
         raw_conv_id = ctx.inputs.conversation_id or ""
         sid = raw_conv_id or "default"
+        self.raise_if_quarantined(sid, ctx.session)
         if raw_conv_id:
             self._conversation_ids[sid] = raw_conv_id
         self._main_sessions[sid] = ctx.session
@@ -582,17 +671,143 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             logger.debug("[StreamEventRail] set_shell_session_id failed", exc_info=True)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        token = ctx.extra.pop(self._SHELL_SID_TOKEN_KEY, None)
-        if token is None:
+        try:
+            if isinstance(ctx.inputs, InvokeInputs) and ctx.session is not None:
+                await self._project_complete_interruption(ctx)
+        finally:
+            token = ctx.extra.pop(self._SHELL_SID_TOKEN_KEY, None)
+            if token is not None:
+                try:
+                    from openjiuwen.core.sys_operation.shell_process_registry import (
+                        reset_shell_session_id,
+                    )
+
+                    reset_shell_session_id(token)
+                except Exception:
+                    logger.debug(
+                        "[StreamEventRail] reset_shell_session_id failed",
+                        exc_info=True,
+                    )
+
+    async def _project_complete_interruption(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        queue = self._root_permission_queue
+        sid = self._resolve_sid(ctx, ctx.session)
+        if queue is None:
+            if contains_permission_interaction(ctx.inputs.result):
+                await self._cancel_interruption_snapshot(
+                    ctx,
+                    keys=(),
+                    reason="permission_queue_unavailable",
+                )
             return
         try:
-            from openjiuwen.core.sys_operation.shell_process_registry import (
-                reset_shell_session_id,
+            snapshot = queue.reconcile(
+                ctx.inputs.result,
+                root_session_id=sid,
             )
+        except RootPermissionQueueError as exc:
+            await self._cancel_interruption_snapshot(
+                ctx,
+                keys=queue.snapshot_scope(root_session_id=sid),
+                reason=str(exc),
+            )
+            return
+        if snapshot is None:
+            return
+        payload = build_verified_permission_ask_user_question(
+            snapshot.interactions[0],
+            snapshot.cards[0],
+        )
+        if payload is None:
+            await self._cancel_interruption_snapshot(
+                ctx,
+                keys=tuple(card.key for card in snapshot.cards),
+                reason="permission_queue_projection_invalid",
+            )
+            return
+        await ctx.session.write_stream(
+            OutputSchema(
+                type="chat.ask_user_question",
+                index=0,
+                payload=payload,
+            )
+        )
 
-            reset_shell_session_id(token)
-        except Exception:
-            logger.debug("[StreamEventRail] reset_shell_session_id failed", exc_info=True)
+    async def _cancel_interruption_snapshot(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        keys: tuple[ToolInvocationKeyV1, ...],
+        reason: str,
+    ) -> None:
+        session = ctx.session
+        sid = self._resolve_sid(ctx, session)
+        try:
+            session.update_state({INTERRUPTION_KEY: None})
+            await session.write_stream(
+                OutputSchema(
+                    type="chat.retract",
+                    index=0,
+                    payload={"reason": "interrupt_snapshot_canceled"},
+                )
+            )
+            cleanup_keys = tuple(
+                dict.fromkeys((*keys, *self._trusted_cleanup_scope(ctx)))
+            )
+            self._discard_permission_records(cleanup_keys, reason=reason)
+            await session.write_stream(
+                OutputSchema(
+                    type="error",
+                    index=0,
+                    payload={"error": self._interruption_retry_message()},
+                )
+            )
+        except BaseException:
+            self.quarantine_session(sid, session)
+            raise
+
+    def _trusted_cleanup_scope(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> tuple[ToolInvocationKeyV1, ...]:
+        run_context = getattr(ctx.inputs, "run_context", None)
+        try:
+            carrier = root_decision_context_from_extra(
+                getattr(run_context, "extra", None)
+            )
+        except (TypeError, ValueError):
+            raise RuntimeError("interrupt_cleanup_scope_unavailable") from None
+        sid = self._resolve_sid(ctx, ctx.session)
+        if carrier.session_id != sid:
+            raise RuntimeError("interrupt_cleanup_scope_mismatch")
+        queue = self._root_permission_queue
+        if queue is None:
+            raise RuntimeError("interrupt_cleanup_store_unavailable")
+        return queue.snapshot_scope(
+            root_session_id=carrier.session_id,
+            request_id=carrier.request_id,
+        )
+
+    def _discard_permission_records(
+        self,
+        keys: tuple[ToolInvocationKeyV1, ...],
+        *,
+        reason: str,
+    ) -> None:
+        queue = self._root_permission_queue
+        if queue is None:
+            raise RuntimeError("interrupt_cleanup_store_unavailable")
+        queue.cancel_snapshot(keys)
+        if any(queue.get(key) is not None for key in keys):
+            raise RuntimeError("interrupt_cleanup_incomplete")
+
+    def _interruption_retry_message(self) -> str:
+        if self._get_prompt_language() == "en":
+            return "This approval batch could not be resumed safely. Please retry the request."
+        return "本次审批批次无法安全恢复，请重新发起请求。"
 
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
@@ -672,13 +887,17 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         sid = self._resolve_sid(ctx, ctx.session)
+        tc = ctx.inputs.tool_call if isinstance(ctx.inputs, ToolCallInputs) else None
+        reviewer_progress_metadata = peek_reviewer_tool_result_metadata(
+            getattr(ctx, "extra", None),
+            tool_call_id=getattr(tc, "id", "") if tc is not None else "",
+        )
         await self._get_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
-            tc = ctx.inputs.tool_call
             # 主模型随 tool_call 产出的目标文案（call_goal）：取出后剥掉，避免 schema 拒收。
             # 绝不碰 display_name（team 成员名等业务字段）。
             model_display, cleaned_args = extract_call_goal(
@@ -695,9 +914,31 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                         exc,
                     )
                 ctx.inputs.tool_args = cleaned_args
-            await self._emit_tool_call(session, tc, model_display_name=model_display)
-            await self._emit_tool_update(session, tc, status="in_progress")
-            self._symphony_stream_handler.bind_progress(ctx, session, tc)
+            tool_call_emitted = await self._emit_tool_call(
+                session,
+                tc,
+                model_display_name=model_display,
+            )
+            in_progress_emitted = await self._emit_tool_update(
+                session,
+                tc,
+                status="in_progress",
+            )
+            if (
+                tool_call_emitted
+                and in_progress_emitted
+                and reviewer_progress_metadata is not None
+            ):
+                await self._emit_reviewer_tool_update(
+                    session,
+                    tool_call_id=getattr(tc, "id", "") if tc is not None else "",
+                    reviewer_metadata=reviewer_progress_metadata,
+                )
+            self._symphony_stream_handler.bind_progress(
+                ctx,
+                session,
+                tc,
+            )
             # Track in-flight tool call for cancellation
             tc_id = getattr(tc, "id", "")
             if tc_id:
@@ -718,22 +959,48 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         tc = ctx.inputs.tool_call
         tc_id = getattr(tc, "id", "")
-        self._symphony_stream_handler.reset_progress(ctx)
-        # Remove from in-flight tracking on completion
-        if tc_id:
-            self._inflight_tool_calls.pop(tc_id, None)
-
-        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
+        if is_marked_permission_interrupt(ctx, ctx.exception):
+            return
+        if getattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, None):
+            return
+        setattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, "projecting")
+        try:
+            self._symphony_stream_handler.reset_progress(ctx)
+            if tc_id:
+                self._inflight_tool_calls.pop(tc_id, None)
+            reviewer_metadata = peek_reviewer_tool_result_metadata(
+                getattr(ctx, "extra", None), tool_call_id=tc_id
+            )
+            tool_result = ctx.inputs.tool_result
+            if tool_result is None and ctx.exception is not None:
+                tool_result = ctx.exception
+            projected = await self._emit_tool_result(
+                session,
+                tc,
+                tool_result,
+                reviewer_metadata=reviewer_metadata,
+            )
+            if not projected:
+                return
+            setattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, "projected")
+            consume_reviewer_tool_result_metadata(
+                getattr(ctx, "extra", None), tool_call_id=tc_id
+            )
+        finally:
+            if getattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE, None) == "projecting":
+                delattr(ctx, _TERMINAL_PROJECTION_STATE_ATTRIBUTE)
+        if not projected:
+            return
         self._symphony_stream_handler.request_force_finish(
             ctx,
             tc,
-            ctx.inputs.tool_result,
+            tool_result,
         )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
             ctx.inputs.tool_name,
-            ctx.inputs.tool_result,
+            tool_result,
             ctx.exception,
         )
 
@@ -768,7 +1035,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         tool_call: Any,
         *,
         model_display_name: str = "",
-    ) -> None:
+    ) -> bool:
         try:
             name = getattr(tool_call, "name", "")
             arguments = getattr(tool_call, "arguments", {})
@@ -790,15 +1057,19 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     payload={"tool_call": tool_call_payload},
                 )
             )
+            return True
         except Exception:
             logger.debug("tool_call emit failed", exc_info=True)
+            return False
 
     async def _emit_tool_result(
         self,
         session: Session,
         tool_call: Any,
         result: Any,
-    ) -> None:
+        *,
+        reviewer_metadata: Mapping[str, Any] | None = None,
+    ) -> bool:
         try:
             raw_output = _structured_tool_result_payload(result)
             tool_result_payload = {
@@ -819,6 +1090,11 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                 if error_state:
                     tool_result_payload["status"] = "error"
                     tool_result_payload["is_error"] = True
+            _enrich_trusted_reviewer_result(
+                tool_result_payload,
+                raw_output,
+                reviewer_metadata,
+            )
             await session.write_stream(
                 OutputSchema(
                     type="tool_result",
@@ -828,8 +1104,10 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     },
                 )
             )
+            return True
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
+            return False
 
     @staticmethod
     async def _emit_ask_user_question_if_interrupted(
@@ -860,24 +1138,55 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             logger.debug("ask_user question emit failed", exc_info=True)
 
     @staticmethod
-    async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
+    async def _emit_reviewer_tool_update(
+        session: Session,
+        *,
+        tool_call_id: str,
+        reviewer_metadata: Mapping[str, Any],
+    ) -> bool:
         try:
+            payload = {
+                "tool_call_id": tool_call_id,
+                "status": "in_progress",
+                "reviewer_metadata": copy.deepcopy(dict(reviewer_metadata)),
+            }
             await session.write_stream(
                 OutputSchema(
                     type="tool_update",
                     index=0,
-                    payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
-                            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                            "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
-                            "status": str(status or "").strip() or "in_progress",
-                        }
-                    },
+                    payload={"tool_update": payload},
                 )
             )
+            return True
+        except Exception:
+            logger.debug("reviewer tool_update emit failed", exc_info=True)
+            return False
+
+    @staticmethod
+    async def _emit_tool_update(
+        session: Session,
+        tool_call: Any,
+        *,
+        status: str,
+    ) -> bool:
+        try:
+            payload = {
+                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
+                "status": str(status or "").strip() or "in_progress",
+            }
+            await session.write_stream(
+                OutputSchema(
+                    type="tool_update",
+                    index=0,
+                    payload={"tool_update": payload},
+                )
+            )
+            return True
         except Exception:
             logger.debug("tool_update emit failed", exc_info=True)
+            return False
 
     async def _emit_todo_updated(self, session: Session, session_id: str) -> None:
         """Load the main agent's todo list and push a todo.updated event to the frontend."""
