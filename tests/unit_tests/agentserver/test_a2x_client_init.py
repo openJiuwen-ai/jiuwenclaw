@@ -199,6 +199,12 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
 
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
+    created_instance = MagicMock(
+        name="deep_agent",
+        ensure_initialized=AsyncMock(),
+        register_rail=AsyncMock(),
+        unregister_rail=AsyncMock(),
+    )
 
     with (
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
@@ -214,10 +220,7 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
         patch.object(
             interface_module,
             "create_deep_agent",
-            return_value=MagicMock(
-                name="deep_agent",
-                ensure_initialized=AsyncMock(),
-            ),
+            return_value=created_instance,
         ),
     ):
         await adapter.create_instance()
@@ -383,7 +386,12 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     monkeypatch.setitem(sys.modules, "jiuwenswarm.agents.harness.team.a2x.client", fake_module)
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
-    created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())
+    created_instance = MagicMock(
+        name="deep_agent",
+        ensure_initialized=AsyncMock(),
+        register_rail=AsyncMock(),
+        unregister_rail=AsyncMock(),
+    )
 
     with (
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),
@@ -405,6 +413,8 @@ async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch:
     assert "runtime_cwd" not in kwargs
     assert "project_root" not in kwargs
     assert kwargs["enable_read_image_multimodal"] is None
+    assert kwargs["subagents"] is None
+    assert kwargs["add_general_purpose_agent"] is False
 
 
 @pytest.mark.asyncio
@@ -574,7 +584,12 @@ async def test_create_instance_keeps_workspace_root_separate_from_project_dir(
     config_base["react"]["workspace_dir"] = str(workspace_dir)
 
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
-    created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())
+    created_instance = MagicMock(
+        name="deep_agent",
+        ensure_initialized=AsyncMock(),
+        register_rail=AsyncMock(),
+        unregister_rail=AsyncMock(),
+    )
 
     with (
         patch.object(interface_module.JiuWenSwarmDeepAdapter, "set_checkpoint", AsyncMock()),

@@ -271,27 +271,24 @@ class _TeamPlanPermissionInterruptRail:
 )
 def build_permission_interrupt(params: dict[str, Any], ctx: SwarmBuildContext) -> Any:
     """Build PermissionInterruptRail (None unless ``permissions.enabled`` in config)."""
-    try:
-        from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
-            build_permission_rail,
-        )
+    from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+        build_permission_rail,
+    )
 
-        inp = PermissionInterruptInput.resolve(params, ctx)
-        rail = build_permission_rail(
-            config={"permissions": inp.permissions_config},
-            llm=None,
-            model_name=inp.model_name,
-        )
-        if rail is not None and inp.trusted_dirs:
-            # Mirrors the single agent: trusted subtrees count as internal, so
-            # the external_directory check skips ask/deny inside them.
-            rail.set_trusted_dirs(inp.trusted_dirs)
-        if rail is not None and _is_team_plan_leader(ctx):
-            return _TeamPlanPermissionInterruptRail(rail)
-        return rail
-    except Exception as exc:
-        logger.warning("[swarm.permission_interrupt] create failed: %s", exc)
-        return None
+    inp = PermissionInterruptInput.resolve(params, ctx)
+    rail = build_permission_rail(
+        config={"permissions": inp.permissions_config},
+        llm=None,
+        model_name=inp.model_name,
+        enable_auto_permission=False,
+    )
+    if rail is not None and inp.trusted_dirs:
+        # Mirrors the single agent: trusted subtrees count as internal, so
+        # the external_directory check skips ask/deny inside them.
+        rail.set_trusted_dirs(inp.trusted_dirs)
+    if rail is not None and _is_team_plan_leader(ctx):
+        return _TeamPlanPermissionInterruptRail(rail)
+    return rail
 
 
 class CodeCodingMemoryInput(ConstructionInput):
@@ -386,9 +383,7 @@ def build_code_agent_mode(params: dict[str, Any], ctx: SwarmBuildContext) -> Any
         )
 
         exit_notification = (
-            _TEAM_PLAN_EXIT_NOTIFICATION_EN
-            if _is_team_plan_leader(ctx)
-            else None
+            _TEAM_PLAN_EXIT_NOTIFICATION_EN if _is_team_plan_leader(ctx) else None
         )
         return CodeAgentModeRail(
             allowed_tools=[

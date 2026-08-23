@@ -40,7 +40,7 @@ from openjiuwen.harness.subagents.browser_agent import build_browser_agent_confi
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
-from openjiuwen.harness.tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
+from openjiuwen.harness.tools import WebFetchWebpageTool, WebPaidSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -58,6 +58,9 @@ from jiuwenswarm.server.runtime.agent_adapter.statusline_setup_agent import (
     DEFAULT_STATUSLINE_SETUP_MAX_ITERATIONS,
     STATUSLINE_SETUP_AGENT_TYPE,
     build_statusline_setup_agent_config,
+)
+from jiuwenswarm.server.runtime.agent_adapter.trusted_web_search import (
+    TrustedWebFreeSearchTool,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
 from jiuwenswarm.agents.harness.common.browser_defaults import (
@@ -538,6 +541,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             return
 
         model = self._create_model(config_base)
+        self._prepare_browser_runtime_security(model, config_base)
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
 
         tool_cards = await self._get_tool_cards(self._tool_owner_id())
@@ -1111,6 +1115,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                         "[JiuwenSwarmCodeAdapter] browser subagent enabled without BROWSER_DRIVER; "
                         "defaulting to managed mode"
                     )
+                browser_kwargs: dict[str, Any] = {}
+                if self._browser_runtime_settings is not None:
+                    browser_kwargs["settings"] = self._browser_runtime_settings
                 browser_spec = build_browser_agent_config(
                     model,
                     workspace=workspace,
@@ -1119,9 +1126,10 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                     max_iterations=parse_int(
                         browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
                         DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
-                    )
+                    ),
+                    **browser_kwargs,
                 )
-                browser_spec.factory_kwargs = {"auto_create_workspace": False}
+                browser_spec.factory_kwargs["auto_create_workspace"] = False
                 subagents.append(browser_spec)
 
         # ── 自定义 agent 不加入 deep_config.subagents ──
@@ -1396,7 +1404,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     def _build_web_free_search_tool(self, agent_id: str) -> Any:
         """构建 web_free_search 工具."""
-        return WebFreeSearchTool(
+        return TrustedWebFreeSearchTool(
             language=self._resolve_runtime_language(), agent_id=agent_id
         )
 
