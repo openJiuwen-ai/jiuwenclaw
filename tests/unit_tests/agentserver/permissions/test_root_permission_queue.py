@@ -28,6 +28,17 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_permission_queue_r
     reset_root_permission_request,
     root_permission_resume_from_context,
 )
+from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
+    ROOT_CONTEXT_KEY,
+    RootDecisionContext,
+    RootIntentTurn,
+    RootIntentTurnKind,
+)
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+    JiuWenSwarmDeepAdapter,
+)
+
+
 def _begin(queue: RootPermissionQueue, tool_call_id: str):
     return queue.begin(
         root_session_id="root-session",
@@ -582,3 +593,61 @@ def test_finish_active_cannot_consume_pending_or_resuming_cards() -> None:
 
     assert queue.finish_active(answer.card.key) is False
     assert queue.get(answer.card.key) == answer.card
+
+
+def test_permission_resume_dispatch_reuses_frozen_root_context() -> None:
+    queue = RootPermissionQueue(id_factory=lambda: "invocation-1")
+    context = RootDecisionContext(
+        session_id="root-session",
+        request_id="original-request",
+        channel_id="web",
+        trusted_turns=(
+            RootIntentTurn(
+                request_id="original-request",
+                kind=RootIntentTurnKind.FRESH,
+                text="Search the current project and summarize it",
+            ),
+        ),
+    )
+    card = _begin(queue, "call-1")
+    pending = queue.mark_pending(
+        card.key,
+        request=InterruptRequest(
+            message="approve",
+            metadata={"tool_invocation_key": card.key.to_wire()},
+        ),
+        auto_manual=True,
+        root_context=context,
+    )
+    queue.reconcile(
+        {
+            "result_type": "interrupt",
+            "interrupt_ids": ["call-1"],
+            "state": [_interaction(pending)],
+        },
+        root_session_id="root-session",
+    )
+    answer = queue.reserve_answer("root-session", _answer(pending))
+    adapter = object.__new__(JiuWenSwarmDeepAdapter)
+    request = SimpleNamespace(
+        params={
+            "source": "permission_interrupt",
+            "request_id": "resume-request",
+            "answers": [{}],
+            "mode": "agent",
+        },
+        request_id="resume-request",
+        session_id="root-session",
+        channel_id="web",
+        req_method="chat.send",
+    )
+
+    prepared = adapter._with_root_context(
+        request,
+        {
+            "query": answer.interactive_input,
+            "_jiuwenswarm_root_permission_answer": answer,
+        },
+    )
+
+    assert prepared["run"]["context"]["extra"][ROOT_CONTEXT_KEY] == context.to_mapping()
