@@ -15,6 +15,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 import unicodedata
 import uuid
 import zipfile
@@ -140,6 +141,7 @@ _PROTOCOL_FIXED_KEYS = frozenset(
         "task_content",
         "task_id",
         "tasks",
+        "timing",
         "total_tasks",
     }
 )
@@ -223,6 +225,35 @@ _FINAL_PIPELINE_NODES = frozenset({
     "vlm_chart_generator",
     "source_tracer",
     "source_tracer_infer",
+    "brief_reporter",
+    "brief_mermaid_generator",
+    "brief_source_tracer",
+})
+_TIMED_SDK_NODES = frozenset({
+    "intent_recognition",
+    "generate_questions",
+    "feedback_handler",
+    "outline",
+    "outline_interaction",
+    "editor_team",
+    "plan_reasoning",
+    "info_collector",
+    "collector_query_generation",
+    "collector_info_retrieval",
+    "collector_supervisor",
+    "collector_summary",
+    "sub_reporter",
+    "reporter",
+    "source_tracer",
+    "source_tracer_infer",
+    "vlm_chart_generator",
+    "brief_outline",
+    "brief_info_collector",
+    "brief_evidence_reviewer",
+    "brief_sub_reporter",
+    "brief_reporter",
+    "brief_mermaid_generator",
+    "brief_source_tracer",
 })
 
 
@@ -1620,6 +1651,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
     file_name: str = "",
     interaction_result: str = "",
 ) -> str:
+    skill_started_ns = time.monotonic_ns()
     route = _get_route()
     try:
         python_bin = resolve_python_executable()
@@ -1833,6 +1865,7 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
             conversation_id=conversation_id,
             file_name=file_name,
             secrets=_config_secret_values(config),
+            skill_started_ns=skill_started_ns,
         )
     except asyncio.CancelledError:
         cleanup = asyncio.create_task(_stop_deepresearch_process(proc))
@@ -1868,6 +1901,14 @@ async def deepresearch_stream(  # pylint: disable=huawei-too-many-arguments
         stderr_text = stderr_tail.decode("utf-8", errors="replace").strip()
         if stderr_text:
             outcome["stderr_tail"] = stderr_text
+    if (
+        outcome.get("status") in {"completed", "interrupted", "error"}
+        and isinstance(outcome.get("timing"), dict)
+    ):
+        outcome["skill_execution_ms"] = max(
+            0,
+            (time.monotonic_ns() - skill_started_ns) // 1_000_000,
+        )
     if outcome.get("status") in {"completed", "error", "cancelled"}:
         _clear_outline_title_cache(
             route, outcome.get("conversation_id", conversation_id)
@@ -1920,6 +1961,7 @@ async def _consume_stream(
     conversation_id: str,
     file_name: str,
     secrets: tuple[str, ...],
+    skill_started_ns: int | None = None,
 ) -> dict[str, Any]:
     push = WebSocketGatewayPushTransport()
     cached_titles = (
@@ -1993,6 +2035,28 @@ async def _consume_stream(
         "error_code": "terminal_marker_missing",
         "error": "no terminal marker",
     }
+    first_sdk_node_ns: int | None = None
+
+    def terminal_timing(chunk: dict[str, Any]) -> dict[str, Any] | None:
+        timing = chunk.get("timing")
+        if not isinstance(timing, dict):
+            return None
+        enriched = dict(timing)
+        if first_sdk_node_ns is not None and skill_started_ns is not None:
+            enriched["skill_to_sdk_first_node_ms"] = max(
+                0,
+                (first_sdk_node_ns - skill_started_ns) // 1_000_000,
+            )
+        return enriched
+
+    def attach_terminal_timing(
+        result: dict[str, Any], chunk: dict[str, Any]
+    ) -> dict[str, Any]:
+        timing = terminal_timing(chunk)
+        if timing is not None:
+            result["timing"] = timing
+        return result
+
     async for raw in _iter_ndjson_lines(proc.stdout):
         try:
             line = raw.decode("utf-8").strip()
@@ -2013,6 +2077,16 @@ async def _consume_stream(
         if not isinstance(chunk, dict):
             continue
         status_value = chunk.get("__deepsearch_status__") or chunk.get("status")
+        is_terminal = status_value in {
+            "completed",
+            "interrupted",
+            "error",
+            "cancelled",
+        }
+        if first_sdk_node_ns is None and not is_terminal:
+            is_timed_node = str(chunk.get("agent") or "") in _TIMED_SDK_NODES
+            if is_timed_node and chunk.get("event") != "done":
+                first_sdk_node_ns = time.monotonic_ns()
         if status_value in {"started", "resuming"}:
             outcome_cid = str(chunk.get("conversation_id") or outcome_cid)
             stage = 1
@@ -2094,6 +2168,9 @@ async def _consume_stream(
                 "prompt": build_interrupt_prompt(node_id, state, marker, query),
                 "_router_state": state,
             }
+            timing = terminal_timing(chunk)
+            if timing is not None:
+                outcome["timing"] = timing
             continue
         if status_value == "completed":
             final_result = chunk.get("final_result")
@@ -2103,12 +2180,12 @@ async def _consume_stream(
                 else ""
             )
             if not response_content:
-                return {
+                return attach_terminal_timing({
                     "status": "error",
                     "conversation_id": chunk.get("conversation_id", outcome_cid),
                     "error_code": "empty_report",
                     "error": "completed marker missing final_result.response_content",
-                }
+                }, chunk)
             if not state.final_report_started:
                 # dev-stable may deliberately finish with a degraded section and
                 # still run the final report pipeline.  Flush that observed
@@ -2118,12 +2195,12 @@ async def _consume_stream(
                     not state.pending_final_report_frames
                     or not _has_completed_final_pipeline_node(state)
                 ):
-                    return {
+                    return attach_terminal_timing({
                         "status": "error",
                         "conversation_id": chunk.get("conversation_id", outcome_cid),
                         "error_code": "incomplete_section_progress",
                         "error": "completed marker arrived before section completion",
-                    }
+                    }, chunk)
                 for payload in start_final_report_processing(state):
                     await send(payload)
             for payload in complete_final_report_processing(state):
@@ -2131,12 +2208,12 @@ async def _consume_stream(
             for payload in advance_stage(state, 4):
                 await send(payload)
             if not route.get("session_id") or not route.get("channel_id"):
-                return {
+                return attach_terminal_timing({
                     "status": "error",
                     "conversation_id": chunk.get("conversation_id", outcome_cid),
                     "error_code": "report_file_delivery_failed",
                     "error": "Markdown report file route is unavailable",
-                }
+                }, chunk)
             try:
                 artifacts = await _write_report_artifacts_stream(
                     final_result,
@@ -2145,12 +2222,12 @@ async def _consume_stream(
                     _normalize_citation_artifacts(chunk),
                 )
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                return {
+                return attach_terminal_timing({
                     "status": "error",
                     "conversation_id": chunk.get("conversation_id", outcome_cid),
                     "error_code": "report_file_write_failed",
                     "error": type(exc).__name__,
-                }
+                }, chunk)
             files = [
                 {"path": value, "name": Path(value).name}
                 for value in artifacts.values()
@@ -2164,28 +2241,28 @@ async def _consume_stream(
             if bundle:
                 file_payload["metadata"] = {"artifactBundle": bundle}
             if not await send(file_payload):
-                return {
+                return attach_terminal_timing({
                     "status": "error",
                     "conversation_id": chunk.get("conversation_id", outcome_cid),
                     "error_code": "report_file_delivery_failed",
                     "error": "Report files could not be delivered",
                     "report_path": artifacts.get("md", ""),
-                }
+                }, chunk)
             for payload in advance_stage(state, 4, complete=True):
                 await send(payload)
-            return {
+            return attach_terminal_timing({
                 "status": "completed",
                 "conversation_id": chunk.get("conversation_id", outcome_cid),
                 "report_delivered": True,
                 "report_chars": len(response_content),
-            }
+            }, chunk)
         if status_value == "error":
-            return {
+            return attach_terminal_timing({
                 "status": "error",
                 "conversation_id": chunk.get("conversation_id", outcome_cid),
                 "error_code": chunk.get("error_code", "workflow_error"),
                 "error": chunk.get("error", "deepresearch workflow failed"),
-            }
+            }, chunk)
         if chunk.get("agent") == "outline" and chunk.get("content"):
             outline = chunk["content"]
             titles = extract_deepresearch_section_titles(

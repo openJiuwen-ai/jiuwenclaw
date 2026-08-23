@@ -78,7 +78,11 @@ class PlanNode(ABC):
         self._after_subplan_execute: (
             Callable[[PlanNode, dict[str, Any], Any], Awaitable[None]] | None
         ) = None
-    
+        # HITL resume：已 completed 的二层 stage 短路跳过真实执行
+        self._should_skip_subplan_execute: (
+            Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
+        ) = None
+
     def _update_subplans_depth(self) -> None:
         """递归更新所有子节点的深度。
 
@@ -104,6 +108,9 @@ class PlanNode(ABC):
         log: Callable[[PlanNode, str, str, tuple[Any, ...]], None] | None = None,
         before_subplan_execute: Callable[[PlanNode, dict[str, Any]], Awaitable[None]] | None = None,
         after_subplan_execute: Callable[[PlanNode, dict[str, Any], Any], Awaitable[None]] | None = None,
+        should_skip_subplan_execute: (
+            Callable[[PlanNode, dict[str, Any]], Awaitable[bool]] | None
+        ) = None,
     ) -> None:
         self._has_tool_callback = has_tool
         self._call_tool_callback = use_tool
@@ -115,6 +122,7 @@ class PlanNode(ABC):
         self._log_callback = log
         self._before_subplan_execute = before_subplan_execute
         self._after_subplan_execute = after_subplan_execute
+        self._should_skip_subplan_execute = should_skip_subplan_execute
         for node in self.sub_plans:
             node.set_runtime_callbacks(
                 has_tool=has_tool,
@@ -127,6 +135,7 @@ class PlanNode(ABC):
                 log=log,
                 before_subplan_execute=before_subplan_execute,
                 after_subplan_execute=after_subplan_execute,
+                should_skip_subplan_execute=should_skip_subplan_execute,
             )
 
     def log(self, level: str, message: str, *args: Any) -> None:
@@ -349,6 +358,31 @@ class PlanNode(ABC):
             async for chunk in self._fallback_stream_callback(self, inputs, e):
                 yield chunk
 
+    @staticmethod
+    def _resume_skip_result(subplan: "PlanNode") -> dict[str, Any]:
+        return {
+            "node": subplan.plan_name,
+            "status": "ok",
+            "message": "resume skip completed stage",
+            "skipped": True,
+            "resume_skip": True,
+        }
+
+    async def _maybe_skip_subplan_execute(
+        self,
+        subplan: "PlanNode",
+        inputs: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """若回调判定应跳过真实执行，触发 after 并返回 skip result；否则返回 None。"""
+        if self._should_skip_subplan_execute is None:
+            return None
+        if not await self._should_skip_subplan_execute(subplan, inputs):
+            return None
+        result = self._resume_skip_result(subplan)
+        if self._after_subplan_execute is not None:
+            await self._after_subplan_execute(subplan, inputs, result)
+        return result
+
     async def execute_subplan(self, subplan: PlanNode, inputs: dict[str, Any]) -> Any:
         """
         执行子节点，带有回调钩子。
@@ -363,6 +397,10 @@ class PlanNode(ABC):
         # 执行前回调
         if self._before_subplan_execute is not None:
             await self._before_subplan_execute(subplan, inputs)
+
+        skipped = await self._maybe_skip_subplan_execute(subplan, inputs)
+        if skipped is not None:
+            return skipped
 
         try:
             result = await subplan.run(inputs)
@@ -452,6 +490,10 @@ class PlanNode(ABC):
         # 执行前回调
         if self._before_subplan_execute is not None:
             await self._before_subplan_execute(subplan, inputs)
+
+        skipped = await self._maybe_skip_subplan_execute(subplan, inputs)
+        if skipped is not None:
+            return
 
         last_chunk: Any = None
         error: Exception | None = None

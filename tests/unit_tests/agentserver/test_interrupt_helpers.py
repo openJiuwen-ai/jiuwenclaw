@@ -164,6 +164,49 @@ def test_scene_hook_approves_ask_user_on_first_pass(monkeypatch: pytest.MonkeyPa
     assert outcome == ("approve",)
 
 
+def test_scene_hook_approves_deepresearch_execute_workflow_answer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A DeepResearch card answer belongs to its execution rail, not permissions."""
+    hook = _permission_scene_hook(monkeypatch)
+    resume_answer = {
+        "status": "answered",
+        "answers": [
+            {
+                "question": "您希望这份报告是精简版还是专业版？",
+                "selected_options": ["精简版"],
+            }
+        ],
+    }
+
+    outcome = asyncio.run(
+        hook(_scene_hook_input("deepresearch_execute", resume_answer))
+    )
+
+    assert outcome == ("approve",)
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        None,
+        {"approved": True, "auto_confirm": False, "feedback": ""},
+    ],
+)
+def test_scene_hook_keeps_deepresearch_execute_permission_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    user_input,
+):
+    """Initial execution and permission decisions still use the permission engine."""
+    hook = _permission_scene_hook(monkeypatch)
+
+    outcome = asyncio.run(
+        hook(_scene_hook_input("deepresearch_execute", user_input))
+    )
+
+    assert outcome is None
+
+
 def test_scene_hook_leaves_other_tools_to_engine(monkeypatch: pytest.MonkeyPatch):
     """Non-interactive tools must still fall through to the tiered engine
     (returns ``None``) when no owner-scope context is set."""

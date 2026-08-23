@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 
 from jiuwenswarm.agents.harness.common.rails.progressive_tool_rail import (
     ProgressiveToolRail,
@@ -89,6 +90,53 @@ async def test_deferred_deepresearch_rebinds_trusted_adapter_context():
             "service_id": "default",
             "agent_id": "default",
         }
+    finally:
+        clear_agent_env_ns(service_id, agent_id)
+
+
+@pytest.mark.asyncio
+async def test_eager_deepresearch_entry_rebinds_trusted_adapter_context():
+    service_id = "progressive-eager-service"
+    agent_id = "office"
+    shared_root = "/trusted/office-claw-skills"
+    replace_active_env(
+        {"JIUWENSWARM_SHARED_SKILLS_DIRS": shared_root},
+        service_id=service_id,
+        agent_id=agent_id,
+    )
+    rail = ProgressiveToolRail(
+        eager_tools=["tools_search", "invoke_tool", "deepresearch_execute"],
+        deepresearch_context_provider=lambda: {
+            "request_id": "request",
+            "channel_id": "officeclaw",
+            "session_id": "session",
+            "service_id": service_id,
+            "agent_id": agent_id,
+            "output_dir": "/trusted/projects",
+        },
+    )
+    tool_call = SimpleNamespace(
+        id="call-1", name="deepresearch_execute", arguments={"query": "q"}
+    )
+    ctx = SimpleNamespace(
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="deepresearch_execute",
+            tool_args=tool_call.arguments,
+        ),
+        extra={},
+    )
+
+    try:
+        await rail.before_tool_call(ctx)
+        assert get_task_env_overlay() == {
+            "JIUWENSWARM_SHARED_SKILLS_DIRS": shared_root
+        }
+        assert dt._get_route()["service_id"] == service_id
+        assert dt._get_route()["agent_id"] == agent_id
+        await rail.after_tool_call(ctx)
+        assert get_task_env_overlay() is None
+        assert dt._get_route()["service_id"] == "default"
     finally:
         clear_agent_env_ns(service_id, agent_id)
 

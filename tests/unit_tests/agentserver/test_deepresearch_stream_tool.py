@@ -266,9 +266,25 @@ async def test_stream_sends_versioned_config_over_stdin_only():
         json.dumps({"__deepsearch_status__": "started", "conversation_id": "C1"}),
         json.dumps(
             {
+                "agent": "intent_recognition",
+                "event": "start",
+                "section_idx": "0",
+            }
+        ),
+        json.dumps(
+            {
                 "__deepsearch_status__": "interrupted",
                 "agent": "feedback_handler",
                 "conversation_id": "C1",
+                "timing": {
+                    "schema_version": 2,
+                    "runner_total_ms": 25,
+                    "runner_bootstrap_ms": 5,
+                    "sdk_execution_ms": 20,
+                    "sdk_first_node_ms": 3,
+                    "sdk_node_spans": [],
+                    "sdk_node_summary": [],
+                },
             }
         ),
     ])
@@ -284,7 +300,11 @@ async def test_stream_sends_versioned_config_over_stdin_only():
     assert frame["version"] == 1
     assert frame["config"] == _valid_config()
     assert frame["tls"] == {"LLM_SSL_VERIFY": False, "TOOL_SSL_VERIFY": False}
-    assert json.loads(outcome)["status"] == "interrupted"
+    parsed_outcome = json.loads(outcome)
+    assert parsed_outcome["status"] == "interrupted"
+    assert parsed_outcome["timing"]["sdk_first_node_ms"] == 3
+    assert parsed_outcome["timing"]["skill_to_sdk_first_node_ms"] >= 0
+    assert parsed_outcome["skill_execution_ms"] >= 0
 
 
 def test_only_six_standard_proxy_names_are_forwarded(tmp_path: Path, monkeypatch):
@@ -3585,3 +3605,16 @@ async def test_outline_interaction_resume_invalid_result_does_not_spawn():
     assert outcome["error_code"] == "outline_interaction_invalid_result"
     assert outcome["status"] == "error"
     spawn.assert_not_awaited()
+
+
+def test_brief_final_pipeline_completion_is_recognized():
+    state = dt.RouterState(
+        active_nodes={
+            "brief_reporter:0": {
+                "agent_name": "brief_reporter",
+                "done": True,
+            }
+        }
+    )
+
+    assert dt._has_completed_final_pipeline_node(state) is True

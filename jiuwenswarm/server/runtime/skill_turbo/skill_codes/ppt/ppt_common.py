@@ -128,6 +128,9 @@ class PptCommon:
         """从 read_file / write_file 工具返回值中提取文本内容，并去掉 cat -n 行号前缀。"""
         if result is None:
             return ""
+        # 增加兜底防止异常值(str(result)) 被当作文件内容返回。      
+        if hasattr(result, "success") and result.success is False:
+            return ""
         if isinstance(result, str):
             text = result.strip()
             if text.startswith("success=False") or text.startswith("success= False"):

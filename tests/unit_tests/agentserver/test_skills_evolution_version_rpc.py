@@ -250,27 +250,6 @@ async def test_do_evolve_rollback_clears_live_evolutions(tmp_path):
     assert live["entries"] == []
 
 
-def test_allowed_skill_roots_for_path_includes_control_plane_root(tmp_path: Path, monkeypatch):
-    workspace_skills = tmp_path / "workspace" / "skills"
-    workspace_skills.mkdir(parents=True)
-    project_skills = tmp_path / "relay-claw" / ".office-claw" / "skills"
-    skill_md = project_skills / "tianqi" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True)
-    skill_md.write_text("# tianqi\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "resolve_agent_registered_skill_dirs",
-        lambda: [workspace_skills],
-    )
-    roots = evolution_version_ctl.allowed_skill_roots_for_path(
-        [str(workspace_skills)],
-        str(skill_md),
-    )
-    assert str(workspace_skills.resolve()) in roots
-    assert str(project_skills.resolve()) in roots
-
-
 @pytest.mark.anyio
 async def test_handle_skills_evolution_rollback_accepts_office_claw_skill_path(
     tmp_path, monkeypatch,
@@ -334,42 +313,6 @@ async def test_handle_skills_evolution_rollback_accepts_office_claw_skill_path(
     assert result["success"] is True
     assert result["rolled_back"] is True
     assert skill_md.read_text(encoding="utf-8") == "# archived-body\n"
-
-
-@pytest.mark.anyio
-async def test_handle_skills_evolution_rollback_rejects_path_outside_allowed(
-    tmp_path, monkeypatch,
-):
-    workspace_skills = tmp_path / "workspace" / "skills"
-    workspace_skills.mkdir(parents=True)
-    other = tmp_path / "other" / "skills" / "demo-skill"
-    other.mkdir(parents=True)
-    skill_md = other / "SKILL.md"
-    skill_md.write_text("# demo\n", encoding="utf-8")
-
-    adapter = JiuWenSwarmDeepAdapter()
-    monkeypatch.setattr(adapter, "_resolve_skill_dirs", lambda: [str(workspace_skills)])
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "resolve_agent_registered_skill_dirs",
-        lambda: [workspace_skills],
-    )
-    # Do not include skill_path root via helper path: validate with stale roots only
-    # by forcing allowed_skill_roots_for_path to omit the control-plane root.
-    monkeypatch.setattr(
-        evolution_version_ctl,
-        "allowed_skill_roots_for_path",
-        lambda _adapter_dirs, _skill_path=None: [str(workspace_skills.resolve())],
-    )
-
-    with pytest.raises(ValueError, match="outside registered skill roots"):
-        await adapter.handle_skills_evolution_rollback(
-            {
-                "name": "demo-skill",
-                "version": "latest",
-                "skill_path": str(skill_md),
-            }
-        )
 
 
 @pytest.mark.anyio

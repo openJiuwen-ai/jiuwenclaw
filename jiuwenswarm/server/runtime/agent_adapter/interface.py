@@ -87,6 +87,12 @@ def _permission_response_key(request: AgentRequest) -> str | None:
     if request.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
         return None
     params = request.params if isinstance(request.params, dict) else {}
+    # AskUser continuations may legitimately reuse the enclosing tool-call ID
+    # after that tool's permission interrupt has completed.  They are workflow
+    # input, not permission replays, so the permission ledger must not consume
+    # or deduplicate them.
+    if params.get("source") == "ask_user_interrupt":
+        return None
     answers = params.get("answers")
     if not isinstance(answers, list) or not answers:
         return None

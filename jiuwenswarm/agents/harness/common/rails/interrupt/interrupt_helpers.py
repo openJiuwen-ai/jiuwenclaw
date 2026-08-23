@@ -324,6 +324,27 @@ def build_permission_rail(
             ):
                 return ("approve",)
 
+            # deepresearch_execute owns a sequence of native AskUser
+            # interruptions under one outer tool call.  Once its initial tool
+            # permission has been decided, structured card answers must reach
+            # DeepResearchExecutionRail instead of being parsed again as a
+            # ConfirmPayload by the permission rail.  Keep first-pass and
+            # explicit permission responses on the normal permission path.
+            workflow_input = inp.user_input
+            is_deepresearch_workflow = (
+                inp.normalized_tool_name == "deepresearch_execute"
+                and isinstance(workflow_input, dict)
+            )
+            if is_deepresearch_workflow:
+                status = workflow_input.get("status")
+                if status in {
+                    "answered",
+                    "skipped",
+                    "cancelled",
+                    "error",
+                } and isinstance(workflow_input.get("answers"), list):
+                    return ("approve",)
+
             if perm_ctx is None:
                 return None
 

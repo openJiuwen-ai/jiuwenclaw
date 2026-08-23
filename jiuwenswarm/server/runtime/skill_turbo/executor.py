@@ -385,7 +385,9 @@ class SkillTurboExecutor:
         # resume 模式下，adapter 在 run_stream 入口注入；executor 在 use_tool
         # 命中目标 tool_call_id 时一次性消费。
         self._pending_resume: dict[str, Any] | None = None
-        
+        # HITL resume 重放：对 task_states 已 completed 的二层 stage 跳过真实执行
+        self._resume_replay: bool = False
+
         # 当前任务状态（用于跨协程共享当前 task_id，解决 asyncio.create_task 复制 ContextVar 的问题）
         self._current_task_id_holder: dict[str, str | None] = {"task_id": None}
         self._task_states_holder: dict[str, dict[str, Any]] = {}
@@ -584,12 +586,15 @@ class SkillTurboExecutor:
 
         # 新一轮 SkillTurbo 执行：清除上轮残留的 node_artifacts，避免全新任务误复用旧产物。
         # holder 此时必为空（每次请求新建 Executor），清的是 session 中持久化的旧记录。
-        await self._clear_stale_node_artifacts()
+        # HITL resume 重放时保留产物（执行跳过主要靠 resume inputs；清盘会误伤可复用记录）。
+        if not self._resume_replay:
+            await self._clear_stale_node_artifacts()
 
         logger.info(
-            "[SkillTurboExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s",
+            "[SkillTurboExecutor] execute_plan_stream start plan_code_len=%s input_keys=%s resume_replay=%s",
             len(plan_code),
             list(merged_inputs.keys()),
+            self._resume_replay,
         )
         # plan.started 必须最先发出，前端依赖它创建本次规划流的根节点。
         yield self._make_plan_started_chunk(request_id, channel_id)
@@ -763,6 +768,7 @@ class SkillTurboExecutor:
                 await self._persist_node_artifacts(session)
             self._reset_execution_context(context_tokens)
             self._execution_inputs = {}
+            self._resume_replay = False
             await self._finish_trace(start)
 
     def _build_permission_rail(self) -> Any | None:
@@ -938,11 +944,24 @@ class SkillTurboExecutor:
         effective_project_dir = inputs.get("effective_project_dir")
         if isinstance(effective_project_dir, str) and effective_project_dir.strip():
             try:
-                from openjiuwen.core.sys_operation.cwd import set_cwd
+                from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd
 
                 resolved_workspace_dir = effective_project_dir.strip()
                 set_effective_request_workspace_dir(resolved_workspace_dir)
-                set_cwd(resolved_workspace_dir)
+                if self._stream_event_rail is not None:
+                    self._stream_event_rail.set_runtime_cwd_paths(
+                        cwd=resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                try:
+                    init_cwd(
+                        resolved_workspace_dir,
+                        project_root=resolved_workspace_dir,
+                        workspace=resolved_workspace_dir,
+                    )
+                except Exception:
+                    set_cwd(resolved_workspace_dir)
                 logger.debug(
                     "[SkillTurboExecutor] effective request workspace set: %s",
                     resolved_workspace_dir,
@@ -1261,6 +1280,7 @@ class SkillTurboExecutor:
         """
         if not expected_tool_call_id:
             return
+        self._resume_replay = True
         self._pending_resume = {
             "expected_tool_call_id": expected_tool_call_id,
             "user_input": user_input,
@@ -2571,6 +2591,36 @@ class SkillTurboExecutor:
         }
         events_queue.append(task_update_event)
 
+    async def _should_skip_subplan_execute(
+        self,
+        subplan: PlanNode,
+        inputs: dict[str, Any],
+    ) -> bool:
+        """HITL resume 重放时，跳过已 completed 的二层 Stage 真实执行。
+
+        in_progress / pending 节点仍完整重入，以便命中同一 tool_call_id 注入 answers。
+        """
+        del inputs  # 接口与 PlanNode 回调一致；跳过判定只依赖 task_states
+        if not self._resume_replay:
+            return False
+        if subplan.depth != 1:
+            return False
+        task_states = self._live_task_states()
+        if not task_states:
+            return False
+        found = self._find_task_state_by_plan_name(subplan.plan_name, task_states)
+        if found is None:
+            return False
+        _task_id, task_state = found
+        if task_state.get("status") != "completed":
+            return False
+        logger.info(
+            "[SkillTurboExecutor] resume skip execute completed stage plan_name=%s task_id=%s",
+            subplan.plan_name,
+            _task_id,
+        )
+        return True
+
     async def _before_subplan_execute(
         self, subplan: PlanNode, inputs: dict[str, Any]
     ) -> None:
@@ -2609,12 +2659,26 @@ class SkillTurboExecutor:
         timestamp = time.time()
         self._set_current_task_context(subplan, task_id, timestamp)
 
-        # HITL resume 会从根节点重放 plan。已 completed 的 stage 若再标成
-        # in_progress，会与快照里仍 in_progress 的中断 stage 同时“运行”。
+        # HITL resume 会从根节点重放 plan：已 completed 的 stage 跳过真实执行
+        # （见 ``_should_skip_subplan_execute``），此处仅跳过 task.start UI，
+        # 避免与快照里仍 in_progress 的中断 stage 同时“运行”。
         if task_state.get("status") == "completed":
             logger.info(
                 "[SkillTurboExecutor] skip task.start for already-completed stage "
                 "(resume replay): task_id=%s plan_name=%s",
+                task_id,
+                subplan.plan_name,
+            )
+            return
+
+        # HITL 中断的 stage 在 resume 快照里仍为 in_progress。重放时若再次
+        # 发 task.start，前端会看到重复的 start（日志中“3 次 start 1 次
+        # complete”的根因）。跳过重复的 task.start 事件发送，但保留 current
+        # task context，让执行继续走到中断的 tool_call_id 命中 resume input。
+        if task_state.get("status") == "in_progress":
+            logger.info(
+                "[SkillTurboExecutor] skip duplicate task.start for in-progress stage "
+                "(HITL resume replay): task_id=%s plan_name=%s",
                 task_id,
                 subplan.plan_name,
             )
@@ -3065,6 +3129,7 @@ class SkillTurboExecutor:
             log=self._log_from_node,
             before_subplan_execute=self._before_subplan_execute,
             after_subplan_execute=self._after_subplan_execute,
+            should_skip_subplan_execute=self._should_skip_subplan_execute,
         )
 
     @staticmethod
