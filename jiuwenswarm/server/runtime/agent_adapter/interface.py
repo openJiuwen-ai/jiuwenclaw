@@ -1691,7 +1691,11 @@ class JiuWenSwarm:
         # 仅审批/确认中断缝 member_name；普通 ask_user/evolution 应答不带 approved 键，
         # manager.py 会对 val["approved"] 硬索引→KeyError，故需 source 门控。
         if source in ("permission_interrupt", "confirm_interrupt"):
-            interactive_input.member_name = member_name
+            # 兼容门：member_name 字段与 manager.py 的消费方由同一个 agent-core 提交
+            # 引入，字段存在 ⇔ 路由消费者存在。CI 锁定的 upstream agent-core 可能早于
+            # 该提交，而 pydantic 禁止给模型赋未知字段（ValueError），此时静默跳过。
+            if hasattr(interactive_input, "member_name"):
+                interactive_input.member_name = member_name
 
         if source == "ask_user_interrupt":
             response = normalize_ask_user_response(

@@ -15,8 +15,17 @@ method. ``InteractiveInput.__init__`` is custom (no kwargs), so member_name is
 assigned after construction.
 """
 
+import pytest
+
 from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+# 被缝字段由 agent-core 侧同一提交引入；CI 锁定的 upstream openjiuwen 可能早于
+# 该提交。生产代码在字段缺失时降级为空操作，故缝入断言仅在字段存在时适用。
+pytestmark = pytest.mark.skipif(
+    not hasattr(InteractiveInput(), "member_name"),
+    reason="installed openjiuwen lacks InteractiveInput.member_name; stitch degrades to a guarded no-op",
+)
 
 
 def _permission_answers() -> list[dict]:
