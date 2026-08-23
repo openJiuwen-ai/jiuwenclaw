@@ -2,12 +2,9 @@
  * WebSocket 消息类型
  */
 
-export type WebConnectionState =
-  | 'idle'
-  | 'connecting'
-  | 'ready'
-  | 'reconnecting'
-  | 'closed';
+import type { AutoReviewerMetadata } from './message';
+
+export type WebConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed';
 
 export interface WsRequest {
   type: 'req';
@@ -41,6 +38,8 @@ export interface WebRequestOptions {
   signal?: AbortSignal;
   /** 对应协议里请求消息的顶层 is_stream 字段（如 command.goal 的 set/resume） */
   isStream?: boolean;
+  /** Keep the existing request pending until the runtime confirms acceptance. */
+  awaitRuntimeAccepted?: boolean;
 }
 
 export interface WebConnectOptions {
@@ -99,7 +98,7 @@ export interface InterruptResultPayload {
   new_input?: string;
   merged_input?: string;
   paused_task?: string;
-  has_active_task?: boolean;  // 是否有活跃任务，false 表示任务已完成
+  has_active_task?: boolean; // 是否有活跃任务，false 表示任务已完成
 }
 
 /**
@@ -139,6 +138,9 @@ export interface Question {
   header: string;
   options: QuestionOption[];
   multi_select?: boolean;
+  card_id?: string;
+  tool_payload?: unknown;
+  reviewer_metadata?: AutoReviewerMetadata;
 }
 
 /**
@@ -166,6 +168,7 @@ export interface UserAnswer {
   question?: string;
   selected_options: string[];
   custom_input?: string;
+  card_id?: string;
 }
 
 /**

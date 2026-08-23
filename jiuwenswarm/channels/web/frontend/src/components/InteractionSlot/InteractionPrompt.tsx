@@ -35,7 +35,7 @@ const CANCELLED_ANSWER_TEXT = '用户已取消本次问答，未作答。';
 
 interface InteractionPromptProps {
   pending: AskUserQuestionPayload;
-  onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
+  onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => Promise<boolean>;
 }
 
 interface PageState {
@@ -57,7 +57,6 @@ function emptyPage(): PageState {
 
 export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps) {
   const { t } = useTranslation();
-  const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const addMessage = useChatStore((s) => s.addMessage);
 
   const questions = useMemo<Question[]>(
@@ -179,11 +178,6 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
     return { title: t('qaSummary.title'), items };
   }, [questions, states, t]);
 
-  const clearPending = useCallback(() => {
-    const sid = useChatStore.getState().activeSessionId;
-    if (sid) setPendingQuestion(sid, null);
-  }, [setPendingQuestion]);
-
   const submit = useCallback(
     (withEcho: boolean, overrides?: Record<number, PageState>, forcedTextByIdx?: Record<number, string>) => {
       if (submitting) return;
@@ -200,10 +194,13 @@ export function InteractionPrompt({ pending, onSubmit }: InteractionPromptProps)
           addMessage(sid, message);
         }
       }
-      onSubmit(pending.request_id, buildAnswers(overrides, forcedTextByIdx), pending.source);
-      clearPending();
+      void onSubmit(
+        pending.request_id,
+        buildAnswers(overrides, forcedTextByIdx),
+        pending.source,
+      ).finally(() => setSubmitting(false));
     },
-    [submitting, pending, buildSummary, buildAnswers, addMessage, onSubmit, clearPending],
+    [submitting, pending, buildSummary, buildAnswers, addMessage, onSubmit],
   );
 
   const goPrev = useCallback(() => setPage((p) => Math.max(0, p - 1)), []);

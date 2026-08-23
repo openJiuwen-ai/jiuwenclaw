@@ -43,7 +43,7 @@ export interface Session {
 
 export type AgentMode = 'agent' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
-export type Permission = 'default' | 'full_access';
+export type Permission = 'default' | 'automatic' | 'full_access';
 
 export interface ModelEntry {
   model_name: string;
