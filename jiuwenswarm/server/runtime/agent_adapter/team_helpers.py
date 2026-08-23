@@ -124,6 +124,60 @@ def _team_hide_teammate_enabled() -> bool:
     """Return whether non-leader teammate frames should be filtered out in team mode."""
     return os.environ.get(_HIDE_TEAMMATE_ENV_KEY, "").strip().lower() == "true"
 
+
+def _should_passthrough_teammate_ask(
+    *,
+    is_leader: bool,
+    event_type: str | None,
+    source: str | None,
+    team_approval_mode: str | None,
+) -> bool:
+    """Decide whether an ``ask_user_question`` frame is forwarded to the frontend.
+
+    Leader asks always pass. A non-leader (teammate) ask passes only under
+    ``user-mediated`` when it carries ``source=permission_interrupt`` (the
+    permission-approval interrupt) so the human user can mediate it directly;
+    every other teammate ask is filtered — approval is routed internally via
+    the leader. Non-ask frames are not subject to this gate (return True).
+
+    Args:
+        is_leader: Whether the chunk is leader output.
+        event_type: Parsed ``event_type`` (``chat.ask_user_question`` for asks).
+        source: Parsed ``source`` (``permission_interrupt`` for approval asks).
+        team_approval_mode: Snapshot from ``TeamAgentSpec.team_approval_mode``.
+
+    Returns:
+        True if the frame should be forwarded (not dropped by the ask gate).
+    """
+    if is_leader:
+        return True
+    if event_type != "chat.ask_user_question":
+        return True
+    return team_approval_mode == "user-mediated" and source == "permission_interrupt"
+
+
+def _should_drop_under_hide(*, is_leader: bool, event_type: str | None) -> bool:
+    """Decide whether the hide-teammate filter drops this chunk.
+
+    ``JIUWENSWARM_TEAM_HIDE_TEAMMATE`` (env, default OFF) drops non-leader
+    teammate frames so the frontend only sees leader output, but exempts
+    ``chat.ask_user_question`` so teammate approval asks survive hide and can
+    reach the user. Leader frames are never hidden.
+
+    Args:
+        is_leader: Whether the chunk is leader output.
+        event_type: Parsed ``event_type`` (may be None when parse returned None).
+
+    Returns:
+        True if the chunk should be dropped by the hide filter.
+    """
+    if not _team_hide_teammate_enabled():
+        return False
+    if is_leader:
+        return False
+    return event_type != "chat.ask_user_question"
+
+
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
     "not_active": "Team is initializing, please try again later",
     "session_mismatch": "Session state mismatch, please refresh and retry",
@@ -2355,13 +2409,16 @@ async def _consume_stream_with_query(
                         session_id, getattr(chunk, "role", None), getattr(chunk, "type", None),
                     )
                 continue
-            # Optional: filter out all non-leader frames so the frontend only
-            # sees leader output. Leader-level control events
-            # (team.runtime_ready / team.completed) are kept because
-            # _is_leader_output returns True.
-            if _team_hide_teammate_enabled() and not is_leader:
-                continue
             parsed = parse_stream_chunk(chunk)
+            # Optional: filter out non-leader teammate frames so the frontend
+            # only sees leader output (env JIUWENSWARM_TEAM_HIDE_TEAMMATE,
+            # default OFF). Leader-level control events (team.runtime_ready /
+            # team.completed) are kept because _is_leader_output returns True.
+            # Parse first so ask_user_question frames can be exempted — teammate
+            # approval asks must survive hide to reach the user (Task 3).
+            _hide_event_type = parsed.get("event_type") if parsed is not None else None
+            if _should_drop_under_hide(is_leader=is_leader, event_type=_hide_event_type):
+                continue
             if parsed is not None:
                 # Time to first token: the first frame actually produced by a
                 # model (reasoning counts — on a thinking model it comes first).
@@ -2380,10 +2437,22 @@ async def _consume_stream_with_query(
                     )
                 if _is_duplicate_ask_user_question(parsed, emitted_ask_user_request_ids):
                     continue
-                # Skip non-leader __interaction__ (permission ASK) — approval
-                # is routed internally via the leader; only leader
-                # interactions are forwarded to the frontend.
-                if not is_leader and parsed.get("event_type") == "chat.ask_user_question":
+                # Skip teammate __interaction__ (permission ASK) unless it is a
+                # user-mediated permission-approval interrupt that the human user
+                # must mediate directly; otherwise approval is routed internally
+                # via the leader. Leader interactions are always forwarded.
+                # ``team_approval_mode`` defaults to user-mediated when the
+                # snapshot omits the field (consistency with the new default;
+                # leader-mediated is the opt-out).
+                if (parsed.get("event_type") == "chat.ask_user_question"
+                        and not _should_passthrough_teammate_ask(
+                            is_leader=is_leader,
+                            event_type=parsed.get("event_type"),
+                            source=parsed.get("source"),
+                            team_approval_mode=getattr(
+                                team_spec, "team_approval_mode", "user-mediated"
+                            ),
+                        )):
                     continue
                 parsed["rid"] = round_id
                 if is_teammate:

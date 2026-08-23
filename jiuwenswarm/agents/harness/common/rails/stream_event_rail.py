@@ -1037,41 +1037,53 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
 
         # SkillTurbo HITL: skill_turbo_tools 在 ContextVar 存了 ToolInterruptException，
         # 此处改写 ctx.inputs.tool_result 为 TIE，使 harness 原生 HITL 机制检测并暂停。
+        # Adapter-token resets are scoped to the adapter-wired rail instance
+        # (those tokens only exist in that context); keep them guarded.
         if self._skill_turbo_adapter is not None:
             _reset_skill_turbo_adapter_token(ctx)
             _reset_skill_turbo_metadata_token(ctx)
             _reset_skill_turbo_workspace_token(ctx)
             _reset_skill_turbo_interactive_ask_token(ctx)
-            try:
-                from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
-                    get_skill_turbo_hitl_tic,
-                    set_skill_turbo_hitl_tic,
-                )
-                _skill_turbo_tic = get_skill_turbo_hitl_tic()
-                if _skill_turbo_tic is not None:
-                    set_skill_turbo_hitl_tic(None)
-                    if isinstance(ctx.inputs, ToolCallInputs):
-                        from openjiuwen.core.single_agent.interrupt.exception import (
-                            ToolInterruptException,
-                        )
-                        new_tic = ToolInterruptException(
-                            request=_skill_turbo_tic.request,
-                            tool_call=ctx.inputs.tool_call,
-                        )
-                        ctx.inputs.tool_result = new_tic
-                        ctx.inputs.tool_msg = None
-                    logger.info(
-                        "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
-                        "original_tcid=%s harness_tcid=%s",
-                        _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
-                        ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
+
+        # SkillTurbo HITL TIC injection must be UNCONDITIONAL, not gated on
+        # _skill_turbo_adapter: skill_turbo_tools stashes the
+        # ToolInterruptException in a ContextVar for whichever StreamEventRail
+        # instance runs after_tool_call (which may be a session-scoped / rebuilt
+        # instance, not the one set_skill_turbo_adapter wired). Gating here drops
+        # the TIC silently -> no __interaction__ -> no chat.ask_user_question ->
+        # the ASK is raised but never surfaced as an approval card. enterprise_dev
+        # has no such guard. When no TIC is stashed (non-skill_turbo context)
+        # get_skill_turbo_hitl_tic() returns None and this whole block is a no-op.
+        try:
+            from jiuwenswarm.server.runtime.skill_turbo.skill_turbo_tools import (
+                get_skill_turbo_hitl_tic,
+                set_skill_turbo_hitl_tic,
+            )
+            _skill_turbo_tic = get_skill_turbo_hitl_tic()
+            if _skill_turbo_tic is not None:
+                set_skill_turbo_hitl_tic(None)
+                if isinstance(ctx.inputs, ToolCallInputs):
+                    from openjiuwen.core.single_agent.interrupt.exception import (
+                        ToolInterruptException,
                     )
-                    return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
-            except Exception:
-                logger.debug(
-                    "[StreamEventRail] skill_turbo HITL rewrite failed",
-                    exc_info=True,
+                    new_tic = ToolInterruptException(
+                        request=_skill_turbo_tic.request,
+                        tool_call=ctx.inputs.tool_call,
+                    )
+                    ctx.inputs.tool_result = new_tic
+                    ctx.inputs.tool_msg = None
+                logger.info(
+                    "[StreamEventRail] SkillTurbo HITL: rewrote tool_result to TIE. "
+                    "original_tcid=%s harness_tcid=%s",
+                    _skill_turbo_tic.tool_call.id if _skill_turbo_tic.tool_call else "?",
+                    ctx.inputs.tool_call.id if isinstance(ctx.inputs, ToolCallInputs) else "?",
                 )
+                return  # 跳过 _emit_tool_result，由 harness __interaction__ 取代
+        except Exception:
+            logger.debug(
+                "[StreamEventRail] skill_turbo HITL rewrite failed",
+                exc_info=True,
+            )
 
         normalize_read_file_tool_outcome(ctx)
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)

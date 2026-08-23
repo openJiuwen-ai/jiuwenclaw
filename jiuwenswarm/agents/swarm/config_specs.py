@@ -446,6 +446,7 @@ def _build_team_capability_specs(
     role: str,
     *,
     enable_permissions: bool = False,
+    team_approval_mode: str = "user-mediated",
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the chat-team profile rail/tool specs for a member."""
     rails_specs: list[RailSpec] = [
@@ -476,7 +477,10 @@ def _build_team_capability_specs(
         rails_specs.append(
             RailSpec(
                 type=registry.TEAM_PERMISSION,
-                params=_rail_params(registry.TEAM_PERMISSION, config),
+                params={
+                    **_rail_params(registry.TEAM_PERMISSION, config),
+                    "team_approval_mode": team_approval_mode,
+                },
             ),
         )
 
@@ -485,6 +489,17 @@ def _build_team_capability_specs(
             RailSpec(
                 type=registry.TEAM_PERMISSION_POLICY,
                 params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+        # Leader tool calls must surface user-facing ASK (the leader has a
+        # frontend connection, unlike headless teammates). enterprise_dev
+        # mounts this as `leader_perm`; dev-stable excluded it from all team
+        # members via _code_base_rail_names, leaving the leader with only the
+        # prompt-injection policy rail and no interception. Re-add it here.
+        rails_specs.append(
+            RailSpec(
+                type=registry.PERMISSION_INTERRUPT,
+                params=_rail_params(registry.PERMISSION_INTERRUPT, config),
             ),
         )
 
@@ -503,6 +518,7 @@ def _build_code_capability_specs(
     role: str,
     *,
     enable_permissions: bool = False,
+    team_approval_mode: str = "user-mediated",
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the code profile (code.team / team.plan) rail/tool specs for a member.
 
@@ -510,7 +526,8 @@ def _build_code_capability_specs(
     interrupts on headless team members: the user-facing confirmation path
     requires a frontend connection that team members lack.  When
     ``enable_permissions`` is true the team permission rails replace it —
-    ``TeamPermissionRail`` for teammates (leader-mediated ASK resolution) and
+    ``TeamPermissionRail`` for teammates (user-mediated ASK resolution by
+    default, leader-mediated opt-out) and
     ``TeamPermissionPolicyRail`` for the leader (prompt section injection).
     When ``enable_permissions`` is false the permission interrupt rail is
     removed entirely: it would deadlock a teammate on any ASK-level tool call.
@@ -529,7 +546,10 @@ def _build_code_capability_specs(
         rails_specs.append(
             RailSpec(
                 type=registry.TEAM_PERMISSION,
-                params=_rail_params(registry.TEAM_PERMISSION, config),
+                params={
+                    **_rail_params(registry.TEAM_PERMISSION, config),
+                    "team_approval_mode": team_approval_mode,
+                },
             ),
         )
 
@@ -538,6 +558,17 @@ def _build_code_capability_specs(
             RailSpec(
                 type=registry.TEAM_PERMISSION_POLICY,
                 params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+            ),
+        )
+        # Leader tool calls must surface user-facing ASK (the leader has a
+        # frontend connection, unlike headless teammates). enterprise_dev
+        # mounts this as `leader_perm`; dev-stable excluded it from all team
+        # members via _code_base_rail_names, leaving the leader with only the
+        # prompt-injection policy rail and no interception. Re-add it here.
+        rails_specs.append(
+            RailSpec(
+                type=registry.PERMISSION_INTERRUPT,
+                params=_rail_params(registry.PERMISSION_INTERRUPT, config),
             ),
         )
 
@@ -573,6 +604,7 @@ def build_member_capability_specs(
     role: str,
     *,
     enable_permissions: bool = False,
+    team_approval_mode: str = "user-mediated",
 ) -> tuple[list[RailSpec], list[BuiltinToolSpec]]:
     """Build the rail and tool specs for a team member.
 
@@ -586,13 +618,21 @@ def build_member_capability_specs(
         mode: The request mode ("team" / "code.team" / "team.plan").
         role: The member role ("leader" or "teammate").
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
+        team_approval_mode: Per-member tool-approval routing from
+            ``TeamAgentSpec.team_approval_mode`` (assembly-time snapshot).
 
     Returns:
         A ``(rails_specs, tool_specs)`` tuple of openjiuwen specs.
     """
     if _is_code_mode(mode):
-        return _build_code_capability_specs(config, mode, role, enable_permissions=enable_permissions)
-    return _build_team_capability_specs(config, role, enable_permissions=enable_permissions)
+        return _build_code_capability_specs(
+            config, mode, role, enable_permissions=enable_permissions,
+            team_approval_mode=team_approval_mode,
+        )
+    return _build_team_capability_specs(
+        config, role, enable_permissions=enable_permissions,
+        team_approval_mode=team_approval_mode,
+    )
 
 
 def _is_subagent_enabled(sub_cfg: Any) -> bool:
@@ -692,6 +732,7 @@ def build_member_deep_agent_spec(
     base_spec: DeepAgentSpec,
     *,
     enable_permissions: bool = False,
+    team_approval_mode: str = "user-mediated",
     mcp_configs: list[McpServerConfig] | None = None,
 ) -> DeepAgentSpec:
     """Fold the member capability specs onto *base_spec*.
@@ -706,6 +747,8 @@ def build_member_deep_agent_spec(
         role: The member role ("leader" or "teammate").
         base_spec: The base member ``DeepAgentSpec`` to extend.
         enable_permissions: Effective team permission toggle from TeamAgentSpec.
+        team_approval_mode: Per-member tool-approval routing from
+            ``TeamAgentSpec.team_approval_mode`` (assembly-time snapshot).
         mcp_configs: MCP server configs inherited from ``config.yaml``.
 
     Returns:
@@ -713,6 +756,7 @@ def build_member_deep_agent_spec(
     """
     rails_specs, tool_specs = build_member_capability_specs(
         config, mode, role, enable_permissions=enable_permissions,
+        team_approval_mode=team_approval_mode,
     )
 
     merged_rails = list(base_spec.rails or [])

@@ -521,12 +521,21 @@ class TeamPermissionInput(ConstructionInput):
         description="Full permission config dict (as consumed by "
         "openjiuwen.harness.security.engine.PermissionEngine).",
     )
+    team_approval_mode: str = param_field(
+        default="user-mediated",
+        description="Per-member tool-approval routing. ``user-mediated`` "
+        "(default): ASK surfaces to the web user via the base rail's "
+        "self.interrupt(). ``leader-mediated``: teammate ASK routes to the "
+        "leader via TeamApprovalOrchestrator. Baked into RailSpec.params "
+        "by config_specs (assembly-time snapshot, same path as "
+        "permissions_config).",
+    )
 
 
 @harness_element(
     kind=ElementKind.RAIL,
     name=TEAM_PERMISSION,
-    description="Team-mode permission guardrail with leader-mediated ASK resolution.",
+    description="Team-mode permission guardrail with user-mediated ASK resolution by default (leader-mediated opt-out).",
     input_model=TeamPermissionInput,
 )
 def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | None:
@@ -559,6 +568,13 @@ def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | N
 
     override = get_permissions_override(context)
     narrowed_config = narrow_permissions(inp.permissions_config, override) if override else inp.permissions_config
+
+    if inp.team_approval_mode == "user-mediated":
+        # user-mediated: skip TeamApprovalOrchestrator / ToolPermissionHost so
+        # an ASK-level tool call falls through to the base rail's
+        # self.interrupt() (tool_security_rail.py:528) -> chat.ask_user_question
+        # surfaces to the web user. leader-mediated path unchanged below.
+        return TeamPermissionRail(config=narrowed_config)
 
     message_manager = TeamMessageManager(
         backend.team_name,

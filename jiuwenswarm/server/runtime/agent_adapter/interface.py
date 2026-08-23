@@ -19,7 +19,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Tuple
+from typing import Any, AsyncIterator, Optional, Tuple
 
 from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
@@ -1414,6 +1414,7 @@ class JiuWenSwarm:
                     source,
                     status=status,
                     original_request=original_request,
+                    member_name=params.get("member_name"),
                 )
                 if interactive_input is not None:
                     final_query = interactive_input
@@ -1663,6 +1664,7 @@ class JiuWenSwarm:
             *,
             status: str = "",
             original_request: str = "",
+            member_name: Optional[str] = None,
     ) -> Any:
         """从用户答案构建 InteractiveInput.
 
@@ -1678,6 +1680,12 @@ class JiuWenSwarm:
         from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
         interactive_input = InteractiveInput()
+        # 构造后赋值；InteractiveInput.__init__ 不吃 kwargs，不改 __init__
+        # member_name 由 relay (c'/Task 9) 经 chat.send params 回传，缝入 sidecar 供 manager 路由。
+        # 仅审批/确认中断缝 member_name；普通 ask_user/evolution 应答不带 approved 键，
+        # manager.py 会对 val["approved"] 硬索引→KeyError，故需 source 门控。
+        if source in ("permission_interrupt", "confirm_interrupt"):
+            interactive_input.member_name = member_name
 
         if source == "ask_user_interrupt":
             response = normalize_ask_user_response(

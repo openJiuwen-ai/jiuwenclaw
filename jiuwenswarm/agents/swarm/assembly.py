@@ -146,6 +146,7 @@ def enrich_team_spec_for_swarm(
                 role,
                 spec.agents[role],
                 enable_permissions=spec.enable_permissions,
+                team_approval_mode=getattr(spec, "team_approval_mode", "user-mediated"),
                 mcp_configs=mcp_configs,
             )
             member_spec = _with_project_cwd(member_spec, project_dir)

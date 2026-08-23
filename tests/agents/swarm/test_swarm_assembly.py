@@ -2584,3 +2584,39 @@ def test_team_mode_deep_spec_replaces_shared_browser_agent() -> None:
             shared_entries.append(s)
     assert not shared_entries, "shared playwright_official_stdio entry must be removed"
     assert subagent_factories.count(SWARM_BROWSER_AGENT) == 1
+
+
+def test_leader_gets_permission_interrupt_when_enable_permissions() -> None:
+    """Leader mounts PERMISSION_INTERRUPT (interception rail) alongside
+    TEAM_PERMISSION_POLICY when enable_permissions=True, so leader tool
+    calls surface user-facing ASK. Teammate still excludes it (headless-safe);
+    enable_permissions=False leaves leader without any permission rail."""
+    config: dict[str, Any] = {
+        "agents": {"leader": {"skills": []}, "teammate": {"skills": []}},
+        "permissions": {"enabled": True},
+    }
+
+    # leader + enable_permissions=True -> policy prompt + interception rail
+    leader_rails, _ = build_member_capability_specs(
+        config, "team", "leader", enable_permissions=True
+    )
+    leader_names = {spec.type for spec in leader_rails}
+    assert registry.TEAM_PERMISSION_POLICY in leader_names
+    assert registry.PERMISSION_INTERRUPT in leader_names
+
+    # teammate + enable_permissions=True -> leader-mediated TEAM_PERMISSION only;
+    # NO PERMISSION_INTERRUPT (headless teammates can't resolve user-facing ASK)
+    teammate_rails, _ = build_member_capability_specs(
+        config, "team", "teammate", enable_permissions=True
+    )
+    teammate_names = {spec.type for spec in teammate_rails}
+    assert registry.TEAM_PERMISSION in teammate_names
+    assert registry.PERMISSION_INTERRUPT not in teammate_names
+
+    # leader + enable_permissions=False -> no permission rails at all
+    leader_off, _ = build_member_capability_specs(
+        config, "team", "leader", enable_permissions=False
+    )
+    leader_off_names = {spec.type for spec in leader_off}
+    assert registry.PERMISSION_INTERRUPT not in leader_off_names
+    assert registry.TEAM_PERMISSION_POLICY not in leader_off_names
