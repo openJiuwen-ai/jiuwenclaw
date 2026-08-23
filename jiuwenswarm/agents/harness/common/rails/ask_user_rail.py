@@ -38,9 +38,11 @@ from openjiuwen.harness.rails.interrupt.interrupt_base import (
     InterruptDecision,
 )
 
-logger = logging.getLogger(__name__)
+from jiuwenswarm.agents.harness.common.rails.ask_user_contract import (
+    MAX_STRUCTURED_QUESTIONS,
+)
 
-MAX_STRUCTURED_QUESTIONS = 4
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Extended input schema
@@ -196,9 +198,7 @@ class StructuredAskUserTool(Tool):
 
     def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
         input_params = (
-            EXTENDED_INPUT_PARAMS_EN
-            if language == "en"
-            else EXTENDED_INPUT_PARAMS_CN
+            EXTENDED_INPUT_PARAMS_EN if language == "en" else EXTENDED_INPUT_PARAMS_CN
         )
         description = (
             _EXTENDED_DESCRIPTION_EN if language == "en" else _EXTENDED_DESCRIPTION_CN
@@ -348,19 +348,37 @@ class StructuredAskUserRail(AskUserRail):
                         "must be an array when provided."
                     )
                 )
+            canonical_labels: list[str] = []
             for option_index, option in enumerate(options):
                 label = option.get("label") if isinstance(option, Mapping) else None
                 if not isinstance(label, str) or not label.strip():
-                    path = (
-                        f"questions[{question_index}]."
-                        f"options[{option_index}].label"
-                    )
+                    path = f"questions[{question_index}].options[{option_index}].label"
                     return self.reject(
                         tool_result=(
                             f"[INVALID_ARGUMENT] {path} is required "
                             "and must be a non-empty string."
                         )
                     )
+                canonical_label = label.strip()
+                description = option.get("description", "")
+                preview = option.get("preview", "")
+                if not isinstance(description, str) or not isinstance(preview, str):
+                    return self.reject(
+                        tool_result=(
+                            f"[INVALID_ARGUMENT] questions[{question_index}]."
+                            f"options[{option_index}] description and preview must "
+                            "be strings when provided."
+                        )
+                    )
+                if canonical_label == "Other" or canonical_label in canonical_labels:
+                    return self.reject(
+                        tool_result=(
+                            f"[INVALID_ARGUMENT] questions[{question_index}].options "
+                            "must use unique labels and must not use the reserved "
+                            "label 'Other'."
+                        )
+                    )
+                canonical_labels.append(canonical_label)
             if options and not 2 <= len(options) <= 4:
                 return self.reject(
                     tool_result=(
@@ -410,9 +428,17 @@ class StructuredAskUserRail(AskUserRail):
                 answer_parts = []
                 for q_text, selected in payload.answers.items():
                     if q_text == "__free_text__":
-                        answer_parts.append(selected if isinstance(selected, str) else ", ".join(selected))
+                        answer_parts.append(
+                            selected
+                            if isinstance(selected, str)
+                            else ", ".join(selected)
+                        )
                     else:
-                        value_text = selected if isinstance(selected, str) else ", ".join(selected)
+                        value_text = (
+                            selected
+                            if isinstance(selected, str)
+                            else ", ".join(selected)
+                        )
                         answer_parts.append(f"{q_text}: {value_text}")
                 answer_text = "\n".join(answer_parts) if answer_parts else ""
                 if not answer_text.strip():
@@ -456,9 +482,7 @@ class StructuredAskUserRail(AskUserRail):
         request = super()._build_ask_request(tool_call)
         return request
 
-    def extract_questions(
-        self, tool_call: Optional[ToolCall]
-    ) -> Optional[list[dict]]:
+    def extract_questions(self, tool_call: Optional[ToolCall]) -> Optional[list[dict]]:
         """Extract questions data from tool call arguments."""
         if tool_call is None:
             return None
