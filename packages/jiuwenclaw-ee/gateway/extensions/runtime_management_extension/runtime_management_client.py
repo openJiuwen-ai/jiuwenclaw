@@ -489,11 +489,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_ttl = int(os.getenv("AGENT_SERVER_SERVICE_TTL", "180"))
         autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL", "5"))
         claw_code_path = os.getenv("CLAW_CODE_PATH")
-        claw_code_pod_path = os.getenv("CLAW_CODE_POD_PATH")
+        claw_code_pod_path = os.getenv("CLAW_POD_CODE_PATH")
         runtime_code_path = os.getenv("RUNTIME_CODE_PATH")
-        runtime_code_pod_path = os.getenv("RUNTIME_CODE_POD_PATH")
+        runtime_code_pod_path = os.getenv("RUNTIME_POD_PKG_PATH")
         core_code_path = os.getenv("CORE_CODE_PATH")
-        core_code_pod_path = os.getenv("CORE_CODE_POD_PATH")
+        core_code_pod_path = os.getenv("CORE_POD_PKG_PATH")
         configmap_name = os.getenv("AGENT_SERVER_CONFIGMAP_NAME", "")
 
         agent_host_mounts: list[HostPathMount] = []

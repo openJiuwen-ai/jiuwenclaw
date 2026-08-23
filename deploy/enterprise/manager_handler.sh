@@ -6,7 +6,7 @@ gen_manager_server_file() {
     local file="${CONFIG["MANAGER_SERVER_FILE"]}"
 
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
-    enable_dev_mode_if_needed ${file}
+    enable_dev_mode_if_needed ${file} manager-server
 
     if [ "${DEPLOY_VARS["DB_TYPE"]}" == "postgresql" ]; then
         yq eval '
@@ -33,6 +33,7 @@ render_manager_files() {
         local manager_web_file="${CONFIG["MANAGER_WEB_FILE"]}"
 
         render_config_template "${manager_web_template_file}" "${manager_web_file}" "DEPLOY_VARS"
+        enable_dev_mode_if_needed "${manager_web_file}" manager-web
         add_resource_if_set "MANAGER_WEB" "${manager_web_file}"
     fi
 }
