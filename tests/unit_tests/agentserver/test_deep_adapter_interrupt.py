@@ -266,6 +266,70 @@ def test_ask_resume_keeps_generic_routing_separate_from_intent_payload() -> None
     assert extra[ASK_USER_RESUME_DTO_KEY].clarifications[0].answers == ("JiuwenSwarm",)
 
 
+def test_agentos_ask_answer_with_original_request_reaches_deep_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    monkeypatch.setattr(
+        interface_module, "get_config", lambda: {"preferred_language": "zh"}
+    )
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    session_id = "session-ask-agentos"
+    tool_call_id = "call-ask-agentos"
+    root_context = RootDecisionContext(
+        session_id=session_id,
+        request_id="request-original",
+        channel_id="web",
+        trusted_turns=(),
+    )
+    request = AgentRequest(
+        request_id="request-answer",
+        channel_id="web",
+        session_id=session_id,
+        req_method=ReqMethod.CHAT_SEND,
+        params={
+            "query": "",
+            "mode": "agent",
+            "request_id": tool_call_id,
+            "source": "ask_user_interrupt",
+            "original_request": "Build the selected project",
+            "answers": [
+                {
+                    "question": "Which project?",
+                    "selected_options": ["JiuwenSwarm"],
+                }
+            ],
+        },
+    )
+    facade = object.__new__(interface_module.JiuWenSwarm)
+    inputs, _, _ = facade.build_inputs(request)
+    loop_session = _nonpermission_core_state(
+        session_id,
+        tool_name="ask_user",
+        tool_call_id=tool_call_id,
+        metadata={
+            ASK_USER_CONTINUATION_METADATA_KEY: {
+                "tool_call_id": tool_call_id,
+                "context": root_context.to_mapping(),
+                "questions": [
+                    {
+                        "question": "Which project?",
+                        "options": [],
+                        "multi_select": False,
+                    }
+                ],
+            }
+        },
+    )
+    adapter = _make_adapter(_instance=SimpleNamespace(loop_session=loop_session))
+
+    prepared = adapter._prepare_permission_resume_dispatch(request, inputs)
+
+    extra = prepared["run"]["context"]["extra"]
+    assert extra[ASK_USER_RESUME_DTO_KEY].clarifications[0].answers == ("JiuwenSwarm",)
+
+
 def test_nonpermission_resume_dispatch_rejects_live_permission_scope() -> None:
     session_id = "session-conflict"
     queue = RootPermissionQueue()

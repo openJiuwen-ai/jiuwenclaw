@@ -1056,6 +1056,12 @@ async def test_forward_loop_cancel_intent_uses_fire_and_forget(
 async def test_forward_loop_supplement_forwards_new_input_to_interrupt() -> None:
     """AgentServer needs the text marker to discard a superseded ask_user round."""
     handler = _TestMessageHandler.create()
+    old_payload = _FakeAgentClient.response_payload
+    _FakeAgentClient.response_payload = {
+        "event_type": "chat.interrupt_result",
+        "message": "任务已切换",
+        "success": True,
+    }
     await handler.start_forwarding()
     try:
         supplement_msg = Message(
@@ -1098,3 +1104,47 @@ async def test_forward_loop_supplement_forwards_new_input_to_interrupt() -> None
         assert follow_up_request.params["supplement_input"] == "再执行一次"
     finally:
         await handler.stop_forwarding()
+        _FakeAgentClient.response_payload = old_payload
+
+
+@pytest.mark.asyncio
+async def test_forward_loop_supplement_stops_when_continuation_discard_fails() -> None:
+    handler = _TestMessageHandler.create()
+    old_payload = _FakeAgentClient.response_payload
+    _FakeAgentClient.response_payload = {
+        "event_type": "chat.interrupt_result",
+        "success": False,
+        "error": "permission_continuation_discard_failed",
+    }
+    await handler.start_forwarding()
+    try:
+        supplement_msg = Message(
+            id="supplement-discard-failed",
+            type="req",
+            channel_id="web",
+            session_id="sess-discard-failed",
+            params={
+                "intent": "supplement",
+                "new_input": "继续执行",
+                "mode": "agent",
+            },
+            timestamp=0.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            is_stream=False,
+        )
+        await handler.publish_user_messages(supplement_msg)
+
+        notification = await handler.consume_robot_messages(timeout=0.5)
+
+        assert len(_FakeAgentClient.sent_requests) == 1
+        assert _FakeAgentClient.sent_stream_requests == []
+        assert notification is not None
+        assert notification.payload["success"] is False
+        assert (
+            notification.payload["message"]
+            == "permission_continuation_discard_failed"
+        )
+    finally:
+        await handler.stop_forwarding()
+        _FakeAgentClient.response_payload = old_payload

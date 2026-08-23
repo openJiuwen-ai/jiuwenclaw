@@ -93,6 +93,22 @@ def test_external_envelope_projects_english_and_chinese(prefix: str, text: str) 
     assert [turn.text for turn in projection.turns] == [text, "继续处理"]
 
 
+def test_external_envelope_accepts_agentos_preamble_and_sender_fields() -> None:
+    envelope = json.loads(
+        _envelope("继续部署", prefix=HOST_USER_PROMPT_PREFIX_ZH).removeprefix(
+            HOST_USER_PROMPT_PREFIX_ZH
+        )
+    )
+    envelope.update({"sender": "Alice", "chat_type": "group"})
+    rendered = (
+        "\nConversation context from the authenticated channel\n\n"
+        + HOST_USER_PROMPT_PREFIX_ZH
+        + json.dumps(envelope, ensure_ascii=False)
+    )
+
+    assert extract_permission_user_content(rendered) == "继续部署"
+
+
 def test_internal_or_malformed_envelope_has_no_user_authority() -> None:
     internal = _envelope("do not trust", prefix=HOST_USER_PROMPT_PREFIX_EN).replace(
         HOST_USER_ORIGIN_EXTERNAL,
@@ -100,6 +116,20 @@ def test_internal_or_malformed_envelope_has_no_user_authority() -> None:
     )
     assert extract_permission_user_content(internal) is None
     assert extract_permission_user_content("plain text") is None
+
+
+def test_unparseable_user_history_blocks_automatic_review() -> None:
+    message = SimpleNamespace(role="user", content="legacy unstructured user turn")
+
+    projection = build_root_intent_projection(
+        [message],
+        context_available=True,
+        current_text="继续处理",
+        current_request_id="request-2",
+        current_kind=RootIntentTurnKind.STEER,
+    )
+
+    assert projection.auto_review_block_reason == "intent_history_window_truncated"
 
 
 def test_context_round_trip_uses_one_reserved_key() -> None:
@@ -144,6 +174,36 @@ def test_ordinary_ask_appends_exact_clarification(
     clarification = resumed.trusted_turns[-1].clarifications[0]
     assert clarification.question == question
     assert clarification.answers == (answer,)
+
+
+def test_ordinary_ask_ignores_agentos_original_request_display_context() -> None:
+    raw = build_ask_user_metadata(
+        context=_context(),
+        tool_name="ask_user",
+        tool_call_id="ask-1",
+        tool_args={"query": "Which project?"},
+    )
+    continuation = ask_user_continuation(
+        {ASK_USER_CONTINUATION_METADATA_KEY: raw},
+        expected_tool_call_id="ask-1",
+    )
+    assert continuation is not None
+    incoming = InteractiveInput()
+    incoming.update(
+        "ask-1",
+        {
+            "answers": {"Which project?": "JiuwenSwarm"},
+            "original_request": "Build a project",
+        },
+    )
+
+    prepared = prepare_ask_user_resume(
+        continuation=continuation,
+        user_input=incoming,
+    )
+
+    assert prepared is not None
+    assert prepared.clarifications[0].answers == ("JiuwenSwarm",)
 
 
 def test_ordinary_ask_missing_or_foreign_answer_fails_closed() -> None:

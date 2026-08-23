@@ -1292,7 +1292,7 @@ def test_deep_adapter_registers_evolution_interrupt_rail_before_skill_evolution(
     assert interrupt_index < skill_evolution_index
 
 
-def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatch):
+def test_deep_adapter_profile_rails_add_ask_user_for_agent_modes(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     class FakeHooksConfig:
@@ -1320,8 +1320,18 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(interface_deep_module, "_build_context_processor_rail", lambda **_kwargs: None)
     monkeypatch.setattr(interface_deep_module, "load_hooks_config", lambda _config: FakeHooksConfig())
 
-    plan_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.plan")
-    fast_rails = adapter._build_agent_rails({}, {"models": {}}, mode="agent.fast")
+    plan_specs = adapter._build_profile_rail_specs(
+        {}, {"models": {}}, mode="agent.plan"
+    )
+    plan_rails = adapter._instantiate_agent_rail_specs(
+        adapter._profile_rail_infos(plan_specs)
+    )
+    fast_specs = adapter._build_profile_rail_specs(
+        {}, {"models": {}}, mode="agent.fast"
+    )
+    fast_rails = adapter._instantiate_agent_rail_specs(
+        adapter._profile_rail_infos(fast_specs)
+    )
 
     assert orchestration_rail in plan_rails
     assert orchestration_rail in fast_rails

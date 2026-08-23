@@ -425,50 +425,67 @@ _REQUIRED_ENVELOPE_KEYS = frozenset(
         "origin_kind",
     }
 )
-_OPTIONAL_ENVELOPE_KEYS = frozenset({"skills_to_use", "trusted_dirs"})
+_OPTIONAL_ENVELOPE_KEYS = frozenset(
+    {"skills_to_use", "trusted_dirs", "sender", "chat_type"}
+)
 
 
 def extract_permission_user_content(rendered_prompt: Any) -> str | None:
+    content, _recognized = _parse_permission_user_content(rendered_prompt)
+    return content
+
+
+def _parse_permission_user_content(
+    rendered_prompt: Any,
+) -> tuple[str | None, bool]:
     if not isinstance(rendered_prompt, str):
-        return None
-    prefix = next(
-        (
-            value
-            for value in (HOST_USER_PROMPT_PREFIX_ZH, HOST_USER_PROMPT_PREFIX_EN)
-            if rendered_prompt.startswith(value)
-        ),
-        None,
-    )
-    if prefix is None:
-        return None
-    raw = rendered_prompt[len(prefix) :]
-    try:
-        envelope, end = json.JSONDecoder(object_pairs_hook=_strict_object).raw_decode(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if raw[end:].strip() or not isinstance(envelope, Mapping):
-        return None
+        return None, False
+    envelope = None
+    for prefix in (HOST_USER_PROMPT_PREFIX_ZH, HOST_USER_PROMPT_PREFIX_EN):
+        start = rendered_prompt.find(prefix)
+        while start >= 0:
+            raw = rendered_prompt[start + len(prefix) :]
+            try:
+                candidate, end = json.JSONDecoder(
+                    object_pairs_hook=_strict_object
+                ).raw_decode(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                if not raw[end:].strip() and isinstance(candidate, Mapping):
+                    envelope = candidate
+                    break
+            start = rendered_prompt.find(prefix, start + len(prefix))
+        if envelope is not None:
+            break
+    if envelope is None:
+        return None, False
     keys = set(envelope)
     if not _REQUIRED_ENVELOPE_KEYS <= keys or not keys <= _REQUIRED_ENVELOPE_KEYS | _OPTIONAL_ENVELOPE_KEYS:
-        return None
+        return None, False
     source = envelope.get("source")
     if (
-        envelope.get("type") != "user input"
-        or envelope.get("origin_kind") != HOST_USER_ORIGIN_EXTERNAL
-        or not isinstance(source, str)
+        not isinstance(source, str)
         or not source.strip()
-        or source.strip().lower() in {"system", "cron", "heartbeat"}
     ):
-        return None
+        return None, False
     if any(
         not isinstance(envelope.get(name), str) or not envelope[name].strip()
         for name in ("timezone", "timestamp", "preferred_response_language")
     ):
-        return None
+        return None, False
     if not _is_json_object_string(envelope.get("files_updated_by_user")):
-        return None
+        return None, False
+    if (
+        envelope.get("type") != "user input"
+        or envelope.get("origin_kind") != HOST_USER_ORIGIN_EXTERNAL
+        or source.strip().lower() in {"system", "cron", "heartbeat"}
+    ):
+        return None, True
     content = envelope.get("content")
-    return content.strip() or None if isinstance(content, str) else None
+    if not isinstance(content, str):
+        return None, False
+    return content.strip() or None, True
 
 
 def build_root_intent_projection(
@@ -486,13 +503,19 @@ def build_root_intent_projection(
         role = getattr(getattr(message, "role", ""), "value", getattr(message, "role", ""))
         if str(role or "").strip().lower() != "user":
             continue
-        content = extract_permission_user_content(getattr(message, "content", None))
+        content, recognized = _parse_permission_user_content(
+            getattr(message, "content", None)
+        )
         if content is not None:
             turns.append(
                 None
                 if len(content) > ROOT_INTENT_MAX_TURN_CHARS
                 else RootIntentTurn("", RootIntentTurnKind.HISTORY, content)
             )
+        elif not recognized:
+            # A user-role history item that cannot be projected safely must
+            # disable automatic review instead of silently deleting intent.
+            turns.append(None)
     current = current_text.strip() if isinstance(current_text, str) else ""
     if current:
         if len(current) > ROOT_INTENT_MAX_TURN_CHARS:
