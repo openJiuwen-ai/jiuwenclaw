@@ -3401,22 +3401,53 @@ class JiuWenSwarmDeepAdapter:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _resolve_model_by_name(self, requested_model_name: str = "") -> Model | None:
-        """Resolve the exact model object that will be used."""
+        """Resolve the exact model object that will be used.
+
+        Accepts three request formats from channels (web/TUI/etc.):
+
+        1. Pure ``model_name`` — returns the ``is_default=true`` entry registered
+           under the bare name, if any.
+        2. ``{model_name}#{index}`` whose ``#index`` matches the backend
+           ``name_counter`` scheme — returned directly from ``_model_cache``.
+        3. ``{model_name}#{index}`` whose ``#index`` was minted by the channel
+           with its own numbering (and so is absent from ``_model_cache``) —
+           the bare ``model_name`` is split off and looked up in
+           ``_model_name_to_keys``; the channel-supplied index is used to pick
+           a slot when in range, otherwise the first registered slot is used as
+           a tolerant fallback. Without this step, any non-default model whose
+           channel index did not coincide with the backend index silently fell
+           back to the default model.
+        """
         requested = (requested_model_name or "").strip()
         if not requested:
             return self._model
         # 精确匹配（#index 格式，或已注册纯 model_name key 的默认模型）
         if requested in self._model_cache:
             return self._model_cache[requested]
-        # 回退：非默认模型只以 {model_name}#{index} 注册在 _model_cache 里，没有纯
-        # model_name 的 key；这里按 _model_name_to_keys 里登记的真实 cache key 去查，
-        # 而不是重复判断上面已知为 False 的 `requested in self._model_cache`
-        # （旧代码在此处写重了，导致非默认模型永远查不到，静默 fallback 回默认模型）。
+        # 纯 model_name 查找（_model_name_to_keys 的 key 是纯名）
         keys = self._model_name_to_keys.get(requested)
         if keys:
             resolved = self._model_cache.get(keys[0])
             if resolved is not None:
                 return resolved
+        # 通道侧用各自的序号体系拼出的 {model_name}#{index}（与后端 name_counter
+        # 序号不一致时，上面两步均不命中）。拆出纯名按通道序号容错选择条目，
+        # 否则非默认模型会被静默 fallback 到默认模型。
+        if "#" in requested:
+            bare_name, _, index_part = requested.rpartition("#")
+            bare_keys = self._model_name_to_keys.get(bare_name)
+            if bare_keys:
+                try:
+                    slot = int(index_part)
+                except ValueError:
+                    slot = 0
+                if 0 <= slot < len(bare_keys):
+                    cache_key = bare_keys[slot]
+                else:
+                    cache_key = bare_keys[0]
+                resolved = self._model_cache.get(cache_key)
+                if resolved is not None:
+                    return resolved
         return self._model
 
     def _resolve_model_for_request(self, request: AgentRequest) -> Model:
