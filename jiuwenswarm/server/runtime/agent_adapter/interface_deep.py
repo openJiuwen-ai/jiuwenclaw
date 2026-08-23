@@ -555,7 +555,11 @@ def _permission_user_text_for_request(request: AgentRequest) -> str:
     mode = str(params.get("mode") or "agent").strip().lower()
     if is_team_params(params) or mode == "auto_harness":
         return ""
-    query = params.get("query")
+    from jiuwenswarm.server.runtime.agent_adapter.interface import (
+        resolve_request_query,
+    )
+
+    query = resolve_request_query(params)
     return query.strip() if isinstance(query, str) else ""
 
 logger = logging.getLogger(__name__)

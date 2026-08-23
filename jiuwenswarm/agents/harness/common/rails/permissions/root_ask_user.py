@@ -155,7 +155,14 @@ def prepare_ask_user_resume(
     if set(user_input.user_inputs) != {continuation.tool_call_id}:
         return None
     payload = user_input.user_inputs[continuation.tool_call_id]
-    if not isinstance(payload, Mapping) or set(payload) != {"answers"}:
+    if not isinstance(payload, Mapping) or set(payload) not in (
+        {"answers"},
+        {"answers", "original_request"},
+    ):
+        return None
+    if "original_request" in payload and not isinstance(
+        payload["original_request"], str
+    ):
         return None
     answers = payload["answers"]
     if not isinstance(answers, Mapping) or set(answers) != {

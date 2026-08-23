@@ -36,6 +36,7 @@ from jiuwenswarm.agents.harness.common.rails.permissions.root_context import (
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
+    _permission_user_text_for_request,
 )
 
 
@@ -101,6 +102,14 @@ def _context(tool_call_id: str, *, extra: dict | None = None) -> AgentCallbackCo
         session=SimpleNamespace(session_id="root-session"),
         extra=extra or {},
     )
+
+
+def test_permission_root_uses_agentos_content_fallback() -> None:
+    request = SimpleNamespace(
+        params={"query": "", "content": "Inspect the release", "mode": "agent"}
+    )
+
+    assert _permission_user_text_for_request(request) == "Inspect the release"
 
 
 def _nonpermission_context(

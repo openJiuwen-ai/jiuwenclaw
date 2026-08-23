@@ -91,6 +91,14 @@ class _TeamPlanApprovalPayloadError(ValueError):
     """Raised when a structured team.plan approval payload is malformed."""
 
 
+def resolve_request_query(params: Any) -> Any:
+    """Return the request payload accepted by the AgentOS input contract."""
+    if not isinstance(params, dict):
+        return ""
+    query = params.get("query")
+    return params.get("content", "") if query is None or query == "" else query
+
+
 def _permission_card_ids_from_answers(answers: list[dict]) -> list[str]:
     """Normalize the single opaque permission-card locator."""
 
@@ -261,6 +269,15 @@ def _should_record_user_history(
     request_method: Any = None,
 ) -> bool:
     """Keep history and permission authority on the same Host predicate."""
+
+    if (
+        isinstance(params, dict)
+        and str(params.get("source") or "").strip() == "skill_evolution_approval"
+    ):
+        # AgentOS keeps passive skill-evolution approvals in the transcript.
+        # This is display history only; interrupt resumes remain non-external
+        # for permission-authority and root-intent classification.
+        return True
 
     return is_external_user_authored_dispatch(
         params,
@@ -1100,9 +1117,7 @@ class JiuWenSwarm:
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
         params: ChatSendParams = request.params if isinstance(request.params, dict) else {}
-        query = params.get("query")
-        if query is None or query == "":
-            query = params.get("content", "")
+        query = resolve_request_query(params)
         # /debug 请求级指令：仅 agent/code 在此剥离前缀；team 自行从
         # ``turn.text`` 解析 /debug（见 team_helpers），故此处对 team 不剥离。
         _request_debug = False
@@ -1185,11 +1200,39 @@ class JiuWenSwarm:
             if answers:
                 request_id = params.get("request_id", "")
                 source = params.get("source", "")
+                raw_original_request = (
+                    params.get("original_request")
+                    if source == "ask_user_interrupt"
+                    else ""
+                )
+                original_request = (
+                    raw_original_request.strip()
+                    if isinstance(raw_original_request, str)
+                    else ""
+                )
                 interactive_input = self._build_interactive_input_from_answers(
                     request_id,
                     answers,
                     source,
                 )
+                if (
+                    source == "ask_user_interrupt"
+                    and original_request
+                    and interactive_input is not None
+                    and str(request_id or "").strip()
+                ):
+                    bound_id = str(request_id).strip()
+                    bound_payload = interactive_input.user_inputs.get(bound_id)
+                    if isinstance(bound_payload, dict) and isinstance(
+                        bound_payload.get("answers"), dict
+                    ):
+                        # AgentOS display context is attached only after the
+                        # strict call/question adapter has accepted the answer.
+                        # Permission/root authority never derives from it.
+                        interactive_input.update(
+                            bound_id,
+                            {**bound_payload, "original_request": original_request},
+                        )
                 if interactive_input is not None:
                     final_query = interactive_input
                     turn = turn.with_text(interactive_input)
@@ -1391,9 +1434,11 @@ class JiuWenSwarm:
             if not request_id:
                 return interactive_input
             answers_dict = {}
+            has_question_key = False
             for answer in answers:
                 if isinstance(answer, dict):
                     question_text = str(answer.get("question", "") or "").strip()
+                    has_question_key = has_question_key or bool(question_text)
                     selected_options = answer.get("selected_options", [])
                     custom_input = str(answer.get("custom_input", "") or "").strip()
                     if selected_options and isinstance(selected_options, list):
@@ -1431,9 +1476,10 @@ class JiuWenSwarm:
                         answer_value = ""
                     if question_text and answer_value:
                         answers_dict[question_text] = answer_value
-            if not answers_dict:
+            if not has_question_key:
                 return interactive_input
-            interactive_input.update(request_id, {"answers": answers_dict})
+            payload: dict[str, Any] = {"answers": answers_dict}
+            interactive_input.update(request_id, payload)
             logger.info(
                 "[JiuWenSwarm] AskUserRail InteractiveInput.update: request_id=%s "
                 "answer_count=%s",

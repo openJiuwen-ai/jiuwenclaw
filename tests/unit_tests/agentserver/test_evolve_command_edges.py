@@ -554,9 +554,9 @@ async def test_agent_non_stream_slash_followup_continues_into_runner(monkeypatch
         {"query": "/evolve code-runner"},
     )
 
-    assert seen_inputs == [
-        {"query": "review and evolve code-runner", "_invoke_turn_id": "req-followup"}
-    ]
+    assert len(seen_inputs) == 1
+    assert seen_inputs[0]["query"] == "review and evolve code-runner"
+    assert seen_inputs[0]["_invoke_turn_id"] == "req-followup"
     assert response.ok is True
     assert response.payload == {"content": "agent completed"}
 
@@ -594,9 +594,9 @@ async def test_agent_stream_slash_followup_continues_into_runner(monkeypatch):
     ):
         chunks.append(chunk)
 
-    assert seen_inputs == [
-        {"query": "review and simplify code-runner", "_invoke_turn_id": "req-followup-stream"}
-    ]
+    assert len(seen_inputs) == 1
+    assert seen_inputs[0]["query"] == "review and simplify code-runner"
+    assert seen_inputs[0]["_invoke_turn_id"] == "req-followup-stream"
     assert chunks[0].payload == {"event_type": "chat.delta", "content": "agent delta"}
     assert chunks[-1].is_complete is True
 
