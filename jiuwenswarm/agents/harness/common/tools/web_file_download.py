@@ -8,6 +8,7 @@
 协议：
 - 令牌格式: Base64URL(payload_json) + "." + Hex(HMAC-SHA256)
 - payload 包含: path, exp, session_id
+- 受管资产令牌额外绑定: asset_id, size, digest, name
 - 密钥来源: 环境变量 JIUWENSWARM_FILE_DOWNLOAD_SECRET 或自动生成并写入共享文件
 """
 
@@ -22,8 +23,14 @@ import os
 import secrets
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
+
+if TYPE_CHECKING:
+    from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (
+        VerifiedDownloadAsset,
+        VerifiedDownloadAssetOwner,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +40,8 @@ _SECRET_FILE_NAME = ".file_download_secret"
 _DOWNLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_DOWNLOAD_HTTP_BASE"
 _UPLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE"
 _LEGACY_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_HTTP_BASE"
+_VERIFIED_ASSET_TOKEN_KIND = "verified_asset_v1"
+_LEGACY_TOKEN_KEYS = frozenset({"path", "sid"})
 
 
 def _get_secret_file_path() -> Path:
@@ -76,8 +85,14 @@ class WebFileDownloadManager:
 
     _instance: WebFileDownloadManager | None = None
 
-    def __init__(self, secret: str | None = None) -> None:
+    def __init__(
+        self,
+        secret: str | None = None,
+        *,
+        asset_owner: VerifiedDownloadAssetOwner | None = None,
+    ) -> None:
         self._secret = secret or _load_or_create_secret()
+        self._asset_owner = asset_owner
 
     @classmethod
     def get_instance(cls) -> WebFileDownloadManager:
@@ -109,16 +124,35 @@ class WebFileDownloadManager:
         base = str(agent_http_base or "").strip()
         if base and agent_http_base_key:
             payload[agent_http_base_key] = base.rstrip("/")
-        payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        payload_b64 = base64.urlsafe_b64encode(
-            payload_json.encode("utf-8")
-        ).decode("ascii")
-        signature = hmac.new(
-            self._secret.encode("utf-8"),
-            payload_b64.encode("ascii"),
-            hashlib.sha256,
-        ).hexdigest()
-        return f"{payload_b64}.{signature}"
+        return self._sign_payload(payload)
+
+    def generate_verified_asset_token(
+        self,
+        asset: VerifiedDownloadAsset,
+        *,
+        file_name: str,
+        session_id: str = "",
+    ) -> str:
+        """Generate a token bound to one durable verified asset registration."""
+
+        payload: dict[str, Any] = {
+            "kind": _VERIFIED_ASSET_TOKEN_KIND,
+            "asset_id": asset.asset_id,
+            "path": asset.sealed_path.as_posix(),
+            "exp": asset.expires_at,
+            "size": asset.size_bytes,
+            "digest": asset.content_digest,
+            "name": Path(file_name).name,
+            "sid": session_id,
+        }
+        base = str(
+            os.getenv(_DOWNLOAD_HTTP_BASE_ENV_KEY)
+            or os.getenv(_LEGACY_HTTP_BASE_ENV_KEY)
+            or ""
+        ).strip()
+        if base:
+            payload["download_http_base"] = base.rstrip("/")
+        return self._sign_payload(payload)
 
     def validate_token(self, token: str) -> dict[str, Any] | None:
         try:
@@ -138,10 +172,47 @@ class WebFileDownloadManager:
             payload = json.loads(payload_json)
             if not isinstance(payload, dict):
                 return None
+            if _is_legacy_no_expiration_payload(payload):
+                return payload
+
+            expires_at = float(payload.get("exp"))
+            if time.time() > expires_at:
+                return None
+            token_kind = payload.get("kind")
+            if token_kind not in (None, _VERIFIED_ASSET_TOKEN_KIND):
+                return None
+            if token_kind == _VERIFIED_ASSET_TOKEN_KIND:
+                owner = self._asset_owner
+                if owner is None:
+                    from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (
+                        get_verified_download_asset_owner,
+                    )
+
+                    owner = get_verified_download_asset_owner()
+                if not owner.is_active(
+                    asset_id=str(payload.get("asset_id") or ""),
+                    sealed_path=str(payload.get("path") or ""),
+                    expires_at=expires_at,
+                    size_bytes=int(payload.get("size")),
+                    content_digest=str(payload.get("digest") or ""),
+                ):
+                    return None
             return payload
         except Exception:
             logger.debug("[WebFileDownload] 令牌解析异常", exc_info=True)
             return None
+
+    def _sign_payload(self, payload: dict[str, Any]) -> str:
+        payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode(
+            "ascii"
+        )
+        signature = hmac.new(
+            self._secret.encode("utf-8"),
+            payload_b64.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{payload_b64}.{signature}"
 
     @staticmethod
     def generate_download_url(token: str, user_id: str = "") -> str:
@@ -150,6 +221,14 @@ class WebFileDownloadManager:
         if normalized_user_id:
             query["user_id"] = normalized_user_id
         return f"/file-api/download?{urlencode(query)}"
+
+
+def _is_legacy_no_expiration_payload(payload: dict[str, Any]) -> bool:
+    """Accept only the exact signed download-token schema used before ``exp``."""
+
+    return set(payload) == _LEGACY_TOKEN_KEYS and all(
+        isinstance(payload[key], str) and payload[key] for key in _LEGACY_TOKEN_KEYS
+    )
 
 
 def generate_file_download_token(
@@ -279,5 +358,36 @@ def build_file_download_info(
         "size": file_size,
         "mime_type": mime_type,
         "download_url": download_url,
+        "download_token": token,
+    }
+
+
+def build_verified_asset_download_info(
+    asset: VerifiedDownloadAsset,
+    file_name: str,
+    session_id: str = "",
+    user_id: str = "",
+) -> dict[str, Any]:
+    """Build download metadata whose token is backed by a staged asset."""
+
+    manager = WebFileDownloadManager.get_instance()
+    token = manager.generate_verified_asset_token(
+        asset,
+        file_name=file_name,
+        session_id=session_id,
+    )
+    mime_type = "application/octet-stream"
+
+    import mimetypes
+
+    guessed_type, _ = mimetypes.guess_type(file_name)
+    if guessed_type:
+        mime_type = guessed_type
+
+    return {
+        "name": Path(file_name).name,
+        "size": asset.size_bytes,
+        "mime_type": mime_type,
+        "download_url": manager.generate_download_url(token, user_id),
         "download_token": token,
     }

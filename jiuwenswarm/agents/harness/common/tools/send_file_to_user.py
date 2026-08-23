@@ -17,9 +17,15 @@ import os
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, List, Union
+from typing import TYPE_CHECKING, Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
+
+if TYPE_CHECKING:
+    from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (
+        VerifiedDownloadAsset,
+        VerifiedDownloadAssetOwner,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +34,7 @@ logger = logging.getLogger(__name__)
 # results, so the agent can re-call the same path; IM request-level dedup alone
 # cannot stop cross-turn duplicates.
 _SENT_FILE_PATHS_BY_SESSION: dict[str, set[str]] = {}
+_VERIFIED_ASSET_TTL_SECONDS = 600
 
 
 def _normalize_sent_file_path(path: str) -> str:
@@ -78,6 +85,8 @@ class SendFileToolkit:
         user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
+        require_execution_authorization: bool = False,
+        asset_owner: VerifiedDownloadAssetOwner | None = None,
     ) -> None:
         """Initialize SendFileToolkit.
 
@@ -96,6 +105,8 @@ class SendFileToolkit:
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
         )
+        self._require_execution_authorization = bool(require_execution_authorization)
+        self._asset_owner = asset_owner
         logger.debug(
             "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -114,6 +125,7 @@ class SendFileToolkit:
         user_id: str | None = None,
         project_dir: str | None = None,
         team_workspace_root: str | None = None,
+        require_execution_authorization: bool | None = None,
     ) -> None:
         """Update per-request runtime context without recreating the toolkit/tool.
         """
@@ -126,6 +138,10 @@ class SendFileToolkit:
         self._team_workspace_root = (
             str(Path(team_workspace_root).resolve()) if team_workspace_root else None
         )
+        if require_execution_authorization is not None:
+            self._require_execution_authorization = bool(
+                require_execution_authorization
+            )
         logger.debug(
             "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
@@ -248,6 +264,21 @@ class SendFileToolkit:
             return [str(x).strip() for x in target_channels if str(x).strip()]
         return [str(target_channels).strip()]
 
+    @staticmethod
+    def _consume_execution_authorization(
+        *,
+        requested_paths: tuple[str, ...],
+        target_channels: Any,
+    ) -> tuple[Any, ...]:
+        from jiuwenswarm.agents.harness.common.rails.permissions.generated_artifact_delivery import (
+            consume_send_file_execution_grant,
+        )
+
+        return consume_send_file_execution_grant(
+            requested_paths,
+            target_channels=target_channels,
+        )
+
     async def send_file(
         self,
         abs_file_path_list: Union[List[str], str],
@@ -274,6 +305,27 @@ class SendFileToolkit:
                 "[SendFileToolkit] send_file target_channels=%s session_id=%s",
                 target_channel_list, self.session_id,
             )
+        if self._require_execution_authorization:
+            from jiuwenswarm.agents.harness.common.rails.permissions.generated_artifact_delivery import (
+                normalize_send_file_paths,
+            )
+
+            requested_paths = normalize_send_file_paths(abs_file_path_list)
+            try:
+                authorization_items = self._consume_execution_authorization(
+                    requested_paths=requested_paths,
+                    target_channels=target_channels,
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "[SendFileToolkit] rejected unauthorized send session_id=%s error=%s",
+                    self.session_id,
+                    exc,
+                )
+                return f"提交文件失败: {exc!s}"
+            abs_file_path_list = [
+                item.resolved_path.as_posix() for item in authorization_items
+            ]
         if isinstance(abs_file_path_list, str):
             try:
                 parsed = json.loads(abs_file_path_list)
@@ -354,47 +406,96 @@ class SendFileToolkit:
             len(skipped_files),
         )
 
+        owned_assets: list[VerifiedDownloadAsset] = []
+        assets_by_path: dict[str, VerifiedDownloadAsset] = {}
+        exposure_started = False
+        asset_owner = self._asset_owner
+        if self._require_execution_authorization and asset_owner is None:
+            from jiuwenswarm.agents.harness.common.tools.verified_download_assets import (
+                get_verified_download_asset_owner,
+            )
+
+            asset_owner = get_verified_download_asset_owner()
+
         try:
             from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 
             server = AgentWebSocketServer.get_instance()
 
             files_payload = []
-            try:
+            if self._require_execution_authorization:
+                if asset_owner is None:
+                    raise RuntimeError("send_file_asset_owner_missing")
+                import time
+
+                expires_at = float(int(time.time()) + _VERIFIED_ASSET_TTL_SECONDS)
+                for file_path in valid_files:
+                    asset = asset_owner.stage(
+                        Path(file_path),
+                        file_name=Path(file_path).name,
+                        expires_at=expires_at,
+                    )
+                    owned_assets.append(asset)
+                    assets_by_path[_normalize_sent_file_path(file_path)] = asset
+
                 from jiuwenswarm.agents.harness.common.tools.web_file_download import (
-                    build_file_download_info,
+                    build_verified_asset_download_info,
                 )
 
                 for file_path in valid_files:
                     base_name = os.path.basename(file_path)
-                    download_info = build_file_download_info(
-                        file_path, base_name, self.session_id, user_id=self._user_id
+                    asset = assets_by_path[_normalize_sent_file_path(file_path)]
+                    download_info = build_verified_asset_download_info(
+                        asset,
+                        base_name,
+                        self.session_id,
+                        user_id=self._user_id,
                     )
                     files_payload.append({
-                        "path": file_path,
+                        "path": asset.sealed_path.as_posix(),
                         "name": base_name,
                         "size": download_info["size"],
                         "mime_type": download_info["mime_type"],
                         "download_url": download_info["download_url"],
                         "download_token": download_info["download_token"],
                     })
-            except Exception as download_err:
-                logger.warning(
-                    "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
-                    download_err,
-                )
-                files_payload = [
-                    {
-                        "path": file_path,
-                        "name": os.path.basename(file_path),
-                    }
-                    for file_path in valid_files
-                ]
+            else:
+                try:
+                    from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+                        build_file_download_info,
+                    )
+
+                    for file_path in valid_files:
+                        base_name = os.path.basename(file_path)
+                        download_info = build_file_download_info(
+                            file_path, base_name, self.session_id, user_id=self._user_id
+                        )
+                        files_payload.append({
+                            "path": file_path,
+                            "name": base_name,
+                            "size": download_info["size"],
+                            "mime_type": download_info["mime_type"],
+                            "download_url": download_info["download_url"],
+                            "download_token": download_info["download_token"],
+                        })
+                except Exception as download_err:
+                    logger.warning(
+                        "[SendFileToolkit] 生成下载信息失败，回退到基础模式: %s",
+                        download_err,
+                    )
+                    files_payload = [
+                        {
+                            "path": file_path,
+                            "name": os.path.basename(file_path),
+                        }
+                        for file_path in valid_files
+                    ]
 
             import time
             from jiuwenswarm.server.runtime.session.session_history import (
                 append_history_record,
             )
+            exposure_started = True
             append_history_record(
                 session_id=self.session_id,
                 request_id=self.request_id,
@@ -427,6 +528,15 @@ class SendFileToolkit:
             if merged_meta:
                 msg["metadata"] = merged_meta
             await server.send_push(msg)
+            if asset_owner is not None:
+                for asset in owned_assets:
+                    try:
+                        asset_owner.commit(asset)
+                    except Exception:
+                        logger.exception(
+                            "[SendFileToolkit] asset commit failed; staged TTL ownership retained asset_id=%s",
+                            asset.asset_id,
+                        )
             _mark_files_sent(self.session_id, valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if copied_to_project:
@@ -449,6 +559,10 @@ class SendFileToolkit:
                 str(e),
             )
             return f"提交文件失败: {str(e)}"
+        finally:
+            if owned_assets and not exposure_started and asset_owner is not None:
+                for asset in owned_assets:
+                    asset_owner.revoke(asset)
 
     def get_tools(self) -> List[Tool]:
         """Return tools for registration in Runner.
