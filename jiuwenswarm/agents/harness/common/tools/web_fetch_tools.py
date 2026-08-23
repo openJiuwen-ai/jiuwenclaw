@@ -8,11 +8,18 @@ import asyncio
 import os
 import re
 from html import unescape
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 import urllib3
 from openjiuwen.core.foundation.tool import tool
+
+from jiuwenswarm.agents.harness.common.rails.permissions.network_scope import (
+    host_matches_allowed_domain,
+)
+from jiuwenswarm.agents.harness.common.rails.permissions.url_safety import (
+    unsafe_public_https_url_reason,
+)
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -30,6 +37,8 @@ _CHARSET_META_RE = re.compile(
     br"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
 )
+_REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECT_HOPS = 5
 
 
 def _extract_declared_charset(response: requests.Response) -> str:
@@ -167,43 +176,49 @@ def _strip_tags(value: str) -> str:
     return unescape(re.sub(r"\s+", " ", value)).strip()
 
 
-def _decode_ddg_redirect(url: str) -> str:
-    parsed = urlparse(url)
-    if parsed.path != "/l/":
-        return url
-    query = parse_qs(parsed.query)
-    target = query.get("uddg")
-    if not target:
-        return url
-    return unquote(target[0])
-
-
 def _normalize_url(url: str) -> str:
     raw = (url or "").strip()
     if not raw:
         return raw
-    decoded = _decode_ddg_redirect(raw)
-    if decoded.startswith(("http://", "https://")):
-        return decoded
-    return f"https://{decoded}"
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return f"https://{raw}"
 
 
-def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
-    reader_url = f"https://r.jina.ai/{url}"
-    response = _http_get(reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    response.raise_for_status()
-    return {
-        "url": url,
-        "status_code": response.status_code,
-        "title": "",
-        "content": _decode_response_text(response).strip(),
-    }
+def _safe_http_get(url: str, *, timeout_seconds: int) -> requests.Response:
+    approved_domain = urlparse(url).hostname
+    current_url = url
+    seen: set[str] = set()
+    for hop in range(_MAX_REDIRECT_HOPS + 1):
+        parsed = urlparse(current_url)
+        rejection = unsafe_public_https_url_reason(parsed)
+        if rejection is not None:
+            raise ValueError(rejection)
+        if not host_matches_allowed_domain(parsed.hostname, approved_domain):
+            raise ValueError("network_redirect_domain_mismatch")
+        if current_url in seen:
+            raise ValueError("network_redirect_loop")
+        seen.add(current_url)
+
+        response = _http_get(
+            current_url,
+            headers=_REQUEST_HEADERS,
+            timeout=timeout_seconds,
+            allow_redirects=False,
+        )
+        if response.status_code not in _REDIRECT_STATUS_CODES:
+            return response
+        location = str(response.headers.get("Location") or "").strip()
+        if not location:
+            raise ValueError("network_redirect_location_missing")
+        if hop >= _MAX_REDIRECT_HOPS:
+            raise ValueError("network_redirect_hop_limit")
+        current_url = urljoin(current_url, location)
+    raise ValueError("network_redirect_hop_limit")
 
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
-    response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    if response.status_code in {401, 403, 429}:
-        return _fetch_via_jina_reader_sync(url, timeout_seconds)
+    response = _safe_http_get(url, timeout_seconds=timeout_seconds)
     response.raise_for_status()
 
     text = _decode_response_text(response)
