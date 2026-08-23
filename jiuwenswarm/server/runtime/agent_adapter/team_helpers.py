@@ -128,7 +128,7 @@ def _team_hide_teammate_enabled() -> bool:
 def _should_passthrough_teammate_ask(
     *,
     is_leader: bool,
-    event_type: str | None,
+    chunk_event_type: str | None,
     source: str | None,
     team_approval_mode: str | None,
 ) -> bool:
@@ -142,7 +142,7 @@ def _should_passthrough_teammate_ask(
 
     Args:
         is_leader: Whether the chunk is leader output.
-        event_type: Parsed ``event_type`` (``chat.ask_user_question`` for asks).
+        chunk_event_type: Parsed ``event_type`` (``chat.ask_user_question`` for asks).
         source: Parsed ``source`` (``permission_interrupt`` for approval asks).
         team_approval_mode: Snapshot from ``TeamAgentSpec.team_approval_mode``.
 
@@ -151,12 +151,12 @@ def _should_passthrough_teammate_ask(
     """
     if is_leader:
         return True
-    if event_type != "chat.ask_user_question":
+    if chunk_event_type != "chat.ask_user_question":
         return True
     return team_approval_mode == "user-mediated" and source == "permission_interrupt"
 
 
-def _should_drop_under_hide(*, is_leader: bool, event_type: str | None) -> bool:
+def _should_drop_under_hide(*, is_leader: bool, chunk_event_type: str | None) -> bool:
     """Decide whether the hide-teammate filter drops this chunk.
 
     ``JIUWENSWARM_TEAM_HIDE_TEAMMATE`` (env, default OFF) drops non-leader
@@ -166,7 +166,7 @@ def _should_drop_under_hide(*, is_leader: bool, event_type: str | None) -> bool:
 
     Args:
         is_leader: Whether the chunk is leader output.
-        event_type: Parsed ``event_type`` (may be None when parse returned None).
+        chunk_event_type: Parsed ``event_type`` (may be None when parse returned None).
 
     Returns:
         True if the chunk should be dropped by the hide filter.
@@ -175,7 +175,7 @@ def _should_drop_under_hide(*, is_leader: bool, event_type: str | None) -> bool:
         return False
     if is_leader:
         return False
-    return event_type != "chat.ask_user_question"
+    return chunk_event_type != "chat.ask_user_question"
 
 
 _INTERACT_REASON_ERROR_MAP: dict[str, str] = {
@@ -2417,7 +2417,7 @@ async def _consume_stream_with_query(
             # Parse first so ask_user_question frames can be exempted — teammate
             # approval asks must survive hide to reach the user (Task 3).
             _hide_event_type = parsed.get("event_type") if parsed is not None else None
-            if _should_drop_under_hide(is_leader=is_leader, event_type=_hide_event_type):
+            if _should_drop_under_hide(is_leader=is_leader, chunk_event_type=_hide_event_type):
                 continue
             if parsed is not None:
                 # Time to first token: the first frame actually produced by a
@@ -2447,7 +2447,7 @@ async def _consume_stream_with_query(
                 if (parsed.get("event_type") == "chat.ask_user_question"
                         and not _should_passthrough_teammate_ask(
                             is_leader=is_leader,
-                            event_type=parsed.get("event_type"),
+                            chunk_event_type=parsed.get("event_type"),
                             source=parsed.get("source"),
                             team_approval_mode=getattr(
                                 team_spec, "team_approval_mode", "user-mediated"

@@ -31,21 +31,21 @@ from jiuwenswarm.server.runtime.agent_adapter.team_helpers import (
 def test_user_mediated_passes_permission_interrupt_ask() -> None:
     """user-mediated: teammate 审批 ask (source=permission_interrupt) 放行。"""
     assert _should_passthrough_teammate_ask(
-        is_leader=False, event_type="chat.ask_user_question",
+        is_leader=False, chunk_event_type="chat.ask_user_question",
         source="permission_interrupt", team_approval_mode="user-mediated") is True
 
 
 def test_user_mediated_filters_normal_ask() -> None:
     """普通 teammate ask_user 仍过滤（防误穿透未来非审批 interrupt）。"""
     assert _should_passthrough_teammate_ask(
-        is_leader=False, event_type="chat.ask_user_question",
+        is_leader=False, chunk_event_type="chat.ask_user_question",
         source="other", team_approval_mode="user-mediated") is False
 
 
 def test_leader_mediated_filters_all_teammate_ask() -> None:
     """leader-mediated: 全过滤（逐字不变，opt-out）。"""
     assert _should_passthrough_teammate_ask(
-        is_leader=False, event_type="chat.ask_user_question",
+        is_leader=False, chunk_event_type="chat.ask_user_question",
         source="permission_interrupt", team_approval_mode="leader-mediated") is False
 
 
@@ -53,9 +53,9 @@ def test_hide_teammate_exempts_ask(monkeypatch) -> None:
     """hide ON + user-mediated: teammate 审批 ask 不被 hide 丢。"""
     monkeypatch.setenv("JIUWENSWARM_TEAM_HIDE_TEAMMATE", "true")
     assert _should_drop_under_hide(
-        is_leader=False, event_type="chat.ask_user_question") is False
+        is_leader=False, chunk_event_type="chat.ask_user_question") is False
     assert _should_drop_under_hide(
-        is_leader=False, event_type="chat.message") is True
+        is_leader=False, chunk_event_type="chat.message") is True
 
 
 # ---------------------------------------------------------------------------
@@ -93,5 +93,5 @@ def test_team_spec_without_approval_mode_defaults_to_passthrough() -> None:
     resolved_mode = getattr(team_spec, "team_approval_mode", "user-mediated")
     assert resolved_mode == "user-mediated"
     assert _should_passthrough_teammate_ask(
-        is_leader=False, event_type="chat.ask_user_question",
+        is_leader=False, chunk_event_type="chat.ask_user_question",
         source="permission_interrupt", team_approval_mode=resolved_mode) is True

@@ -535,7 +535,8 @@ class TeamPermissionInput(ConstructionInput):
 @harness_element(
     kind=ElementKind.RAIL,
     name=TEAM_PERMISSION,
-    description="Team-mode permission guardrail with user-mediated ASK resolution by default (leader-mediated opt-out).",
+    description="Team-mode permission guardrail with user-mediated ASK "
+    "resolution by default (leader-mediated opt-out).",
     input_model=TeamPermissionInput,
 )
 def _build_team_permission_rail(params: dict[str, Any], context: Any) -> Any | None:
