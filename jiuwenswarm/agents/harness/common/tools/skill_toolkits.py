@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -80,6 +81,13 @@ class SkillToolkit:
             if re.match(pattern, raw):
                 return source
         raise ValueError(f"cannot infer source from identifier: {target}")
+
+    @staticmethod
+    def _search_query_fingerprint(query: str) -> str:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return ""
+        return hashlib.sha256(normalized_query.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _safe_int(value: Any, default: int) -> int:
@@ -266,7 +274,11 @@ class SkillToolkit:
         }
 
     @staticmethod
-    def _summarize_search_payload(source: str, query: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _summarize_search_payload(
+        source: str,
+        query_fingerprint: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
         """提取一小段调试摘要，便于日志与 tool 返回里排查问题。"""
         skills = payload.get("skills", []) or []
         first = skills[0] if skills else {}
@@ -277,7 +289,7 @@ class SkillToolkit:
                 first = {"repr": repr(first)}
         return {
             "source": source,
-            "query": query,
+            "query_fingerprint": query_fingerprint,
             "success": bool(payload.get("success")),
             "count": len(skills),
             "detail": str(payload.get("detail", "")).strip(),
@@ -360,12 +372,6 @@ class SkillToolkit:
         try:
             normalized_source = self._normalize_source(source)
             query = str(query or "").strip()
-            logger.info(
-                "[SkillToolkit] search_skill called: query=%r source=%s limit=%s",
-                query,
-                normalized_source,
-                limit,
-            )
             if not query:
                 return {
                     "success": False,
@@ -373,6 +379,13 @@ class SkillToolkit:
                     "items": [],
                     "detail": "query is required",
                 }
+            query_fingerprint = self._search_query_fingerprint(query)
+            logger.info(
+                "[SkillToolkit] search_skill called: query_fingerprint=%s source=%s limit=%s",
+                query_fingerprint,
+                normalized_source,
+                limit,
+            )
 
             search_limit = self._safe_int(limit, 10)
             installed_names = self._get_installed_names()
@@ -399,7 +412,11 @@ class SkillToolkit:
                     payload = await self._manager.handle_skills_team_skills_hub_search(params)
                 else:
                     raise AssertionError(f"unexpected search source: {current_source}")
-                payload_summary = self._summarize_search_payload(current_source, query, payload)
+                payload_summary = self._summarize_search_payload(
+                    current_source,
+                    query_fingerprint,
+                    payload,
+                )
                 logger.info(
                     "[SkillToolkit] %s search payload summary: %s",
                     current_source,
@@ -416,7 +433,8 @@ class SkillToolkit:
             detail = "; ".join(errors)
             if not items:
                 no_result_detail = (
-                    f"No skills found from {normalized_source} for query {query!r}. "
+                    f"No skills found from {normalized_source} for query fingerprint "
+                    f"{query_fingerprint}. "
                     "Underlying search returned success but an empty skills list."
                 )
                 if any_success and detail:
@@ -429,7 +447,10 @@ class SkillToolkit:
                 "source": normalized_source,
                 "items": items[:search_limit],
                 "detail": detail,
-                "query_summary": f"search query={query!r} source={normalized_source} limit={search_limit}",
+                "query_summary": (
+                    f"search query_fingerprint={query_fingerprint} "
+                    f"source={normalized_source} limit={search_limit}"
+                ),
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("search_skill failed")
