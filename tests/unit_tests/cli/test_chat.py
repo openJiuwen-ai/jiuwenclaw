@@ -9,8 +9,6 @@ import asyncio
 import io
 import json
 import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -683,6 +681,58 @@ class TestGatewayClient:
                 await client.connect()
 
 
+def _permission_question(card_id: str) -> dict:
+    return {"card_id": card_id}
+
+
+class TestPermissionCardAnswer:
+
+    @staticmethod
+    def test_builds_one_opaque_card_answer():
+        from jiuwenswarm.cli.chat import _permission_answer_for_card
+
+        answers = _permission_answer_for_card(
+            [_permission_question("invocation-1")],
+            selected="本次允许",
+            custom_input="1",
+        )
+
+        assert answers == [
+            {
+                "selected_options": ["本次允许"],
+                "custom_input": "1",
+                "card_id": "invocation-1",
+            },
+        ]
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "questions",
+        [
+            [],
+            [{}],
+            [
+                _permission_question("one"),
+                _permission_question("two"),
+            ],
+            [
+                _permission_question("same"),
+                _permission_question("same"),
+            ],
+        ],
+    )
+    def test_missing_or_duplicate_host_key_fails_closed(questions: list[dict]):
+        from jiuwenswarm.cli.chat import _permission_answer_for_card
+
+        assert (
+            _permission_answer_for_card(
+                questions,
+                selected="本次允许",
+                custom_input="1",
+            )
+            == []
+        )
+
 class TestInteractiveLoop:
     @staticmethod
     async def _make_connected_client(messages: list[dict]):
@@ -1007,8 +1057,6 @@ class TestSpinner:
 
     @staticmethod
     def test_spinner_verb_rotates():
-        from jiuwenswarm.cli.render import _VERBS
-
         fake_time = 1000.0
 
         def mock_monotonic():
