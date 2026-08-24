@@ -36,7 +36,7 @@
   box-shadow: var(--effect-tool-panel-shadow);
   transform: translateY(-1px);
 }
-}
+
 
 .toolpanel-collapsed-task-section > * {
   min-height: 0;
