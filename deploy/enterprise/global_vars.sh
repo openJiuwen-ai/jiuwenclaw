@@ -102,6 +102,7 @@ declare -A DEPLOY_VARS=(
     ["COLLECT_LOG_MASK_ENABLED"]="false"
     ["DB_TYPE"]="sqlite"
     ["DEPLOYMENT_MODE"]="standalone"
+    ["GATEWAY_EDITION"]="enterprise"
     ["ENTERPRISE_WEB_WS_PORT"]="19000"
     ["ENABLE_EXTERNAL_OBS"]="false"
     ["ENABLE_EXTERNAL_MYSQL"]="false"
