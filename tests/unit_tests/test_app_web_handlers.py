@@ -2393,6 +2393,201 @@ def test_update_channel_subsection_in_config_overwrites_existing(tmp_path, monke
     assert len(saved["channels"]["feishu"]["apps"]) == 1
     assert saved["channels"]["feishu"]["apps"][0]["name"] == "新应用"
     assert saved["channels"]["feishu"]["apps"][0]["app_id"] == "new_id"
+
+
+# ── tts.synthesize ──────────────────────────────────────────
+
+_AUDIO_ENV = {
+    "AUDIO_API_BASE": "https://dashscope.aliyuncs.com/api/v1",
+    "AUDIO_API_KEY": "test-audio-key",
+    "AUDIO_MODEL_NAME": "qwen3-tts-flash",
+    "AUDIO_PROVIDER": "DashScope",
+}
+
+
+def _set_audio_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in _AUDIO_ENV.items():
+        monkeypatch.setenv(key, value)
+
+
+def _clear_audio_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in _AUDIO_ENV:
+        monkeypatch.delenv(key, raising=False)
+
+
+def _make_tts_channel(monkeypatch: pytest.MonkeyPatch, generate_speech) -> FakeWebChannel:
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    class FakeTtsModel:
+        def __init__(self, *, model_config, model_client_config):
+            self.model_config = model_config
+            self.model_client_config = model_client_config
+
+        async def generate_speech(self, messages, **kwargs):
+            return await generate_speech(messages, **kwargs)
+
+    monkeypatch.setattr(app_web_handlers, "Model", FakeTtsModel)
+    return channel
+
+
+def test_tts_synthesize_registered_as_local_method():
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+    assert "tts.synthesize" in channel.methods
+    assert "tts.synthesize" not in app_web_handlers._FORWARD_REQ_METHODS
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_requires_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_audio_env(monkeypatch)
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "   "}, "sess-1")
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is False
+    assert resp["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_unconfigured_returns_success_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_audio_env(monkeypatch)
+
+    class ExplodingModel:
+        def __init__(self, **kwargs):
+            raise AssertionError("Model must not be constructed without audio env")
+
+    monkeypatch.setattr(app_web_handlers, "Model", ExplodingModel)
+    channel = FakeWebChannel()
+    _register_web_handlers(WebHandlersBindParams(channel=channel))
+
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "你好"}, "sess-1")
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_passes_through_base64_audio_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    _set_audio_env(monkeypatch)
+    encoded = base64.b64encode(b"raw-mp3-bytes")
+    seen_kwargs: dict = {}
+
+    async def fake_generate(messages, **kwargs):
+        assert messages[0].content == "hello"
+        seen_kwargs.update(kwargs)
+        return SimpleNamespace(audio_data=encoded, audio_url=None, format="mp3")
+
+    channel = _make_tts_channel(monkeypatch, fake_generate)
+    await channel.methods["tts.synthesize"](
+        object(), "req-tts", {"text": "hello", "voice": "Ethan", "session_id": "sess-1"}, "sess-1"
+    )
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"] == {
+        "success": True,
+        "audio_base64": encoded.decode("ascii"),
+        "audio_mime": "audio/mpeg",
+    }
+    assert seen_kwargs.get("voice") == "Ethan"
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_encodes_raw_audio_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    _set_audio_env(monkeypatch)
+    raw = b"\xff\xfb\x90\x00raw-audio"
+
+    async def fake_generate(messages, **kwargs):
+        return SimpleNamespace(audio_data=raw, audio_url=None, format="wav")
+
+    channel = _make_tts_channel(monkeypatch, fake_generate)
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "hi"}, "sess-1")
+
+    payload = channel.responses[-1]["payload"]
+    assert payload["success"] is True
+    assert base64.b64decode(payload["audio_base64"]) == raw
+    assert payload["audio_mime"] == "audio/wav"
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_downloads_audio_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    _set_audio_env(monkeypatch)
+    downloaded: list[str] = []
+
+    async def fake_download(url):
+        downloaded.append(url)
+        return b"url-audio-bytes"
+
+    monkeypatch.setattr(app_web_handlers, "_tts_download_audio", fake_download)
+
+    async def fake_generate(messages, **kwargs):
+        return SimpleNamespace(
+            audio_data=None, audio_url="https://example.com/a.mp3", format="mp3"
+        )
+
+    channel = _make_tts_channel(monkeypatch, fake_generate)
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "hi"}, "sess-1")
+
+    payload = channel.responses[-1]["payload"]
+    assert downloaded == ["https://example.com/a.mp3"]
+    assert payload["success"] is True
+    assert base64.b64decode(payload["audio_base64"]) == b"url-audio-bytes"
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_stub_provider_returns_success_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_audio_env(monkeypatch)
+
+    async def fake_generate(messages, **kwargs):
+        return None
+
+    channel = _make_tts_channel(monkeypatch, fake_generate)
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "hi"}, "sess-1")
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["success"] is False
+    assert "no audio" in resp["payload"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_tts_synthesize_generation_error_returns_success_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_audio_env(monkeypatch)
+
+    async def fake_generate(messages, **kwargs):
+        raise RuntimeError("provider down")
+
+    channel = _make_tts_channel(monkeypatch, fake_generate)
+    await channel.methods["tts.synthesize"](object(), "req-tts", {"text": "hi"}, "sess-1")
+
+    resp = channel.responses[-1]
+    assert resp["ok"] is True
+    assert resp["payload"]["success"] is False
+    assert "provider down" in resp["payload"]["error"]
+    
+    
 class _McpFakeAgentClient:
     """Minimal agent_client fake: returns a canned AgentResponse."""
 

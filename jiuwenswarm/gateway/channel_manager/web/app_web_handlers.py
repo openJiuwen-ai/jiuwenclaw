@@ -32,7 +32,7 @@ except ImportError:
     _psutil = None  # type: ignore[assignment]
     _HAS_PSUTIL = False
 from openjiuwen.core.common.logging import LogManager
-from openjiuwen.core.foundation.llm import Model, ProviderType
+from openjiuwen.core.foundation.llm import Model, ProviderType, UserMessage
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.utils.provider_utils import is_openai_account_provider
 from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
@@ -630,7 +630,6 @@ _FORWARD_REQ_METHODS = frozenset({
     "chat.resume",
     "chat.user_answer",
     "history.get",
-    # "tts.synthesize",
     "skills.marketplace.list",
     "skills.list",
     "skills.installed",
@@ -2246,6 +2245,38 @@ def _resolve_model_config_obj_for_validate(model_name: str, params: dict[str, An
     if "reasoning_level" in params:
         model_config_obj["reasoning_level"] = params.get("reasoning_level")
     return model_config_obj
+
+
+# ── tts.synthesize constants and helpers ────────────────────
+_TTS_MAX_TEXT_CHARS = 1000
+_TTS_DOWNLOAD_TIMEOUT_SECONDS = 30.0
+_TTS_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+_TTS_MIME_BY_FORMAT = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "pcm": "audio/pcm",
+}
+
+
+def _tts_audio_to_base64(audio_data: bytes) -> str:
+    """The DashScope client stores the API's base64 string utf-8-encoded in bytes;
+    pass through if it decodes as base64 text, otherwise treat as raw audio and encode."""
+    try:
+        base64.b64decode(audio_data, validate=True)
+        return audio_data.decode("ascii")
+    except ValueError:
+        return base64.b64encode(audio_data).decode("ascii")
+
+
+async def _tts_download_audio(url: str) -> bytes:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=_TTS_DOWNLOAD_TIMEOUT_SECONDS) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        if len(resp.content) > _TTS_DOWNLOAD_MAX_BYTES:
+            raise ValueError("audio download exceeds size limit")
+        return resp.content
 
 
 def _register_web_handlers(bind: WebHandlersBindParams) -> None:
@@ -5941,6 +5972,90 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload={"forbidden_formats": forbidden_formats()},
         )
 
+    async def _tts_synthesize(ws, req_id, params, session_id):
+        """Synthesize speech with the configured audio model; return base64 audio per the frontend contract."""
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        text = str(params.get("text") or "").strip()[:_TTS_MAX_TEXT_CHARS]
+        if not text:
+            await channel.send_response(ws, req_id, ok=False, error="text is required", code="BAD_REQUEST")
+            return
+
+        audio_api_base = (os.getenv("AUDIO_API_BASE") or "").strip()
+        audio_api_key = (os.getenv("AUDIO_API_KEY") or "").strip()
+        audio_model = (os.getenv("AUDIO_MODEL_NAME") or "").strip()
+        audio_provider = _normalize_provider_value(os.getenv("AUDIO_PROVIDER") or "")
+        # No audio model configured: return success=False fast; frontend silently falls back to browser TTS
+        if not all([audio_api_base, audio_api_key, audio_model, audio_provider]):
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"success": False, "error": "audio model not configured"},
+            )
+            return
+
+        speech_kwargs = {}
+        voice = params.get("voice")
+        if isinstance(voice, str) and voice.strip():
+            speech_kwargs["voice"] = voice.strip()
+
+        try:
+            llm = Model(
+                model_config=ModelRequestConfig(model_name=audio_model),
+                model_client_config=ModelClientConfig(
+                    client_id="tts-synthesize",
+                    client_provider=audio_provider,
+                    api_key=audio_api_key,
+                    api_base=audio_api_base.rstrip("/"),
+                    timeout=30.0,
+                    max_retries=0,
+                ),
+            )
+            # The DashScope client is a blocking SDK call inside; run on a thread to avoid stalling the event loop
+            resp = await asyncio.to_thread(
+                asyncio.run,
+                llm.generate_speech([UserMessage(content=text)], **speech_kwargs),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[tts.synthesize] speech generation failed: %s", exc)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"success": False, "error": str(exc) or "speech generation failed"},
+            )
+            return
+
+        audio_data = getattr(resp, "audio_data", None)
+        audio_url = getattr(resp, "audio_url", None)
+        if audio_data:
+            audio_base64 = _tts_audio_to_base64(audio_data)
+        elif audio_url:
+            # CosyVoice URLs are short-lived; download server-side and return base64
+            try:
+                audio_base64 = base64.b64encode(await _tts_download_audio(audio_url)).decode("ascii")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[tts.synthesize] audio download failed: %s", exc)
+                await channel.send_response(
+                    ws, req_id, ok=True,
+                    payload={"success": False, "error": str(exc) or "audio download failed"},
+                )
+                return
+        else:
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"success": False, "error": "provider returned no audio"},
+            )
+            return
+
+        audio_format = str(getattr(resp, "format", "") or "").strip().lower()
+        await channel.send_response(
+            ws, req_id, ok=True,
+            payload={
+                "success": True,
+                "audio_base64": audio_base64,
+                "audio_mime": _TTS_MIME_BY_FORMAT.get(audio_format, "audio/mpeg"),
+            },
+        )
+
     async def _chat_resume(ws, req_id, params, session_id):
         await channel.send_response(
             ws,
@@ -7055,6 +7170,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("media.persist", _media_persist)
     channel.register_method("document.persist", _document_persist)
     channel.register_method("document.formats", _document_formats)
+    channel.register_method("tts.synthesize", _tts_synthesize)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
