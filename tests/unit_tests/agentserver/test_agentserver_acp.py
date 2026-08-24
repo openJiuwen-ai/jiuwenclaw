@@ -565,6 +565,43 @@ def test_parse_stream_chunk_unwraps_controller_output_interaction():
     assert parsed["questions"][0]["question"] == "Need details?"
 
 
+def test_deep_adapter_unwraps_task_interaction_controller_output():
+    interaction = {
+        "type": "__interaction__",
+        "payload": {
+            "id": "write-file-approval-1",
+            "value": {
+                "message": "工具 `write_file` 需要授权才能执行",
+                "tool_name": "write_file",
+                "tool_call_id": "write-file-approval-1",
+                "tool_args": {"file_path": "C:/outside/.env.approval-test"},
+            },
+        },
+    }
+    chunk = types.SimpleNamespace(
+        type="controller_output",
+        payload=types.SimpleNamespace(
+            type="task_interaction",
+            data=[
+                {
+                    "type": "json",
+                    "data": {
+                        "result_type": "interrupt",
+                        "state": [interaction],
+                    },
+                }
+            ],
+        ),
+    )
+
+    parsed = interface_deep_module.JiuWenSwarmDeepAdapter._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed["event_type"] == "chat.ask_user_question"
+    assert parsed["request_id"] == "write-file-approval-1"
+    assert parsed["source"] == "permission_interrupt"
+
+
 def test_parse_stream_chunk_prefers_ask_user_when_controller_has_mixed_interactions():
     parsed = parse_stream_chunk(
         types.SimpleNamespace(
