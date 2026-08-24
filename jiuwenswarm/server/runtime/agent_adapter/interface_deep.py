@@ -396,6 +396,7 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     extract_office_claw_mcp,
+    is_asyncio_outer_cancellation,
     list_office_claw_mcp_tools,
     preflight_mcp_server_reachable,
     validate_office_claw_mcp_config,
@@ -3521,6 +3522,14 @@ class JiuWenSwarmDeepAdapter:
                 cfg.server_name, cfg.client_type, cfg.server_path, reason,
             )
             return False
+        # Remote MCP connect failures may surface as CancelledError: anyio
+        # TaskGroup cancel()+uncancel() the host task, and CancelledError is not
+        # an Exception subclass (Python 3.8+), so the bare ``except Exception``
+        # below cannot isolate it. ResourceMgr isolation that keys off
+        # connect_task.cancelled() also fails after uncancel(). Catch
+        # CancelledError here and use cancelling() to tell apart:
+        #   - cancelling()==0 → anyio-internal cancel → skip this server
+        #   - cancelling()>0  → real outer cancel (interrupt / WS drop) → re-raise
         try:
             result = await Runner.resource_mgr.add_mcp_server(cfg, tag=tag)
             ok = True
@@ -3543,6 +3552,17 @@ class JiuWenSwarmDeepAdapter:
                 return True
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] MCP server register failed: %s", cfg.server_name
+            )
+            return False
+        except asyncio.CancelledError:
+            if is_asyncio_outer_cancellation():
+                raise
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] MCP register cancelled (anyio internal), skip: "
+                "name=%s transport=%s path=%s",
+                cfg.server_name,
+                cfg.client_type,
+                cfg.server_path,
             )
             return False
         except Exception as exc:

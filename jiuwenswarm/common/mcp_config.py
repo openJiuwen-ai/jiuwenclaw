@@ -185,6 +185,18 @@ async def preflight_mcp_server_reachable(
     return True, ""
 
 
+def is_asyncio_outer_cancellation() -> bool:
+    """Return True when the current task has a pending outer cancel request.
+
+    Used to distinguish real interrupt / WebSocket disconnect cancels from
+    anyio TaskGroup connect-failure paths that cancel()+uncancel() the host
+    task (leaving ``cancelling()`` at 0 when ``CancelledError`` reaches the
+    caller). Requires Python 3.11+ (``Task.cancelling()``).
+    """
+    current = asyncio.current_task()
+    return bool(current is not None and current.cancelling())
+
+
 def _stable_mcp_server_id(scope: str, name: str, payload: dict[str, Any]) -> str:
     stable_payload = {
         key: value
