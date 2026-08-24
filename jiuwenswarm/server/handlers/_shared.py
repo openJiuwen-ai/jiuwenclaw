@@ -102,6 +102,9 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
     metadata_project_dir = metadata.get("project_dir") if isinstance(metadata, dict) else None
     if isinstance(metadata_project_dir, str) and metadata_project_dir.strip():
         return metadata_project_dir.strip()
+    workspace_dir = params.get("workspace_dir")
+    if isinstance(workspace_dir, str) and workspace_dir.strip():
+        return workspace_dir.strip()
     cwd = params.get("cwd")
     if isinstance(cwd, str) and cwd.strip():
         return cwd.strip()

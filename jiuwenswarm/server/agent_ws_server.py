@@ -102,6 +102,7 @@ from jiuwenswarm.server.handlers._default import (  # noqa: F401  — re-exporte
     _is_explicit_plan_entry_request,
     _is_readonly_goal_get_request,
     _is_stateless_method_request,
+    _prepare_tenant_code_mode_chat_turn,
     _session_mode_sync_lock,
     _should_sync_code_mode_state,
     _uses_tenant_pool,

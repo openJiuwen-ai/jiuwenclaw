@@ -354,7 +354,7 @@ def test_unary_tenant_pool_branch_short_circuits(dp, server, monkeypatch):
     resp = AgentResponse(request_id=req.request_id, channel_id="web", ok=True,
                          payload={"content": "tenant"})
 
-    used = {"pool": False, "prepare": False}
+    used = {"pool": False, "prepare": False, "tenant_prepare": False}
 
     class _Pool:
         async def process_message(self, request):  # noqa: ANN001
@@ -365,14 +365,20 @@ def test_unary_tenant_pool_branch_short_circuits(dp, server, monkeypatch):
         used["prepare"] = True
         return ("agent", None, StubAgent(unary=resp))
 
+    async def _tenant_prepare(*_a, **_k):  # noqa: ANN002
+        used["tenant_prepare"] = True
+        return None
+
     monkeypatch.setattr(dp, "_uses_tenant_pool", lambda _r: True)
     monkeypatch.setattr(server, "_tenant_pool", lambda: _Pool())
     monkeypatch.setattr(dp, "_prepare_code_mode_chat_turn", _prepare)
+    monkeypatch.setattr(dp, "_prepare_tenant_code_mode_chat_turn", _tenant_prepare)
 
     ws = _run_unary(dp, server, req)
 
     assert used["pool"], "应走租户池分支"
-    assert not used["prepare"], "租户池分支不应触发 code-mode 准备"
+    assert used["tenant_prepare"], "chat.send 租户池应先做 code.plan 同步"
+    assert not used["prepare"], "不应再走默认 agent_manager 的 code-mode 准备"
     assert len(ws.sent) == 1
 
 

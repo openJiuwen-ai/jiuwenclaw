@@ -1770,6 +1770,8 @@ async def test_nonstream_structured_goal_never_enters_html_direct_path(monkeypat
 async def test_stream_html_text_in_hitl_resume_goes_to_core_attach_and_send(monkeypatch):
     adapter, instance = _entry_adapter(monkeypatch)
     instance.attach_output.return_value = None
+    reattach = AsyncMock(return_value=None)
+    monkeypatch.setattr(adapter, "_reattach_interrupt_output", reattach)
     html_followup = AsyncMock(
         return_value=RewriteHtmlFollowupResult(
             status="completed",
@@ -1801,6 +1803,7 @@ async def test_stream_html_text_in_hitl_resume_goes_to_core_attach_and_send(monk
     assert chunks[-1].is_complete is True
     html_followup.assert_not_awaited()
     instance.attach_output.assert_awaited_once_with()
+    reattach.assert_awaited_once_with("session-1")
     instance.send_input.assert_awaited_once()
 
 
