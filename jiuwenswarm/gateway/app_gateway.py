@@ -1610,6 +1610,38 @@ async def _run_with_telemetry(
     else:
         third_agent = get_unsupported_third_agent()
 
+    full_cfg: dict[str, Any] = {}
+    heartbeat_cfg: dict | None = None
+    channels_cfg: dict | None = None
+    try:
+        full_cfg = get_config()
+        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
+        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[App] failed to read config.yaml, using defaults: %s", e)
+        heartbeat_cfg = None
+        channels_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    gateway_storage_ctx = None
+    try:
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            is_session_map_repository_enabled,
+            setup_session_map_repository,
+        )
+
+        if is_session_map_repository_enabled(full_cfg):
+            gateway_storage_ctx = await setup_session_map_repository(full_cfg)
+            if gateway_storage_ctx is not None:
+                logger.info("[App] SessionMap wired to PersistentStore repository")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] SessionMap repository setup failed, using legacy storage: %s",
+            exc,
+        )
+        gateway_storage_ctx = None
+
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
         agent_server_url=agent_server_url,
@@ -1634,21 +1666,6 @@ async def _run_with_telemetry(
     message_handler.set_cron_registry(cron_registry)
     # Default-tenant controller for proactive sync / TUI compatibility.
     cron_controller = await cron_registry.get_controller("default", "default")
-
-    full_cfg: dict[str, Any] = {}
-    heartbeat_cfg: dict | None = None
-    channels_cfg: dict | None = None
-    try:
-        full_cfg = get_config()
-        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
-        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
-        heartbeat_cfg = None
-        channels_cfg = None
-
-    # Retain enterprise Redis initialization while tenant config remains tip-scoped.
-    await init_gateway_redis_from_config(dict(full_cfg or {}))
 
     from jiuwenswarm.common.local_env_config import get_local_config
 
@@ -1849,7 +1866,12 @@ async def _run_with_telemetry(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        ws_port=web_port,
+        path=web_path,
+    )
     web_channel = WebChannel(web_config, _DummyBus())
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
@@ -2721,12 +2743,24 @@ async def _run_with_telemetry(
         if web_channel is not None
         else None
     )
+    # Give WebChannel.start() a tick to bind WS + start Web HTTP before logging.
+    if web_task is not None:
+        for _ in range(40):
+            if getattr(web_channel, "web_http_port", None):
+                break
+            await asyncio.sleep(0.05)
+    web_http_port_for_log: int | str = "-"
+    if web_channel is not None:
+        port_val = getattr(web_channel, "web_http_port", None)
+        web_http_port_for_log = port_val if port_val is not None else "-"
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+            "[App] started: Web ws://%s:%s%s  WebHTTP http://%s:%s/api/v1  AgentServer: %s  Press Ctrl+C to exit.",
             web_host,
             web_port,
             web_path,
+            web_host,
+            web_http_port_for_log,
             agent_server_url,
         )
 
@@ -2883,6 +2917,19 @@ async def _run_with_telemetry(
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
+
+        if gateway_storage_ctx is not None:
+            try:
+                from jiuwenswarm.gateway.storage_assembly.setup import (
+                    teardown_session_map_repository,
+                )
+
+                await teardown_session_map_repository(gateway_storage_ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[App] SessionMap repository teardown failed: %s",
+                    exc,
+                )
 
         _cleanup_task.cancel()
         try:

@@ -54,14 +54,20 @@ def _create_persistent(edition: str) -> PersistentStore:
             build_gateway_store_registry(),
         )
 
-    from jiuwenswarm.common.utils import get_config_file, get_user_workspace_dir
+    from jiuwenswarm.common.utils import (
+        get_checkpoint_dir,
+        get_config_file,
+        get_user_workspace_dir,
+    )
 
     persistent_root = get_user_workspace_dir() / "gateway" / "persistent"
     config_file = get_config_file()
+    session_map_file = get_checkpoint_dir() / "session_map.json"
     return FilePersistentBackend(
         registry=build_gateway_store_registry(
             persistent_root=persistent_root,
             config_file=config_file,
+            session_map_file=session_map_file,
         ),
         on_write=_on_config_written,
     )
@@ -116,14 +122,55 @@ def resolve_storage_instance_id(cfg: dict[str, Any] | None = None) -> str:
 
 
 def is_storage_repositories_enabled(cfg: dict[str, Any] | None = None) -> bool:
-    """业务写路径是否已切到 PersistentStore Repository。
+    """业务写路径是否已全部切到 PersistentStore Repository。
 
-    迁移期固定为 ``False``：企业版 / 单机版均继续走旧路径
-    （``config.py`` / LocalSessionStorage / FileCronJobStore / EE DBHandler）。
-    Repository 与 access 适配层可继续开发；启动时不注入，业务接口调用保持原样。
+    除 SessionMap 外仍固定为 ``False``；其它域继续走旧路径
+    （``config.py`` / FileCronJobStore / EE DBHandler 等）。
     """
     _ = cfg
     return False
+
+
+def is_session_map_repository_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    """SessionMap 是否切到 PersistentStore Repository（其它域不受影响）。"""
+    if cfg is None:
+        from jiuwenswarm.common.config import get_config
+
+        cfg = get_config()
+    storage = (cfg.get("gateway") or {}).get("storage") or {}
+    if "session_map_repository" in storage:
+        return bool(storage["session_map_repository"])
+    env = os.getenv("GATEWAY_SESSION_MAP_REPOSITORY", "").strip().lower()
+    if env in ("0", "false", "no", "off"):
+        return False
+    if env in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
+async def setup_session_map_repository(
+    cfg: dict[str, Any] | None = None,
+) -> StorageContext | None:
+    """装配 SessionMap Repository；未启用或失败时返回 ``None``。"""
+    if not is_session_map_repository_enabled(cfg):
+        return None
+    if cfg is None:
+        from jiuwenswarm.common.config import get_config
+
+        cfg = get_config()
+    ctx = create_gateway_storage_context(cfg)
+    store = await ctx.persistent()
+    from jiuwenswarm.gateway.routing.session_map_access import set_session_map_repository
+
+    set_session_map_repository(create_session_map_repository(store))
+    return ctx
+
+
+async def teardown_session_map_repository(ctx: StorageContext) -> None:
+    from jiuwenswarm.gateway.routing.session_map_access import clear_session_map_repository
+
+    clear_session_map_repository()
+    await ctx.shutdown()
 
 
 def create_gateway_storage_context(cfg: dict[str, Any] | None = None) -> StorageContext:
@@ -318,30 +365,30 @@ def create_a2ui_config_repository(
     )
 
 
-def create_config_record_repository(
+def create_enterprise_record_repository(
     store: PersistentStore,
     store_name: str,
     *,
     instance_id: str = "",
 ):
     """企业专属表通用 Repository（仅 DB；不注入则 EE 仍走 DBHandler）。"""
-    from jiuwenswarm.gateway.config.enterprise import ConfigRecordRepository
+    from jiuwenswarm.gateway.config.enterprise import EnterpriseRecordRepository
 
-    return ConfigRecordRepository(
+    return EnterpriseRecordRepository(
         store,
         store_name,
         instance_id=instance_id,
     )
 
 
-def create_enterprise_config_record_repositories(
+def create_enterprise_record_repositories(
     store: PersistentStore,
     *,
     instance_id: str = "",
 ) -> dict[str, Any]:
-    """为全部企业专属 store name 创建 ``ConfigRecordRepository``。
+    """为全部企业专属 store name 创建 ``EnterpriseRecordRepository``。
 
-    返回 ``{store_name: repo}``；迁移期不调用 ``set_config_record_repositories``，
+    返回 ``{store_name: repo}``；迁移期不调用 ``set_enterprise_record_repositories``，
     业务仍走 EE ``DBHandler``。
     """
     from jiuwenswarm.gateway.config.enterprise.catalog import (
@@ -349,7 +396,7 @@ def create_enterprise_config_record_repositories(
     )
 
     return {
-        name: create_config_record_repository(
+        name: create_enterprise_record_repository(
             store, name, instance_id=instance_id
         )
         for name in ENTERPRISE_RECORD_STORE_NAMES
@@ -360,8 +407,8 @@ __all__ = [
     "create_a2ui_config_repository",
     "create_browser_config_repository",
     "create_channel_config_repository",
-    "create_config_record_repository",
-    "create_enterprise_config_record_repositories",
+    "create_enterprise_record_repository",
+    "create_enterprise_record_repositories",
     "create_gateway_storage_context",
     "create_heartbeat_config_repository",
     "create_logging_config_repository",
@@ -369,6 +416,9 @@ __all__ = [
     "create_permissions_config_repository",
     "create_preferred_language_config_repository",
     "create_session_map_repository",
+    "is_session_map_repository_enabled",
     "is_storage_repositories_enabled",
     "resolve_storage_instance_id",
+    "setup_session_map_repository",
+    "teardown_session_map_repository",
 ]

@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.common.e2a.wire_codec import encode_agent_response_for_wire
 from jiuwenswarm.common.log_preview import preview_text
+from jiuwenswarm.common.request_ext import lift_from_metadata, reset_ext
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.common.ws_diagnostics import (
@@ -85,6 +86,7 @@ async def dispatch_parsed_request(
             preview_text(_request_query_text(request)),
         )
 
+    _ext_token = lift_from_metadata(request.metadata)
     try:
         if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
             metadata = dict(request.metadata or {})
@@ -173,3 +175,5 @@ async def dispatch_parsed_request(
                 request.request_id,
                 send_err,
             )
+    finally:
+        reset_ext(_ext_token)
