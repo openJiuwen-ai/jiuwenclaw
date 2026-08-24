@@ -1210,6 +1210,8 @@ class PageWorkerNode(PlanNode):
                 timeout_seconds=8,
             )
         except Exception as exc:
+            if isinstance(exc, AbortError):
+                raise
             logger.warning("[P6.1] WebFetch 批量抓取失败 urls=%s: %s", fetch_urls, exc)
             return []
 
