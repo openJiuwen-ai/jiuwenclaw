@@ -480,7 +480,12 @@ def build_jiuwen_web_search(
     ctx: SwarmBuildContext,
 ) -> list[Any]:
     agent_id, language = _member_web_tool_identity(ctx)
-    tool = JiuwenHarnessWebSearchTool(language=language, agent_id=agent_id)
+    from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
+    tool = JiuwenHarnessWebSearchTool(language=language, agent_id=agent_id, cache=content_cache)
     return [_reuse_registered_tool(tool)]
 
 
@@ -494,7 +499,12 @@ def build_jiuwen_web_fetch(
     ctx: SwarmBuildContext,
 ) -> list[Any]:
     agent_id, language = _member_web_tool_identity(ctx)
-    tool = JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id)
+    from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+        get_agent_cache_registry,
+    )
+
+    content_cache = get_agent_cache_registry().get_cache_sync(agent_id or "default")
+    tool = JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id, cache=content_cache)
     return [_reuse_registered_tool(tool)]
 
 
