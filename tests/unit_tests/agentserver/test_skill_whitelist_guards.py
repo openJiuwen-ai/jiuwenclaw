@@ -282,6 +282,124 @@ def test_db_same_version_with_disk_missing_redownloads(
     assert "cached-skill" in db.rows
 
 
+def test_disk_skill_missing_from_db_reconciled_on_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """盘有库无：sync 时补 SOURCE_USER 账本并进入启用集。"""
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_USER
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import (
+        AgentSkillWhitelistConfig,
+        SkillWhitelistSynchronizer,
+    )
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    orphan = skills_dir / "orphan-skill"
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("---\nname: orphan-skill\n---\n", encoding="utf-8")
+
+    reserved = skills_dir / "_marketplace"
+    reserved.mkdir(parents=True)
+    (reserved / "SKILL.md").write_text("---\nname: marketplace\n---\n", encoding="utf-8")
+
+    db = _FakeSkillDb()
+    _patch_skill_db(monkeypatch, db)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_whitelist.SkillManager",
+        lambda **kwargs: type(
+            "FakeSkillManager",
+            (),
+            {
+                "install_skill_sync": staticmethod(
+                    lambda *_a, **_k: {"ok": False, "detail": "unused"}
+                )
+            },
+        )(),
+    )
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(
+            workspace,
+            service_id="svc",
+            agent_id="bot",
+        ).sync(AgentSkillWhitelistConfig(agent_id="bot", service_id="svc"))
+    )
+
+    assert "orphan-skill" in db.rows
+    assert db.rows["orphan-skill"]["source_type"] == SOURCE_USER
+    assert "_marketplace" not in db.rows
+    assert result.enabled_skill_dirs == ["orphan-skill"]
+    assert "reconciled_disk:orphan-skill" in result.succeeded
+
+
+def test_reconcile_disk_does_not_overwrite_prebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """账本已是 prefbuilt 的技能，盘→库对账不得改成 user。"""
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_PREBUILT
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import SkillWhitelistSynchronizer
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    skill_dir = skills_dir / "prebuilt-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: prebuilt-skill\n---\n", encoding="utf-8")
+
+    db = _FakeSkillDb()
+    db.rows["prebuilt-skill"] = {
+        "skill_name": "prebuilt-skill",
+        "source_type": SOURCE_PREBUILT,
+        "skill_source": "https://example.com/pre.zip",
+        "skill_version": "1.0.0",
+        "skill_id": "pre-1",
+    }
+    _patch_skill_db(monkeypatch, db)
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(
+            workspace,
+            service_id="svc",
+            agent_id="bot",
+        ).reconcile_disk_into_ledger()
+    )
+
+    assert result.ok is True
+    assert db.rows["prebuilt-skill"]["source_type"] == SOURCE_PREBUILT
+    assert result.enabled_skill_dirs == ["prebuilt-skill"]
+    assert not any(s.startswith("reconciled_disk:") for s in result.succeeded)
+
+
+def test_reconcile_disk_into_ledger_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """热刷新路径：只跑盘→库对账，不依赖预制模板。"""
+    from jiuwenswarm.agents.harness.common.installed_skill import SOURCE_USER
+    from jiuwenswarm.server.runtime.skill.skill_whitelist import SkillWhitelistSynchronizer
+
+    workspace = tmp_path / "tenant_ws"
+    skills_dir = workspace / "skills"
+    skill_dir = skills_dir / "disk-only"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: disk-only\n---\n", encoding="utf-8")
+
+    db = _FakeSkillDb()
+    _patch_skill_db(monkeypatch, db)
+
+    result = asyncio.run(
+        SkillWhitelistSynchronizer(
+            workspace,
+            service_id="svc",
+            agent_id="bot",
+        ).reconcile_disk_into_ledger()
+    )
+
+    assert result.ok is True
+    assert db.rows["disk-only"]["source_type"] == SOURCE_USER
+    assert result.enabled_skill_dirs == ["disk-only"]
+    assert "reconciled_disk:disk-only" in result.succeeded
+
+
 def test_multi_tenant_skill_dirs_requires_ids_for_tenant_path() -> None:
     with pytest.raises(TypeError, match="tenant scope is required"):
         get_tenant_agent_skills_dirs()
