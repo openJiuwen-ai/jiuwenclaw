@@ -12,7 +12,6 @@ import asyncio
 import inspect
 import json
 import logging
-import os
 import secrets
 import time
 import uuid
@@ -20,10 +19,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-import aiohttp
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
-from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.gateway.channel_manager.base import ChannelMetadata, RobotMessageRouter, ConnectHook
 from jiuwenswarm.gateway.routing.base_ws_channel import BaseWsChannel
 from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
@@ -67,6 +64,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "context.compression_state",
         "chat.ask_user_question",
         "chat.subtask_update",
+        "chat.subagent_activity",
         "chat.symphony_status",
         "chat.notice",
         "history.message",
@@ -130,9 +128,11 @@ class WebChannel(BaseWsChannel):
     name = "web"
     channel_id = "web"
 
-    def __init__(self, config: WebChannelConfig, router: RobotMessageRouter):
+    def __init__(self, config: WebChannelConfig, router: RobotMessageRouter, agent_client: Any = None):
         super().__init__(config, router)
         self.config: WebChannelConfig = config
+        # Phase 2：注入 AgentServerClient，供 _process_files 文件导入 E2A 转发使用
+        self.agent_client: Any = agent_client
         self._server: Any = None
         self._uvicorn_server: Any = None
         self._on_message_cb: Callable[[Message], Any] | None = None
@@ -487,50 +487,81 @@ class WebChannel(BaseWsChannel):
             clients = {c for c in clients if c is not exclude_ws}
         await self._broadcast_to(frame, clients)
 
-    async def _download_file(self, url: str) -> bytes | None:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        logger.warning("WebChannel 文件下载失败: %s, 状态码: %s", url, response.status)
-                        return None
-        except Exception as e:
-            logger.warning("WebChannel 文件下载异常: %s, 错误: %s", url, e)
-            return None
+    async def _process_files(
+        self,
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        req_id: str = "",
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """chat.send 上行文件处理（Phase 2：不再 Gateway 下载/落盘）。
 
-    async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
+        把 ``files`` 中的外部 ``url`` 列表经 E2A ``FILE_IMPORT_URL`` 交给目标
+        AgentServer 下载落盘至其注入目录，返回带本地 ``path`` 的元数据供后续
+        CHAT_SEND 链路消费。Gateway 全程不接触文件内容（方案 §10.5 传输取舍）。
+        AgentServer 不可达时保留原样并记日志（不可达由下游链路返回可重试错误）。
+        """
         files = params.get("files")
         if not files or not isinstance(files, list):
             return params
 
-        downloaded_files = []
-        workspace_dir = str(get_agent_workspace_dir())
+        url_files = [
+            file_info
+            for file_info in files
+            if isinstance(file_info, dict) and (file_info.get("url") or file_info.get("uri"))
+        ]
+        if not url_files:
+            return params
 
-        for file_info in files:
-            if not isinstance(file_info, dict):
-                downloaded_files.append(file_info)
-                continue
+        ac = getattr(self, "agent_client", None)
+        if ac is None:
+            logger.warning("[WebChannel] 文件导入跳过：AgentServer 不可用")
+            return params
 
-            file_url = file_info.get("url") or file_info.get("uri") or ""
-            file_name = file_info.get("name") or file_info.get("filename") or "unknown_file"
+        from jiuwenswarm.gateway.routing.e2a_proxy import (
+            fetch_agent_unary,
+            is_agentos_routing_client,
+        )
 
-            if file_url:
-                file_content = await self._download_file(file_url)
-                if file_content:
-                    try:
-                        os.makedirs(workspace_dir, exist_ok=True)
-                        file_path = os.path.join(workspace_dir, file_name)
-                        with open(file_path, "wb") as f:
-                            f.write(file_content)
-                        file_info["path"] = file_path
-                    except Exception as e:
-                        logger.warning("WebChannel 文件保存失败: %s", e)
-
-            downloaded_files.append(file_info)
-
-        params["files"] = downloaded_files
+        ok, payload = await fetch_agent_unary(
+            agent_client=ac,
+            req_method=ReqMethod.FILE_IMPORT_URL,
+            # Retain the historic overwrite semantics in the shared-directory
+            # single-user deployment.  Per-user AgentOS directories keep
+            # collision-safe names so independent uploads never overwrite a
+            # user artifact.
+            params={
+                "files": url_files,
+                "overwrite": not is_agentos_routing_client(ac),
+            },
+            session_id=session_id,
+            user_id=user_id or None,
+            channel_id=self.channel_id,
+            label="file.import_url",
+        )
+        if not ok:
+            logger.warning(
+                "[WebChannel] 文件导入失败，保留原 files: %s",
+                payload.get("error") or "forward failed",
+            )
+            return params
+        imported = payload.get("files")
+        if isinstance(imported, list):
+            # 按原 files 顺序合并：导入成功项替换为带 path 的元数据
+            imported_by_url = {
+                str(item.get("url") or item.get("uri") or ""): item
+                for item in imported
+                if isinstance(item, dict) and (item.get("path") or item.get("error"))
+            }
+            merged = []
+            for file_info in files:
+                if isinstance(file_info, dict):
+                    key = str(file_info.get("url") or file_info.get("uri") or "")
+                    merged.append(imported_by_url.get(key, file_info))
+                else:
+                    merged.append(file_info)
+            params["files"] = merged
         return params
 
     # ── Channel 生命周期 ──────────────────────────────────
@@ -779,17 +810,21 @@ class WebChannel(BaseWsChannel):
             )
             return
 
-        # ── 定时任务推 web：原设计绑定 job.session_id，但关闭 tab/换设备后旧会话再无连接，
-        # 按 session_id 路由会被丢弃。cron 推送（占位 + 结果）带 payload.cron 标记，普通对话
-        # chat.final 不带，以此为识别条件广播给所有 web 客户端。前端 _push_to_targets 已对 web
-        # 置空 session_id，shouldHandleSessionEvent 放行，消息进当前活跃会话流（含 placeholder 替换）。
+        # ── 定时任务推 web：不绑定旧 session_id，以支持关闭 tab/换设备；但在
+        # AgentOS 下必须按 job.user_id 限定接收者。空 user_id 是历史单用户任务，
+        # 仍保持原有广播行为。
         if (
             msg.event_type == EventType.CHAT_FINAL
             and isinstance(msg.payload, dict)
             and isinstance(msg.payload.get("cron"), dict)
         ):
             frame = self._serialize_frame(msg, None)  # 返回 dict，由 writer 统一序列化
-            clients = self.clients
+            cron_user_id = str(msg.payload.get("user_id") or "").strip()
+            clients = (
+                [ws for ws in self.clients if self.connection_user_id(ws) == cron_user_id]
+                if cron_user_id
+                else self.clients
+            )
             for w in clients:
                 self._enqueue_send(w, frame)
             logger.debug(
@@ -1317,7 +1352,12 @@ class WebChannel(BaseWsChannel):
                 self._ws_sessions[ws_id] = sessions
             sessions.add(session_id)
 
-        params = await self._process_files(params)
+        params = await self._process_files(
+            params,
+            session_id=session_id,
+            req_id=req_id if isinstance(req_id, str) else "",
+            user_id=self._connection_user_id(ws),
+        )
 
         # ── V2: 用实际的 session_id / mode / agent_id 更新 ws 注册 ──
         _flat_query = {k: (v[0] if v else "") for k, v in query.items()}

@@ -41,7 +41,7 @@ EXTERNAL_TRANSPORT_CONFIG_PATH = ("modes", "team", "jiuwen_team", "external_tran
 _ALLOWED_EXTERNAL_CLI_AGENTS = {"claude", "codex"}
 # Keep progressive tool search enabled by default for existing user workspaces
 # whose config.yaml predates this switch.
-DEFAULT_PROGRESSIVE_TOOL_ENABLED = True
+DEFAULT_PROGRESSIVE_TOOL_ENABLED = False
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
 if _user_config:
@@ -299,6 +299,14 @@ def get_skill_evolution_enabled(config: dict[str, Any] | None) -> bool:
     return _get_evolution_config(config).get("skill_evolution") is True
 
 
+def is_subagent_runtime_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return ``react.subagent_runtime.enabled`` for persistent subagent tools."""
+    cfg = config or get_config()
+    react = cfg.get("react") if isinstance(cfg, dict) else None
+    runtime_cfg = react.get("subagent_runtime") if isinstance(react, dict) else None
+    return bool(runtime_cfg.get("enabled")) if isinstance(runtime_cfg, dict) else False
+
+
 def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether the ProgressiveToolRail is enabled for an agent.
 
@@ -315,6 +323,16 @@ def get_progressive_tool_enabled(config: dict[str, Any] | None = None) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
     return bool(value)
+
+
+def get_evolution_review_feedback_min_confidence(config: dict[str, Any] | None) -> float:
+    """Return the minimum confidence required for reviewer-driven evolution."""
+
+    raw = _get_evolution_config(config).get("review_feedback_min_confidence", 0.7)
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.7
 
 
 def get_evolution_auto_save_enabled(config: dict[str, Any] | None = None) -> bool:

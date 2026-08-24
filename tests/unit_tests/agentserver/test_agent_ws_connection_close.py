@@ -14,7 +14,8 @@ from jiuwenswarm.common.e2a.wire_codec import parse_agent_server_wire_unary
 from jiuwenswarm.common.schema.agent import AgentResponse
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
-from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+from jiuwenswarm.server.agent_ws_server import AdapterRegistry, AgentWebSocketServer
+from jiuwenswarm.agents.harness.common.tools.cron import cron_tools
 
 
 class FakeWebSocket:
@@ -33,6 +34,11 @@ class ClosedFakeWebSocket:
 
 
 class _AgentWsTestHarness(AgentWebSocketServer):
+    # 测试实例常用 __new__ 绕过 __init__（不会执行 AgentWebSocketServer.__init__
+    # 里的注册表初始化）；提供空注册表，保证 _handle_message 的 Phase 1 适配器
+    # 注册表查找可用，未被注册的 method 继续走既有 if/elif 链。
+    _adapter_registry = AdapterRegistry()
+
     async def handle_message_for_test(self, ws, raw: str, send_lock: asyncio.Lock) -> None:
         await self._handle_message(ws, raw, send_lock)
 
@@ -144,7 +150,10 @@ async def test_handle_message_treats_no_close_frame_as_disconnect(caplog) -> Non
         timestamp=0.0,
     )
     try:
-        await ClosedDuringUnaryServer().handle_message_for_test(
+        # 用 __new__ 绕过 __init__：真实 __init__ 会注册 ConfigAdapter 接管
+        # config.get，导致请求走适配器路径、不再触发 _handle_unary 的关闭帧场景；
+        # 空注册表下 CONFIG_GET 落到 _handle_unary（本类覆写为抛 ConnectionClosedError）。
+        await ClosedDuringUnaryServer.__new__(ClosedDuringUnaryServer).handle_message_for_test(
             FakeWebSocket(),
             json.dumps(env.to_dict(), ensure_ascii=False),
             asyncio.Lock(),
@@ -183,6 +192,87 @@ async def test_handle_message_reports_json_error_when_peer_is_open() -> None:
     )
 
     assert ws.sent[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_dispatches_registered_gateway_adapter() -> None:
+    """Migrated project RPCs must not fall through to generic chat handling."""
+    class ProjectListAdapter:
+        methods = frozenset({ReqMethod.PROJECT_LIST.value})
+
+        async def handle(self, request):
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"projects": [{"project_id": "historical-project"}]},
+            )
+
+    registry = AdapterRegistry()
+    registry.register(ProjectListAdapter())
+    server = _AgentWsTestHarness.__new__(_AgentWsTestHarness)
+    server._adapter_registry = registry
+    ws = FakeWebSocket()
+    env = e2a_from_agent_fields(
+        request_id="req-project-list",
+        channel_id="web",
+        session_id="startup",
+        req_method=ReqMethod.PROJECT_LIST,
+        params={"filter": "all"},
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    await server.handle_message_for_test(
+        ws, json.dumps(env.to_dict(), ensure_ascii=False), asyncio.Lock()
+    )
+
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is True
+    assert response.payload == {"projects": [{"project_id": "historical-project"}]}
+
+
+@pytest.mark.asyncio
+async def test_handle_message_resolves_gateway_cron_command_ack(monkeypatch) -> None:
+    """Cron callbacks must not fall through to an ordinary chat turn."""
+    resolved: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        cron_tools,
+        "resolve_gateway_cron_command_ack",
+        lambda command_id, result: resolved.append((command_id, result)),
+    )
+    ws = FakeWebSocket()
+    env = e2a_from_agent_fields(
+        request_id="cron-command-ack-command-1",
+        channel_id="web",
+        req_method=ReqMethod.CRON_COMMAND_ACK,
+        params={"command_id": "command-1", "data": {"job_id": "job-1"}},
+        is_stream=False,
+        timestamp=0.0,
+    )
+
+    await _AgentWsTestHarness.__new__(_AgentWsTestHarness).handle_message_for_test(
+        ws, json.dumps(env.to_dict(), ensure_ascii=False), asyncio.Lock()
+    )
+
+    assert resolved == [("command-1", {"data": {"job_id": "job-1"}})]
+    response = parse_agent_server_wire_unary(ws.sent[0])
+    assert response.ok is True
+    assert response.payload == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_send_push_returns_true_after_writing_to_gateway() -> None:
+    server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._current_ws = FakeWebSocket()
+    server._current_send_lock = asyncio.Lock()
+
+    delivered = await server.send_push(
+        {"request_id": "cron-request", "channel_id": "web", "response_kind": "cron"}
+    )
+
+    assert delivered is True
+    assert len(server._current_ws.sent) == 1
 
 
 @pytest.mark.asyncio

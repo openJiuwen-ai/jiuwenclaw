@@ -48,7 +48,7 @@ class TestPrepareWorkspaceAndMarketplace:
         built_in = kind_root / "built_in" / "kept"
         built_in.mkdir(parents=True)
         (built_in / "manifest.json").write_text(
-            json.dumps({"packageType": "agent_template"}), encoding="utf-8"
+            json.dumps({"package_type": "agent_template"}), encoding="utf-8"
         )
         marker = built_in / "_keep.txt"
         marker.write_text("keep", encoding="utf-8")
@@ -58,7 +58,7 @@ class TestPrepareWorkspaceAndMarketplace:
         local = kind_root / "local" / "mine"
         local.mkdir(parents=True)
         (local / "manifest.json").write_text(
-            json.dumps({"packageType": "agent_template"}), encoding="utf-8"
+            json.dumps({"package_type": "agent_template"}), encoding="utf-8"
         )
         (kind_root / "marketplace.json").write_text(
             json.dumps({"plugins": [{"id": "kept", "installed": True}]}),
@@ -165,12 +165,23 @@ class TestCreateInstallUninstall:
         assert not (extension_workspace / "plugins" / kind / "built_in" / "mine").exists()
         manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
         if kind == AGENT_TEMPLATES:
-            assert manifest["packageType"] == "agent_template"
+            from openjiuwen.harness.resources import load_agent_template_package
+
+            assert manifest["package_type"] == "agent_template"
             assert "persona" in manifest
+            assert manifest["name"] == "N"
+            assert manifest["description"] == "D"
+            assert "agentCard" not in manifest
+            template = load_agent_template_package(pkg / "manifest.json")
+            assert template.agent_card.name == "N"
         else:
-            assert manifest["packageType"] == "plugin"
+            from openjiuwen.harness.resources import load_plugin_package
+
+            assert manifest["package_type"] == "plugin"
             assert "persona" not in manifest
             assert "agentCard" not in manifest
+            plugin = load_plugin_package(pkg / "manifest.json")
+            assert plugin.id == "mine"
         entry = next(e for e in marketplace_entries(kind) if e["id"] == "mine")
         assert entry["installed"] is False
         assert entry["source"] == "local"
@@ -325,7 +336,7 @@ class TestInstallPendingConnectorsGate:
         manifest.write_text(
             json.dumps(
                 {
-                    "packageType": "agent_template",
+                    "package_type": "agent_template",
                     "mcps": [{"connector": "feishu"}],
                 }
             ),

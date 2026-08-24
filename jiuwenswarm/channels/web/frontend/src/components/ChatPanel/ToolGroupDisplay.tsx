@@ -58,6 +58,9 @@ export function isToolResultSuccessful(result?: ToolExecution['result']) {
   if (!result) {
     return false;
   }
+  if (result.pending) {
+    return false;
+  }
   if (result.timedOut) {
     return false;
   }
@@ -68,6 +71,9 @@ export function isToolResultSuccessful(result?: ToolExecution['result']) {
 export function isToolExecutionFailed(execution: ToolExecution): boolean {
   if (execution.status === 'error' || execution.status === 'timeout') {
     return true;
+  }
+  if (execution.result?.pending) {
+    return false;
   }
   if (execution.result && !isToolResultSuccessful(execution.result)) {
     return true;
@@ -153,8 +159,9 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const { t } = useTranslation();
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout' || Boolean(result?.timedOut);
+  const isPending = Boolean(result?.pending);
   const failed = isToolExecutionFailed(execution);
-  const resultSuccess = Boolean(result) && !failed;
+  const resultSuccess = Boolean(result) && !failed && !isPending;
   const hasArguments = Object.keys(toolCall.arguments).length > 0;
   const toolNameLabel = toolCall.name?.trim() || result?.toolName || 'tool';
 
@@ -195,6 +202,11 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
                 )}
               >
                 {isTimeout ? t('chatUi.toolResult.timeout') : t('chatUi.toolResult.failed')}
+              </span>
+            )}
+            {isPending && (
+              <span className="tool-tree-item__detail-badge is-pending">
+                {t('chatUi.toolResult.pending')}
               </span>
             )}
             {resultSuccess && (
@@ -246,6 +258,9 @@ function isDisplayRunning(execution: ToolExecution): boolean {
     execution.status === 'timeout'
   ) {
     return false;
+  }
+  if (execution.result?.pending) {
+    return true;
   }
   if (execution.result) {
     return false;

@@ -7,8 +7,7 @@
 
 协议：
 - 令牌格式: Base64URL(payload_json) + "." + Hex(HMAC-SHA256)
-- 普通下载 payload: path, exp, sid
-- Skill 正文图片 payload: purpose=skill_content_image, name, version, relative_path, exp, sid（无 path）
+- payload 包含: path, exp, session_id
 - 密钥来源: 环境变量 JIUWENSWARM_FILE_DOWNLOAD_SECRET 或自动生成并写入共享文件
 """
 
@@ -24,13 +23,16 @@ import secrets
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_EXPIRES_SECONDS = 600
 _SECRET_ENV_KEY = "JIUWENSWARM_FILE_DOWNLOAD_SECRET"
 _SECRET_FILE_NAME = ".file_download_secret"
-
+_DOWNLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_DOWNLOAD_HTTP_BASE"
+_UPLOAD_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_UPLOAD_HTTP_BASE"
+_LEGACY_HTTP_BASE_ENV_KEY = "JIUWENSWARM_AGENT_HTTP_BASE"
 PURPOSE_SKILL_CONTENT_IMAGE = "skill_content_image"
 
 
@@ -90,14 +92,8 @@ class WebFileDownloadManager:
 
     def _sign_payload(self, payload: dict[str, Any]) -> str:
         payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-        payload_b64 = base64.urlsafe_b64encode(
-            payload_json.encode("utf-8")
-        ).decode("ascii")
-        signature = hmac.new(
-            self._secret.encode("utf-8"),
-            payload_b64.encode("ascii"),
-            hashlib.sha256,
-        ).hexdigest()
+        payload_b64 = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii")
+        signature = hmac.new(self._secret.encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
         return f"{payload_b64}.{signature}"
 
     def generate_token(
@@ -105,55 +101,40 @@ class WebFileDownloadManager:
         file_path: str,
         session_id: str = "",
         expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+        *,
+        agent_http_base: str | None = None,
+        agent_http_base_key: str = "",
     ) -> str:
         payload = {
             "path": file_path,
             "exp": int(time.time()) + expires_in,
             "sid": session_id,
         }
+        # AgentOS 下 token 由目标 AgentServer 签发。将部署注入的、可访问该
+        # sandbox 的 HTTP bridge 基址随 token 返回，使独立运行的 Web 静态进程
+        # 不必持有用户态目录或 AgentOS Router 对象也能代理到正确用户。
+        base = str(agent_http_base or "").strip()
+        if base and agent_http_base_key:
+            payload[agent_http_base_key] = base.rstrip("/")
         return self._sign_payload(payload)
 
     def generate_skill_content_image_token(
-        self,
-        *,
-        name: str,
-        version: str | None,
-        relative_path: str,
-        session_id: str,
-        expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+        self, *, name: str, version: str | None, relative_path: str,
+        session_id: str, expires_in: int = _DEFAULT_EXPIRES_SECONDS,
     ) -> str:
-        """签发正文图片预览 token（不携带服务端绝对路径）."""
         sid = str(session_id or "").strip()
-        if not sid:
-            raise ValueError("skill_content_image token 需要非空 session_id")
         skill_name = str(name or "").strip()
         rel = str(relative_path or "").strip().replace("\\", "/")
-        if not skill_name or not rel:
-            raise ValueError("skill_content_image token 需要 name 与 relative_path")
-        payload: dict[str, Any] = {
-            "purpose": PURPOSE_SKILL_CONTENT_IMAGE,
-            "name": skill_name,
+        if not sid or not skill_name or not rel:
+            raise ValueError("skill_content_image token requires session_id, name and relative_path")
+        return self._sign_payload({
+            "purpose": PURPOSE_SKILL_CONTENT_IMAGE, "name": skill_name,
             "version": version if version is None else str(version).strip() or None,
-            "relative_path": rel,
-            "exp": int(time.time()) + expires_in,
-            "sid": sid,
-        }
-        return self._sign_payload(payload)
+            "relative_path": rel, "exp": int(time.time()) + expires_in, "sid": sid,
+        })
 
-    def validate_token(
-        self,
-        token: str,
-        *,
-        session_id: str | None = None,
-        check_expiry: bool = True,
-    ) -> dict[str, Any] | None:
-        """校验下载令牌。
-
-        Args:
-            token: HMAC 签名令牌。
-            session_id: 若提供非空字符串，则要求 payload.sid 与之相等。
-            check_expiry: 是否校验 ``exp`` 过期时间（默认开启）。
-        """
+    def validate_token(self, token: str, *, session_id: str | None = None,
+                       check_expiry: bool = True) -> dict[str, Any] | None:
         try:
             parts = token.split(".")
             if len(parts) != 2:
@@ -172,17 +153,11 @@ class WebFileDownloadManager:
             if not isinstance(payload, dict):
                 return None
             if check_expiry:
-                # 兼容历史令牌：无 exp 字段时不强制过期；有 exp 则严格校验
                 exp = payload.get("exp")
-                if exp is not None and (
-                    not isinstance(exp, (int, float)) or int(exp) < int(time.time())
-                ):
-                    logger.warning("[WebFileDownload] 令牌已过期")
+                if exp is not None and (not isinstance(exp, (int, float)) or int(exp) < int(time.time())):
                     return None
             if session_id is not None and str(session_id).strip():
-                token_sid = str(payload.get("sid") or "").strip()
-                if token_sid != str(session_id).strip():
-                    logger.warning("[WebFileDownload] 令牌会话不匹配")
+                if str(payload.get("sid") or "").strip() != str(session_id).strip():
                     return None
             return payload
         except Exception:
@@ -190,8 +165,12 @@ class WebFileDownloadManager:
             return None
 
     @staticmethod
-    def generate_download_url(token: str) -> str:
-        return f"/file-api/download?token={token}"
+    def generate_download_url(token: str, user_id: str = "") -> str:
+        query: dict[str, str] = {"token": token}
+        normalized_user_id = str(user_id or "").strip()
+        if normalized_user_id:
+            query["user_id"] = normalized_user_id
+        return f"/file-api/download?{urlencode(query)}"
 
 
 def generate_file_download_token(
@@ -200,37 +179,110 @@ def generate_file_download_token(
     expires_in: int = _DEFAULT_EXPIRES_SECONDS,
 ) -> str:
     return WebFileDownloadManager.get_instance().generate_token(
-        file_path, session_id, expires_in
+        file_path,
+        session_id,
+        expires_in,
+        agent_http_base=(
+            os.getenv(_DOWNLOAD_HTTP_BASE_ENV_KEY)
+            or os.getenv(_LEGACY_HTTP_BASE_ENV_KEY)
+        ),
+        agent_http_base_key="download_http_base",
     )
 
 
 def generate_skill_content_image_token(
-    *,
-    name: str,
-    version: str | None,
-    relative_path: str,
-    session_id: str,
+    *, name: str, version: str | None, relative_path: str, session_id: str,
     expires_in: int = _DEFAULT_EXPIRES_SECONDS,
 ) -> str:
     return WebFileDownloadManager.get_instance().generate_skill_content_image_token(
-        name=name,
-        version=version,
-        relative_path=relative_path,
-        session_id=session_id,
-        expires_in=expires_in,
+        name=name, version=version, relative_path=relative_path,
+        session_id=session_id, expires_in=expires_in,
+    )
+
+
+def _resolve_user_dirs() -> list[Path]:
+    """返回用户态业务目录根（注入目录 workspace / sessions / agent workspace + 项目目录）。
+
+    项目目录（``project_store``）可位于注入目录之外（如 code 模式下用户自选的工作目录），
+    ``send_file`` 等工具会把项目目录内的文件作为下载目标；若仅按注入目录三个根校验，
+    会误拒绝这些合法下载。故把已登记项目（含隐藏）的 ``project_dir`` 一并纳入边界。
+    """
+    from jiuwenswarm.common.utils import (
+        get_agent_sessions_dir,
+        get_agent_workspace_dir,
+        get_user_workspace_dir,
+    )
+
+    roots: list[Path] = []
+    for factory in (get_user_workspace_dir, get_agent_sessions_dir, get_agent_workspace_dir):
+        try:
+            root = Path(factory()).resolve(strict=False)
+        except Exception:  # noqa: BLE001
+            continue
+        roots.append(root)
+
+    # 已登记项目目录同样属于合法下载边界。project_store 依赖注入目录内的
+    # projects.json，读盘失败/尚未初始化时仅影响项目目录回退，不影响上面的三根。
+    try:
+        from jiuwenswarm.server.runtime.session import project_store
+
+        for project in project_store.list_projects(include_hidden=True):
+            project_dir = str(project.project_dir or "").strip()
+            if not project_dir:
+                continue
+            try:
+                roots.append(Path(project_dir).resolve(strict=False))
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return roots
+
+
+def is_path_within_user_dirs(path_str: str) -> bool:
+    """判断路径是否位于用户态业务目录内（Phase 2 下载/上传边界校验）。
+
+    下载与上传端点只允许访问注入目录内的用户数据；越界路径一律拒绝。
+    """
+    if not path_str or not str(path_str).strip():
+        return False
+    try:
+        candidate = Path(str(path_str)).resolve(strict=False)
+    except OSError:
+        return False
+    for root in _resolve_user_dirs():
+        if candidate == root or root in candidate.parents:
+            return True
+    return False
+
+
+def generate_file_upload_token(
+    target_rel_path: str,
+    session_id: str = "",
+    expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+) -> str:
+    """生成文件上传令牌（Phase 2 HTTP bridge 上传端点）。
+
+    payload 的 ``path`` 为**相对用户目录根**（``get_user_workspace_dir()``）
+    的目标路径（如 ``agent/workspace/upload.txt`` / ``agent/sessions/<sid>/uploads/x.png``）；
+    上传端点校验令牌后按相对路径落盘注入目录，并做目录边界校验。
+    """
+    return WebFileDownloadManager.get_instance().generate_token(
+        str(target_rel_path),
+        session_id,
+        expires_in,
+        # Uploads use a dedicated listener (normally WS port + 1).  The
+        # download/WS base must never be embedded as an upload target.
+        agent_http_base=os.getenv(_UPLOAD_HTTP_BASE_ENV_KEY),
+        agent_http_base_key="upload_http_base",
     )
 
 
 def validate_file_download_token(
-    token: str,
-    *,
-    session_id: str | None = None,
-    check_expiry: bool = True,
+    token: str, *, session_id: str | None = None, check_expiry: bool = True,
 ) -> dict[str, Any] | None:
     return WebFileDownloadManager.get_instance().validate_token(
-        token,
-        session_id=session_id,
-        check_expiry=check_expiry,
+        token, session_id=session_id, check_expiry=check_expiry,
     )
 
 
@@ -239,9 +291,10 @@ def build_file_download_info(
     file_name: str,
     session_id: str = "",
     expires_in: int = _DEFAULT_EXPIRES_SECONDS,
+    user_id: str = "",
 ) -> dict[str, Any]:
     token = generate_file_download_token(file_path, session_id, expires_in)
-    download_url = WebFileDownloadManager.get_instance().generate_download_url(token)
+    download_url = WebFileDownloadManager.get_instance().generate_download_url(token, user_id)
 
     file_size = 0
     mime_type = "application/octet-stream"

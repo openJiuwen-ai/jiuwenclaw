@@ -20,7 +20,7 @@ class _FakeResourceMgr:
     def get_tool(self, tool_id: str) -> object | None:
         return self._tools.get(tool_id)
 
-    def add_tool(self, tool: object) -> None:
+    def add_tool(self, tool: object, **_kwargs) -> None:
         self._tools[tool.card.id] = tool
 
 
@@ -33,7 +33,7 @@ def test_code_adapter_builds_acp_chat_when_profile_configured(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        "jiuwenswarm.common.tool_ownership.Runner",
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 
@@ -51,7 +51,7 @@ def test_code_adapter_skips_acp_chat_without_profiles(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "jiuwenswarm.server.runtime.agent_adapter.interface_code.Runner",
+        "jiuwenswarm.common.tool_ownership.Runner",
         SimpleNamespace(resource_mgr=_FakeResourceMgr()),
     )
 

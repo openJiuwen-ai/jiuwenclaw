@@ -39,13 +39,13 @@ def point_resources_shelf(
         pkg = root / AGENT_TEMPLATES / name
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "manifest.json").write_text(
-            json.dumps({"packageType": "agent_template"}), encoding="utf-8"
+            json.dumps({"package_type": "agent_template"}), encoding="utf-8"
         )
     for name in plugins or []:
         pkg = root / PLUGIN_PACKAGES / name
         pkg.mkdir(parents=True, exist_ok=True)
         (pkg / "manifest.json").write_text(
-            json.dumps({"packageType": "plugin"}), encoding="utf-8"
+            json.dumps({"package_type": "plugin"}), encoding="utf-8"
         )
     at = root / AGENT_TEMPLATES
     pp = root / PLUGIN_PACKAGES
@@ -76,7 +76,7 @@ def seed_package(
     package_type = "agent_template" if kind == AGENT_TEMPLATES else "plugin"
     pkg = ws / "plugins" / kind / under / package_id
     pkg.mkdir(parents=True, exist_ok=True)
-    manifest: dict = {"packageType": package_type}
+    manifest: dict = {"package_type": package_type}
     if extra_manifest:
         manifest.update(extra_manifest)
     if connectors:

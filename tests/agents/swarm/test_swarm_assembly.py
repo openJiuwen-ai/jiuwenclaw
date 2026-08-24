@@ -209,10 +209,14 @@ class _FakeEvolutionRail:
         self.args = args
         self.kwargs = kwargs
         self.swarm_context = {}
+        self.review_feedback_config = None
         self.approval_submission_service = object()
 
     def bind_swarm_context(self, **kwargs) -> None:
         self.swarm_context.update(kwargs)
+
+    def configure_review_feedback_evolution(self, **kwargs) -> None:
+        self.review_feedback_config = kwargs
 
 
 class _FakeMemberSkillEvolutionRail(_FakeEvolutionRail):
@@ -846,6 +850,7 @@ def test_enrich_team_spec_for_swarm_has_no_deep_agent_param() -> None:
         "project_dir",
         "trusted_dirs",
         "request_id",
+        "user_id",
         "channel_id",
         "request_metadata",
         "agent_group_name",
@@ -1636,12 +1641,16 @@ def test_team_skill_evolution_provider_passes_review_runtime(
     assert rail.kwargs["signal_trigger"] is False
     assert rail.kwargs["auto_save"] is auto_save
     assert rail.kwargs["review_trigger"] is True
+    assert rail.review_feedback_config["session_id"] == "sess"
+    assert rail.review_feedback_config["team_id"] == "t"
+    assert rail.review_feedback_config["min_confidence"] == 0.7
 
 
 def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    create_rail = object()
 
     class _FakeManager:
         @staticmethod
@@ -1651,6 +1660,11 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         @staticmethod
         def register_team_skill_rail(session_id, rail) -> None:
             calls.append(f"skill:{session_id}")
+
+        @staticmethod
+        def get_team_skill_create_rail(session_id):
+            calls.append(f"create:{session_id}")
+            return create_rail
 
         @staticmethod
         def consume_team_evolution_watcher_deferred(session_id) -> bool:
@@ -1680,12 +1694,13 @@ def test_swarm_team_skill_evolution_registration_retries_deferred_watcher(
         team_id="team-1",
         config={},
     )
-
     rail.init(SimpleNamespace(card=SimpleNamespace(name="leader")))
 
+    assert rail._review_feedback_skill_create_rail is create_rail
     assert calls == [
         "live:sess-1",
         "skill:sess-1",
+        "create:sess-1",
         "consume:sess-1",
         "watcher:web:sess-1:rail_registered",
     ]
@@ -1799,6 +1814,9 @@ def test_team_skill_create_rail_registers_full_workspace(
     assert rail is not None
 
     captured: dict[str, object] = {}
+    team_rail = SimpleNamespace(
+        bind_review_feedback_skill_create_rail=MagicMock(),
+    )
 
     class _RecorderTeamManager:
         def register_team_live_rail(self, session_id, agent, registered_rail) -> None:
@@ -1806,6 +1824,9 @@ def test_team_skill_create_rail_registers_full_workspace(
 
         def register_team_skill_create_rail(self, session_id, registered_rail) -> None:
             captured["create_rail"] = (session_id, registered_rail)
+
+        def get_team_skill_rail(self, session_id):
+            return team_rail
 
         def get_team_rail_context(self, session_id):
             return None
@@ -1824,6 +1845,7 @@ def test_team_skill_create_rail_registers_full_workspace(
     )
     rail.init(fake_agent)
 
+    team_rail.bind_review_feedback_skill_create_rail.assert_called_once_with(rail)
     workspace = captured["rail_context"].team_workspace
     assert workspace.root_dir == "/tmp/team-x"
     # The team owns no skills/ directory: the library is the global one.
@@ -1950,6 +1972,21 @@ def test_normal_team_plan_leader_uses_deepagent_plan_profile() -> None:
     assert registry.TEAM_PLAN_APPROVAL in leader_types
     assert registry.CODE_RUNTIME_PROMPT not in leader_types
     assert registry.CODE_CODING_MEMORY not in leader_types
+    assert registry.CODE_AGENT_MODE not in teammate_types
+    assert registry.TEAM_PLAN_APPROVAL not in teammate_types
+
+
+def test_team_work_plan_leader_uses_deepagent_plan_profile() -> None:
+    """The new Team Plan canonical mounts the plan mechanics on the Leader."""
+    register_swarm_providers()
+    leader_rails, _ = build_member_capability_specs({}, "team.work.plan", "leader")
+    teammate_rails, _ = build_member_capability_specs({}, "team.work.plan", "teammate")
+
+    leader_types = {spec.type for spec in leader_rails}
+    teammate_types = {spec.type for spec in teammate_rails}
+
+    assert registry.CODE_AGENT_MODE in leader_types
+    assert registry.TEAM_PLAN_APPROVAL in leader_types
     assert registry.CODE_AGENT_MODE not in teammate_types
     assert registry.TEAM_PLAN_APPROVAL not in teammate_types
 
@@ -2226,8 +2263,8 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
         _TEAM_PLAN_EXIT_NOTIFICATION_EN,
     )
     from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
-        _ENTER_PLAN_MODE_INSTRUCTIONS_EN,
         _PLAN_MODE_SYSTEM_NOTE,
+        _code_enter_plan_instructions,
     )
 
     plan_leader = SwarmBuildContext(mode="team.plan.code", role="leader")
@@ -2250,20 +2287,29 @@ def test_team_plan_leader_code_agent_mode_has_team_exit_notification(monkeypatch
 
     team_config, code_config = captured_configs
     # team.plan.code leader goes through CodeAgentModeRail with the code
-    # profile prompts plus the team exit notification prompting Team Leader
-    # to use build_team.
+    # profile prompts plus a user-facing team execution notification.
     assert team_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
     assert "plan_mode_attachment_note" not in team_config
-    assert team_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert team_config["enter_plan_instructions"] == _code_enter_plan_instructions(
+        plan_leader.config
+    )
     assert team_config["exit_plan_notification"] == _TEAM_PLAN_EXIT_NOTIFICATION_EN
     assert "Team Leader" in team_config["exit_plan_notification"]
-    assert "build_team" in team_config["exit_plan_notification"]
+    for internal_name in (
+        "build_team",
+        "create_task",
+        "spawn_teammate",
+        "send_message",
+    ):
+        assert internal_name not in team_config["exit_plan_notification"]
     assert "ask_user" in team_config["allowed_tools"]
     # code.team leader stays on the code profile prompts with no exit
     # notification (only Team Plan leaders receive the Team Leader reminder).
     assert code_config["plan_mode_system_note"] == _PLAN_MODE_SYSTEM_NOTE
     assert "plan_mode_attachment_note" not in code_config
-    assert code_config["enter_plan_instructions"] == _ENTER_PLAN_MODE_INSTRUCTIONS_EN
+    assert code_config["enter_plan_instructions"] == _code_enter_plan_instructions(
+        code_team_leader.config
+    )
     assert code_config["exit_plan_notification"] is None
     assert "ask_user" in code_config["allowed_tools"]
 

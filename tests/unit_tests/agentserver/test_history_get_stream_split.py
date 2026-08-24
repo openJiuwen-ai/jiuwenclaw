@@ -80,11 +80,11 @@ def _make_history_records() -> list[dict]:
 
 
 def _patch_history(monkeypatch, records: list[dict]) -> None:
-    monkeypatch.setattr(agent_ws_server_module, "history_exists", lambda session_id: True)
+    monkeypatch.setattr(agent_ws_server_module, "history_exists", lambda session_id, **_kwargs: True)
     monkeypatch.setattr(
         agent_ws_server_module,
         "load_history_records",
-        lambda session_id: records,
+        lambda session_id, **_kwargs: records,
     )
 
 

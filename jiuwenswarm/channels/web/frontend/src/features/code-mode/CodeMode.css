@@ -22,14 +22,14 @@
   padding: 5px 9px;
   border: 0;
   border-radius: 8px;
-  background: var(--color-surface-card);
+  background: var(--color-action-secondary);
   color: var(--color-text-primary);
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
 }
 
 .code-branch__trigger:hover:not(:disabled) {
-  background: var(--color-surface-hover);
+  background: var(--color-surface-card);
 }
 
 .code-branch__trigger:disabled {
@@ -592,8 +592,6 @@
 
 .code-environment {
   flex: none;
-  padding: 14px 16px 16px;
-  border-top: 1px solid var(--color-border-default);
   background: var(--color-surface-panel);
 }
 
@@ -610,14 +608,14 @@
 .code-environment__row {
   display: flex;
   width: 100%;
-  min-height: 34px;
+  min-height: 36px;
   align-items: center;
-  gap: 9px;
-  padding: 5px 0;
+  gap: 8px;
+  padding: 8px 0;
   border: 0;
   background: transparent;
   color: var(--color-text-primary);
-  font-size: 13px;
+  font-size: 12px;
   text-align: left;
 }
 

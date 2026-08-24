@@ -13,6 +13,94 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmD
 
 
 @pytest.mark.anyio
+async def test_team_evolution_approval_dispatches_core_continuation(monkeypatch):
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = SimpleNamespace(
+        _pending_approval_snapshots={"team_skill_evolve_create_1": None},
+        pop_approval_continuation=lambda request_id: (
+            "create the approved skill"
+            if request_id == "team_skill_evolve_create_1"
+            else None
+        ),
+    )
+    manager = SimpleNamespace(interact=AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda *_args: rail)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda _channel_id: manager,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "approved_record_ids_from_answers",
+        lambda _answers, _labels, _record_ids: (True, None),
+    )
+    approve = AsyncMock()
+    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
+
+    handled = await adapter.handle_team_skill_evolve_approval(
+        "team_skill_evolve_create_1",
+        [{"selected_options": ["接收"]}],
+        "sess-1",
+        "web",
+    )
+
+    assert handled is True
+    approve.assert_awaited_once_with(
+        rail,
+        "team_skill_evolve_create_1",
+        None,
+    )
+    manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
+
+
+@pytest.mark.anyio
+async def test_approved_evolution_stays_successful_when_continuation_delivery_fails(
+    monkeypatch,
+):
+    adapter = JiuWenSwarmDeepAdapter()
+    rail = SimpleNamespace(
+        _pending_approval_snapshots={"team_skill_evolve_create_1": None},
+        pop_approval_continuation=lambda _request_id: "create the approved skill",
+    )
+    manager = SimpleNamespace(interact=AsyncMock(return_value=(False, "session ended")))
+    push_resolution = AsyncMock()
+    monkeypatch.setattr(adapter, "find_team_skill_rail", lambda *_args: rail)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_team_manager",
+        lambda _channel_id: manager,
+    )
+    monkeypatch.setattr(
+        interface_deep_module,
+        "approved_record_ids_from_answers",
+        lambda _answers, _labels, _record_ids: (True, None),
+    )
+    approve = AsyncMock()
+    monkeypatch.setattr(interface_deep_module, "approve_evolution_records", approve)
+    monkeypatch.setattr(
+        adapter,
+        "_push_team_skill_evolve_resolution_status",
+        push_resolution,
+    )
+
+    handled = await adapter.handle_team_skill_evolve_approval(
+        "team_skill_evolve_create_1",
+        [{"selected_options": ["接收"]}],
+        "sess-1",
+        "web",
+    )
+
+    assert handled is True
+    approve.assert_awaited_once_with(rail, "team_skill_evolve_create_1", None)
+    manager.interact.assert_awaited_once_with("sess-1", "create the approved skill")
+    push_resolution.assert_awaited_once_with(
+        "team_skill_evolve_create_1",
+        session_id="sess-1",
+        channel_id="web",
+        accepted=True,
+    )
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("query", "mode", "slash_command", "expected_output"),
     [
@@ -522,6 +610,38 @@ async def test_stream_error_answer_aborts_active_round_without_debug_logger(monk
     } in payloads
     assert not any(payload.get("event_type") == "chat.final" for payload in payloads)
     assert closed_with == [True]
+
+
+@pytest.mark.anyio
+async def test_non_stream_error_answer_returns_failure_instead_of_empty_success(monkeypatch):
+    """openjiuwen's terminal ``answer/result_type:error`` must reach cron callers."""
+    adapter = _adapter_ready_for_followup_execution(monkeypatch)
+    seen_inputs: list[dict] = []
+    _install_interaction_followup_agent(
+        adapter,
+        chunk=SimpleNamespace(
+            type="answer",
+            payload={
+                "output": "Error code: 401 - model access denied",
+                "result_type": "error",
+            },
+        ),
+        seen_inputs=seen_inputs,
+    )
+
+    response = await adapter.process_message_impl(
+        AgentRequest(
+            request_id="req-model-error",
+            channel_id="__cron__",
+            session_id="cron-session",
+            params={"query": "run task", "mode": "agent"},
+        ),
+        {"query": "run task"},
+    )
+
+    assert response.ok is False
+    assert response.payload == {"error": "Error code: 401 - model access denied"}
+    assert seen_inputs == [{"query": "run task"}]
 
 
 @pytest.mark.anyio

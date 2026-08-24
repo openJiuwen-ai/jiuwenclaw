@@ -41,11 +41,23 @@ import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import { ProactiveRecommendationCard } from './ProactiveRecommendationCard';
 import { fileArtifactId } from '../ArtifactsPanel';
 import { openArtifactPanel } from '../../features/teamPanelState';
+import { openSingleAgentPanel } from '../../features/singleAgentPanelState';
 import { executeDesktopSave, type DesktopSaveApiResult } from '../../utils/desktopSave';
 import { FileIcon } from '../FileIcon';
 import { webRequest } from '../../services/webClient';
 import { useChatStore } from '../../stores/chatStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { extractTokenFromDownloadUrl } from '../../utils/fileDownloadDedup';
+
+function openArtifactPanelForActiveMode(selectedArtifactId: string): void {
+  const sessionId = useChatStore.getState().activeSessionId;
+  const mode = useSessionStore.getState().runtimes[sessionId ?? '']?.mode ?? 'agent';
+  if (mode === 'team' || mode === 'auto_harness') {
+    openArtifactPanel(selectedArtifactId);
+    return;
+  }
+  openSingleAgentPanel('artifacts', selectedArtifactId);
+}
 
 export const MarkdownMessageBody = memo(function MarkdownMessageBody({
   content,
@@ -115,7 +127,7 @@ function TeamLeaderPlainTextMessage({
         <FileDownloadList
           files={fileItems}
           className="chat-message-file-list"
-          onPreview={(index) => openArtifactPanel(fileArtifactId(fileItems[index]))}
+          onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(fileItems[index]))}
         />
       )}
       <div className="team-member-message__plain" data-testid="chat-panel-team-leader-message-plain">
@@ -673,7 +685,7 @@ export const MessageItem = memo(function MessageItem({
                   <FileDownloadList
                     files={visibleFileItems}
                     className="chat-message-file-list"
-                    onPreview={(index) => openArtifactPanel(fileArtifactId(visibleFileItems[index]))}
+                    onPreview={(index) => openArtifactPanelForActiveMode(fileArtifactId(visibleFileItems[index]))}
                   />
                 )}
               </>

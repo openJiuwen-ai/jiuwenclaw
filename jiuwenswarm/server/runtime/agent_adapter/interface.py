@@ -284,6 +284,12 @@ def _history_user_extra(params: Any) -> dict[str, Any] | None:
         if files:
             extra["files"] = files
 
+    raw_skills = params.get("skills")
+    if isinstance(raw_skills, list):
+        skills = [s.strip() for s in raw_skills if isinstance(s, str) and s.strip()]
+        if skills:
+            extra["skills"] = skills
+
     return extra or None
 
 

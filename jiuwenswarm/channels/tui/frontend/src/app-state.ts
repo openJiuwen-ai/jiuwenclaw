@@ -1,4 +1,5 @@
 import { addError, addInfo } from "./core/commands/helpers.js";
+import { PrWatchController } from "./core/commands/builtins/autofix-pr.watch.js";
 import type { CommandContext, PreferredLanguage } from "./core/commands/types.js";
 import type {
   HandoffPort,
@@ -90,6 +91,15 @@ import {
 } from "./core/workflows.js";
 import type { PendingHumanPrompt } from "./core/event-handlers.js";
 import { spawnSync } from "node:child_process";
+
+// A just-exited TUI can remain bound briefly while its WebSocket close is
+// observed by the gateway. Retry only this startup-specific ownership race.
+const BOOT_SESSION_IN_USE_RETRY_DELAYS_MS = [100, 200, 400, 800, 800, 800, 800];
+
+function isTransientSessionInUseError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("already active in another window");
+}
 
 export interface ModelUsageEntry {
   model: string;
@@ -430,6 +440,12 @@ export class CliPiAppState {
   private autoRecapState: "idle" | "pending" | "generated" = "idle";
   /** 周期检查空闲状态的定时器。 */
   private autoRecapTimer: ReturnType<typeof setInterval> | null = null;
+  /** Active TUI-side PR watch, if any (see startPrWatch). */
+  private prWatchController: PrWatchController | null = null;
+  /** Run-scoped grant: auto-approve tool-permission prompts during a /autofix-pr
+   *  run. Set when the user grants it at the start; cleared when the run ends
+   *  (single-round turn end, watch stop) or is interrupted (Ctrl+C, session reset). */
+  private autofixAutoApprove = false;
   /** 是否启用自动回顾（从 config.yaml 读取，默认 true）。 */
   private autoRecapEnabled: boolean = true;
   private ripgrepAvailable: boolean | null = null;
@@ -487,6 +503,11 @@ export class CliPiAppState {
       this.emitChange();
     },
     setPendingQuestion: (question) => {
+      // Run-scoped auto-approve: during a /autofix-pr run the user pre-authorized,
+      // silently approve tool-permission prompts instead of surfacing the card.
+      if (question && this.autofixAutoApprove && this.tryAutoApprovePermission(question)) {
+        return;
+      }
       this.pendingQuestion = question;
     },
     setLastError: (error) => {
@@ -861,6 +882,16 @@ export class CliPiAppState {
     const wasActiveResponseStream = this.hasActiveResponseStream();
     this.streamingState = state;
     this.handleStreamingStateChanged(wasActiveResponseStream);
+    // Single-round /autofix-pr: the run ends when the turn goes idle, so drop the
+    // auto-approve grant. A watch owns the grant across its rounds' idle gaps, so
+    // skip while a watch is active (it clears via onStopped instead).
+    if (
+      state === StreamingState.Idle &&
+      this.autofixAutoApprove &&
+      !this.prWatchController?.active
+    ) {
+      this.autofixAutoApprove = false;
+    }
   }
 
   private noteStreamActivity(): void {
@@ -1257,7 +1288,93 @@ export class CliPiAppState {
       cancelAndWaitForIdle: (opts) => this.taskLifecycle
         ? this.taskLifecycle.cancelAndWaitForIdle(opts)
         : Promise.reject(new Error("Task lifecycle port not available")),
+      startPrWatch: this.startPrWatch,
+      stopPrWatch: this.stopPrWatch,
+      isPrWatchActive: this.isPrWatchActive,
+      setAutofixAutoApprove: this.setAutofixAutoApprove,
     };
+  }
+
+  /** Start a TUI-side PR watch (replacing any existing one). */
+  readonly startPrWatch = (config: {
+    repo: string;
+    prNumber: string;
+    platform: string;
+    intervalMs?: number;
+    autoApprove?: boolean;
+    preferredLanguage?: PreferredLanguage;
+  }): void => {
+    const { autoApprove, preferredLanguage, ...watchConfig } = config;
+    this.prWatchController?.stop("被新的 watch 取代", { silent: true });
+    // Apply the run-scoped grant here — after the prior watch's onStopped has
+    // cleared it, but before start() synchronously sends the first round — so
+    // round 1 is auto-approved too. (Setting it in the command before this call
+    // would be wiped by the replaced watch's onStopped.)
+    if (autoApprove) this.autofixAutoApprove = true;
+    this.prWatchController = new PrWatchController(
+      {
+        sendMessage: (prompt) => this.sendMessage(prompt, undefined, this.mode, { logAsUser: false }),
+        isBusy: () => {
+          const s = this.getSnapshot();
+          return s.isProcessing || s.cancellableWork || Boolean(s.pendingQuestion);
+        },
+        isConnected: () => this.connectionStatus === "connected",
+        notify: (message, isError) =>
+          this.addItem((isError ? addError : addInfo)(this.sessionId, message, isError ? undefined : "i")),
+        preferredLanguage: preferredLanguage ?? this.preferredLanguage,
+        onStopped: () => {
+          // Watch ended (green / merged / closed / fuse / replaced) → drop the
+          // run-scoped auto-approve grant so the next run asks again.
+          this.autofixAutoApprove = false;
+        },
+      },
+      watchConfig,
+    );
+    this.prWatchController.start();
+  };
+
+  /** Stop the active PR watch; returns true if one was running. */
+  readonly stopPrWatch = (): boolean => {
+    if (!this.prWatchController?.active) return false;
+    this.prWatchController.stop(this.preferredLanguage === "zh" ? "用户手动停止" : "stopped by user");
+    this.prWatchController = null;
+    return true;
+  };
+
+  readonly isPrWatchActive = (): boolean => Boolean(this.prWatchController?.active);
+
+  /** Grant/revoke run-scoped auto-approval of tool-permission prompts. */
+  readonly setAutofixAutoApprove = (on: boolean): void => {
+    this.autofixAutoApprove = on;
+  };
+
+  /**
+   * If this is a tool-permission prompt and we can confidently identify its
+   * "allow once" option, approve it automatically (the user pre-authorized) and
+   * return true. Scoped to permission_interrupt only — ask_user / confirm / plan
+   * prompts are genuine decisions and must still reach the user. If the option
+   * shape is not what we expect, return false so the card renders normally
+   * (fail toward asking, never toward a blind wrong answer).
+   */
+  private tryAutoApprovePermission(question: PendingQuestion): boolean {
+    if (question.source !== "permission_interrupt") return false;
+    const options = question.questions?.[0]?.options;
+    if (!Array.isArray(options) || options.length === 0) return false;
+    // "Allow once" = an allow option that is NOT "always allow" (which would
+    // persist beyond the run). zh: 本次允许 / 总是允许; en: Allow once / Always allow.
+    const isAllow = (l: string) => l.includes("允许") || /^allow\b/i.test(l.trim());
+    const isAlwaysAllow = (l: string) =>
+      l.includes("总是允许") || /^always allow\b/i.test(l.trim());
+    const allowOnce = options.find((o) => isAllow(o.label) && !isAlwaysAllow(o.label));
+    if (!allowOnce) return false;
+    this.pendingQuestion = question; // submitQuestionAnswers reads this
+    this.addItem(
+      addInfo(this.sessionId, `※ /autofix-pr 自动批准命令：${allowOnce.label}`, "※"),
+    );
+    this.submitQuestionAnswers([
+      { selected_options: [allowOnce.label], custom_input: allowOnce.label },
+    ]);
+    return true;
   }
 
   getUsageSummary(): SessionUsageSummary {
@@ -1895,6 +2012,10 @@ export class CliPiAppState {
       this.localPendingQuestion.reject(new Error("input flow was interrupted"));
       this.localPendingQuestion = null;
     }
+    // A watch is tied to the current PR/session; a new/cleared session drops it.
+    this.prWatchController?.stop("会话已重置", { silent: true });
+    this.prWatchController = null;
+    this.autofixAutoApprove = false;
     this.entries = [];
     this.pendingQuestion = null;
     this.lastError = null;
@@ -2132,6 +2253,9 @@ export class CliPiAppState {
 
   /** 向服务端请求中断当前 session 的任务；成功发送前不宣称"已中断"。 */
   cancel(options?: { showNotice?: boolean }): boolean {
+    // User intervention (Ctrl+C / other) revokes the run-scoped auto-approve
+    // grant — subsequent tool prompts must reach the user again.
+    this.autofixAutoApprove = false;
     if (this.connectionStatus !== "connected") {
       if (options?.showNotice !== false) {
         this.addItem(addError(this.sessionId, "Unable to interrupt task while disconnected"));
@@ -3365,22 +3489,41 @@ export class CliPiAppState {
     const target = this.bootSessionId;
     const previousMode = this.mode;
     try {
-      const res = await this.requestAgentServer<{
+      type BootSessionResult = {
         session_id?: string;
         mode?: string;
         created?: boolean;
-      }>(
-        "session.create",
-        {
-          ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
-          ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
-          previous_session_id: "",
-          previous_mode: previousMode,
-          mode: previousMode,
-        },
-        undefined,
-        false,
-      );
+      };
+      let res: BootSessionResult;
+      let retryIndex = 0;
+      while (true) {
+        try {
+          res = await this.requestAgentServer<BootSessionResult>(
+            "session.create",
+            {
+              ...(target ? { session_id: target } : { create_token: this.bootCreateToken }),
+              ...(!target && this.bootPersistSession ? { persist_session: true } : {}),
+              previous_session_id: "",
+              previous_mode: previousMode,
+              mode: previousMode,
+            },
+            undefined,
+            false,
+          );
+          break;
+        } catch (error) {
+          if (
+            target === null
+            || !isTransientSessionInUseError(error)
+            || retryIndex >= BOOT_SESSION_IN_USE_RETRY_DELAYS_MS.length
+          ) {
+            throw error;
+          }
+          const delayMs = BOOT_SESSION_IN_USE_RETRY_DELAYS_MS[retryIndex];
+          retryIndex += 1;
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
       const createdId = res?.session_id;
       if (typeof createdId !== "string" || !createdId) {
         throw new Error("session.create did not return a session id");

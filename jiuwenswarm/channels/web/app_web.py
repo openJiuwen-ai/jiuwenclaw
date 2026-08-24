@@ -41,6 +41,53 @@ from jiuwenswarm.server.runtime.session.session_history import history_exists, l
 
 configure_agent_teams_home()
 
+# AgentServer HTTP bridge 基址解析与上传执行统一收口在 gateway/routing 公共模块，
+# 供 Web 静态服务 / IM 附件落盘钩子 / Web media.persist 大图分流共用（避免各处
+# 重复推导）。此处保留私有别名兼容既有调用点，并 re-export 扩展点。
+from jiuwenswarm.gateway.routing.agent_http_bridge import (
+    resolve_agent_http_base,
+    resolve_agent_http_base_for_token,
+    resolve_agent_upload_base,
+    set_agent_http_base_resolver,  # noqa: F401  — re-exported 扩展点
+)
+
+_resolve_agent_http_base = resolve_agent_http_base
+_resolve_agent_upload_base = resolve_agent_upload_base
+
+
+def _parse_single_byte_range(
+    range_header: str,
+    file_size: int,
+) -> tuple[int, int] | None:
+    """Parse one HTTP byte range for the legacy local-download fallback.
+
+    The AgentServer owns the same helper for its HTTP endpoint.  The Web static
+    server still needs it when a single-user AgentServer is temporarily down
+    and the verified shared-directory fallback serves the file itself.
+    """
+    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
+        return None
+    range_value = range_header[6:]
+    if "-" not in range_value:
+        return None
+    start_text, end_text = range_value.split("-", 1)
+    if not start_text:
+        if not end_text.isascii() or not end_text.isdecimal():
+            return None
+        suffix_length = int(end_text)
+        if suffix_length <= 0:
+            return None
+        return max(0, file_size - suffix_length), file_size - 1
+    if not start_text.isascii() or not start_text.isdecimal():
+        return None
+    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
+        return None
+    start = int(start_text)
+    end = int(end_text) if end_text else file_size - 1
+    if start >= file_size or end < start:
+        return None
+    return start, min(end, file_size - 1)
+
 
 def _get_agent_teams_root() -> Path:
     """Return the agent teams root after dotenv initialization."""
@@ -144,37 +191,21 @@ def _generate_agent_data(project_root: Path) -> None:
     )
 
 
-def _parse_single_byte_range(
-    range_header: str,
-    file_size: int,
-) -> tuple[int, int] | None:
-    """Parse one HTTP byte range, returning inclusive start and end offsets."""
-    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
-        return None
+def _uses_agentos_routing() -> bool:
+    """Whether this static service is paired with an AgentOS Gateway.
 
-    range_value = range_header[6:]
-    if "-" not in range_value:
-        return None
+    The static server owns no per-user route context.  Its historical local
+    file APIs are therefore valid only for the shared-directory deployment;
+    in AgentOS they must never silently read the Gateway deployment directory.
+    """
+    try:
+        from jiuwenswarm.common.config import get_config_raw
 
-    start_text, end_text = range_value.split("-", 1)
-    if not start_text:
-        if not end_text.isascii() or not end_text.isdecimal():
-            return None
-        suffix_length = int(end_text)
-        if suffix_length <= 0:
-            return None
-        return max(0, file_size - suffix_length), file_size - 1
-
-    if not start_text.isascii() or not start_text.isdecimal():
-        return None
-    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
-        return None
-
-    start = int(start_text)
-    end = int(end_text) if end_text else file_size - 1
-    if start >= file_size or end < start:
-        return None
-    return start, min(end, file_size - 1)
+        gateway = (get_config_raw() or {}).get("gateway") or {}
+        client = gateway.get("agent_client") or {}
+        return str(client.get("type") or "").strip().lower() == "agentos_router"
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class _SpaStaticHandler(SimpleHTTPRequestHandler):
@@ -762,6 +793,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         return snapshot, filename
 
     def _handle_share_api_get(self, parsed) -> None:
+        if _uses_agentos_routing():
+            self._write_json(503, {"error": "agentserver_file_rpc_required"})
+            return
         if parsed.path != "/share-api/snapshot":
             self._write_json(404, {"error": "not_found"})
             return
@@ -785,6 +819,20 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _handle_file_api_get(self, parsed) -> None:
         path = parsed.path
         query = self._parse_query(parsed.query)
+
+        # All non-token file APIs below access ``project_root`` directly.
+        # That root belongs to the Gateway deployment in AgentOS, not to the
+        # routed user's mounted AgentServer directory.  Do not provide a
+        # deployment-directory fallback while the E2A file RPC endpoint is
+        # being used by AgentOS clients.
+        if _uses_agentos_routing() and path in {
+            "/file-api/list-markdown",
+            "/file-api/list-files",
+            "/file-api/raw-file",
+            "/file-api/file-content",
+        }:
+            self._write_json(503, {"error": "agentserver_file_rpc_required"})
+            return
 
         if path == "/file-api/list-markdown":
             dir_arg = query.get("dir", "")
@@ -906,7 +954,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                                 return raw_data.decode(try_encoding), try_encoding
                             except (UnicodeDecodeError, LookupError):
                                 continue
-                        raise OSError(f"Unable to decode file with any known encoding") from decode_exc
+                        raise OSError("Unable to decode file with any known encoding") from decode_exc
                 else:
                     return file_path.read_text(encoding=encoding), encoding
 
@@ -941,9 +989,25 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self._write_json(404, {"error": "not_found"})
 
     def _handle_file_download(self, query: dict[str, str]) -> None:
+        """处理 ``/file-api/download``（Phase 2 迁移：代理目标 AgentServer）。
+
+        - Gateway 侧保留 token 校验作为第一道防线；本进程 secret 能校验通过的
+          token（单机同目录 / 部署侧签发）保持原有下载范围；
+        - 内容与路径判定由目标 AgentServer 在其注入目录执行。若 token 能由
+          单用户本地 secret 验证，则 AgentServer 不可达时可安全回退到同一用户
+          目录的本地读取；AgentOS token 无法由 Gateway 验证，因此始终不回退。
+        """
         token = query.get("token", "")
         if not token:
             self._write_json(400, {"error": "missing_token"})
+            return
+
+        # AgentOS 的浏览器入口是本静态服务（通常 5173），而实际能够按用户
+        # sandbox 下载文件的是 WebChannel（api_target，通常 19000）。send_file
+        # 已在 URL 中附带 user_id；直接将同一请求转发到 WebChannel，避免再按
+        # 单机 AgentServer HTTP bridge（18092）解析并错误返回 503。
+        if _uses_agentos_routing() and query.get("user_id", "").strip():
+            self._proxy_http()
             return
 
         try:
@@ -961,69 +1025,98 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._write_json(500, {"error": "download_module_unavailable"})
             return
 
-        request_sid = extract_request_session_id(query=query, headers=self.headers)
-        payload = validate_file_download_token(
-            token,
-            session_id=request_sid or None,
-        )
-        if payload is None:
-            self._write_json(403, {"error": "invalid_or_expired_token"})
-            return
-
-        purpose = str(payload.get("purpose") or "").strip()
-        force_inline = False
-        mime_type = "application/octet-stream"
-        file_path = ""
-
-        if purpose == PURPOSE_SKILL_CONTENT_IMAGE:
-            err = validate_skill_content_image_payload(
+        payload = validate_file_download_token(token)
+        # Skill 正文图片 token intentionally does not carry an absolute path.
+        # In the legacy shared-directory layout it must therefore be resolved
+        # through the skill manifest before entering the generic file bridge.
+        if payload is not None and str(payload.get("purpose") or "") == PURPOSE_SKILL_CONTENT_IMAGE:
+            request_sid = extract_request_session_id(query=query, headers=self.headers)
+            error = validate_skill_content_image_payload(
                 payload, request_session_id=request_sid
             )
-            if err:
-                self._write_json(403, {"error": err})
+            if error:
+                self._write_json(403, {"error": error})
                 return
-            version_raw = payload.get("version")
-            if version_raw is None or (
-                isinstance(version_raw, str) and not version_raw.strip()
-            ):
-                version = None
-            else:
-                version = str(version_raw).strip()
+            version_value = payload.get("version")
+            version = str(version_value).strip() if version_value else None
             try:
-                resolved, mime_type = resolve_skill_content_image_file(
+                file_path, _ = resolve_skill_content_image_file(
                     name=str(payload.get("name") or ""),
                     version=version,
                     relative_path=str(payload.get("relative_path") or ""),
                 )
             except SkillFilesError as exc:
                 code = str(exc.code or "")
-                if code in {"SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND"}:
-                    self._write_json(404, {"error": "file_not_found", "code": code})
-                elif "图片" in str(exc.message) or code == "SKILL_INVALID_PACKAGE":
-                    self._write_json(415, {"error": "unsupported_media_type", "code": code})
-                else:
-                    self._write_json(403, {"error": "forbidden_path", "code": code})
+                self._write_json(
+                    404 if code in {"SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND"} else 403,
+                    {
+                        "error": "file_not_found"
+                        if code in {"SKILL_NOT_FOUND", "SKILL_VERSION_NOT_FOUND"}
+                        else "forbidden_path",
+                        "code": code,
+                    },
+                )
                 return
-            except Exception as exc:
-                self.log_error("skill content image resolve error: %s", exc)
-                self._write_json(404, {"error": "file_not_found"})
-                return
-            file_path = str(resolved)
-            force_inline = True
-        else:
+            self._serve_verified_local_download(str(file_path), inline=True)
+            return
+        if payload is not None:
+            # 本进程 secret 能校验并不意味着 token 的路径位于 Gateway 宿主机。
+            # AgentOS 的部署与用户 AgentServer 可能共用下载密钥；此时 token
+            # 仍可被 Gateway 验证，但 ``path`` 是用户容器内路径，必须先按 token
+            # 携带的 bridge 地址代理给目标 AgentServer，不能在这里误判 404。
             file_path = str(payload.get("path") or "")
-            if not file_path or not os.path.isfile(file_path):
+            has_target_bridge = bool(
+                str(payload.get("download_http_base") or "").strip()
+            )
+            if not file_path or (not has_target_bridge and not os.path.isfile(file_path)):
                 self._write_json(404, {"error": "file_not_found"})
                 return
-            guessed, _ = mimetypes.guess_type(os.path.basename(file_path))
-            mime_type = guessed or "application/octet-stream"
 
+            # Legacy Gateway and AgentServer deliberately share this verified
+            # directory.  Do not proxy these downloads to the AgentServer WS
+            # port: it is not an HTTP file server.  Routed tokens carry their
+            # explicit bridge address and continue through the proxy below.
+            if not has_target_bridge:
+                raw_inline = query.get("inline")
+                if isinstance(raw_inline, list):
+                    raw_inline = raw_inline[0] if raw_inline else ""
+                inline = str(raw_inline or "").strip().lower() in {"1", "true"}
+                _SpaStaticHandler._serve_verified_local_download(
+                    self, file_path, inline=inline
+                )
+                return
+
+        # 代理到目标 AgentServer（AgentOS 下 token 由用户 AgentServer secret 签发，
+        # Gateway 校验必然失败，仍转发由 AgentServer 做最终校验与路径判定）。
+        raw_inline = query.get("inline")
+        if isinstance(raw_inline, list):
+            raw_inline = raw_inline[0] if raw_inline else ""
+        inline = str(raw_inline or "").strip().lower() in {"1", "true"}
+        if self._proxy_file_download(token, inline=inline):
+            return
+
+        # In the legacy single-user layout Gateway and AgentServer share the
+        # same verified user directory.  Preserve the pre-AgentOS availability
+        # contract only when that local file is actually present.  A token for
+        # a routed AgentServer may be locally verifiable when deployments reuse
+        # the same secret, but it must never fall back to the Gateway directory.
+        if payload is not None and os.path.isfile(file_path):
+            _SpaStaticHandler._serve_verified_local_download(
+                self, file_path, inline=inline
+            )
+            return
+
+        self.logger.warning("[file-api/download] 目标 AgentServer 不可达: token=%s...", token[:8])
+        self._write_json(503, {"error": "agent_server_unavailable"})
+
+    def _serve_verified_local_download(self, file_path: str, *, inline: bool) -> None:
+        """Stream a token-verified legacy single-user file with Range support."""
         try:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
-
-            range_header = self.headers.get("Range")
+            mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
             byte_range = None
+            range_header = self.headers.get("Range")
             if range_header:
                 byte_range = _parse_single_byte_range(range_header, file_size)
                 if byte_range is None:
@@ -1031,50 +1124,196 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     self.send_header("Content-Range", f"bytes */{file_size}")
                     self.end_headers()
                     return
-
             start, end = byte_range or (0, max(0, file_size - 1))
             content_length = 0 if file_size == 0 else end - start + 1
             self.send_response(206 if byte_range is not None else 200)
             self.send_header("Content-Type", mime_type)
             self.send_header("Content-Length", str(content_length))
             self.send_header("Accept-Ranges", "bytes")
-            encoded_name = quote(file_name, safe="")
-            disposition = (
-                "inline"
-                if force_inline or query.get("inline", "").lower() in {"1", "true"}
-                else "attachment"
-            )
             self.send_header(
                 "Content-Disposition",
-                f"{disposition}; filename*=UTF-8''{encoded_name}",
+                f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(file_name, safe='')}",
             )
             self.send_header("Cache-Control", "no-store")
-            if force_inline:
-                self.send_header("X-Content-Type-Options", "nosniff")
             if byte_range is not None:
-                self.send_header(
-                    "Content-Range",
-                    f"bytes {start}-{end}/{file_size}",
-                )
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
             self.end_headers()
-
             if self.command != "HEAD":
-                with open(file_path, "rb") as f:
-                    f.seek(start)
+                with open(file_path, "rb") as file_handle:
+                    file_handle.seek(start)
                     remaining = content_length
                     while remaining > 0:
-                        chunk = f.read(min(65536, remaining))
+                        chunk = file_handle.read(min(65536, remaining))
                         if not chunk:
                             break
                         self.wfile.write(chunk)
                         remaining -= len(chunk)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self.log_error("file download error: %s", exc)
+            self._write_json(500, {"error": "download_failed", "detail": str(exc)})
+
+    def _proxy_file_download(self, token: str, *, inline: bool = False) -> bool:
+        """把下载请求代理到目标 AgentServer 的 HTTP 端点并流式回传。
+
+        - 透传 ``inline`` 查询参数与 ``Range`` 请求头（AgentServer 侧解析）；
+        - 透传上游全部相关响应头（Content-Type/Length/Disposition、
+          Accept-Ranges/Content-Range、Cache-Control）与状态码（200/206/416）；
+        - 上游 4xx/5xx（如 AgentServer 校验 token 失败 403、文件缺失 404）
+          原样透传，避免误报 503；仅网络级不可达返回 False（→ 503）。
+        """
+        try:
+            import urllib.error
+            import urllib.request
+            import shutil
+
+            base = resolve_agent_http_base_for_token(
+                token, endpoint="download"
+            ) or _resolve_agent_http_base()
+            query_parts = [f"token={quote(token, safe='')}"]
+            if inline:
+                query_parts.append("inline=1")
+            url = f"{base}/file-api/download?{'&'.join(query_parts)}"
+            headers: dict[str, str] = {}
+            range_header = self.headers.get("Range")
+            if range_header:
+                headers["Range"] = range_header
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as upstream:  # noqa: S310
+                status = int(getattr(upstream, "status", 200))
+                self.send_response(status)
+                for header_name in (
+                    "Content-Type",
+                    "Content-Length",
+                    "Content-Disposition",
+                    "Accept-Ranges",
+                    "Content-Range",
+                    "Cache-Control",
+                ):
+                    value = upstream.headers.get(header_name)
+                    if value:
+                        self.send_header(header_name, value)
+                self.end_headers()
+                if self.command != "HEAD":
+                    shutil.copyfileobj(upstream, self.wfile, length=65536)
+            return True
+        except urllib.error.HTTPError as exc:
+            # 上游返回 4xx/5xx（403 token 无效/越界、404 缺失、416 非法 Range 等）：
+            # 透传状态码与 body，保持错误语义不混淆为 503。
+            body = b""
             try:
-                self._write_json(500, {"error": "download_failed", "detail": str(exc)})
-            except Exception:
-                # Connection may already be closed or broken; nothing more we can do.
-                self.log_error("failed to send download error response")
+                body = exc.read()
+            except Exception:  # noqa: BLE001
+                body = b""
+            try:
+                self.send_response(int(exc.code))
+                self.send_header(
+                    "Content-Type",
+                    exc.headers.get("Content-Type", "application/json; charset=utf-8")
+                    if exc.headers
+                    else "application/json; charset=utf-8",
+                )
+                self.send_header("Content-Length", str(len(body)))
+                if exc.headers and exc.headers.get("Content-Range"):
+                    self.send_header("Content-Range", exc.headers.get("Content-Range"))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[file-api/download] 代理转发失败: %s", exc)
+            return False
+
+    def _handle_file_upload_proxy(self, parsed) -> None:
+        """处理 ``POST /file-api/upload``（Phase 2 HTTP bridge 上传代理）。
+
+        读取客户端上传 body 后转发到目标 AgentServer 的上传端点（不落盘
+        Gateway），由 AgentServer 校验 upload token 并落盘注入目录。
+        AgentServer 不可达 → 503 可重试错误（方案 §8 禁止本地 fallback）。
+        """
+        from urllib.parse import parse_qs
+
+        query = parse_qs(parsed.query)
+        token = (query.get("token") or [""])[0]
+        if not token:
+            self._write_json(400, {"error": "missing_token"})
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._write_json(400, {"error": "invalid_content_length"})
+            return
+        if content_length <= 0:
+            self._write_json(400, {"error": "empty_body"})
+            return
+
+        # The legacy Gateway and AgentServer share one verified user directory.
+        # Its upload token has no routed HTTP base, so persist it locally rather
+        # than forwarding to the AgentServer's nonexistent HTTP upload listener.
+        if not _uses_agentos_routing():
+            try:
+                from jiuwenswarm.agents.harness.common.tools.web_file_download import (
+                    validate_file_download_token,
+                )
+                from jiuwenswarm.common.utils import (
+                    get_user_workspace_dir as _get_user_workspace_dir,
+                )
+
+                payload = validate_file_download_token(token)
+                target_rel_path = str((payload or {}).get("path") or "").strip()
+                if payload is not None and target_rel_path and not payload.get("upload_http_base"):
+                    root = Path(_get_user_workspace_dir()).resolve()
+                    target = (root / target_rel_path).resolve()
+                    if root not in target.parents:
+                        self._write_json(403, {"error": "forbidden_path"})
+                        return
+                    body = self.rfile.read(content_length)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(body)
+                    self._write_json(200, {"path": str(target), "size": len(body)})
+                    return
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("[file-api/upload] local legacy persist failed: %s", exc)
+                self._write_json(500, {"error": "upload_failed"})
+                return
+
+        import urllib.error
+        import urllib.request
+
+        base = resolve_agent_http_base_for_token(
+            token, endpoint="upload"
+        ) or _resolve_agent_upload_base()
+        url = f"{base}/file-api/upload?token={quote(token, safe='')}"
+        body = self.rfile.read(content_length)
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/octet-stream", "Content-Length": str(len(body))},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as upstream:  # noqa: S310
+                status = int(getattr(upstream, "status", 200))
+                raw = upstream.read()
+        except urllib.error.HTTPError as exc:
+            # 上游校验/落盘失败（403 越界、400 非法 token 等）：透传状态码与 body
+            raw = b""
+            try:
+                raw = exc.read()
+            except Exception:  # noqa: BLE001
+                raw = b""
+            status = int(exc.code)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("[file-api/upload] 代理转发失败: %s", exc)
+            self._write_json(503, {"error": "agent_server_unavailable"})
+            return
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(raw)
 
     def _handle_file_api_post(self, parsed) -> None:
         if parsed.path == "/file-api/skills/import":
@@ -1084,6 +1323,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self._handle_skills_create_from_knowledge()
             return
 
+        if _uses_agentos_routing() and parsed.path in {
+            "/file-api/rebuild-agent-data",
+            "/file-api/file-content",
+        }:
+            self._write_json(503, {"error": "agentserver_file_rpc_required"})
+            return
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
                 _generate_agent_data(self.project_root)
@@ -1092,6 +1337,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 return
 
             self._write_json(200, {"ok": True})
+            return
+
+        if parsed.path == "/file-api/upload":
+            self._handle_file_upload_proxy(parsed)
             return
 
         if parsed.path == "/file-api/file-content":

@@ -337,10 +337,18 @@ export interface SessionRuntime {
   teamMemberExecutionEvents: TeamMemberExecutionEvent[];
   teamMemberContextCompression: Record<string, TeamMemberContextCompressionState>;
   teamHistoryMessages: Message[];
-  /** 当前会话输入栏已选中的技能名（用于随消息发送） */
+  /** 当前会话输入栏已选中的技能名（用于随消息发送，发送后清空——一次性语义） */
   selectedSkills: string[];
   /** skill-creator 统一入口等场景的会话级元数据，随 chat.send 发送后清除 */
   metadata?: Record<string, unknown>;
+  /**
+   * 本会话期间持续启用的插件id/MCP名，由输入框"+"菜单"扩展"面板的开关控制。与
+   * selectedSkills 不同：这两个字段发 chat.send 后不清空，会一直带在每条消息里，直到用户在
+   * 面板里手动关闭开关。插件字段名 plugin_names 后端尚未定义（backend-requests.md 需求11，
+   * 前端乐观发送，后端目前忽略）；mcp 字段名是 MCP 接口文档 v2 §6.2 的权威定义。
+   */
+  enabledPlugins: string[];
+  enabledMcps: string[];
 }
 
 function createEmptyRuntime(): SessionRuntime {
@@ -366,6 +374,8 @@ function createEmptyRuntime(): SessionRuntime {
     teamHistoryMessages: [],
     selectedSkills: [],
     metadata: undefined,
+    enabledPlugins: [],
+    enabledMcps: [],
   };
 }
 
@@ -428,6 +438,18 @@ interface SessionState {
   clearSelectedSkills: (sessionId: string) => void;
   /** 设置/清除会话级元数据（skill-creator 统一入口等场景） */
   setSessionMetadata: (sessionId: string, metadata: Record<string, unknown> | null) => void;
+  /** 本会话启用插件：追加（去重） */
+  addEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：移除指定项 */
+  removeEnabledPlugin: (sessionId: string, pluginId: string) => void;
+  /** 本会话启用插件：清空 */
+  clearEnabledPlugins: (sessionId: string) => void;
+  /** 本会话启用MCP：追加（去重） */
+  addEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：移除指定项 */
+  removeEnabledMcp: (sessionId: string, mcpName: string) => void;
+  /** 本会话启用MCP：清空 */
+  clearEnabledMcps: (sessionId: string) => void;
   addTeamMember: (sessionId: string, member: TeamMember) => void;
   updateTeamMemberStatus: (sessionId: string, memberId: string, newStatus: string, timestamp?: number) => void;
   setTeamHumanShareCommands: (sessionId: string, commands: HumanShareCommand[]) => void;
@@ -988,6 +1010,96 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, metadata: metadata ?? undefined },
+        },
+      };
+    });
+  },
+
+  addEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [...runtime.enabledPlugins, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledPlugin: (sessionId, pluginId) => {
+    const normalized = pluginId.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledPlugins.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: runtime.enabledPlugins.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledPlugins: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledPlugins.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledPlugins: [] },
+        },
+      };
+    });
+  },
+
+  addEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId] ?? createEmptyRuntime();
+      if (runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [...runtime.enabledMcps, normalized] },
+        },
+      };
+    });
+  },
+
+  removeEnabledMcp: (sessionId, mcpName) => {
+    const normalized = mcpName.trim();
+    if (!normalized) return;
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (!runtime.enabledMcps.includes(normalized)) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: runtime.enabledMcps.filter((s) => s !== normalized) },
+        },
+      };
+    });
+  },
+
+  clearEnabledMcps: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      if (runtime.enabledMcps.length === 0) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, enabledMcps: [] },
         },
       };
     });

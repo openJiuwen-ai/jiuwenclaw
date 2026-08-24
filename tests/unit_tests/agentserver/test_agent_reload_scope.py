@@ -640,6 +640,68 @@ def test_deep_adapter_resolve_model_for_request_fails_when_no_model_is_available
         adapter._resolve_model_for_request(request)
 
 
+def test_deep_adapter_resolve_model_for_request_falls_back_to_session_metadata():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        AgentRequest,
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    default_model = _real_deep_reload_model("https://api.example.com/v1", "default-model")
+    session_model = _real_deep_reload_model("https://real.provider.test/v1", "session-model")
+    adapter._model = default_model
+    adapter._model_cache = {
+        "default-model#0": default_model,
+        "session-model#0": session_model,
+    }
+    adapter._model_name_to_keys = {
+        "default-model": ["default-model#0"],
+        "session-model": ["session-model#0"],
+    }
+    request = AgentRequest(
+        request_id="req-goal",
+        channel_id="test",
+        session_id="sid-goal",
+        params={},
+    )
+
+    with patch(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        return_value={"model": "session-model"},
+    ):
+        resolved = adapter._resolve_model_for_request(request)
+
+    assert resolved is session_model
+
+
+def test_deep_adapter_apply_model_updates_deep_config_for_goal_assessor():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+        JiuWenSwarmDeepAdapter,
+    )
+
+    adapter = JiuWenSwarmDeepAdapter()
+    default_model = _real_deep_reload_model("https://api.example.com/v1", "default-model")
+    session_model = _real_deep_reload_model("https://real.provider.test/v1", "session-model")
+    react_config = SimpleNamespace(
+        model_name="default-model",
+        model_client_config=None,
+        model_config_obj=None,
+    )
+    react_agent = SimpleNamespace(set_llm=MagicMock(), _config=react_config)
+    deep_config = SimpleNamespace(model=default_model)
+    adapter._instance = SimpleNamespace(
+        _react_agent=react_agent,
+        deep_config=deep_config,
+    )
+
+    adapter._apply_model_to_react_agent(session_model)
+
+    react_agent.set_llm.assert_called_once_with(session_model)
+    assert deep_config.model is session_model
+    assert adapter._last_resolved_model is session_model
+    assert adapter._active_request_model is session_model
+
+
 def test_deep_adapter_model_config_fingerprint_includes_legacy_react_model_fields():
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
         JiuWenSwarmDeepAdapter,

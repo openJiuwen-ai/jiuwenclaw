@@ -82,6 +82,8 @@ export interface NormalizedToolResult {
   toolCallId?: string;
   result: string;
   success: boolean;
+  /** status=pending 表示后台任务已接受，尚未进入终态。 */
+  pending?: boolean;
   /** status=timeout / timed_out 时为 true，供 store 落成 timeout */
   timedOut?: boolean;
   summary?: string;
@@ -132,31 +134,55 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
   const toolResultPayload = asRecord(payload.tool_result) ?? payload;
   const rawOutputRecord =
     asRecord(toolResultPayload.raw_output) ?? asRecord(toolResultPayload.rawOutput);
+  const rawOutputData = asRecord(rawOutputRecord?.data);
   const rawOutputResult =
     typeof rawOutputRecord?.result === 'string'
       ? rawOutputRecord.result
       : undefined;
+  const nestedDataResult =
+    typeof rawOutputData?.result === 'string'
+      ? rawOutputData.result
+      : typeof rawOutputData?.message === 'string'
+        ? rawOutputData.message
+        : undefined;
+  const directDataRecord = asRecord(toolResultPayload.data);
+  const directDataResult =
+    typeof directDataRecord?.result === 'string'
+      ? directDataRecord.result
+      : typeof directDataRecord?.message === 'string'
+        ? directDataRecord.message
+        : undefined;
   const result =
     rawOutputResult ||
+    nestedDataResult ||
     (typeof toolResultPayload.result === 'string' &&
       toolResultPayload.result) ||
-    (toolResultPayload.data != null ? String(toolResultPayload.data) : '') ||
+    directDataResult ||
+    (typeof toolResultPayload.data === 'string' ? toolResultPayload.data : '') ||
     (typeof toolResultPayload.error === 'string'
       ? toolResultPayload.error
       : '');
   const status =
     typeof toolResultPayload.status === 'string'
       ? toolResultPayload.status.trim().toLowerCase()
-      : '';
+      : typeof rawOutputRecord?.status === 'string'
+        ? rawOutputRecord.status.trim().toLowerCase()
+        : typeof rawOutputData?.status === 'string'
+          ? rawOutputData.status.trim().toLowerCase()
+          : '';
+  const pending = status === 'pending';
   const timedOut = status === 'timeout' || status === 'timed_out';
   const statusFailed =
-    timedOut || status === 'error' || status === 'failed' || status === 'failure';
+    !pending &&
+    (timedOut || status === 'error' || status === 'failed' || status === 'failure');
   const success =
-    typeof toolResultPayload.success === 'boolean'
-      ? toolResultPayload.success && !timedOut
-      : status
-        ? !statusFailed
-        : true;
+    pending
+      ? true
+      : typeof toolResultPayload.success === 'boolean'
+        ? toolResultPayload.success && !timedOut
+        : status
+          ? !statusFailed
+          : true;
   const toolName =
     (typeof toolResultPayload.tool_name === 'string' &&
       toolResultPayload.tool_name) ||
@@ -179,6 +205,7 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     toolCallId,
     result,
     success,
+    ...(pending ? { pending: true } : {}),
     ...(timedOut ? { timedOut: true } : {}),
     summary,
     skillTree,

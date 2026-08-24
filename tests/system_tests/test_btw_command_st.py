@@ -24,6 +24,20 @@ pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BTW_MODEL_RESPONSE_TIMEOUT = 120.0
+# Gateway reserves five seconds to return a timeout response before the
+# client's own deadline. Keep the system-test wait aligned with that contract.
+_BTW_CLIENT_TIMEOUT_MS = 30_000
+_BTW_RESPONSE_TIMEOUT_SECONDS = 30.0
+_INHERITED_CONFIG_ENV_KEYS = (
+    "AGENT_SERVER_URL",
+    "API_BASE",
+    "API_KEY",
+    "JIUWENSWARM_CONFIG_DIR",
+    "JIUWENSWARM_DATA_DIR",
+    "MODEL_ALIAS",
+    "MODEL_NAME",
+    "MODEL_PROVIDER",
+)
 
 
 # =============================================================================
@@ -37,6 +51,18 @@ def _pick_free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
+
+
+def _isolated_service_env(temp_home: Path) -> dict[str, str]:
+    """Build a subprocess environment without inherited user/model config."""
+    env = os.environ.copy()
+    for key in _INHERITED_CONFIG_ENV_KEYS:
+        env.pop(key, None)
+    env["HOME"] = str(temp_home)
+    env["JIUWENSWARM_HOME"] = str(temp_home)
+    # Preserve the per-test ports when service startup loads runtime dotenv.
+    env["JIUWENSWARM_CLI_PORTS"] = "1"
+    return env
 
 
 def _start_process(
@@ -148,11 +174,7 @@ async def test_btw_command_system_roundtrip(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    # Tell load_dotenv_runtime to preserve session-injected ports instead of
-    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
-    env["JIUWENSWARM_CLI_PORTS"] = "1"
+    env = _isolated_service_env(temp_home)
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -202,6 +224,7 @@ async def test_btw_command_system_roundtrip(
                 "type": "req",
                 "id": "req-btw-st",
                 "method": "command.btw",
+                "timeout_ms": _BTW_CLIENT_TIMEOUT_MS,
                 "params": {
                     "session_id": "sess_btw_test",
                     "question": "what is the current project about?",
@@ -218,10 +241,11 @@ async def test_btw_command_system_roundtrip(
             # Verify response frame structure
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-st"
-            # ok may be True or False depending on model availability
+            # ok may be True or False depending on model availability.
             assert "ok" in btw_res
-            # payload must contain a status field
-            assert "status" in btw_res.get("payload", {})
+            payload = btw_res.get("payload", {})
+            assert isinstance(payload, dict)
+            assert "status" in payload
 
     finally:
         _stop_process(gateway_proc)
@@ -241,11 +265,7 @@ async def test_btw_command_empty_question(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    # Tell load_dotenv_runtime to preserve session-injected ports instead of
-    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
-    env["JIUWENSWARM_CLI_PORTS"] = "1"
+    env = _isolated_service_env(temp_home)
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -295,6 +315,7 @@ async def test_btw_command_empty_question(
                 "type": "req",
                 "id": "req-btw-empty-st",
                 "method": "command.btw",
+                "timeout_ms": _BTW_CLIENT_TIMEOUT_MS,
                 "params": {
                     "session_id": "sess_btw_empty",
                     "question": "",
@@ -304,7 +325,9 @@ async def test_btw_command_empty_question(
             await ws.send(json.dumps(req_btw, ensure_ascii=False))
 
             btw_res = await _recv_until_response(
-                ws, "req-btw-empty-st", timeout=15
+                ws,
+                "req-btw-empty-st",
+                timeout=_BTW_RESPONSE_TIMEOUT_SECONDS,
             )
             # Verify response frame structure
             assert btw_res["type"] == "res"
@@ -334,11 +357,7 @@ async def test_btw_no_context_when_no_session(
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
 
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home)
-    # Tell load_dotenv_runtime to preserve session-injected ports instead of
-    # letting ~/.jiuwenswarm/config/.env override them (AGENT_SERVER_PORT etc).
-    env["JIUWENSWARM_CLI_PORTS"] = "1"
+    env = _isolated_service_env(temp_home)
     env["AGENT_SERVER_HOST"] = "127.0.0.1"
     env["AGENT_SERVER_PORT"] = str(agent_port)
     env["WEB_HOST"] = "127.0.0.1"
@@ -388,6 +407,7 @@ async def test_btw_no_context_when_no_session(
                 "type": "req",
                 "id": "req-btw-nocontext-st",
                 "method": "command.btw",
+                "timeout_ms": _BTW_CLIENT_TIMEOUT_MS,
                 "params": {
                     "session_id": "sess_btw_nonexistent_99999",
                     "question": "what is happening?",
@@ -403,16 +423,18 @@ async def test_btw_no_context_when_no_session(
             )
             assert btw_res["type"] == "res"
             assert btw_res["id"] == "req-btw-nocontext-st"
-            assert "status" in btw_res.get("payload", {})
+            payload = btw_res.get("payload", {})
+            assert isinstance(payload, dict)
+            assert "status" in payload
             # Empty history alone is not enough for no_context once the agent
-            # has a system prompt; accept the model path outcomes as well.
-            status = btw_res["payload"]["status"]
+            # has a system prompt; accept model path outcomes too.
+            status = payload["status"]
             assert status in ("ok", "no_context", "failed")
             if status == "ok":
-                assert isinstance(btw_res["payload"].get("answer"), str)
-                assert btw_res["payload"]["answer"].strip()
+                assert isinstance(payload.get("answer"), str)
+                assert payload["answer"].strip()
             elif status == "failed":
-                assert "error" in btw_res["payload"]
+                assert "error" in payload
 
     finally:
         _stop_process(gateway_proc)

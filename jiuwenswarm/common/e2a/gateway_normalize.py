@@ -576,6 +576,10 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     if kind == E2A_RESPONSE_KIND_CRON:
         body_payload = {
             "event_type": "cron.response",
+            # Gateway uses this correlation id to return the authoritative
+            # CronController result to the Agent tool.  Do not drop it while
+            # projecting the typed E2A response into a legacy chunk payload.
+            "command_id": body.get("command_id"),
             "action": body.get("action"),
             "status": body.get("status"),
             "data": body.get("data"),
