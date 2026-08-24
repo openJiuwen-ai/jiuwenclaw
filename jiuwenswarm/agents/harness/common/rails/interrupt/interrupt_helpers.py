@@ -205,6 +205,21 @@ def build_permission_rail(
                     return value.strip()
             return None
 
+        def _fire_permission_denied(tool_name: str, session_id: str | None,
+                                    reason: str) -> None:
+            """触发 PermissionDenied hook（fire-and-forget，永不阻塞）."""
+            try:
+                from jiuwenswarm.common.hooks_config import HookEvent
+                from jiuwenswarm.server.hooks.rail_hook_emitter import get_rail_hook_emitter
+                get_rail_hook_emitter().trigger(
+                    HookEvent.PERMISSION_DENIED,
+                    query=tool_name,
+                    hook_input={"tool_name": tool_name, "reason": reason},
+                    session_id=str(session_id or ""),
+                )
+            except Exception:
+                logger.debug("PermissionDenied hook trigger failed", exc_info=True)
+
         async def _request_permission_confirmation(
             req: PermissionConfirmationRequest,
         ) -> PermissionConfirmResponse | str | None:
@@ -223,10 +238,30 @@ def build_permission_rail(
                 )
 
             channel = TOOL_PERMISSION_CHANNEL_ID.get() or "web"
+            session_id = _resolve_session_id(req.ctx)
+
+            # 触发 PermissionRequest hook：权限请求发出时刻（覆盖 ACP 与非 ACP
+            # "interrupt" 两条路径）。fire-and-forget，永不阻塞权限流程。
+            _tool_call = req.tool_call
+            _tname = str(getattr(_tool_call, "name", "") or "") if _tool_call is not None else ""
+            try:
+                from jiuwenswarm.common.hooks_config import HookEvent
+                from jiuwenswarm.server.hooks.rail_hook_emitter import get_rail_hook_emitter
+                get_rail_hook_emitter().trigger(
+                    HookEvent.PERMISSION_REQUEST,
+                    query=_tname,
+                    hook_input={
+                        "tool_name": _tname,
+                        "tool_args": getattr(_tool_call, "arguments", None) if _tool_call is not None else None,
+                    },
+                    session_id=session_id or "",
+                )
+            except Exception:
+                logger.debug("PermissionRequest hook trigger failed", exc_info=True)
+
             if channel != "acp":
                 return "interrupt"
 
-            session_id = _resolve_session_id(req.ctx)
             if not session_id:
                 return None
 
@@ -289,6 +324,7 @@ def build_permission_rail(
                     return PermissionConfirmResponse(approved=True, auto_confirm=False, feedback="")
                 if option_id == "allow-always":
                     return PermissionConfirmResponse(approved=True, auto_confirm=True, feedback="")
+                _fire_permission_denied(_tname, session_id, "User rejected the request")
                 return PermissionConfirmResponse(
                     approved=False,
                     auto_confirm=False,
@@ -296,6 +332,7 @@ def build_permission_rail(
                 )
 
             if outcome_kind == "cancelled":
+                _fire_permission_denied(_tname, session_id, "Permission request was cancelled")
                 return PermissionConfirmResponse(
                     approved=False,
                     auto_confirm=False,
@@ -340,7 +377,8 @@ def build_permission_rail(
 
             if getattr(perm_ctx, "scene", None) == "group_digital_avatar":
                 if inp.user_input is not None:
-                    return ("reject", "[PERMISSION_DENIED] 数字分身场景不支持交互审批")
+                    _fire_permission_denied(inp.normalized_tool_name, "", "数字分身场景不支持交互审批")
+                return ("reject", "[PERMISSION_DENIED] 数字分身场景不支持交互审批")
                 level = await check_avatar_permission(
                     inp.normalized_tool_name,
                     inp.tool_args,
@@ -349,6 +387,7 @@ def build_permission_rail(
                 )
                 if level == "allow":
                     return ("approve",)
+                _fire_permission_denied(inp.normalized_tool_name, "", "该工具未被授权在数字分身场景下使用")
                 return ("reject", "[PERMISSION_DENIED] 该工具未被授权在数字分身场景下使用")
 
             principal_user_id = str(getattr(perm_ctx, "principal_user_id", "") or "").strip()
@@ -370,6 +409,7 @@ def build_permission_rail(
                 return None
             if owner_level == "allow":
                 return ("approve",)
+            _fire_permission_denied(inp.normalized_tool_name, "", f"该工具未被授权 (owner_scopes: {owner_level})")
             return ("reject", f"[PERMISSION_DENIED] 该工具未被授权 (owner_scopes: {owner_level})")
 
         def _get_permissions_snapshot():

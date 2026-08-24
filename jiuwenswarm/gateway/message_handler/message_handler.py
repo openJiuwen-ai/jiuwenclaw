@@ -374,6 +374,50 @@ class MessageHandler(ABC):
                 self._gateway_hook_handler.on_session_start(session_id, source=source)
             )
 
+    def trigger_session_end_hook(self, session_id: str, reason: str = "clear") -> None:
+        """供 Channel 层调用，触发 SessionEnd hook."""
+        if self._gateway_hook_handler:
+            asyncio.create_task(
+                self._gateway_hook_handler.on_session_end(session_id, reason=reason)
+            )
+
+    def trigger_notification_hook(self, notification_type: str, message: str,
+                                   session_id: str = "") -> None:
+        """供 Channel 层调用，触发 Notification hook."""
+        if self._gateway_hook_handler:
+            asyncio.create_task(
+                self._gateway_hook_handler.on_notification(
+                    notification_type, message, session_id=session_id,
+                )
+            )
+
+    def trigger_config_change_hook(self, changed_keys: list[str] | None = None,
+                                     session_id: str = "") -> None:
+        """供 Channel 层调用，触发 ConfigChange hook."""
+        if self._gateway_hook_handler:
+            asyncio.create_task(
+                self._gateway_hook_handler.on_config_change(
+                    changed_keys, session_id=session_id,
+                )
+            )
+
+    def trigger_instructions_loaded_hook(self, source: str = "AGENTS.md",
+                                          session_id: str = "") -> None:
+        """供 Channel 层调用，触发 InstructionsLoaded hook."""
+        if self._gateway_hook_handler:
+            asyncio.create_task(
+                self._gateway_hook_handler.on_instructions_loaded(
+                    source, session_id=session_id,
+                )
+            )
+
+    def trigger_setup_hook(self, source: str = "startup", session_id: str = "") -> None:
+        """供 Channel 层调用，触发 Setup hook."""
+        if self._gateway_hook_handler:
+            asyncio.create_task(
+                self._gateway_hook_handler.on_setup(source, session_id=session_id)
+            )
+
     def set_inbound_pipeline(self, pipeline: Any) -> None:
         self._inbound_pipeline = pipeline
 
@@ -913,6 +957,18 @@ class MessageHandler(ABC):
             payload.setdefault("is_complete", True)
         else:
             payload = {"content": text_or_payload, "is_complete": True}
+
+        # 触发 Notification hook：send_channel_notice 是 agent/系统向用户
+        # 下发提示的总入口，在此触发使配置在 hooks.Notification 下的脚本生效。
+        # fire-and-forget，永不阻塞消息下发；matcher 可按 notification_type 过滤。
+        try:
+            self.trigger_notification_hook(
+                str(payload.get("type") or "notice"),
+                str(payload.get("content") or ""),
+                session_id=str(session_id or ""),
+            )
+        except Exception:
+            logger.debug("trigger_notification_hook failed", exc_info=True)
 
         _app_id = user_infos.get("app_id") or user_infos.get("bot_id", "")
         msg = Message(

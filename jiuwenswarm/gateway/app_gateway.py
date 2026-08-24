@@ -194,6 +194,15 @@ def _inject_session_work_mode(msg: Message) -> None:
     if not isinstance(params, dict):
         return
     channel_id = getattr(msg, "channel_id", None)
+    # AgentServer 自 2026-08-01 起拒绝非 TUI 渠道的 session.create 携带 session_id
+    # ("session.create no longer accepts session_id; use session.switch to restore")。
+    # 本函数仅对 web 的 session.create 生效(TUI 的 session.create 不在
+    # CLI_FORWARD_REQ_METHODS,不走 forward 路径,可合法携带外部 session_id)。
+    # 与 fallback _session_create 的 create_params.pop("session_id") 对齐,摘掉
+    # legacy 客户端携带的 session_id,避免被 AgentServer 拒绝。恢复已有会话应
+    # 使用 session.switch,而非 session.create 带 session_id。
+    if str(channel_id or "").strip().lower() != "tui":
+        params.pop("session_id", None)
     try:
         from jiuwenswarm.server.runtime.session.work_mode import resolve_session_work_mode_params
         binding = resolve_session_work_mode_params(params, channel_id=channel_id)
@@ -1617,6 +1626,16 @@ async def _run(
 
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
+
+    # 触发 Setup / InstructionsLoaded hooks：Gateway 启动时系统完成初始化(Setup)、
+    # 系统指令(AGENTS.md 等)视为已加载(InstructionsLoaded)。fire-and-forget。
+    # 这两个事件归类为 Gateway 事件(hooks_config._GATEWAY_EVENTS)；AGENTS.md 的逐
+    # 会话加载发生在 AgentServer，Gateway 进程无独立加载点，故在启动点触发。
+    try:
+        message_handler.trigger_setup_hook(source="gateway")
+        message_handler.trigger_instructions_loaded_hook(source="AGENTS.md")
+    except Exception:
+        logger.warning("[App] trigger setup/instructions hooks failed", exc_info=True)
 
     # IM Pipeline 初始化（数字分身）
     from jiuwenswarm.gateway.im_pipeline.im_inbound import IMInboundPipeline

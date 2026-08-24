@@ -2243,6 +2243,18 @@ async def _stop_dynamic_member_agent(session_id: str, member_name: str) -> bool:
         member_name=member,
         source="dynamic-member",
     )
+    # 触发 SubagentStop hook：动态成员运行时停止。fire-and-forget。
+    try:
+        from jiuwenswarm.common.hooks_config import HookEvent
+        from jiuwenswarm.server.hooks.rail_hook_emitter import get_rail_hook_emitter
+        get_rail_hook_emitter().trigger(
+            HookEvent.SUBAGENT_STOP,
+            query=member,
+            hook_input={"member_name": member, "reason": "dynamic-member-stop"},
+            session_id=sid,
+        )
+    except Exception:
+        logger.debug("SubagentStop hook trigger failed", exc_info=True)
     return True
 
 

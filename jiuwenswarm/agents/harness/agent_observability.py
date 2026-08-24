@@ -479,6 +479,22 @@ def install_subagent_observability_hook() -> None:
         """Create the sub-agent, then give it its own observability rail."""
         subagent = original(self, *args, **kwargs)
         attach_subagent_observability(subagent)
+        # 触发 SubagentStart hook：create_subagent 是所有子 agent 创建的总入口
+        # （TaskTool / SessionSpawnExecutor 共用）。subagent_type 为成员类型，
+        # subsession_id 为子会话 id。fire-and-forget，永不阻塞创建流程。
+        try:
+            _sat = kwargs.get("subagent_type") if "subagent_type" in kwargs else (args[0] if args else "")
+            _ssid = kwargs.get("subsession_id") if "subsession_id" in kwargs else (args[1] if len(args) > 1 else "")
+            from jiuwenswarm.common.hooks_config import HookEvent
+            from jiuwenswarm.server.hooks.rail_hook_emitter import get_rail_hook_emitter
+            get_rail_hook_emitter().trigger(
+                HookEvent.SUBAGENT_START,
+                query=str(_sat or ""),
+                hook_input={"subagent_type": str(_sat or ""), "subsession_id": str(_ssid or "")},
+                session_id=str(_ssid or ""),
+            )
+        except Exception:
+            logger.debug("[AgentObservability] SubagentStart hook trigger failed", exc_info=True)
         return subagent
 
     setattr(create_subagent_with_observability, _SUBAGENT_HOOK_MARKER_ATTR, True)

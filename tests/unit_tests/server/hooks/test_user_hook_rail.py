@@ -32,6 +32,14 @@ class MockCallbackContext:
     session: Any = None
 
 
+@dataclass
+class MockModelCallInputs:
+    """Mock for openjiuwen ModelCallInputs (BeforeModelCall/AfterModelCall)."""
+    messages: Any = None
+    tools: Any = None
+    response: Any = None
+
+
 # ============================================================
 # UserHookRail: before_tool_call (PreToolUse)
 # ============================================================
@@ -382,3 +390,158 @@ class TestDisableAllHooks:
         ctx = MockCallbackContext(inputs=MockToolInputs(tool_name="Bash"))
         await rail.before_tool_call(ctx)
         assert "_skip_tool" not in ctx.extra
+
+
+# ============================================================
+# UserHookRail: before_model_call (BeforeModelCall)
+# ============================================================
+
+class TestBeforeModelCall:
+    @staticmethod
+    def _make_config(**events):
+        matchers = {}
+        for event_name, matcher_list in events.items():
+            matchers[event_name] = [
+                HookMatcher(matcher=m[0], hooks=m[1]) for m in matcher_list
+            ]
+        return HooksConfig(events=matchers)
+
+    @pytest.mark.asyncio
+    async def test_no_matching_hooks_does_nothing(self):
+        config = self._make_config()
+        rail = UserHookRail(config)
+        ctx = MockCallbackContext(inputs=MockModelCallInputs(messages=[]))
+        await rail.before_model_call(ctx)
+        assert "_before_model_hook_feedback" not in ctx.extra
+
+    @pytest.mark.asyncio
+    async def test_runs_hook_with_messages_and_tools(self):
+        config = self._make_config(
+            BeforeModelCall=[("*", [{"command": "echo ok", "timeout": 5}])]
+        )
+        rail = UserHookRail(config)
+        rail._executor.run_all = AsyncMock(return_value=[])
+        ctx = MockCallbackContext(
+            inputs=MockModelCallInputs(
+                messages=[{"role": "user", "content": "hi"}], tools=["t1"],
+            ),
+        )
+        await rail.before_model_call(ctx)
+        hook_input = rail._executor.run_all.await_args.kwargs["hook_input"]
+        assert hook_input["event"] == "BeforeModelCall"
+        assert hook_input["messages"] == [{"role": "user", "content": "hi"}]
+        assert hook_input["tools"] == ["t1"]
+
+    @pytest.mark.asyncio
+    async def test_additional_context_appended(self):
+        config = self._make_config(
+            BeforeModelCall=[(
+                "*",
+                [{"command": 'echo \'{"additionalContext":"model guard"}\'', "timeout": 5}]
+            )]
+        )
+        rail = UserHookRail(config)
+        ctx = MockCallbackContext(inputs=MockModelCallInputs(messages=[]))
+        await rail.before_model_call(ctx)
+        assert "model guard" in ctx.extra.get("_hook_additional_context", "")
+
+    @pytest.mark.asyncio
+    async def test_blocking_is_advisory(self):
+        """模型调用在 Rail 层无安全短路，blocking 仅记录 feedback 不跳过."""
+        config = self._make_config(
+            BeforeModelCall=[("*", [{"command": "echo block >&2; exit 2", "timeout": 5}])]
+        )
+        rail = UserHookRail(config)
+        ctx = MockCallbackContext(inputs=MockModelCallInputs(messages=[]))
+        await rail.before_model_call(ctx)
+        assert "_before_model_hook_feedback" in ctx.extra
+
+
+# ============================================================
+# UserHookRail: after_model_call (AfterModelCall)
+# ============================================================
+
+class TestAfterModelCall:
+    @staticmethod
+    def _make_config(**events):
+        matchers = {}
+        for event_name, matcher_list in events.items():
+            matchers[event_name] = [
+                HookMatcher(matcher=m[0], hooks=m[1]) for m in matcher_list
+            ]
+        return HooksConfig(events=matchers)
+
+    @pytest.mark.asyncio
+    async def test_no_matching_hooks_does_nothing(self):
+        config = self._make_config()
+        rail = UserHookRail(config)
+        ctx = MockCallbackContext(inputs=MockModelCallInputs(messages=[]))
+        await rail.after_model_call(ctx)
+        assert "_after_model_hook_feedback" not in ctx.extra
+
+    @pytest.mark.asyncio
+    async def test_runs_hook_with_response(self):
+        config = self._make_config(
+            AfterModelCall=[("*", [{"command": "echo ok", "timeout": 5}])]
+        )
+        rail = UserHookRail(config)
+        rail._executor.run_all = AsyncMock(return_value=[])
+        ctx = MockCallbackContext(
+            inputs=MockModelCallInputs(
+                messages=[], response={"content": "hello"},
+            ),
+        )
+        await rail.after_model_call(ctx)
+        hook_input = rail._executor.run_all.await_args.kwargs["hook_input"]
+        assert hook_input["event"] == "AfterModelCall"
+        assert hook_input["response"] == {"content": "hello"}
+
+    @pytest.mark.asyncio
+    async def test_additional_context_appended(self):
+        config = self._make_config(
+            AfterModelCall=[(
+                "*",
+                [{"command": 'echo \'{"additionalContext":"post-model note"}\'', "timeout": 5}]
+            )]
+        )
+        rail = UserHookRail(config)
+        ctx = MockCallbackContext(inputs=MockModelCallInputs(messages=[]))
+        await rail.after_model_call(ctx)
+        assert "post-model note" in ctx.extra.get("_hook_additional_context", "")
+
+
+# ============================================================
+# UserHookRail: _resolve_session_id (会话 id 解析)
+# ============================================================
+
+class TestResolveSessionId:
+    def test_prefers_ctx_extra_key(self):
+        """优先取 StreamEventRail 写入 ctx.extra 的会话 id."""
+        ctx = MockCallbackContext(
+            extra={UserHookRail._SESSION_ID_KEY: "conv-123"},
+            session=type("S", (), {"get_session_id": lambda self: "internal-uuid"})(),
+        )
+        assert UserHookRail._resolve_session_id(ctx) == "conv-123"
+
+    def test_skips_default_sentinel_falls_back_to_session(self):
+        """ctx.extra 里的 'default' 哨兵值视为未设置，回退到 session."""
+        ctx = MockCallbackContext(
+            extra={UserHookRail._SESSION_ID_KEY: "default"},
+            session=type("S", (), {"get_session_id": lambda self: "internal-uuid"})(),
+        )
+        assert UserHookRail._resolve_session_id(ctx) == "internal-uuid"
+
+    def test_falls_back_to_session_get_session_id(self):
+        ctx = MockCallbackContext(
+            extra={},
+            session=type("S", (), {"get_session_id": lambda self: "session-99"})(),
+        )
+        assert UserHookRail._resolve_session_id(ctx) == "session-99"
+
+    def test_returns_empty_when_nothing_available(self):
+        ctx = MockCallbackContext(extra={}, session=None)
+        assert UserHookRail._resolve_session_id(ctx) == ""
+
+    def test_returns_empty_when_session_has_no_get_session_id(self):
+        ctx = MockCallbackContext(extra={}, session=object())
+        assert UserHookRail._resolve_session_id(ctx) == ""
