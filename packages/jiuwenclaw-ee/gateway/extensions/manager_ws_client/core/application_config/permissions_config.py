@@ -30,7 +30,7 @@ def _row_to_dict(obj: Any) -> dict[str, Any]:
 
 def _apply_permissions(body: dict[str, Any] | None, *, op: str) -> None:
     """热更新权限引擎（与 logging_config._apply_log_levels 同模式：不再读 GDB）。"""
-    from jiuwenclaw.agentserver.permissions.config_loader import (
+    from jiuwenswarm.agents.harness.common.rails.permissions.config_loader import (
         apply_permissions_config_payload,
     )
 

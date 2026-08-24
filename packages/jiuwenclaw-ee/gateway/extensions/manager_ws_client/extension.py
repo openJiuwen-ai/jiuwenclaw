@@ -7,10 +7,10 @@ import asyncio
 import contextlib
 import logging
 
-from jiuwenclaw.config import get_config
-from jiuwenclaw.extensions.registry import ExtensionRegistry
-from jiuwenclaw.extensions.sdk.base import BaseExtension
-from jiuwenclaw.extensions.types import ExtensionConfig
+from jiuwenswarm.common.config import get_config
+from jiuwenswarm.extensions.registry import ExtensionRegistry
+from jiuwenswarm.extensions.sdk.base import BaseExtension
+from jiuwenswarm.extensions.types import ExtensionConfig
 
 from .infrastructure.config import get_settings
 from .routers.manager_ws_client_router import apply_config_push
