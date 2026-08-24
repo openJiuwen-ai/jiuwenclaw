@@ -12982,11 +12982,33 @@ class JiuWenSwarmDeepAdapter:
             AgentResponse 包含执行结果
         """
         if not self._is_session_scoped_adapter:
+            # 提前绑定 LLM trace ContextVar，使 supervisor task（由
+            # _get_or_create_session_adapter → start_interaction →
+            # self._instance.start() 经 asyncio.create_task 创建）继承正确的
+            # session_id / request_id。否则 task 上下文里恒为空，
+            # LLM_IO_TRACE 行全部 session_id='' request_id=''。
+            _early_trace_sid = _LLM_TRACE_SESSION_ID.set(
+                request.session_id or "default"
+            )
+            _early_trace_rid = _LLM_TRACE_REQUEST_ID.set(
+                request.request_id or ""
+            )
+            _early_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            _early_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self, "_model", None)
+                and getattr(self._model, "model_config", None)
+                and getattr(self._model.model_config, "model_name", "")
+                or ""
+            )
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
                 return await session_adapter.process_message_impl(request, inputs)
             finally:
+                _LLM_TRACE_SESSION_ID.reset(_early_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(_early_trace_rid)
+                _LLM_TRACE_ITERATION.reset(_early_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(_early_trace_model)
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
                 finally:
@@ -13552,6 +13574,24 @@ class JiuWenSwarmDeepAdapter:
         # "entering runner streaming" line so the pre-dispatch work is visible.
         stream_impl_started_at = time.monotonic()
         if not self._is_session_scoped_adapter:
+            # 提前绑定 LLM trace ContextVar，使 supervisor task（由
+            # _get_or_create_session_adapter → start_interaction →
+            # self._instance.start() 经 asyncio.create_task 创建）继承正确的
+            # session_id / request_id。否则 task 上下文里恒为空，
+            # LLM_IO_TRACE 行全部 session_id='' request_id=''。
+            _early_trace_sid = _LLM_TRACE_SESSION_ID.set(
+                request.session_id or "default"
+            )
+            _early_trace_rid = _LLM_TRACE_REQUEST_ID.set(
+                request.request_id or ""
+            )
+            _early_trace_iter = _LLM_TRACE_ITERATION.set(0)
+            _early_trace_model = _LLM_TRACE_MODEL_NAME.set(
+                getattr(self, "_model", None)
+                and getattr(self._model, "model_config", None)
+                and getattr(self._model.model_config, "model_name", "")
+                or ""
+            )
             session_adapter = await self._get_or_create_session_adapter(request.session_id)
             request_mcp = await session_adapter.register_request_scoped_office_claw_mcp(request)
             try:
@@ -13559,6 +13599,10 @@ class JiuWenSwarmDeepAdapter:
                     yield chunk
                 return
             finally:
+                _LLM_TRACE_SESSION_ID.reset(_early_trace_sid)
+                _LLM_TRACE_REQUEST_ID.reset(_early_trace_rid)
+                _LLM_TRACE_ITERATION.reset(_early_trace_iter)
+                _LLM_TRACE_MODEL_NAME.reset(_early_trace_model)
                 try:
                     await session_adapter.cleanup_request_scoped_office_claw_mcp(request_mcp)
                 finally:
