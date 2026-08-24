@@ -339,6 +339,17 @@ async def skill_turbo(query: str) -> dict[str, Any]:
     if channel_id:
         inputs["channel_id"] = channel_id
 
+    # user_id / chat_id：从 request_metadata 提取放到 inputs 顶层，
+    # 供 pipeline_init 的 fallback 重建 files/{user_id}/{chat_id}/output 路径。
+    # chat_id 兼容 group_id（agent_compat.py 确认两者等价）。
+    if isinstance(request_metadata, dict):
+        _uid = request_metadata.get("user_id")
+        if _uid:
+            inputs["user_id"] = str(_uid)
+        _cid = request_metadata.get("chat_id") or request_metadata.get("group_id")
+        if _cid:
+            inputs["chat_id"] = str(_cid)
+
     # effective_project_dir：adapter 在 _update_runtime_config 中已写入 ContextVar
     effective_project_dir = get_effective_request_workspace_dir()
     if effective_project_dir:
