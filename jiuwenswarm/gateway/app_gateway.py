@@ -2507,14 +2507,29 @@ async def _run(
                         if isinstance(reply_in_thread_raw, str)
                         else bool(reply_in_thread_raw)
                     )
+                    acknowledge_raw = slack_conf.get("acknowledge_requests", False)
+                    acknowledge_requests = (
+                        str(acknowledge_raw).strip().lower() in ("true", "1", "yes", "on")
+                        if isinstance(acknowledge_raw, str)
+                        else bool(acknowledge_raw)
+                    )
                     slack_config = SlackChannelConfig(
                         enabled=True,
                         bot_token=str(slack_conf.get("bot_token") or "").strip(),
                         app_token=str(slack_conf.get("app_token") or "").strip(),
                         allow_from=slack_conf.get("allow_from") or [],
                         allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
+                        auto_link_channel_ids=slack_conf.get("auto_link_channel_ids") or [],
+                        auto_link_prompt=str(
+                            slack_conf.get("auto_link_prompt") or ""
+                        ).strip(),
                         default_channel_id=str(slack_conf.get("default_channel_id") or "").strip(),
                         reply_in_thread=reply_in_thread,
+                        acknowledge_requests=acknowledge_requests,
+                        acknowledgement_text=str(
+                            slack_conf.get("acknowledgement_text")
+                            or "Received. Analyzing…"
+                        ).strip(),
                     )
                     slack_channel = SlackChannel(slack_config, _DummyBus())
                     channel_manager.register_channel(slack_channel)

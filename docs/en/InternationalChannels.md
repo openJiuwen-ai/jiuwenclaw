@@ -326,9 +326,11 @@ JiuwenSwarm connects to Slack through the asynchronous Slack Bolt Socket Mode ad
    - `chat:write`
    - `app_mentions:read`
    - `im:history`
+   - To process links automatically in selected channels, also add `channels:history`
 5. Under **Event Subscriptions**, subscribe to these Bot Events:
    - `app_mention`
    - `message.im`
+   - To process links automatically in selected channels, also subscribe to `message.channels`
 6. Install the app to the workspace and save the generated `xoxb-...` Bot Token.
 7. Add the bot to every Slack channel where it should respond.
 
@@ -347,8 +349,12 @@ channels:
     app_token: "xapp-your-app-token"
     allow_from: []
     allowed_channel_ids: []
+    auto_link_channel_ids: []
+    auto_link_prompt: ""
     default_channel_id:
     reply_in_thread: true
+    acknowledge_requests: false
+    acknowledgement_text: "Received. Analyzing…"
     enabled: true
 ```
 
@@ -358,14 +364,24 @@ channels:
 | `app_token` | Required Socket Mode App Token in `xapp-...` format | empty |
 | `allow_from` | Allow-list of Slack user IDs; empty allows all users | `[]` |
 | `allowed_channel_ids` | Channel IDs allowed to mention the bot; empty allows all channels and does not restrict DMs | `[]` |
+| `auto_link_channel_ids` | Channel IDs where link messages trigger the bot without a mention; empty disables the feature | `[]` |
+| `auto_link_prompt` | Optional instructions appended to automatically processed link messages | empty |
 | `default_channel_id` | Fallback channel for outbound messages without request context | empty |
 | `reply_in_thread` | Reply in the thread containing the triggering channel message | `true` |
+| `acknowledge_requests` | Immediately confirm accepted Slack requests before agent processing | `false` |
+| `acknowledgement_text` | Text used for the immediate confirmation | `Received. Analyzing…` |
 | `enabled` | Enable the Slack channel | `false` |
 
 ### 3. Use the Bot
 
 - In a channel, send `@bot your message`. JiuwenSwarm processes it and replies in the message thread by default.
 - Send the bot a direct message without mentioning it.
+- Channels in `auto_link_channel_ids` automatically process member messages containing an HTTP/HTTPS link and reply in a thread; plain text is still ignored.
+- Set `auto_link_prompt` to add workflow-specific instructions; when empty, JiuwenSwarm forwards the original link message unchanged.
+- When `acknowledge_requests` is enabled, accepted mentions, direct messages, and automatic links receive an immediate confirmation before agent processing begins.
+- Cron jobs created from Slack use `targets: slack` by default and return results
+  to the originating channel or thread. Jobs without Slack request context use
+  `default_channel_id`.
 - Channel conversations are isolated by Slack thread, so separate threads do not share a JiuwenSwarm session.
 - The current integration sends final text replies and suppresses token-level `chat.delta` events to avoid channel noise and Slack rate limits.
 
@@ -390,6 +406,19 @@ Slack user IDs and channel IDs are available from the member profile and channel
 
 - Confirm the app has `im:history` and subscribes to `message.im`.
 - Reinstall the app to the workspace after changing scopes or event subscriptions.
+
+**Links in an automatic channel do not trigger the bot**
+
+- Confirm the channel ID is in `auto_link_channel_ids` and the bot is a member.
+- Confirm the app has `channels:history` and subscribes to `message.channels`.
+- Confirm the message is from a human, contains an HTTP/HTTPS link, and the sender passes `allow_from`.
+- Reinstall the app after changing scopes or event subscriptions.
+
+**A Slack cron job does not deliver its result**
+
+- Confirm the job's `targets` value is `slack`.
+- For jobs without Slack request context, configure `default_channel_id`.
+- Confirm the bot is a member of the destination channel and has `chat:write`.
 
 ---
 

@@ -266,6 +266,37 @@ async def test_cron_tools_create_job_resolves_route_project_dir(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_cron_tools_create_job_defaults_to_slack_route(
+    tmp_path, monkeypatch
+) -> None:
+    _setup_project_store(tmp_path, monkeypatch)
+    tools, push = _make_cron_tools(tmp_path, monkeypatch)
+    session_id = "slack_T1_C1_1710000000.000100"
+
+    token = tools.push_cron_route(
+        CronToolRoute(channel_id="slack", session_id=session_id)
+    )
+    try:
+        job = await tools.create_job(
+            {
+                "id": "job-slack",
+                "name": "daily",
+                "cron_expr": "0 8 * * *",
+                "timezone": "Europe/Paris",
+                "description": "hello",
+            }
+        )
+    finally:
+        tools.reset_cron_route(token)
+
+    assert job["targets"] == "slack"
+    assert job["session_id"] == session_id
+    synced = push.payloads[-1]["body"]["data"]
+    assert synced["targets"] == "slack"
+    assert synced["session_id"] == session_id
+
+
+@pytest.mark.asyncio
 async def test_cron_tools_create_job_uses_route_project_id_and_work_mode(
     tmp_path, monkeypatch,
 ) -> None:

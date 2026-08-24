@@ -166,8 +166,12 @@ type SlackConfig = {
   app_token: string;
   allow_from: string[];
   allowed_channel_ids: string[];
+  auto_link_channel_ids: string[];
+  auto_link_prompt: string;
   default_channel_id: string;
   reply_in_thread: boolean;
+  acknowledge_requests: boolean;
+  acknowledgement_text: string;
 };
 
 type SlackDraft = {
@@ -176,8 +180,12 @@ type SlackDraft = {
   app_token: string;
   allow_from: string;
   allowed_channel_ids: string;
+  auto_link_channel_ids: string;
+  auto_link_prompt: string;
   default_channel_id: string;
   reply_in_thread: boolean;
+  acknowledge_requests: boolean;
+  acknowledgement_text: string;
 };
 
 type WhatsAppConfig = {
@@ -282,14 +290,20 @@ const DEFAULT_DISCORD_CONF: DiscordConfig = {
   allow_from: [],
 };
 
+const DEFAULT_SLACK_ACKNOWLEDGEMENT_TEXT = 'Received. Analyzing…';
+
 const DEFAULT_SLACK_CONF: SlackConfig = {
   enabled: false,
   bot_token: '',
   app_token: '',
   allow_from: [],
   allowed_channel_ids: [],
+  auto_link_channel_ids: [],
+  auto_link_prompt: '',
   default_channel_id: '',
   reply_in_thread: true,
+  acknowledge_requests: false,
+  acknowledgement_text: DEFAULT_SLACK_ACKNOWLEDGEMENT_TEXT,
 };
 
 const DEFAULT_WHATSAPP_CONF: WhatsAppConfig = {
@@ -733,8 +747,14 @@ function normalizeSlackConfig(input: unknown): SlackConfig {
     app_token: String(data.app_token ?? '').trim(),
     allow_from: normalizeList(data.allow_from),
     allowed_channel_ids: normalizeList(data.allowed_channel_ids),
+    auto_link_channel_ids: normalizeList(data.auto_link_channel_ids),
+    auto_link_prompt: String(data.auto_link_prompt ?? '').trim(),
     default_channel_id: String(data.default_channel_id ?? '').trim(),
     reply_in_thread: data.reply_in_thread === undefined ? true : Boolean(data.reply_in_thread),
+    acknowledge_requests: Boolean(data.acknowledge_requests),
+    acknowledgement_text:
+      String(data.acknowledgement_text ?? '').trim() ||
+      DEFAULT_SLACK_ACKNOWLEDGEMENT_TEXT,
   };
 }
 
@@ -745,8 +765,12 @@ function draftFromSlackConfig(conf: SlackConfig): SlackDraft {
     app_token: conf.app_token,
     allow_from: conf.allow_from.join('\n'),
     allowed_channel_ids: conf.allowed_channel_ids.join('\n'),
+    auto_link_channel_ids: conf.auto_link_channel_ids.join('\n'),
+    auto_link_prompt: conf.auto_link_prompt,
     default_channel_id: conf.default_channel_id,
     reply_in_thread: conf.reply_in_thread,
+    acknowledge_requests: conf.acknowledge_requests,
+    acknowledgement_text: conf.acknowledgement_text,
   };
 }
 
@@ -757,8 +781,14 @@ function buildSlackPayload(draft: SlackDraft): Record<string, unknown> {
     app_token: draft.app_token.trim(),
     allow_from: normalizeAllowFromText(draft.allow_from),
     allowed_channel_ids: normalizeAllowFromText(draft.allowed_channel_ids),
+    auto_link_channel_ids: normalizeAllowFromText(draft.auto_link_channel_ids),
+    auto_link_prompt: draft.auto_link_prompt.trim(),
     default_channel_id: draft.default_channel_id.trim(),
     reply_in_thread: draft.reply_in_thread,
+    acknowledge_requests: draft.acknowledge_requests,
+    acknowledgement_text:
+      draft.acknowledgement_text.trim() ||
+      DEFAULT_SLACK_ACKNOWLEDGEMENT_TEXT,
   };
 }
 
@@ -1346,8 +1376,13 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       normalizeAllowFromText(baseDraft.allow_from).join('\n') !== normalizeAllowFromText(slackDraft.allow_from).join('\n') ||
       normalizeAllowFromText(baseDraft.allowed_channel_ids).join('\n') !==
         normalizeAllowFromText(slackDraft.allowed_channel_ids).join('\n') ||
+      normalizeAllowFromText(baseDraft.auto_link_channel_ids).join('\n') !==
+        normalizeAllowFromText(slackDraft.auto_link_channel_ids).join('\n') ||
+      baseDraft.auto_link_prompt !== slackDraft.auto_link_prompt ||
       baseDraft.default_channel_id !== slackDraft.default_channel_id ||
-      baseDraft.reply_in_thread !== slackDraft.reply_in_thread
+      baseDraft.reply_in_thread !== slackDraft.reply_in_thread ||
+      baseDraft.acknowledge_requests !== slackDraft.acknowledge_requests ||
+      baseDraft.acknowledgement_text !== slackDraft.acknowledgement_text
     );
   }, [slackConfig, slackDraft]);
   const hasWhatsAppConfigChanges = useMemo(() => {
@@ -3600,7 +3635,46 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                   </button>
                                 </td>
                               </tr>
-                              {(['bot_token', 'app_token', 'default_channel_id'] as const).map((field) => (
+                              <tr
+                                className="border-t border-border first:border-t-0 even:bg-secondary/10"
+                                data-testid="channels-panel-channel-config-field"
+                                data-variant="acknowledge_requests"
+                              >
+                                <td
+                                  className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]"
+                                  data-testid="channels-panel-channel-config-field-label"
+                                  data-variant="acknowledge_requests"
+                                >
+                                  acknowledge_requests
+                                </td>
+                                <td
+                                  className="px-4 py-2.5 align-middle"
+                                  data-testid="channels-panel-channel-config-field-toggle"
+                                  data-variant="acknowledge_requests"
+                                >
+                                  <button
+                                    type="button"
+                                    role="switch"
+                                    aria-checked={slackDraft.acknowledge_requests}
+                                    onClick={() =>
+                                      handleSlackFieldChange(
+                                        'acknowledge_requests',
+                                        !slackDraft.acknowledge_requests,
+                                      )
+                                    }
+                                    className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent focus:outline-none ${
+                                      slackDraft.acknowledge_requests ? 'bg-ok' : 'bg-secondary'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-[var(--color-control-thumb)] shadow ${
+                                        slackDraft.acknowledge_requests ? 'translate-x-4' : 'translate-x-0'
+                                      }`}
+                                    />
+                                  </button>
+                                </td>
+                              </tr>
+                              {(['bot_token', 'app_token', 'default_channel_id', 'acknowledgement_text'] as const).map((field) => (
                                 <tr
                                   key={field}
                                   className="border-t border-border first:border-t-0 even:bg-secondary/10"
@@ -3623,7 +3697,9 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                             ? t('channels.placeholders.slackBotToken')
                                             : field === 'app_token'
                                               ? t('channels.placeholders.slackAppToken')
-                                              : t('channels.placeholders.slackChannelId')
+                                              : field === 'default_channel_id'
+                                                ? t('channels.placeholders.slackChannelId')
+                                                : t('channels.placeholders.slackAcknowledgementText')
                                         }
                                         className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                           isSensitiveSlackField(field) ? 'pr-10' : ''
@@ -3691,6 +3767,34 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
                                     data-testid="channels-panel-channel-config-field-textarea"
                                     data-variant="allowed_channel_ids"
+                                  />
+                                </td>
+                              </tr>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">
+                                  auto_link_channel_ids
+                                </td>
+                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                  <textarea
+                                    value={slackDraft.auto_link_channel_ids}
+                                    onChange={(e) => handleSlackFieldChange('auto_link_channel_ids', e.target.value)}
+                                    placeholder={t('channels.placeholders.slackAutoLinkChannelIds')}
+                                    rows={4}
+                                    className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  />
+                                </td>
+                              </tr>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">
+                                  auto_link_prompt
+                                </td>
+                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                  <textarea
+                                    value={slackDraft.auto_link_prompt}
+                                    onChange={(e) => handleSlackFieldChange('auto_link_prompt', e.target.value)}
+                                    placeholder={t('channels.placeholders.slackAutoLinkPrompt')}
+                                    rows={3}
+                                    className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
                                   />
                                 </td>
                               </tr>

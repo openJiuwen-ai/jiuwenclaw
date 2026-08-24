@@ -567,6 +567,44 @@ class TestHandleEventStoreValidation:
         assert cron["exec_session_id"] == run_info["session_id"]
 
     @pytest.mark.asyncio
+    async def test_slack_push_update_targets_slack_channel(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(store, targets="slack")
+
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler)
+        await svc.reload()
+
+        run_id = f"{job.id}:1234"
+        svc.runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=None,
+            chat_type=None,
+            timezone=job.timezone,
+            result_text="repository digest",
+        )
+
+        ev = _Event(
+            at_ts=time.time(),
+            seq=1,
+            kind="push_update",
+            job_id=job.id,
+            run_id=run_id,
+        )
+        await svc.handle_event(ev)
+
+        assert len(handler.published) == 1
+        msg = handler.published[0]
+        assert msg.channel_id == "slack"
+        assert msg.session_id is None
+        assert _cron_published_content(msg) == "repository digest"
+
+    @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):
         store_file = tmp_path / "cron_jobs.json"
         store = CronJobStore(path=store_file)

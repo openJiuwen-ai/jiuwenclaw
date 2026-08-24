@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import logging
 from dataclasses import dataclass
@@ -187,6 +186,8 @@ class CronTools:
             return normalize_target_channel_id(channel_raw, default=CronTargetChannel.WEB.value)
         if channel.startswith("feishu"):
             return CronTargetChannel.FEISHU.value
+        if channel.startswith("slack"):
+            return CronTargetChannel.SLACK.value
         if channel.startswith("wecom"):
             return CronTargetChannel.WECOM.value
         if channel.startswith("xiaoyi"):
@@ -557,7 +558,14 @@ class CronTools:
                         "cron_expr": {"type": "string"},
                         "timezone": {"type": "string"},
                         "description": {"type": "string"},
-                        "targets": {"type": "string"},
+                        "targets": {
+                            "type": "string",
+                            "enum": [e.value for e in CronTargetChannel],
+                            "description": (
+                                "Delivery channel. If omitted, use the current "
+                                "request source channel."
+                            ),
+                        },
                         "enabled": {"type": "boolean"},
                         "wake_offset_seconds": {"type": "integer"},
                         "mode": {
@@ -632,7 +640,8 @@ class CronTools:
                                     "type": "string",
                                     "enum": [e.value for e in CronTargetChannel],
                                     "description": (
-                                        "推送频道：web/tui/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
+                                        "推送频道：web/tui/feishu/slack/dingtalk/"
+                                        "whatsapp/wecom/xiaoyi/wechat"
                                     ),
                                 },
                                 "mode": {

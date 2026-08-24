@@ -653,7 +653,7 @@
       "discordHint": "Discord Bot messaging is supported. Enable Message Content Intent in Developer Portal and optionally set the target channel, the block_dm toggle can be used to block direct message.",
       "slackTitle": "Slack Channel Configuration",
       "slackSubtitle": "Configure Slack Socket Mode bot settings",
-      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Subscribe to app_mention and message.im events.",
+      "slackHint": "Create a Slack app with Socket Mode enabled, an xoxb bot token, and an xapp app token. Basic chat uses app_mention and message.im. Automatic link channels also require channels:history and the message.channels event.",
       "telegramTitle": "Telegram Channel Configuration",
       "telegramSubtitle": "Configure Telegram Bot service settings",
       "whatsappTitle": "WhatsApp Channel Configuration",
@@ -695,6 +695,9 @@
       "slackChannelId": "Enter the fallback Slack channel ID",
       "slackUserIds": "One Slack user ID per line (empty allows all users)",
       "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
+      "slackAutoLinkChannelIds": "One Slack channel ID per line for automatic link processing (empty disables it)",
+      "slackAutoLinkPrompt": "Optional instructions appended to automatically processed link messages",
+      "slackAcknowledgementText": "Message sent immediately before agent processing",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"
     },
     "saved": {
@@ -1465,6 +1468,7 @@
       "tui": "Terminal (tui)",
       "xiaoyi": "Xiaoyi (xiaoyi)",
       "feishu": "Lark (feishu)",
+      "slack": "Slack (slack)",
       "dingtalk": "DingTalk (dingtalk)",
       "whatsapp": "WhatsApp (whatsapp)",
       "wecom": "WeCom (wecom)",
