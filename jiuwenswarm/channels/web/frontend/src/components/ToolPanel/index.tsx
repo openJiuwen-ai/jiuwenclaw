@@ -257,6 +257,7 @@ export function ToolPanel({
   const { t } = useTranslation();
   const { isConnected, memoryUsage, setMemoryUsage } = useSessionStore();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
   const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
   const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
@@ -460,23 +461,24 @@ export function ToolPanel({
     isProcessing && latestUserMessageIndex >= 0 && !hasVisibleReplyAfterLatestUser;
   const visibleContextCompressionBefore = shouldMaskContextUsage ? 0 : contextCompressionBefore;
   const visibleContextCompressionAfter = shouldMaskContextUsage ? 0 : contextCompressionAfter;
-  const contextUsagePercent =
-    visibleContextCompressionBefore != null &&
-    visibleContextCompressionBefore > 0 &&
-    visibleContextCompressionAfter != null
-      ? Math.min(
-          100,
-          Math.max(0, Math.round((visibleContextCompressionAfter / visibleContextCompressionBefore) * 100)),
-        )
-      : null;
-  const contextUsageLabel = contextUsagePercent == null ? '--' : `${contextUsagePercent}%`;
-  const contextWindowDisplay =
-    visibleContextCompressionBefore == null ||
-    visibleContextCompressionBefore <= 0 ||
-    visibleContextCompressionAfter == null ||
-    visibleContextCompressionAfter <= 0
-      ? '--'
-      : `${(visibleContextCompressionAfter / 1000).toFixed(1)}K/${(visibleContextCompressionBefore / 1000).toFixed(1)}K`;
+  const beforeK = ((visibleContextCompressionBefore ?? 0) / 1000).toFixed(1);
+  const afterK = ((visibleContextCompressionAfter ?? 0) / 1000).toFixed(1);
+  let compressionRateDisplay;
+  if (
+    visibleContextCompressionBefore === 0 ||
+    visibleContextCompressionBefore === null ||
+    visibleContextCompressionAfter === 0 ||
+    visibleContextCompressionAfter === null
+  ) {
+    compressionRateDisplay = '--';
+  } else if (visibleContextCompressionAfter === visibleContextCompressionBefore) {
+    compressionRateDisplay = '100.0';
+  } else {
+    compressionRateDisplay = Number.isFinite(contextCompressionRate)
+      ? contextCompressionRate.toFixed(1)
+      : '0.0';
+  }
+  const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
 
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
 
@@ -617,31 +619,29 @@ export function ToolPanel({
 
         {/* 状态显示 - 只在收起模式下显示 */}
         {!panelExpanded && (
-          <section data-testid="tool-panel-status-card" data-variant="context" className="toolpanel-context-card" aria-label={t('toolPanel.context')}>
-            <div className="toolpanel-context-card__heading">
-              <h3 data-testid="tool-panel-status-title">{t('toolPanel.context')}</h3>
-              <span className="mono">{contextUsageLabel}</span>
+          <>
+            <hr className="border-0 border-t border-border m-0" />
+            <div data-testid="tool-panel-status-card" className="toolpanel-status-card px-3">
+              <h3 data-testid="tool-panel-status-title" className="toolpanel-status-card__title">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
+                  <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
+                  <rect x="11" y="1" width="3" height="14" rx="0.5" fill="currentColor" />
+                </svg>
+                {t('toolPanel.status')}
+              </h3>
+              <div className="space-y-2">
+                <div data-testid="tool-panel-status-context-compression" className="toolpanel-status-card__row">
+                  <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
+                  <span className="mono text-text">{compressionDisplay}</span>
+                </div>
+                <div data-testid="tool-panel-status-memory" className="toolpanel-status-card__row">
+                  <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
+                  <span className="mono text-text">{memoryDisplay}</span>
+                </div>
+              </div>
             </div>
-            <div
-              className="toolpanel-context-card__meter"
-              role="progressbar"
-              aria-label={t('toolPanel.context')}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={contextUsagePercent ?? undefined}
-              aria-valuetext={contextUsageLabel}
-            >
-              <span style={{ width: `${contextUsagePercent ?? 0}%` }} />
-            </div>
-            <div data-testid="tool-panel-status-context-compression" className="toolpanel-context-card__row">
-              <span>{t('toolPanel.contextCompression')}</span>
-              <span className="mono">{contextWindowDisplay}</span>
-            </div>
-            <div data-testid="tool-panel-status-memory" className="toolpanel-context-card__row">
-              <span>{t('toolPanel.memoryUsage')}</span>
-              <span className="mono">{memoryDisplay}</span>
-            </div>
-          </section>
+          </>
         )}
       </div>
     </div>
