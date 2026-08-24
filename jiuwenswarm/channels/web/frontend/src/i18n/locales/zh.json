@@ -57,7 +57,6 @@
       "browser": "浏览器",
       "channels": "频道",
       "memory": "记忆",
-      "security": "安全与权限",
       "experimental": "实验功能"
     },
     "moduleDescriptions": {
@@ -67,7 +66,6 @@
       "browser": "设置浏览器自动化运行时及可执行文件路径。",
       "channels": "配置外部消息频道的连接凭据与消息行为。",
       "memory": "管理敏感信息过滤与上下文处理能力。",
-      "security": "管理全局权限开关与逐工具权限规则。",
       "experimental": "管理试验性界面和智能体能力。"
     },
     "feedback": {
@@ -173,30 +171,6 @@
       "editRuleDescription": "该规则按当前界面语言单独保存，不会覆盖其他语言的规则。",
       "context": "上下文处理"
     },
-    "security": {
-      "guardrails": "系统风险操作权限",
-      "guardrailsDescription": "普通 Agent 与 Team 统一使用全局权限控制；逐工具规则在下方维护。",
-      "toolPermissions": "逐工具权限",
-      "toolPermissionsDescription": "权限等级修改后立即保存。",
-      "noTools": "尚未配置逐工具权限",
-      "noToolsDescription": "添加工具后，可单独设置自动执行、用户确认或拒绝。",
-      "deleteToolConfirm": "确定删除工具“{{tool}}”的权限规则吗？",
-      "deleteToolTitle": "删除工具权限",
-      "addTool": "添加工具权限",
-      "toolNamePlaceholder": "工具名称",
-      "toolAlreadyExists": "工具已存在",
-      "add": "添加",
-      "permissionLevels": {
-        "allow": "自动执行",
-        "ask": "用户确认",
-        "deny": "拒绝"
-      },
-      "permissionModes": {
-        "auto": "默认权限",
-        "full_access": "完全访问权限",
-        "strict": "严格审批"
-      }
-    },
     "experimental": {
       "externalCliAgents": "三方 Agent",
       "externalCliAgentsDescription": "配置 Team 模式中可由 Leader 拉起的 Claude 与 Codex Agent。",
@@ -271,10 +245,6 @@
         "placeholder": "例如：密码、API 密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
       },
       "context_engine_enabled": { "title": "上下文压缩", "description": "启用现有上下文引擎压缩能力。" },
-      "permissions_enabled": {
-        "title": "启用全局权限控制",
-        "description": "为普通 Agent 与 Team 启用统一的权限检查。"
-      },
       "permissions_mode": { "title": "全局权限模式", "description": "为普通 Agent 与 Team 选择统一的安全护栏模式。" },
       "a2ui_enabled": { "title": "启用 A2UI", "description": "允许将支持的结果渲染成交互式界面。" },
       "external_cli_agent_claude_enabled": {

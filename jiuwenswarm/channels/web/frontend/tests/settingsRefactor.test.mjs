@@ -234,12 +234,21 @@ function translationAt(locale, key) {
   return key.split('.').reduce((value, part) => value?.[part], locale);
 }
 
-test('registry definition preserves the fixed eight-module order and fails invalid registrations', () => {
+test('registry definition preserves the fixed seven-module order and fails invalid registrations', () => {
   const definition = source('src/features/settings/registry/openSourceDefinition.ts');
   assert.match(
     definition,
-    /generalModule,\s*modelsModule,\s*agentModule,\s*browserModule,\s*channelsModule,\s*memoryModule,\s*securityModule,\s*experimentalModule/,
+    /generalModule,\s*modelsModule,\s*agentModule,\s*browserModule,\s*channelsModule,\s*memoryModule,\s*experimentalModule/,
   );
+  assert.doesNotMatch(definition, /securityModule/);
+  for (const removedPath of [
+    'src/features/settings/modules/security/SecuritySettings.tsx',
+    'src/features/settings/modules/security/definition.ts',
+    'src/features/settings/modules/security/index.ts',
+    'src/assets/settings/navigation/security.svg',
+  ]) {
+    assert.equal(existsSync(new URL(removedPath, root)), false, `${removedPath} must not exist`);
+  }
   assert.throws(
     () =>
       createSettingsPageDefinition({
@@ -723,7 +732,7 @@ test('new Settings architecture has no legacy giant page or setting-specific pri
 });
 
 test('simple Settings controls are declared per module and enforced by the shared renderer', () => {
-  const modules = ['general', 'models', 'agent', 'browser', 'channels', 'memory', 'security', 'experimental'];
+  const modules = ['general', 'models', 'agent', 'browser', 'channels', 'memory', 'experimental'];
   const definitions = modules.map((module) => ({
     module,
     source: source(`src/features/settings/modules/${module}/definition.ts`),
@@ -992,11 +1001,6 @@ test('every visible Settings control maps to an exact persistence field or RPC',
     'memory_forbidden_description',
     'memory_forbidden_enabled',
   ]);
-  const securityFile = parseTsx('src/features/settings/modules/security/SecuritySettings.tsx');
-  assert.deepEqual(findSettingDefinitionKeys(parseTsx('src/features/settings/modules/security/definition.ts')), [
-    'permissions_enabled',
-  ]);
-  assert.deepEqual([...contractByCategory('security')], ['permissions_enabled']);
   assert.deepEqual(findSettingDefinitionKeys(parseTsx('src/features/settings/modules/experimental/definition.ts')), [
     'proactive_recommendation_enabled',
   ]);
@@ -1081,11 +1085,6 @@ test('every visible Settings control maps to an exact persistence field or RPC',
   assert.deepEqual([...settingsConfigMethods].sort(), ['config.get', 'config.save_all']);
   const sourceMethods = findRequestMethods(parseTsx('src/features/settings/services/SettingsSourceProvider.tsx'));
   assert.deepEqual([...sourceMethods].sort(), ['locale.set_conf', 'path.get', 'path.set']);
-  assert.deepEqual([...findRequestMethods(securityFile)].sort(), [
-    'permissions.tools.delete',
-    'permissions.tools.get',
-    'permissions.tools.update',
-  ]);
   const channelController = source('src/features/settings/modules/channels/useSettingsChannelsController.ts');
   const channelFormHook = source('src/features/settings/modules/channels/useChannelForm.ts');
   assert.match(channelFormHook, /request<\{ config\?: unknown \}>\(getMethod\)/);
@@ -1098,7 +1097,6 @@ test('every visible Settings control maps to an exact persistence field or RPC',
 
 test('reachable Settings dialog confirmations are not disabled by unchanged drafts', () => {
   for (const path of [
-    'src/features/settings/modules/security/SecuritySettings.tsx',
     'src/features/settings/modules/memory/MemorySettings.tsx',
     'src/features/settings/modules/agent/AgentSettings.tsx',
     'src/features/settings/modules/experimental/ExperimentalSettings.tsx',
@@ -1426,7 +1424,6 @@ test('Settings high-fidelity visual contract remains wired to exact assets and s
     'src/assets/settings/navigation/browser.svg',
     'src/assets/settings/navigation/channels.svg',
     'src/assets/settings/navigation/memory.svg',
-    'src/assets/settings/navigation/security.svg',
     'src/assets/settings/navigation/experimental.svg',
     'src/assets/settings/channels/xiaoyi.svg',
     'src/assets/settings/channels/feishu.svg',

@@ -6,7 +6,6 @@ import { agentModule } from '../modules/agent';
 import { browserModule } from '../modules/browser';
 import { channelsModule } from '../modules/channels';
 import { memoryModule } from '../modules/memory';
-import { securityModule } from '../modules/security';
 import { experimentalModule } from '../modules/experimental';
 
 export const openSourceSettingsPageDefinition = createSettingsPageDefinition({
@@ -20,7 +19,6 @@ export const openSourceSettingsPageDefinition = createSettingsPageDefinition({
     browserModule,
     channelsModule,
     memoryModule,
-    securityModule,
     experimentalModule,
   ],
 });

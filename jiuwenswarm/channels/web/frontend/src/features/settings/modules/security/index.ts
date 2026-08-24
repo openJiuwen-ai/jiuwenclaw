@@ -1,1 +1,0 @@
-export { securityModule } from './definition';

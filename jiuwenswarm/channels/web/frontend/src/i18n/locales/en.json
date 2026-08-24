@@ -57,7 +57,6 @@
       "browser": "Browser",
       "channels": "Channels",
       "memory": "Memory",
-      "security": "Security & Permissions",
       "experimental": "Experimental"
     },
     "moduleDescriptions": {
@@ -67,7 +66,6 @@
       "browser": "Configure the browser automation runtime and executable path.",
       "channels": "Configure external channel credentials and message behavior.",
       "memory": "Manage sensitive-information filtering and context handling.",
-      "security": "Manage the global permission switch and per-tool permission rules.",
       "experimental": "Manage experimental interface and agent capabilities."
     },
     "feedback": {
@@ -173,30 +171,6 @@
       "editRuleDescription": "This rule is saved separately for the current interface language and does not overwrite other languages.",
       "context": "Context processing"
     },
-    "security": {
-      "guardrails": "System risk-operation permissions",
-      "guardrailsDescription": "Ordinary Agents and Teams use the same global permission control; maintain per-tool rules below.",
-      "toolPermissions": "Per-tool permissions",
-      "toolPermissionsDescription": "Permission level changes are saved immediately.",
-      "noTools": "No per-tool permissions configured",
-      "noToolsDescription": "Add a tool to choose whether it runs automatically, asks for confirmation, or is denied.",
-      "deleteToolConfirm": "Delete the permission rule for “{{tool}}”?",
-      "deleteToolTitle": "Delete tool permission",
-      "addTool": "Add tool permission",
-      "toolNamePlaceholder": "Tool name",
-      "toolAlreadyExists": "Tool already exists",
-      "add": "Add",
-      "permissionLevels": {
-        "allow": "Run automatically",
-        "ask": "Ask for confirmation",
-        "deny": "Deny"
-      },
-      "permissionModes": {
-        "auto": "Default",
-        "full_access": "Full Access",
-        "strict": "Strict Approval"
-      }
-    },
     "experimental": {
       "externalCliAgents": "Third-Party Agents",
       "externalCliAgentsDescription": "Configure Claude and Codex Agents that a Team Leader can spawn in Team mode.",
@@ -285,10 +259,6 @@
       "context_engine_enabled": {
         "title": "Context compression",
         "description": "Enable the existing context-engine compression capability."
-      },
-      "permissions_enabled": {
-        "title": "Enable global permission controls",
-        "description": "Apply unified permission checks to ordinary Agents and Teams."
       },
       "permissions_mode": {
         "title": "Global permission mode",
