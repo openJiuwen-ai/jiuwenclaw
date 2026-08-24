@@ -173,6 +173,8 @@ class ReqMethod(Enum):
     PERMISSIONS_APPROVAL_OVERRIDES_DELETE = "permissions.approval_overrides.delete"
     PERMISSIONS_WORKSPACE_ENABLE_GET = "permissions.file_guard.workspace.rw_enabled.get"
     PERMISSIONS_WORKSPACE_ENABLE_SET = "permissions.file_guard.workspace.rw_enabled.set"
+    PERMISSIONS_WORKSPACE_ACCESS_GET = "permissions.file_guard.workspace.access.get"
+    PERMISSIONS_WORKSPACE_ACCESS_SET = "permissions.file_guard.workspace.access.set"
 
     CHANNEL_FEISHU_GET_CONF = "channel.feishu.get_conf"
     CHANNEL_FEISHU_SET_CONF = "channel.feishu.set_conf"
