@@ -285,11 +285,8 @@ export function ToolPanel({
   maximized = false,
 }: ToolPanelProps) {
   const { t } = useTranslation();
-  const { isConnected, memoryUsage } = useSessionStore();
+  const { isConnected } = useSessionStore();
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const contextCompressionRate = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRate ?? 0);
-  const contextCompressionBefore = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionBefore ?? null);
-  const contextCompressionAfter = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionAfter ?? null);
   const mode = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.mode ?? 'agent');
   const resolvedSessionId = sessionId ?? activeSessionId ?? '';
   const teamMembers = useSessionStore((s) => s.runtimes[activeSessionId ?? '']?.teamMembers ?? []);
@@ -477,47 +474,6 @@ export function ToolPanel({
       controller.abort();
     };
   }, [isConnected, isNewSessionPromotion, mergeTeamTaskProgressBaseline, mode, sessionId, setTeamHistoryMessages, setTeamHumanShareCommands, setTeamMemberExecutionEvents, setTeamMembers, setTeamTaskEvents, setTeamTasks]);
-
-  const memoryDisplay =
-    memoryUsage.rssMb == null
-      ? '--'
-      : `${memoryUsage.rssMb.toFixed(1)} MB${memoryUsage.usedPercent == null ? '' : ` (${memoryUsage.usedPercent.toFixed(1)}%)`}`;
-  let latestUserMessageIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === 'user') {
-      latestUserMessageIndex = i;
-      break;
-    }
-  }
-  const hasVisibleReplyAfterLatestUser = messages
-    .slice(latestUserMessageIndex + 1)
-    .some(
-      (message) =>
-        (message.role === 'assistant' || message.id.startsWith('team-leader-')) &&
-        Boolean(message.content.trim())
-    );
-  const shouldMaskContextUsage =
-    isProcessing && latestUserMessageIndex >= 0 && !hasVisibleReplyAfterLatestUser;
-  const visibleContextCompressionBefore = shouldMaskContextUsage ? 0 : contextCompressionBefore;
-  const visibleContextCompressionAfter = shouldMaskContextUsage ? 0 : contextCompressionAfter;
-  const beforeK = ((visibleContextCompressionBefore ?? 0) / 1000).toFixed(1);
-  const afterK = ((visibleContextCompressionAfter ?? 0) / 1000).toFixed(1);
-  let compressionRateDisplay;
-  if (
-    visibleContextCompressionBefore === 0 ||
-    visibleContextCompressionBefore === null ||
-    visibleContextCompressionAfter === 0 ||
-    visibleContextCompressionAfter === null
-  ) {
-    compressionRateDisplay = '--';
-  } else if (visibleContextCompressionAfter === visibleContextCompressionBefore) {
-    compressionRateDisplay = '100.0';
-  } else {
-    compressionRateDisplay = Number.isFinite(contextCompressionRate)
-      ? contextCompressionRate.toFixed(1)
-      : '0.0';
-  }
-  const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
 
   const panelExpanded = mode === 'team' ? teamAreaExpanded : singleAgentPanelExpanded;
 
@@ -756,32 +712,6 @@ export function ToolPanel({
             {section.render()}
           </div>
         ))}
-        {/* 状态显示 - 只在收起模式下显示 */}
-        {!panelExpanded && (
-          <>
-            <hr className="border-0 border-t border-border m-0" />
-            <div data-testid="tool-panel-status-card" className="toolpanel-status-card px-3">
-              <h3 data-testid="tool-panel-status-title" className="toolpanel-status-card__title">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <rect x="1" y="8" width="3" height="7" rx="0.5" fill="currentColor" opacity="0.5" />
-                  <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
-                  <rect x="11" y="1" width="3" height="14" rx="0.5" fill="currentColor" />
-                </svg>
-                {t('toolPanel.status')}
-              </h3>
-              <div className="space-y-2">
-                <div data-testid="tool-panel-status-context-compression" className="toolpanel-status-card__row">
-                  <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
-                  <span className="mono text-text">{compressionDisplay}</span>
-                </div>
-                <div data-testid="tool-panel-status-memory" className="toolpanel-status-card__row">
-                  <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
-                  <span className="mono text-text">{memoryDisplay}</span>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
