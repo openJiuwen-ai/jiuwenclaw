@@ -43,6 +43,7 @@ import {
   sanitizeTtsText,
   stopAllTts,
   normalizeFinalContent,
+  normalizeUserFacingError,
 } from '../utils';
 import {
   normalizeToolCallPayload,
@@ -143,6 +144,39 @@ function makeClientRequestId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
 }
 
+function formatUserFacingError(message: string): string {
+  return normalizeUserFacingError(message, {
+    dbQueryTimeout: i18n.t('network.dbQueryTimeout'),
+    requestTimeout: i18n.t('network.requestTimeout'),
+  });
+}
+
+function turnReceivedAssistantOutput(): boolean {
+  const { messages } = useChatStore.getState();
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) {
+    return true;
+  }
+  return messages.slice(lastUserIndex + 1).some((msg) => {
+    if (msg.isError) {
+      return true;
+    }
+    if (msg.role === 'tool') {
+      return true;
+    }
+    if (msg.role === 'assistant') {
+      return Boolean(msg.content?.trim()) || Boolean(msg.fileItems?.length);
+    }
+    return false;
+  });
+}
+
 /** 流式 chat.send / supplement 在网关侧使用的 request_id 形态 */
 function isActiveStreamRequestId(requestId: string): boolean {
   return requestId.startsWith('req_') || requestId.startsWith('chat-');
@@ -188,6 +222,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const pausedEventsRef = useRef<WsEvent[]>([]);
   /** supplement 后待认领的新流 request_id（后端形如 req_{hex}_{interruptId}） */
   const pendingSupplementInterruptIdRef = useRef<string | null>(null);
+  /** 用户主动 cancel 后，processing 结束不应再提示“处理失败” */
+  const turnCancelledRef = useRef(false);
 
   // Stores
   const {
@@ -292,6 +328,37 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       pendingInterruptRequestIds: pendingInterruptRequestIdsRef.current,
     });
   }, []);
+
+  const reportChatError = useCallback(
+    (rawMessage: string) => {
+      const errorMsg = formatUserFacingError(rawMessage);
+      if (isSubagentApprovalQuestion(useChatStore.getState().pendingQuestion)) {
+        setPendingQuestion(null);
+      }
+      setThinking(false);
+      setProcessing(false);
+      setHasActiveRequest(false);
+      subagentApprovalSeenRef.current = false;
+      activeRequestIdRef.current = null;
+      setConnectionStats({ lastError: errorMsg });
+      onErrorRef.current?.(errorMsg);
+      addMessage({
+        id: `error-${Date.now()}`,
+        role: 'system',
+        content: i18n.t('network.errorPrefix', { message: errorMsg }),
+        timestamp: new Date().toISOString(),
+        isError: true,
+      });
+    },
+    [
+      addMessage,
+      setConnectionStats,
+      setHasActiveRequest,
+      setPendingQuestion,
+      setProcessing,
+      setThinking,
+    ]
+  );
 
   const clearPauseBuffer = useCallback(() => {
     pauseHoldActiveRef.current = false;
@@ -433,6 +500,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       stopAllTts();
       clearPauseBuffer();
       pendingSupplementInterruptIdRef.current = null;
+      turnCancelledRef.current = false;
 
       const displayContent =
         trimmed ||
@@ -497,22 +565,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }, { requestId });
       } catch (error) {
         const webError = error as WebError;
-        setConnectionStats({ lastError: webError.message });
-        setProcessing(false);
-        setThinking(false);
         subagentApprovalSeenRef.current = false;
         activeRequestIdRef.current = null;
-        const errorMsg = webError.message || i18n.t('network.sendMessageFailed');
-        onErrorRef.current?.(errorMsg);
-        addMessage({
-          id: `error-${Date.now()}`,
-          role: 'system',
-          content: i18n.t('network.errorPrefix', { message: errorMsg }),
-          timestamp: new Date().toISOString(),
-        });
+        reportChatError(webError.message || i18n.t('network.sendMessageFailed'));
       }
     },
-    [addMessage, clearPauseBuffer, request, setHasActiveRequest, setProcessing, setThinking]
+    [addMessage, clearPauseBuffer, reportChatError, request, setHasActiveRequest, setProcessing, setThinking]
   );
 
   // 存储sendMessage函数到ref
@@ -561,6 +619,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const interruptRequestId = makeClientRequestId('interrupt');
       pendingInterruptRequestIdsRef.current.add(interruptRequestId);
       if (intent === 'cancel') {
+        turnCancelledRef.current = true;
         clearPauseBuffer();
         pendingSupplementInterruptIdRef.current = null;
         const rid = activeRequestIdRef.current;
@@ -1309,6 +1368,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setHasActiveRequest(false);
           subagentApprovalSeenRef.current = false;
           activeRequestIdRef.current = null;
+
+          const shouldReportSilentFailure =
+            !turnCancelledRef.current &&
+            !pauseHoldActiveRef.current &&
+            !useChatStore.getState().pendingQuestion &&
+            !turnReceivedAssistantOutput();
+          if (shouldReportSilentFailure) {
+            reportChatError(i18n.t('network.requestProcessingFailed'));
+          }
+          turnCancelledRef.current = false;
           
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
@@ -1334,27 +1403,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         if (activeRequestIdRef.current && !shouldHandleCurrentRequestEvent(event)) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
-        if (isSubagentApprovalQuestion(useChatStore.getState().pendingQuestion)) {
-          setPendingQuestion(null);
-        }
-        setThinking(false);
-        setProcessing(false);
-        setHasActiveRequest(false);
-        subagentApprovalSeenRef.current = false;
-        activeRequestIdRef.current = null;
         const errorMsg =
           typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
           return;
         }
-        onErrorRef.current?.(errorMsg);
-        addMessage({
-          id: `error-${Date.now()}`,
-          role: 'system',
-          content: i18n.t('network.errorPrefix', { message: errorMsg }),
-          timestamp: new Date().toISOString(),
-        });
+        reportChatError(errorMsg);
       }),
       webClient.on('chat.interrupt_result', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
@@ -1652,6 +1707,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     flushPausedEvents,
     handleConnectionAck,
     handleTtsPlayback,
+    reportChatError,
     setMode,
     setPaused,
     setPendingQuestion,

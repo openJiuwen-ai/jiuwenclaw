@@ -116,6 +116,7 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_DB_MAX_OVERFLOW"]="20"
     ["GATEWAY_DB_POOL_SIZE"]="2"
     ["GATEWAY_DB_POOL_TIMEOUT"]="30"
+    ["GATEWAY_DB_QUERY_TIMEOUT"]="5"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_INSTANCE_ID"]=""
     ["GATEWAY_SCHED_LABEL_ENABLED"]="false"

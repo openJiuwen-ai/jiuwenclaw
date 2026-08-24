@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date, datetime
 from pathlib import Path
@@ -33,6 +34,53 @@ _INSTANCE_SCOPED_TABLES = frozenset({
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]
+
+_DB_QUERY_TIMEOUT_MARKERS = (
+    "max_execution_time",
+    "statement timeout",
+    "query execution was interrupted",
+    "maximum statement execution time exceeded",
+    "querycanceled",
+    "canceling statement",
+    "command timeout",
+    "read timeout",
+    "write timeout",
+    "lock wait timeout",
+)
+
+
+class DatabaseQueryTimeoutError(RuntimeError):
+    """DB 查询超过 ``RUNTIME_DB_QUERY_TIMEOUT`` 或服务端执行超时。"""
+
+
+def is_db_query_timeout(exc: BaseException) -> bool:
+    """识别 ``RUNTIME_DB_QUERY_TIMEOUT`` 等导致的查询超时异常。"""
+    if isinstance(exc, (DatabaseQueryTimeoutError, asyncio.TimeoutError)):
+        return True
+    message = str(exc).lower()
+    if type(exc).__name__.lower() in {"timeouterror", "querycancelederror"}:
+        return True
+    orig = getattr(exc, "orig", None)
+    if orig is not None and orig is not exc and is_db_query_timeout(orig):
+        return True
+    return any(marker in message for marker in _DB_QUERY_TIMEOUT_MARKERS)
+
+
+def format_db_exception(exc: BaseException) -> str:
+    """将 DB 异常转为非空、可下发给前端的文案。"""
+    if isinstance(exc, DatabaseQueryTimeoutError):
+        return str(exc).strip() or "database query timeout"
+    if is_db_query_timeout(exc):
+        return "database query timeout"
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__ or "database error"
+
+
+def raise_db_query_timeout(exc: BaseException) -> None:
+    """向上抛出可安全重抛的超时异常（勿用 ``type(exc)(msg)`` 重建 SQLAlchemy 异常）。"""
+    raise DatabaseQueryTimeoutError(format_db_exception(exc)) from exc
 
 
 class GatewayDb(Database):
@@ -161,7 +209,10 @@ class GatewayDb(Database):
             )
             return [_row_to_dict(r) for r in rows]
         except Exception as exc:
-            logger.warning("[enterprise_config] query %s failed: %s", table, exc)
+            err_text = format_db_exception(exc)
+            logger.warning("[enterprise_config] query %s failed: %s", table, err_text)
+            if is_db_query_timeout(exc):
+                raise_db_query_timeout(exc)
             return []
 
 
@@ -203,4 +254,10 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return out
 
 
-__all__ = ("GatewayDb",)
+__all__ = (
+    "DatabaseQueryTimeoutError",
+    "GatewayDb",
+    "format_db_exception",
+    "is_db_query_timeout",
+    "raise_db_query_timeout",
+)

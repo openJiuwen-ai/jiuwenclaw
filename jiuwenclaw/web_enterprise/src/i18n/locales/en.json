@@ -967,6 +967,8 @@
     "connectionClosed": "Connection closed",
     "connectionUnavailable": "Connection unavailable",
     "requestTimeout": "Request timed out",
+    "dbQueryTimeout": "Database query timed out. Please try again later.",
+    "requestProcessingFailed": "Request failed. Please try again later.",
     "requestAborted": "Request aborted",
     "requestFailed": "Request failed",
     "sendMessageFailed": "Failed to send message",

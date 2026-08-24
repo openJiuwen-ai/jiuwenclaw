@@ -1856,7 +1856,8 @@ class MessageHandler(ABC):
             return False
         if payload.get("content") not in (None, ""):
             return False
-        if payload.get("error") not in (None, ""):
+        # 显式带 error 字段（即使为空）视为业务失败，不能当终止哨兵吞掉
+        if "error" in payload:
             return False
         # runtime 资源拒绝：error_code/message 必须下发，不能当哨兵吞掉
         if payload.get("error_code") not in (None, ""):
