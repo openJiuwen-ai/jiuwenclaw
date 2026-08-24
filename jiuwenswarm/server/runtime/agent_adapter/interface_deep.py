@@ -762,6 +762,19 @@ def _model_provider(model: Any) -> str:
     return ""
 
 
+def _api_type_for_provider(provider: Any) -> str:
+    """根据模型 provider 推导 API 协议类型（仅用于 history 落盘标识，不含敏感信息）。"""
+    name = str(getattr(provider, "value", provider) or "").strip()
+    if not name:
+        return ""
+    if name == "Anthropic":
+        return "anthropic-messages"
+    if is_openai_account_provider(name):
+        return "openai-responses"
+    # OpenAI / DeepSeek / SiliconFlow / DashScope / OpenRouter / Affinity 等均走 chat/completions
+    return "openai-completions"
+
+
 def _deep_agent_kv_cache_affinity_config(
         react_cfg: dict[str, Any] | None,
         model: Model | None = None,
@@ -6793,7 +6806,20 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 ctx_eng = self._instance.react_agent.context_engine
                 flush_history_writes()
                 records = load_history_records(session_id)
-                rebuilt = self._build_messages_for_model(records)
+                rebuilt = self._build_rewind_messages_for_model(records)
+                _rebuilt_roles = [getattr(m, "role", "?") for m in rebuilt]
+                _rebuilt_tool_calls = sum(
+                    len(getattr(m, "tool_calls", None) or []) for m in rebuilt
+                )
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] %s: rewind rebuilt messages roles=%s "
+                    "tool_calls=%d records=%d session=%s",
+                    reason,
+                    _rebuilt_roles,
+                    _rebuilt_tool_calls,
+                    len(records),
+                    session_id,
+                )
                 if rebuilt:
                     try:
                         from openjiuwen.core.single_agent import create_agent_session
@@ -9421,6 +9447,15 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 had_assistant_output = True
             if event_type == "chat.final":
                 emitted_terminal_chat_final = True
+                payload = dict(payload)
+                _mcc = getattr(resolved_model, "model_client_config", None)
+                _mc = getattr(resolved_model, "model_config", None)
+                payload["model"] = getattr(_mc, "model_name", "") or ""
+                payload["model_provider"] = str(getattr(_mcc, "client_provider", "") or "")
+                payload["api_type"] = _api_type_for_provider(
+                    getattr(_mcc, "client_provider", "")
+                )
+                payload["usage"] = dict(usage_accumulator)
             # Persist goal-completed cards at the stream yield choke point so
             # every goal.updated path (typed chunk / dict chunk) is covered once
             # without touching the pure payload parser.
@@ -11536,6 +11571,138 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                     if event_type in ("context.compact_boundary",):
                         continue
                     messages.append(AssistantMessage(content=content))
+
+        return messages
+
+    @staticmethod
+    def _build_rewind_messages_for_model(records: list[dict[str, Any]]) -> list[Any]:
+        """为 rewind 重建模型可接受的完整消息序列，保留 tool_call / tool_result。
+
+        与 ``_build_messages_for_model``（仅供 compact/摘要使用，会跳过 tool 记录）不同，
+        本函数把 ``chat.tool_call`` 还原成带 ``tool_calls`` 的 AssistantMessage，
+        把 ``chat.tool_result`` 还原成 ToolMessage，保证模型报错后下一轮复盘时
+        能看到完整的工具轨迹。一条「要调工具的 assistant 消息」在 history.jsonl
+        里被拆成 ``chat.final``（正文）+ ``chat.tool_call``（调用），这里重新合并。
+        """
+        from openjiuwen.core.foundation.llm.schema.message import (
+            AssistantMessage,
+            ToolMessage,
+            UserMessage,
+        )
+        from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+        # 单个 tool_result 的最大回放长度，避免把超大文件内容塞回上下文。
+        _MAX_TOOL_RESULT_CHARS = 4000
+
+        messages: list[Any] = []
+        i = 0
+        n = len(records)
+        while i < n:
+            rec = records[i]
+            if not isinstance(rec, dict):
+                i += 1
+                continue
+
+            role = rec.get("role")
+            event_type = rec.get("event_type")
+            request_id = rec.get("request_id")
+
+            # 用户消息
+            if role == "user":
+                content = rec.get("content")
+                content = content if isinstance(content, str) else ""
+                cleaned = re.sub(
+                    r"<file-content[^>]*>.*?</file-content>",
+                    "",
+                    content,
+                    flags=re.DOTALL,
+                ).strip()
+                if cleaned:
+                    messages.append(UserMessage(content=cleaned))
+                i += 1
+                continue
+
+            # 工具结果 -> ToolMessage
+            if event_type == "chat.tool_result":
+                tool_call_id = str(rec.get("tool_call_id") or "")
+                result = rec.get("result")
+                if isinstance(result, (dict, list)):
+                    result = json.dumps(result, ensure_ascii=False)
+                result = str(result or "")
+                if len(result) > _MAX_TOOL_RESULT_CHARS:
+                    result = result[:_MAX_TOOL_RESULT_CHARS] + "…[truncated]"
+                if tool_call_id:
+                    messages.append(
+                        ToolMessage(content=result, tool_call_id=tool_call_id)
+                    )
+                i += 1
+                continue
+
+            # 工具调用（一轮可能并行多个，合并成一条带 tool_calls 的 assistant 消息）
+            if role == "assistant" and event_type == "chat.tool_call":
+                tool_calls: list[ToolCall] = []
+                j = i
+                while (
+                    j < n
+                    and isinstance(records[j], dict)
+                    and records[j].get("event_type") == "chat.tool_call"
+                ):
+                    tc = records[j].get("tool_call") or {}
+                    if isinstance(tc, dict):
+                        tool_calls.append(
+                            ToolCall(
+                                id=str(tc.get("tool_call_id") or ""),
+                                type="function",
+                                name=str(tc.get("name") or ""),
+                                arguments=str(tc.get("arguments") or ""),
+                            )
+                        )
+                    j += 1
+
+                # 工具调用前的 chat.final（同 request_id）是这条 assistant 消息的正文
+                text = ""
+                if i > 0 and isinstance(records[i - 1], dict):
+                    prev = records[i - 1]
+                    if (
+                        prev.get("event_type") == "chat.final"
+                        and prev.get("request_id") == request_id
+                    ):
+                        prev_content = prev.get("content")
+                        text = prev_content if isinstance(prev_content, str) else ""
+
+                if tool_calls:
+                    messages.append(AssistantMessage(content=text, tool_calls=tool_calls))
+                i = j
+                continue
+
+            # assistant 普通文本 / 摘要
+            if role == "assistant":
+                if rec.get("is_goal_completed_message"):
+                    i += 1
+                    continue
+                if event_type in ("chat.final", "context.compact_summary", "context.rewind_summary") or not event_type:
+                    if event_type == "context.compact_boundary":
+                        i += 1
+                        continue
+                    # 该 chat.final 后紧跟同 request 的 tool_call 时，正文归 tool_call 消息，
+                    # 这里跳过，避免重复出现两条相邻 assistant 消息。
+                    nxt = records[i + 1] if i + 1 < n else None
+                    if (
+                        event_type == "chat.final"
+                        and isinstance(nxt, dict)
+                        and nxt.get("event_type") == "chat.tool_call"
+                        and nxt.get("request_id") == request_id
+                    ):
+                        i += 1
+                        continue
+                    content = rec.get("content")
+                    content = content if isinstance(content, str) else ""
+                    if content.strip():
+                        messages.append(AssistantMessage(content=content))
+                i += 1
+                continue
+
+            i += 1
 
         return messages
 
