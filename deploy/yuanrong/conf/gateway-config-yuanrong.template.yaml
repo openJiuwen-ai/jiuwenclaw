@@ -1104,3 +1104,5 @@ sandbox:
   cpu: <<TOOL_SANDBOX_CPU>>
   # 内存限制，单位：MB
   memory: <<TOOL_SANDBOX_MEMORY>>
+  user: <<TOOL_SANDBOX_USER>>
+  group: <<TOOL_SANDBOX_GROUP>>

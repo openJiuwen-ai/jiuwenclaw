@@ -246,6 +246,47 @@ def _sandbox_isolation_custom_id(project_dir: str | Path | None) -> str:
     return f"project_{digest}"
 
 
+def _resolve_posix_id(value: str, *, kind: Literal["user", "group"]) -> str | None:
+    """Return a numeric uid/gid string; resolve name lookups when ``value`` is not digits."""
+    if value.isdigit():
+        return value
+    try:
+        if kind == "user":
+            import pwd
+
+            return str(pwd.getpwnam(value).pw_uid)
+        import grp
+
+        return str(grp.getgrnam(value).gr_gid)
+    except KeyError:
+        logger.warning(
+            "[sysop_builder] yuanrong sandbox %s %r could not be resolved to a numeric id",
+            kind,
+            value,
+        )
+        return None
+    except ImportError:
+        logger.warning(
+            "[sysop_builder] posix user/group lookup is unavailable; cannot resolve %s %r",
+            kind,
+            value,
+        )
+        return None
+
+
+def _yuanrong_sandbox_user(endpoint: dict[str, Any]) -> str | None:
+    """Build yuanrong docker ``user`` as numeric ``"<uid>:<gid>"`` from sandbox config."""
+    user = str(endpoint.get("user") or "").strip()
+    group = str(endpoint.get("group") or "").strip()
+    if not user or not group:
+        return None
+    uid = _resolve_posix_id(user, kind="user")
+    gid = _resolve_posix_id(group, kind="group")
+    if uid is None or gid is None:
+        return None
+    return f"{uid}:{gid}"
+
+
 def _build_yuanrong_extra_params() -> dict[str, Any]:
     """Assemble yuanrong provider extra_params; always identity-mount workspace."""
     endpoint = get_sandbox_endpoint()
@@ -288,6 +329,9 @@ def _build_yuanrong_extra_params() -> dict[str, Any]:
         "executor": executor,
         "mounts": mounts,
     }
+    sandbox_user = _yuanrong_sandbox_user(endpoint)
+    if sandbox_user is not None:
+        extra_params["user"] = sandbox_user
 
     workdir = endpoint.get("workdir")
     if workdir is not None and str(workdir).strip():
@@ -562,13 +606,14 @@ def create_sandbox_sysop_card(
                 "  base_url=%s sandbox_type=yuanrong\n"
                 "  isolation_custom_id=%s\n"
                 "  idle_ttl=%s\n"
-                "  executor=%s workdir=%s\n"
+                "  executor=%s workdir=%s user=%s\n"
                 "  mounts(%d)=%s",
                 sandbox_url,
                 isolation_custom_id,
                 idle_ttl_seconds,
                 extra_params.get("executor"),
                 extra_params.get("workdir"),
+                extra_params.get("user"),
                 len(extra_params.get("mounts") or []),
                 extra_params.get("mounts") or [],
             )
