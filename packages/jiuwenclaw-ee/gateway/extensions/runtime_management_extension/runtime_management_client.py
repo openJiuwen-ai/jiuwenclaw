@@ -582,7 +582,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 )
             )
         if mode == "dev":
-            jiuwenbox_code_pod_path = os.getenv("JIUWENBOX_CODE_POD_PATH")
+            jiuwenbox_code_pod_path = os.getenv("JIUWENBOX_POD_PKG_PATH")
             if claw_code_path and jiuwenbox_code_pod_path:
                 jiuwenbox_host_mounts.append(
                     HostPathMount(

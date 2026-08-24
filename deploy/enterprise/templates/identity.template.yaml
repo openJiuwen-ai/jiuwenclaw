@@ -1,0 +1,62 @@
+# Service：提供稳定 DNS 域名, 供集群内部访问（manager-web 的 /idp 反代到此）
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<IDENTITY_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<IDENTITY_NAME>>
+  ports:
+    - name: rest
+      port: <<IDENTITY_REST_PORT>>
+      targetPort: <<IDENTITY_REST_PORT>>
+  type: ClusterIP                             # 集群内部访问，不需要外网
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<IDENTITY_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<IDENTITY_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<IDENTITY_NAME>>
+    spec:
+      containers:
+      - name: <<IDENTITY_NAME>>
+        image: <<IDENTITY_IMAGE>>
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: rest
+          containerPort: <<IDENTITY_REST_PORT>>
+        envFrom:
+            - secretRef:
+                name: <<SECRET_CM_NAME>>
+        env:
+        - name: IDENTITY_REST_HOST
+          value: "0.0.0.0"
+        - name: IDENTITY_REST_PORT
+          value: "<<IDENTITY_REST_PORT>>"
+        - name: IDENTITY_DB_TYPE
+          value: "<<DB_TYPE>>"
+        - name: IDENTITY_DB_HOST
+          value: "<<DB_HOST>>"
+        - name: IDENTITY_DB_PORT
+          value: "<<DB_PORT>>"
+        - name: IDENTITY_DB_USER
+          value: "<<IDENTITY_DB_USER>>"
+        - name: IDENTITY_DB_NAME
+          value: "<<IDENTITY_DB_NAME>>"
+        - name: IDENTITY_SEED_ADMIN
+          value: "<<IDENTITY_SEED_ADMIN>>"
+        - name: IDENTITY_SEED_USER1
+          value: "<<IDENTITY_SEED_USER1>>"
+        - name: TZ
+          value: "<<TIMEZONE>>"
