@@ -407,9 +407,10 @@ def _team_common_rail_names(role: str) -> tuple[str, ...]:
 def _code_base_rail_names(role: str) -> tuple[str, ...]:
     """Code-profile rails minus permission interrupt; leaders omit code todo planning.
 
-    ``PERMISSION_INTERRUPT`` is excluded for all team members: it relies on a
-    frontend user response that headless teammates cannot provide, and even the
-    leader's interrupt path is unreliable in a team context.
+    ``PERMISSION_INTERRUPT`` remains excluded from code.team/team.plan for all
+    members: teammates are headless, and these profiles retain their historical
+    Leader-mediated approval path.  Ordinary chat-team Leaders are assembled by
+    ``_build_team_capability_specs`` and do receive the user-facing interrupt.
     """
     names = tuple(
         name for name in _CODE_RAIL_NAMES
@@ -473,6 +474,9 @@ def _build_team_capability_specs(
     )
 
     if enable_permissions and role == "teammate":
+        # Teammates are headless in a Team run.  TeamPermissionRail forwards
+        # ASK decisions to the Leader's approve_tool flow instead of creating
+        # a frontend interrupt for the teammate itself.
         rails_specs.append(
             RailSpec(
                 type=registry.TEAM_PERMISSION,
@@ -481,11 +485,22 @@ def _build_team_capability_specs(
         )
 
     if enable_permissions and role == "leader":
-        rails_specs.append(
-            RailSpec(
-                type=registry.TEAM_PERMISSION_POLICY,
-                params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
-            ),
+        # These Rails serve different consumers: the policy Rail teaches the
+        # Leader how to approve teammate requests, while PermissionInterruptRail
+        # exposes the Leader's own ASK decisions through the user-facing Team
+        # stream.  Keeping both mounted avoids silently auto-approving Leader
+        # tool calls and does not change teammate approval semantics.
+        rails_specs.extend(
+            [
+                RailSpec(
+                    type=registry.TEAM_PERMISSION_POLICY,
+                    params=_rail_params(registry.TEAM_PERMISSION_POLICY, config),
+                ),
+                RailSpec(
+                    type=registry.PERMISSION_INTERRUPT,
+                    params=_rail_params(registry.PERMISSION_INTERRUPT, config),
+                ),
+            ]
         )
 
     rails_specs.extend(_role_evolution_rails(config, role))
