@@ -9976,12 +9976,26 @@ class JiuWenSwarmDeepAdapter:
         from jiuwenswarm.agents.harness.macro_routing import (
             is_auto_mode,
             macro_mode_label,
+            normalize_macro_mode,
             route_macro_mode,
         )
 
         params = request.params if isinstance(request.params, dict) else {}
         requested = str(params.get("mode") or "agent").strip()
         if not is_auto_mode(requested):
+            # Early path in agent_ws_server may have already resolved Auto and
+            # composed to code.normal / code.team; still emit macro.routing once.
+            stashed = params.get("macro_routing")
+            if (
+                isinstance(stashed, dict)
+                and str(params.get("macro_mode_requested") or "").strip().lower()
+                == "auto"
+                and not params.get("_macro_routing_emitted")
+            ):
+                params = dict(params)
+                params["_macro_routing_emitted"] = True
+                request.params = params
+                return requested or "agent", stashed
             return requested or "agent", None
 
         decision = await route_macro_mode(
@@ -9989,13 +10003,15 @@ class JiuWenSwarmDeepAdapter:
             requested_mode=requested,
             config_base=get_config(),
         )
-        resolved = decision.mode
+        resolved = normalize_macro_mode(decision.mode)
+        decision.mode = resolved
         label = macro_mode_label(resolved)
         # Mutate request params so downstream team/agent branching sees the concrete mode.
         params = dict(params)
         params["mode"] = resolved
         params["macro_mode_requested"] = "auto"
         params["macro_routing"] = decision.to_dict()
+        params["_macro_routing_emitted"] = True
         request.params = params
         if isinstance(request.metadata, dict):
             request.metadata = dict(request.metadata)

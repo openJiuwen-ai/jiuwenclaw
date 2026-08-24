@@ -1189,8 +1189,8 @@ mcp:
 
 modes:
   # Lightweight MACRO Auto scheduler (LAS-inspired). Default UI mode is Agent;
-  # Plan is a separate toggle on forced Agent. Auto is opt-in and maps to
-  # agent.plan / agent / team.
+  # Plan is a separate toggle on forced Agent/Cluster. Auto is opt-in and maps
+  # to agent / team.
   macro_routing:
     enabled: true
     # llm = classify every Auto query with the lightweight scheduler (better cross-dataset;
@@ -1199,7 +1199,6 @@ modes:
     confidence_threshold: 0.72
     # Optional marker overrides (empty → built-in defaults in gate.py)
     # team_markers: []
-    # plan_markers: []
     # fast_markers: []
 
   # 一级模式 agent / code / team

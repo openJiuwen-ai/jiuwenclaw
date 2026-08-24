@@ -121,6 +121,7 @@ def apply_a2ui_text_fallback_to_gateway_payload(
 
 class ChannelMode(str, Enum):
     AGENT = "agent"
+    AUTO = "auto"
     # 历史值：plan / fast 已合并为 agent，保留以兼容旧持久化 channel state。
     AGENT_PLAN = "agent.plan"
     AGENT_FAST = "agent.fast"
@@ -667,6 +668,7 @@ class MessageHandler(ABC):
         mode_raw = str(ch_cfg.get("default_mode") or "agent").strip().lower()
         mode_map = {
             "agent": ChannelMode.AGENT,
+            "auto": ChannelMode.AUTO,
             # plan / fast 已合并：历史 default_mode 归一到 agent。
             "agent.plan": ChannelMode.AGENT,
             "agent.fast": ChannelMode.AGENT,
@@ -1618,6 +1620,7 @@ class MessageHandler(ABC):
             mode_str = parsed.mode_subcommand or ""
             if mode_str not in (
                 "agent",
+                "auto",
                 "code",
                 "team",
                 "agent.plan",
@@ -1642,6 +1645,8 @@ class MessageHandler(ABC):
             old_sid = state.session_id
             if mode_str == "agent":
                 state.mode = ChannelMode.AGENT
+            elif mode_str == "auto":
+                state.mode = ChannelMode.AUTO
             elif mode_str == "code":
                 state.mode = ChannelMode.CODE_NORMAL
             elif mode_str == "team":

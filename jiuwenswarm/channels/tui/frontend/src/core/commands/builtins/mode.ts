@@ -55,6 +55,9 @@ export async function switchMode(
 const MODE_ALIASES: Record<string, ClientMode> = {
   plan: "agent.plan",
   agent: "agent.plan",
+  auto: "auto",
+  "agent.auto": "auto",
+  "macro.auto": "auto",
   code: "code.normal",
   "agent.plan": "agent.plan",
   "agent.fast": "agent.fast",
@@ -80,6 +83,7 @@ export function buildModeAutocompleteItems(): AutocompleteItem[] {
   return [
     { value: "agent", label: "agent" },
     { value: "agent.plan", label: "    plan" },
+    { value: "auto", label: "auto" },
     { value: "code", label: "code" },
     { value: "code.plan", label: "    plan" },
     { value: "code.normal", label: "    normal" },
@@ -92,6 +96,7 @@ export function buildModeAutocompleteItems(): AutocompleteItem[] {
 export function createModeCommand(): SlashCommand {
   const directModes = [
     "agent",
+    "auto",
     "code",
     "agent.plan",
     "code.plan",
@@ -103,8 +108,8 @@ export function createModeCommand(): SlashCommand {
   return {
     name: "mode",
     description: "Switch chat mode",
-    usage: "/mode <agent|code|code.plan|code.normal|team.work|team.code>",
-    example: "/mode code",
+    usage: "/mode <agent|auto|code|code.plan|code.normal|team.work|team.code>",
+    example: "/mode auto",
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     completion: async () => [...directModes],
@@ -129,7 +134,7 @@ export function createModeCommand(): SlashCommand {
           makeItem(
             ctx.sessionId,
             "error",
-            "usage: /mode <agent|code|code.plan|code.normal|team.work|team.code>",
+            "usage: /mode <agent|auto|code|code.plan|code.normal|team.work|team.code>",
           ),
         );
         return;

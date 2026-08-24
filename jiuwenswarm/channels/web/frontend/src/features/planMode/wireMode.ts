@@ -17,17 +17,15 @@
  * `code.team` runtime。前端不需要自行拼接 canonical mode。
  */
 
-/** UI 层的基础模式。agent 与 team 都支持 Plan；Auto 不提供 Plan toggle。 */
+/** UI 层的基础模式。只有单 agent（非 Auto）支持 Plan toggle。 */
 export type PlanBaseMode = 'agent' | 'team' | 'auto' | 'auto_harness';
 
 /**
- * Plan 对单 agent 与集群均开放。
+ * Plan 只对单 agent 开放。
  *
- * 集群 Plan 由 Leader 先产出计划、经用户审批再执行，和单 agent 的 Plan 流程
- * 看齐；profile（Deep / Code）由 work_mode 决定，映射到
- * `team.plan.normal` / `team.plan.code`。
- *
- * Auto 不提供 Plan 入口：Auto 自己路由到 agent.plan 时由 MACRO 写 wire mode。
+ * 集群（`team`）不支持 Plan：集群的计划由 Leader 在团队运行时里自行编排，
+ * 没有独立的计划审批流程，所以工具栏不提供 Plan 入口。
+ * Auto 不提供 Plan 入口：Auto 只路由到 agent / team，不会写 agent.plan。
  */
 export function supportsPlanMode(mode: PlanBaseMode | string | undefined): boolean {
   return mode === 'agent' || mode === 'team';

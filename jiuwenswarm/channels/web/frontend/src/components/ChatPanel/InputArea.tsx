@@ -602,7 +602,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const goalTagVisible = canUseGoalMenu && goalArmed;
   // Plan 是持续开关（不是 Goal 那种"下一条消息生效"的过渡态）：打开后一直用
   // agent.plan / team.plan.* 发送，直到用户点叉或后端推 plan.mode_exited。
-  // agent 与 team 都提供 Plan 入口；Auto 不提供（MACRO 自己路由到 agent.plan）。
+  // agent 与 team 都提供 Plan 入口；Auto 不提供（MACRO 只路由到 agent / team）。
   const planActive = usePlanStore((s) => s.runtimes[activeSessionId ?? '']?.active ?? false);
   const planPendingExplicitEntry = usePlanStore(
     (s) => s.runtimes[activeSessionId ?? '']?.pendingExplicitEntry ?? false,

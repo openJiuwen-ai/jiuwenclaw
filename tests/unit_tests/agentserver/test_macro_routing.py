@@ -10,16 +10,19 @@ from jiuwenswarm.agents.harness.macro_routing.config import load_macro_routing_c
 from jiuwenswarm.agents.harness.macro_routing.gate import route_with_gate
 from jiuwenswarm.agents.harness.macro_routing.router import route_macro_mode
 from jiuwenswarm.agents.harness.macro_routing.schemas import (
+    MACRO_MODES,
     is_auto_mode,
     normalize_macro_mode,
 )
 
 
 def test_normalize_and_auto_aliases():
+    assert MACRO_MODES == frozenset({"agent", "team"})
     assert normalize_macro_mode("performance") == "agent"
     assert normalize_macro_mode("agent.fast") == "agent"
     assert normalize_macro_mode("cluster") == "team"
-    assert normalize_macro_mode("planning") == "agent.plan"
+    assert normalize_macro_mode("planning") == "agent"
+    assert normalize_macro_mode("agent.plan") == "agent"
     assert normalize_macro_mode("agent") == "agent"
     assert is_auto_mode("auto")
     assert is_auto_mode("agent.auto")
@@ -51,18 +54,50 @@ def test_gate_team_markers_confident():
     assert decision.gate_confident is True
 
 
-def test_gate_ambiguous_low_confidence():
+def test_gate_spawn_team_of_agents():
+    """Explicit 'team of N agents' should route to Cluster."""
+    decision = route_with_gate(
+        "Spawn a team of 6 agents working on a full-stack feature in parallel"
+    )
+    assert decision.mode == "team"
+    assert decision.gate_confident is True
+
+
+@pytest.mark.asyncio
+async def test_auto_rules_spawn_team_of_agents():
+    decision = await route_macro_mode(
+        "Spawn a team of 6 agents working on a full-stack feature in parallel",
+        requested_mode="auto",
+        config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
+    )
+    assert decision.mode == "team"
+    assert decision.source == "rules"
+
+
+@pytest.mark.asyncio
+async def test_auto_rules_simple_fix_stays_agent():
+    decision = await route_macro_mode(
+        "Fix the typo in README.md",
+        requested_mode="auto",
+        config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
+    )
+    assert decision.mode == "agent"
+    assert decision.source == "rules"
+
+
+def test_gate_ambiguous_defaults_to_agent():
     decision = route_with_gate("What do you think about this overall?")
+    assert decision.mode == "agent"
     assert decision.gate_confident is False
     assert decision.confidence < 0.72
 
 
-def test_gate_plan_markers():
+def test_gate_plan_like_query_stays_agent():
     decision = route_with_gate(
         "Should we redesign the architecture and weigh the tradeoffs for a migration roadmap?"
     )
-    assert decision.mode == "agent.plan"
-    assert len(decision.features.get("plan_hits") or []) >= 1
+    assert decision.mode == "agent"
+    assert decision.mode != "team"
 
 
 @pytest.mark.asyncio
@@ -73,6 +108,17 @@ async def test_forced_mode_untouched():
         config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
     )
     assert decision.mode == "agent"
+    assert decision.source == "forced"
+
+
+@pytest.mark.asyncio
+async def test_forced_team_untouched():
+    decision = await route_macro_mode(
+        "Fix the typo in README.md",
+        requested_mode="team",
+        config_base={"modes": {"macro_routing": {"enabled": True, "strategy": "rules"}}},
+    )
+    assert decision.mode == "team"
     assert decision.source == "forced"
 
 

@@ -54,6 +54,7 @@ const planApprovalKind = "plan_approval";
 
 const modeItems = buildModeAutocompleteItems();
 assert.ok(modeItems.some((item) => item.value === "team.work" && item.label === "    work"));
+assert.ok(modeItems.some((item) => item.value === "auto" && item.label === "auto"));
 assert.ok(modeItems.some((item) => item.value === "team.code" && item.label === "    code"));
 assert.equal(modeItems.some((item) => item.value === "team.plan.normal"), false);
 assert.equal(modeItems.some((item) => item.value === "team.plan.code"), false);
@@ -63,7 +64,11 @@ assert.equal(resolveModeTarget("team.work"), "team");
 assert.equal(resolveModeTarget("team.code"), "code.team");
 assert.equal(resolveModeTarget("team"), "team");
 assert.equal(resolveModeTarget("code.team"), "code.team");
+assert.equal(resolveModeTarget("auto"), "auto");
+assert.equal(resolveModeTarget("agent.auto"), "auto");
+assert.equal(resolveModeTarget("macro.auto"), "auto");
 assert.equal(formatModeForDisplay("code.team"), "team.code");
+assert.equal(formatModeForDisplay("auto"), "auto");
 assert.equal(formatModeForDisplay("team.plan.code"), "team.plan.code");
 
 assert.equal(resolvePlanTarget("team"), "team.plan.normal");
@@ -73,6 +78,7 @@ assert.equal(resolvePlanTarget("code.team"), "team.plan.code");
 assert.equal(resolvePlanTarget("team.plan.code"), "team.plan.code");
 assert.equal(resolvePlanTarget("code.normal"), "code.plan");
 assert.equal(resolvePlanTarget("agent.fast"), "agent.plan");
+assert.equal(resolvePlanTarget("auto"), "auto");
 
 assert.equal(isPlanApprovalRequest("confirm_interrupt", planApprovalKind), true);
 assert.equal(isPlanApprovalRequest("confirm_interrupt", "permission"), false);
@@ -201,6 +207,7 @@ const teamSnapshot = {
   connectionStatus: "connected",
   sessionId: "team-session",
   mode: "code.normal",
+  lastMacroRoutedMode: null,
   themeName: "default",
   accentColor: "blue",
   transcriptMode: "compact",

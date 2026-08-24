@@ -28,6 +28,7 @@ Users can switch to more granular modes using the `/mode` command during a conve
 | Mode | Code | Description |
 |------|------|-------------|
 | Agent | `agent` | Unified single-agent mode (former `agent.plan` / `agent.fast` modes merged). Full tools + passive memory |
+| Auto | `auto` | MACRO Auto: classify each query as Agent (single) or Cluster (team). Stays selected; do not confuse with `/auto-harness`. |
 | Code (Normal) | `code.normal` | Code mode + coding memory, focused on code execution |
 | Code (Team) | `code.team` | Team collaboration launched from the Code profile |
 | Team | `team` | Multi-agent collaboration mode, based on the `team` definition in config |
@@ -42,6 +43,7 @@ Use the following commands during a channel conversation:
 
 ```
 /mode agent          # Switch to Agent mode (defaults to agent.plan)
+/mode auto           # MACRO Auto: Agent vs Cluster per query (same as Web Auto)
 /mode plan           # TUI local shorthand, equivalent to agent.plan
 /mode code           # Switch to Code mode (defaults to code.normal)
 /mode team           # Switch to Team mode
@@ -52,7 +54,7 @@ Use the following commands during a channel conversation:
 /mode team.normal    # TUI local form, equivalent to team
 ```
 
-> Compatibility: `/mode plan` and `/mode team.normal` are TUI-local command forms. Gateway controlled channels accept `agent`, `code`, `team`, `agent.plan`, `agent.fast`, `code.normal`, and `code.team`.
+> Compatibility: `/mode plan` and `/mode team.normal` are TUI-local command forms. Gateway controlled channels accept `agent`, `auto`, `code`, `team`, `agent.plan`, `agent.fast`, `code.normal`, and `code.team`.
 
 You can also use `/switch` to change sub-modes within the same category:
 

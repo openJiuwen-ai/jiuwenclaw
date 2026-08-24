@@ -6,6 +6,9 @@ const CODE_MODES = new Set(["code.normal", "code.team", "code.plan"]);
 
 /** Resolve the plan variant while preserving the current agent/team profile. */
 export function resolvePlanTarget(mode: ClientMode): ClientMode {
+  if (mode === "auto") {
+    return "auto";
+  }
   if (mode === "team" || mode === "team.plan" || mode === "team.plan.normal") {
     return "team.plan.normal";
   }
@@ -25,6 +28,16 @@ export function createPlanCommand(): SlashCommand {
     takesArgs: true,
     action: (ctx, args) => {
       const value = args.trim();
+      if (ctx.mode === "auto") {
+        ctx.addItem(
+          addInfo(
+            ctx.sessionId,
+            "Plan is not available in Auto. MACRO Auto stays on until you /mode away.",
+            "i",
+          ),
+        );
+        return;
+      }
       const target = resolvePlanTarget(ctx.mode);
       if (ctx.mode !== target) {
         ctx.setMode(target);

@@ -40,7 +40,6 @@ def load_macro_routing_config(config_base: dict[str, Any] | None = None) -> dict
         "model_name": str(raw.get("model_name", "")).strip(),
         "confidence_threshold": confidence_threshold,
         "team_markers": _str_list("team_markers"),
-        "plan_markers": _str_list("plan_markers"),
         "fast_markers": _str_list("fast_markers"),
         "raw": deepcopy(raw),
     }

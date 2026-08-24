@@ -49,12 +49,11 @@ def _build_prompt(query: str, gate: MacroRoutingDecision) -> str:
 Pick ONE top-level mode for this user task.
 
 Modes:
-- agent.plan: Planning Mode — ambiguous/design/tradeoff tasks; think before acting (plan loop)
-- agent: Agent Mode — clear short execution tasks for a single agent (no plan loop)
+- agent: Agent Mode — single-agent tasks (Q&A, coding, design, execution)
 - team: Cluster Mode — multi-role or multi-area work needing a team
 
 Return ONLY JSON:
-{{"mode":"agent.plan|agent|team","confidence":0.0,"rationale":"one sentence"}}
+{{"mode":"agent|team","confidence":0.0,"rationale":"one sentence"}}
 
 Gate suggestion (may be uncertain):
 mode={gate.mode}, confidence={gate.confidence:.2f}, rationale={gate.rationale}
@@ -199,14 +198,14 @@ async def route_with_llm_scheduler(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[MacroRouter] LLM scheduler failed: %s", exc)
-        # Prefer Planning on scheduler failure unless the gate was already confident.
-        fallback_mode = gate.mode if gate.gate_confident else "agent.plan"
+        # Prefer Agent Mode on scheduler failure unless the gate was already confident.
+        fallback_mode = gate.mode if gate.gate_confident else "agent"
         return MacroRoutingDecision(
             mode=fallback_mode,
             confidence=max(0.5, float(gate.confidence)),
             rationale=(
                 f"LLM scheduler failed; using "
-                f"{'gate choice' if gate.gate_confident else 'Planning Mode'} ({fallback_mode})."
+                f"{'gate choice' if gate.gate_confident else 'Agent Mode'} ({fallback_mode})."
             ),
             source="fallback",
             features=dict(gate.features),
