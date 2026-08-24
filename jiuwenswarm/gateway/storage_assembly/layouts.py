@@ -93,6 +93,25 @@ def _json_and_db(
     return StoreLayout(file=file, db=DbLayout(table=table))
 
 
+def _json_and_db_at_path(
+    table: str,
+    path: Path,
+    *,
+    shape: Literal["map", "list"] = "map",
+    key_fields: tuple[str, ...] = (),
+) -> StoreLayout:
+    """JSON 文件使用装配层提供的绝对路径（兼容既有落盘位置）。"""
+    return StoreLayout(
+        file=FileLayout(
+            path=str(path.resolve()),
+            format="json",
+            shape=shape,
+            key_fields=key_fields,
+        ),
+        db=DbLayout(table=table),
+    )
+
+
 def _db_table(table: str) -> StoreLayout:
     """形态：仅企业 DB 表（无 file）。"""
     return StoreLayout(db=DbLayout(table=table))
@@ -130,6 +149,7 @@ def _build_layouts(
     *,
     persistent_root: Path | None,
     config_file: Path | None,
+    session_map_file: Path | None = None,
 ) -> dict[str, StoreLayout]:
     """按形态工厂组装全部业务 name → StoreLayout。"""
     from jiuwenswarm.gateway.config.enterprise.catalog import (
@@ -139,12 +159,30 @@ def _build_layouts(
     layouts: dict[str, StoreLayout] = {}
 
     for name, (rel, shape, key_fields) in _JSON_AND_DB_STORES.items():
+        if name == "session_map":
+            continue
         layouts[name] = _json_and_db(
             name,
             rel,
             persistent_root=persistent_root,
             shape=shape,
             key_fields=key_fields,
+        )
+
+    if session_map_file is not None:
+        layouts["session_map"] = _json_and_db_at_path(
+            "session_map",
+            session_map_file,
+            shape="map",
+            key_fields=("identity_key",),
+        )
+    else:
+        layouts["session_map"] = _json_and_db(
+            "session_map",
+            "session_map.json",
+            persistent_root=persistent_root,
+            shape="map",
+            key_fields=("identity_key",),
         )
 
     for name, (pointer, key_fields, yaml_scalar_field) in _YAML_AND_DB_SECTIONS.items():
@@ -176,15 +214,22 @@ def build_gateway_store_registry(
     *,
     persistent_root: Path | None = None,
     config_file: Path | None = None,
+    session_map_file: Path | None = None,
 ) -> StoreRegistry:
     """装配 name 对应的落盘布局。
 
     personal 传入绝对 ``persistent_root`` / ``config_file``；
+    ``session_map_file`` 默认与 ``LocalSessionStorage`` 相同（``.checkpoint/session_map.json``），
+    由 ``setup._create_persistent`` 注入。
     enterprise 可不传（file 为空，YAML-only name 不注册，只挂 DB）。
     """
     registry = StoreRegistry()
     registry.register_many(
-        _build_layouts(persistent_root=persistent_root, config_file=config_file)
+        _build_layouts(
+            persistent_root=persistent_root,
+            config_file=config_file,
+            session_map_file=session_map_file,
+        )
     )
     return registry
 

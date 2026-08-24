@@ -15,7 +15,7 @@ class FileLayout:
     ``path`` 必须是绝对路径，或带 ``{field}`` 的绝对模板，由装配层写入。
     storage 只替换占位符（缺字段则 glob），不拼接 root、不查 named_files。
 
-        /ws/gateway/persistent/session_map.json
+        /ws/service_default/agent_default/.checkpoint/session_map.json
         /ws/gateway/persistent/cron_jobs/{service_id}/{agent_id}/jobs.json
         /home/user/.jiuwenswarm/config.yaml
 
