@@ -229,7 +229,10 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
+from jiuwenswarm.server.utils.stream_utils import (
+    parse_ask_user_question_payload,
+    parse_stream_chunk as parse_common_stream_chunk,
+)
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -10409,6 +10412,11 @@ class JiuWenSwarmDeepAdapter(ExpertCapabilityMixin):
                 if chunk_type == "controller_output" and payload is not None:
                     inner_t = getattr(payload, "type", None)
                     inner_val = getattr(inner_t, "value", inner_t) if inner_t is not None else None
+                    if inner_val == "task_interaction":
+                        return parse_common_stream_chunk(
+                            chunk,
+                            _has_streamed_content=_has_streamed_content,
+                        )
                     if inner_val == "task_completion":
                         return None
                     if inner_val == "task_failed":

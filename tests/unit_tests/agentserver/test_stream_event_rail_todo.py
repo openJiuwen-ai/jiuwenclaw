@@ -1,8 +1,14 @@
 from types import SimpleNamespace
 
 import pytest
+from openjiuwen.core.session.interaction.interaction import InteractionOutput
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import (
+    InterruptRequest,
+    ToolCallInterruptRequest,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import (
@@ -309,6 +315,114 @@ async def test_before_tool_permission_interrupt_emits_question_on_tool_exception
 
     questions = [output for output in session.outputs if output.type == "chat.ask_user_question"]
     assert len(questions) == 1
+    assert not [output for output in session.outputs if output.type == "tool_result"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_interrupt_result_is_not_emitted_as_tool_result():
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-task-1",
+        name="task_tool",
+        arguments={"subagent_type": "general-purpose"},
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="task_tool",
+            tool_args=tool_call.arguments,
+            tool_result={
+                "result_type": "interrupt",
+                "interrupt_ids": ["inner-call"],
+                "state": [
+                    OutputSchema(
+                        type="__interaction__",
+                        index=0,
+                        payload=InteractionOutput(
+                            id="inner-call",
+                            value=ToolCallInterruptRequest(
+                                message="**工具 `write_file` 需要授权才能执行**",
+                                tool_name="write_file",
+                                tool_call_id="inner-call",
+                                tool_args={"file_path": ".env.approval-test"},
+                            ),
+                        ),
+                    ),
+                ],
+            },
+        ),
+    )
+
+    await _TestRail().after_tool_call(ctx)
+
+    assert not [output for output in session.outputs if output.type == "tool_result"]
+    questions = [output for output in session.outputs if output.type == "chat.ask_user_question"]
+    assert len(questions) == 1
+    assert questions[0].payload["request_id"] == "inner-call"
+    assert questions[0].payload["source"] == "permission_interrupt"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_resume_does_not_reemit_tool_start_events():
+    session = _FakeSession()
+    approval_input = InteractiveInput()
+    approval_input.update("inner-call", {"approved": True})
+    tool_call = SimpleNamespace(
+        id="tool-task-1",
+        name="task_tool",
+        arguments={
+            "subagent_type": "general-purpose",
+            "query": approval_input,
+        },
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="task_tool",
+            tool_args=tool_call.arguments,
+        ),
+    )
+
+    await _TestRail().before_tool_call(ctx)
+
+    assert not [
+        output
+        for output in session.outputs
+        if output.type in {"tool_call", "tool_update"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_tool_first_call_still_emits_tool_start_events():
+    session = _FakeSession()
+    tool_call = SimpleNamespace(
+        id="tool-task-1",
+        name="task_tool",
+        arguments={
+            "subagent_type": "general-purpose",
+            "query": "检查文件",
+        },
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        session=session,
+        inputs=ToolCallInputs(
+            tool_call=tool_call,
+            tool_name="task_tool",
+            tool_args=tool_call.arguments,
+        ),
+    )
+
+    await _TestRail().before_tool_call(ctx)
+
+    assert [output.type for output in session.outputs] == [
+        "tool_call",
+        "tool_update",
+    ]
 
 
 @pytest.mark.asyncio
