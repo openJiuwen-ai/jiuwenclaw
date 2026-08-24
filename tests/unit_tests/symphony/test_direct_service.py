@@ -246,6 +246,37 @@ def _config(tmp_path, *, evolution=True):
     )
 
 
+def _minimal_planned_graph(status="ready"):
+    nodes = (
+        {}
+        if status == "no_plan"
+        else {
+            "writer": {"label": "Writer", "metadata": {"type": "skill"}},
+            "reviewer": {"label": "Reviewer", "metadata": {"type": "skill"}},
+        }
+    )
+    return {
+        "graph": {
+            "id": "plan-1",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": status},
+            "nodes": nodes,
+            "edges": (
+                []
+                if status == "no_plan"
+                else [
+                    {
+                        "source": "writer",
+                        "target": "reviewer",
+                        "relation": "can_feed",
+                    }
+                ]
+            ),
+        }
+    }
+
+
 def test_adapter_deduplicates_candidate_skill_ids():
     assert candidate_ids_from_skill_ids(["writer", "writer", "reviewer"]) == [
         "writer",
@@ -381,7 +412,7 @@ async def test_service_graph_adapts_public_artifact_for_skill_graph_panel(
 
 
 @pytest.mark.asyncio
-async def test_service_plans_through_public_runtime_and_restores_skill_fields(
+async def test_service_plans_through_public_runtime_with_minimal_jgf(
     monkeypatch,
     tmp_path,
 ):
@@ -391,31 +422,7 @@ async def test_service_plans_through_public_runtime_and_restores_skill_fields(
     class FakeOrchestration:
         async def plan(self, query, candidate_ids=None, **kwargs):
             captured.update(query=query, candidate_ids=candidate_ids, **kwargs)
-            return OrchestrationPlan(
-                {
-                    "plan_id": "plan-1",
-                    "dynamic_graph_enabled": True,
-                    "recommended_plans": [
-                        {
-                            "title": "Plan",
-                            "status": "ready",
-                            "steps": [
-                                {
-                                    "step": 1,
-                                    "capability_id": "writer",
-                                    "name": "Writer",
-                                }
-                            ],
-                            "can_feed_edges": [],
-                            "missing_inputs": [],
-                        }
-                    ],
-                    "execution_graph": {
-                        "nodes": [{"id": "writer"}],
-                        "edges": [],
-                    },
-                }
-            )
+            return OrchestrationPlan({"planned_graph": _minimal_planned_graph()})
 
     service = SwarmSymphonyService()
 
@@ -450,9 +457,10 @@ async def test_service_plans_through_public_runtime_and_restores_skill_fields(
         progress=progress,
     )
 
-    assert result["success"] is True
-    assert result["direct_display"] is True
-    assert result["result"]["recommended_plans"][0]["steps"][0]["skill_id"] == "writer"
+    assert result == {
+        "success": True,
+        "planned_graph": _minimal_planned_graph(),
+    }
     assert captured["candidate_ids"] == ["writer"]
     assert captured["disabled_capability_ids"] == {"disabled"}
     assert captured["dynamic_overlay"]["edges"]
@@ -472,7 +480,7 @@ async def test_service_rebuilds_stale_graph_before_planning(monkeypatch, tmp_pat
             del args
             plan_kwargs.update(kwargs)
             return OrchestrationPlan(
-                {"recommended_plans": [], "execution_graph": {"nodes": [], "edges": []}}
+                {"planned_graph": _minimal_planned_graph("no_plan")}
             )
 
     service = SwarmSymphonyService()
@@ -509,10 +517,45 @@ async def test_service_rebuilds_stale_graph_before_planning(monkeypatch, tmp_pat
 
     assert calls == [(False, progress)]
     assert result["graph_build"]["rebuilt"] is True
-    assert result["language"] == "en"
+    assert result["planned_graph"]["graph"]["metadata"]["status"] == "no_plan"
     assert plan_kwargs["dynamic_overlay"] is None
-    assert "No Symphony plan" in result["content"]
-    assert "Would you like to proceed" not in result["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("planned_graph", [None, [], "not-a-graph"])
+async def test_service_rejects_non_dict_planned_graph(
+    monkeypatch,
+    tmp_path,
+    planned_graph,
+):
+    config = _config(tmp_path)
+
+    class FakeOrchestration:
+        async def plan(self, *args, **kwargs):
+            del args, kwargs
+            return OrchestrationPlan({"planned_graph": planned_graph})
+
+    service = SwarmSymphonyService()
+
+    async def fresh_status():
+        return {"success": True, "exists": True, "stale": False}
+
+    service.graph_status = fresh_status
+    service._runtime_for = lambda _config: SimpleNamespace(
+        orchestration=FakeOrchestration()
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.load_symphony_config", lambda: config
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.symphony.service.get_config",
+        lambda: {"preferred_language": "zh"},
+    )
+
+    result = await service.plan("compose")
+
+    assert result["success"] is False
+    assert result["detail"] == "Symphony orchestration returned no planned_graph"
 
 
 @pytest.mark.asyncio

@@ -156,24 +156,3 @@ def model_from_config(config: LLMConfig):
 
 def model_response_observer_from_config(config: LLMConfig):
     return create_model_response_observer(config)
-
-
-def swarm_plan_from_public(value: Any) -> Any:
-    """Restore the Agent-tool field vocabulary while core stays capability-first."""
-
-    key_mapping = {
-        "capability_id": "skill_id",
-        "capability_ids": "skill_ids",
-        "candidate_ids": "candidate_skill_ids",
-        "candidate_count": "candidate_skill_count",
-    }
-    if isinstance(value, dict):
-        return {
-            key_mapping.get(key, key): swarm_plan_from_public(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [swarm_plan_from_public(item) for item in value]
-    if isinstance(value, tuple):
-        return [swarm_plan_from_public(item) for item in value]
-    return value

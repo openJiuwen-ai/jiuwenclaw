@@ -290,6 +290,13 @@ async def test_symphony_orchestration_rail_injects_when_tool_visible(
     assert "Calling `skill_branch_explore` creates a mandatory orchestration follow-up" in prompt
     assert "never pass every Skill returned by exploration" in prompt
     assert "still call `symphony_compose_graph`" in prompt
+    assert "`planned_graph.graph.metadata.status`" in prompt
+    assert "`planned_graph.graph.nodes`" in prompt
+    assert "`planned_graph.graph.edges`" in prompt
+    assert "Do not present a planning" in prompt
+    assert "search_skill" not in prompt
+    assert "install_skill" not in prompt
+    assert "returned\n`content` directly" not in prompt
     assert "none of the three trigger conditions is true" in prompt
     assert "Symphony" not in prompt
 

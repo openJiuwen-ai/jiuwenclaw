@@ -24,7 +24,6 @@ from jiuwenswarm.symphony.adapter import (
     model_from_config,
     model_response_observer_from_config,
     orchestration_config_from_swarm,
-    swarm_plan_from_public,
 )
 from jiuwenswarm.symphony.llm import LLMConfig
 from jiuwenswarm.symphony.config import load_symphony_config
@@ -225,9 +224,6 @@ class SwarmSymphonyService:
         except ValueError as exc:
             return {
                 "success": False,
-                "graph_dir": str(graph_dir),
-                "query": query,
-                "mode": config.orchestration.mode,
                 "detail": str(exc),
             }
 
@@ -240,7 +236,6 @@ class SwarmSymphonyService:
             }
         if _graph_needs_build(status):
             graph_build = await self.refresh_graph(progress=progress)
-            graph_build["rebuilt"] = True
             if not graph_build.get("success"):
                 return {
                     "success": False,
@@ -248,12 +243,9 @@ class SwarmSymphonyService:
                     "graph_status": status,
                     "graph_build": graph_build,
                 }
+            graph_build["rebuilt"] = True
         else:
-            graph_build = {
-                "success": True,
-                "rebuilt": False,
-                "reason": "not_required",
-            }
+            graph_build = None
         try:
             public_payload = await self._runtime_for(config).orchestration.plan(
                 query,
@@ -268,34 +260,39 @@ class SwarmSymphonyService:
                 ),
                 mode=requested_mode,
             )
-            payload = swarm_plan_from_public(public_payload.to_dict())
+            payload = public_payload.to_dict()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Symphony planning failed")
             payload = {"success": False, "detail": str(exc)}
+        if not isinstance(payload, dict):
+            return {
+                "success": False,
+                "detail": "Symphony orchestration returned an invalid payload",
+                "graph_status": status,
+                **({"graph_build": graph_build} if graph_build else {}),
+            }
         if payload.get("success") is False:
             return {
                 "success": False,
-                "graph_dir": str(graph_dir),
-                "query": query,
-                "mode": requested_mode,
-                "language": language,
                 "graph_status": status,
-                "graph_build": graph_build,
+                **({"graph_build": graph_build} if graph_build else {}),
                 **payload,
             }
-        presentation = _build_presentation(payload, language=language)
-        return {
+        planned_graph = payload.get("planned_graph")
+        if not isinstance(planned_graph, dict):
+            return {
+                "success": False,
+                "detail": "Symphony orchestration returned no planned_graph",
+                "graph_status": status,
+                **({"graph_build": graph_build} if graph_build else {}),
+            }
+        result = {
             "success": True,
-            "graph_dir": str(graph_dir),
-            "query": query,
-            "mode": requested_mode,
-            "language": language,
-            "content": presentation["markdown"],
-            "direct_display": True,
-            "graph_status": status,
-            "graph_build": graph_build,
-            "result": payload,
+            "planned_graph": planned_graph,
         }
+        if graph_build is not None:
+            result["graph_build"] = graph_build
+        return result
 
     async def _build_graph(
         self,
@@ -613,23 +610,6 @@ def _resolve_orchestration_language(value: Any = None) -> str:
     if language == "zh":
         language = "cn"
     return language if language in {"cn", "en"} else "cn"
-
-
-def _select_primary_plan(payload: dict[str, Any]) -> dict[str, Any]:
-    for key in ("recommended_plans", "plans"):
-        plans = payload.get(key)
-        if not isinstance(plans, list):
-            continue
-        for plan in plans:
-            if isinstance(plan, dict):
-                return plan
-    return {}
-
-
-def _default_plan_title(language: str) -> str:
-    if _resolve_orchestration_language(language) == "en":
-        return "Symphony plan"
-    return "Symphony 编排计划"
 
 
 _BUILD_STAGE_LABELS = {
@@ -1154,73 +1134,3 @@ def _compact_details(details: dict[str, Any]) -> str:
         return "{}"
     rendered = json.dumps(details, ensure_ascii=False, default=str)
     return rendered if len(rendered) <= 500 else rendered[:497] + "..."
-
-
-def _build_presentation(
-    payload: dict[str, Any],
-    *,
-    language: str = "cn",
-) -> dict[str, str]:
-    plan = _select_primary_plan(payload)
-    title = str(plan.get("title") or _default_plan_title(language)).strip()
-    mermaid = _plan_to_mermaid(plan, payload.get("execution_graph") or {})
-    lines = [
-        f"## {title}",
-        "",
-        "```mermaid",
-        mermaid,
-        "```",
-    ]
-    reason = str(plan.get("reason") or payload.get("reason") or "").strip()
-    if reason:
-        lines.extend(["", reason])
-    steps = plan.get("steps") if isinstance(plan, dict) else []
-    if isinstance(steps, list) and steps:
-        confirmation = (
-            "Would you like to proceed with the orchestration plan above?"
-            if language == "en"
-            else "是否按照上述编排结果执行？"
-        )
-        lines.extend(["", confirmation])
-    return {"markdown": "\n".join(lines), "mermaid": mermaid}
-
-
-def _plan_to_mermaid(plan: dict[str, Any], graph: dict[str, Any]) -> str:
-    steps = plan.get("steps") if isinstance(plan, dict) else []
-    edges = graph.get("edges") if isinstance(graph, dict) else []
-    labels = {
-        str(step.get("skill_id") or ""): str(
-            step.get("skill_name") or step.get("name") or step.get("skill_id") or ""
-        )
-        for step in steps or []
-        if isinstance(step, dict)
-    }
-    node_ids = [skill_id for skill_id in labels if skill_id]
-    for edge in edges or []:
-        source = str(edge.get("source") or "")
-        target = str(edge.get("target") or "")
-        if source and source not in node_ids:
-            node_ids.append(source)
-        if target and target not in node_ids:
-            node_ids.append(target)
-    if not node_ids:
-        return 'flowchart LR\n  none["No Symphony plan"]'
-
-    node_keys = {
-        node_id: f"N{index}" for index, node_id in enumerate(node_ids, start=1)
-    }
-    lines = ["flowchart LR"]
-    for node_id in node_ids:
-        lines.append(
-            f'  {node_keys[node_id]}["{_mermaid_escape(labels.get(node_id) or node_id)}"]'
-        )
-    for edge in edges or []:
-        source = str(edge.get("source") or "")
-        target = str(edge.get("target") or "")
-        if source in node_keys and target in node_keys:
-            lines.append(f"  {node_keys[source]} --> {node_keys[target]}")
-    return "\n".join(lines)
-
-
-def _mermaid_escape(value: str) -> str:
-    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')[:80]

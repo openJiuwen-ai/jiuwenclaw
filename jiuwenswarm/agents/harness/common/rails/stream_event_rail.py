@@ -725,11 +725,6 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
 
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
-        self._symphony_stream_handler.request_force_finish(
-            ctx,
-            tc,
-            ctx.inputs.tool_result,
-        )
         await self._emit_ask_user_question_if_interrupted(
             session,
             tc,
