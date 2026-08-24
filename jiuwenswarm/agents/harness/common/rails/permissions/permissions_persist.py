@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.patterns import (
+    merge_file_guard_access_allows,
     merge_permission_allow_rule_into_permissions,
 )
 
@@ -203,6 +204,121 @@ def persist_permission_allow_rule(tool_name: str, tool_args: dict | str) -> bool
     return True
 
 
+def persist_exact_permission_allow_rule(
+    tool_name: str,
+    tool_args: dict | str,
+    ask_accesses: tuple[tuple[str, str], ...] = (),
+) -> bool:
+    """Merge one host-derived permanent approval into the latest config."""
+
+    normalized_name = str(tool_name or "").strip()
+    normalized_args = _normalize_tool_args(tool_args)
+    normalized_accesses = _normalize_exact_accesses(ask_accesses)
+    if not normalized_name or normalized_accesses is None:
+        return False
+
+    from openjiuwen.harness.security.file_guard import build_file_guard_checker
+    from openjiuwen.harness.security.models import PermissionLevel
+    from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
+
+    from jiuwenswarm.common.config import update_config
+    from jiuwenswarm.common.utils import get_workspace_dir
+
+    try:
+        workspace_root = get_workspace_dir()
+    except (OSError, RuntimeError, ValueError):
+        logger.exception("[PermissionPersist] workspace resolution failed")
+        return False
+    outcome = {"success": False}
+
+    def mutator(data: dict[str, Any]) -> dict[str, Any] | None:
+        permissions = _ensure_permissions_dict(data)
+        tiered_level, _ = evaluate_tiered_policy(
+            permissions,
+            normalized_name,
+            normalized_args,
+        )
+        checker = build_file_guard_checker(
+            permissions,
+            workspace_root=workspace_root,
+            trusted_dirs=(),
+        )
+        file_result = (
+            checker.evaluate(normalized_name, normalized_args)
+            if checker is not None
+            else None
+        )
+        if tiered_level == PermissionLevel.DENY or (
+            file_result is not None
+            and file_result.permission == PermissionLevel.DENY
+        ):
+            return None
+
+        merged = permissions
+        tool_applied = False
+        if tiered_level == PermissionLevel.ASK:
+            merged, tool_applied = merge_permission_allow_rule_into_permissions(
+                merged,
+                normalized_name,
+                normalized_args,
+            )
+            if not tool_applied:
+                return None
+
+        current_asks = set(
+            checker.collect_ask_accesses(normalized_name, normalized_args)
+            if checker is not None
+            else ()
+        )
+        pending_accesses = [
+            access for access in normalized_accesses if access in current_asks
+        ]
+        path_applied = False
+        if pending_accesses:
+            merged, path_applied = merge_file_guard_access_allows(
+                merged,
+                pending_accesses,
+            )
+            if not path_applied:
+                return None
+
+        outcome["success"] = True
+        changed = tool_applied or path_applied
+        if not changed:
+            return None
+        data["permissions"] = merged
+        return data
+
+    try:
+        update_config(mutator)
+    except Exception:
+        logger.exception("[PermissionPersist] exact permission persist failed")
+        return False
+    return outcome["success"]
+
+
+def _normalize_exact_accesses(
+    accesses: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...] | None:
+    if not isinstance(accesses, tuple):
+        return None
+    normalized: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for access in accesses:
+        if not isinstance(access, tuple) or len(access) != 2:
+            return None
+        path, action = access
+        path_norm = str(path or "").replace("\\", "/").rstrip("/")
+        action_norm = str(action or "").strip().lower()
+        if not path_norm or action_norm not in {"read", "write", "exec"}:
+            return None
+        item = (path_norm, action_norm)
+        if item not in seen:
+            seen.add(item)
+            normalized.append(item)
+    return tuple(normalized)
+
+
 def persist_external_directory_allow(
     paths: list[str],
     *,
@@ -218,8 +334,6 @@ def persist_external_directory_allow(
         return
 
     try:
-        from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
-
         data, yaml_path = _load_config_yaml_round_trip()
         permissions = _ensure_permissions_dict(data)
         access_list: list[tuple[str, str]] = []
@@ -356,5 +470,6 @@ __all__ = [
     "persist_cli_trusted_directory",
     "persist_cli_trusted_directory_with_overrides",
     "persist_external_directory_allow",
+    "persist_exact_permission_allow_rule",
     "persist_permission_allow_rule",
 ]
