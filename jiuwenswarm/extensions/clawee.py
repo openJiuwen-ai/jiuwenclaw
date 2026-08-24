@@ -226,9 +226,20 @@ async def ahandler(event, context=None):
     fake_ws = FakeWs()
     send_lock = asyncio.Lock()
 
-    # 设置上下文：_handle_message 内多个分支（如 _handle_cancel）会读取 self._current_ws
-    server._current_ws = fake_ws  # pylint: disable=protected-access
-    server._current_send_lock = send_lock  # pylint: disable=protected-access
+    # 设置上下文：_handle_message 内多个分支（如 _handle_cancel）需要push_registry注册
+    from jiuwenswarm.server.agent_ws_server import _GatewayWSPushSink
+    from jiuwenswarm.server.transports.push_registry import (
+        WS_PUSH_SUBSCRIBER_ID,
+        get_push_registry,
+    )
+
+    # drop_on_stall=False：与 agent_ws_server 侧同一契约 —— _GatewayWSPushSink
+    # 从不因发送失败/变慢被注销（固定 id 单槽位，摘掉就恢复不了）。
+    get_push_registry().register(
+        WS_PUSH_SUBSCRIBER_ID,
+        _GatewayWSPushSink(fake_ws, send_lock),
+        drop_on_stall=False,
+    )
 
     is_stream = bool(event.get("is_stream", False))
 
@@ -307,9 +318,8 @@ async def ahandler(event, context=None):
         )
         return to_json(error_response)
     finally:
-        # 恢复上下文
-        server._current_ws = None  # pylint: disable=protected-access
-        server._current_send_lock = None  # pylint: disable=protected-access
+        # 无条件注销，与真实 WS 连接断开时的处理一致
+        get_push_registry().unregister(WS_PUSH_SUBSCRIBER_ID)
         # 清理 ACP capabilities（_get_ws_acp_client_capabilities 用 id(ws) 做 key，faas 每次 invoke 新建 FakeWs 会泄漏）
         server._clear_ws_acp_client_capabilities(fake_ws)  # pylint: disable=protected-access
 

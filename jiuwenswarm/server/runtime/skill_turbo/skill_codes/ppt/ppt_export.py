@@ -52,6 +52,9 @@ class ExportPaths:
     pptx_root: str
 
 
+_CONVERT_MAX_ATTEMPTS = 2
+
+
 class PPTExportNode(PlanNode):
     """P9 — PPTX 导出（对应 SKILL Stage 8）。"""
 
@@ -156,16 +159,7 @@ class PPTExportNode(PlanNode):
             )
             return await self._execute_template_finalizer(inputs, paths)
 
-        convert_ok = await self._run_convert(pages_dir, pptx_path, pptx_root)
-        if not convert_ok:
-            return {
-                "pptx_path": "",
-                "pptx_filename": pptx_filename,
-                "export_status": "failed",
-            }
-
-        export_status = await self._validate_pptx(pptx_path, pptx_root)
-
+        export_status = await self._run_convert(pages_dir, pptx_path, pptx_root)
         return {
             "pptx_path": pptx_path if export_status != "failed" else "",
             "pptx_filename": pptx_filename,
@@ -303,15 +297,7 @@ class PPTExportNode(PlanNode):
             logger.warning("[P9-TF] check-post-fix-template-pages 异常: %s（继续导出）", e)
 
         # 5. 导出 PPTX
-        convert_ok = await self._run_convert(pages_dir, pptx_path, pptx_root)
-        if not convert_ok:
-            return {
-                "pptx_path": "",
-                "pptx_filename": pptx_filename,
-                "export_status": "failed",
-            }
-
-        export_status = await self._validate_pptx(pptx_path, pptx_root)
+        export_status = await self._run_convert(pages_dir, pptx_path, pptx_root)
         if export_status == "failed":
             return {
                 "pptx_path": "",
@@ -341,26 +327,64 @@ class PPTExportNode(PlanNode):
             "export_status": export_status,
         }
 
-    async def _run_convert(self, pages_dir: str, pptx_path: str, pptx_root: str) -> bool:
+    async def _attempt_convert(
+        self, pages_dir: str, pptx_path: str, pptx_root: str
+    ) -> tuple[str, str | None]:
+        """执行一次 convert，返回 (export_status, error_detail)。"""
+        convert_cmd = (
+            f"{cli_path('convert', pptx_root)} "
+            f"{quote_path(pages_dir + '/')} {quote_path(pptx_path)}"
+        )
         try:
-            convert_cmd = (
-                f"{cli_path('convert', pptx_root)} "
-                f"{quote_path(pages_dir + '/')} {quote_path(pptx_path)}"
-            )
             await run_bash(
                 self, convert_cmd,
                 timeout_seconds=600, required=True, workdir=pptx_root,
             )
-            logger.info("[P9] cli.js convert 完成")
-            return True
+            export_status = await self._validate_pptx(pptx_path, pptx_root)
+            if export_status == "failed":
+                return "failed", f"PPTX 未生成或无效: {pptx_path}"
+            return export_status, None
         except BashExecError as e:
-            logger.error("[P9] cli.js convert 失败: %s", e)
-            return False
+            return "failed", str(e)
         except Exception as e:
             if isinstance(e, AbortError):
                 raise
-            logger.error("[P9] cli.js convert 未知异常: %s", e)
-            return False
+            return "failed", str(e)
+
+    async def _run_convert(self, pages_dir: str, pptx_path: str, pptx_root: str) -> str:
+        last_error: str | None = None
+        for attempt in range(1, _CONVERT_MAX_ATTEMPTS + 1):
+            export_status, error_detail = await self._attempt_convert(
+                pages_dir, pptx_path, pptx_root,
+            )
+            if export_status != "failed":
+                if attempt > 1:
+                    logger.info(
+                        "[P9] cli.js convert 第 %d 次重试成功 status=%s",
+                        attempt,
+                        export_status,
+                    )
+                else:
+                    logger.info("[P9] cli.js convert 完成 status=%s", export_status)
+                return export_status
+
+            last_error = error_detail
+            if attempt < _CONVERT_MAX_ATTEMPTS:
+                logger.warning(
+                    "[P9] cli.js convert 第 %d 次失败，准备重试: %s",
+                    attempt,
+                    (error_detail or "")[:500],
+                )
+            else:
+                logger.error(
+                    "[P9] cli.js convert 重试后仍失败（共 %d 次）"
+                    " pages_dir=%s pptx_path=%s error=%s",
+                    _CONVERT_MAX_ATTEMPTS,
+                    pages_dir,
+                    pptx_path,
+                    (last_error or "")[:2000],
+                )
+        return "failed"
 
     async def _validate_pptx(self, pptx_path: str, pptx_root: str) -> str:
         try:
@@ -396,13 +420,21 @@ class PPTExportNode(PlanNode):
 
     async def _execute_stream(self, inputs: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         result = await self._execute(inputs)
+        export_status = str(result.get("export_status") or "failed")
         status_map = {"ok": "ok", "partial": "warning", "failed": "error"}
+        if export_status == "failed":
+            message = (
+                "PPTX 导出失败：未生成有效文件，请检查 Chromium 环境及网络后重试"
+            )
+        elif export_status == "partial":
+            message = (
+                f"PPTX 导出部分成功（文件偏小）file={result.get('pptx_filename')}"
+            )
+        else:
+            message = f"PPTX 导出成功 file={result.get('pptx_filename')}"
         yield {
             **result,
             "node": self.plan_name,
-            "status": status_map.get(result.get("export_status", ""), "warning"),
-            "message": (
-                f"PPTX 导出完成 status={result.get('export_status')} "
-                f"file={result.get('pptx_filename')}"
-            ),
+            "status": status_map.get(export_status, "error"),
+            "message": message,
         }

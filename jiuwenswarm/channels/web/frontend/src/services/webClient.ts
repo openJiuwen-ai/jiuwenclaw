@@ -8,9 +8,10 @@ import {
   WsRequest,
   WsResponse,
 } from '../types';
-import { getWsBase } from '../utils/env';
+import { getWebTransport, getWsBase } from '../utils/env';
 import i18n from '../i18n';
 import { GoalRecord } from '../types/goal';
+import { WebHttpClient } from './webHttpClient';
 
 type EventHandler = (event: WsEvent) => void;
 type TypedEventHandler<TPayload> = (event: WsEvent & { payload: TPayload }) => void;
@@ -550,7 +551,8 @@ class WebClient {
   }
 }
 
-export const webClient = new WebClient();
+export const webClient =
+  getWebTransport() === 'http' ? new WebHttpClient() : new WebClient();
 
 export async function webRequest<T = unknown>(
   method: string,

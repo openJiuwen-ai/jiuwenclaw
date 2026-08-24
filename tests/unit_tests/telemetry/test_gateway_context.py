@@ -762,6 +762,7 @@ async def test_real_agentserver_boundaries_restore_remote_parent_and_identity(
     impl_name: str,
 ) -> None:
     from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+    from jiuwenswarm.server.handlers import _default
     from jiuwenswarm.telemetry.gateway import (
         close_gateway_request,
         open_gateway_request,
@@ -781,7 +782,7 @@ async def test_real_agentserver_boundaries_restore_remote_parent_and_identity(
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     server._agent_manager = None
 
-    async def impl(_ws: object, _request: object, _lock: asyncio.Lock) -> None:
+    async def impl(_ctx: object, _request: object) -> None:
         seen_identities.append(IdentityStore.get_identity())
         span = runtime.tracer_provider.get_tracer("agentserver.boundary").start_span(
             f"bound.{wrapper_name}",
@@ -789,9 +790,24 @@ async def test_real_agentserver_boundaries_restore_remote_parent_and_identity(
         )
         span.end()
 
-    setattr(server, impl_name, impl)
+    monkeypatch.setattr(_default, impl_name, impl)
+
+    class _NullWs:
+        async def send(self, text: str) -> None:
+            return None
+
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    _ws = _NullWs()
+    ctx = RequestContext(
+        request=request,
+        sink=WSSink(_ws, asyncio.Lock()),
+        connection_id=str(id(_ws)),
+        services=AgentServerServices(server),
+    )
     try:
-        await getattr(server, wrapper_name)(object(), request, asyncio.Lock())
+        await getattr(_default, wrapper_name)(ctx, request)
     finally:
         close_gateway_request(gateway_handle)
         IdentityStore.clear(identity_token)

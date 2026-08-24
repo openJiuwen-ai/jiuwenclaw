@@ -93,19 +93,18 @@ def _build_oversized_fallback(
     return fallback
 
 
-async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
-    """Send one bounded wire payload, replacing oversized data with an error."""
+def enforce_send_budget(wire: dict[str, Any]) -> tuple[str, bool]:
+    """把一帧wire序列化，并施加发送预算"""
     serialized = json.dumps(wire, ensure_ascii=False)
     actual_bytes = len(serialized.encode("utf-8"))
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
-        await ws.send(serialized)
-        return True
+        return serialized, True
 
     _preview = serialized[:1000]
     if len(serialized) > 1000:
         _preview += "...(truncated)"
     logger.error(
-        "AgentServer WebSocket response too large: "
+        "AgentServer response too large: "
         "request_id=%s session_id=%s channel=%s type=%s is_stream=%s "
         "response_kind=%s actual_bytes=%d max_bytes=%d preview=%s",
         wire.get("request_id"),
@@ -127,5 +126,11 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
             f"actual_bytes={fallback_bytes} "
             f"max_bytes={AGENT_WS_SEND_BUDGET_BYTES}"
         )
-    await ws.send(fallback_json)
-    return False
+    return fallback_json, False
+
+
+async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
+    """Send one bounded wire payload, replacing oversized data with an error."""
+    payload, sent_original = enforce_send_budget(wire)
+    await ws.send(payload)
+    return sent_original

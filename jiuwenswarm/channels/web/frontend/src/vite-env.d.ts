@@ -4,6 +4,10 @@
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
   readonly VITE_WS_BASE?: string;
+  readonly VITE_WEB_TRANSPORT?: string;
+  readonly VITE_TRANSPORT?: string;
+  readonly VITE_GATEWAY_HTTP_BASE?: string;
+  readonly VITE_WEB_HTTP_BASE?: string;
 }
 
 interface ImportMeta {

@@ -207,6 +207,7 @@ from jiuwenswarm.agents.harness.common.tools.todo_compat import (
 )
 from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails import (
+    DeepResearchExecutionRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
     ResponsePromptRail,
@@ -397,6 +398,7 @@ from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     extract_office_claw_mcp,
+    is_asyncio_outer_cancellation,
     list_office_claw_mcp_tools,
     preflight_mcp_server_reachable,
     validate_office_claw_mcp_config,
@@ -1212,6 +1214,10 @@ def build_progressive_tool_rail_from_config(
             lazy_cfg.get("eager_tools", _DEFAULT_PROGRESSIVE_EAGER_TOOLS),
             _DEFAULT_PROGRESSIVE_EAGER_TOOLS,
         )
+        # This tool owns native multi-step HITL. It must execute directly;
+        # invoke_tool would hide the outer call from its lifecycle Rail.
+        if "deepresearch_execute" not in eager_tools:
+            eager_tools.insert(2, "deepresearch_execute")
 
     normalized_language = resolve_language(language)
     logger.info(
@@ -1934,6 +1940,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._progressive_tool_rail: ProgressiveToolRail | None = None
+        self._deepresearch_execution_rail: DeepResearchExecutionRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
@@ -2054,6 +2061,15 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
         )
+        # Per-session-adapter snapshot of the current chat request's route,
+        # captured from request.* at request entry. Used by
+        # _get_deepresearch_tool_context() so deepresearch_stream progress
+        # pushes bind to the originating session/request even when concurrent
+        # requests leak module-level _CRON_TOOL_* bindings into background
+        # tool tasks. Plain attribute (not ContextVar): per-session-scoped,
+        # no propagation/reset concerns. Cron-triggered paths don't set this
+        # and fall back to _runtime_cron_tool_context.
+        self._current_request_route: dict[str, str] = {}
         # Language the currently registered cron tools were built for, or None
         # when they are not registered yet. Doubles as the rebuild condition.
         self._cron_tools_registered_language: str | None = None
@@ -3410,6 +3426,10 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+                    get_agent_cache_registry,
+                )
+
                 subagents.append(
                     build_research_agent_config(
                         model,
@@ -3423,6 +3443,9 @@ class JiuWenSwarmDeepAdapter:
                         tools=build_jiuwen_harness_named_web_tools(
                             agent_id="research_agent",
                             language=resolved_language,
+                            cache=get_agent_cache_registry().get_cache_sync(
+                                "research_agent",
+                            ),
                         ),
                     )
                 )
@@ -3510,6 +3533,14 @@ class JiuWenSwarmDeepAdapter:
                 cfg.server_name, cfg.client_type, cfg.server_path, reason,
             )
             return False
+        # Remote MCP connect failures may surface as CancelledError: anyio
+        # TaskGroup cancel()+uncancel() the host task, and CancelledError is not
+        # an Exception subclass (Python 3.8+), so the bare ``except Exception``
+        # below cannot isolate it. ResourceMgr isolation that keys off
+        # connect_task.cancelled() also fails after uncancel(). Catch
+        # CancelledError here and use cancelling() to tell apart:
+        #   - cancelling()==0 → anyio-internal cancel → skip this server
+        #   - cancelling()>0  → real outer cancel (interrupt / WS drop) → re-raise
         try:
             result = await Runner.resource_mgr.add_mcp_server(cfg, tag=tag)
             ok = True
@@ -3532,6 +3563,17 @@ class JiuWenSwarmDeepAdapter:
                 return True
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] MCP server register failed: %s", cfg.server_name
+            )
+            return False
+        except asyncio.CancelledError:
+            if is_asyncio_outer_cancellation():
+                raise
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] MCP register cancelled (anyio internal), skip: "
+                "name=%s transport=%s path=%s",
+                cfg.server_name,
+                cfg.client_type,
+                cfg.server_path,
             )
             return False
         except Exception as exc:
@@ -5875,7 +5917,11 @@ class JiuWenSwarmDeepAdapter:
         return get_agent_evolution_trajectories_dir()
 
     async def refresh_enabled_skills_from_db(self) -> None:
-        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。"""
+        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
+
+        不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
+        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
+        """
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
@@ -5883,6 +5929,23 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
             )
             return
+
+        try:
+            recon = await SkillWhitelistSynchronizer(
+                self._workspace_dir,
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            ).reconcile_disk_into_ledger()
+            if recon.errors:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] disk→ledger reconcile warnings: %s",
+                    recon.errors,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] disk→ledger reconcile failed: %s",
+                exc,
+            )
 
         from jiuwenswarm.agents.harness.common.installed_skill import list_enabled_skill_names
 
@@ -6142,6 +6205,23 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] JiuSwarmStreamEventRail create failed: %s", exc)
             stream_event_rail = None
         return stream_event_rail
+
+    def _build_deepresearch_execution_rail(
+        self,
+    ) -> DeepResearchExecutionRail | None:
+        """Build the native HITL bridge for deepresearch_execute."""
+        try:
+            rail = DeepResearchExecutionRail(model_provider=lambda: self._model)
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create success"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] DeepResearchExecutionRail create failed: %s",
+                exc,
+            )
+            return None
 
     @staticmethod
     def _build_context_overflow_recovery_rail() -> ContextOverflowRecoveryRail | None:
@@ -6573,7 +6653,28 @@ class JiuWenSwarmDeepAdapter:
         return rail
 
     def _get_deepresearch_tool_context(self) -> dict[str, str]:
-        """Return the adapter-owned route that survives runner task boundaries."""
+        """Return the adapter-owned route that survives runner task boundaries.
+
+        Prefers the per-session-adapter ``_current_request_route`` snapshot
+        (captured from request.* at chat request entry) so deepresearch_stream
+        progress pushes bind to the originating session/request even when
+        concurrent requests leak module-level ``_CRON_TOOL_*`` bindings into
+        background tool tasks. Falls back to ``_runtime_cron_tool_context``
+        for cron-triggered paths that don't populate the snapshot.
+        """
+        route = self._current_request_route
+        if route.get("session_id"):
+            scope = RuntimeScopeKey.from_adapter(
+                self, session_id=route["session_id"]
+            )
+            return {
+                "request_id": str(route.get("request_id") or ""),
+                "channel_id": str(route.get("channel_id") or ""),
+                "session_id": scope.session_id,
+                "service_id": scope.service_id,
+                "agent_id": scope.agent_id,
+                "output_dir": self._deepresearch_artifact_output_dir(),
+            }
         context = self._runtime_cron_tool_context
         metadata = context.metadata if isinstance(context.metadata, dict) else {}
         scope = RuntimeScopeKey.from_adapter(self, session_id=context.session_id)
@@ -6730,6 +6831,10 @@ class JiuWenSwarmDeepAdapter:
                 {
                     "enable_image_multimodal": self._resolve_enable_read_image_multimodal(config),
                 },
+            ),
+            _RailBuildInfo(
+                "_deepresearch_execution_rail",
+                self._build_deepresearch_execution_rail,
             ),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             # an example to use extension rail (enterprise)
@@ -7128,9 +7233,15 @@ class JiuWenSwarmDeepAdapter:
             registered = self._register_shared_tool(wtool)
             tool_cards.append(registered.card)
 
+        from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+            get_agent_cache_registry,
+        )
+
+        content_cache = await get_agent_cache_registry().get_cache(agent_id)
         for tool_instance in build_jiuwen_harness_named_web_tools(
             agent_id=agent_id,
             language=self._resolve_runtime_language(),
+            cache=content_cache,
         ):
             registered = self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(registered.card)
@@ -13671,6 +13782,11 @@ class JiuWenSwarmDeepAdapter:
             getattr(self, "_model", None) and getattr(self._model, "model_config", None)
             and getattr(self._model.model_config, "model_name", "") or ""
         )
+        self._current_request_route = {
+            "session_id": session_id,
+            "request_id": rid or "",
+            "channel_id": cid or "",
+        }
 
         # Team 模式处理
         if mode in ("team", "team.plan", "code.team"):

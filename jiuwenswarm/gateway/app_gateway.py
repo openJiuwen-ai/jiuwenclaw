@@ -311,6 +311,31 @@ async def _connect_with_retry(
             backoff = min(backoff * 2, interval)
 
 
+def _gateway_agent_client_type() -> str:
+    """``gateway.agent_client.type``，缺省 websocket。不探测 Agent 开没开 HTTP。"""
+    from jiuwenswarm.common.config import get_config
+
+    try:
+        full_cfg = get_config()
+        gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg, dict) else {}
+        agent_cfg = gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+        if isinstance(agent_cfg, dict):
+            return str(agent_cfg.get("type") or "websocket").strip().lower()
+    except Exception:  # noqa: BLE001
+        pass
+    return "websocket"
+
+
+def _default_agent_server_url() -> str:
+    """未设 AGENT_SERVER_URL 时：type=http 默认 HTTP 口，否则 WS 口。"""
+    host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
+    if _gateway_agent_client_type() == "http":
+        port = os.getenv("AGENT_HTTP_PORT") or "8766"
+        return f"http://{host}:{port}"
+    port = os.getenv("AGENT_SERVER_PORT") or os.getenv("AGENT_PORT", "18092")
+    return f"ws://{host}:{port}"
+
+
 async def _connect_wrap_and_create_message_handler(
     client,
     *,
@@ -321,14 +346,14 @@ async def _connect_wrap_and_create_message_handler(
 ):
     """Connect the selected raw client before installing its telemetry proxy."""
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
     from jiuwenswarm.telemetry.gateway_client import wrap_gateway_agent_client
 
-    telemetry_target_uri = (
-        agent_server_url
-        if isinstance(client, WebSocketAgentServerClient)
-        else None
+    needs_url_connect = isinstance(
+        client, (WebSocketAgentServerClient, HttpSseAgentServerClient)
     )
-    if isinstance(client, WebSocketAgentServerClient):
+    telemetry_target_uri = agent_server_url if needs_url_connect else None
+    if needs_url_connect:
         await _connect_with_retry(
             client,
             agent_server_url,
@@ -1510,6 +1535,7 @@ async def _run_with_telemetry(
     from jiuwenswarm.common.cleanup import start_background_cleanup
     from jiuwenswarm.extensions.redis import init_gateway_redis_from_config
     from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+    from jiuwenswarm.gateway.routing.http_agent_client import HttpSseAgentServerClient
     from jiuwenswarm.gateway.channel_manager.channel_manager import ChannelManager
     from jiuwenswarm.gateway.cron import CronTenantRegistry
     from jiuwenswarm.gateway.heartbeat.heartbeat import GatewayHeartbeatService, HeartbeatConfig
@@ -1564,11 +1590,14 @@ async def _run_with_telemetry(
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    # 从扩展注册表获取 AgentServerClient（WebSocket 或 Yuanrong 等扩展实现）
+    # 从扩展注册表获取 AgentServerClient（WebSocket / HTTP / Yuanrong 等扩展实现）
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
         logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
         client = agent_server_ext.get_client()
+    elif _gateway_agent_client_type() == "http":
+        logger.info("[App] using HttpSseAgentServerClient (gateway.agent_client.type=http)")
+        client = HttpSseAgentServerClient()
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
 
@@ -1580,6 +1609,38 @@ async def _run_with_telemetry(
         third_agent = third_agent_ext.get_third_agent()
     else:
         third_agent = get_unsupported_third_agent()
+
+    full_cfg: dict[str, Any] = {}
+    heartbeat_cfg: dict | None = None
+    channels_cfg: dict | None = None
+    try:
+        full_cfg = get_config()
+        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
+        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[App] failed to read config.yaml, using defaults: %s", e)
+        heartbeat_cfg = None
+        channels_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    gateway_storage_ctx = None
+    try:
+        from jiuwenswarm.gateway.storage_assembly.setup import (
+            is_session_map_repository_enabled,
+            setup_session_map_repository,
+        )
+
+        if is_session_map_repository_enabled(full_cfg):
+            gateway_storage_ctx = await setup_session_map_repository(full_cfg)
+            if gateway_storage_ctx is not None:
+                logger.info("[App] SessionMap wired to PersistentStore repository")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[App] SessionMap repository setup failed, using legacy storage: %s",
+            exc,
+        )
+        gateway_storage_ctx = None
 
     client, message_handler = await _connect_wrap_and_create_message_handler(
         client,
@@ -1605,21 +1666,6 @@ async def _run_with_telemetry(
     message_handler.set_cron_registry(cron_registry)
     # Default-tenant controller for proactive sync / TUI compatibility.
     cron_controller = await cron_registry.get_controller("default", "default")
-
-    full_cfg: dict[str, Any] = {}
-    heartbeat_cfg: dict | None = None
-    channels_cfg: dict | None = None
-    try:
-        full_cfg = get_config()
-        heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
-        channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
-        heartbeat_cfg = None
-        channels_cfg = None
-
-    # Retain enterprise Redis initialization while tenant config remains tip-scoped.
-    await init_gateway_redis_from_config(dict(full_cfg or {}))
 
     from jiuwenswarm.common.local_env_config import get_local_config
 
@@ -1820,7 +1866,12 @@ async def _run_with_telemetry(
 
     web_channel = None
     tui_channel = None
-    web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
+    web_config = WebChannelConfig(
+        enabled=True,
+        host=web_host,
+        ws_port=web_port,
+        path=web_path,
+    )
     web_channel = WebChannel(web_config, _DummyBus())
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
@@ -2692,12 +2743,24 @@ async def _run_with_telemetry(
         if web_channel is not None
         else None
     )
+    # Give WebChannel.start() a tick to bind WS + start Web HTTP before logging.
+    if web_task is not None:
+        for _ in range(40):
+            if getattr(web_channel, "web_http_port", None):
+                break
+            await asyncio.sleep(0.05)
+    web_http_port_for_log: int | str = "-"
+    if web_channel is not None:
+        port_val = getattr(web_channel, "web_http_port", None)
+        web_http_port_for_log = port_val if port_val is not None else "-"
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
+            "[App] started: Web ws://%s:%s%s  WebHTTP http://%s:%s/api/v1  AgentServer: %s  Press Ctrl+C to exit.",
             web_host,
             web_port,
             web_path,
+            web_host,
+            web_http_port_for_log,
             agent_server_url,
         )
 
@@ -2855,6 +2918,19 @@ async def _run_with_telemetry(
         await message_handler.stop_forwarding()
         await client.disconnect()
 
+        if gateway_storage_ctx is not None:
+            try:
+                from jiuwenswarm.gateway.storage_assembly.setup import (
+                    teardown_session_map_repository,
+                )
+
+                await teardown_session_map_repository(gateway_storage_ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[App] SessionMap repository teardown failed: %s",
+                    exc,
+                )
+
         _cleanup_task.cancel()
         try:
             await _cleanup_task
@@ -2878,7 +2954,7 @@ def main() -> None:
         "-u",
         default=None,
         metavar="URL",
-        help="AgentServer WebSocket URL (default: AGENT_SERVER_URL or ws://AGENT_SERVER_HOST:AGENT_SERVER_PORT).",
+        help="AgentServer URL (default: AGENT_SERVER_URL, or type=http → http://host:8766, else ws://host:18092).",
     )
     parser.add_argument(
         "--host",
@@ -2921,12 +2997,10 @@ def main() -> None:
             # Error was already printed by parse_dotenv_early()
             raise SystemExit(1)
 
-    default_host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
-    default_port = os.getenv("AGENT_SERVER_PORT") or os.getenv("AGENT_PORT", "18092")
     agent_server_url = (
             args.agent_server_url
             or os.getenv("AGENT_SERVER_URL")
-            or f"ws://{default_host}:{default_port}"
+            or _default_agent_server_url()
     )
     web_host = args.host or os.getenv("WEB_HOST", "127.0.0.1")
     web_port = args.port or int(os.getenv("WEB_PORT", "19000"))

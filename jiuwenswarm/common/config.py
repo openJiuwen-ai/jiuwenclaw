@@ -27,7 +27,7 @@ from jiuwenswarm.common.local_env_config import (
     SPAWN_ENV_KEYS,
     get_bound_agent_env_ns,
     get_local_config,
-    is_task_env_overlay_bound,
+    get_task_env_overlay,
 )
 from jiuwenswarm.common.utils import (
     get_config_dir,
@@ -229,41 +229,97 @@ def _read_with_retry(filepath: Path, max_attempts: int = 3) -> dict[str, Any]:
 
 
 _ConfigNsKey = tuple[str, str] | None
-_resolved_config_by_ns: dict[_ConfigNsKey, tuple[float, dict[str, Any]]] = {}
+# Cache entries: (monotonic_ts, resolved_config, config_version).
+# Keys are either ``ns`` (no overlay) or ``(ns, overlay_content_hash)``.
+_resolved_config_by_ns: dict[Any, tuple[float, dict[str, Any], int]] = {}
 _CONFIG_CACHE_TTL_SECONDS: float = 20.0
 _config_lock = threading.Lock()
 _config_version: int = 0
+
+
+def _overlay_cache_key(ns: _ConfigNsKey, overlay: dict[str, Any] | None) -> Any:
+    """Build get_config cache key; overlay content hash avoids id() reuse."""
+    if overlay is None:
+        return ns
+    return (
+        ns,
+        hash(tuple(sorted((str(k), str(v)) for k, v in overlay.items()))),
+    )
+
+
+def _collect_expired_config_cache_keys(
+    entries: dict[Any, tuple[float, dict[str, Any], int]],
+    *,
+    cleanup_now: float,
+    config_version: int,
+) -> list[Any]:
+    """Return cache keys that are TTL-expired or tied to an old config version."""
+    expired_keys: list[Any] = []
+    for key, (ts, _, ver) in entries.items():
+        if (cleanup_now - ts) >= _CONFIG_CACHE_TTL_SECONDS:
+            expired_keys.append(key)
+            continue
+        if ver != config_version:
+            expired_keys.append(key)
+    return expired_keys
 
 
 def get_config():
     """Return merged, env-var-resolved config with per-ns TTL cache.
 
     Results are cached per bound ``(service_id, agent_id)`` from
-    ``bind_agent_env_ns``. When a task env overlay is sealed, the cache is
-    bypassed so overlay values are always visible.
+    ``bind_agent_env_ns`` with a TTL of ``_CONFIG_CACHE_TTL_SECONDS``.
+    Unbound callers share a separate ``None`` slot.
+
+    When a task env overlay is bound, the cache key includes a content hash of
+    the overlay so different overlays get different entries while the same
+    overlay content reuses the cached result (avoids ``id(overlay)`` reuse
+    after GC). Invalidated by ``clear_config_cache()`` via ``_config_version``.
+
+    **WARNING**: The returned dict is a shared reference. Callers MUST NOT
+    mutate it (including nested dicts/lists) within the TTL window; use
+    ``copy.deepcopy()`` if modification is required.
     """
     global _config_version
     ns: _ConfigNsKey = get_bound_agent_env_ns()
-    skip_cache = is_task_env_overlay_bound()
+    overlay = get_task_env_overlay()
+    cache_key = _overlay_cache_key(ns, overlay)
     now = time.monotonic()
 
-    if not skip_cache:
-        with _config_lock:
-            entry = _resolved_config_by_ns.get(ns)
-            if entry is not None and (now - entry[0]) < _CONFIG_CACHE_TTL_SECONDS:
-                return entry[1]
-            read_version = _config_version
-    else:
-        read_version = -1
+    with _config_lock:
+        entry = _resolved_config_by_ns.get(cache_key)
+        if entry is not None:
+            entry_time, entry_config, entry_version = entry
+            if (
+                (now - entry_time) < _CONFIG_CACHE_TTL_SECONDS
+                and entry_version == _config_version
+            ):
+                return entry_config
+            # Drop stale / version-mismatched entry to avoid unbounded growth.
+            del _resolved_config_by_ns[cache_key]
+        read_version = _config_version
 
+    # Slow path: lock released during YAML merge / env resolve / normalize.
     config_base = get_merged_config_dict()
     config_base = resolve_env_vars(config_base)
     _normalize_config(config_base)
 
-    if not skip_cache:
-        with _config_lock:
-            if _config_version == read_version:
-                _resolved_config_by_ns[ns] = (time.monotonic(), config_base)
+    with _config_lock:
+        if _config_version == read_version:
+            _resolved_config_by_ns[cache_key] = (
+                time.monotonic(),
+                config_base,
+                _config_version,
+            )
+            if len(_resolved_config_by_ns) > 50:
+                cleanup_now = time.monotonic()
+                expired_keys = _collect_expired_config_cache_keys(
+                    _resolved_config_by_ns,
+                    cleanup_now=cleanup_now,
+                    config_version=_config_version,
+                )
+                for key in expired_keys:
+                    del _resolved_config_by_ns[key]
 
     return config_base
 
@@ -272,7 +328,13 @@ def clear_config_cache(
     service_id: str | None = None,
     agent_id: str | None = None,
 ) -> None:
-    """Invalidate resolved-config cache (all slots or one ns)."""
+    """Invalidate resolved-config cache (all slots or one ns).
+
+    With no args: clear all slots (yaml write / full reload).
+    With ``service_id`` / ``agent_id``: clear that ns and its overlay-keyed
+    entries. Clearing ``default``/``default`` also clears the unbound
+    (``None``) slot and its overlay keys.
+    """
     global _config_version
     with _config_lock:
         _config_version += 1
@@ -283,9 +345,24 @@ def clear_config_cache(
 
         sid = normalize_env_ns_id(service_id, default="default")
         aid = normalize_env_ns_id(agent_id, default="default")
-        _resolved_config_by_ns.pop((sid, aid), None)
+        ns_key: _ConfigNsKey = (sid, aid)
+        _resolved_config_by_ns.pop(ns_key, None)
+        keys_to_remove = [
+            key
+            for key in _resolved_config_by_ns
+            if isinstance(key, tuple) and len(key) == 2 and key[0] == ns_key
+        ]
+        for key in keys_to_remove:
+            _resolved_config_by_ns.pop(key, None)
         if sid == "default" and aid == "default":
             _resolved_config_by_ns.pop(None, None)
+            unbound_overlay_keys = [
+                key
+                for key in _resolved_config_by_ns
+                if isinstance(key, tuple) and len(key) == 2 and key[0] is None
+            ]
+            for key in unbound_overlay_keys:
+                _resolved_config_by_ns.pop(key, None)
 
 
 def get_config_raw():

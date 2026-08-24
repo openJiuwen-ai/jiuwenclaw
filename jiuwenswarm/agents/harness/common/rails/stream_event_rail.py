@@ -1286,6 +1286,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
                     exc_info=True,
                 )
 
+        if (
+            str(getattr(tc, "name", "") or "").strip() == "deepresearch_execute"
+            and _extract_tool_interrupt(ctx.inputs.tool_result) is not None
+        ):
+            return
+
         normalize_read_file_tool_outcome(ctx)
         # A call suspended for user input (approval card, ask_user) has no
         # result yet: ToolCallResilienceRail only left a failure placeholder

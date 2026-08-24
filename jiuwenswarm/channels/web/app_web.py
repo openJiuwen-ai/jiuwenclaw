@@ -2,13 +2,16 @@
 
 """Serve built frontend static files with optional reverse proxy.
 
+Production role: SPA + health; business file/share/sessions HTTP lives on
+Gateway Web HTTP — this process proxies those paths when Ingress still hits Web.
+``/api`` (non-sessions) and ``/ws`` proxy to Gateway WebChannel remain.
+
 Supports ``--dotenv <path>`` for multi-instance isolation.
 """
 
 from __future__ import annotations
 
 import argparse
-import cgi
 import errno
 import http.client
 import json
@@ -19,12 +22,10 @@ import select
 import socket
 import ssl
 import sys
-import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenswarm imports) ---
 from jiuwenswarm.dotenv_early import parse_dotenv_early
@@ -32,30 +33,16 @@ parse_dotenv_early("jiuwenswarm-web")
 
 # --- Now safe to import jiuwenswarm modules ---
 from jiuwenswarm.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
-from jiuwenswarm.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenswarm.common.debug_dump import install_async_dump_handler
 from jiuwenswarm.common.ws_diagnostics import describe_ws_exception, format_ws_diagnostics
-from jiuwenswarm.common.utils import get_agent_root_dir, get_logs_dir, \
-    get_agent_sessions_dir, get_multi_tenant_user_workspace_dir, get_root_dir, get_user_workspace_dir, \
-    is_package_installation, wait_for_tcp_port, SensitiveDataFilter
-from jiuwenswarm.channels.web.history_store import (
-    ChatHistoryStore,
-    HistoryFrameRunner,
-    get_session_detail_sync,
-    list_sessions_sync,
+from jiuwenswarm.common.utils import (
+    get_logs_dir,
+    get_root_dir,
+    get_user_workspace_dir,
+    wait_for_tcp_port,
+    SensitiveDataFilter,
 )
-from jiuwenswarm.server.runtime.session.session_history import history_exists, load_history_records
-
-configure_agent_teams_home()
-
-_history_runner: HistoryFrameRunner | None = None
-
-
-def _get_agent_teams_root() -> Path:
-    """Return the agent teams root after dotenv initialization."""
-    from openjiuwen.agent_teams.paths import get_agent_teams_home
-
-    return get_agent_teams_home().resolve()
+from jiuwenswarm.gateway.channel_manager.web.web_http_server import resolve_web_http_port
 
 
 def _get_package_dir() -> Path:
@@ -81,106 +68,6 @@ def _default_dist_dir() -> Path:
     return dist_dir
 
 
-def _normalize_lang_suffix(name: str) -> str:
-    """将 xxxx_zh.MD / xxxx_en.MD 规范为 xxxx.MD（去除 _zh/_en 后缀）。"""
-    stem, suffix = name.rpartition(".")[0], name.rpartition(".")[2]
-    suffix_lower = suffix.lower()
-    if suffix_lower in ("md", "mdx"):
-        stem_lower = stem.lower()
-        if stem_lower.endswith("_zh"):
-            stem = stem[:-3]
-        elif stem_lower.endswith("_en"):
-            stem = stem[:-3]
-    return f"{stem}.{suffix}" if stem else name
-
-
-def _generate_agent_data(project_root: Path) -> None:
-    """Generate agent/workspace/agent-data.json from agent tree."""
-    agent_root = (project_root / "agent").resolve()
-    workspace_root = (agent_root / "workspace").resolve()
-    output_path = (workspace_root / "agent-data.json").resolve()
-    root_folder_key = "__root__"
-
-    if not agent_root.exists():
-        raise FileNotFoundError("agent directory not found")
-    if not agent_root.is_dir():
-        raise NotADirectoryError("agent is not a directory")
-
-    folder_data: dict[str, list[dict[str, str | bool]]] = {}
-    seen_paths: dict[str, set[str]] = {}  # folder_key -> normalized paths，用于去重
-    for entry in sorted(workspace_root.rglob("*")):
-        if not entry.is_file() or entry.name.startswith("."):
-            continue
-        # Skip files in hidden directories (e.g., .agent_history)
-        if any(part.startswith(".") for part in entry.relative_to(workspace_root).parts):
-            continue
-        relative_folder_path = entry.parent.relative_to(agent_root).as_posix()
-        folder_key = root_folder_key if relative_folder_path == "." else relative_folder_path
-
-        display_name = _normalize_lang_suffix(entry.name)
-        display_path = (
-            f"agent/{relative_folder_path}/{display_name}".replace("/.", "/").replace("//", "/")
-            if relative_folder_path != "."
-            else f"agent/{display_name}"
-        )
-        seen = seen_paths.setdefault(folder_key, set())
-        if display_path in seen:
-            continue  # 同一文件夹内 _zh 与 _en 并存时只保留先出现的
-        seen.add(display_path)
-
-        folder_data.setdefault(folder_key, []).append(
-            {
-                "name": display_name,
-                "path": display_path,
-                "isMarkdown": entry.suffix.lower() in {".md", ".mdx"},
-            }
-        )
-
-    sorted_folder_data = {
-        folder_key: sorted(files, key=lambda item: item["path"])
-        for folder_key, files in sorted(folder_data.items(), key=lambda item: item[0])
-    }
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(sorted_folder_data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _parse_single_byte_range(
-    range_header: str,
-    file_size: int,
-) -> tuple[int, int] | None:
-    """Parse one HTTP byte range, returning inclusive start and end offsets."""
-    if file_size == 0 or not range_header.startswith("bytes=") or "," in range_header:
-        return None
-
-    range_value = range_header[6:]
-    if "-" not in range_value:
-        return None
-
-    start_text, end_text = range_value.split("-", 1)
-    if not start_text:
-        if not end_text.isascii() or not end_text.isdecimal():
-            return None
-        suffix_length = int(end_text)
-        if suffix_length <= 0:
-            return None
-        return max(0, file_size - suffix_length), file_size - 1
-
-    if not start_text.isascii() or not start_text.isdecimal():
-        return None
-    if end_text and (not end_text.isascii() or not end_text.isdecimal()):
-        return None
-
-    start = int(start_text)
-    end = int(end_text) if end_text else file_size - 1
-    if start >= file_size or end < start:
-        return None
-    return start, min(end, file_size - 1)
-
-
 class _SpaStaticHandler(SimpleHTTPRequestHandler):
     """Static file handler with SPA fallback to index.html."""
 
@@ -196,13 +83,8 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     api_target = ""
     ws_target = ""
+    web_http_target = ""
     ws_disable_compress = False
-    project_root = get_user_workspace_dir()
-    workspace_root = get_agent_root_dir()
-    agent_teams_root = _get_agent_teams_root()
-    logs_root = get_logs_dir()
-    auto_harness_root = project_root / "auto-harness"
-    history_db = ""
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -385,12 +267,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
     def _is_ws_route(self) -> bool:
         return urlparse(self.path).path.startswith("/ws")
-
-    def _is_file_api_route(self) -> bool:
-        return urlparse(self.path).path.startswith("/file-api/")
-
-    def _is_share_api_route(self) -> bool:
-        return urlparse(self.path).path.startswith("/share-api/")
 
     def _is_websocket_upgrade(self) -> bool:
         upgrade = self.headers.get("Upgrade", "")
@@ -599,13 +475,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     if sock is self.connection:
                         for text_message in client_parser.feed(data):
                             self._log_ws_business_message("frontend->backend", text_message)
-                            if _history_runner is not None:
-                                _history_runner.submit("browser", text_message)
                     else:
                         for text_message in server_parser.feed(data):
                             self._log_ws_business_message("backend->frontend", text_message)
-                            if _history_runner is not None:
-                                _history_runner.submit("uplink", text_message)
                     # 非阻塞 socket 写入：循环增量 send，缓冲区满时等待可写后继续，
                     # 跨平台覆盖 Windows WSAEWOULDBLOCK (10035) 与 POSIX EAGAIN/EWOULDBLOCK。
                     pending = data
@@ -660,6 +532,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 pass
 
     def _dispatch_proxy(self) -> bool:
+        # /api/sessions* is handled by _is_web_http_route (Gateway Web HTTP), not WebChannel.
+        if self._is_web_http_route():
+            self._proxy_web_http()
+            return True
         if self._is_api_route():
             self._proxy_http()
             return True
@@ -671,596 +547,39 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return True
         return False
 
-    @staticmethod
-    def _is_markdown(path_obj: Path) -> bool:
-        ext = path_obj.suffix.lower()
-        return ext in {".md", ".mdx"}
 
-    @classmethod
-    def _is_path_under_allowed_root(cls, target: Path) -> bool:
-        target_resolved = target.resolve()
-        try:
-            in_workspace = (
-                os.path.commonpath([str(cls.workspace_root), str(target_resolved)])
-                == str(cls.workspace_root)
-            )
-            in_agent_teams = (
-                os.path.commonpath([str(cls.agent_teams_root), str(target_resolved)]) == str(cls.agent_teams_root)
-            )
-            in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
-            in_auto_harness = \
-                os.path.commonpath([str(cls.auto_harness_root), str(target_resolved)]) == str(cls.auto_harness_root)
-            return in_workspace or in_agent_teams or in_logs or in_auto_harness
-        except ValueError:
-            return False
-
-    def _write_json(self, status: int, payload: dict) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(data)
-
-    @staticmethod
-    def _parse_query(query: str) -> dict[str, str]:
-        parsed: dict[str, str] = {}
-        if not query:
-            return parsed
-        for pair in query.split("&"):
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-            else:
-                k, v = pair, ""
-            parsed[unquote(k)] = unquote(v)
-        return parsed
-
-    def _resolve_session_title(self, session_dir: Path, history: list[dict[str, Any]]) -> str:
-        metadata_path = session_dir / "metadata.json"
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                title = metadata.get("title") if isinstance(metadata, dict) else None
-                if isinstance(title, str) and title.strip():
-                    return title.strip()
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                pass
-        for record in history:
-            if record.get("role") == "user":
-                content = record.get("content")
-                if isinstance(content, str) and content.strip():
-                    return content.strip().replace("\n", " ")[:80]
-        return session_dir.name
-
-    def _build_share_snapshot(
-        self,
-        *,
-        session_id: str,
-    ) -> tuple[dict[str, Any], str]:
-        sessions_root = get_agent_sessions_dir().resolve()
-        session_dir = (sessions_root / session_id).resolve()
-        try:
-            if os.path.commonpath([str(sessions_root), str(session_dir)]) != str(sessions_root):
-                raise FileNotFoundError("history_not_found")
-        except ValueError as exc:
-            raise FileNotFoundError("history_not_found") from exc
-
-        if not session_dir.exists() or not history_exists(session_id):
-            raise FileNotFoundError("history_not_found")
-        try:
-            history_raw = load_history_records(session_id)
-        except Exception as exc:
-            raise ValueError("invalid_history_json") from exc
-        if not isinstance(history_raw, list):
-            raise ValueError("invalid_history_shape")
-
-        history = [item for item in history_raw if isinstance(item, dict)]
-        exported_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"jiuwenswarm-share-{timestamp}.png"
-        snapshot = {
-            "session_id": session_id,
-            "metadata": {
-                "title": self._resolve_session_title(session_dir, history),
-                "exported_at": exported_at,
-                "filename": filename,
-            },
-            "records": history_raw,
-        }
-        return snapshot, filename
-
-    def _handle_share_api_get(self, parsed) -> None:
-        if parsed.path != "/share-api/snapshot":
-            self._write_json(404, {"error": "not_found"})
-            return
-        query = self._parse_query(parsed.query)
-        session_id = query.get("session_id", "").strip()
-        if not session_id:
-            self._write_json(400, {"error": "missing_session_id"})
-            return
-        try:
-            snapshot, filename = self._build_share_snapshot(
-                session_id=session_id,
-            )
-        except FileNotFoundError:
-            self._write_json(404, {"error": "history_not_found"})
-            return
-        except ValueError as exc:
-            self._write_json(400, {"error": str(exc)})
-            return
-        self._write_json(200, {"filename": filename, "snapshot": snapshot})
-
-    def _handle_history_api_get(self, parsed) -> bool:
-        """Enterprise local session history (SQLite); not proxied to Gateway."""
-        if not os.getenv("AGENT_RUNTIME", "").strip():
-            return False
-        if not self.history_db:
-            return False
-        path = parsed.path
-        if path == "/api/sessions":
-            query = self._parse_query(parsed.query)
-            try:
-                limit = int(query.get("limit", "20") or 20)
-                offset = int(query.get("offset", "0") or 0)
-            except ValueError:
-                limit, offset = 20, 0
-            limit = max(1, min(limit, 100))
-            offset = max(0, offset)
-            user = query.get("user") or None
-            self._write_json(
-                200,
-                {
-                    "sessions": list_sessions_sync(
-                        self.history_db,
-                        limit=limit,
-                        offset=offset,
-                        user=user,
-                    ),
-                },
-            )
+    def _is_web_http_route(self) -> bool:
+        """Paths served by Gateway Web HTTP; proxy when Ingress still points at Web static."""
+        path = urlparse(self.path).path
+        if path.startswith("/file-api/") or path.startswith("/share-api/"):
             return True
-        if path.startswith("/api/sessions/"):
-            session_id = path[len("/api/sessions/"):]
-            query = self._parse_query(parsed.query)
-            user = query.get("user") or None
-            detail = get_session_detail_sync(self.history_db, session_id, user=user)
-            if detail is None:
-                self._write_json(404, {"error": "not_found"})
-            else:
-                self._write_json(200, detail)
+        if path == "/api/sessions" or path.startswith("/api/sessions/"):
+            return True
+        if path == "/api/v1" or path.startswith("/api/v1/"):
             return True
         return False
 
-    def _handle_file_api_get(self, parsed) -> None:
-        path = parsed.path
-        query = self._parse_query(parsed.query)
-
-        if path == "/file-api/list-markdown":
-            dir_arg = query.get("dir", "")
-            if not dir_arg:
-                self._write_json(400, {"error": "missing_dir"})
-                return
-            full_dir = (self.project_root / dir_arg).resolve()
-            if not self._is_path_under_allowed_root(full_dir):
-                self._write_json(403, {"error": "forbidden_dir"})
-                return
-            if not full_dir.exists() or not full_dir.is_dir():
-                self._write_json(200, {"files": []})
-                return
-            files = []
-            for entry in sorted(full_dir.iterdir(), key=lambda p: p.name.lower()):
-                if not entry.is_file() or not self._is_markdown(entry):
-                    continue
-                files.append(
-                    {
-                        "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
-                    }
-                )
-            self._write_json(200, {"files": files})
+    def _proxy_web_http(self) -> None:
+        if not self.web_http_target:
+            self.send_error(502, "web http proxy target not configured")
             return
-
-        if path == "/file-api/list-files":
-            dir_arg = query.get("dir", "")
-            if not dir_arg:
-                self._write_json(400, {"error": "missing_dir"})
-                return
-            full_dir = (self.project_root / dir_arg).resolve()
-            if not self._is_path_under_allowed_root(full_dir):
-                self._write_json(403, {"error": "forbidden_dir"})
-                return
-            if not full_dir.exists() or not full_dir.is_dir():
-                self._write_json(200, {"files": []})
-                return
-            files = []
-            entries = sorted(
-                full_dir.iterdir(),
-                key=lambda p: (not p.is_dir(), p.name.lower()),
-            )
-            for entry in entries:
-                files.append(
-                    {
-                        "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
-                        "isMarkdown": self._is_markdown(entry) if entry.is_file() else False,
-                        "isDirectory": entry.is_dir(),
-                    }
-                )
-            self._write_json(200, {"files": files})
-            return
-
-        if path == "/file-api/raw-file":
-            file_arg = query.get("path", "")
-            if not file_arg:
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            full_path = (self.project_root / file_arg).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not full_path.is_file():
-                self._write_json(404, {"error": "file_not_found"})
-                return
-
-            mime_type, _ = mimetypes.guess_type(full_path.name)
-            self.send_response(200)
-            self.send_header("Content-Type", mime_type or "application/octet-stream")
-            self.send_header("Content-Length", str(full_path.stat().st_size))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            if self.command != "HEAD":
-                with full_path.open("rb") as file_obj:
-                    while True:
-                        chunk = file_obj.read(65536)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-            return
-
-        if path == "/file-api/file-content":
-            file_arg = query.get("path", "")
-            encoding_arg = query.get("encoding", "utf-8")
-            if not file_arg:
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            full_path = (self.project_root / file_arg).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not full_path.exists():
-                if file_arg.replace("\\", "/") == "agent/workspace/agent-data.json":
-                    try:
-                        _generate_agent_data(self.project_root)
-                    except Exception as exc:  # noqa: BLE001
-                        self._write_json(500, {"error": "generate_failed", "detail": str(exc)})
-                        return
-                if not full_path.exists():
-                    self._write_json(404, {"error": "file_not_found", "fullPath": str(full_path)})
-                    return
-
-            def read_file_with_encoding(file_path: Path, encoding: str) -> tuple[str, str]:
-                if encoding == "auto":
-                    import charset_normalizer
-                    raw_data = file_path.read_bytes()
-                    detected = charset_normalizer.from_bytes(raw_data).best()
-                    if detected is None:
-                        detected_encoding = "utf-8"
-                    else:
-                        detected_encoding = detected.encoding or "utf-8"
-                    try:
-                        return raw_data.decode(detected_encoding), detected_encoding
-                    except (UnicodeDecodeError, LookupError) as decode_exc:
-                        for try_encoding in ["gbk", "gb2312", "big5", "shift_jis", "euc_kr"]:
-                            try:
-                                return raw_data.decode(try_encoding), try_encoding
-                            except (UnicodeDecodeError, LookupError):
-                                continue
-                        raise OSError(f"Unable to decode file with any known encoding") from decode_exc
-                else:
-                    return file_path.read_text(encoding=encoding), encoding
-
-            try:
-                data, used_encoding = read_file_with_encoding(full_path, encoding_arg)
-            except OSError as exc:
-                self._write_json(500, {"error": str(exc)})
-                return
-            body = data.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("X-Original-Encoding", used_encoding)
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-            return
-
-        if path == "/file-api/download":
-            self._handle_file_download(query)
-            return
-
-        if path == "/file-api/ws-debug-config":
-            self._write_json(
-                200,
-                {
-                    "wsDisableCompress": bool(type(self).ws_disable_compress),
-                },
-            )
-            return
-
-        self._write_json(404, {"error": "not_found"})
-
-    def _handle_file_download(self, query: dict[str, str]) -> None:
-        token = query.get("token", "")
-        if not token:
-            self._write_json(400, {"error": "missing_token"})
-            return
-
+        self.__dict__["api_target"] = self.web_http_target
         try:
-            from jiuwenswarm.agents.harness.common.tools.web_file_download import (
-                validate_file_download_token,
-            )
-        except ImportError:
-            self._write_json(500, {"error": "download_module_unavailable"})
-            return
-
-        payload = validate_file_download_token(token)
-        if payload is None:
-            self._write_json(403, {"error": "invalid_or_expired_token"})
-            return
-
-        file_path = payload.get("path", "")
-        if not file_path or not os.path.isfile(file_path):
-            self._write_json(404, {"error": "file_not_found"})
-            return
-
-        try:
-            file_size = os.path.getsize(file_path)
-            file_name = os.path.basename(file_path)
-
-            mime_type, _ = mimetypes.guess_type(file_name)
-            if not mime_type:
-                mime_type = "application/octet-stream"
-
-            range_header = self.headers.get("Range")
-            byte_range = None
-            if range_header:
-                byte_range = _parse_single_byte_range(range_header, file_size)
-                if byte_range is None:
-                    self.send_response(416)
-                    self.send_header("Content-Range", f"bytes */{file_size}")
-                    self.end_headers()
-                    return
-
-            start, end = byte_range or (0, max(0, file_size - 1))
-            content_length = 0 if file_size == 0 else end - start + 1
-            self.send_response(206 if byte_range is not None else 200)
-            self.send_header("Content-Type", mime_type)
-            self.send_header("Content-Length", str(content_length))
-            self.send_header("Accept-Ranges", "bytes")
-            encoded_name = quote(file_name, safe="")
-            disposition = (
-                "inline"
-                if query.get("inline", "").lower() in {"1", "true"}
-                else "attachment"
-            )
-            self.send_header(
-                "Content-Disposition",
-                f"{disposition}; filename*=UTF-8''{encoded_name}",
-            )
-            self.send_header("Cache-Control", "no-store")
-            if byte_range is not None:
-                self.send_header(
-                    "Content-Range",
-                    f"bytes {start}-{end}/{file_size}",
-                )
-            self.end_headers()
-
-            if self.command != "HEAD":
-                with open(file_path, "rb") as f:
-                    f.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk = f.read(min(65536, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-        except Exception as exc:
-            self.log_error("file download error: %s", exc)
-            try:
-                self._write_json(500, {"error": "download_failed", "detail": str(exc)})
-            except Exception:
-                # Connection may already be closed or broken; nothing more we can do.
-                self.log_error("failed to send download error response")
-
-    def _handle_file_push(self) -> None:
-        """接收来自 Gateway 的文件推送（企业版 AGENT_RUNTIME 反向推送方案）."""
-        if not os.getenv("AGENT_RUNTIME", "").strip():
-            self._write_json(404, {"error": "not_available"})
-            return
-
-        from jiuwenswarm.agents.harness.common.tools.web_file_download import (
-            build_file_download_info,
-        )
-
-        content_type = self.headers.get("Content-Type", "")
-        if "multipart/form-data" not in content_type:
-            self._write_json(400, {"error": "expected_multipart_form_data"})
-            return
-
-        try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-
-            environ = {
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-                "CONTENT_LENGTH": str(content_length),
-            }
-            fs = cgi.FieldStorage(
-                fp=io.BytesIO(body),
-                headers=self.headers,
-                environ=environ,
-            )
-
-            file_item = fs["file"]
-            session_id = fs.getvalue("session_id", "default")
-            filename = fs.getvalue("filename", file_item.filename or "unnamed")
-
-            if not file_item.file:
-                self._write_json(400, {"error": "missing_file_field"})
-                return
-
-            received_dir = Path("./web_received_files")
-            received_dir.mkdir(parents=True, exist_ok=True)
-
-            safe_name = f"{int(time.time())}_{filename}"
-            local_path = received_dir / safe_name
-
-            with open(local_path, "wb") as f:
-                while True:
-                    chunk = file_item.file.read(65536)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-
-            self.logger.info(
-                "[WebServer] 接收文件推送: %s -> %s", filename, local_path
-            )
-
-            download_info = build_file_download_info(
-                file_path=str(local_path),
-                file_name=filename,
-                session_id=session_id,
-            )
-
-            self._write_json(
-                200,
-                {
-                    "success": True,
-                    "file_path": str(local_path),
-                    "download_url": download_info["download_url"],
-                    "download_token": download_info["download_token"],
-                    "expires_at": download_info.get("expires_at"),
-                },
-            )
-
-        except Exception as exc:
-            self.logger.error(
-                "[WebServer] 处理文件推送失败: %s", exc, exc_info=True
-            )
-            self._write_json(500, {"error": "push_failed", "detail": str(exc)})
-
-    def _handle_obs_upload(self) -> None:
-        """Upload browser file payload to self-hosted MinIO (企业版)."""
-        if not os.getenv("AGENT_RUNTIME", "").strip():
-            self._write_json(404, {"error": "not_available"})
-            return
-
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(length) if length > 0 else b""
-        status, payload = _process_obs_upload_body(raw, logger=self.logger)
-        self._write_json(status, payload)
-
-    def _handle_file_api_post(self, parsed) -> None:
-        if parsed.path == "/file-api/push":
-            self._handle_file_push()
-            return
-
-        if parsed.path == "/file-api/upload-obs":
-            self._handle_obs_upload()
-            return
-
-        if parsed.path == "/file-api/rebuild-agent-data":
-            try:
-                _generate_agent_data(self.project_root)
-            except Exception as exc:  # noqa: BLE001
-                self._write_json(500, {"error": "rebuild_failed", "detail": str(exc)})
-                return
-
-            self._write_json(200, {"ok": True})
-            return
-
-        if parsed.path == "/file-api/file-content":
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length) if length > 0 else b""
-            try:
-                payload = json.loads(raw.decode("utf-8") if raw else "{}")
-            except json.JSONDecodeError:
-                self._write_json(400, {"error": "invalid_json"})
-                return
-
-            request_path = payload.get("path")
-            request_content = payload.get("content")
-            if not isinstance(request_path, str) or not request_path.strip():
-                self._write_json(400, {"error": "missing_file_path"})
-                return
-            if not isinstance(request_content, str):
-                self._write_json(400, {"error": "missing_file_content"})
-                return
-
-            full_path = (self.project_root / request_path).resolve()
-            if not self._is_path_under_allowed_root(full_path):
-                self._write_json(403, {"error": "forbidden_path"})
-                return
-            if not self._is_markdown(full_path):
-                self._write_json(400, {"error": "only_markdown_supported"})
-                return
-            if not full_path.exists():
-                self._write_json(404, {"error": "file_not_found"})
-                return
-
-            try:
-                full_path.write_text(request_content, encoding="utf-8")
-            except OSError as exc:
-                self._write_json(500, {"error": str(exc)})
-                return
-            self._write_json(200, {"ok": True})
-            return
-
-        if parsed.path == "/file-api/ws-debug-config":
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length) if length > 0 else b""
-            try:
-                payload = json.loads(raw.decode("utf-8") if raw else "{}")
-            except json.JSONDecodeError:
-                self._write_json(400, {"error": "invalid_json"})
-                return
-
-            ws_disable_compress = payload.get("wsDisableCompress")
-            if not isinstance(ws_disable_compress, bool):
-                self._write_json(400, {"error": "invalid_ws_disable_compress"})
-                return
-
-            type(self).ws_disable_compress = ws_disable_compress
-            self.logger.info(
-                "[jiuwenswarm-web] ws disable compress updated: %s",
-                ws_disable_compress,
-            )
-            self._write_json(200, {"ok": True, "wsDisableCompress": ws_disable_compress})
-            return
-
-        self._write_json(404, {"error": "not_found"})
+            self._proxy_http()
+        finally:
+            self.__dict__.pop("api_target", None)
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._handle_history_api_get(parsed):
-            return
-        if self._is_share_api_route():
-            self._handle_share_api_get(parsed)
-            return
-        if self._is_file_api_route():
-            self._handle_file_api_get(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
             return
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._is_file_api_route():
-            self._handle_file_api_post(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
             return
@@ -1282,14 +601,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         self.send_error(405, "method not allowed")
 
     def do_OPTIONS(self) -> None:  # noqa: N802
+        if self._is_web_http_route():
+            self._proxy_web_http()
+            return
         if self._dispatch_proxy():
             return
         self.send_error(405, "method not allowed")
 
     def do_HEAD(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if self._is_file_api_route():
-            self._handle_file_api_get(parsed)
+        if self._is_web_http_route():
+            self._proxy_web_http()
             return
         if self._dispatch_proxy():
             return
@@ -1373,64 +694,6 @@ def _wait_for_gateway(ws_target: str, logger: logging.Logger) -> None:
         logger.warning("[jiuwenswarm-web] gateway not available after 15 seconds")
 
 
-def _process_obs_upload_body(
-    raw: bytes, *, logger: logging.Logger | None = None
-) -> tuple[int, dict[str, Any]]:
-    try:
-        payload = json.loads(raw.decode("utf-8") if raw else "{}")
-    except json.JSONDecodeError:
-        return 400, {"ok": False, "error": "invalid_json"}
-    if not isinstance(payload, dict):
-        return 400, {"ok": False, "error": "invalid_payload"}
-    try:
-        from jiuwenswarm.channels.web.minio_upload import upload_base64_payload
-
-        return 200, upload_base64_payload(payload)
-    except Exception as exc:
-        if logger is not None:
-            logger.error("[WebServer] MinIO upload failed: %s", exc, exc_info=True)
-        return 500, {"ok": False, "error": str(exc)}
-
-
-def _run_upload_api_server(*, host: str, port: int, log_level: str) -> None:
-    """Minimal HTTP server for POST /file-api/upload-obs (企业版 Vite dev)."""
-    if not os.getenv("AGENT_RUNTIME", "").strip():
-        raise ValueError("upload-api-only requires AGENT_RUNTIME")
-
-    logs_root = get_logs_dir().resolve()
-    logger = _setup_logger(logs_root, log_level)
-
-    class _UploadApiHandler(SimpleHTTPRequestHandler):
-        def log_message(self, fmt: str, *args: Any) -> None:
-            logger.debug(fmt, *args)
-
-        def do_POST(self) -> None:  # noqa: N802
-            if urlparse(self.path).path != "/file-api/upload-obs":
-                self.send_error(404)
-                return
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length) if length > 0 else b""
-            status, payload = _process_obs_upload_body(raw, logger=logger)
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-    server = ThreadingHTTPServer((host, port), _UploadApiHandler)
-    logger.info(
-        "[jiuwenswarm-upload-api] POST http://%s:%s/file-api/upload-obs", host, port
-    )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        logger.info("[jiuwenswarm-upload-api] server closed")
-
-
 def main() -> None:
     from jiuwenswarm.dotenv_early import get_parsed_dotenv
 
@@ -1488,11 +751,6 @@ def main() -> None:
         help="Disable websocket compression for easier ws req/res/event debug logging.",
     )
     parser.add_argument(
-        "--upload-api-only",
-        action="store_true",
-        help="Run a minimal HTTP server that only serves POST /file-api/upload-obs (enterprise Vite dev).",
-    )
-    parser.add_argument(
         "--name",
         metavar="<name>",
         help="Start a named instance from instances.yaml.",
@@ -1503,13 +761,6 @@ def main() -> None:
         help="Load environment from .env file (processed at startup, not used here).",
     )
     args = parser.parse_args()
-
-    if args.upload_api_only:
-        try:
-            _run_upload_api_server(host=args.host, port=args.port, log_level=args.log_level)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        return
 
     install_async_dump_handler("web")
 
@@ -1526,38 +777,24 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    # default_project_root should be the user workspace root (~/.jiuwenswarm in package mode)
-    # get_root_dir() already handles this correctly
-    default_project_root = get_user_workspace_dir()
-
-    project_root = default_project_root
-    workspace_root = (project_root / "agent").resolve()
-    agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 
-    global _history_runner
-    history_db = ""
-    if os.getenv("AGENT_RUNTIME", "").strip():
-        tenant_root = get_multi_tenant_user_workspace_dir("default", "default")
-        history_db = str((tenant_root or get_user_workspace_dir()) / "web_history.db")
-        store = ChatHistoryStore(history_db)
-        _history_runner = HistoryFrameRunner(store)
-        _history_runner.start()
-        logger.info("[jiuwenswarm-web] enterprise history db: %s", history_db)
+    web_port_int = int(os.getenv("WEB_PORT", "19000"))
+    web_http_port = resolve_web_http_port(web_port_int)
+    web_http_target = f"http://127.0.0.1:{web_http_port}"
+    explicit_web_http = os.getenv("GATEWAY_WEB_HTTP_URL", "").strip()
+    if explicit_web_http:
+        web_http_target = explicit_web_http.rstrip("/")
 
     class _ConfiguredHandler(_SpaStaticHandler):
         pass
 
     _ConfiguredHandler.api_target = api_target
     _ConfiguredHandler.ws_target = ws_target
+    _ConfiguredHandler.web_http_target = web_http_target
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
-    _ConfiguredHandler.project_root = project_root
-    _ConfiguredHandler.workspace_root = workspace_root
-    _ConfiguredHandler.agent_teams_root = agent_teams_root
-    _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
-    _ConfiguredHandler.history_db = history_db
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
@@ -1565,8 +802,11 @@ def main() -> None:
     logger.info("[jiuwenswarm-web] http://%s:%s", args.host, args.port)
     logger.info("[jiuwenswarm-web] /api -> %s", api_target)
     logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)
+    logger.info(
+        "[jiuwenswarm-web] /file-api,/share-api,/api/sessions*,/api/v1* -> %s",
+        web_http_target,
+    )
     logger.info("[jiuwenswarm-web] ws disable compress: %s", args.ws_disable_compress)
-    logger.info("[jiuwenswarm-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
 
     _wait_for_gateway(ws_target, logger)
 

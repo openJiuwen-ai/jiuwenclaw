@@ -11,7 +11,7 @@ from jiuwenswarm.gateway.cron.job_access import (
     set_cron_persistent_store,
 )
 from jiuwenswarm.gateway.cron.job_repository import CronJobRepository
-from jiuwenswarm.gateway.routing.session_map import Session
+from jiuwenswarm.gateway.routing.session_map import Session, SessionMap
 from jiuwenswarm.gateway.routing.session_map_access import (
     PersistentSessionStorage,
     clear_session_map_repository,
@@ -19,6 +19,7 @@ from jiuwenswarm.gateway.routing.session_map_access import (
 )
 from jiuwenswarm.gateway.routing.session_map_repository import SessionMapRepository
 from jiuwenswarm.gateway.storage.backends.memory_persistent import InMemoryPersistentBackend
+from jiuwenswarm.gateway.storage_assembly.layouts import build_gateway_store_registry
 
 
 @pytest.mark.asyncio
@@ -46,6 +47,75 @@ def test_persistent_session_storage_sync_bridge() -> None:
         assert storage.get("web::c::b").session_id == "s2"
     finally:
         clear_session_map_repository()
+
+
+def test_persistent_session_storage_personal_uses_local_cache() -> None:
+    store = InMemoryPersistentBackend()
+    repo = SessionMapRepository(store)
+    storage = PersistentSessionStorage(repo, read_through=False)
+    key = "feishu::chat::bot"
+    storage.set(key, Session(session_id="sess-1", service_id="svc", agent_id=None))
+    assert storage.get(key).session_id == "sess-1"
+    # External write bypassing this instance's cache (same as before LocalSessionStorage).
+    import asyncio
+
+    asyncio.run(
+        repo.upsert(key, Session(session_id="sess-2", service_id="svc", agent_id=None))
+    )
+    assert storage.get(key).session_id == "sess-1"
+
+
+def test_persistent_session_storage_read_through_across_instances() -> None:
+    """Pod B must see Pod A writes without stale local cache (P-04)."""
+    store = InMemoryPersistentBackend()
+    storage_a = PersistentSessionStorage(
+        SessionMapRepository(store),
+        read_through=True,
+    )
+    storage_b = PersistentSessionStorage(
+        SessionMapRepository(store),
+        read_through=True,
+    )
+
+    key = "feishu::chat::bot"
+    storage_a.set(key, Session(session_id="sess-old", service_id="svc", agent_id=None))
+    assert storage_b.get(key) is not None
+    assert storage_b.get(key).session_id == "sess-old"
+
+    storage_a.set(key, Session(session_id="sess-new", service_id="svc", agent_id=None))
+    assert storage_b.get(key).session_id == "sess-new"
+
+    all_rows = storage_b.get_all()
+    assert all_rows[key].session_id == "sess-new"
+
+
+def test_session_map_uses_persistent_storage_when_repository_wired() -> None:
+    store = InMemoryPersistentBackend()
+    repo = SessionMapRepository(store)
+    set_session_map_repository(repo)
+    try:
+        session_map = SessionMap()
+        assert isinstance(session_map._storage, PersistentSessionStorage)
+    finally:
+        clear_session_map_repository()
+
+
+def test_personal_session_map_layout_uses_checkpoint_path(tmp_path) -> None:
+    checkpoint = tmp_path / "service_default" / "agent_default" / ".checkpoint"
+    checkpoint.mkdir(parents=True)
+    workspace = tmp_path / "home"
+    workspace.mkdir()
+    config_file = workspace / "config.yaml"
+    config_file.write_text("gateway:\n  edition: personal\n", encoding="utf-8")
+
+    registry = build_gateway_store_registry(
+        persistent_root=workspace / "gateway" / "persistent",
+        config_file=config_file,
+        session_map_file=checkpoint / "session_map.json",
+    )
+    layout = registry.get("session_map")
+    assert layout.file is not None
+    assert layout.file.path == str((checkpoint / "session_map.json").resolve())
 
 
 @pytest.mark.asyncio

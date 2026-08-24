@@ -44,10 +44,11 @@ BASE_PORTS = {
     "web": 19000,
     "gateway": 19001,
     "frontend": 5173,
+    "http_api": 8766,
 }
 
 # Port types that must be unique across instances
-PORT_TYPES = ("agent_server", "web", "gateway", "frontend")
+PORT_TYPES = ("agent_server", "web", "gateway", "frontend", "http_api")
 
 # PID file name in workspace directory
 PID_FILENAME = ".instance.pid"
@@ -134,6 +135,7 @@ PORT_ENV_OVERRIDES = {
     "web": "JIUWENSWARM_WEB_PORT",
     "gateway": "JIUWENSWARM_GATEWAY_PORT",
     "frontend": "JIUWENSWARM_FRONTEND_PORT",
+    "http_api": "JIUWENSWARM_HTTP_API_PORT",
 }
 
 
@@ -376,6 +378,10 @@ PORT_ENV_NAMES = {
     "web": "WEB_PORT",
     "gateway": "GATEWAY_PORT",
     "frontend": "FRONTEND_PORT",
+    # http_api 参与端口分配与冲突扫描（见 BASE_PORTS / PORT_TYPES），因此也必须
+    # 下发到进程 —— 否则实例预留了端口却收不到，开启 HTTP 时会回落到默认 8766。
+    # 是否真正监听由 config.yaml 的 http_server.enabled 决定，与本端口无关。
+    "http_api": "AGENT_HTTP_PORT",
 }
 
 

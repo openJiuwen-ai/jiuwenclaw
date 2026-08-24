@@ -18,6 +18,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
+def _default_ctx(server, request):
+    import asyncio as _asyncio
+
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    class _NullWs:
+        async def send(self, text):  # noqa: ANN001
+            return None
+
+    _ws = _NullWs()
+    return RequestContext(
+        request=request,
+        sink=WSSink(_ws, _asyncio.Lock()),
+        connection_id=str(id(_ws)),
+        services=AgentServerServices(server),
+    )
+
+
+
+from jiuwenswarm.server.handlers import _default
+
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
@@ -83,7 +106,8 @@ async def test_prepare_code_mode_chat_turn_resolves_mode_and_agent() -> None:
 
     request = _chat_request(session_id, "hello", mode="code.plan")
 
-    mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+    mode, sub_mode, resolved_agent = await _default._prepare_code_mode_chat_turn(
+        _default_ctx(server, request),
         request, "tui"
     )
 
@@ -112,11 +136,12 @@ async def test_prepare_chat_normalizes_agent_request_for_code_workspace() -> Non
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         return_value={},
     ), patch.object(
-        agent_ws_server_module,
+        _default,
         "_sync_chat_request_metadata",
         return_value="/tmp/code-project",
     ):
-        mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+        mode, sub_mode, resolved_agent = await _default._prepare_code_mode_chat_turn(
+            _default_ctx(server, request),
             request,
             "web",
         )
@@ -150,11 +175,12 @@ async def test_prepare_team_chat_turn_propagates_locked_project_dir() -> None:
     request.metadata = {"member_name": "reviewer", "project_dir": "/tmp/stale"}
 
     with patch.object(
-        agent_ws_server_module,
+        _default,
         "_sync_chat_request_metadata",
         return_value=" /tmp/locked-project ",
     ):
-        mode, sub_mode, resolved_agent = await server._prepare_code_mode_chat_turn(
+        mode, sub_mode, resolved_agent = await _default._prepare_code_mode_chat_turn(
+            _default_ctx(server, request),
             request, "web"
         )
 
@@ -204,7 +230,8 @@ async def test_ensure_code_mode_state_syncs_plan_to_normal() -> None:
     ):
         session.pre_run = pre_run
         session.post_run = post_run
-        restored = await server._ensure_code_mode_state(
+        restored = await _default._ensure_code_mode_state(
+            _default_ctx(server, request),
             request, "code", "normal", plan_agent
         )
 
@@ -239,7 +266,8 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
     ):
         session.pre_run = AsyncMock()
         session.post_run = AsyncMock()
-        restored = await server._ensure_code_mode_state(
+        restored = await _default._ensure_code_mode_state(
+            _default_ctx(server, request),
             request, "code", "plan", plan_agent
         )
 
@@ -248,7 +276,7 @@ async def test_ensure_code_mode_state_skips_if_mode_already_matches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() -> None:
+async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit(monkeypatch) -> None:
     """A user-triggered /plan re-entry must not be blocked by stale exit guards."""
     session_id = "sess_explicit_reentry"
 
@@ -266,7 +294,8 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-    server._push_plan_mode_exited = AsyncMock()
+    _push_mock = AsyncMock()
+    monkeypatch.setattr(_default, "_push_plan_mode_exited", _push_mock)
     request = _chat_request(
         session_id,
         "implement this in plan mode",
@@ -282,7 +311,8 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
         ):
             session.pre_run = AsyncMock()
             session.post_run = AsyncMock()
-            restored = await server._ensure_code_mode_state(
+            restored = await _default._ensure_code_mode_state(
+                _default_ctx(server, request),
                 request, "code", "plan", plan_agent
             )
     finally:
@@ -290,12 +320,14 @@ async def test_ensure_code_mode_state_allows_explicit_plan_reentry_after_exit() 
 
     assert restored is False
     plan_instance.switch_mode.assert_called_once_with(session=session, mode="plan")
-    server._push_plan_mode_exited.assert_not_awaited()
+    _push_mock.assert_not_awaited()
     assert request.params["mode"] == "code.plan"
 
 
 @pytest.mark.asyncio
-async def test_ensure_code_mode_state_allows_e2a_plan_reentry_after_exit() -> None:
+async def test_ensure_code_mode_state_allows_e2a_plan_reentry_after_exit(
+    monkeypatch,
+) -> None:
     """E2A/officeclaw clients mark explicit plan entry with plan_entry_source=e2a."""
     session_id = "sess_e2a_reentry"
 
@@ -311,7 +343,8 @@ async def test_ensure_code_mode_state_allows_e2a_plan_reentry_after_exit() -> No
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-    server._push_plan_mode_exited = AsyncMock()
+    _push_mock = AsyncMock()
+    monkeypatch.setattr(_default, "_push_plan_mode_exited", _push_mock)
     request = _chat_request(
         session_id,
         "continue in plan mode",
@@ -327,7 +360,8 @@ async def test_ensure_code_mode_state_allows_e2a_plan_reentry_after_exit() -> No
         ):
             session.pre_run = AsyncMock()
             session.post_run = AsyncMock()
-            restored = await server._ensure_code_mode_state(
+            restored = await _default._ensure_code_mode_state(
+                _default_ctx(server, request),
                 request, "code", "plan", plan_agent
             )
     finally:
@@ -335,6 +369,7 @@ async def test_ensure_code_mode_state_allows_e2a_plan_reentry_after_exit() -> No
 
     assert restored is False
     plan_instance.switch_mode.assert_called_once_with(session=session, mode="plan")
+    _push_mock.assert_not_awaited()
     assert request.params["mode"] == "code.plan"
 
 
@@ -348,36 +383,37 @@ def test_explicit_plan_entry_accepts_only_known_sources() -> None:
         "sess", extra_params={"plan_entry_source": "always-present-client-marker"}
     )
 
-    assert AgentWebSocketServer._is_explicit_plan_entry_request(e2a_request) is True
-    assert AgentWebSocketServer._is_explicit_plan_entry_request(slash_request) is True
-    assert AgentWebSocketServer._is_explicit_plan_entry_request(stale_request) is False
-    assert AgentWebSocketServer._is_explicit_plan_entry_request(unknown_request) is False
+    assert _default._is_explicit_plan_entry_request(e2a_request) is True
+    assert _default._is_explicit_plan_entry_request(slash_request) is True
+    assert _default._is_explicit_plan_entry_request(stale_request) is False
+    assert _default._is_explicit_plan_entry_request(unknown_request) is False
 
 
 @pytest.mark.asyncio
 async def test_tenant_unary_plan_exit_cleanup_runs_when_processing_fails() -> None:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     agent = MagicMock()
-    server._uses_tenant_pool = MagicMock(return_value=True)
-    server._prepare_tenant_code_mode_chat_turn = AsyncMock(
-        return_value=("code", "plan", agent)
-    )
-    server._check_post_process_plan_exit = AsyncMock()
     pool = MagicMock()
     pool.process_message = AsyncMock(side_effect=RuntimeError("send failed"))
     server._tenant_pool = MagicMock(return_value=pool)
     request = _chat_request("sess_unary_failure")
+    ctx = _default_ctx(server, request)
+    check_exit = AsyncMock()
 
-    with patch(
+    with patch.object(_default, "_uses_tenant_pool", return_value=True), patch.object(
+        _default,
+        "_prepare_tenant_code_mode_chat_turn",
+        new=AsyncMock(return_value=("code", "plan", agent)),
+    ), patch.object(
+        _default, "_check_post_process_plan_exit", new=check_exit
+    ), patch(
         "jiuwenswarm.server.runtime.agent_adapter.interface_deep.ensure_persistent_checkpointer",
         new=AsyncMock(),
     ):
         with pytest.raises(RuntimeError, match="send failed"):
-            await server._handle_unary_impl(
-                MagicMock(), request, asyncio.Lock()
-            )
+            await _default._handle_unary_impl(ctx, request)
 
-    server._check_post_process_plan_exit.assert_awaited_once_with(request, agent)
+    check_exit.assert_awaited_once_with(ctx, request, agent)
 
 
 @pytest.mark.asyncio
@@ -420,8 +456,11 @@ async def test_prepare_code_mode_chat_turn_uses_injected_agent_manager() -> None
     server._agent_manager = default_manager
     request = _chat_request("sess_injected", mode="code.plan")
 
-    mode, sub_mode, _agent = await server._prepare_code_mode_chat_turn(
-        request, "officeclaw", agent_manager=injected
+    mode, sub_mode, _agent = await _default._prepare_code_mode_chat_turn(
+        _default_ctx(server, request),
+        request,
+        "officeclaw",
+        agent_manager=injected,
     )
 
     assert mode == "code"
@@ -459,6 +498,7 @@ async def test_tenant_interrupt_continuation_restores_code_route_before_defaults
     manager.get_agent = AsyncMock(return_value=agent)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
     request = AgentRequest(
         request_id="resume-wire-request",
         channel_id="officeclaw",
@@ -482,11 +522,12 @@ async def test_tenant_interrupt_continuation_restores_code_route_before_defaults
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         return_value=metadata,
     ), patch.object(
-        agent_ws_server_module,
+        _default,
         "_sync_chat_request_metadata",
         return_value=metadata["project_dir"],
     ):
-        mode, sub_mode, selected = await server._prepare_code_mode_chat_turn(
+        mode, sub_mode, selected = await _default._prepare_code_mode_chat_turn(
+            _default_ctx(server, request),
             request,
             "officeclaw",
             agent_manager=manager,
@@ -510,6 +551,7 @@ async def test_explicit_code_mode_wins_over_stale_stored_work_mode() -> None:
     manager.get_agent = AsyncMock(return_value=agent)
     manager.wait_for_session_prewarm = AsyncMock()
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
+    server._agent_manager = manager
     request = _chat_request(
         "sess_explicit_code",
         mode="code.normal",
@@ -520,11 +562,12 @@ async def test_explicit_code_mode_wins_over_stale_stored_work_mode() -> None:
         "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
         return_value={"mode": "unknown", "work_mode": "work"},
     ), patch.object(
-        agent_ws_server_module,
+        _default,
         "_sync_chat_request_metadata",
         return_value=None,
     ):
-        mode, sub_mode, _ = await server._prepare_code_mode_chat_turn(
+        mode, sub_mode, _ = await _default._prepare_code_mode_chat_turn(
+            _default_ctx(server, request),
             request,
             "officeclaw",
             agent_manager=manager,
@@ -566,7 +609,7 @@ def test_agent_lookup_restores_project_dir_for_interrupt_continuation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> None:
+async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug(monkeypatch) -> None:
     """After disconnect cleanup discards the plan-exited flag, a stale (non-explicit)
     normal→plan request must still be blocked by the checkpoint plan_slug fallback.
 
@@ -592,7 +635,8 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     create_session = MagicMock(return_value=session)
 
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
-    server._push_plan_mode_exited = AsyncMock()
+    _push_mock = AsyncMock()
+    monkeypatch.setattr(_default, "_push_plan_mode_exited", _push_mock)
     # No plan_entry_source => this is a stale re-entry, not an explicit /plan.
     request = _chat_request(session_id, "go", mode="code.plan")
 
@@ -605,7 +649,8 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
         ):
             session.pre_run = AsyncMock()
             session.post_run = AsyncMock()
-            restored = await server._ensure_code_mode_state(
+            restored = await _default._ensure_code_mode_state(
+                _default_ctx(server, request),
                 request, "code", "plan", plan_agent
             )
     finally:
@@ -617,7 +662,7 @@ async def test_disconnect_cleanup_then_stale_plan_reentry_blocked_by_slug() -> N
     assert plan_state.plan_slug is None
     plan_instance.save_state.assert_called_once()
     session.post_run.assert_awaited_once()
-    server._push_plan_mode_exited.assert_awaited_once()
+    _push_mock.assert_awaited_once()
     plan_instance.switch_mode.assert_not_called()
     assert request.params["mode"] == "code.normal"
 
@@ -629,7 +674,7 @@ async def test_ensure_skips_for_team_sub_mode() -> None:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     request = _chat_request("sess_team", mode="code.team")
 
-    restored = await server._ensure_code_mode_state(request, "code", "team", agent)
+    restored = await _default._ensure_code_mode_state(_default_ctx(server, request), request, "code", "team", agent)
     assert restored is False
 
 
@@ -658,7 +703,7 @@ async def test_prepare_chat_turn_skips_approval_for_interrupt_resume() -> None:
         },
     )
 
-    mode, sub_mode, _agent = await server._prepare_code_mode_chat_turn(request, "tui")
+    mode, sub_mode, _agent = await _default._prepare_code_mode_chat_turn(_default_ctx(server, request), request, "tui")
 
     assert mode == "code"
     assert sub_mode == "plan"
@@ -673,5 +718,5 @@ async def test_ensure_skips_for_agent_mode() -> None:
     server = AgentWebSocketServer.__new__(AgentWebSocketServer)
     request = _chat_request("sess_agent", mode="agent.fast")
 
-    restored = await server._ensure_code_mode_state(request, "agent", "fast", agent)
+    restored = await _default._ensure_code_mode_state(_default_ctx(server, request), request, "agent", "fast", agent)
     assert restored is False

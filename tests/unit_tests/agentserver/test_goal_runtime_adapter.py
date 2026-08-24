@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.server.handlers import _default
+
 # Goal capability tests exercise the checked-out OpenJiuwen implementation,
 # not whichever released package happens to be installed in the test venv.
 _AGENT_CORE_ROOT = Path(__file__).resolve().parents[3].parent / "agent-core"
@@ -517,9 +519,9 @@ def test_readonly_goal_get_skips_metadata_sync_flag() -> None:
         req_method=ReqMethod.COMMAND_GOAL,
         params={"action": "get", "mode": "agent"},
     )
-    assert AgentWebSocketServer._is_readonly_goal_get_request(get_req) is True
+    assert _default._is_readonly_goal_get_request(get_req) is True
     # Default action is get when omitted.
-    assert AgentWebSocketServer._is_readonly_goal_get_request(
+    assert _default._is_readonly_goal_get_request(
         AgentRequest(
             request_id="g2",
             channel_id="web",
@@ -529,7 +531,7 @@ def test_readonly_goal_get_skips_metadata_sync_flag() -> None:
         )
     ) is True
     for action in ("set", "resume", "pause", "clear"):
-        assert AgentWebSocketServer._is_readonly_goal_get_request(
+        assert _default._is_readonly_goal_get_request(
             AgentRequest(
                 request_id=f"a-{action}",
                 channel_id="web",

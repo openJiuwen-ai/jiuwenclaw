@@ -365,13 +365,15 @@ async def test_ws_disk_only_evolution_uses_agent_manager_not_stateless_agent(mon
             raise AssertionError("stateless agent must not handle disk-only evolution")
 
     server._agent_manager = _Manager()  # pylint: disable=protected-access
+    from jiuwenswarm.server.handlers import _default as _default_handlers
+
     monkeypatch.setattr(
-        AgentWebSocketServer,
+        _default_handlers,
         "_uses_tenant_pool",
-        staticmethod(lambda _request: False),
+        lambda _request: False,
     )
     monkeypatch.setattr(
-        AgentWebSocketServer,
+        _default_handlers,
         "_get_stateless_agent",
         AsyncMock(return_value=_Stateless()),
     )
@@ -402,7 +404,20 @@ async def test_ws_disk_only_evolution_uses_agent_manager_not_stateless_agent(mon
         params={"name": "tianqi", "version": "latest", "skill_path": "X:/proj/.office-claw/skills/tianqi/SKILL.md"},
         is_stream=False,
     )
-    await server._handle_unary_impl(None, request, asyncio.Lock())  # pylint: disable=protected-access
+    from jiuwenswarm.server.context import AgentServerServices, RequestContext
+    from jiuwenswarm.server.transports.sink import WSSink
+
+    class _FakeWS:
+        async def send(self, payload):
+            sent.append(payload)
+
+    ctx = RequestContext(
+        request=request,
+        sink=WSSink(_FakeWS(), asyncio.Lock()),
+        services=AgentServerServices(server),
+        connection_id="test",
+    )
+    await _default_handlers._handle_unary_impl(ctx, request)
 
     assert len(manager_calls) == 1
     assert not stateless_calls

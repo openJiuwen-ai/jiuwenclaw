@@ -45,7 +45,8 @@ from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 import logging
-from logging.handlers import BaseRotatingHandler
+import queue as _queue
+from logging.handlers import BaseRotatingHandler, QueueHandler, QueueListener
 from collections import OrderedDict
 import yaml
 from ruamel.yaml import YAML
@@ -2854,6 +2855,50 @@ class IdentityTextFormatter(logging.Formatter):
         return super().format(record)
 
 
+_log_queue: _queue.SimpleQueue | None = None
+_log_listener: QueueListener | None = None
+# respect_handler_level is Python 3.12+; cache once for setup_logger.
+_SUPPORTS_RESPECT_HANDLER_LEVEL: bool = sys.version_info >= (3, 12)
+
+
+def _iter_log_output_handlers() -> list[logging.Handler]:
+    """Return handlers that actually write logs (listener targets when queued)."""
+    if _log_listener is not None:
+        return list(_log_listener.handlers)
+    return list(logging.getLogger("jiuwenswarm").handlers)
+
+
+def flush_queued_logs() -> None:
+    """Block until queued log records are written (tests / graceful drain).
+
+    Stops the ``QueueListener`` (which drains the queue through the sentinel),
+    flushes target handlers, then restarts the listener so logging keeps working.
+    """
+    global _log_listener
+    listener = _log_listener
+    if listener is None or _log_queue is None:
+        return
+    targets = list(listener.handlers)
+    listener.stop()
+    for handler in targets:
+        try:
+            handler.flush()
+        except OSError as exc:
+            logger.warning(
+                "[jiuwenswarm] log handler flush failed during drain: %s",
+                exc,
+            )
+    if _SUPPORTS_RESPECT_HANDLER_LEVEL:
+        _log_listener = QueueListener(
+            _log_queue,
+            *targets,
+            respect_handler_level=True,
+        )
+    else:
+        _log_listener = QueueListener(_log_queue, *targets)
+    _log_listener.start()
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenswarm`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
@@ -2864,7 +2909,22 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - 身份字段：IdentityFieldFilter（每 handler）
     - user_visible Tag：UserVisibleTagFilter（text/dual）
     保留 dev-stable 既有的 SensitiveDataFilter + install_source_record_masking 双层脱敏。
+
+    File/console handlers are served by a ``QueueListener`` thread so emit/flush
+    I/O does not block the asyncio event loop. Source-record masking still runs
+    on the caller thread (covers third-party loggers outside this root).
     """
+    global _log_queue, _log_listener
+
+    # Stop previous listener (supports repeated setup_logger calls).
+    if _log_listener is not None:
+        _log_listener.stop()
+        for old_h in _log_listener.handlers:
+            old_h.close()
+        _log_listener = None
+    _log_queue = _queue.SimpleQueue()
+    listener_targets: list[logging.Handler] = []
+
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
     logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
@@ -2933,7 +2993,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.addFilter(UserVisibleTagFilter(tag_config))
         if name_filter is not None:
             h.addFilter(name_filter)
-        root.addHandler(h)
+        listener_targets.append(h)
 
     def _component_files(ext: str, use_json: bool) -> None:
         _add_rotating(f"gateway.{ext}", levels.gateway, _ComponentNameFilter("gateway"), use_json=use_json)
@@ -2967,7 +3027,24 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             stream_handler.addFilter(UserVisibleTagFilter(tag_config))
         stream_handler.addFilter(identity_filter)
         stream_handler.addFilter(privacy_filter)
-        root.addHandler(stream_handler)
+        listener_targets.append(stream_handler)
+
+    # QueueHandler keeps file I/O / flush off the asyncio event-loop thread.
+    if listener_targets:
+        queue_handler = QueueHandler(_log_queue)
+        queue_handler.setLevel(logging.NOTSET)
+        root.addHandler(queue_handler)
+        if _SUPPORTS_RESPECT_HANDLER_LEVEL:
+            _log_listener = QueueListener(
+                _log_queue,
+                *listener_targets,
+                respect_handler_level=True,
+            )
+        else:
+            for target in listener_targets:
+                target.addFilter(lambda record, handler=target: record.levelno >= handler.level)
+            _log_listener = QueueListener(_log_queue, *listener_targets)
+        _log_listener.start()
 
     # 保留 dev-stable 既有的源头脱敏（与 handler 层 SensitiveDataFilter 双保险）
     install_source_record_masking()
@@ -3064,9 +3141,13 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
 
 _FILE_HANDLER_LEVEL_MAP: dict[str, str] = {
     "gateway.log": "gateway",
+    "gateway.json": "gateway",
     "channel.log": "channel",
+    "channel.json": "channel",
     "agent_server.log": "agent_server",
+    "agent_server.json": "agent_server",
     "full.log": "full",
+    "full.json": "full",
     "permissions.log": "agent_server",
 }
 
@@ -3100,7 +3181,8 @@ def update_log_levels(
     root = logging.getLogger("jiuwenswarm")
     root.setLevel(levels.logger)
 
-    for h in root.handlers:
+    # File/console handlers live on the QueueListener after setup_logger.
+    for h in _iter_log_output_handlers():
         if isinstance(h, SafeRotatingFileHandler):
             fname = Path(h.baseFilename).name
             attr = _FILE_HANDLER_LEVEL_MAP.get(fname)

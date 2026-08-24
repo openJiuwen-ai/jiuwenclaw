@@ -340,11 +340,37 @@ def _infer_tool_kind(tool_name: str) -> str:
     return "other"
 
 
+def _first_url_value(arguments: dict[str, Any]) -> str | None:
+    """Resolve the ``url`` argument to a displayable string.
+
+    ``url`` may be a single string or an array of strings (multi-URL fetch).
+    For arrays, the first URL is returned.
+    """
+    value = arguments.get("url")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+    return None
+
+
+def _url_list(arguments: dict[str, Any]) -> list[str]:
+    """Return the ``url`` argument as a list of non-empty strings."""
+    value = arguments.get("url")
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
 def _build_tool_title(tool_name: str, arguments: dict[str, Any]) -> str:
     normalized = normalize_tool_name(tool_name).lower()
     path = _summarize_path(_first_string_value(arguments, *_PATH_KEYS))
     query = _first_string_value(arguments, "pattern", "query", "term", "text")
-    url = _first_string_value(arguments, "url")
+    url = _first_url_value(arguments)
     command = _first_string_value(arguments, "command", "cmd")
     terminal_id = _first_string_value(arguments, "terminalId", "terminal_id")
 
@@ -362,8 +388,12 @@ def _build_tool_title(tool_name: str, arguments: dict[str, Any]) -> str:
             return f"Running in {path}"
         return "Running command"
 
-    if normalized in _FETCH_TOOL_NAMES and url:
-        return f"Fetching {url}"
+    if normalized in _FETCH_TOOL_NAMES:
+        urls = _url_list(arguments)
+        if len(urls) > 1:
+            return f"Fetching {len(urls)} URLs"
+        if url:
+            return f"Fetching {url}"
     if normalized in _SEARCH_TOOL_NAMES:
         if query and path:
             return f"Searching {query} in {path}"

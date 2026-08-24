@@ -35,7 +35,9 @@ from jiuwenswarm.agents.harness.common.tools.invoke_tool_tool import (
 logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[ProgressiveToolRail]"
+_EAGER_DEEPRESEARCH_BINDINGS_KEY = "__eager_deepresearch_bindings__"
 _DEEPRESEARCH_CONTEXT_TOOLS = frozenset({
+    "deepresearch_execute",
     "deepresearch_stream",
     "deepresearch_prepare_rewrite",
     "deepresearch_commit_rewrite",
@@ -281,6 +283,42 @@ class ProgressiveToolRail(DeepAgentRail):
             self._deep_agent = agent
             self.invalidate_deferred_tool_cache()
         return agent
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Bind trusted tenant context for the direct DeepResearch entry."""
+        inputs = getattr(ctx, "inputs", None)
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_name = str(
+            getattr(inputs, "tool_name", "")
+            or getattr(tool_call, "name", "")
+            or ""
+        ).strip()
+        if tool_name != "deepresearch_execute":
+            return
+        manager = self._bind_deepresearch_context(tool_name)
+        manager.__enter__()
+        tool_call_id = str(getattr(tool_call, "id", "") or id(inputs))
+        bindings = ctx.extra.setdefault(_EAGER_DEEPRESEARCH_BINDINGS_KEY, {})
+        bindings[tool_call_id] = manager
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Release a direct DeepResearch entry's tenant bindings."""
+        inputs = getattr(ctx, "inputs", None)
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_name = str(
+            getattr(inputs, "tool_name", "")
+            or getattr(tool_call, "name", "")
+            or ""
+        ).strip()
+        if tool_name != "deepresearch_execute":
+            return
+        tool_call_id = str(getattr(tool_call, "id", "") or id(inputs))
+        bindings = ctx.extra.get(_EAGER_DEEPRESEARCH_BINDINGS_KEY, {})
+        manager = bindings.pop(tool_call_id, None) if isinstance(bindings, dict) else None
+        if not bindings:
+            ctx.extra.pop(_EAGER_DEEPRESEARCH_BINDINGS_KEY, None)
+        if manager is not None:
+            manager.__exit__(None, None, None)
 
     # ------------------------------------------------------------------
     # Meta tool management

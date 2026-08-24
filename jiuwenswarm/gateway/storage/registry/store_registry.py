@@ -15,7 +15,7 @@ class FileLayout:
     ``path`` 必须是绝对路径，或带 ``{field}`` 的绝对模板，由装配层写入。
     storage 只替换占位符（缺字段则 glob），不拼接 root、不查 named_files。
 
-        /ws/gateway/persistent/session_map.json
+        /ws/service_default/agent_default/.checkpoint/session_map.json
         /ws/gateway/persistent/cron_jobs/{service_id}/{agent_id}/jobs.json
         /home/user/.jiuwenswarm/config.yaml
 
@@ -60,6 +60,8 @@ class FileLayout:
     shape: Literal["map", "list"] = "map"  # JSON only; YAML ignores this
     yaml_pointer: str = ""  # YAML only; JSON ignores this. fragment path e.g. "/channels"
     key_fields: tuple[str, ...] = ()  # record primary key; first field is map key. empty = single document
+    # YAML only：片段是标量时，用该字段名包装/解包为单字段 record（如 preferred_language）
+    yaml_scalar_field: str = ""
 
 
 @dataclass(frozen=True)

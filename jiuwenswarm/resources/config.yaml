@@ -86,6 +86,16 @@ symphony:
 # 类似 Claude Code 的 auto-memory 功能
 auto_memory_enabled: false
 
+# HTTP+SSE入口
+# enabled: true 后监听独立端口，提供 RESTful接口与SSE流式对话；
+# 交互式文档在 http://{host}:{port}/api/v1/docs
+# 优先级：环境变量 > 本文件 > 默认值。
+# 下面的 port 用于不经启动器的独立运行场景。
+http_server:
+  enabled: false
+  host:
+  port: 8766
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。
@@ -712,6 +722,9 @@ redis:
   health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
 
 gateway:
+  # 产品形态：personal（个人版，默认）| enterprise（企业版）；影响 Gateway 存储选型（文件/DB、内存/Redis）
+  edition: ${GATEWAY_EDITION:-personal}
+
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
@@ -730,9 +743,10 @@ gateway:
     interval_seconds: ${GATEWAY_CONFIG_POLL_INTERVAL_SECONDS:-10}
 
   # AgentClient 配置 - Gateway 连接到 AgentServer 的方式
-  # type: websocket（默认） | yuanrong（直接函数调用） | agentos_router（AgentOS 扩展）
+  # type: websocket（默认） | http（REST/SSE，须 Agent 已开 http_server） | yuanrong | agentos_router
+  # http 不探测、不回退 WS；AGENT_SERVER_URL 用 http://host:8766，不要打 WS :18092。
   agent_client:
-    type: websocket # websocket | yuanrong | agentos_router
+    type: websocket # websocket | http | yuanrong | agentos_router
     # yuanrong 函数模式配置下面参数
     frontend_endpoint:
     function_version_urn:

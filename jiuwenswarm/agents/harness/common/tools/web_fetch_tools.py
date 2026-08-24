@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
+import time
 from html import unescape
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -17,6 +19,11 @@ from openjiuwen.core.foundation.tool import tool
 
 from jiuwenswarm.common.http_proxy_config import requests_get
 from jiuwenswarm.common.local_env_config import get_local_config
+
+logger = logging.getLogger(__name__)
+# 独立 baseline logger，命名空间挂在 jiuwenswarm 日志树下，避免被日志框架丢弃。
+# 日志行以 "BASELINE " 前缀开头，便于 grep 摸底。
+baseline = logging.getLogger("jiuwenswarm.agents.harness.common.tools.web_fetch_tools.baseline")
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -227,19 +234,121 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     }
 
 
-@tool(
-    name="mcp_fetch_webpage",
-    description=(
-        "抓取网页文本内容，返回状态码、标题和纯文本正文。"
-        "设置 max_chars=0 可禁用输出截断。"
-        "慢速网站可增大 timeout_seconds。"
-    ),
-)
-async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
-    url = _normalize_url(url)
-    if not url:
-        return "[ERROR]: url cannot be empty."
+async def _fetch_single_url(
+    raw_url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: int,
+    use_cache: bool,
+    cache: Any | None,
+) -> dict[str, Any]:
+    """Fetch a single URL and return one result-item dict.
 
+    The returned dict always carries the (normalized) ``url`` key plus either
+    success fields (``status_code``/``title``/``content``/``provider``/
+    ``from_cache``...) or an ``error`` field when fetching failed.
+    """
+    url = _normalize_url(raw_url)
+    if not url:
+        return {
+            "url": str(raw_url or "").strip(),
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": "url cannot be empty.",
+        }
+
+    # 模式 1：查缓存
+    if cache is not None and use_cache:
+        cached = await cache.get(url)
+        if cached is not None:
+            now = time.time()
+            cache_age_days = round((now - float(cached.cached_at or 0)) / 86400, 1)
+            update_time = cached.update_time
+            page_update_days = None
+            if update_time is not None:
+                page_update_days = round((now - float(update_time)) / 86400, 1)
+            return {
+                "url": cached.url,
+                "status_code": 200,
+                "title": cached.title or "",
+                "content": _clip_text(str(cached.content or ""), max_chars) or "[empty]",
+                "provider": f"cache:{cached.source or 'unknown'}",
+                "from_cache": True,
+                "cache_age_days": cache_age_days,
+                "page_update_days": page_update_days,
+            }
+    elif cache is not None and not use_cache:
+        cache.bypassed += 1
+
+    # 模式 2：实时抓取（不回写缓存）
+    _fetch_start = time.perf_counter()
+    try:
+        data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
+    except Exception as exc:
+        cost_ms = int((time.perf_counter() - _fetch_start) * 1000)
+        baseline.info(
+            "BASELINE fetch url=%s ok=N cost_ms=%d",
+            url,
+            cost_ms,
+        )
+        reason = str(exc).strip() or "unknown error"
+        return {
+            "url": url,
+            "status_code": None,
+            "title": "",
+            "content": "",
+            "provider": "",
+            "from_cache": False,
+            "error": f"fetch failed ({reason})",
+        }
+
+    cost_ms = int((time.perf_counter() - _fetch_start) * 1000)
+    content_chars = len(str(data.get("content", "") or ""))
+    baseline.info(
+        "BASELINE fetch url=%s ok=Y cost_ms=%d chars=%d provider=direct",
+        url,
+        cost_ms,
+        content_chars,
+    )
+
+    return {
+        "url": data.get("url", url),
+        "status_code": data.get("status_code"),
+        "title": data.get("title", ""),
+        "content": _clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]",
+        "provider": "direct",
+        "from_cache": False,
+    }
+
+
+def _coerce_url_list(url: str | list[str]) -> list[str]:
+    """Normalize the ``url`` argument into a flat list of URL strings."""
+    if url is None:
+        return []
+    if isinstance(url, str):
+        return [url] if url.strip() else []
+    if isinstance(url, (list, tuple)):
+        return [str(u).strip() for u in url if str(u).strip()]
+    return [str(url).strip()] if str(url).strip() else []
+
+
+async def mcp_fetch_webpage_impl(
+    url: str | list[str],
+    max_chars: int = 0,
+    timeout_seconds: int = 30,
+    use_cache: bool = True,
+    cache: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch one or more webpages.
+
+    ``url`` accepts either a single URL string or a list of URLs. Each URL is
+    fetched concurrently (cache-first when ``use_cache`` is true). Returns a
+    list of per-URL items preserving the input order.
+    """
+    urls = _coerce_url_list(url)
     try:
         max_chars = int(max_chars)
     except (TypeError, ValueError):
@@ -258,17 +367,51 @@ async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int =
     max_timeout_seconds = max(1, max_timeout_seconds)
     timeout_seconds = max(1, min(timeout_seconds, max_timeout_seconds))
 
-    try:
-        data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
-    except Exception as exc:
-        return f"[ERROR]: failed to fetch webpage: {exc}"
+    if not urls:
+        if cache is not None:
+            _log_cache_stats(cache)
+        return []
 
-    lines = [
-        f"URL: {data.get('url', url)}",
-        f"Status: {data.get('status_code', '')}",
+    tasks = [
+        _fetch_single_url(
+            u,
+            max_chars=max_chars,
+            timeout_seconds=timeout_seconds,
+            use_cache=use_cache,
+            cache=cache,
+        )
+        for u in urls
     ]
-    if data.get("title"):
-        lines.append(f"Title: {data['title']}")
-    lines.append("Content:")
-    lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
-    return "\n".join(lines)
+    items = await asyncio.gather(*tasks)
+
+    if cache is not None:
+        _log_cache_stats(cache)
+
+    return list(items)
+
+
+mcp_fetch_webpage = tool(
+    name="mcp_fetch_webpage",
+    description=(
+        "抓取网页文本内容，支持一次传入多个 URL 并行抓取。"
+        "默认优先从内存缓存读取（use_cache=true），"
+        "若缓存内容不够新或需要最新数据，请用 use_cache=false 重新从原站抓取。"
+        "返回列表，每个元素含一个 URL 的状态码、标题、纯文本正文与是否命中缓存。"
+    ),
+)(mcp_fetch_webpage_impl)
+
+
+def _log_cache_stats(cache: Any) -> None:
+    """输出缓存命中率汇总日志（与 enterprise_dev [FetchCache] 风格对齐）。"""
+    try:
+        stats = cache.stats()
+        logger.info(
+            "[FetchCache] hits=%d misses=%d bypassed=%d hit_rate=%.1f%% entries=%d",
+            stats["hits"],
+            stats["misses"],
+            stats["bypassed"],
+            stats["hit_rate_pct"],
+            stats["entries"],
+        )
+    except Exception:
+        logger.debug("[FetchCache] stats log failed", exc_info=True)

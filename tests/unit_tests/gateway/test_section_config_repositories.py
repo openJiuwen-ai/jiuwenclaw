@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import pytest
 
+from jiuwenswarm.gateway.config.a2ui import A2uiConfigRepository
+from jiuwenswarm.gateway.config.browser import BrowserConfigRepository
+from jiuwenswarm.gateway.config.heartbeat import HeartbeatConfigRepository
+from jiuwenswarm.gateway.config.locale import PreferredLanguageConfigRepository
 from jiuwenswarm.gateway.config.logging import LoggingConfigRepository, db_logging_codec
 from jiuwenswarm.gateway.config.memory import MemoryConfigRepository
 from jiuwenswarm.gateway.config.permissions import PermissionsConfigRepository
@@ -18,9 +22,13 @@ from jiuwenswarm.gateway.storage.backends.file_persistent import FilePersistentB
 from jiuwenswarm.gateway.storage.backends.memory_persistent import InMemoryPersistentBackend
 from jiuwenswarm.gateway.storage_assembly.layouts import build_gateway_store_registry
 from jiuwenswarm.gateway.storage_assembly.setup import (
+    create_a2ui_config_repository,
+    create_browser_config_repository,
+    create_heartbeat_config_repository,
     create_logging_config_repository,
     create_memory_config_repository,
     create_permissions_config_repository,
+    create_preferred_language_config_repository,
 )
 
 
@@ -182,3 +190,96 @@ def test_factory_codec_selection() -> None:
     )
     assert isinstance(mem_personal._inner._codec, YamlSectionCodec)
     assert isinstance(mem_enterprise._inner._codec, DbBodySectionCodec)
+
+@pytest.mark.asyncio
+async def test_heartbeat_browser_a2ui_merge() -> None:
+    store = InMemoryPersistentBackend()
+    heartbeat = HeartbeatConfigRepository(store, YamlSectionCodec())
+    await heartbeat.merge_heartbeat_fields(
+        {"every": 120, "target": "web", "active_hours": {"start": "09:00", "end": "18:00"}}
+    )
+    assert (await heartbeat.get_body())["every"] == 120
+
+    browser = BrowserConfigRepository(store, YamlSectionCodec())
+    await browser.merge({"chrome_path": "/usr/bin/chrome", "headless": False})
+    body = await browser.get_body()
+    assert body["chrome_path"] == "/usr/bin/chrome"
+    assert body["headless"] is False
+
+    a2ui = A2uiConfigRepository(store, YamlSectionCodec())
+    await a2ui.merge({"enabled": True, "protocol_version": "0.8"})
+    assert (await a2ui.get_body())["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_preferred_language_scalar_overlay(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "preferred_language: zh\n"
+        "browser:\n  headless: true\n"
+        "heartbeat:\n  every: 3600\n"
+        "a2ui:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    store = FilePersistentBackend(
+        registry=build_gateway_store_registry(config_file=config_path)
+    )
+    locale = PreferredLanguageConfigRepository(store, YamlSectionCodec())
+    assert await locale.get_language() == "zh"
+    await locale.set_language("en")
+    browser = BrowserConfigRepository(store, YamlSectionCodec())
+    await browser.merge({"chrome_path": "C:/chrome.exe"})
+    heartbeat = HeartbeatConfigRepository(store, YamlSectionCodec())
+    await heartbeat.merge_heartbeat_fields({"target": "feishu"})
+    a2ui = A2uiConfigRepository(store, YamlSectionCodec())
+    await a2ui.merge({"enabled": True})
+
+    text = config_path.read_text(encoding="utf-8")
+    assert "preferred_language: en" in text
+    assert "chrome_path:" in text
+    assert "target: feishu" in text
+    assert "enabled: true" in text.lower() or "enabled: True" in text
+    assert "preferred_language:\n  preferred_language:" not in text
+
+
+def test_new_section_factory_codec_selection() -> None:
+    store = InMemoryPersistentBackend()
+    for factory in (
+        create_heartbeat_config_repository,
+        create_browser_config_repository,
+        create_preferred_language_config_repository,
+        create_a2ui_config_repository,
+    ):
+        personal = factory(store, EDITION_PERSONAL)
+        assert isinstance(personal._inner._codec, YamlSectionCodec)
+        try:
+            factory(store, EDITION_ENTERPRISE, instance_id="x")
+            raise AssertionError("expected personal-only ValueError")
+        except ValueError as exc:
+            assert "personal-only" in str(exc)
+
+
+def test_yaml_only_sections_have_no_db_layout(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("preferred_language: zh\n", encoding="utf-8")
+    personal = build_gateway_store_registry(config_file=config_path)
+    for name in (
+        "heartbeat_config",
+        "browser_config",
+        "preferred_language_config",
+        "a2ui_config",
+    ):
+        layout = personal.get(name)
+        assert layout is not None
+        assert layout.file is not None
+        assert layout.db is None
+
+    enterprise = build_gateway_store_registry()
+    for name in (
+        "heartbeat_config",
+        "browser_config",
+        "preferred_language_config",
+        "a2ui_config",
+    ):
+        assert enterprise.get(name) is None
+

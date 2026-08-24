@@ -1510,7 +1510,7 @@ class AgentManager:
         Must match ``AgentWebSocketServer._prepare_code_mode_chat_turn`` so the
         tenant-pool path reuses the same cached instance after plan-mode sync.
         """
-        from jiuwenswarm.server.agent_ws_server import resolve_agent_request_mode
+        from jiuwenswarm.server.handlers._shared import resolve_agent_request_mode
 
         params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
         mode_full = self._resolve_request_mode(request, params)

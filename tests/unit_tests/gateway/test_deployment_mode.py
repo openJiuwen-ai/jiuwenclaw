@@ -13,6 +13,7 @@ from jiuwenswarm.deployment_mode import (
     channel_config_overlay_default,
     default_cron_enabled,
     distributed_channel_whitelist,
+    history_storage_backend,
     normalize_deployment_mode,
     session_storage_backend,
     uses_gateway_redis,
@@ -64,6 +65,13 @@ def test_session_storage_backend():
     assert session_storage_backend(MODE_ACTIVE_STANDBY) == "redis"
     assert session_storage_backend(MODE_DISTRIBUTED) == "redis"
     assert session_storage_backend("bogus") == "local"
+
+
+def test_history_storage_backend():
+    assert history_storage_backend(MODE_STANDALONE) == "sqlite"
+    assert history_storage_backend(MODE_ACTIVE_STANDBY) == "mysql"
+    assert history_storage_backend(MODE_DISTRIBUTED) == "mysql"
+    assert history_storage_backend("bogus") == "sqlite"
 
 
 def test_default_cron_enabled():
