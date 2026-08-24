@@ -1923,6 +1923,13 @@ body.workspace-resize-active iframe {
     opacity: 0.75;
   }
 
+  .tool-tree-item__detail-hint {
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    opacity: 0.72;
+  }
+
   .tool-tree-item__detail-badge {
     padding: 1px 6px;
     border-radius: 4px;
@@ -1977,6 +1984,41 @@ body.workspace-resize-active iframe {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
+  }
+
+  .tool-tree-item__detail-raw {
+    margin-top: 6px;
+  }
+
+  /* 流程图与折叠标题保持和原始结果标题到输出框一致的间距。 */
+  .tool-tree-item__detail-raw .diagram-container {
+    margin: 4px 0 0;
+    border-radius: 8px;
+  }
+
+  .tool-tree-item__detail-raw .diagram-container__toolbar {
+    min-height: 32px;
+    padding: 4px 6px;
+  }
+
+  .tool-tree-item__detail-raw .markdown-toggle-pill {
+    height: 22px;
+    padding: 0 6px;
+    font-size: var(--font-size-2xs);
+  }
+
+  .tool-tree-item__detail-raw .markdown-toolbar-btn {
+    width: 22px;
+    height: 22px;
+  }
+
+  .tool-tree-item__detail-raw .markdown-toolbar-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .tool-tree-item__detail-raw .diagram-menu__item {
+    font-size: var(--font-size-2xs);
   }
 
   .tool-tree-item__detail-status {

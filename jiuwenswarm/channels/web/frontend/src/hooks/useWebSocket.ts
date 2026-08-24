@@ -3339,6 +3339,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             summary: toolResult.summary,
             skillTree: toolResult.skillTree,
             beamSearch: toolResult.beamSearch,
+            ...(toolResult.mermaid ? { mermaid: toolResult.mermaid } : {}),
             ...(toolResult.timedOut ? { timedOut: true } : {}),
           },
           {

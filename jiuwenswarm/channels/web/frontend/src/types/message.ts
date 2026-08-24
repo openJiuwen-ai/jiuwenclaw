@@ -133,6 +133,8 @@ export interface ToolResult {
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;
+  /** 仅 symphony_compose_graph 的合法 planned_graph Mermaid 展示投影。 */
+  mermaid?: string;
 }
 
 export type ToolExecutionStatus = 'pending' | 'timeout' | 'completed' | 'error';
