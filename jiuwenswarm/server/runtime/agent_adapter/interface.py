@@ -1570,42 +1570,6 @@ class JiuWenSwarm:
             )
         return inputs, memory_mode, query
 
-    def _make_retry_without_a2ui_call(
-            self,
-            *,
-            adapter: AgentAdapter,
-            request: AgentRequest,
-    ):
-        async def retry_without_a2ui_call(query: str) -> str | None:
-            if getattr(adapter, "_instance", None) is None:
-                return None
-            try:
-                modified_request = AgentRequest(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    session_id=request.session_id,
-                    chat_id=request.chat_id,
-                    req_method=request.req_method,
-                    params={**request.params, "query": query},
-                    is_stream=False,
-                    timestamp=request.timestamp,
-                    metadata={**(request.metadata or {}), "skip_a2ui": True},
-                )
-                retry_inputs, _, _ = self._build_inputs(modified_request)
-                retry_inputs["_invoke_turn_id"] = request.request_id
-                result = await adapter.process_message_impl(modified_request, retry_inputs)
-                if result.ok and result.payload.get("content"):
-                    return str(result.payload["content"])
-            except Exception as exc:
-                logger.warning(
-                    "Retry without A2UI failed: request_id=%s error=%s",
-                    request.request_id,
-                    exc,
-                )
-            return None
-
-        return retry_without_a2ui_call
-
     @staticmethod
     def _team_plan_approval_payload_error_message() -> str:
         return (

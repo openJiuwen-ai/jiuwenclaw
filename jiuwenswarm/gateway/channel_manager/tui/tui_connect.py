@@ -1990,7 +1990,7 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
     async def _session_rename(ws, req_id, params, session_id, user_id=None):
-        """优先经 E2A 转发至 AgentWebSocketServer._handle_session_rename；无 agent 或转发失败时本地回退。"""
+        """优先经 E2A 转发至 session 域 handler handle_session_rename；无 agent 或转发失败时本地回退。"""
         from jiuwenswarm.server.runtime.session.session_rename import apply_session_rename
         from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenswarm.common.schema.message import ReqMethod

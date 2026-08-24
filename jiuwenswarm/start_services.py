@@ -515,6 +515,8 @@ def _start_process(
                 "FRONTEND_PORT": str(ports["frontend"]),
             }
         )
+        if ports.get("http_api"):
+            env["AGENT_HTTP_PORT"] = str(ports["http_api"])
         env.pop("AGENT_SERVER_URL", None)
     return subprocess.Popen(cmd, cwd=str(cwd), env=env)
 
@@ -545,6 +547,7 @@ def _resolve_runtime_ports() -> dict[str, int]:
         "web": "WEB_PORT",
         "gateway": "GATEWAY_PORT",
         "frontend": "FRONTEND_PORT",
+        "http_api": "AGENT_HTTP_PORT",
     }
     ports = {pt: compute_auto_port(pt, 0) for pt in PORT_TYPES}
     for port_type, env_name in env_map.items():
@@ -643,6 +646,25 @@ def _wait_for_services_ready(
             targets.append(("Gateway HTTP", gateway_port, f"http://localhost:{gateway_port}"))
         if web_port:
             targets.append(("WebChannel WebSocket", web_port, f"ws://localhost:{web_port}/ws"))
+
+        # HTTP/SSE 入口（可选）：与 AgentServer 同进程，开启时才展示。
+        # 配置解析与 AgentServer 共用同一函数，避免两处逻辑漂移。
+        try:
+            from jiuwenswarm.server.agent_http_server import resolve_http_server_settings
+
+            # 是否开启走统一解析；端口以本次实例分配的为准（与子进程 env 一致）。
+            http_enabled, http_host, _ = resolve_http_server_settings("localhost")
+            http_port = ports.get("http_api", 0)
+            if http_enabled and http_port:
+                targets.append(
+                    (
+                        "AgentServer HTTP API",
+                        http_port,
+                        f"http://{http_host or 'localhost'}:{http_port}/api/v1",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 - 横幅展示失败不应影响启动
+            logging.debug("[start_services] HTTP API banner entry skipped: %s", exc)
 
     frontend_alive = _proc_alive("web") or _proc_alive("web-dev")
     frontend_port = ports.get("frontend", 0)

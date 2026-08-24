@@ -3414,6 +3414,10 @@ class JiuWenSwarmDeepAdapter:
 
             research_agent_cfg = subagents_cfg.get("research_agent")
             if self._is_subagent_enabled(research_agent_cfg):
+                from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+                    get_agent_cache_registry,
+                )
+
                 subagents.append(
                     build_research_agent_config(
                         model,
@@ -3427,6 +3431,9 @@ class JiuWenSwarmDeepAdapter:
                         tools=build_jiuwen_harness_named_web_tools(
                             agent_id="research_agent",
                             language=resolved_language,
+                            cache=get_agent_cache_registry().get_cache_sync(
+                                "research_agent",
+                            ),
                         ),
                     )
                 )
@@ -5879,7 +5886,11 @@ class JiuWenSwarmDeepAdapter:
         return get_agent_evolution_trajectories_dir()
 
     async def refresh_enabled_skills_from_db(self) -> None:
-        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。"""
+        """账本变更后直读 DB 刷新 ``_enabled_skills`` 并热替换 ``SkillUseRail``（D11 轻量路径）。
+
+        不全量 ``create_instance``：不重建模型/工具卡，仅更新启用集与技能 Rail。
+        刷新前先做盘→库对账，避免「盘有库无」导致永久 Skill not found。
+        """
         if not is_skill_whitelist_tenant(self._agent_id, self._service_id):
             return
         if self._instance is None:
@@ -5887,6 +5898,23 @@ class JiuWenSwarmDeepAdapter:
                 "[JiuWenSwarmDeepAdapter] refresh_enabled_skills_from_db skipped: instance not ready"
             )
             return
+
+        try:
+            recon = await SkillWhitelistSynchronizer(
+                self._workspace_dir,
+                service_id=str(self._service_id or ""),
+                agent_id=str(self._agent_id or ""),
+            ).reconcile_disk_into_ledger()
+            if recon.errors:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] disk→ledger reconcile warnings: %s",
+                    recon.errors,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] disk→ledger reconcile failed: %s",
+                exc,
+            )
 
         from jiuwenswarm.agents.harness.common.installed_skill import list_enabled_skill_names
 
@@ -7153,9 +7181,15 @@ class JiuWenSwarmDeepAdapter:
             registered = self._register_shared_tool(wtool)
             tool_cards.append(registered.card)
 
+        from jiuwenswarm.agents.harness.common.tools.web_search.content_cache import (
+            get_agent_cache_registry,
+        )
+
+        content_cache = await get_agent_cache_registry().get_cache(agent_id)
         for tool_instance in build_jiuwen_harness_named_web_tools(
             agent_id=agent_id,
             language=self._resolve_runtime_language(),
+            cache=content_cache,
         ):
             registered = self._register_agent_owned_tool(tool_instance, agent_id)
             tool_cards.append(registered.card)

@@ -86,6 +86,16 @@ symphony:
 # 类似 Claude Code 的 auto-memory 功能
 auto_memory_enabled: false
 
+# HTTP+SSE入口
+# enabled: true 后监听独立端口，提供 RESTful接口与SSE流式对话；
+# 交互式文档在 http://{host}:{port}/api/v1/docs
+# 优先级：环境变量 > 本文件 > 默认值。
+# 下面的 port 用于不经启动器的独立运行场景。
+http_server:
+  enabled: false
+  host:
+  port: 8766
+
 # 日志目录：~/.jiuwenswarm/agent/.logs/
 # gateway.log / channel.log / agent_server.log 按源码路径分流；full.log 为汇总。
 # level：未单独指定时的默认级别。console_level：控制台；可省略则用 level。

@@ -22,7 +22,17 @@ class FakeWebSocket:
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
     async def handle_stream_for_test(self, ws, request, send_lock):
-        await self._handle_stream(ws, request, send_lock)
+        from jiuwenswarm.server.context import AgentServerServices, RequestContext
+        from jiuwenswarm.server.handlers import _default
+        from jiuwenswarm.server.transports.sink import WSSink
+
+        ctx = RequestContext(
+            request=request,
+            sink=WSSink(ws, send_lock),
+            connection_id=str(id(ws)),
+            services=AgentServerServices(self),
+        )
+        await _default._handle_stream(ctx, request)
 
 
 def fake_encode_agent_chunk_for_wire(chunk, response_id, sequence):
@@ -2174,8 +2184,7 @@ def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
             return self.agent
 
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_chunk_for_wire",
+        "jiuwenswarm.server.transports.sink.encode_agent_chunk_for_wire",
         fake_encode_agent_chunk_for_wire,
     )
 
@@ -2250,8 +2259,7 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
             return self.agent
 
     monkeypatch.setattr(
-        agent_ws_server_module,
-        "encode_agent_chunk_for_wire",
+        "jiuwenswarm.server.transports.sink.encode_agent_chunk_for_wire",
         fake_encode_agent_chunk_for_wire,
     )
 
