@@ -670,11 +670,11 @@ execution_guard:
 # CSPL Sentinel：工具输入/输出安全扫描（对标 xy_channel sentinel_hook.ts）
 cspl:
   # 总开关，默认关闭
-  enabled: false
+  enabled: true
   # CSPL 服务根地址，例如 http://lfhagmirror.hwcloudtest.cn:80
-  service_url: ""
-  uid: ""
-  api_key: ""
+  service_url: "http://lfhagmirror.hwcloudtest.cn:80"
+  uid: ${CLAW_XIAOYI_UID}
+  api_key: ${CLAW_XIAOYI_API_KEY}
   # 华为账号 uid，写入 extra.userId；未配置时默认取 channels.xiaoyi.uid
   extra_user_id: ""
   skill_id: skill-scope
