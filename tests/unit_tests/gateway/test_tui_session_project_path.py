@@ -18,6 +18,8 @@ from jiuwenswarm.gateway.channel_manager.tui.tui_connect import (
 
 
 class _TuiChannel:
+    channel_id = "tui"
+
     def __init__(self) -> None:
         self.local_handlers: dict[str, dict[str, object]] = {}
         self.responses: list[dict] = []

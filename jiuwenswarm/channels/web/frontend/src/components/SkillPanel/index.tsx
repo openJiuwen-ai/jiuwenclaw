@@ -6,15 +6,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Loader2, Music2 } from 'lucide-react';
+import MoreIcon from '../../assets/work-mode/more-rimless.svg?react';
+import NewConversationIcon from '../../assets/new_conversation.svg?react';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
 import { SkillNetSearchModal } from "../../features/SkillNetSearchModal";
 import { ClawHubSearchModal } from "../../features/ClawHubSearchModal";
 import { TeamSkillsHubModal } from "../../features/TeamSkillsHubModal";
 import { OnlineSkillSearchPanel } from "../../features/OnlineSkillSearchPanel";
-import { SkillEvolutionModal } from "../../features/SkillEvolutionModal";
 import { normalizeSkillNetUrl } from "../../utils/skillNetUrl";
 import { getSkillAvatar } from "../../utils/skillAvatar";
+import { computeMySkills } from "../../utils/mySkills";
 import { SkillGraphPanel, type SkillGraphPanelHandle } from "../SkillGraphPanel";
 import { MarkdownRenderer } from "../MarkdownRenderer";
 import { Switch } from "../Switch";
@@ -48,6 +50,12 @@ type SkillItem = {
   has_evolutions?: boolean;
   /** 是否启用 */
   enabled?: boolean;
+  /** 是否已安装 */
+  installed?: boolean;
+  /** 技能文件路径（列表去重 / React key） */
+  path?: string;
+  /** 技能类型：skill | swarm_skill | multimodal_skill */
+  skill_type?: string;
 };
 
 type InstalledPluginItem = {
@@ -57,7 +65,7 @@ type InstalledPluginItem = {
   version: string;
   installed_at: string;
   git_commit?: string | null;
-  skills: string[];
+  skills: (string | { name: string; version?: string | null })[];
 };
 
 type MarketplaceItem = {
@@ -70,6 +78,83 @@ type MarketplaceItem = {
 type SkillDetail = SkillItem & {
   content: string;
   file_path: string;
+};
+
+type SkillVersion = {
+  version: string;
+  is_default: boolean;
+  source: string;
+  available: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type SkillVersionsListResponse = {
+  success: boolean;
+  name: string;
+  default_version: string | null;
+  versions: SkillVersion[];
+};
+
+type SkillFileEntry = {
+  path: string;
+  type: 'file' | 'directory';
+  size: number | null;
+  mime_type: string | null;
+};
+
+type SkillFilesListResponse = {
+  name: string;
+  files: SkillFileEntry[];
+};
+
+type SkillFilePreview = {
+  name: string;
+  path: string;
+  type: 'file';
+  mime_type: string;
+  size: number;
+  encoding?: string;
+  content?: string;
+  download_url?: string;
+};
+
+type SkillRebuildResponse = {
+  success: boolean;
+  result_type: 'followup';
+  action: string;
+  followup_prompt: string;
+  skill_name: string;
+  rebuild_target: {
+    version: string | null;
+    is_default: boolean;
+    skill_dir: string;
+    content_root: string | null;
+    swap_workspace: boolean;
+  };
+};
+
+type EvolutionChange = {
+  section?: string;
+  action?: string;
+  content: string;
+  target?: string;
+};
+
+type EvolutionEntry = {
+  id: string;
+  source?: string;
+  timestamp?: string;
+  context?: string;
+  change: EvolutionChange;
+  applied?: boolean;
+};
+
+type EvolutionGetResponse = {
+  exists: boolean;
+  valid?: boolean;
+  detail?: string;
+  entries?: EvolutionEntry[];
 };
 
 type LoadState = "idle" | "loading" | "success" | "error";
@@ -139,17 +224,6 @@ interface SkillPanelProps {
   onNavigateToConfig?: () => void;
   /** 当前是否处于激活状态（左边栏选中技能） */
   isActive?: boolean;
-}
-
-function getSourceLabel(source: string, t: (key: string) => string, isBuiltinSource?: boolean): string {
-  if (isBuiltinSource) return t('skills.source.builtin');
-  if (source === "local") return t('skills.source.local');
-  if (source === "project") return t('skills.source.project');
-  if (source === "builtin") return t('skills.source.builtin');
-  if (source === "clawhub") return t('skills.source.clawhub');
-  if (source === "skillnet") return t('skills.source.skillnet');
-  if (source === "teamskillshub") return t('skills.source.teamskillshub');
-  return source || t('skills.source.unknown');
 }
 
 /** 与后端一致：tags/allowed_tools 可能是逗号分隔字符串，统一为 string[] */
@@ -575,6 +649,81 @@ function SkillIndexTreeView({
   return <div className="space-y-1" role="tree">{roots.map((node) => renderNode(node, 0))}</div>;
 }
 
+interface MarketplacePluginItem {
+  asset_id: string;
+  name: string;
+  display_name?: string | null;
+  short_desc?: string | null;
+  detail_desc?: string | null;
+  icon_uri?: string | null;
+  publisher_name: string;
+  tags?: string[] | null;
+  plugin_type?: string | null;
+  category_id?: string | null;
+  category_name?: string | null;
+  latest_version?: string | null;
+  install_count: number;
+  like_count: number;
+  view_count: number;
+  moderation_status?: string | null;
+}
+
+interface HubPluginListResponse {
+  code: number;
+  message: string;
+  data: {
+    page: number;
+    page_size: number;
+    total: number;
+    items: MarketplacePluginItem[];
+  };
+}
+
+const MARKETPLACE_CATEGORIES = ["all", "software-development", "office-productivity", "content-creation", "multimodal-media", "data-science-research", "compliance-legal", "lifestyle-health", "finance-wealth"] as const;
+const SKILL_TYPES = ["skill", "team", "multimodal"] as const;
+
+/**
+ * 将技能内容中的图片路径转换为 /file-api/raw-file 可访问的 URL。
+ * 处理两种情况：
+ * 1. 相对路径（references/img_00.png）→ 直接拼接技能目录
+ * 2. 后端改写的 /file-api/download?token=xxx → 解码 token 获取 relative_path
+ * skillFilePath 为 SKILL.md 的绝对路径，用于推导技能所在目录。
+ */
+function transformSkillContentImages(content: string, skillFilePath: string): string {
+  if (!content || !skillFilePath) return content;
+  const lastSlash = Math.max(skillFilePath.lastIndexOf('/'), skillFilePath.lastIndexOf('\\'));
+  const skillDir = lastSlash >= 0 ? skillFilePath.substring(0, lastSlash).replace(/\\/g, '/') : '';
+
+  const toRawFileUrl = (relativePath: string): string => {
+    const fullPath = skillDir ? `${skillDir}/${relativePath}`.replace(/\\/g, '/') : relativePath;
+    return `/file-api/raw-file?path=${encodeURIComponent(fullPath)}`;
+  };
+
+  return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, imgPath: string) => {
+    // 跳过外部 URL 和 data URI
+    if (/^(https?:|data:|file:\/\/\/)/.test(imgPath)) return match;
+
+    // 处理后端改写的 /file-api/download?token=xxx URL
+    if (imgPath.startsWith('/file-api/download?token=')) {
+      try {
+        const token = new URL(imgPath, 'http://localhost').searchParams.get('token') || '';
+        const payloadB64 = token.split('.')[0];
+        const payload = JSON.parse(atob(payloadB64));
+        if (payload.relative_path) {
+          return `![${alt}](${toRawFileUrl(payload.relative_path)})`;
+        }
+      } catch {
+        // 解码失败，保留原 URL
+      }
+      return match;
+    }
+
+    // 处理相对路径
+    if (imgPath.startsWith('/file-api/')) return match;
+    return `![${alt}](${toRawFileUrl(imgPath)})`;
+  });
+}
+
 export function SkillPanel({
   sessionId,
   isConnected,
@@ -585,15 +734,24 @@ export function SkillPanel({
 }: SkillPanelProps) {
   const { t, i18n } = useTranslation();
   const [activeTab, setActiveTab] = useState<"my" | "marketplace" | "index" | "graph">("my");
-  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("all");
-  const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "swarmskills" | "online">("builtin");
+  const [mySkillsSubTab, setMySkillsSubTab] = useState<"all" | "enabled" | "disabled">("enabled");
+  const [mySkillsPublishFilter, setMySkillsPublishFilter] = useState<"all" | "published" | "unpublished">("all");
+  const [marketplaceCategory, setMarketplaceCategory] = useState<"all" | "software-development" | "office-productivity" | "content-creation" | "multimodal-media" | "data-science-research" | "compliance-legal" | "lifestyle-health" | "finance-wealth">("all");
+  const [marketplaceSubTab, setMarketplaceSubTab] = useState<"skillhub" | "swarmskills" | "online">("skillhub");
   const [searchTrigger, setSearchTrigger] = useState(0);
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const searchDebounceRef = useRef<number | null>(null);
+  const [skillType, setSkillType] = useState<"skill" | "team" | "multimodal" | null>(() => {
+    const stored = localStorage.getItem('skillPanel.skillType');
+    if (stored === "skill" || stored === "team" || stored === "multimodal") return stored;
+    return null;
+  });
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
   const [marketplaces, setMarketplaces] = useState<MarketplaceItem[]>([]);
+  const [hubSkills, setHubSkills] = useState<MarketplacePluginItem[]>([]);
+  const [hubLoading, setHubLoading] = useState(false);
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const searchDebounceRef = useRef<number | null>(null);
   const prevIsActiveRef = useRef(isActive);
   const [selectedSkill, setSelectedSkill] = useState<SkillDetail | null>(null);
   const [listState, setListState] = useState<LoadState>("idle");
@@ -608,12 +766,14 @@ export function SkillPanel({
   const skillGraphPanelRef = useRef<SkillGraphPanelHandle | null>(null);
   const graphReadingStartedAtRef = useRef<number | null>(null);
   const graphReadingTimerRef = useRef<number | null>(null);
+  const evolutionSaveTimerRef = useRef<number | null>(null);
   const [graphReading, setGraphReading] = useState(false);
   const [symphonyEnabledDraft, setSymphonyEnabledDraft] = useState(symphonyEnabled);
   const [symphonySaving, setSymphonySaving] = useState(false);
   const [symphonySaveError, setSymphonySaveError] = useState<string | null>(null);
   const [graphActionError, setGraphActionError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [openMenuSkillName, setOpenMenuSkillName] = useState<string | null>(null);
+  const [pinnedSkillNames, setPinnedSkillNames] = useState<Set<string>>(new Set());
   const [retrievalStatus, setRetrievalStatus] = useState<SkillRetrievalStatus | null>(null);
   const [retrievalTree, setRetrievalTree] = useState("");
   const [retrievalTreeNodes, setRetrievalTreeNodes] = useState<SkillIndexNode[]>([]);
@@ -622,13 +782,15 @@ export function SkillPanel({
   const [retrievalShowExistingIndexFailureNotice, setRetrievalShowExistingIndexFailureNotice] = useState(false);
   const [retrievalLoading, setRetrievalLoading] = useState<"idle" | "status" | "tree" | "build" | "cancel">("idle");
 
+  // 持久化技能类型胶囊选中状态
+  useEffect(() => {
+    localStorage.setItem('skillPanel.skillType', skillType ?? '');
+  }, [skillType]);
+
   useEffect(() => {
     return () => {
       if (messageTimerRef.current !== null) {
         window.clearTimeout(messageTimerRef.current);
-      }
-      if (searchDebounceRef.current !== null) {
-        window.clearTimeout(searchDebounceRef.current);
       }
       if (retrievalPollRef.current !== null) {
         window.clearInterval(retrievalPollRef.current);
@@ -638,6 +800,9 @@ export function SkillPanel({
       }
       if (graphReadingTimerRef.current !== null) {
         window.clearTimeout(graphReadingTimerRef.current);
+      }
+      if (searchDebounceRef.current !== null) {
+        window.clearTimeout(searchDebounceRef.current);
       }
     };
   }, []);
@@ -706,24 +871,18 @@ export function SkillPanel({
     }, delay);
   }, []);
 
-  useEffect(() => {
-    if (searchDebounceRef.current !== null) {
-      window.clearTimeout(searchDebounceRef.current);
-    }
-    searchDebounceRef.current = window.setTimeout(() => {
-      setDebouncedSearch(search);
-      searchDebounceRef.current = null;
-    }, 500);
-  }, [search]);
-
-  const showMessage = useCallback((type: "success" | "error", text: string) => {
+  const showMessage = useCallback((type: "success" | "error" | "loading", text: string) => {
     if (messageTimerRef.current !== null) {
       window.clearTimeout(messageTimerRef.current);
+      messageTimerRef.current = null;
     }
     const displayText = type === "success" ? `√ ${text}` : text;
     setMessage(displayText);
     setMessageType(type);
-    // 错误信息显示时间更长（8秒），方便用户阅读详细错误描述
+    // loading 持续到下一次消息；错误信息显示时间更长（8秒）
+    if (type === "loading") {
+      return;
+    }
     const duration = type === "error" ? 8000 : 3000;
     messageTimerRef.current = window.setTimeout(() => {
       setMessage(null);
@@ -732,11 +891,46 @@ export function SkillPanel({
     }, duration);
   }, []);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [uploadSkillModalOpen, setUploadSkillModalOpen] = useState(false);
+  const [docToSkillModalOpen, setDocToSkillModalOpen] = useState(false);
+  const [uploadSkillPath, setUploadSkillPath] = useState("");
+  const [docToSkillPath, setDocToSkillPath] = useState("");
+  const [docToSkillSource, setDocToSkillSource] = useState<"local" | "link">("local");
+  const [docToSkillLink, setDocToSkillLink] = useState("");
+  const [docToSkillDesc, setDocToSkillDesc] = useState("");
+  const [docToSkillTooltip, setDocToSkillTooltip] = useState<{ left: number; top: number } | null>(null);
+  const [publishFilterOpen, setPublishFilterOpen] = useState(false);
+  const [enableFilterOpen, setEnableFilterOpen] = useState(false);
   const [skillNetModalOpen, setSkillNetModalOpen] = useState(false);
   const [clawHubModalOpen, setClawHubModalOpen] = useState(false);
   const [teamSkillsHubModalOpen, setTeamSkillsHubModalOpen] = useState(false);
-  const [evolutionModalOpen, setEvolutionModalOpen] = useState(false);
-  const [evolutionSkillName, setEvolutionSkillName] = useState<string | null>(null);
+  const [synthesizeTooltip, setSynthesizeTooltip] = useState<{ left: number; top: number } | null>(null);
+  const [goTryTooltip, setGoTryTooltip] = useState<{ left: number; top: number } | null>(null);
+  const [detailMenuOpen, setDetailMenuOpen] = useState(false);
+  const [publishDrawerOpen, setPublishDrawerOpen] = useState(false);
+  const [publishName, setPublishName] = useState("");
+  const [publishSkillName, setPublishSkillName] = useState("");
+  const [publishVersion, setPublishVersion] = useState("");
+  const [publishDisplayName, setPublishDisplayName] = useState("");
+  const [publishSha256, setPublishSha256] = useState("");
+  const [publishNoticeVisible, setPublishNoticeVisible] = useState(true);
+  const [detailTab, setDetailTab] = useState<"content" | "files" | "experience">("content");
+  const [evolutionEntries, setEvolutionEntries] = useState<EvolutionEntry[]>([]);
+  const [evolutionListState, setEvolutionListState] = useState<LoadState>("idle");
+  const [, setEvolutionSaving] = useState(false);
+  const [evolutionMessage, setEvolutionMessage] = useState<string | null>(null);
+  const [evolutionMessageType, setEvolutionMessageType] = useState<"success" | "error" | null>(null);
+  const [evolutionFormatError, setEvolutionFormatError] = useState<string | null>(null);
+  const [skillVersions, setSkillVersions] = useState<SkillVersion[]>([]);
+  const [skillVersionsDefault, setSkillVersionsDefault] = useState<string | null>(null);
+  const [versionsLoadState, setVersionsLoadState] = useState<LoadState>("idle");
+  const [skillFiles, setSkillFiles] = useState<SkillFileEntry[]>([]);
+  const [filesLoadState, setFilesLoadState] = useState<LoadState>("idle");
+  const [filePreview, setFilePreview] = useState<SkillFilePreview | null>(null);
+  const [filePreviewPath, setFilePreviewPath] = useState<string | null>(null);
+  const [expandedFileFolders, setExpandedFileFolders] = useState<Set<string>>(new Set([""]));
+  const [rebuildLoading, setRebuildLoading] = useState(false);
   const withSession = useCallback(
     (params?: Record<string, unknown>) => ({
       ...(params || {}),
@@ -749,8 +943,9 @@ export function SkillPanel({
     const map = new Map<string, InstalledPluginItem>();
     plugins.forEach((plugin) => {
       plugin.skills.forEach((skill) => {
-        if (!map.has(skill)) {
-          map.set(skill, plugin);
+        const skillName = typeof skill === 'string' ? skill : skill.name;
+        if (!map.has(skillName)) {
+          map.set(skillName, plugin);
         }
       });
     });
@@ -777,12 +972,18 @@ export function SkillPanel({
   const filteredSkills = useMemo(() => {
     let result = skills;
     if (activeTab === "my") {
-      result = result.filter((skill) => 
-        installedSkillMap.has(skill.name) || 
-        skill.source === "local" || 
-        skill.is_builtin === true || 
-        skill.is_builtin_source === true
-      );
+      // 2026-08-21：抽成 utils/mySkills.ts 的 computeMySkills，跟"手动创建插件"的"添加技能"
+      // 弹窗共用同一份"我的技能"判定规则，见该文件头注释。这里原本是"候选集过滤+排除内置未装"
+      // 两步（第二步挪到了下面 visibleSkills 里），computeMySkills 已经把两步合并，语义不变
+      // （排除条件不依赖搜索关键字，跟下面的关键字过滤谁先谁后结果一样）。
+      result = computeMySkills(result, installedSkillNames);
+    }
+    if (skillType === "team") {
+      result = result.filter((skill) => skill.skill_type === "swarm_skill");
+    } else if (skillType === "multimodal") {
+      result = result.filter((skill) => skill.skill_type === "multimodal_skill");
+    } else if (skillType === "skill") {
+      result = result.filter((skill) => !skill.skill_type || skill.skill_type === "skill");
     }
     const keyword = search.trim().toLowerCase();
     if (!keyword) return result;
@@ -798,19 +999,10 @@ export function SkillPanel({
         .toLowerCase();
       return haystack.includes(keyword);
     });
-  }, [skills, search, activeTab, installedSkillMap]);
+  }, [skills, search, activeTab, installedSkillNames]);
 
   const visibleSkills = useMemo(() => {
-    let filtered = [...filteredSkills];
-    if (activeTab === "my") {
-      filtered = filtered.filter((skill) => {
-        if (skill.is_builtin_source && !installedSkillMap.has(skill.name) && skill.source !== "local") {
-          return false;
-        }
-        return true;
-      });
-    }
-    return filtered.sort((a, b) => {
+    return [...filteredSkills].sort((a, b) => {
       const aSkillNet = a.source === "skillnet" ? 1 : 0;
       const bSkillNet = b.source === "skillnet" ? 1 : 0;
       if (aSkillNet !== bSkillNet) {
@@ -818,20 +1010,57 @@ export function SkillPanel({
       }
       return a.name.localeCompare(b.name);
     });
-  }, [filteredSkills, activeTab, installedSkillMap]);
+  }, [filteredSkills]);
 
-  const builtinSkills = useMemo(() => {
-    let filtered = skills.filter((skill) => skill.is_builtin === true || skill.is_builtin_source === true);
-    if (search.trim()) {
-      const searchLower = search.toLowerCase();
-      filtered = filtered.filter(
-        (skill) =>
-          skill.name.toLowerCase().includes(searchLower) ||
-          (skill.description && skill.description.toLowerCase().includes(searchLower))
-      );
+  const fetchHubSkills = useCallback(async (category: string, searchKeyword?: string) => {
+    setHubLoading(true);
+    try {
+      const params = new URLSearchParams({
+        plugin_type: 'skill',
+        page: '1',
+        page_size: '100',
+        order_by: 'install_count',
+        desc: 'true',
+      });
+      if (category !== 'all') {
+        params.set('category_id', category);
+      }
+      if (searchKeyword?.trim()) {
+        params.set('search_keyword', searchKeyword.trim());
+      }
+      const resp = await fetch(`/skillhub-api/plugins?${params}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json: HubPluginListResponse = await resp.json();
+      if (json.code !== 200) throw new Error(json.message || 'API error');
+      setHubSkills(json.data.items);
+    } catch (error) {
+      console.error('Failed to fetch SkillHub skills:', error);
+      setHubSkills([]);
+    } finally {
+      setHubLoading(false);
     }
-    return filtered;
-  }, [skills, search]);
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'marketplace' && marketplaceSubTab === 'skillhub') {
+      fetchHubSkills(marketplaceCategory, search);
+    }
+  }, [activeTab, marketplaceSubTab, marketplaceCategory, search, fetchHubSkills]);
+
+  useEffect(() => {
+    if (searchDebounceRef.current !== null) {
+      window.clearTimeout(searchDebounceRef.current);
+    }
+    searchDebounceRef.current = window.setTimeout(() => {
+      setDebouncedSearch(search);
+      searchDebounceRef.current = null;
+    }, 300);
+    return () => {
+      if (searchDebounceRef.current !== null) {
+        window.clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, [search]);
 
   const fetchMarketplaces = useCallback(async () => {
     try {
@@ -883,13 +1112,195 @@ export function SkillPanel({
           withSession({ name: skillName })
         );
         setSelectedSkill(normalizeSkillItem(data));
+        setDetailTab("content");
         setDetailState("success");
+        setFilePreview(null);
+        setFilePreviewPath(null);
       } catch (error) {
         console.error(error);
         setDetailState("error");
       }
     },
     [withSession]
+  );
+
+  const fetchSkillVersions = useCallback(
+    async (skillName: string) => {
+      setVersionsLoadState("loading");
+      try {
+        const data = await webRequest<SkillVersionsListResponse>(
+          "skills.versions.list",
+          withSession({ name: skillName })
+        );
+        setSkillVersions(data.versions || []);
+        setSkillVersionsDefault(data.default_version);
+        setVersionsLoadState("success");
+      } catch (error) {
+        console.error(error);
+        setVersionsLoadState("error");
+      }
+    },
+    [withSession]
+  );
+
+  const fetchSkillFiles = useCallback(
+    async (skillName: string) => {
+      setFilesLoadState("loading");
+      try {
+        const data = await webRequest<SkillFilesListResponse>(
+          "skills.files.list",
+          withSession({ name: skillName })
+        );
+        setSkillFiles(data.files || []);
+        setFilesLoadState("success");
+      } catch (error) {
+        console.error(error);
+        setFilesLoadState("error");
+      }
+    },
+    [withSession]
+  );
+
+  const fetchFilePreview = useCallback(
+    async (skillName: string, filePath: string) => {
+      try {
+        const data = await webRequest<SkillFilePreview>(
+          "skills.files.get",
+          withSession({ name: skillName, path: filePath })
+        );
+        setFilePreview(data);
+        setFilePreviewPath(filePath);
+      } catch (error) {
+        console.error(error);
+        setFilePreview(null);
+      }
+    },
+    [withSession]
+  );
+
+  // ---- 文件树构建 ----
+  interface FileTreeNode {
+    name: string;
+    path: string;
+    type: 'file' | 'directory';
+    size: number | null;
+    mime_type: string | null;
+    children: FileTreeNode[];
+  }
+
+  const skillFileTree = useMemo(() => {
+    const root: FileTreeNode = { name: '', path: '', type: 'directory', size: null, mime_type: null, children: [] };
+    const dirMap = new Map<string, FileTreeNode>();
+    dirMap.set('', root);
+    for (const entry of skillFiles) {
+      const parts = entry.path.split('/').filter(Boolean);
+      let currentPath = '';
+      let currentNode = root;
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        const isLast = i === parts.length - 1;
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        if (isLast && entry.type === 'file') {
+          currentNode.children.push({ name: part, path: entry.path, type: 'file', size: entry.size, mime_type: entry.mime_type, children: [] });
+        } else {
+          if (!dirMap.has(currentPath)) {
+            const dirNode: FileTreeNode = { name: part, path: currentPath, type: 'directory', size: null, mime_type: null, children: [] };
+            dirMap.set(currentPath, dirNode);
+            currentNode.children.push(dirNode);
+          }
+          currentNode = dirMap.get(currentPath)!;
+        }
+      }
+    }
+    const sortNode = (node: FileTreeNode) => {
+      node.children.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      node.children.forEach(sortNode);
+    };
+    sortNode(root);
+    return root;
+  }, [skillFiles]);
+
+  const isFilePreviewable = useCallback((entry: { type: string; mime_type: string | null; name: string }) => {
+    if (entry.type !== 'file') return false;
+    const mime = entry.mime_type || '';
+    if (mime.startsWith('text/')) return true;
+    const previewableMimes = ['application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
+    if (previewableMimes.includes(mime)) return true;
+    const ext = entry.name.split('.').pop()?.toLowerCase() || '';
+    return ['md', 'txt', 'json', 'yaml', 'yml', 'xml', 'js', 'ts', 'py', 'sh', 'csv', 'ini', 'toml', 'css', 'html'].includes(ext);
+  }, []);
+
+  const toggleFileFolder = useCallback((path: string) => {
+    setExpandedFileFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const renderFileTree = useCallback((node: FileTreeNode, depth: number): JSX.Element | null => {
+    if (node.type === 'file') {
+      const previewable = isFilePreviewable(node);
+      const selected = filePreviewPath === node.path;
+      return (
+        <button key={node.path} type="button"
+          onClick={() => { if (previewable && selectedSkill) fetchFilePreview(selectedSkill.name, node.path); }}
+          className={`w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm border ${selected ? 'bg-accent-subtle text-text border-[var(--color-border-accent)]' : previewable ? 'text-text-muted hover:bg-secondary/40 hover:text-text border-transparent' : 'text-text-muted/60 border-transparent cursor-not-allowed'}`}
+          style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
+          <span className="w-4 h-4" />
+          <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3.75h7.5l4.5 4.5v12a1.5 1.5 0 01-1.5 1.5h-10.5a1.5 1.5 0 01-1.5-1.5v-15a1.5 1.5 0 011.5-1.5zM14.25 3.75v4.5h4.5" /></svg>
+          <span className="flex-1 min-w-0 truncate">{node.name}</span>
+          {!previewable ? <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">不可预览</span> : null}
+        </button>
+      );
+    }
+    const isExpanded = expandedFileFolders.has(node.path);
+    const hasChildren = node.children.length > 0;
+    return (
+      <div key={node.path || 'root'}>
+        {node.path !== '' ? (
+          <button type="button" onClick={() => toggleFileFolder(node.path)}
+            className="w-full min-h-9 flex items-center gap-2 rounded-lg px-2 text-left text-sm text-text-muted hover:bg-secondary/40 hover:text-text"
+            style={{ paddingLeft: `${depth * 14 + 8}px` }} title={node.name}>
+            <span className="w-4 h-4 flex items-center justify-center text-text-muted/80">
+              {hasChildren ? <svg className={`w-3 h-3 ${isExpanded ? 'rotate-90' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6l6 6-6 6" /></svg> : null}
+            </span>
+            <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h4.5l1.5 2.25h10.5v8.25A2.25 2.25 0 0118 19.5H6A2.25 2.25 0 013.75 17.25V6.75z" /></svg>
+            <span className="flex-1 min-w-0 truncate">{node.name}</span>
+          </button>
+        ) : null}
+        {isExpanded || node.path === '' ? (
+          <div>{node.children.map(child => renderFileTree(child, node.path === '' ? 0 : depth + 1))}</div>
+        ) : null}
+      </div>
+    );
+  }, [expandedFileFolders, filePreviewPath, selectedSkill, isFilePreviewable, toggleFileFolder, fetchFilePreview]);
+
+  const handleRebuild = useCallback(
+    async (skillName: string, version: string | null) => {
+      setRebuildLoading(true);
+      showMessage("loading", "正在重建技能，请耐心等待");
+      try {
+        const data = await webRequest<SkillRebuildResponse>(
+          "skills.rebuild",
+          withSession({ name: skillName, version }),
+          { timeoutMs: 5 * 60_000 }
+        );
+        if (data.success) {
+          showMessage("success", "技能重建完成");
+          fetchSkillDetail(skillName);
+        }
+      } catch (error) {
+        console.error(error);
+        showMessage("error", `重建失败: ${error}`);
+      } finally {
+        setRebuildLoading(false);
+      }
+    },
+    [withSession, fetchSkillDetail, showMessage]
   );
 
   const fetchRetrievalStatus = useCallback(async (options?: { silent?: boolean }) => {
@@ -1103,15 +1514,150 @@ export function SkillPanel({
     setDetailState("idle");
   }, []);
 
-  const handleOpenEvolution = useCallback((skillName: string) => {
-    setEvolutionSkillName(skillName);
-    setEvolutionModalOpen(true);
+  // 新建会话并将技能选中到输入框
+  const handleGoToChat = useCallback((skillName: string) => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: { skillName }
+    }));
   }, []);
 
-  const handleCloseEvolution = useCallback(() => {
-    setEvolutionModalOpen(false);
-    setEvolutionSkillName(null);
+  // 新建会话：skill-creator（所有 Skill Creator 统一入口）chip + "帮我修改这个技能" + 该技能 chip
+  const handleEditSkill = useCallback((skillName: string, skillType?: string) => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: {
+        skillName: 'skill-creator',
+        suffixText: t('skills.chatPrompts.editSkill'),
+        secondSkillName: skillName,
+        metadata: {
+          scene: 'edit_skill',
+          target_skill: skillName,
+          ...(skillType ? { target_skill_type: skillType } : {}),
+        }
+      }
+    }));
+  }, [t]);
+
+  // 通过聊天创建：新建会话，选中 skill-creator（统一入口）并在 chip 后追加创建提示文字
+  const handleCreateViaChat = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('jiuwen:new-conversation', {
+      detail: {
+        skillName: 'skill-creator',
+        suffixText: t('skills.chatPrompts.createSkill'),
+        metadata: { scene: 'create_skill' }
+      }
+    }));
+  }, [t]);
+
+  // ---- 技能经验（内联展示） ----
+  const sortedEvolutionEntries = useMemo(
+    () =>
+      [...evolutionEntries].sort((a, b) => {
+        const ta = a.timestamp || "";
+        const tb = b.timestamp || "";
+        return tb.localeCompare(ta);
+      }),
+    [evolutionEntries]
+  );
+
+  const fetchEvolutionEntries = useCallback(async () => {
+    if (!selectedSkill) return;
+    setEvolutionListState("loading");
+    setEvolutionMessage(null);
+    setEvolutionMessageType(null);
+    setEvolutionFormatError(null);
+    try {
+      const data = await webRequest<EvolutionGetResponse>(
+        "skills.evolution.get",
+        withSession({ name: selectedSkill.name })
+      );
+      if (!data.exists) {
+        setEvolutionEntries([]);
+        setEvolutionListState("success");
+        return;
+      }
+      if (data.valid === false) {
+        setEvolutionEntries([]);
+        setEvolutionFormatError(data.detail || t("skills.evolution.errors.invalidFile"));
+        setEvolutionListState("success");
+        return;
+      }
+      setEvolutionEntries(data.entries || []);
+      setEvolutionListState("success");
+    } catch (error) {
+      console.error(error);
+      setEvolutionListState("error");
+    }
+  }, [selectedSkill, t, withSession]);
+
+  useEffect(() => {
+    if (detailTab === "experience" && selectedSkill?.has_evolutions) {
+      void fetchEvolutionEntries();
+    }
+  }, [detailTab, selectedSkill, fetchEvolutionEntries]);
+
+  const handleEvolutionContentChange = useCallback((entryId: string, value: string) => {
+    setEvolutionEntries((prev) =>
+      prev.map((entry) =>
+        entry.id === entryId
+          ? { ...entry, change: { ...entry.change, content: value } }
+          : entry
+      )
+    );
   }, []);
+
+  const handleEvolutionDeleteEntry = useCallback(
+    (entryId: string) => {
+      const confirmed = window.confirm(t("skills.evolution.deleteConfirm"));
+      if (!confirmed) return;
+      setEvolutionEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+    },
+    [t]
+  );
+
+  // 自动保存（带防抖）
+  const saveEvolutionEntries = useCallback(async (entries: EvolutionEntry[]) => {
+    if (!selectedSkill) return;
+    setEvolutionSaving(true);
+    try {
+      const data = await webRequest<{
+        success: boolean;
+        detail?: string;
+        message?: string;
+      }>("skills.evolution.save", withSession({ name: selectedSkill.name, entries }));
+      if (!data.success) {
+        throw new Error(data.detail || data.message || t("skills.evolution.errors.saveFailed"));
+      }
+      await fetchSkills();
+    } catch (error) {
+      console.error(error);
+      setEvolutionMessage(t("skills.evolution.errors.saveFailed"));
+      setEvolutionMessageType("error");
+    } finally {
+      setEvolutionSaving(false);
+    }
+  }, [selectedSkill, t, withSession, fetchSkills]);
+
+  // 防抖保存：监听 evolutionEntries 变化
+  useEffect(() => {
+    // 只在技能经验页签且有数据时触发
+    if (detailTab !== "experience" || !selectedSkill?.has_evolutions || evolutionEntries.length === 0) {
+      return;
+    }
+    // 清除之前的计时器
+    if (evolutionSaveTimerRef.current) {
+      clearTimeout(evolutionSaveTimerRef.current);
+    }
+    // 设置新的防抖计时器
+    evolutionSaveTimerRef.current = window.setTimeout(() => {
+      saveEvolutionEntries(evolutionEntries);
+    }, 500);
+    // 清理函数
+    return () => {
+      if (evolutionSaveTimerRef.current) {
+        clearTimeout(evolutionSaveTimerRef.current);
+      }
+    };
+  }, [evolutionEntries, detailTab, selectedSkill, saveEvolutionEntries]);
 
   const handleInstall = useCallback(
     async (skillName?: string) => {
@@ -1199,11 +1745,8 @@ export function SkillPanel({
     [fetchSkills, fetchSkillDetail, selectedSkill, marketplaces, skills, withSession, t]
   );
 
-  const handleImportLocal = useCallback(async () => {
-    const path = window.prompt(
-      t('skills.importPrompt')
-    );
-    if (!path) return;
+  const handleImportLocal = useCallback(async (path: string) => {
+    if (!path.trim()) return;
 
     setActionTarget("import_local");
     setMessage(null);
@@ -1215,7 +1758,7 @@ export function SkillPanel({
         message?: string;
         skill?: { name?: string };
       }>("skills.import_local", withSession({
-        path,
+        path: path.trim(),
         force: false,
       }));
       if (!data.success) {
@@ -1268,138 +1811,6 @@ export function SkillPanel({
     },
     [fetchSkills, handleBackToList, t, withSession]
   );
-
-  const renderActionButton = (skill: SkillItem) => {
-    const plugin = installedSkillMap.get(skill.name);
-
-    // 未安装到用户目录的内置技能（来自内置目录，需要安装）
-    // 判断条件：is_builtin_source 为 true 且不在已安装列表中
-    const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
-    if (skill.is_builtin_source && !isInstalled) {
-      const isLoading = actionTarget === `${skill.name}@builtin`;
-      return (
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            handleInstall(skill.name);
-          }}
-          data-testid="skill-panel-skill-install-btn"
-          className="skill-action-btn"
-          disabled={isLoading}
-        >
-          {isLoading ? t('skills.actions.installing') : t('skills.actions.install')}
-        </button>
-      );
-    }
-
-    // 用户本地导入的技能（source="local"）允许删除
-    if (skill.source === "local") {
-      const isLoading = actionTarget === skill.name;
-      return (
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            handleUninstall(skill.name);
-          }}
-          data-testid="skill-panel-skill-uninstall-btn"
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
-          disabled={isLoading}
-          style={{ color: 'var(--color-text-primary)' }}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          {t('skills.actions.uninstall')}
-        </button>
-      );
-    }
-
-    // Marketplace 安装的技能
-    if (plugin) {
-      const pluginName = plugin.plugin_name || skill.name;
-      const isLoading = actionTarget === pluginName;
-      return (
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            handleUninstall(pluginName);
-          }}
-          data-testid="skill-panel-skill-uninstall-btn"
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
-          disabled={isLoading}
-          style={{ color: 'var(--color-text-primary)' }}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          {t('skills.actions.uninstall')}
-        </button>
-      );
-    }
-
-    // Marketplace 中未安装的技能显示安装按钮
-    if (skill.source !== "project") {
-      const isLoading = Boolean(actionTarget?.startsWith(`${skill.name}@`));
-      return (
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            handleInstall(skill.name);
-          }}
-          data-testid="skill-panel-skill-install-btn"
-          className="skill-action-btn"
-          disabled={isLoading}
-        >
-          {isLoading ? t('skills.actions.installing') : t('skills.actions.install')}
-        </button>
-      );
-    }
-
-    // 已安装到用户目录的内置技能（从内置目录复制过来的）
-    // 这种情况下 source 可能是 "project"，但 is_builtin_source 为 true
-    // 只对已安装的内置技能显示卸载按钮
-    if (skill.is_builtin_source && isInstalled) {
-      const isLoading = actionTarget === skill.name;
-      return (
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            handleUninstall(skill.name);
-          }}
-          data-testid="skill-panel-skill-uninstall-btn"
-          className="flex items-center gap-2 px-3 py-1.5 rounded-full text-sm whitespace-nowrap hover:bg-secondary "
-          disabled={isLoading}
-          style={{ color: 'var(--color-text-primary)' }}
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} style={{ color: 'var(--color-text-primary)' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-          {t('skills.actions.uninstall')}
-        </button>
-      );
-    }
-
-    // 默认显示内置（兜底）
-    return (
-      <button
-        data-testid="skill-panel-skill-builtin-btn"
-        className="px-4 py-2 rounded-2xl text-sm text-text-muted cursor-not-allowed whitespace-nowrap border border-gray-300"
-        disabled
-      >
-        {t('skills.builtIn')}
-      </button>
-    );
-  };
-
-  const renderStatus = (skill: SkillItem) => {
-    if (installedSkillMap.has(skill.name)) return t('skills.status.installed');
-    if (skill.source === "local") return t('skills.status.installed');
-    if (skill.is_builtin) {
-      return t('skills.status.notInstalled');
-    }
-    if (skill.source !== "project") return t('skills.status.notInstalled');
-    return t('skills.status.builtIn');
-  };
 
   const isSkillInstalled = (skill: SkillItem): boolean => {
     return installedSkillMap.has(skill.name) || skill.source === "local" || skill.source === "project";
@@ -1459,23 +1870,54 @@ export function SkillPanel({
     }
   };
 
-  const renderEvolutionButton = (skill: SkillItem) => {
-    const disabled = !skill.has_evolutions;
-    if (disabled) {
-      return null;
-    }
+  /** 判断技能是否为技能包（技能名与所属插件名一致） */
+  const isSkillPackage = useCallback((skill: SkillItem): boolean => {
+    const plugin = installedSkillMap.get(skill.name);
+    return Boolean(plugin && plugin.plugin_name === skill.name && plugin.skills.length > 1);
+  }, [installedSkillMap]);
+
+  const togglePinSkill = useCallback((skillName: string) => {
+    setPinnedSkillNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(skillName)) {
+        next.delete(skillName);
+      } else {
+        next.add(skillName);
+      }
+      return next;
+    });
+  }, []);
+
+  const renderSkillTypeCapsules = () => {
+    // "我的技能"下不展示"多模态"胶囊
+    const types = activeTab === "my" ? SKILL_TYPES.filter((t) => t !== "multimodal") : SKILL_TYPES;
     return (
-      <button
-        onClick={(event) => {
-          event.stopPropagation();
-          handleOpenEvolution(skill.name);
-        }}
-        data-testid="skill-panel-skill-evolution-btn"
-        className="px-4 py-2 rounded-2xl  whitespace-nowrap hover:opacity-80"
-        style={{ color: 'var(--color-text-link)', fontSize: '12px' }}
-      >
-        {t('skills.actions.viewEvolution')}
-      </button>
+      <div className="flex items-center gap-2">
+        {types.map((type) => {
+          // 技能包（skill）后端尚未适配，置灰不可点击
+          const isDisabled = type === "skill";
+          return (
+            <button
+              key={type}
+              type="button"
+              disabled={isDisabled}
+              onClick={() => {
+                if (isDisabled) return;
+                setSkillType(prev => prev === type ? null : type);
+              }}
+              className={`h-7 px-4 rounded-[8px] text-sm whitespace-nowrap border ${
+                isDisabled
+                  ? "border-border/50 text-text-muted/40 cursor-not-allowed bg-secondary/30"
+                  : skillType === type
+                    ? "border-[var(--color-skill-capsule-active)] text-[var(--color-skill-capsule-active)]"
+                    : "border-border text-text-muted hover:text-text"
+              }`}
+            >
+              {t(`skills.skillTypes.${type}`)}
+            </button>
+          );
+        })}
+      </div>
     );
   };
 
@@ -1549,7 +1991,7 @@ export function SkillPanel({
   return (
     <>
       {message && messageType === "success" && (
-        <div data-testid="skill-panel-toast" data-variant="success" className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
+        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4" style={{ backgroundColor: "var(--color-feedback-success-toast)", width: "564px", height: "40px" }}>
           <span className="w-4 h-4 rounded-full bg-[var(--color-feedback-success-indicator)] flex items-center justify-center flex-shrink-0">
             <svg className="w-3 h-3 text-text-inverse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
@@ -1559,7 +2001,6 @@ export function SkillPanel({
           <button
             type="button"
             onClick={() => setMessage(null)}
-            data-testid="skill-panel-success-toast-close"
             className="ml-auto w-6 h-6 flex items-center justify-center hover:bg-card/30 rounded-full "
           >
             <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1568,21 +2009,28 @@ export function SkillPanel({
           </button>
         </div>
       )}
-      <div data-testid="skill-panel" className="flex-1 flex flex-col min-w-0 min-h-0">
-        <div data-testid="skill-panel-card" className="card flex-1 flex flex-col min-h-0 overflow-hidden">
-          <div data-testid="skill-panel-header" className="flex items-start justify-between">
+      {message && messageType === "loading" && (
+        <div className="fixed top-4 right-4 z-[9999] rounded-[4px] text-sm text-text shadow-lg flex items-center gap-3 px-4 bg-card border border-border" style={{ width: "564px", height: "40px" }}>
+          <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          {cleanMessage}
+        </div>
+      )}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        <div className="card flex-1 flex flex-col min-h-0 overflow-hidden">
+          {!(activeTab === "my" && selectedSkill) && (
+          <>
+          <div className="flex items-start justify-between">
           <div>
-            <h2 data-testid="skill-panel-title" className="text-lg font-semibold">
+            <h2 className="text-lg font-semibold">
               {t('skills.title')}
             </h2>
-            <p data-testid="skill-panel-subtitle" className="text-sm text-text-muted mt-1">
+            <p className="text-sm text-text-muted mt-1">
               {t('skills.subtitle')}
             </p>
           </div>
-          <div data-testid="skill-panel-header-actions" className="flex items-center">
+          <div className="flex items-center">
             <button
               onClick={() => setSourceModalOpen(true)}
-              data-testid="skill-panel-source-manager-btn"
               className="flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 "
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -1600,135 +2048,236 @@ export function SkillPanel({
                   if (started) {
                     updateGraphReading(true);
                   }
-                } else if (activeTab === "my" || (activeTab === "marketplace" && marketplaceSubTab === "builtin")) {
+                } else if (activeTab === "my" || activeTab === "marketplace") {
                   setSearch("");
                   fetchSkills(true);
-                } else {
-                  setSearchTrigger((prev) => prev + 1);
                 }
               }}
-              data-testid="skill-panel-refresh-btn"
-              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm text-text-muted  ${
+              className={`flex items-center gap-1.5 pl-[18px] pr-[24px] py-1.5 rounded-lg text-sm text-text-muted  ${
                 activeTab === "graph" && graphReading
                   ? "cursor-not-allowed opacity-70"
                   : "hover:text-text hover:bg-secondary/50"
               }`}
               disabled={activeTab === "graph" && graphReading}
             >
-              <svg className={`w-4 h-4 ${activeTab === "graph" && graphReading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              <svg className={`w-4 h-4 ${activeTab === "graph" && graphReading ? "animate-spin" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
               </svg>
               {activeTab === "graph" && graphReading ? t('skills.graph.status.reading') : t('common.refresh')}
-            </button>
-            <button
-              onClick={handleImportLocal}
-              data-testid="skill-panel-import-local-btn"
-              className={`flex items-center gap-1.5 px-1 py-1.5 rounded-lg text-sm  ${
-                actionTarget === "import_local"
-                  ? "text-text-muted cursor-not-allowed"
-                  : "text-text-muted hover:text-text hover:bg-secondary/50"
-              }`}
-              disabled={actionTarget === "import_local"}
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9m0 0l-3-3m3 3l3-3" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 15v4a2 2 0 002 2h10a2 2 0 002-2v-4" />
-              </svg>
-              {t('skills.actions.importLocal')}
             </button>
           </div>
         </div>
 
-        <div data-testid="skill-panel-tabs-row" className="mt-4 flex items-center justify-between gap-2">
-          <div data-testid="skill-panel-tabs" className="flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab("my")}
-              data-testid="skill-panel-tab-my"
-              className={`px-4 text-sm font-medium  ${
-                activeTab === "my"
-                  ? "rounded-[8px] bg-secondary h-8 text-text"
-                  : "text-text-muted hover:text-text"
-              }`}
-            >
-              {t('skills.tabs.mySkills')}
-            </button>
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
             <button
               onClick={() => setActiveTab("marketplace")}
-              data-testid="skill-panel-tab-marketplace"
-              className={`px-4 text-sm font-medium  ${
+              className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "marketplace"
-                  ? "rounded-[8px] bg-secondary h-8 text-text"
-                  : "text-text-muted hover:text-text"
+                  ? "text-text font-bold"
+                  : "border-transparent text-text-muted hover:text-text font-medium"
               }`}
+              style={activeTab === "marketplace" ? { borderColor: 'var(--color-text-primary)' } : undefined}
             >
               {t('skills.tabs.marketplace')}
             </button>
             <button
-              onClick={() => setActiveTab("graph")}
-              data-testid="skill-panel-tab-graph"
-              className={`px-4 text-sm font-medium  ${
-                activeTab === "graph"
-                  ? "rounded-[8px] bg-secondary h-8 text-text"
-                  : "text-text-muted hover:text-text"
+              onClick={() => setActiveTab("my")}
+              className={`px-4 py-2 text-sm border-b-2 ${
+                activeTab === "my"
+                  ? "text-text font-bold"
+                  : "border-transparent text-text-muted hover:text-text font-medium"
               }`}
+              style={activeTab === "my" ? { borderColor: 'var(--color-text-primary)' } : undefined}
+            >
+              {t('skills.tabs.mySkills')}
+            </button>
+            <button
+              onClick={() => setActiveTab("graph")}
+              className={`px-4 py-2 text-sm border-b-2 ${
+                activeTab === "graph"
+                  ? "text-text font-bold"
+                  : "border-transparent text-text-muted hover:text-text font-medium"
+              }`}
+              style={activeTab === "graph" ? { borderColor: 'var(--color-text-primary)' } : undefined}
             >
               {t('skills.tabs.skillGraph')}
             </button>
             <button
               onClick={() => setActiveTab("index")}
-              data-testid="skill-panel-tab-index"
-              className={`px-4 text-sm font-medium  ${
+              className={`px-4 py-2 text-sm border-b-2 ${
                 activeTab === "index"
-                  ? "rounded-[8px] bg-secondary h-8 text-text"
-                  : "text-text-muted hover:text-text"
+                  ? "text-text font-bold"
+                  : "border-transparent text-text-muted hover:text-text font-medium"
               }`}
+              style={activeTab === "index" ? { borderColor: 'var(--color-text-primary)' } : undefined}
             >
               {t('skills.tabs.skillIndex')}
             </button>
           </div>
-          {activeTab !== "index" && activeTab !== "graph" ? (
-            <div data-testid="skill-panel-view-mode-tabs" className="flex items-center gap-1 border border-border rounded-lg p-1">
-              <button
-                onClick={() => setViewMode("list")}
-                data-testid="skill-panel-view-mode-tab-list"
-                className={`p-1.5 rounded-md  ${
-                  viewMode === "list"
-                    ? "bg-secondary text-text"
-                    : "text-text-muted hover:text-text"
-                }`}
-                title={t('skills.viewMode.list')}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+          <div className="flex items-center gap-3">
+            {activeTab === "my" && (
+              <>
+                {/* 已发布/未发布筛选 */}
+                <div className="relative" style={{ width: mySkillsPublishFilter === "all" ? '40px' : '55px' }}>
+                  <button
+                    onClick={() => { setPublishFilterOpen((v) => !v); setEnableFilterOpen(false); }}
+                    className="flex items-center justify-between w-full h-[32px] text-xs text-text bg-transparent"
+                  >
+                    <span className="truncate">
+                      {mySkillsPublishFilter === "published" ? t('skills.publishFilter.published') :
+                       mySkillsPublishFilter === "unpublished" ? t('skills.publishFilter.unpublished') :
+                       t('skills.publishFilter.all')}
+                    </span>
+                    <svg className={`shrink-0 w-3.5 h-3.5 transition-transform ${publishFilterOpen ? 'rotate-180' : ''} text-text-muted`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {publishFilterOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setPublishFilterOpen(false)} />
+                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                        <button
+                          onClick={() => { setMySkillsPublishFilter("all"); setPublishFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "all" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.publishFilter.all')}
+                        </button>
+                        <button
+                          onClick={() => { setMySkillsPublishFilter("published"); setPublishFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "published" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.publishFilter.published')}
+                        </button>
+                        <button
+                          onClick={() => { setMySkillsPublishFilter("unpublished"); setPublishFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsPublishFilter === "unpublished" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.publishFilter.unpublished')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+                {/* 启用/禁用筛选 */}
+                <div className="relative" style={{ width: '40px' }}>
+                  <button
+                    onClick={() => { setEnableFilterOpen((v) => !v); setPublishFilterOpen(false); }}
+                    className="flex items-center justify-between w-full h-[32px] text-xs text-text bg-transparent"
+                  >
+                    <span className="truncate">
+                      {mySkillsSubTab === "enabled" ? t('skills.mySkillsTabs.enabled') :
+                       mySkillsSubTab === "disabled" ? t('skills.mySkillsTabs.disabled') :
+                       t('skills.mySkillsTabs.all')}
+                    </span>
+                    <svg className={`shrink-0 w-3.5 h-3.5 transition-transform ${enableFilterOpen ? 'rotate-180' : ''} text-text-muted`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {enableFilterOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setEnableFilterOpen(false)} />
+                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                        <button
+                          onClick={() => { setMySkillsSubTab("all"); setEnableFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "all" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.mySkillsTabs.all')}
+                        </button>
+                        <button
+                          onClick={() => { setMySkillsSubTab("enabled"); setEnableFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "enabled" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.mySkillsTabs.enabled')}
+                        </button>
+                        <button
+                          onClick={() => { setMySkillsSubTab("disabled"); setEnableFilterOpen(false); }}
+                          className={`flex items-center w-full px-3 py-2 text-sm text-left hover:bg-secondary ${mySkillsSubTab === "disabled" ? "text-[#1476ff]" : "text-text-muted"}`}
+                        >
+                          {t('skills.mySkillsTabs.disabled')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+            {(activeTab === "my" || activeTab === "marketplace") && (
+              <div className="relative" style={{ width: '360px' }}>
+                <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
                 </svg>
-              </button>
-              <button
-                onClick={() => setViewMode("grid")}
-                data-testid="skill-panel-view-mode-tab-grid"
-                className={`p-1.5 rounded-md  ${
-                  viewMode === "grid"
-                    ? "bg-secondary text-text"
-                    : "text-text-muted hover:text-text"
-                }`}
-                title={t('skills.viewMode.grid')}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
-                </svg>
-              </button>
-            </div>
-          ) : null}
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t('skills.searchPlaceholder')}
+                  className="w-full pl-8 pr-3 py-1.5 rounded-[6px] border border-border text-sm text-text placeholder:text-text-muted"
+                />
+              </div>
+            )}
+            {activeTab === "my" && (
+              <div className="relative">
+                <button
+                  onClick={() => setCreateMenuOpen((v) => !v)}
+                  className="flex items-center justify-center gap-1 h-8 w-[96px] rounded-[16px] text-sm text-text-inverse bg-[#191919] hover:opacity-80"
+                >
+                  {t('skills.actions.create')}
+                  <svg className={`w-3.5 h-3.5 transition-transform ${createMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {createMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setCreateMenuOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                      <button
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          setUploadSkillModalOpen(true);
+                        }}
+                        disabled={actionTarget === "import_local"}
+                        className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary disabled:opacity-60 disabled:cursor-not-allowed"
+                      >
+                        {t('skills.actions.uploadLocalSkill')}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          setDocToSkillModalOpen(true);
+                        }}
+                        className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                      >
+                        {t('skills.actions.documentToSkill')}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setCreateMenuOpen(false);
+                          handleCreateViaChat();
+                        }}
+                        className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                      >
+                        {t('skills.actions.createViaChat')}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
+          </>
+          )}
 
         {activeTab === "index" ? (
-          <div data-testid="skill-panel-index-view" className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
-            <div data-testid="skill-panel-retrieval-card" className="rounded-lg border border-border bg-panel p-4">
+          <div className="mt-4 flex flex-col flex-1 min-h-0 gap-4 overflow-y-auto pr-2">
+            <div className="rounded-lg border border-border bg-panel p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div data-testid="skill-panel-retrieval-info" className="min-w-[220px]">
-                  <div data-testid="skill-panel-retrieval-title" className="text-sm font-medium text-text-strong">
+                <div className="min-w-[220px]">
+                  <div className="text-sm font-medium text-text-strong">
                     {t('skills.retrieval.title')}
                   </div>
-                  <div data-testid="skill-panel-retrieval-summary" className="text-xs text-text-muted mt-1">
+                  <div className="text-xs text-text-muted mt-1">
                     {retrievalStatusText}
                     {retrievalStatus?.indexed_count != null
                       ? ` · ${t('skills.retrieval.indexedCount', { count: retrievalStatus.indexed_count })}`
@@ -1740,15 +2289,14 @@ export function SkillPanel({
                       : ""}
                   </div>
                   {retrievalLastBuildMessage ? (
-                    <div data-testid="skill-panel-retrieval-last-build-hint" className="mt-1 text-xs text-amber-600">
+                    <div className="mt-1 text-xs text-amber-600">
                       {retrievalLastBuildMessage}
                     </div>
                   ) : null}
                 </div>
-                <div data-testid="skill-panel-retrieval-actions" className="flex items-center gap-2">
+                <div className="flex items-center gap-2">
                   <button
                     onClick={() => void handleBuildRetrievalIndex(false)}
-                    data-testid="skill-panel-retrieval-build-btn"
                     className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                   >
@@ -1759,7 +2307,6 @@ export function SkillPanel({
                   {retrievalStatus?.index_exists ? (
                     <button
                       onClick={() => void handleBuildRetrievalIndex(true)}
-                      data-testid="skill-panel-retrieval-full-rebuild-btn"
                       className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "build" || retrievalBuildRunning || retrievalStatus?.enabled === false}
                     >
@@ -1771,7 +2318,6 @@ export function SkillPanel({
                   {retrievalBuildRunning ? (
                     <button
                       onClick={handleCancelRetrievalBuild}
-                      data-testid="skill-panel-retrieval-cancel-btn"
                       className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                       disabled={retrievalLoading === "cancel"}
                     >
@@ -1786,7 +2332,6 @@ export function SkillPanel({
                       void fetchRetrievalStatus();
                       void fetchRetrievalTree();
                     }}
-                    data-testid="skill-panel-retrieval-refresh-btn"
                     className="px-3 py-1.5 rounded-lg text-sm border border-border hover:bg-secondary  disabled:opacity-60"
                     disabled={retrievalLoading === "tree" || retrievalLoading === "status"}
                   >
@@ -1805,14 +2350,14 @@ export function SkillPanel({
                 />
               ) : null}
             </div>
-            <div data-testid="skill-panel-retrieval-grid" className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
-              <div data-testid="skill-panel-retrieval-tree-panel" className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
-                <div data-testid="skill-panel-retrieval-tree-header" className="mb-3 flex items-center justify-between gap-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(320px,1fr)_minmax(320px,0.9fr)]">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
+                <div className="mb-3 flex items-center justify-between gap-2">
                   <div>
-                    <div data-testid="skill-panel-retrieval-tree-title" className="text-sm font-medium text-text-strong">
+                    <div className="text-sm font-medium text-text-strong">
                       {t('skills.retrieval.treeTitle')}
                     </div>
-                    <div data-testid="skill-panel-retrieval-tree-count" className="text-xs text-text-muted mt-1">
+                    <div className="text-xs text-text-muted mt-1">
                       {retrievalTreeNodes.length > 0
                         ? t('skills.retrieval.treeCount', {
                             branches: retrievalTreeCounts.branches,
@@ -1824,7 +2369,7 @@ export function SkillPanel({
                     </div>
                   </div>
                 </div>
-                <div data-testid="skill-panel-retrieval-tree-content" className="flex-1 min-h-[320px] overflow-auto rounded-md border border-border bg-secondary/40 p-2">
+                <div className="flex-1 min-h-[320px] overflow-auto rounded-md border border-border bg-secondary/40 p-2">
                   {retrievalTreeNodes.length > 0 ? (
                     <SkillIndexTreeView
                       roots={retrievalTreeRoots}
@@ -1847,24 +2392,22 @@ export function SkillPanel({
                   )}
                 </div>
               </div>
-              <div data-testid="skill-panel-retrieval-detail-panel" className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
-                <div data-testid="skill-panel-retrieval-detail-title" className="text-sm font-medium text-text-strong mb-3">
+              <div className="rounded-lg border border-border bg-panel p-4 min-h-[420px] flex flex-col">
+                <div className="text-sm font-medium text-text-strong mb-3">
                   {t('skills.retrieval.nodeDetails')}
                 </div>
                 {selectedTreeNode ? (
-                  <div data-testid="skill-panel-retrieval-detail-content" className="flex-1 min-h-0 overflow-auto">
+                  <div className="flex-1 min-h-0 overflow-auto">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <div data-testid="skill-panel-retrieval-detail-node-title" className="text-base font-semibold text-text-strong break-words">
+                        <div className="text-base font-semibold text-text-strong break-words">
                           {getSkillIndexNodeLabel(selectedTreeNode)}
                         </div>
-                        <div data-testid="skill-panel-retrieval-detail-node-cid" className="mt-1 text-xs text-text-muted break-all">
+                        <div className="mt-1 text-xs text-text-muted break-all">
                           {selectedTreeNode.cid}
                         </div>
                       </div>
                       <span
-                        data-testid="skill-panel-retrieval-detail-node-type-badge"
-                        data-variant={selectedTreeNode.type}
                         className={`shrink-0 rounded border px-2 py-1 text-xs ${
                           selectedTreeNode.type === "leaf"
                             ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-600"
@@ -1877,46 +2420,46 @@ export function SkillPanel({
                       </span>
                     </div>
 
-                    <dl data-testid="skill-panel-retrieval-detail-properties" className="mt-4 space-y-3 text-sm">
+                    <dl className="mt-4 space-y-3 text-sm">
                       <div>
-                        <dt data-testid="skill-panel-retrieval-detail-field-label-description" className="text-xs text-text-muted">{t('skills.retrieval.nodeDescription')}</dt>
+                        <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDescription')}</dt>
                         <dd className="mt-1 whitespace-pre-wrap text-text">
                           {selectedTreeNode.description || t('skills.noDescription')}
                         </dd>
                       </div>
                       {selectedTreeNode.select_when ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-select-when" className="text-xs text-text-muted">{t('skills.retrieval.nodeSelectWhen')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSelectWhen')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.select_when}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.dont_select_when ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-dont-select-when" className="text-xs text-text-muted">{t('skills.retrieval.nodeDontSelectWhen')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeDontSelectWhen')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.dont_select_when}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.source_description ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-source-description" className="text-xs text-text-muted">{t('skills.retrieval.nodeSourceDescription')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeSourceDescription')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.source_description}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.worker_id ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-worker-id" className="text-xs text-text-muted">{t('skills.retrieval.nodeWorkerId')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeWorkerId')}</dt>
                           <dd className="mt-1 break-all font-mono text-xs text-text">{selectedTreeNode.worker_id}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.category ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-category" className="text-xs text-text-muted">{t('skills.retrieval.nodeCategory')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeCategory')}</dt>
                           <dd className="mt-1 whitespace-pre-wrap text-text">{selectedTreeNode.category}</dd>
                         </div>
                       ) : null}
                       {selectedTreeNode.keywords?.length ? (
                         <div>
-                          <dt data-testid="skill-panel-retrieval-detail-field-label-keywords" className="text-xs text-text-muted">{t('skills.retrieval.nodeKeywords')}</dt>
+                          <dt className="text-xs text-text-muted">{t('skills.retrieval.nodeKeywords')}</dt>
                           <dd className="mt-2 flex flex-wrap gap-1.5">
                             {selectedTreeNode.keywords.slice(0, 24).map((keyword) => (
                               <span key={keyword} className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-text-muted">
@@ -1941,7 +2484,7 @@ export function SkillPanel({
                     </dl>
                   </div>
                 ) : (
-                  <div data-testid="skill-panel-retrieval-detail-empty" className="flex-1 min-h-[220px] rounded-md border border-dashed border-border bg-secondary/30 p-4 text-sm text-text-muted">
+                  <div className="flex-1 min-h-[220px] rounded-md border border-dashed border-border bg-secondary/30 p-4 text-sm text-text-muted">
                     {t('skills.retrieval.selectNodeHint')}
                   </div>
                 )}
@@ -1952,29 +2495,30 @@ export function SkillPanel({
 
         {activeTab === "graph" ? (
           <div data-testid="skill-panel-graph-view" className="mt-4 flex flex-1 min-h-0 flex-col gap-3">
-            <div
-              data-testid="skill-panel-graph-definition"
-              className="flex flex-none items-start gap-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-[10px] leading-4 text-text-muted"
-            >
-              <Music2 size={14} className="mt-px flex-shrink-0 text-accent" aria-hidden="true" />
-              <span>{t('skills.graph.orchestration.graphDefinition')}</span>
-            </div>
             <div data-testid="skill-panel-graph-orchestration-card" className="flex flex-none flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-panel p-4">
               <div className="min-w-[240px] flex-1">
-                <p data-testid="skill-panel-graph-orchestration-description" className="text-xs leading-5 text-text-muted">
-                  {t('skills.graph.orchestration.description')}
-                </p>
+                <div className="flex items-start gap-2">
+                  <Music2 size={28} className="mt-1 flex-shrink-0 text-accent" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <p data-testid="skill-panel-graph-definition" className="text-xs leading-5 text-text-muted">
+                      {t('skills.graph.orchestration.graphDefinition')}
+                    </p>
+                    <p data-testid="skill-panel-graph-orchestration-description" className="text-xs leading-5 text-text-muted">
+                      {t('skills.graph.orchestration.description')}
+                    </p>
+                  </div>
+                </div>
                 {symphonySaveError ? (
-                  <p data-testid="skill-panel-graph-orchestration-error" className="mt-1 text-xs leading-5 text-danger" role="alert">
+                  <p className="mt-1 text-xs leading-5 text-danger" role="alert">
                     {symphonySaveError}
                   </p>
                 ) : null}
               </div>
-              <div data-testid="skill-panel-switch-5" className="flex flex-shrink-0 items-center gap-2">
+              <div className="flex flex-shrink-0 items-center gap-2">
                 {symphonySaving ? (
                   <>
                     <Loader2 size={16} className="animate-spin text-text-muted" aria-hidden="true" />
-                    <span data-testid="skill-panel-graph-orchestration-saving" className="text-xs text-text-muted">
+                    <span className="text-xs text-text-muted">
                       {t('skills.graph.orchestration.saving')}
                     </span>
                   </>
@@ -2004,31 +2548,29 @@ export function SkillPanel({
 
         {activeTab === "marketplace" ? (
           <>
-            <div data-testid="skill-panel-marketplace-tabs-row" className="mt-4 flex items-center justify-between gap-4">
-              <div data-testid="skill-panel-marketplace-tabs" className="flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    setMarketplaceSubTab("builtin");
-                    setDebouncedSearch(search);
-                    setSearchTrigger((prev) => prev + 1);
-                  }}
-                  data-testid="skill-panel-marketplace-tab-builtin"
-                  className={`px-4 text-sm font-medium  ${
-                    marketplaceSubTab === "builtin"
-                      ? "rounded-[8px] bg-secondary h-8 text-text"
-                      : "text-text-muted hover:text-text"
-                  }`}
-                >
-                  {t('skills.marketplaceTabs.builtin')}
-                </button>
+            <div className="mt-4 flex items-center gap-2">
               <button
+                type="button"
+                onClick={() => {
+                  setMarketplaceSubTab("skillhub");
+                  setSearchTrigger((prev) => prev + 1);
+                }}
+                className={`px-4 text-sm font-medium ${
+                  marketplaceSubTab === "skillhub"
+                    ? "rounded-[8px] bg-secondary h-8 text-text"
+                    : "text-text-muted hover:text-text"
+                }`}
+              >
+                {t('skills.marketplaceTabs.skillhub', { defaultValue: 'SkillHub' })}
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setMarketplaceSubTab("swarmskills");
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
-                data-testid="skill-panel-marketplace-tab-swarmskills"
-                className={`px-4 text-sm font-medium  ${
+                className={`px-4 text-sm font-medium ${
                   marketplaceSubTab === "swarmskills"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
                     : "text-text-muted hover:text-text"
@@ -2037,13 +2579,13 @@ export function SkillPanel({
                 {t('skills.swarmskills.title')}
               </button>
               <button
+                type="button"
                 onClick={() => {
                   setMarketplaceSubTab("online");
                   setDebouncedSearch(search);
                   setSearchTrigger((prev) => prev + 1);
                 }}
-                data-testid="skill-panel-marketplace-tab-online"
-                className={`px-4 text-sm font-medium  ${
+                className={`px-4 text-sm font-medium ${
                   marketplaceSubTab === "online"
                     ? "rounded-[8px] bg-secondary h-8 text-text"
                     : "text-text-muted hover:text-text"
@@ -2051,416 +2593,736 @@ export function SkillPanel({
               >
                 {t('skills.onlineSearch.title')}
               </button>
-              </div>
-              <div data-testid="skill-panel-marketplace-search" className="flex-1">
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  data-testid="skill-panel-marketplace-search-input"
-                  placeholder={
-                    marketplaceSubTab === "builtin"
-                      ? t("skills.searchPlaceholder")
-                      : marketplaceSubTab === "swarmskills"
-                      ? t("skills.swarmskills.searchPlaceholder")
-                      : t("skills.onlineSearch.searchPlaceholder")
-                  }
-                  className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
-                />
-              </div>
             </div>
 
-            <div data-testid="skill-panel-marketplace-list" data-variant={viewMode} className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" && marketplaceSubTab === "builtin" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
-              {marketplaceSubTab === "builtin" && (
-                <>
-                  {listState === "loading" && (
-                    <div data-testid="skill-panel-marketplace-loading" className="flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
-                  )}
-                  {listState === "error" && (
-                    <div data-testid="skill-panel-marketplace-error" className="text-sm text-text-muted">{t('skills.listError')}</div>
-                  )}
-                  {listState === "success" && builtinSkills.length === 0 && (
-                    <div data-testid="skill-panel-marketplace-no-results" className="text-sm text-text-muted">{t('skills.noMatches')}</div>
-                  )}
-                  {listState === "success" && builtinSkills.length > 0 && (
-                    builtinSkills.map((skill) => {
+            {marketplaceSubTab === "skillhub" ? (
+            <>
+            <div className="mt-3 flex items-center gap-2">
+              {MARKETPLACE_CATEGORIES.map((cat, idx) => (
+                <span key={cat} className="flex items-center gap-2">
+                  {idx > 0 && <span className="text-text-muted/40">|</span>}
+                  <button
+                    onClick={() => setMarketplaceCategory(cat)}
+                    className={`px-1 text-sm ${
+                      marketplaceCategory === cat
+                        ? "text-text font-bold"
+                        : "text-text-muted hover:text-text"
+                    }`}
+                  >
+                    {t(`skills.marketplaceCategories.${cat}`)}
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              {renderSkillTypeCapsules()}
+            </div>
+
+            <div className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
+                {hubLoading && (
+                  <div className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
+                )}
+                {!hubLoading && hubSkills.length === 0 && (
+                  <div className="col-span-2 text-sm text-text-muted">{t('skills.noMatches')}</div>
+                )}
+                {!hubLoading && hubSkills.length > 0 && (
+                    hubSkills.map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
                       const displayName = skill.display_name || skill.name;
-                      const isDisabled = skill.enabled === false;
-                      const isToggling = actionTarget === `toggle:${skill.name}`;
-                      const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
-                      const isInstalling = actionTarget === `${skill.name}@builtin`;
                       return (
                         <div
-                          key={skill.name}
-                          onClick={() => handleOpenSkill(skill.name)}
-                          data-testid="skill-panel-marketplace-skill-card" data-variant={viewMode}
-                          className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
-                          style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
+                          key={skill.asset_id}
+                          className="group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible"
+                          style={{ height: "156px", width: '616px' }}
                         >
-                          {viewMode === "list" ? (
-                            <div className="flex items-center justify-between gap-4">
-                              <div className="flex items-center gap-3 min-w-0 flex-1">
-                                <div data-testid="skill-panel-marketplace-skill-avatar" className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
-                                  {avatar.firstChar}
-                                </div>
-                                <div className="min-w-0">
-                                  <div data-testid="skill-panel-marketplace-skill-name" className="text-base font-semibold text-text-strong">
-                                    {displayName}
-                                  </div>
-                                  <div data-testid="skill-panel-marketplace-skill-description" className="text-sm text-text-muted mt-1 line-clamp-3">
-                                    {skill.description || t('skills.noDescription')}
-                                  </div>
-                                </div>
-                              </div>
-                              <div data-testid="skill-panel-switch-1" className="flex items-center gap-4 flex-shrink-0">
-                                {skill.is_builtin_source && !isInstalled ? (
-                                  <button
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      handleInstall(skill.name);
-                                    }}
-                                    data-testid="skill-panel-skill-install-btn"
-                                    className="min-w-[76px] h-[28px] px-3 text-sm rounded-full border border-black bg-card text-text hover:bg-gray-100  whitespace-nowrap"
-                                    disabled={isInstalling}
-                                  >
-                                    {isInstalling ? t('skills.actions.installing') : t('skills.actions.install')}
-                                  </button>
-                                ) : (
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
-                                    disabled={isToggling}
-                                  />
-                                )}
-                              </div>
+                          {/* 上盒子：头像 + 名称 + 来源 */}
+                          <div className="flex items-center gap-3 flex-shrink-0">
+                            <div className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                              {avatar.firstChar}
                             </div>
-                          ) : (
-                            <>
-                              <div className="flex items-start gap-3 flex-shrink-0">
-                                <div data-testid="skill-panel-marketplace-skill-avatar" className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
-                                  {avatar.firstChar}
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div data-testid="skill-panel-marketplace-skill-name" className="text-sm font-semibold text-text-strong truncate">
-                                    {displayName}
-                                  </div>
-                                  <div data-testid="skill-panel-marketplace-skill-description" className="text-xs text-text-muted mt-1 line-clamp-2">
-                                    {skill.description || t('skills.noDescription')}
-                                  </div>
-                                </div>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5 mt-2 flex-shrink-0 text-xs text-text-muted">
-                                <span data-testid="skill-panel-marketplace-skill-source-badge" data-variant={skill.source} className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source)}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-sm font-semibold text-text-strong truncate leading-5">
+                                  {displayName}
                                 </span>
                               </div>
-                              <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
-                                <div className="flex gap-1.5 flex-1">
-                                  {renderEvolutionButton(skill)}
-                                </div>
-                                <div className="flex-shrink-0 ml-auto">
-                                  {renderActionButton(skill)}
-                                </div>
+                              <div className="mt-1">
+                                <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
+                                  {t('skills.sourceLabel')}: SkillHub
+                                </span>
                               </div>
-                            </>
-                          )}
+                            </div>
+                            {/* 悬浮操作按钮 */}
+                            <div className="shrink-0">
+                              {(() => {
+                                const isInstalled = installedSkillMap.has(skill.name);
+                                if (isInstalled) {
+                                  return (
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); handleGoToChat(skill.name); }}
+                                      onMouseEnter={(e) => {
+                                        const rect = e.currentTarget.getBoundingClientRect();
+                                        setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                                      }}
+                                      onMouseLeave={() => setGoTryTooltip(null)}
+                                      className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                    >
+                                      <NewConversationIcon aria-hidden width="20" height="20" />
+                                    </button>
+                                  );
+                                }
+                                return (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleInstall(skill.name); }}
+                                    className="w-8 h-8 flex items-center justify-center rounded-[8px] hover:bg-[#F0F7FF] text-text-muted hover:text-[#1476FF] transition-colors"
+                                  >
+                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
+                                    </svg>
+                                  </button>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                          {/* 下盒子：描述 */}
+                          <div className="text-xs text-text-muted mt-4 line-clamp-2">
+                            {skill.short_desc || skill.detail_desc || t('skills.noDescription')}
+                          </div>
                         </div>
                       );
                     })
                   )}
-                </>
-              )}
-
-              {marketplaceSubTab === "swarmskills" && (
-                <div data-testid="skill-panel-swarmskills-view" className="h-full" key={`swarmskills-${searchTrigger}`}>
-                  <TeamSkillsHubModal
-                    open={true}
-                    embedded={true}
-                    sessionId={sessionId}
-                    externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
-                    viewMode={viewMode}
-                    onClose={() => {}}
-                    onInstalled={(_skillName: string) => {
-                      void fetchSkills();
-                    }}
-                  />
-                </div>
-              )}
-
-              {marketplaceSubTab === "online" && (
-                <div data-testid="skill-panel-online-view" className="h-full" key={`online-${searchTrigger}`}>
-                  <OnlineSkillSearchPanel
-                    sessionId={sessionId}
-                    externalSearchQuery={debouncedSearch}
-                    installedSkillNames={installedSkillNames}
-                    installedSkillOrigins={installedSkillOrigins}
-                    viewMode={viewMode}
-                    onInstalled={(_skillName: string) => {
-                      void fetchSkills();
-                    }}
-                  />
-                </div>
-              )}
             </div>
+            </>
+            ) : null}
+
+            {marketplaceSubTab === "swarmskills" ? (
+              <div className="mt-4 h-full flex-1 min-h-0" key={`swarmskills-${searchTrigger}`}>
+                <TeamSkillsHubModal
+                  open={true}
+                  embedded={true}
+                  sessionId={sessionId}
+                  externalSearchQuery={debouncedSearch}
+                  installedSkillNames={installedSkillNames}
+                  onClose={() => {}}
+                  onInstalled={(_skillName: string) => {
+                    void fetchSkills();
+                  }}
+                />
+              </div>
+            ) : null}
+
+            {marketplaceSubTab === "online" ? (
+              <div className="mt-4 h-full flex-1 min-h-0" key={`online-${searchTrigger}`}>
+                <OnlineSkillSearchPanel
+                  sessionId={sessionId}
+                  externalSearchQuery={debouncedSearch}
+                  installedSkillNames={installedSkillNames}
+                  installedSkillOrigins={installedSkillOrigins}
+                  onInstalled={(_skillName: string) => {
+                    void fetchSkills();
+                  }}
+                />
+              </div>
+            ) : null}
           </>
         ) : null}
 
         {activeTab === "my" ? (
           <>
             {message && messageType === "error" && (
-              <div data-testid="skill-panel-toast" data-variant="error" className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+              <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
                 {message}
               </div>
             )}
             {selectedSkill ? (
-              <div data-testid="skill-panel-my-detail-view" className="mt-4 flex-1 overflow-y-auto">
-                <div data-testid="skill-panel-my-detail-status" className="text-sm text-text-muted mb-3">
-                  {detailState === "loading" && t('skills.detailLoading')}
-                  {detailState === "error" && t('skills.detailError')}
+              <div className="mt-4 flex-1 flex flex-col overflow-y-auto" style={{ paddingLeft: '96px', paddingRight: '96px' }}>
+                {/* 加载/错误状态 */}
+                {detailState === "loading" && (
+                  <div className="text-sm text-text-muted mb-3">{t('skills.detailLoading')}</div>
+                )}
+                {detailState === "error" && (
+                  <div className="text-sm text-text-muted mb-3">{t('skills.detailError')}</div>
+                )}
+
+                {/* 面包屑 */}
+                <div className="flex items-center gap-1.5 text-sm text-text-muted mb-4">
+                  <span>{t('skills.title')}</span>
+                  <span className="text-text-muted/40">/</span>
+                  <span>{t('skills.tabs.mySkills')}</span>
+                  <span className="text-text-muted/40">/</span>
+                  <span className="text-text truncate">{selectedSkill.name}</span>
                 </div>
 
-                <div data-testid="skill-panel-my-detail-card" className="rounded-lg border border-border bg-panel p-4">
-                  <div data-testid="skill-panel-my-detail-header" className="flex items-start justify-between gap-4">
-                    <div className="flex items-start gap-3">
-                      <button
-                        onClick={handleBackToList}
-                        data-testid="skill-panel-my-detail-back-btn"
-                        className="flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-secondary/50 "
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-                        </svg>
-                      </button>
-                      <div data-testid="skill-panel-my-detail-avatar" className={`w-10 h-10 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
-                        {getSkillAvatar(selectedSkill.name).firstChar}
-                      </div>
-                      <div>
-                        <div data-testid="skill-panel-my-detail-name" className="text-lg font-semibold text-text-strong">
-                          {selectedSkill.display_name || selectedSkill.name}
-                        </div>
-                        <div data-testid="skill-panel-my-detail-description" className="text-sm text-text-muted mt-1">
-                          {selectedSkill.description || t('skills.noDescription')}
-                        </div>
-                        <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
-                          <span data-testid="skill-panel-my-detail-source-badge" data-variant={selectedSkill.source} className="px-2 py-1 rounded-full bg-secondary border border-border">
-                            {t('skills.sourceLabel')}: {getSourceLabel(selectedSkill.source, t, selectedSkill.is_builtin_source)}
-                          </span>
-                          <span data-testid="skill-panel-my-detail-version-badge" className="px-2 py-1 rounded-full bg-secondary border border-border">
-                            {t('skills.versionLabel')}: {selectedSkill.version || 'unknown'}
-                          </span>
-                          <span data-testid="skill-panel-my-detail-author-badge" className="px-2 py-1 rounded-full bg-secondary border border-border">
-                            {t('skills.authorLabel')}: {selectedSkill.author || 'unknown'}
-                          </span>
-                        </div>
-                      </div>
+                {/* 顶部：返回按钮 + 头像/名称/演进icon + 来源tag + 操作按钮 */}
+                <div className="flex items-center justify-between gap-4 mb-6">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <button
+                      onClick={handleBackToList}
+                      className="flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-secondary/50"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m12 19-7-7 7-7" />
+                        <path d="M19 12H5" />
+                      </svg>
+                    </button>
+                    <div className={`w-9 h-9 rounded-lg ${getSkillAvatar(selectedSkill.name).color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                      {getSkillAvatar(selectedSkill.name).firstChar}
                     </div>
-
-                    <div className="flex flex-col items-end gap-2">
-                      <div className="flex items-center gap-4">
-                        <div data-testid="skill-panel-switch-2" className="flex items-center gap-2">
-                          <span data-testid="skill-panel-my-detail-enabled-label" className="text-sm whitespace-nowrap" style={{ color: 'var(--color-text-primary)' }}>{selectedSkill.enabled === false ? t('skills.mySkillsTabs.disabled') : t('skills.mySkillsTabs.enabled')}</span>
-                          <Switch
-                            checked={selectedSkill.enabled !== false}
-                            onChange={() => toggleSkillDisabled(selectedSkill.name)}
-                            disabled={actionTarget === `toggle:${selectedSkill.name}`}
-                          />
-                        </div>
-                        {renderActionButton(selectedSkill)}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-lg font-semibold text-text-strong truncate">
+                          {selectedSkill.name}
+                        </span>
+                        {selectedSkill.has_evolutions ? (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDetailTab("experience");
+                            }}
+                            className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
+                            title={t('skills.actions.viewEvolution')}
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M11.68 2.009A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673c-.824-.85-1.678-1.731-2.21-3.348"/><circle cx="18" cy="5" r="3"/></svg>
+                          </button>
+                        ) : null}
                       </div>
-                      {renderEvolutionButton(selectedSkill)}
+                      <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                        {selectedSkill.skill_type === 'swarm_skill' ? (
+                          <span className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border text-xs text-text-link">
+                            团队技能
+                          </span>
+                        ) : selectedSkill.skill_type === 'multimodal_skill' ? (
+                          <span className="px-2 h-5 inline-flex items-center rounded border border-border text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
+                            多模态
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
 
-                  <div data-testid="skill-panel-my-detail-tools" className="mt-4">
-                    <div data-testid="skill-panel-my-detail-tools-title" className="text-sm font-medium text-text mb-2">
-                      {t('skills.allowedTools')}
+                  {/* 右侧操作按钮 */}
+                  <div className="flex items-center gap-6 flex-shrink-0">
+                    {/* ... 菜单：编辑/卸载 */}
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setDetailMenuOpen((v) => !v)}
+                        className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                      >
+                        <MoreIcon aria-hidden />
+                      </button>
+                      {detailMenuOpen ? (
+                        <>
+                          <div className="fixed inset-0 z-40" onClick={() => setDetailMenuOpen(false)} />
+                          <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                            <button
+                              onClick={() => {
+                                setDetailMenuOpen(false);
+                                handleEditSkill(selectedSkill.name, selectedSkill.skill_type);
+                              }}
+                              className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                            >
+                              {t('skills.actions.edit')}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setDetailMenuOpen(false);
+                                const plugin = installedSkillMap.get(selectedSkill.name);
+                                handleUninstall(plugin?.plugin_name || selectedSkill.name);
+                              }}
+                              className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                            >
+                              {t('skills.actions.uninstall')}
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
                     </div>
-                    <div className="flex flex-wrap gap-2 text-xs text-text-muted">
-                      {selectedSkill.allowed_tools?.length ? (
-                        selectedSkill.allowed_tools.map((tool) => (
-                          <span
-                            key={tool}
-                            data-testid="skill-panel-my-detail-tool-tag"
-                            className="px-2 py-1 rounded-full bg-secondary border border-border"
-                          >
-                            {tool}
-                          </span>
-                        ))
+                    {/* 启用开关 + 文字 */}
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={selectedSkill.enabled !== false}
+                        onChange={() => toggleSkillDisabled(selectedSkill.name)}
+                        disabled={actionTarget === `toggle:${selectedSkill.name}`}
+                      />
+                      <span className="text-sm text-text-muted whitespace-nowrap">
+                        {selectedSkill.enabled !== false ? t('skills.enable') : t('skills.disable')}
+                      </span>
+                    </div>
+                    {/* 去试试 */}
+                    <button
+                      onClick={() => handleGoToChat(selectedSkill.name)}
+                      className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                      style={{ height: '32px', padding: '0 24px' }}
+                    >
+                      {t('skills.actions.goTry')}
+                    </button>
+                    {/* 发布 */}
+                    <button
+                      onClick={() => setPublishDrawerOpen(true)}
+                      className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                      style={{ height: '32px', padding: '0 24px' }}
+                    >
+                      {t('skills.actions.publish')}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 基本信息 */}
+                <div className="mb-6">
+                  <div className="text-sm font-semibold text-text mb-2">
+                    {t('skills.detail.basicInfo')}
+                  </div>
+                  <div className="text-sm text-text-muted">
+                    {selectedSkill.description || t('skills.noDescription')}
+                  </div>
+                </div>
+
+                {/* 版本管理 */}
+                <div className="mb-6">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="text-sm font-semibold text-text">
+                      {t('skills.detail.versionManage')}
+                    </div>
+                    <button
+                      onClick={() => fetchSkillVersions(selectedSkill.name)}
+                      disabled={versionsLoadState === 'loading'}
+                      className="flex items-center justify-center w-5 h-5 text-text-muted hover:text-text disabled:opacity-50"
+                      title={t('common.refresh')}
+                    >
+                      <svg className={`w-4 h-4 ${versionsLoadState === 'loading' ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.582m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                    </button>
+                  </div>
+                  {versionsLoadState === 'loading' ? (
+                    <div className="text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
+                  ) : versionsLoadState === 'error' ? (
+                    <div className="text-sm text-text-muted">{t('skills.detail.versionsLoadFailed', { defaultValue: '版本加载失败' })}</div>
+                  ) : skillVersions.length === 0 ? (
+                    <div className="text-sm text-text-muted">
+                      {selectedSkill.version ? `v${selectedSkill.version}` : (t('skills.detail.noVersions', { defaultValue: '暂无版本记录' }))}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        value={selectedSkill.version || skillVersionsDefault || ''}
+                        onChange={(e) => {
+                          const ver = e.target.value;
+                          if (ver) fetchSkillDetail(selectedSkill.name);
+                        }}
+                        className="appearance-none rounded-[6px] border border-border bg-panel text-sm text-text outline-none focus:outline-none focus:ring-0 focus:border-border"
+                        style={{ width: '360px', height: '28px', paddingLeft: '12px', paddingRight: '12px' }}
+                      >
+                        {skillVersions.map((v) => (
+                          <option key={v.version} value={v.version}>
+                            {v.version}{v.is_default ? ` (${'默认'})` : ''}{!v.available ? ` (${'不可用'})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {selectedSkill.has_evolutions ? (
+                        <button
+                          onClick={() => handleRebuild(selectedSkill.name, selectedSkill.version || null)}
+                          disabled={rebuildLoading}
+                          className="flex items-center justify-center rounded-[6px] text-xs text-text-muted border border-border hover:bg-secondary whitespace-nowrap disabled:opacity-50"
+                          style={{ height: '28px', padding: '0 12px' }}
+                        >
+                          {rebuildLoading ? (t('common.processing', { defaultValue: '处理中…' })) : (t('skills.actions.rebuild', { defaultValue: '重建' }))}
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+
+                {/* 三个页签 */}
+                <div className="flex-1 flex flex-col min-h-0">
+                  <div className="flex items-center mb-4 flex-shrink-0">
+                    <div className="flex items-center gap-8 flex-1 border-b border-border">
+                      <button
+                        onClick={() => setDetailTab("content")}
+                        className={`pb-2 text-sm ${
+                          detailTab === "content"
+                            ? "text-text font-semibold border-b-2 border-text"
+                            : "text-text-muted hover:text-text"
+                        }`}
+                      >
+                        {t('skills.detail.tabs.contentDetail')}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setDetailTab("files");
+                          fetchSkillFiles(selectedSkill.name);
+                        }}
+                        className={`pb-2 text-sm ${
+                          detailTab === "files"
+                            ? "text-text font-semibold border-b-2 border-text"
+                            : "text-text-muted hover:text-text"
+                        }`}
+                      >
+                        {t('skills.detail.tabs.filePreview')}
+                      </button>
+                      {selectedSkill.has_evolutions ? (
+                        <button
+                          onClick={() => setDetailTab("experience")}
+                          className={`pb-2 text-sm ${
+                            detailTab === "experience"
+                              ? "text-text font-semibold border-b-2 border-text"
+                              : "text-text-muted hover:text-text"
+                          }`}
+                        >
+                          {t('skills.detail.tabs.skillExperience')}
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {/* 合成新版本按钮（仅技能经验页签时显示） */}
+                    {detailTab === "experience" && selectedSkill.has_evolutions ? (
+                      <button
+                        onClick={() => handleRebuild(selectedSkill.name, selectedSkill.version || null)}
+                        disabled={rebuildLoading}
+                        onMouseEnter={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          setSynthesizeTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                        }}
+                        onMouseLeave={() => setSynthesizeTooltip(null)}
+                        className="mb-1 flex items-center justify-center rounded-[16px] text-xs font-medium text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap disabled:opacity-50"
+                        style={{ width: '118px', height: '32px' }}
+                      >
+                        {rebuildLoading ? (t('common.processing', { defaultValue: '处理中…' })) : (t('skills.actions.synthesizeNewVersion'))}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  {/* 内容详情 */}
+                  {detailTab === "content" && (
+                    <div className="flex-1 min-h-0 overflow-y-auto text-sm text-text bg-secondary border border-border rounded-md p-3">
+                      {selectedSkill.content ? (
+                        <MarkdownRenderer content={transformSkillContentImages(selectedSkill.content, selectedSkill.file_path)} className="chat-text chat-markdown" />
                       ) : (
-                        <span data-testid="skill-panel-my-detail-tools-empty" className="text-text-muted">{t('skills.unlimited')}</span>
+                        t('skills.noContent')
                       )}
                     </div>
-                  </div>
+                  )}
 
-                  <div data-testid="skill-panel-my-detail-content-preview" className="mt-4">
-                    <div data-testid="skill-panel-my-detail-content-title" className="text-sm font-medium text-text mb-2">
-                      {t('skills.contentPreview')}
+                  {/* 文件预览 */}
+                  {detailTab === "files" && (
+                    <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,3fr)_minmax(0,7fr)] gap-3">
+                      <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+                        <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between">
+                          <span className="text-sm font-medium text-text">{t('skills.detail.fileTree', { defaultValue: '文件列表' })}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{skillFiles.filter(f => f.type === 'file').length} 文件</span>
+                            <button type="button" onClick={() => selectedSkill && fetchSkillFiles(selectedSkill.name)} className="text-xs text-text-muted hover:text-text px-2 py-0.5 rounded border border-border hover:bg-secondary">{t('common.refresh', { defaultValue: '刷新' })}</button>
+                          </div>
+                        </div>
+                        <div className="flex-1 overflow-auto p-2">
+                          {filesLoadState === 'loading' ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('common.loading', { defaultValue: '加载中…' })}</div>
+                          ) : filesLoadState === 'error' ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.filesLoadFailed', { defaultValue: '文件列表加载失败' })}</div>
+                          ) : skillFiles.length === 0 ? (
+                            <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('skills.detail.noFiles', { defaultValue: '暂无文件' })}</div>
+                          ) : (
+                            <div className="space-y-0.5">{skillFileTree.children.map(child => renderFileTree(child, 0))}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
+                        {filePreview ? (
+                          <>
+                            <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center justify-between flex-shrink-0">
+                              <span className="text-sm font-medium text-text truncate">{filePreview.path.split('/').pop()}</span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.mime_type || ''}</span>
+                                {filePreview.size != null ? <span className="text-[10px] mono px-2 py-0.5 rounded-full border border-border bg-secondary/60">{filePreview.size > 1024 ? `${Math.ceil(filePreview.size / 1024)} KB` : `${filePreview.size} B`}</span> : null}
+                                {filePreview.download_url ? <a href={filePreview.download_url} download className="text-xs text-text-link hover:underline">{t('common.download', { defaultValue: '下载' })}</a> : null}
+                              </div>
+                            </div>
+                            {filePreview.content != null ? (
+                              <pre className="flex-1 min-h-0 overflow-auto text-xs text-text p-3 whitespace-pre-wrap font-mono">{filePreview.content}</pre>
+                            ) : (
+                              <div className="flex-1 flex items-center justify-center text-sm text-text-muted">{filePreview.download_url ? (t('skills.detail.binaryFileDownload', { defaultValue: '此文件无法文本预览，请点击下载' })) : (t('skills.detail.noPreview', { defaultValue: '无法预览此文件' }))}</div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div className="px-3 py-2 bg-secondary/30 border-b border-border flex items-center gap-3 flex-shrink-0">
+                              <span className="h-8 w-8 rounded-lg border border-border bg-card flex items-center justify-center text-text-muted flex-shrink-0">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="h-6 w-6"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+                              </span>
+                              <div>
+                                <h4 className="text-sm font-medium text-text">{t('skills.detail.contentPreview', { defaultValue: '内容预览' })}</h4>
+                                <p className="text-xs text-text-muted mt-0.5">{t('skills.detail.selectFileToPreview', { defaultValue: '请选择左侧文件进行预览' })}</p>
+                              </div>
+                            </div>
+                            <div className="flex-1 min-h-0 flex items-center justify-center">
+                              <div className="text-center text-text-muted"><div className="mb-2 text-sm">{t('skills.detail.selectFileToPreview', { defaultValue: '请选择左侧文件进行预览' })}</div></div>
+                            </div>
+                          </>
+                        )}
+                      </div>
                     </div>
-                    <div data-testid="skill-panel-my-detail-content-text" className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                      {selectedSkill.content || t('skills.noContent')}
+                  )}
+
+                  {/* 技能经验 */}
+                  {detailTab === "experience" && selectedSkill.has_evolutions && (
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      {evolutionMessage && (
+                        <div
+                          className={`mb-3 px-3 py-2 rounded-md text-sm ${
+                            evolutionMessageType === "error"
+                              ? "bg-secondary text-danger"
+                              : "bg-secondary text-text"
+                          }`}
+                        >
+                          {evolutionMessage}
+                        </div>
+                      )}
+
+                      {evolutionFormatError && (
+                        <div className="mb-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+                          {evolutionFormatError}
+                        </div>
+                      )}
+
+                      {evolutionListState === "loading" && (
+                        <div className="flex items-center justify-center text-text-muted">{t('common.loading')}</div>
+                      )}
+                      {evolutionListState === "error" && (
+                        <div className="text-sm text-text-muted">
+                          {t('skills.evolution.errors.loadFailed')}
+                        </div>
+                      )}
+                      {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length === 0 && (
+                        <div className="text-sm text-text-muted">
+                          {t('skills.evolution.empty')}
+                        </div>
+                      )}
+
+                      {evolutionListState === "success" && !evolutionFormatError && sortedEvolutionEntries.length > 0 && (
+                        <div className="space-y-4">
+                          {sortedEvolutionEntries.map((entry) => (
+                            <div
+                              key={entry.id}
+                              className="border border-border py-4 px-4"
+                              style={{ backgroundColor: '#FAFAFA', borderRadius: '8px' }}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 text-xs space-y-1 w-[90%]">
+                                <div className="grid grid-cols-3 gap-4">
+                                  <div>
+                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.section')}:</span>
+                                    <span className="ml-1" style={{ color: '#191919' }}>{entry.change?.section || "-"}</span>
+                                  </div>
+                                  <div>
+                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.target')}:</span>
+                                    <span className="ml-1" style={{ color: '#191919' }}>{entry.change?.target || "-"}</span>
+                                  </div>
+                                  <div>
+                                    <span style={{ color: '#777777' }}>{t('skills.evolution.fields.timestamp')}:</span>
+                                    <span className="ml-1" style={{ color: '#191919' }}>
+                                      {entry.timestamp ? new Date(entry.timestamp).toLocaleString(i18n.language) : "-"}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleEvolutionDeleteEntry(entry.id)}
+                                  className="w-7 h-7 flex items-center justify-center rounded-lg hover:opacity-80"
+                                  style={{ color: '#191919' }}
+                                  title={t('skills.evolution.actions.delete')}
+                                >
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+
+                              <div className="mt-3">
+                                <textarea
+                                  value={entry.change?.content || ""}
+                                  onChange={(event) => handleEvolutionContentChange(entry.id, event.target.value)}
+                                  className="w-full min-h-28 px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
             ) : (
-              <div data-testid="skill-panel-my-list-view" className="mt-4 flex flex-col flex-1 min-h-0">
-                <div data-testid="skill-panel-my-tabs-row" className="flex items-center gap-3 flex-shrink-0">
-                  <div data-testid="skill-panel-my-tabs" className="flex items-center gap-2">
-                    <button
-                      onClick={() => setMySkillsSubTab("all")}
-                      data-testid="skill-panel-my-tab-all"
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "all"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.all')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("enabled")}
-                      data-testid="skill-panel-my-tab-enabled"
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "enabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.enabled')}
-                    </button>
-                    <button
-                      onClick={() => setMySkillsSubTab("disabled")}
-                      data-testid="skill-panel-my-tab-disabled"
-                      className={`px-4 text-sm font-medium  ${
-                        mySkillsSubTab === "disabled"
-                          ? "rounded-[8px] bg-secondary h-8 text-text"
-                          : "text-text-muted hover:text-text"
-                      }`}
-                    >
-                      {t('skills.mySkillsTabs.disabled')}
-                    </button>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <input
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                      data-testid="skill-panel-my-search-input"
-                      placeholder={t('skills.searchPlaceholder')}
-                      className="w-full px-3 py-2 rounded-md bg-panel border border-border text-sm text-text placeholder:text-text-muted"
-                    />
-                  </div>
-                  <div data-testid="skill-panel-my-total-count" className="text-xs text-text-muted flex-shrink-0">
-                    {t('skills.totalCount', { count: getMySkillsFiltered().length })}
-                  </div>
+              <div className="mt-4 flex flex-col flex-1 min-h-0">
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {renderSkillTypeCapsules()}
                 </div>
 
-                <div data-testid="skill-panel-my-list" data-variant={viewMode} className={`mt-4 flex-1 min-h-0 overflow-y-auto ${viewMode === "grid" ? "flex flex-wrap gap-4 content-start" : "space-y-3"}`}>
-                  {listState === "loading" && (
-                    <div data-testid="skill-panel-my-loading" className="flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
-                  )}
-                  {listState === "error" && (
-                    <div data-testid="skill-panel-my-error" className="text-sm text-text-muted">
-                      {t('skills.listError')}
-                    </div>
-                  )}
-                  {listState === "success" && getMySkillsFiltered().length === 0 && (
-                    <div data-testid="skill-panel-my-empty" data-variant={mySkillsSubTab} className="text-sm text-text-muted">
-                      {mySkillsSubTab === "disabled" ? t('skills.noDisabledSkills') :
-                       mySkillsSubTab === "enabled" ? t('skills.noEnabledSkills') :
-                       t('skills.noMatches')}
-                    </div>
-                  )}
+                {listState === "success" && getMySkillsFiltered().length === 0 ? (
+                  <div className="mt-4 text-sm text-text-muted">
+                    {mySkillsSubTab === "disabled" ? t('skills.noDisabledSkills') :
+                     mySkillsSubTab === "enabled" ? t('skills.noEnabledSkills') :
+                     t('skills.noMatches')}
+                  </div>
+                ) : (
+                  <div className="mt-4 flex-1 min-h-0 overflow-y-auto grid justify-center items-start gap-4" style={{ gridTemplateColumns: 'repeat(2, 616px)' }}>
+                    {listState === "loading" && (
+                      <div className="col-span-2 flex items-center justify-center h-full text-text-muted">{t('common.loading')}</div>
+                    )}
+                    {listState === "error" && (
+                      <div className="col-span-2 text-sm text-text-muted">
+                        {t('skills.listError')}
+                      </div>
+                    )}
                   {listState === "success" &&
                     getMySkillsFiltered().map((skill) => {
                       const avatar = getSkillAvatar(skill.name);
-                      const displayName = skill.display_name || skill.name;
                       const isDisabled = skill.enabled === false;
                       const isToggling = actionTarget === `toggle:${skill.name}`;
+                      const isPackage = isSkillPackage(skill);
+                      const isPinned = pinnedSkillNames.has(skill.name);
+                      const isMenuOpen = openMenuSkillName === skill.name;
+                      const listKey = skill.path || `${skill.source || "local"}:${skill.name}`;
                       return (
                         <div
-                          key={skill.name}
+                          key={listKey}
                           onClick={() => handleOpenSkill(skill.name)}
-                          data-testid="skill-panel-my-skill-card" data-variant={viewMode}
-                          className={`text-left border border-border bg-panel hover:bg-card  cursor-pointer ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
-                          style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
+                          className="group relative text-left border border-border bg-panel hover:bg-card cursor-pointer rounded-[8px] pt-6 pb-4 px-4 flex flex-col min-w-0 overflow-visible"
+                          style={{ height: "156px", width: '616px' }}
                         >
-                          {viewMode === "list" ? (
-                            <div className="flex items-center justify-between gap-4">
-                              <div className="flex items-center gap-3 min-w-0 flex-1">
-                                <div data-testid="skill-panel-my-skill-avatar" className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold`}>
-                                  {avatar.firstChar}
-                                </div>
-                                <div className="min-w-0">
-                                  <div data-testid="skill-panel-my-skill-name" className="text-base font-semibold text-text-strong">
-                                    {displayName}
-                                  </div>
-                                  <div data-testid="skill-panel-my-skill-description" className="text-sm text-text-muted mt-1 line-clamp-3">
-                                    {skill.description || t('skills.noDescription')}
-                                  </div>
-                                  <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
-                                    <span data-testid="skill-panel-my-skill-source-badge" data-variant={skill.source} className="px-2 py-1 rounded-full bg-secondary border border-border">
-                                      {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source)}
-                                    </span>
-                                    <span data-testid="skill-panel-my-skill-status-badge" className="px-2 py-1 rounded-full bg-secondary border border-border">
-                                      {t('skills.statusLabel')}: {renderStatus(skill)}
-                                    </span>
-                                  </div>
-                                </div>
+                          {/* 上盒子：头像 + 名称/演进 + 来源 + 悬浮按钮 */}
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`w-9 h-9 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
+                              {avatar.firstChar}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-sm font-semibold text-text-strong truncate leading-5">
+                                  {skill.name}
+                                </span>
+                                {skill.has_evolutions ? (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleOpenSkill(skill.name);
+                                      setDetailTab("experience");
+                                    }}
+                                    className="relative shrink-0 w-5 h-5 flex items-center justify-center text-text-muted hover:text-text"
+                                    title={t('skills.actions.viewEvolution')}
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="lucide lucide-bell-dot-icon lucide-bell-dot"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M11.68 2.009A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673c-.824-.85-1.678-1.731-2.21-3.348"/><circle cx="18" cy="5" r="3"/></svg>
+                                  </button>
+                                ) : null}
                               </div>
-                              <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                                {renderEvolutionButton(skill)}
-                                <div data-testid="skill-panel-switch-3" className="flex items-center gap-2">
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
-                                    disabled={isToggling}
-                                  />
-                                </div>
+                              <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                                {skill.skill_type === 'swarm_skill' ? (
+                                  <span className="px-2 h-5 inline-flex items-center rounded bg-accent/10 border border-border truncate text-xs text-text-link">
+                                    团队技能
+                                  </span>
+                                ) : skill.skill_type === 'multimodal_skill' ? (
+                                  <span className="px-2 h-5 inline-flex items-center rounded border border-border truncate text-xs" style={{ backgroundColor: '#D5F2DC', color: '#029931' }}>
+                                    多模态
+                                  </span>
+                                ) : null}
+                                {activeTab === "my" ? (
+                                  <span className="px-2 h-5 inline-flex items-center rounded bg-secondary border border-border truncate text-xs text-text-muted">
+                                    未发布
+                                  </span>
+                                ) : null}
                               </div>
                             </div>
-                          ) : (
-                            <>
-                              <div className="flex items-start gap-3 flex-shrink-0">
-                                <div data-testid="skill-panel-my-skill-avatar" className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-text-inverse font-semibold text-sm`}>
-                                  {avatar.firstChar}
+                            {/* 悬浮按钮 + 始终显示的启用开关 */}
+                            <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <div className="relative">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOpenMenuSkillName(isMenuOpen ? null : skill.name);
+                                    }}
+                                    className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                                  >
+                                    <MoreIcon aria-hidden />
+                                  </button>
+                                  {isMenuOpen ? (
+                                    <>
+                                      <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setOpenMenuSkillName(null); }} />
+                                      <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-lg border border-border bg-panel shadow-lg py-1">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            togglePinSkill(skill.name);
+                                            setOpenMenuSkillName(null);
+                                          }}
+                                          className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                        >
+                                          {isPinned
+                                            ? (isPackage ? t('skills.actions.unpinSkillPackage') : t('skills.actions.unpinSkill'))
+                                            : (isPackage ? t('skills.actions.pinSkillPackage') : t('skills.actions.pinSkill'))}
+                                        </button>
+                                        {!isPackage ? (
+                                          <button
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setOpenMenuSkillName(null);
+                                              handleEditSkill(skill.name, skill.skill_type);
+                                            }}
+                                            className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                          >
+                                            {t('skills.actions.edit')}
+                                          </button>
+                                        ) : null}
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setOpenMenuSkillName(null);
+                                            const plugin = installedSkillMap.get(skill.name);
+                                            handleUninstall(plugin?.plugin_name || skill.name);
+                                          }}
+                                          className="flex items-center w-full px-3 py-2 text-sm text-left text-text hover:bg-secondary"
+                                        >
+                                          {t('skills.actions.uninstall')}
+                                        </button>
+                                      </div>
+                                    </>
+                                  ) : null}
                                 </div>
-                                <div className="min-w-0 flex-1">
-                                  <div data-testid="skill-panel-my-skill-name" className="text-sm font-semibold text-text-strong truncate">
-                                    {displayName}
-                                  </div>
-                                  <div data-testid="skill-panel-my-skill-description" className="text-xs text-text-muted mt-1 line-clamp-2">
-                                    {skill.description || t('skills.noDescription')}
-                                  </div>
-                                </div>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleGoToChat(skill.name);
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    setGoTryTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                                  }}
+                                  onMouseLeave={() => setGoTryTooltip(null)}
+                                  className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+                                >
+                                  <NewConversationIcon aria-hidden width="16" height="16" />
+                                </button>
                               </div>
-                              <div className="flex flex-wrap gap-1.5 mt-2 flex-shrink-0 text-xs text-text-muted">
-                                <span data-testid="skill-panel-my-skill-source-badge" data-variant={skill.source} className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source)}
-                                </span>
-                                <span data-testid="skill-panel-my-skill-status-badge" className="px-2 py-0.5 rounded-full bg-secondary border border-border truncate">
-                                  {t('skills.statusLabel')}: {renderStatus(skill)}
-                                </span>
-                              </div>
-                              <div className="flex items-center mt-auto pt-2 gap-2 flex-shrink-0" style={{ width: "100%" }}>
-                                <div className="flex gap-1.5 flex-1">
-                                  {renderEvolutionButton(skill)}
-                                </div>
-                                <div data-testid="skill-panel-switch-4" className="flex items-center gap-2">
-                                  <Switch
-                                    checked={!isDisabled}
-                                    onChange={() => toggleSkillDisabled(skill.name)}
-                                    disabled={isToggling}
-                                  />
-                                </div>
-                              </div>
-                            </>
-                          )}
+                              <Switch
+                                checked={!isDisabled}
+                                onChange={() => toggleSkillDisabled(skill.name)}
+                                disabled={isToggling}
+                              />
+                            </div>
+                          </div>
+                          {/* 下盒子：描述 */}
+                          <div className="text-xs text-text-muted mt-4 line-clamp-2">
+                            {skill.description || t('skills.noDescription')}
+                          </div>
                         </div>
                       );
                     })}
                 </div>
+            )}
               </div>
             )}
           </>
@@ -2508,18 +3370,538 @@ export function SkillPanel({
           await fetchSkills();
         }}
       />
-      <SkillEvolutionModal
-        open={evolutionModalOpen}
-        sessionId={sessionId}
-        skillName={evolutionSkillName}
-        onClose={handleCloseEvolution}
-        onSaved={async () => {
-          await fetchSkills();
-          if (selectedSkill) {
-            await fetchSkillDetail(selectedSkill.name);
-          }
-        }}
-      />
+      {/* 上传技能弹窗 */}
+      {uploadSkillModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/60"
+            onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
+            aria-label={t('skills.uploadSkillModal.cancel')}
+          />
+          <div
+            className="relative overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise flex flex-col"
+            style={{ width: '550px' }}
+          >
+            {/* 头部 */}
+            <div className="flex items-center justify-between gap-3 px-5 py-3 bg-panel">
+              <span className="text-lg font-semibold text-text-strong">
+                {t('skills.uploadSkillModal.title')}
+              </span>
+              <button
+                type="button"
+                onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
+                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* 提示行 */}
+            <div className="px-5 pt-3">
+              <div
+                className="flex items-start gap-1.5 rounded-[8px] px-3 py-2 text-xs text-text"
+                style={{ backgroundColor: '#DEECFF', width: '502px' }}
+              >
+                <svg className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#1476FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <circle cx="12" cy="12" r="10" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
+                </svg>
+                <span className="leading-4">{t('skills.uploadSkillModal.notice')}</span>
+              </div>
+            </div>
+            {/* 文件上传拖动框 */}
+            <div className="px-5 pt-3 pb-5">
+              <label
+                onDragOver={(e) => { e.preventDefault(); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const file = e.dataTransfer.files[0];
+                  if (file) {
+                    // Electron 环境下 file.path 可获取完整路径
+                    const path = (file as File & { path?: string }).path || file.name;
+                    setUploadSkillPath(path);
+                  }
+                }}
+                className="flex flex-col items-center justify-center gap-2 rounded-[12px] border border-dashed border-border cursor-pointer hover:bg-[#EEEEEE]"
+                style={{ width: '502px', height: '160px', backgroundColor: '#F5F5F5' }}
+              >
+                <svg className="w-10 h-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                </svg>
+                <span className="text-sm text-text-muted">
+                  {uploadSkillPath.trim()
+                    ? uploadSkillPath
+                    : t('skills.uploadSkillModal.dropHint')}
+                </span>
+                <input
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const path = (file as File & { path?: string }).path || file.name;
+                      setUploadSkillPath(path);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            {/* 底部按钮 */}
+            <div className="flex items-center justify-end gap-3 px-5 py-3 bg-panel">
+              <button
+                type="button"
+                onClick={() => { setUploadSkillModalOpen(false); setUploadSkillPath(""); }}
+                className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.uploadSkillModal.cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={!uploadSkillPath.trim() || actionTarget === "import_local"}
+                onClick={() => {
+                  const path = uploadSkillPath;
+                  setUploadSkillModalOpen(false);
+                  setUploadSkillPath("");
+                  handleImportLocal(path);
+                }}
+                className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
+                  !uploadSkillPath.trim() || actionTarget === "import_local"
+                    ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'
+                    : 'text-text-inverse bg-[#191919] hover:opacity-80'
+                }`}
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.uploadSkillModal.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 知识转技能弹窗 */}
+      {docToSkillModalOpen && (() => {
+        const isDocConfirmDisabled = docToSkillSource === "local" ? !docToSkillPath.trim() : !docToSkillLink.trim();
+        return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/60"
+            onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
+            aria-label={t('skills.docToSkillModal.cancel')}
+          />
+          <div
+            className="relative overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise flex flex-col"
+            style={{ width: '550px' }}
+          >
+            {/* 头部 */}
+            <div className="flex items-center justify-between gap-3 px-5 pt-3 pb-0 bg-panel">
+              <span className="text-lg font-semibold text-text-strong">
+                {t('skills.docToSkillModal.title')}
+              </span>
+              <button
+                type="button"
+                onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
+                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* 副标题 */}
+            <div className="px-5">
+              <span className="text-xs text-text-muted">{t('skills.docToSkillModal.subtitle')}</span>
+            </div>
+            {/* 来源 */}
+            <div className="px-5 pt-4">
+              <span className="block text-sm font-medium text-text mb-2">
+                {t('skills.docToSkillModal.sourceLabel')}
+              </span>
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={docToSkillSource === "local"}
+                    onChange={() => setDocToSkillSource("local")}
+                    className="w-3.5 h-3.5 accent-[#1476ff]"
+                  />
+                  <span className="text-sm text-text">{t('skills.docToSkillModal.sourceLocal')}</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="radio"
+                    checked={docToSkillSource === "link"}
+                    onChange={() => setDocToSkillSource("link")}
+                    className="w-3.5 h-3.5 accent-[#1476ff]"
+                  />
+                  <span className="text-sm text-text">{t('skills.docToSkillModal.sourceLink')}</span>
+                </label>
+              </div>
+            </div>
+            {/* 本地上传 */}
+            {docToSkillSource === "local" && (
+              <div className="px-5 pt-3">
+                <label
+                  onDragOver={(e) => { e.preventDefault(); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files[0];
+                    if (file) {
+                      const path = (file as File & { path?: string }).path || file.name;
+                      setDocToSkillPath(path);
+                    }
+                  }}
+                  className="flex flex-col items-center justify-center gap-2 rounded-[12px] border border-dashed border-border cursor-pointer hover:bg-[#EEEEEE]"
+                  style={{ width: '502px', height: '160px', backgroundColor: '#F5F5F5' }}
+                >
+                  <svg className="w-10 h-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                  </svg>
+                  <span className="text-sm text-text-muted whitespace-pre-line text-center">
+                    {docToSkillPath.trim()
+                      ? docToSkillPath
+                      : t('skills.docToSkillModal.dropHint')}
+                  </span>
+                  <input
+                    type="file"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const path = (file as File & { path?: string }).path || file.name;
+                        setDocToSkillPath(path);
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            )}
+            {/* 链接 */}
+            {docToSkillSource === "link" && (
+              <div className="px-5 pt-3">
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span className="text-sm font-medium text-text">
+                    {t('skills.docToSkillModal.linkLabel')}
+                  </span>
+                  <span
+                    onMouseEnter={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setDocToSkillTooltip({ left: rect.left + rect.width / 2, top: rect.top });
+                    }}
+                    onMouseLeave={() => setDocToSkillTooltip(null)}
+                    className="w-4 h-4 flex items-center justify-center text-text-muted cursor-help"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                      <circle cx="12" cy="12" r="10" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3M12 17h.01" />
+                    </svg>
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  value={docToSkillLink}
+                  onChange={(e) => setDocToSkillLink(e.target.value)}
+                  placeholder={t('skills.docToSkillModal.linkPlaceholder')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                  style={{ maxWidth: '502px' }}
+                />
+              </div>
+            )}
+            {/* 技能描述 */}
+            <div className="px-5 pt-4">
+              <span className="block text-sm font-medium text-text mb-1.5">
+                {t('skills.docToSkillModal.descLabel')}
+              </span>
+              <input
+                type="text"
+                value={docToSkillDesc}
+                onChange={(e) => setDocToSkillDesc(e.target.value)}
+                placeholder={t('skills.docToSkillModal.descPlaceholder')}
+                className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                style={{ maxWidth: '502px' }}
+              />
+            </div>
+            {/* 底部按钮 */}
+            <div className="flex items-center justify-end gap-3 px-5 pt-4 pb-4 bg-panel">
+              <button
+                type="button"
+                onClick={() => { setDocToSkillModalOpen(false); setDocToSkillPath(""); setDocToSkillLink(""); setDocToSkillDesc(""); }}
+                className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.docToSkillModal.cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={isDocConfirmDisabled}
+                onClick={() => {
+                  const path = docToSkillSource === "local" ? docToSkillPath : docToSkillLink;
+                  setDocToSkillModalOpen(false);
+                  setDocToSkillPath("");
+                  setDocToSkillLink("");
+                  setDocToSkillDesc("");
+                  handleImportLocal(path);
+                }}
+                className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
+                  isDocConfirmDisabled
+                    ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'
+                    : 'text-text-inverse bg-[#191919] hover:opacity-80'
+                }`}
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.docToSkillModal.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
+      {synthesizeTooltip && (
+        <div
+          className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
+          style={{
+            left: synthesizeTooltip.left,
+            top: synthesizeTooltip.top - 50 - 6,
+            transform: 'translateX(-50%)',
+          }}
+        >
+          {t('skills.actions.synthesizeTooltip')}
+        </div>
+      )}
+      {goTryTooltip && (
+        <div
+          className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
+          style={{
+            left: goTryTooltip.left,
+            top: goTryTooltip.top - 50 - 6,
+            transform: 'translateX(-50%)',
+          }}
+        >
+          {t('skills.actions.goTry')}
+        </div>
+      )}
+      {docToSkillTooltip && (
+        <div
+          className="fixed whitespace-nowrap rounded-[8px] h-[50px] flex items-center px-2.5 text-xs text-text bg-[var(--color-surface-popover)] border border-border shadow-lg pointer-events-none z-[9999]"
+          style={{
+            left: docToSkillTooltip.left,
+            top: docToSkillTooltip.top - 50 - 6,
+            transform: 'translateX(-50%)',
+          }}
+        >
+          {t('skills.docToSkillModal.linkTooltip')}
+        </div>
+      )}
+      {/* 发布技能右侧弹窗 */}
+      {publishDrawerOpen && selectedSkill && (() => {
+        const isPublishDisabled = !publishName || !publishSkillName || !publishVersion || !publishDisplayName || !publishSha256;
+        return (
+        <>
+          <div
+            className="fixed inset-0 z-[9998] bg-black/30"
+            onClick={() => setPublishDrawerOpen(false)}
+          />
+          <div
+            className="fixed top-0 right-0 bottom-0 z-[9999] bg-panel border-l border-border shadow-2xl flex flex-col"
+            style={{ width: '550px' }}
+          >
+            {/* 头部（无分割线） */}
+            <div className="flex items-center justify-between px-6 pt-4 pb-2 flex-shrink-0">
+              <span className="text-base font-semibold text-text-strong">
+                {t('skills.publishForm.title')}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPublishDrawerOpen(false)}
+                className="w-7 h-7 flex items-center justify-center rounded-md hover:bg-secondary text-text-muted hover:text-text"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* 提示行（标题下方，可关闭） */}
+            {publishNoticeVisible && (
+              <div
+                className="mx-6 mb-2 flex items-center gap-1.5 rounded-[6px] px-3 text-xs text-text flex-shrink-0"
+                style={{ backgroundColor: '#DEECFF', height: '34px' }}
+              >
+                <svg className="w-3.5 h-3.5 shrink-0 text-[#1476FF]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <circle cx="12" cy="12" r="10" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4M12 16h.01" />
+                </svg>
+                <span>{t('skills.publishForm.noticeText')}</span>
+                <a
+                  href={t('skills.publishForm.noticeUrl')}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-0.5 text-[#1476FF] hover:underline"
+                >
+                  {t('skills.publishForm.noticeView')}
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14 5h5v5M19 5l-9 9M19 14v5a1 1 0 01-1 1H6a1 1 0 01-1-1V7a1 1 0 011-1h5" />
+                  </svg>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPublishNoticeVisible(false)}
+                  className="ml-auto w-5 h-5 flex items-center justify-center rounded hover:bg-[#1476FF]/10 text-text-muted hover:text-text"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            )}
+            {/* 表单内容 */}
+            <div className="flex-1 overflow-y-auto px-6 py-2 space-y-4">
+              {/* 名称（下拉框） */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.name')}
+                </label>
+                <select
+                  value={publishName}
+                  onChange={(e) => setPublishName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                >
+                  <option value="">{t('skills.publishForm.placeholderSelect')}</option>
+                  {skills.map((s) => (
+                    <option key={s.name} value={s.name}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              {/* 技能名 */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.skillName')}
+                </label>
+                <input
+                  type="text"
+                  value={publishSkillName}
+                  onChange={(e) => setPublishSkillName(e.target.value)}
+                  placeholder={t('skills.publishForm.placeholderSelect')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                />
+              </div>
+              {/* 版本号 */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.version')}
+                </label>
+                <input
+                  type="text"
+                  value={publishVersion}
+                  onChange={(e) => setPublishVersion(e.target.value)}
+                  placeholder={t('skills.publishForm.placeholderSelect')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                />
+              </div>
+              {/* 显示名 */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.displayName')}
+                </label>
+                <input
+                  type="text"
+                  value={publishDisplayName}
+                  onChange={(e) => setPublishDisplayName(e.target.value)}
+                  placeholder={t('skills.publishForm.placeholderSelect')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                />
+              </div>
+              {/* 描述（可选） */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.descriptionOptional')}
+                </label>
+                <textarea
+                  defaultValue={selectedSkill.description || ""}
+                  placeholder={t('skills.publishForm.placeholderSelect')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text min-h-[72px]"
+                />
+              </div>
+              {/* 标签（可选） */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.tagsOptional')}
+                </label>
+                <input
+                  type="text"
+                  defaultValue={coerceStringList(selectedSkill.tags).join(", ")}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text"
+                />
+              </div>
+              {/* Skill图标（可选）- 图片上传框 */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.skillIconOptional')}
+                </label>
+                <div
+                  className="flex items-center justify-center rounded-[6px] border border-dashed border-border bg-secondary/30 cursor-pointer hover:bg-secondary/50"
+                  style={{ width: '100px', height: '100px' }}
+                >
+                  <svg className="w-8 h-8 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 3.75h16.5a1.5 1.5 0 011.5 1.5v13.5a1.5 1.5 0 01-1.5 1.5H3.75a1.5 1.5 0 01-1.5-1.5V5.25a1.5 1.5 0 011.5-1.5z" />
+                  </svg>
+                </div>
+                <span className="block mt-1.5 text-xs text-text-muted">
+                  {t('skills.publishForm.skillIconHint')}
+                </span>
+              </div>
+              {/* SHA-256 校验 */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.sha256')}
+                </label>
+                <input
+                  type="text"
+                  value={publishSha256}
+                  onChange={(e) => setPublishSha256(e.target.value)}
+                  placeholder={t('skills.publishForm.placeholderSha256')}
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text font-mono"
+                />
+              </div>
+              {/* 版本说明（Swarm Skill，可选） */}
+              <div>
+                <label className="block text-sm font-medium text-text mb-1.5">
+                  {t('skills.publishForm.versionNoteOptional')}
+                </label>
+                <textarea
+                  className="w-full px-3 py-2 rounded-[6px] border border-border bg-panel text-sm text-text min-h-[72px]"
+                />
+              </div>
+            </div>
+            {/* 底部按钮 */}
+            <div className="flex items-center justify-end gap-3 px-6 pb-4 pt-2 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setPublishDrawerOpen(false)}
+                className="flex items-center justify-center rounded-[16px] text-sm text-[#191919] bg-white border border-[#191919] hover:bg-secondary/30 whitespace-nowrap"
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.publishForm.cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={isPublishDisabled}
+                onClick={() => setPublishDrawerOpen(false)}
+                className={`flex items-center justify-center rounded-[16px] text-sm whitespace-nowrap transition-colors ${
+                  isPublishDisabled
+                    ? 'bg-[#E0E0E0] text-[#999999] cursor-not-allowed'
+                    : 'text-text-inverse bg-[#191919] hover:opacity-80'
+                }`}
+                style={{ height: '32px', padding: '0 32px' }}
+              >
+                {t('skills.publishForm.publish')}
+              </button>
+            </div>
+          </div>
+        </>
+        );
+      })()}
     </div>
       </>
     );

@@ -1881,7 +1881,7 @@ async def _run(
         path=web_path,
         dual_protocol=web_dual_protocol,
     )
-    web_channel = WebChannel(web_config, _DummyBus())
+    web_channel = WebChannel(web_config, _DummyBus(), agent_client=client)
 
     # 注入 Git diff 监控注册表(设计文档阶段10):
     # 1. 让 ``_mark_git_watcher_dirty`` 能通过 ``channel.git_watcher_registry`` 唤醒轮询
@@ -1892,6 +1892,25 @@ async def _run(
     _git_watcher_registry = get_git_diff_watcher_registry()
     web_channel.git_watcher_registry = _git_watcher_registry
     _git_watcher_registry.set_channel(web_channel)
+
+    # Git watch 状态计算委托：diff 状态、项目解析与工作目录访问都在目标
+    # AgentServer 注入目录完成，Gateway 只做指纹比对与事件推送（方案 §10.6 C）。
+    async def _git_diff_status_fetcher(request: dict):
+        from jiuwenswarm.gateway.routing.e2a_proxy import fetch_git_diff_status
+
+        hunk_paths = request.get("hunk_paths")
+        return await fetch_git_diff_status(
+            agent_client=client,
+            project_id=request.get("project_id"),
+            session_id=request.get("session_id") or None,
+            include_files=request.get("include_files"),
+            include_hunks=request.get("include_hunks"),
+            hunk_paths=list(hunk_paths) if hunk_paths else None,
+            user_id=request.get("user_id"),
+            channel_id="web",
+        )
+
+    _git_watcher_registry.set_diff_status_fetcher(_git_diff_status_fetcher)
 
     _register_web_handlers(
         WebHandlersBindParams(
@@ -2732,7 +2751,28 @@ async def _run(
     # Gateway 进程独立拉取 Zen 免费模型到内存缓存（_models_list 在此进程处理，
     # 与 AgentServer 内存不共享，故各自预热）。失败留空，不阻断启动。
     try:
-        from jiuwenswarm.server.runtime.opencode_zen import warm_zen_free_models
+        from jiuwenswarm.server.runtime.opencode_zen import (
+            warm_zen_free_models,
+            set_main_event_loop,
+            register_models_ready_callback,
+        )
+        # 注册 event loop，供后台重试线程通过 call_soon_threadsafe 调度回调
+        set_main_event_loop(asyncio.get_running_loop())
+
+        # 注册回调：后台重试成功后广播 models.updated 事件，前端自动刷新模型列表
+        async def _on_zen_models_ready():
+            try:
+                web_channel = channel_manager.get_channel("web")
+                if web_channel:
+                    await web_channel.broadcast_event("models.updated", {})
+                    logger.info("[App] broadcasted models.updated: zen free models ready")
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[App] broadcast models.updated failed: %s", e)
+
+        def _models_ready_cb():
+            asyncio.create_task(_on_zen_models_ready())
+
+        register_models_ready_callback(_models_ready_cb)
         await warm_zen_free_models(reason="gateway-startup")
     except Exception as e:  # noqa: BLE001 - 兜底
         logger.warning("[App] zen free models warm failed (non-fatal): %s", e)

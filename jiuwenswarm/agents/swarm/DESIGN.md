@@ -226,12 +226,13 @@ _TOOL_PARAM_BUILDERS: dict[name, (config) -> params]   # send_file / code_extra_
 
 ## 8. assembly.py：enrich 流程
 
-`enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata)`（就地改写 `spec`）：
+`enrich_team_spec_for_swarm(spec, *, session_id, mode, project_dir, request_id, channel_id, request_metadata, agent_group_name)`（就地改写 `spec`）：
 
 1. `register_swarm_providers()`（幂等，把 manifest catalog 驱动注册进 openjiuwen 注册表）；
 2. 用 `get_config()` + 工作区路径 + 进程级 trajectory span processor 建 `SwarmBuildContext`；
 3. 对 `leader` / `teammate` 调 `build_member_deep_agent_spec`，把能力 spec（含烘焙好的 params）折叠到成员 `DeepAgentSpec`；
-4. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
+4. 若指定 `agent_group_name`，加载 AgentGroup，为 Leader 写入模板快照、按通用 teammate spec 派生同名预定义成员，并设置 `team_mode="hybrid"`，保留运行时动态增加成员的能力；
+5. `spec.build_context = base`；`spec.build_context_seed = base.to_seed()`（跨边界重建）。
 
 ---
 

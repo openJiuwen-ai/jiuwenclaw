@@ -87,13 +87,13 @@ minute hour day month weekday
 | **Status** | Task status | Enable/Disable |
 | **Description** | Task content description | Generate today's work reminder |
 | **Wake Offset Seconds** | Wake-up advance seconds, default 0 | `0` (default, no advance wake-up) |
-| **Timeout Seconds** | Execution timeout (60-259200), default 600 for normal modes, 1200 for team modes | `600` (default) |
+| **Timeout Seconds** | Execution timeout (60-259200), default 3600 (1 hour) for both normal and team modes | `3600` (default) |
 | **Delete After Run** | Auto-delete after one execution, default false | `false` (default) |
 | **Delivery Channel** | Result delivery channel (single channel ID) | `tui`, `web`, `feishu`, `wechat`, `wecom`, `whatsapp`, `xiaoyi`, `dingtalk` |
 | **Execution Mode** | Agent execution mode | `agent.fast` (default) |
 | **Project Directory** | Project working directory (absolute path) | `/home/user/my-project`; defaults to current session's project |
 
-> **Timeout Note**: Normal modes like `agent.fast` default to 600 seconds (10 minutes), while Team modes like `team`/`team.plan`/`code.team` default to 1200 seconds (20 minutes). If you need a longer execution time, you can set it when creating.
+> **Timeout Note**: Both normal modes like `agent.fast` and Team modes like `team`/`team.plan`/`code.team` default to 3600 seconds (1 hour). If you need a longer execution time, you can set it when creating.
 
 5. Click **Create**, the task will take effect automatically
 
@@ -329,8 +329,8 @@ When creating jobs from TUI/Web, pass `mode=`. The UI loads supported modes and 
 
 | Mode | Default Timeout |
 |---|---|
-| Normal modes (e.g. `agent.fast`) | 600 s (10 min) |
-| `team` / `team.plan` / `code.team` | 1200 s (20 min) |
+| Normal modes (e.g. `agent.fast`) | 3600 s (1 hour) |
+| `team` / `team.plan` / `code.team` | 3600 s (1 hour) |
 
 If you need a longer execution time, you can specify it when creating:
 ```text

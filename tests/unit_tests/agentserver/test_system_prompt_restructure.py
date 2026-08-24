@@ -799,6 +799,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
     assert [item.id for item in items] == ["session.sess1.runtime.setting"]
     rendered = agent.prompt_attachment_manager.render(items)
     assert "model-x" in rendered
+    assert "Current channel: web" in rendered
     assert "Always respond in English" not in prompt
     assert "# Browser Tool Policy" not in prompt
     assert "## Browser Subagent Rules" not in prompt
@@ -806,7 +807,7 @@ async def test_runtime_dynamic_sections_go_to_prompt_attachment_when_manager_ava
 
 @pytest.mark.asyncio
 async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
-    rail = JiuWenSwarmDeepAdapter._build_subagent_rail()
+    rail = _TestableJiuWenSwarmDeepAdapter()._build_subagent_rail()
     if rail is None:
         pytest.skip("SubagentRail is unavailable with the installed openjiuwen API")
     rail.tools = [object()]
@@ -820,24 +821,34 @@ async def test_browser_policy_is_localized_and_merged_into_task_tool_section():
     )
     await rail.before_model_call(ctx)
 
-    task_section = rail.system_prompt_builder.get_section("task_tool")
-    if task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in task_section.content["en"]
-    assert "## task_tool" not in task_section.content["en"]
-    assert "## Browser Subagent Rules" in task_section.content["en"]
-    assert 'set `subagent_type` to `"browser_agent"`' in task_section.content["en"]
+    section = rail.system_prompt_builder.get_section("subagent_tools")
+    if section is None:
+        section = rail.system_prompt_builder.get_section("task_tool")
+    if section is None:
+        pytest.skip("subagent prompt section is unavailable in this tool configuration")
+    assert "## Browser Subagent Rules" in section.content["en"]
+    assert 'set `subagent_type` to `"browser_agent"`' in section.content["en"]
+    if "task_tool" in section.content["en"] and section.name == "task_tool":
+        assert "# Subagent Usage Rules" in section.content["en"]
+        assert "## task_tool" not in section.content["en"]
+    else:
+        assert "subagent_spawn" in section.content["en"]
     assert not rail.system_prompt_builder.has_section("browser_tool_policy")
     assert "浏览器子智能体规则" in build_browser_task_prompt("cn")
 
     rail.set_channel("tui")
     rail.system_prompt_builder = SystemPromptBuilder(language="en")
     await rail.before_model_call(ctx)
-    non_web_task_section = rail.system_prompt_builder.get_section("task_tool")
-    if non_web_task_section is None:
-        pytest.skip("task_tool prompt section is unavailable in this tool configuration")
-    assert "# Subagent Usage Rules" in non_web_task_section.content["en"]
-    assert "## Browser Subagent Rules" not in non_web_task_section.content["en"]
+    non_web_section = rail.system_prompt_builder.get_section("subagent_tools")
+    if non_web_section is None:
+        non_web_section = rail.system_prompt_builder.get_section("task_tool")
+    if non_web_section is None:
+        pytest.skip("subagent prompt section is unavailable in this tool configuration")
+    if non_web_section.name == "task_tool":
+        assert "# Subagent Usage Rules" in non_web_section.content["en"]
+    else:
+        assert "subagent_spawn" in non_web_section.content["en"]
+    assert "## Browser Subagent Rules" not in non_web_section.content["en"]
 
 
 def test_task_planning_tools_remain_enabled_without_todo_prompt_section():
@@ -1181,7 +1192,14 @@ async def test_skill_retrieval_prompt_hides_legacy_list_skill(monkeypatch):
     assert agent.ability_manager.get("list_skill") is None
     prompt = builder.build()
     assert "旧 list_skill 提示" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
 
     await rail.after_model_call(ctx)
 
@@ -1235,7 +1253,14 @@ async def test_skill_retrieval_prompt_hides_native_skill_prompt_after_skill_use_
     prompt = builder.build()
     assert "需要时先调用 list_skill 查看可用技能" not in prompt
     assert "# 技能" not in prompt
-    assert "Agentic 技能检索" in prompt
+    assert "Agentic 技能检索" not in prompt
+    attachments = await agent.prompt_attachment_manager.list_by_filter(
+        session_id="sess1",
+        section="skill_retrieval",
+    )
+    assert [item.content for item in attachments] == [
+        "# Agentic 技能检索\n使用 skill_branch_explore。"
+    ]
     assert [tool.name for tool in ctx.inputs.tools] == ["skill_branch_explore"]
 
 

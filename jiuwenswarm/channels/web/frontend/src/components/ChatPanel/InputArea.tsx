@@ -1,4 +1,4 @@
-﻿import {
+import {
   useState,
   useRef,
   useCallback,
@@ -24,7 +24,7 @@ import {
   usePlanStore,
   useSessionStore,
   useWorkspaceStore,
-  resolveEffectiveModel,
+  resolveChatModelSelection,
 } from '../../stores';
 import { supportsPlanMode } from '../../features/planMode/wireMode';
 import { queueOrAddGoalObjectiveMessage } from '../../features/goalPendingObjectiveBubble';
@@ -41,6 +41,9 @@ import { getEvolutionPillLabel } from './evolution-status';
 import { webRequest } from '../../services/webClient';
 import { getSkillAvatar } from '../../utils/skillAvatar';
 import { withUploadDocumentBlock } from '../../utils/documentMessage';
+import { ExtensionPickerPanel } from './ExtensionPickerPanel';
+import { Switch } from '../Switch';
+import { ExtensionIcon } from '../ConnectorMarket/icons';
 import {
   isLikelyAbsolutePath,
   isProjectDirectoryPickerSupported,
@@ -72,6 +75,7 @@ type InputAreaSkillItem = {
   is_builtin?: boolean;
   is_builtin_source?: boolean;
   enabled?: boolean;
+  installed?: boolean;
 };
 
 /** 已安装插件信息（用于判定技能是否已安装） */
@@ -527,6 +531,13 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const [modeMenuAnchor, setModeMenuAnchor] = useState<DOMRect | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [attachMenuAnchor, setAttachMenuAnchor] = useState<DOMRect | null>(null);
+  // 默认下弹（这是本轮"扩展"需求里明确要的方向），但会话有消息、输入框沉到视口底部时，"+"按钮
+  // 本身已经贴近视口下边缘，下弹会把整个菜单渲染到可视区域外面、用户点了完全没反应——2026-08-18
+  // 用户报告的严重 bug。这里补上跟同文件里 modeMenu/model-selector 菜单一致的"空间不够就翻上去"
+  // 兜底逻辑，只在下方空间不够时才翻上，正常情况仍然默认下弹。
+  const [attachMenuDirection, setAttachMenuDirection] = useState<'up' | 'down'>('down');
+  const [extensionPanelOpen, setExtensionPanelOpen] = useState(false);
+  const [extensionAnchor, setExtensionAnchor] = useState<DOMRect | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   /** 保存技能插入前的光标位置，用于在光标处插入 chip */
   const savedRangeRef = useRef<Range | null>(null);
@@ -535,6 +546,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const modeMenuPortalRef = useRef<HTMLDivElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const attachMenuPortalRef = useRef<HTMLDivElement>(null);
+  const extensionMenuItemRef = useRef<HTMLButtonElement>(null);
+  const extensionPanelRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachmentMenuOpenedByLongPressRef = useRef(false);
@@ -1166,9 +1179,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     const handlePointerDown = (event: PointerEvent) => {
       if (
         !attachMenuRef.current?.contains(event.target as Node) &&
-        !attachMenuPortalRef.current?.contains(event.target as Node)
+        !attachMenuPortalRef.current?.contains(event.target as Node) &&
+        !extensionPanelRef.current?.contains(event.target as Node)
       ) {
         setAttachMenuOpen(false);
+        setExtensionPanelOpen(false);
       }
     };
 
@@ -1874,6 +1889,54 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     if (sid) useChatStore.getState().setInputValue(sid, extractPlainText());
   }, [extractPlainText]);
 
+  // 监听从 SkillPanel 发来的"跳转到聊天并插入技能"事件
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { skillName: string; prefixText?: string; suffixText?: string; secondSkillName?: string };
+      const sid = useChatStore.getState().activeSessionId;
+      if (!sid || !inputRef.current) return;
+
+      // 清空输入框并插入前缀文本（如"帮我修改这个技能"）
+      inputRef.current.textContent = detail.prefixText || '';
+      inputRef.current.focus();
+
+      // 将光标移到末尾，确保技能 chip 插入在前缀文本之后
+      const range = document.createRange();
+      range.selectNodeContents(inputRef.current);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+
+      // 先更新 store 中的 selectedSkills，再插入 chip DOM
+      useSessionStore.getState().addSelectedSkill(sid, detail.skillName);
+      insertSkillChip(detail.skillName);
+
+      // 如果有后缀文本（如"帮我修改这个技能"），追加到 chip 之后
+      if (detail.suffixText) {
+        inputRef.current.appendChild(document.createTextNode(detail.suffixText));
+        // 光标移到末尾
+        const r = document.createRange();
+        r.selectNodeContents(inputRef.current);
+        r.collapse(false);
+        const s = window.getSelection();
+        s?.removeAllRanges();
+        s?.addRange(r);
+      }
+
+      // 如果有第二个技能（如被编辑的技能），追加 chip
+      if (detail.secondSkillName) {
+        useSessionStore.getState().addSelectedSkill(sid, detail.secondSkillName);
+        insertSkillChip(detail.secondSkillName);
+      }
+
+      // 同步纯文本到 store（chip 不进入纯文本，前缀/后缀文本会保留）
+      useChatStore.getState().setInputValue(sid, extractPlainText());
+    };
+    window.addEventListener('chat-input-insert-skill', handler);
+    return () => window.removeEventListener('chat-input-insert-skill', handler);
+  }, [insertSkillChip, extractPlainText]);
+
   // const handleVoiceStart = useCallback(() => {
   //   if (isListening) return;
   //   stopAllTts();
@@ -2226,9 +2289,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               onClick={() => {
                 if (attachTriggerDisabled) return;
                 if (!attachMenuOpen && attachMenuRef.current) {
-                  setAttachMenuAnchor(attachMenuRef.current.getBoundingClientRect());
+                  const rect = attachMenuRef.current.getBoundingClientRect();
+                  setAttachMenuAnchor(rect);
+                  setAttachMenuDirection(window.innerHeight - rect.bottom >= 200 ? 'down' : 'up');
                 }
                 setAttachMenuOpen((open) => !open);
+                setExtensionPanelOpen(false);
               }}
               disabled={attachTriggerDisabled}
               className={cx(
@@ -2248,12 +2314,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 className="chat-mode-select__menu"
                 role="menu"
                 data-testid="chat-panel-input-attach-menu"
-                style={{
-                  position: 'fixed',
-                  bottom: window.innerHeight - attachMenuAnchor.top + 10,
-                  left: attachMenuAnchor.left,
-                  zIndex: 9999,
-                }}
+                style={attachMenuDirection === 'up'
+                  ? { position: 'fixed', bottom: window.innerHeight - attachMenuAnchor.top + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                  : { position: 'fixed', top: attachMenuAnchor.bottom + 10, left: attachMenuAnchor.left, zIndex: 9999 }
+                }
               >
                 <button
                   type="button"
@@ -2273,88 +2337,149 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                     <span className="chat-mode-select__label">{t('chat.addFile')}</span>
                   </span>
                 </button>
-                {canUseGoalMenu && (() => {
-                  // Goal 和 Plan 互斥：已有真正生效的目标/计划时都不能再选目标。已提交的目标沿用
-                  // 原提示；被"计划已生效"挡住时换一条对应文案，避免误导用户去找目标本身的问题。
-                  const goalDisabled = hasUnfinishedGoal || planCommitted;
-                  const goalDisabledTitle = hasUnfinishedGoal
-                    ? t('goal.toolbarUnavailable')
-                    : planCommitted
-                      ? t('goal.toolbarUnavailablePlan')
-                      : undefined;
-                  return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
-                      role="menuitem"
-                      data-testid="chat-panel-input-attach-menu-goal"
-                      disabled={goalDisabled}
-                      title={goalDisabledTitle}
-                      onClick={() => {
-                        if (goalDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
-                          // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
-                          if (planActive) {
-                            usePlanStore.getState().setActive(activeSessionId, false);
-                          }
-                          useGoalStore.getState().setArmed(activeSessionId, true);
-                        }
-                      }}
-                    >
-                      <span className="chat-mode-select__option-main">
-                        <span className="chat-mode-select__icon" aria-hidden="true">
-                          <Target className="w-4 h-4" />
-                        </span>
-                        <span className="chat-mode-select__label">{t('goal.toolbarTag')}</span>
-                      </span>
-                    </button>
-                  );
-                })()}
+                <button
+                  ref={extensionMenuItemRef}
+                  type="button"
+                  className="chat-mode-select__option"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={extensionPanelOpen}
+                  onClick={() => {
+                    if (!extensionPanelOpen && extensionMenuItemRef.current) {
+                      setExtensionAnchor(extensionMenuItemRef.current.getBoundingClientRect());
+                    }
+                    setExtensionPanelOpen((open) => !open);
+                  }}
+                >
+                  <span className="chat-mode-select__option-main">
+                    {/* 手绘拼图图标（ConnectorMarket/icons.tsx）在这个菜单里视觉上比旁边
+                        FileText/Target/ClipboardList 这些 lucide 图标显得更小（用户 2026-08-19
+                        反馈），单独放大到 18px。真正生效的是 CSS 里的 --lg 修饰 class（见
+                        ChatPanel.css `.chat-mode-select__icon svg { width/height: 14px }`
+                        这条共享基础规则的选择器特异度是 class+元素，Tailwind 任意值 class 在
+                        SVG 自身上加宽高属性/class 特异度更低会被它盖掉，实测确认过），不是这里
+                        ExtensionIcon 的 className。 */}
+                    <span className="chat-mode-select__icon chat-mode-select__icon--lg" aria-hidden="true">
+                      <ExtensionIcon />
+                    </span>
+                    <span className="chat-mode-select__label">{t('chat.extension')}</span>
+                  </span>
+                  <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 6l4 4-4 4" />
+                  </svg>
+                </button>
+                {(canUsePlanMenu || canUseGoalMenu) && <div className="chat-mode-select__divider" role="separator" />}
                 {canUsePlanMenu && (() => {
                   // 对称地：已有未完成目标时不能选计划；对话进行中（isProcessing）时也先禁掉，
-                  // 避免在当前这轮还没结束时又叠加切一次模式。
-                  const planDisabled = hasUnfinishedGoal || isProcessing;
-                  const planDisabledTitle = hasUnfinishedGoal
+                  // 避免在当前这轮还没结束时又叠加切一次模式。这条"打开"方向的限制沿用原逻辑；
+                  // "关闭"方向只受 isProcessing 限制（跟输入框旁边现有的计划 chip 关闭按钮一致）。
+                  const planDisabledOn = hasUnfinishedGoal || isProcessing;
+                  const planDisabledOnTitle = hasUnfinishedGoal
                     ? t('plan.toolbarUnavailableGoal')
                     : isProcessing
                       ? t('plan.toolbarUnavailableProcessing')
                       : undefined;
+                  const planDisabled = planActive ? isProcessing : planDisabledOn;
+                  const planTitle = planActive
+                    ? (isProcessing ? t('plan.closeTagDisabled') : undefined)
+                    : planDisabledOnTitle;
+                  const togglePlan = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (planDisabledOn) return;
+                      // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
+                      // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                      // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
+                      // plan_entry_source，否则会被后端的防重入闸门拦下。
+                      usePlanStore.getState().setActive(activeSessionId, true, { explicitEntry: true });
+                    } else {
+                      if (isProcessing) return;
+                      usePlanStore.getState().setActive(activeSessionId, false);
+                    }
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
+                  };
                   return (
-                    <button
-                      type="button"
-                      className="chat-mode-select__option"
+                    <div
+                      className={cx('chat-mode-select__option', planDisabled && 'chat-mode-select__option--disabled')}
                       role="menuitem"
                       data-testid="chat-panel-input-attach-menu-plan"
-                      disabled={planDisabled}
-                      title={planDisabledTitle}
+                      title={planTitle}
                       onClick={() => {
                         if (planDisabled) return;
-                        setAttachMenuOpen(false);
-                        if (activeSessionId) {
-                          // 走到这里 hasUnfinishedGoal 一定是 false，goalArmed 为 true 时只可能是
-                          // "刚选了目标、还没发消息"的未提交态，顶掉换成 Plan。
-                          useGoalStore.getState().setArmed(activeSessionId, false);
-                          // explicitEntry：这是用户手动打开开关，下一条 Plan 消息要带
-                          // plan_entry_source，否则会被后端的防重入闸门拦下。
-                          usePlanStore
-                            .getState()
-                            .setActive(activeSessionId, true, { explicitEntry: true });
-                        }
+                        togglePlan(!planActive);
                       }}
                     >
                       <span className="chat-mode-select__option-main">
                         <span className="chat-mode-select__icon" aria-hidden="true">
                           <ClipboardList className="w-4 h-4" />
                         </span>
-                        <span className="chat-mode-select__label">{t('plan.toolbarTag')}</span>
+                        <span className="chat-mode-select__label">{t('plan.toggleLabel')}</span>
                       </span>
-                    </button>
+                      <Switch checked={planActive} disabled={planDisabled} onChange={togglePlan} />
+                    </div>
+                  );
+                })()}
+                {canUseGoalMenu && (() => {
+                  // Goal 和 Plan 互斥：已有真正生效的计划时不能再选目标；"打开"方向沿用原逻辑，
+                  // "关闭"方向不受限制（跟输入框旁边现有的目标 chip 关闭按钮一致，随时可关）。
+                  const goalChecked = goalArmed || hasUnfinishedGoal;
+                  const goalDisabledOn = hasUnfinishedGoal || planCommitted;
+                  const goalDisabledOnTitle = hasUnfinishedGoal
+                    ? t('goal.toolbarUnavailable')
+                    : planCommitted
+                      ? t('goal.toolbarUnavailablePlan')
+                      : undefined;
+                  const goalDisabled = goalChecked ? false : goalDisabledOn;
+                  const goalTitle = goalChecked ? undefined : goalDisabledOnTitle;
+                  const toggleGoal = (next: boolean) => {
+                    if (!activeSessionId) return;
+                    if (next) {
+                      if (goalDisabledOn) return;
+                      // 走到这里 planCommitted 一定是 false（否则上面已 disabled），所以 planActive
+                      // 为 true 时只可能是"刚打开开关、还没发过消息"的未提交态，可以放心顶掉。
+                      if (planActive) {
+                        usePlanStore.getState().setActive(activeSessionId, false);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, true);
+                    } else {
+                      if (currentGoal) {
+                        onClearGoal?.(activeSessionId);
+                      }
+                      useGoalStore.getState().setArmed(activeSessionId, false);
+                    }
+                    // 不关闭菜单：用户拨动开关后保持菜单打开，便于看到开关状态变化并继续操作。
+                  };
+                  return (
+                    <div
+                      className={cx('chat-mode-select__option', goalDisabled && 'chat-mode-select__option--disabled')}
+                      role="menuitem"
+                      data-testid="chat-panel-input-attach-menu-goal"
+                      title={goalTitle}
+                      onClick={() => {
+                        if (goalDisabled) return;
+                        toggleGoal(!goalChecked);
+                      }}
+                    >
+                      <span className="chat-mode-select__option-main">
+                        <span className="chat-mode-select__icon" aria-hidden="true">
+                          <Target className="w-4 h-4" />
+                        </span>
+                        <span className="chat-mode-select__label">{t('goal.toggleLabel')}</span>
+                      </span>
+                      <Switch checked={goalChecked} disabled={goalDisabled} onChange={toggleGoal} />
+                    </div>
                   );
                 })()}
               </div>,
               document.body
+            )}
+            {extensionPanelOpen && extensionAnchor && (
+              <ExtensionPickerPanel
+                anchorRect={extensionAnchor}
+                panelRef={extensionPanelRef}
+                onClose={() => setExtensionPanelOpen(false)}
+              />
             )}
           </div>
           <div
@@ -2550,10 +2675,9 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               )}
             </button>
           )} */}
-
+          
           <ModelSelector
-            disabled={isTeamMode || isProcessing}
-            lockedToDefault={isTeamMode}
+            disabled={isProcessing || activeSessionId !== NEW_CONVERSATION_ID}
           />
 
           <button
@@ -2856,10 +2980,8 @@ function ComposerSuggestionMenu({
 
 function ModelSelector({
   disabled = false,
-  lockedToDefault = false,
 }: {
   disabled?: boolean;
-  lockedToDefault?: boolean;
 }) {
   const chatAvailableModels = useSessionStore((s) => s.chatAvailableModels);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -2888,14 +3010,12 @@ function ModelSelector({
 
   if (chatAvailableModels.length === 0) return null;
 
-  // 集群模式下 UI 禁止手动改模型（见下方 disabled/tooltip），但显示仍应优先反映
-  // 该会话实际记录的模型（如定时任务在集群模式下显式指定了非默认模型，后端也确实
-  // 按该模型执行——见 bug002 回归），而不是不管三七二十一恒显示全局默认模型；
-  // 从未指定过模型的会话 selectedModelName 本就兜底等于默认模型，行为不变。
-  // 与实际发给后端的 model_name（sessionStore.getEffectiveModelName）复用同一套解析逻辑，
-  // 避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的兜底结果（bug003）。
+  // 单 Agent 与集群（team）模式共用同一套解析，展示会话自选模型（含 metadata 恢复值），
+  // 失配时回退默认模型。与实际发给后端的 model_name（sessionStore.getEffectiveModelName）
+  // 复用同一套解析逻辑，避免模型改名/改别名后 UI 显示值和实际请求参数走出两份不同的
+  // 兜底结果（bug003）。
   const selectedModel =
-    resolveEffectiveModel(chatAvailableModels, selectedModelName, defaultModelName) ??
+    resolveChatModelSelection(chatAvailableModels, selectedModelName, defaultModelName) ??
     chatAvailableModels[0];
 
   const handleSelect = (modelKey: string) => {
@@ -2917,7 +3037,7 @@ function ModelSelector({
       <button
         type="button"
         className="chat-mode-select__trigger"
-        title={t(lockedToDefault ? 'chat.modelSelector.clusterLockedTooltip' : 'chat.modelSelector.tooltip')}
+        title={t('chat.modelSelector.tooltip')}
         onClick={() => {
           if (disabled) return;
           if (!isOpen && menuRef.current) {
@@ -3204,6 +3324,7 @@ function SkillSelector({ onNavigateToSkills, onInsertSkill, onRemoveSkill }: {
 
   const isSkillInstalled = useCallback(
     (skill: InputAreaSkillItem): boolean =>
+      skill.installed === true ||
       installedSkillMap.has(skill.name) ||
       skill.source === 'local' ||
       skill.source === 'project',

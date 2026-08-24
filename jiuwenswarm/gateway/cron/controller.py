@@ -135,6 +135,13 @@ class CronController:
         return cron_job_metadata()
 
     async def create_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        # This marker is set only by the AgentServer-to-Gateway path after the
+        # project has been resolved against the user's AgentServer directory.
+        # Do not persist it with the job payload.
+        params = dict(params or {})
+        allow_unresolved_project_id = bool(
+            params.pop("_agentos_project_binding_verified", False)
+        )
         name = str(params.get("name") or "").strip()
         cron_expr = normalize_cron_expr(str(params.get("cron_expr") or "").strip())
         timezone = str(params.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai"
@@ -174,8 +181,9 @@ class CronController:
         # 3. 无显式 project_id → 按 (work_mode, project_dir) 解析可见项目,
         #    匹配不到(含命中隐藏项目 / 无命中)归默认项目
         # 非绝对路径抛 ValueError → BAD_REQUEST
-        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
-
+        # AgentOS 多用户时，此绑定已由目标 AgentServer 完成。Gateway 必须把该
+        # 结果作为不透明值持久化，绝不能再探测部署侧 project_store：即使两边
+        # 恰好存在同 ID 项目，也会造成 work_mode 被错误覆盖。
         raw_project_id = str(params.get("project_id") or "").strip()
         project_dir_raw = params.get("project_dir")
         project_dir_val = (
@@ -183,11 +191,21 @@ class CronController:
             if isinstance(project_dir_raw, str) and project_dir_raw.strip()
             else ""
         )
-        binding = resolve_cron_project_binding(raw_project_id, project_dir_val, work_mode)
-        if binding.error is not None:
-            raise ValueError(binding.error)
-        resolved_project_id = binding.project_id
-        work_mode = binding.work_mode
+        if allow_unresolved_project_id:
+            # The marker is only injected after AgentServer-side validation.
+            # Do not import or read the Gateway-local project store on this path.
+            resolved_project_id = raw_project_id
+            caller_work_mode = str(params.get("work_mode") or "").strip()
+            if caller_work_mode in ("code", "work"):
+                work_mode = caller_work_mode
+        else:
+            from jiuwenswarm.server.runtime.session.project_store import resolve_cron_project_binding
+
+            binding = resolve_cron_project_binding(raw_project_id, project_dir_val, work_mode)
+            if binding.error is not None:
+                raise ValueError(binding.error)
+            resolved_project_id = binding.project_id
+            work_mode = binding.work_mode
         app_id = str(params.get("app_id") or "").strip()
         # user_id：web 端创建定时任务时由 handler 注入 params（见 _cron_job_create），
         # 执行时透传给 faas 的 X-Session-Context。agent 内部创建的 cron 无 user_id 即存空串。
@@ -217,6 +235,9 @@ class CronController:
 
     async def update_job(self, job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         patch = dict(patch or {})
+        allow_unresolved_project_id = bool(
+            patch.pop("_agentos_project_binding_verified", False)
+        )
         if "mode" in patch:
             patch["mode"] = normalize_cron_job_mode(patch.get("mode"))
         if "model_name" in patch:
@@ -239,12 +260,28 @@ class CronController:
         # work_mode / project_id / project_dir 重解析(共享 helper):
         # 与 cron_tools.py update_job 共用同一 ``resolve_cron_job_patch``,
         # 确保 Web RPC 与 AgentTool 两条链路逻辑一致。
-        from jiuwenswarm.server.runtime.session.project_store import resolve_cron_job_patch
-        resolve_cron_job_patch(
-            patch,
-            existing_work_mode=existing.work_mode or "",
-            channel_id="web",
-        )
+        # 仅 AgentServer 已校验过的多用户请求可跳过 Gateway 本地反查；单用户仍须
+        # 因无效 project_id 明确失败，避免把失效 ID 写入定时任务。
+        from jiuwenswarm.common.work_mode import DEFAULT_WEB_WORK_MODE
+
+        caller_work_mode = str(patch.get("work_mode") or "").strip()
+        if allow_unresolved_project_id:
+            # AgentServer has already resolved this project in the user's
+            # injected directory.  Never look up the deployment-side project
+            # table here: a colliding ID must not influence the stored job.
+            patch["work_mode"] = (
+                caller_work_mode
+                if caller_work_mode in ("code", "work")
+                else (existing.work_mode or DEFAULT_WEB_WORK_MODE)
+            )
+        else:
+            from jiuwenswarm.server.runtime.session.project_store import resolve_cron_job_patch
+
+            resolve_cron_job_patch(
+                patch,
+                existing_work_mode=existing.work_mode or "",
+                channel_id="web",
+            )
 
         final_targets = str(patch.get("targets") or existing.targets).strip()
         if "session_id" in patch:
@@ -495,7 +532,7 @@ class CronController:
                             "type": "integer",
                             "description": (
                                 "Execution timeout in seconds (60-259200). "
-                                "Default 600 for normal modes and 1200 for team modes."
+                                "Default 3600 (1 hour) for both normal and team modes."
                             ),
                         },
                         "model_name": {

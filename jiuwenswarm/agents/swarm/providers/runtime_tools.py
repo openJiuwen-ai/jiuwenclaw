@@ -60,6 +60,9 @@ class CronToolsInput(ConstructionInput):
         attr="request_metadata",
         description="Request metadata mapping.",
     )
+    user_id: str | None = context_field(
+        attr="user_id", description="Authenticated request owner for routed tools."
+    )
     language: str = context_field(
         attr="language", default="cn", description="Member language code."
     )
@@ -88,12 +91,43 @@ def build_cron_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> list[Any
     """
     inp = CronToolsInput.resolve(params, ctx)
     agent_id = inp.member_card_id
+    # Team members receive the original request metadata, which intentionally
+    # does not duplicate every session field.  Cron project binding must still
+    # use the caller's project (especially code-mode projects), rather than
+    # silently falling back to the work default project.
+    metadata = dict(inp.request_metadata or {})
+    if isinstance(inp.session_id, str) and inp.session_id.strip():
+        try:
+            from jiuwenswarm.server.runtime.session.session_metadata import (
+                get_session_metadata,
+            )
+
+            session_metadata = get_session_metadata(
+                inp.session_id.strip(), cache_bust=True, enable_writeback=False
+            )
+            if isinstance(session_metadata, dict):
+                for key in ("project_id", "project_dir", "work_mode", "model_name"):
+                    if not str(metadata.get(key) or "").strip():
+                        value = session_metadata.get(key)
+                        if isinstance(value, str) and value.strip():
+                            metadata[key] = value.strip()
+                if not str(metadata.get("model_name") or "").strip():
+                    model = session_metadata.get("model")
+                    if isinstance(model, str) and model.strip():
+                        metadata["model_name"] = model.strip()
+        except Exception as exc:  # noqa: BLE001 - cron retains legacy fallback
+            logger.debug(
+                "[swarm.cron_tools] failed to load session project binding: %s", exc
+            )
     cron_context = SimpleNamespace(
         tool_scope=f"team_member_{agent_id or 'unknown'}",
         channel_id=inp.channel_id or "web",
         session_id=inp.session_id,
-        metadata=inp.request_metadata,
-        mode="team",
+        metadata=metadata,
+        user_id=inp.user_id,
+        # Preserve code.team/team.work variants so a cron execution retains
+        # the same runtime mode as the originating team conversation.
+        mode=str(getattr(ctx, "mode", "") or "team"),
     )
     try:
         cron_tools = CronRuntimeBridge().build_tools(
@@ -161,6 +195,9 @@ class SendFileInput(ConstructionInput):
         attr="request_metadata",
         description="Request metadata mapping.",
     )
+    user_id: str | None = context_field(
+        attr="user_id", description="Authenticated request owner for routed downloads."
+    )
     project_dir: str | None = context_field(
         attr="project_dir",
         description="Active user project directory.",
@@ -211,6 +248,7 @@ def build_send_file_tools(params: dict[str, Any], ctx: SwarmBuildContext) -> lis
             session_id=inp.session_id,
             channel_id=inp.channel_id,
             metadata=inp.request_metadata,
+            user_id=inp.user_id,
             project_dir=inp.project_dir,
             team_workspace_root=inp.team_workspace_root,
         )

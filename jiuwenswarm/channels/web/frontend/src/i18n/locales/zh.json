@@ -32,6 +32,7 @@
     "skills": "技能",
     "channels": "频道",
     "extensions": "Harness",
+    "connectorMarket": "扩展",
     "rails": "Rails",
     "harnesspkg": "Harness Package",
     "more": "更多",
@@ -57,6 +58,7 @@
     "statusShutdown": "已关闭",
     "statusError": "错误",
     "collapse": "收起",
+    "toolTabs": "工具面板页签",
     "taskOverview": "任务概览",
     "elapsedTime": "已花费时间: {{value}}",
     "noTasks": "暂无任务",
@@ -306,7 +308,6 @@
     "stop": "停止",
     "modelSelector": {
       "tooltip": "切换对话使用的模型",
-      "clusterLockedTooltip": "集群模式使用配置的默认模型，不支持修改",
       "configured": "已配置模型",
       "free": "免费模型",
       "addModel": "添加自定义模型",
@@ -323,6 +324,12 @@
     "skillsManage": "技能管理",
     "skillsAdd": "添加到输入栏",
     "skillsRemove": "移除",
+    "extension": "扩展",
+    "extensionSearchPlaceholder": "请输入关键字搜索",
+    "extensionEmpty": "暂无内容",
+    "extensionConnect": "连接",
+    "extensionManagePlugins": "管理我的插件",
+    "extensionManageMcps": "管理我的MCP",
     "recentTasks": "任务规划",
     "teamPause": "暂停",
     "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
@@ -390,6 +397,7 @@
   },
   "toolPanel": {
     "status": "状态",
+    "context": "上下文",
     "contextCompression": "上下文窗口",
     "memoryUsage": "内存占用",
     "poweredBy": "Powered by openJiuwen",
@@ -466,6 +474,7 @@
   },
   "plan": {
     "toolbarTag": "计划",
+    "toggleLabel": "计划模式",
     "closeTag": "退出计划模式",
     "closeTagDisabled": "回答完成或取消后才能退出计划模式",
     "toolbarUnavailableGoal": "当前已有进行中的目标，暂不可选择计划",
@@ -477,11 +486,15 @@
     "approvalNext": "下一步",
     "approvalInputPlaceholder": "填写修改意见后点击「下一步」；留空点击「跳过」"
   },
+  "persistSession": {
+    "textRequired": "请在 /persist 后输入任务内容"
+  },
   "goal": {
     "formSubmit": "确定",
     "formCancel": "取消",
     "editTitle": "编辑目标",
     "toolbarTag": "目标",
+    "toggleLabel": "追求目标",
     "toolbarUnavailable": "当前已有进行中的目标，请先完成或清除",
     "toolbarUnavailablePlan": "计划模式进行中，暂不可选择目标",
     "closeTag": "取消目标",
@@ -767,6 +780,7 @@
     "clickMore": "点击「更多」继续",
     "acknowledge": "我知道了",
     "skip": "跳过",
+    "open": "配置指引",
     "steps": {
       "0": {
         "title": "欢迎使用 jiuwenswarm",
@@ -855,11 +869,11 @@
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-        "swarmflowEnabled": "启用 SwarmFlow",
-        "externalCliAgentClaudeEnabled": "启用 Claude",
-        "externalCliAgentUseBuiltin": "使用内置",
-        "externalCliAgentCliPath": "CLI 路径",
-        "externalCliAgentCodexEnabled": "启用 Codex",
+      "swarmflowEnabled": "启用 SwarmFlow",
+      "externalCliAgentClaudeEnabled": "启用 Claude",
+      "externalCliAgentUseBuiltin": "使用内置",
+      "externalCliAgentCliPath": "CLI 路径",
+      "externalCliAgentCodexEnabled": "启用 Codex",
       "kvCacheReleaseEnabled": "旧链路（KV 释放）",
       "kvCacheAffinityEnabled": "新链路（Ascend 亲和）",
       "skillRetrievalBuildRootCategoriesPlaceholder": "直接编辑 YAML/JSON 树根分层配置",
@@ -1113,41 +1127,41 @@
       "dynamicGraph": "启用动态图谱",
       "kvCacheRelease": "旧链路（KV 释放）",
       "kvCacheAffinity": "新链路（Ascend 亲和）",
-        "externalCliClaude": "启用 Claude",
-        "externalCliCodex": "启用 Codex",
-        "externalCliUseBuiltin": "使用内置"
-      },
-      "externalCli": {
-        "claude": "Claude",
-        "codex": "Codex",
-        "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
-        "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
-        "useBuiltin": "使用内置",
-        "detect": "检测",
-        "selectFile": "选择文件",
-        "selectFileTitle": "选择 {{agent}} 命令",
-        "selectFileFailed": "选择文件失败",
-        "cliPathPlaceholder": "自动检测 {{agent}} 路径，或手动填写可执行文件路径",
-        "statusUnknown": "未检测",
-        "statusOk": "可用",
-        "statusWarning": "可能不兼容",
-        "statusMissing": "未找到",
-        "statusUnsupported": "路径不可用",
-        "statusUnavailable": "不可用",
-        "version": "版本 {{version}}",
-        "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
-        "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
-        "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
-        "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
-        "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
-        "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
-        "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
-        "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
-        "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
-        "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
-        "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
-        "dependencyInstallRecentOutput": "安装日志"
-      },
+      "externalCliClaude": "启用 Claude",
+      "externalCliCodex": "启用 Codex",
+      "externalCliUseBuiltin": "使用内置"
+    },
+    "externalCli": {
+      "claude": "Claude",
+      "codex": "Codex",
+      "claudeHint": "可使用系统 PATH 中的 Claude，也可指定可执行文件路径。",
+      "codexHint": "可使用系统 PATH 中的 Codex，也可指定可执行文件路径。",
+      "useBuiltin": "使用内置",
+      "detect": "检测",
+      "selectFile": "选择文件",
+      "selectFileTitle": "选择 {{agent}} 命令",
+      "selectFileFailed": "选择文件失败",
+      "cliPathPlaceholder": "自动检测 {{agent}} 路径，或手动填写可执行文件路径",
+      "statusUnknown": "未检测",
+      "statusOk": "可用",
+      "statusWarning": "可能不兼容",
+      "statusMissing": "未找到",
+      "statusUnsupported": "路径不可用",
+      "statusUnavailable": "不可用",
+      "version": "版本 {{version}}",
+      "compatibilityWarning": "检测到的版本可能不兼容。可以更换可执行文件路径、升级版本，或勾选“使用内置”，改用默认启动方式。",
+      "compatibilityWarningWithVersion": "检测到的版本可能不兼容。可以更换可执行文件路径、升级到 {{version}} 或更高版本，或勾选“使用内置”，改用默认启动方式。",
+      "windowsScriptPath": "当前选择的是 Windows 脚本文件。请改选真实的可执行文件，或勾选“使用内置”。",
+      "dependencyInstalling": "正在后台安装 {{agents}} 依赖。安装期间暂未启用；安装完成后，请再次启用并保存配置。",
+      "dependencyInstalled": "请再次启用 {{agent}} 并保存配置。",
+      "dependencyInstallFailed": "{{agent}} 依赖安装失败。请检查安装日志后重试。",
+      "dependencyInstallPhasePreparing": "准备安装 {{agent}} 依赖",
+      "dependencyInstallPhaseInstalling": "正在安装 {{agent}} 依赖",
+      "dependencyInstallPhaseVerifying": "正在校验 {{agent}} 依赖",
+      "dependencyInstallPhaseSucceeded": "{{agent}} 依赖已安装",
+      "dependencyInstallPhaseFailed": "{{agent}} 依赖安装失败",
+      "dependencyInstallRecentOutput": "安装日志"
+    },
     "permissionsTools": {
       "title": "工具防护（permissions.tools）",
       "subtitle": "按工具名设置 allow / ask / deny，立即写入配置并热更新；不含基于 pattern 的规则。",
@@ -1230,7 +1244,6 @@
     "enable": "启动",
     "disable": "停用",
     "loading": "正在加载任务列表...",
-    "empty": "暂无定时任务",
     "deleteConfirm": "确定要删除这个任务吗？",
     "autoManaged": "自动维护",
     "autoManagedHint": "此任务由主动推荐开关自动创建/删除；开关在设置→主动推荐。仅 Cron 表达式与时区可在此面板编辑，其余字段（名称/状态/描述/偏移/频道）不可改；删除请到设置关闭开关。",
@@ -1548,7 +1561,7 @@
     }
   },
   "skills": {
-    "title": "技能管理",
+    "title": "技能",
     "subtitle": "管理并安装智能体可用的技能。",
     "tabs": {
       "mySkills": "我的技能",
@@ -1561,7 +1574,29 @@
       "enabled": "启用",
       "disabled": "禁用"
     },
+    "publishFilter": {
+      "all": "全部",
+      "published": "已发布",
+      "unpublished": "未发布"
+    },
+    "skillTypes": {
+      "skill": "技能包",
+      "team": "团队技能",
+      "multimodal": "多模态"
+    },
+    "marketplaceCategories": {
+      "all": "全部",
+      "software-development": "软件开发",
+      "office-productivity": "办公效率",
+      "content-creation": "内容创作",
+      "multimodal-media": "多模态媒体",
+      "data-science-research": "数据与科研",
+      "compliance-legal": "合规与法律",
+      "lifestyle-health": "生活与健康",
+      "finance-wealth": "金融与理财"
+    },
     "enable": "启用",
+    "disable": "禁用",
     "noDisabledSkills": "暂无禁用的技能",
     "noEnabledSkills": "暂无启用的技能",
     "setEnabledError": "设置技能启用状态失败",
@@ -1598,10 +1633,80 @@
       "uninstall": "卸载",
       "importLocal": "导入本地技能",
       "sourceManager": "源管理",
+      "create": "创建",
+      "uploadLocalSkill": "上传技能",
+      "documentToSkill": "知识转技能",
+      "createViaChat": "通过聊天创建",
       "backToList": "返回列表",
       "viewEvolution": "查看技能经验",
+      "evolutionTooltip": "该技能有新技能经验，可合成新版本",
       "enabling": "启用中...",
-      "disabling": "禁用中..."
+      "disabling": "禁用中...",
+      "pinSkill": "置顶技能",
+      "pinSkillPackage": "置顶技能包",
+      "unpinSkill": "取消置顶技能",
+      "unpinSkillPackage": "取消置顶技能包",
+      "edit": "编辑",
+      "refresh": "刷新",
+      "goToChat": "去聊天",
+      "goTry": "去试试",
+      "publish": "发布",
+      "rebuild": "重建",
+      "synthesizeNewVersion": "重建技能",
+      "synthesizeTooltip": "将积累的技能经验与原技能合成，生成新的版本"
+    },
+    "chatPrompts": {
+      "editSkill": "帮我修改这个技能",
+      "createSkill": "请帮我创建一个可以实现xxx功能的技能/团队技能/多模态技能"
+    },
+    "publishForm": {
+      "title": "发布技能",
+      "name": "名称",
+      "skillName": "技能名",
+      "version": "版本号",
+      "displayName": "显示名",
+      "description": "描述",
+      "descriptionOptional": "描述（可选）",
+      "tags": "标签",
+      "tagsOptional": "标签（可选）",
+      "skillIcon": "Skill图标",
+      "skillIconOptional": "Skill图标（可选）",
+      "skillIconHint": "PNG文件，不能超过5MB",
+      "sha256": "SHA-256 校验",
+      "versionNote": "版本说明",
+      "versionNoteOptional": "版本说明（Swarm Skill，可选）",
+      "confirm": "确认发布",
+      "cancel": "取消",
+      "publish": "发布",
+      "placeholderSelect": "请选择",
+      "placeholderSha256": "打包完成后显示 64 位小写十六进制",
+      "noticeText": "技能将会被发布到 JiuwenHub。",
+      "noticeView": "去查看",
+      "noticeUrl": "https://swarmskills.openjiuwen.com/?type=swarmskill"
+    },
+    "uploadSkillModal": {
+      "title": "上传技能",
+      "pathLabel": "本地技能路径",
+      "pathPlaceholder": "请输入技能文件/目录路径",
+      "notice": "文件夹或者.zip需要包含SKILL.md文件，.md 文件需包含 YAML 格式的技能名称和描述。",
+      "dropHint": "点击或拖动压缩包或文件到此处",
+      "confirm": "导入",
+      "cancel": "取消"
+    },
+    "docToSkillModal": {
+      "title": "知识转技能",
+      "subtitle": "提炼知识，生成技能",
+      "sourceLabel": "来源",
+      "sourceLocal": "本地上传",
+      "sourceLink": "链接",
+      "dropHint": "点击或拖动文档到此处\n上传压缩包",
+      "linkLabel": "链接",
+      "linkTooltip": "支持网页链接、视频链接",
+      "linkPlaceholder": "请输入",
+      "descLabel": "技能描述（可选）",
+      "descPlaceholder": "请输入",
+      "confirm": "确认",
+      "cancel": "取消"
     },
     "builtIn": "内置",
     "status": {
@@ -1630,6 +1735,8 @@
     "searchPlaceholder": "搜索技能名称、描述或标签",
     "totalCount": "共 {{count}} 个",
     "listError": "获取技能失败，请检查后端服务",
+    "featuredTeamSkills": "精选团队技能",
+    "featuredSkills": "精选技能",
     "noMatches": "暂无匹配的技能",
     "viewMode": {
       "list": "列表模式",
@@ -1637,6 +1744,34 @@
     },
     "detailLoading": "加载详情中...",
     "detailError": "加载详情失败",
+    "detail": {
+      "basicInfo": "基本信息",
+      "versionManage": "版本管理",
+      "versionsLoadFailed": "版本加载失败",
+      "noVersions": "暂无版本记录",
+      "fileTree": "文件列表",
+      "filesLoadFailed": "文件列表加载失败",
+      "noFiles": "暂无文件",
+      "binaryFileDownload": "此文件无法文本预览，请点击下载",
+      "noPreview": "无法预览此文件",
+      "contentPreview": "内容预览",
+      "selectFileToPreview": "请选择左侧文件进行预览",
+      "tabs": {
+        "contentDetail": "内容详情",
+        "filePreview": "文件预览",
+        "skillExperience": "技能经验"
+      }
+    },
+    "hubDetail": {
+      "loadFailed": "加载技能详情失败",
+      "installs": "{{count}} 次安装",
+      "views": "{{count}} 次浏览",
+      "likes": "{{count}} 个赞",
+      "rating": "评分 {{rating}}",
+      "publisher": "发布者",
+      "description": "内容详情",
+      "changelog": "更新日志"
+    },
     "retrieval": {
       "title": "本地技能检索",
       "disabled": "检索已关闭",
@@ -1743,24 +1878,35 @@
         "skillsSuffix": "技能",
         "edgesSuffix": "关联"
       },
-      "searchPlaceholder": "搜索技能",
+      "searchPlaceholder": "搜索技能并筛选图谱",
       "minConfidence": "最小关联强度 {{percent}}%",
-      "minConfidenceHelp": "拖动滑块，调整右侧视图中的最小关联强度；数值越高，可显示的关联越少；数值越低，可显示的关联越多。",
+      "minConfidenceHelp": "拖动滑块设置最小关联强度；数值越高，显示的关联越少。",
       "linkStrength": "关联强度 {{percent}}%",
       "buildLogFallback": "构建日志",
       "tokenUsage": "{{prompt}} in / {{completion}} out / {{total}} total",
       "required": "必需",
       "skillList": "技能列表",
       "noVisibleSkills": "没有可显示的技能。",
+      "emptyGraph": "暂无技能图谱，点击增量构建开始。",
+      "noFilteredGraph": "当前筛选条件下没有可展示的技能图谱。",
       "degreeSummary": "入度 {{inDegree}} · 出度 {{outDegree}}",
       "updatedAt": "更新时间 {{time}}",
       "inDegree": "入度",
       "outDegree": "出度",
+      "inputs": "输入",
+      "noInputs": "暂无输入",
+      "outputs": "输出",
+      "noOutputs": "暂无输出",
       "description": "描述",
       "tasks": "任务",
       "relatedEdges": "关联技能",
       "noRelatedEdges": "暂无关联技能。",
-      "selectSkillHint": "选择一个技能查看详情",
+      "selectSkillHint": "从技能列表或画布中选择一个技能，查看说明和关联。",
+      "detailDrawerLabel": "技能详情",
+      "closeDetail": "关闭详情",
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "zoomLevel": "当前缩放 {{percent}}%",
       "actions": {
         "read": "读取图谱",
         "incrementalBuild": "增量构建",
@@ -2057,7 +2203,6 @@
     "paused": "已暂停",
     "waitingTasks": "等待任务",
     "messageQueue": "消息队列",
-    "parallelProgress": "并行任务执行中 ({{completedCount}}/{{total}} 完成)",
     "turnRunning": "任务执行",
     "turnElapsed": "任务用时",
     "workCompleted": "已完成 {{duration}}",
@@ -2096,18 +2241,11 @@
       "todoGet": "读取待办",
       "skill": "查看技能"
     },
-    "subtask": {
-      "starting": "启动中...",
-      "toolCall": "调用 {{tool}} (#{{count}})",
-      "toolFallback": "工具",
-      "toolResult": "处理结果...",
-      "taskLabel": "任务 {{index}}: {{description}}",
-      "callCount": "{{count}} 次调用"
-    },
     "toolResult": {
       "success": "完成",
       "failed": "失败",
       "timeout": "执行超时",
+      "pending": "已接受，执行中...",
       "running": "执行中...",
       "toolName": "工具名称",
       "arguments": "参数",
@@ -2127,7 +2265,13 @@
       },
       "sessionExecuted": "{{count}} 个会话任务已完成",
       "sessionCompleted": "会话任务已完成",
+      "sessionPending": "会话任务已接受，执行中",
+      "sessionCancelled": "会话任务已取消",
       "sessionFailed": "会话失败",
+      "sessionTask": "会话任务：【{{name}}】",
+      "sessionTaskUnknown": "未知任务",
+      "sessionDescription": "描述",
+      "sessionResult": "结果",
       "latest": "↓ 最新"
     },
     "teamActivity": {
@@ -2455,6 +2599,48 @@
     "notFound": { "title": "对话不存在或已删除", "newConversation": "新建对话" },
     "errors": { "delete": "删除对话失败", "create": "创建对话失败", "send": "发送消息失败" }
   },
+  "subagent": {
+    "title": "Subagents",
+    "compactTitle": "Subagents（{{count}}）",
+    "activeListTitle": "当前活跃 {{count}}",
+    "expand": "展开 Subagents",
+    "selectWithStatus": "选择 {{name}}，状态：{{status}}",
+    "running": "运行中",
+    "idle": "待机中",
+    "closed": "已关闭",
+    "failed": "异常",
+    "cancelled": "已取消",
+    "tasksEmpty": "暂无任务",
+    "activityTitle": "活动",
+    "activityEmpty": "暂无活动",
+    "historyLoading": "正在恢复历史…",
+    "empty": "暂无 Subagent",
+    "activity": {
+      "thinking": "思考",
+      "toolCall": "工具调用",
+      "toolResult": "工具结果",
+      "expand": "展开活动详情",
+      "collapse": "收起活动详情",
+      "ok": "完成",
+      "error": "异常",
+      "truncated": "活动已折叠",
+      "fields": {
+        "type": "类型",
+        "time": "时间",
+        "tool": "工具",
+        "call": "调用",
+        "result": "结果",
+        "content": "内容",
+        "status": "状态",
+        "dropped": "丢弃数量"
+      },
+      "tools": {
+        "search": "搜索网页",
+        "terminal": "运行终端",
+        "todo": "待办清单"
+      }
+    }
+  },
   "mermaid": {
     "rendering": "绘制中…",
     "zoomIn": "放大",
@@ -2465,12 +2651,10 @@
     "image": "图片",
     "code": "代码",
     "moreActions": "更多图表操作",
-    "downloadSource": "下载到本地",
     "downloadImage": "下载为图片",
     "copyCode": "复制代码",
     "copied": "已复制",
     "copyFailed": "复制失败",
-    "downloadSourceFailed": "源文件保存失败",
     "preparingImage": "正在生成图片…",
     "downloadImageFailed": "图片保存失败"
   },
@@ -2505,5 +2689,202 @@
   },
   "qaSummary": {
     "title": "问题澄清"
+  },
+  "connectorMarket": {
+    "title": "扩展",
+    "subtitle": "创建并管理插件、MCP",
+    "tabs": {
+      "plugin": "插件",
+      "mcp": "MCP",
+      "my": "我的扩展"
+    },
+    "categories": {
+      "all": "全部",
+      "product-design": "产品设计",
+      "marketing": "市场营销",
+      "productivity": "效率提升",
+      "data-analysis": "数据分析",
+      "content-creation": "内容创作",
+      "security": "安全过滤",
+      "communication": "通话沟通",
+      "other": "其他"
+    },
+    "search": {
+      "plugin": "搜索插件",
+      "mcp": "搜索MCP",
+      "my": "搜索我的扩展"
+    },
+    "statusFilter": {
+      "all": "全部",
+      "pending": "待安装/联接",
+      "available": "已连接"
+    },
+    "create": {
+      "menuLabel": "创建",
+      "manual": "手动创建",
+      "withSkill": "通过聊天创建",
+      "withUpload": "上传文件创建",
+      "registerMcp": "配置MCP",
+      "basicInfo": "基本信息",
+      "uploadHint": "支持上传png、jpeg、gif、jpg格式图片，限200Kb内",
+      "avatarNotPersisted": "头像暂时只能本地预览，还无法保存（等待后端支持）",
+      "name": "插件名称",
+      "id": "插件 ID",
+      "idPlaceholder": "自动根据名称生成，可编辑",
+      "idHint": "工作区目录名，同名插件不可重复创建",
+      "description": "插件描述",
+      "skillsOptional": "技能配置（可选）",
+      "addSkill": "添加技能",
+      "mcpOptional": "MCP配置（可选）",
+      "addMcp": "添加MCP",
+      "pickSkillTitle": "选择技能",
+      "pickMcpTitle": "选择MCP",
+      "submitError": "创建失败，该功能仍在等待后端支持",
+      "withSkillNotWired": "该入口尚未接入聊天面板，需先在聊天输入框完成对接"
+    },
+    "errors": {
+      "runtimeMissing": "该 MCP 依赖的运行环境缺失，请先安装对应运行环境后再使用",
+      "runtimeMissingNamed": "该 MCP 依赖 {{runtime}} 运行环境，请先安装 {{runtime}} 后再使用",
+      "installNetwork": "依赖下载失败，请检查网络连接后重试",
+      "cliIncomplete": "CLI 安装不完整或版本过低，请重新连接以重试",
+      "cliIncompleteNamed": "CLI 安装不完整或版本过低，请手动执行以下命令安装或升级后重试：{{command}}"
+    },
+    "card": {
+      "use": "使用",
+      "useNotWired": "该功能尚未接入，请在会话输入框的\"+\"面板里选用",
+      "install": "安装",
+      "installing": "安装中",
+      "connecting": "连接中",
+      "disconnecting": "解绑中",
+      "deleting": "删除中",
+      "stateError": "连接失败",
+      "retry": "重试",
+      "uninstall": "卸载",
+      "unbind": "解绑",
+      "edit": "编辑",
+      "editNotSupportedYet": "插件编辑功能还在等待后端支持，暂不可用"
+    },
+    "detail": {
+      "breadcrumbMy": "我的扩展",
+      "breadcrumbPlugin": "插件详情",
+      "breadcrumbMcp": "MCP详情",
+      "mcpDisconnectedBanner": "当前插件未连接MCP无法正常使用",
+      "mcpDisconnectedBannerSelf": "当前MCP未连接无法正常使用",
+      "connectMcp": "连接MCP",
+      "sections": {
+        "basicInfo": "基本信息",
+        "skills": "技能",
+        "tools": "工具",
+        "rails": "Rail",
+        "mcps": "MCP",
+        "connectionConfig": "连接配置",
+        "examples": "试试这样用"
+      },
+      "integrationType": {
+        "cli": "CLI 授权",
+        "stdioMcp": "本地 MCP",
+        "remoteMcp": "远程 MCP",
+        "skillOnly": "仅技能"
+      },
+      "cliSpecPresentHint": "支持命令行驱动",
+      "config": {
+        "transport": "传输方式",
+        "command": "启动命令",
+        "url": "服务地址",
+        "headers": "请求头",
+        "env": "环境变量"
+      }
+    },
+    "confirmUninstall": {
+      "title": "卸载{{name}}？",
+      "message": "卸载后该 MCP 将变为不可用状态，需要重新联接才能继续使用。"
+    },
+    "confirmUnbind": {
+      "title": "解绑{{name}}？",
+      "message": "解绑后将清除本地凭证并断开连接，该 MCP 会变为不可用状态。保留的定义可重新连接，重连需重新填写凭证。"
+    },
+    "confirmDeleteMcp": {
+      "title": "彻底删除{{name}}？",
+      "message": "删除后该自定义 MCP 的配置、凭证与技能将被彻底清除，不可恢复；如果只是想以后还能重连，请用解绑而不是删除。"
+    },
+    "confirmUninstallPlugin": {
+      "message": "卸载后该插件将变为不可用状态，可以重新安装。"
+    },
+    "empty": {
+      "myMcp": "还没有已安装的MCP",
+      "myPlugin": "还没有已安装的插件",
+      "searchNoResult": "没有找到匹配的结果",
+      "loadingPlugin": "加载插件中...",
+      "loadingMcp": "加载MCP中...",
+      "loadingMyPlugin": "加载我的插件中...",
+      "loadingMyMcp": "加载我的MCP中..."
+    },
+    "pagination": {
+      "pageSize": "每页显示",
+      "all": "全部",
+      "rangeInfo": "{{start}}-{{end}} / 共 {{total}} 条",
+      "prev": "上一页",
+      "next": "下一页"
+    },
+    "toast": {
+      "mcpConnected": "MCP已连接成功。",
+      "mcpCreated": "MCP已创建成功。",
+      "mcpCreatedAndConnected": "MCP已创建并连接成功。",
+      "pluginInstalled": "插件安装成功。",
+      "pluginUninstalled": "插件卸载成功。"
+    },
+    "tokenModal": {
+      "title": "连接 {{name}}",
+      "placeholder": "粘贴你的{{name}}API Key",
+      "saveAndConnect": "保存并连接"
+    },
+    "cliAuth": {
+      "title": "连接 {{name}}",
+      "step": "步骤 {{current}}/{{total}}",
+      "instruction": "已自动为你打开授权页面，请在浏览器中完成授权，完成后这里会自动确认。如果没有弹出新页面，点击下方按钮手动打开。",
+      "instructionNoUrl": "CLI 已自动打开浏览器窗口，请在该窗口完成授权，完成后这里会自动确认，无需在此手动操作。",
+      "openLink": "打开授权页面",
+      "waiting": "等待授权完成…",
+      "stepDone": "已完成，请继续下一步",
+      "error": "连接失败，请重试",
+      "retry": "重试",
+      "timeout": "等待授权超时，请重新打开授权页面重试"
+    },
+    "registerMcp": {
+      "title": "配置MCP",
+      "editTitle": "编辑MCP",
+      "creating": "创建中",
+      "saving": "保存中",
+      "name": "名称",
+      "type": "类型",
+      "typeStdio": "STUDIO",
+      "typeHttp": "流式HTTP",
+      "command": "启动命令",
+      "args": "参数",
+      "pleaseInput": "请输入",
+      "env": "环境变量",
+      "key": "键",
+      "value": "值",
+      "bearerTokenEnvKey": "Bearer令牌环境变量",
+      "headers": "标头",
+      "headersFromEnv": "来自环境变量的标头",
+      "envPassthrough": "环境变量传递",
+      "envVarName": "环境变量名",
+      "addJson": "添加JSON代码",
+      "addJsonHint": "请从 MCP Servers 的介绍页面复制配置 JSON（优先使用 NPX 或 UVX 配置），并粘贴到输入框中。"
+    },
+    "upload": {
+      "hint": "支持.zip和.tar文件，解压后的文件夹需要至少包含 manifest.json 文件和 README.md，.json 文件需包含 packageType 声明包类型。",
+      "dropHint": "点击或拖动文件到此处",
+      "invalidType": "仅支持 .zip / .tar 文件",
+      "importSuccess": "插件导入成功"
+    },
+    "common": {
+      "back": "返回",
+      "cancel": "取消",
+      "confirm": "确定",
+      "search": "搜索",
+      "noResult": "没有匹配结果"
+    }
   }
 }

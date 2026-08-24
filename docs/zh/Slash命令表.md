@@ -34,6 +34,7 @@
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/hooks` | 浏览已配置的 hooks（只读，见下文） |
 | `/simplify` | 代码精简审查：检查复用性、质量、效率并自动修复（仅 `code.*`，见下文） |
+| `/autofix-pr` | 修复当前分支的开放 PR，直到检查通过并处理完评审意见；自动识别平台（GitHub 走 `gh`，GitCode 走 REST）；`--watch` 持续复查直到绿/合并/关闭（仅 `code.*`，详见[自动修复 PR](自动修复PR.md)） |
 | `/sandbox` | 设置沙箱模式（见下文） |
 | `/agents` | 管理 Agent 配置（list, get, create, update, enable, disable, delete，见下文） |
 | `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`/`issue`，见下文） |
@@ -511,7 +512,7 @@ SwarmFlow 专用命令；完整流程见 **[TUI 使用 SwarmFlow 指南](TUI使�
 | `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat`、`dingtalk` 或 `feishu_enterprise:<app_id>`。`targets=tui` 时结果会广播到所有已连接的 TUI 窗口，详见 [定时任务 — 推送到 TUI](定时任务.md#推送到-tui-频道) |
 | `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
 | `mode` | 否 | 执行模式，默认 `agent.fast`。可选：`agent`、`agent.fast`、`agent.plan`、`plan`、`team`、`team.plan`、`code.team`。`team` 系列走多 Agent 流式执行，详见 [定时任务 — Team 模式](定时任务.md#team-模式与-swarmflow多智能体定时任务) |
-| `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式默认 600，Team 模式默认 1200 |
+| `timeout_seconds` | 否 | 单次执行超时（秒），范围 60～259200。未设置时普通模式与 Team 模式默认均为 3600（1 小时） |
 | `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 0 |
 | `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
 

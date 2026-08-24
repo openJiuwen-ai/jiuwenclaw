@@ -58,6 +58,10 @@ export type NewConversationOptions = {
   project?: Pick<ProjectInfo, 'project_id' | 'project_dir'>;
   /** 进入新对话时预填到输入框的文本（例如"通过聊天创建定时任务"引导语），见 App.tsx enterNewConversation */
   initialInputValue?: string;
+  /** 扩展详情页"使用"按钮跳转——进入新对话时顺带打开这些插件/MCP 的会话内启用开关，
+   * 见 App.tsx enterNewConversation。 */
+  initialEnabledPlugins?: string[];
+  initialEnabledMcps?: string[];
 };
 
 function isDefaultProject(project: ProjectInfo): boolean {
@@ -879,7 +883,7 @@ export function ConversationSidebar({
 
   useEffect(() => {
     for (const projectId of projectIdSnapshot.split('\0')) {
-      if (projectId && (expandedProjectIds[projectId] ?? true)) {
+      if (projectId && expandedProjectIds[projectId]) {
         void loadProjectSessions(projectId);
       }
     }
@@ -1177,7 +1181,7 @@ export function ConversationSidebar({
 
   function renderProject(project: ProjectInfo) {
     const sessionsForProject = sortedProjectSessions[project.project_id] || [];
-    const expanded = expandedProjectIds[project.project_id] ?? true;
+    const expanded = Boolean(expandedProjectIds[project.project_id]);
     return (
       <div key={project.project_id} className="conversation-sidebar__group" data-testid="multi-session-project-group" data-variant={project.project_id}>
         <ProjectEntityRow

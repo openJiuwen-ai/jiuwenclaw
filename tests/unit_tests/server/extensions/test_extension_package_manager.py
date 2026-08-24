@@ -14,6 +14,7 @@ from jiuwenswarm.server.runtime import extension_package_manager as catalog
 from jiuwenswarm.server.runtime.mcp import state_store as mcp_state
 
 from tests.unit_tests.server.extensions.conftest import (
+    AGENT_GROUPS,
     AGENT_TEMPLATES,
     PLUGIN_PACKAGES,
     create_package,
@@ -38,6 +39,8 @@ class TestPrepareWorkspaceAndMarketplace:
             assert not (plugins / kind / "marketplace.json").exists()
             assert not any((plugins / kind / "built_in").iterdir())
             assert not any((plugins / kind / "local").iterdir())
+        assert (plugins / AGENT_GROUPS / "built_in").is_dir()
+        assert (plugins / AGENT_GROUPS / "local").is_dir()
 
     def test_prepare_overwrite_true_resets_false_keeps_built_in(self, tmp_path: Path) -> None:
         utils.prepare_workspace(overwrite=True, workspace_dir=tmp_path)
@@ -45,7 +48,7 @@ class TestPrepareWorkspaceAndMarketplace:
         built_in = kind_root / "built_in" / "kept"
         built_in.mkdir(parents=True)
         (built_in / "manifest.json").write_text(
-            json.dumps({"packageType": "agent_template"}), encoding="utf-8"
+            json.dumps({"package_type": "agent_template"}), encoding="utf-8"
         )
         marker = built_in / "_keep.txt"
         marker.write_text("keep", encoding="utf-8")
@@ -55,7 +58,7 @@ class TestPrepareWorkspaceAndMarketplace:
         local = kind_root / "local" / "mine"
         local.mkdir(parents=True)
         (local / "manifest.json").write_text(
-            json.dumps({"packageType": "agent_template"}), encoding="utf-8"
+            json.dumps({"package_type": "agent_template"}), encoding="utf-8"
         )
         (kind_root / "marketplace.json").write_text(
             json.dumps({"plugins": [{"id": "kept", "installed": True}]}),
@@ -95,6 +98,60 @@ class TestPrepareWorkspaceAndMarketplace:
         importlib.reload(app_agentserver)
 
 
+class TestAgentGroupResolution:
+    def test_resolve_local_agent_group(
+        self,
+        extension_workspace: Path,
+    ) -> None:
+        package = (
+            extension_workspace
+            / "plugins"
+            / AGENT_GROUPS
+            / "local"
+            / "finance-group"
+        )
+        package.mkdir(parents=True)
+        (package / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "finance-group",
+                    "package_type": "agent_group",
+                    "agents": ["leader"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert catalog.resolve_agent_group_dir("finance-group") == package.resolve()
+
+    def test_resolve_agent_group_rejects_conflict(
+        self,
+        extension_workspace: Path,
+    ) -> None:
+        for source in ("local", "built_in"):
+            package = (
+                extension_workspace
+                / "plugins"
+                / AGENT_GROUPS
+                / source
+                / "duplicate"
+            )
+            package.mkdir(parents=True)
+            (package / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "name": "duplicate",
+                        "package_type": "agent_group",
+                        "agents": ["leader"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        with pytest.raises(ValueError, match="package conflict"):
+            catalog.resolve_agent_group_dir("duplicate")
+
+
 class TestCreateInstallUninstall:
     """create → local/; install copy or flip flags; uninstall deletes user copy."""
 
@@ -108,12 +165,23 @@ class TestCreateInstallUninstall:
         assert not (extension_workspace / "plugins" / kind / "built_in" / "mine").exists()
         manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
         if kind == AGENT_TEMPLATES:
-            assert manifest["packageType"] == "agent_template"
+            from openjiuwen.harness.resources import load_agent_template_package
+
+            assert manifest["package_type"] == "agent_template"
             assert "persona" in manifest
+            assert manifest["name"] == "N"
+            assert manifest["description"] == "D"
+            assert "agentCard" not in manifest
+            template = load_agent_template_package(pkg / "manifest.json")
+            assert template.agent_card.name == "N"
         else:
-            assert manifest["packageType"] == "plugin"
+            from openjiuwen.harness.resources import load_plugin_package
+
+            assert manifest["package_type"] == "plugin"
             assert "persona" not in manifest
             assert "agentCard" not in manifest
+            plugin = load_plugin_package(pkg / "manifest.json")
+            assert plugin.id == "mine"
         entry = next(e for e in marketplace_entries(kind) if e["id"] == "mine")
         assert entry["installed"] is False
         assert entry["source"] == "local"
@@ -268,7 +336,7 @@ class TestInstallPendingConnectorsGate:
         manifest.write_text(
             json.dumps(
                 {
-                    "packageType": "agent_template",
+                    "package_type": "agent_template",
                     "mcps": [{"connector": "feishu"}],
                 }
             ),
