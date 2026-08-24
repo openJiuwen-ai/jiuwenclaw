@@ -89,6 +89,13 @@ async def test_missing_detail_interrupts_before_sdk_start():
 
     assert result["kind"] == "interaction"
     assert result["interaction"]["questions"][0]["header"] == "报告详略度"
+    assert result["interaction"]["questions"][0]["question"] == (
+        "您希望这份报告是通用版还是专业版？"
+    )
+    assert result["interaction"]["questions"][0]["options"] == [
+        {"label": "专业版（包含深度分析和详细评测）"},
+        {"label": "通用版（仅包含核心结论和快速对比）"},
+    ]
     assert result["state"]["phase"] == "wait_report_detail"
     assert saved[-1]["phase"] == "wait_report_detail"
     stream.assert_not_awaited()
@@ -141,6 +148,48 @@ async def test_detail_answer_starts_sdk_and_preserves_sdk_questions():
     stream.assert_awaited_once()
     assert stream.await_args.kwargs["action"] == "start"
     assert "请生成专业版报告" in stream.await_args.kwargs["query"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selected_option",
+    [
+        "通用版（仅包含核心结论和快速对比）",
+        "精简版（仅包含核心结论和快速对比）",
+    ],
+)
+async def test_general_and_legacy_brief_detail_answers_map_to_brief_sdk_query(
+    selected_option,
+):
+    state = {
+        "schema_version": 1,
+        "phase": "wait_report_detail",
+        "query": "研究智能家电竞争格局",
+        "file_name": "智能家电报告",
+        "revision": 1,
+    }
+    completed = {
+        "status": "completed",
+        "conversation_id": "conversation-1",
+        "report_delivered": True,
+        "report_chars": 42,
+    }
+    answer = {
+        "status": "answered",
+        "answers": [{"selected_options": [selected_option]}],
+    }
+
+    with patch.object(
+        de,
+        "_call_deepresearch_stream_impl",
+        new=AsyncMock(return_value=json.dumps(completed, ensure_ascii=False)),
+    ) as stream:
+        result, _ = await _invoke(state=state, user_input=answer)
+
+    assert result["kind"] == "completed"
+    assert stream.await_args.kwargs["query"] == (
+        "研究智能家电竞争格局（请生成精简版报告）"
+    )
 
 
 @pytest.mark.asyncio
@@ -736,8 +785,8 @@ async def test_execution_rail_turns_interaction_result_into_native_interrupt():
             "questions": [
                 {
                     "header": "报告详略度",
-                    "question": "专业版还是精简版？",
-                    "options": [{"label": "专业版"}, {"label": "精简版"}],
+                    "question": "通用版还是专业版？",
+                    "options": [{"label": "专业版"}, {"label": "通用版"}],
                 }
             ],
         },

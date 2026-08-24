@@ -257,10 +257,10 @@ def _detail_interaction(state: dict[str, Any]) -> dict[str, Any]:
             "questions": [
                 {
                     "header": "报告详略度",
-                    "question": "您希望这份报告是精简版还是专业版？",
+                    "question": "您希望这份报告是通用版还是专业版？",
                     "options": [
                         {"label": "专业版（包含深度分析和详细评测）"},
-                        {"label": "精简版（仅包含核心结论和快速对比）"},
+                        {"label": "通用版（仅包含核心结论和快速对比）"},
                     ],
                 }
             ],
@@ -312,7 +312,7 @@ def _detail_query(query: str, user_input: Any) -> str:
     selected = " ".join(values)
     if "专业版" in selected:
         requirement = "请生成专业版报告"
-    elif "精简版" in selected:
+    elif "通用版" in selected or "精简版" in selected:
         requirement = "请生成精简版报告"
     else:
         requirement = selected.strip()
