@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 import logging
 from collections.abc import Hashable, Iterable
 from typing import Any, ClassVar
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.mcp_config import (
+    invalidate_office_claw_mcp_schema_cache,
+    list_office_claw_mcp_tools,
+    validate_office_claw_mcp_config,
+)
 from jiuwenswarm.common.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
 from jiuwenswarm.server.runtime.reload_result import (
     ReloadAggregateResult,
@@ -36,6 +43,14 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_background_prepare_result(task: asyncio.Task[Any]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("[TenantAgentPool] background schema prewarm failed: %s", exc)
 
 
 def filter_cached_agent_managers(values: Iterable[Any]) -> list[Any]:
@@ -82,6 +97,7 @@ class TenantAgentPool:
         self._global_lock = asyncio.Lock()
         self._sync_lock = asyncio.Lock()
         self._last_sync_revision: dict[str, str] = {}
+        self._background_prepare_tasks: set[asyncio.Task[Any]] = set()
 
         self._last_reload_trace_id: str | None = None
 
@@ -177,6 +193,12 @@ class TenantAgentPool:
 
     async def cleanup(self) -> None:
         """清理所有缓存的 AgentManager 实例（用于 shutdown 或重置）."""
+        background_tasks = list(self._background_prepare_tasks)
+        self._background_prepare_tasks.clear()
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
         keys = await self._agent_wrappers.keys()
         for key in keys:
             agent_manager = await self._agent_wrappers.get(key)
@@ -446,10 +468,17 @@ class TenantAgentPool:
             env_overrides: Any = None,
     ) -> Any:
         """确保 agent_id + service_id + workspace_key 对应的 AgentManager 已创建."""
-        request_agent_id = agent_id
-        request_service_id = service_id or "default"
-        request_workspace_key = (workspace_key or "").strip() or "default"
-        cache_key = self._build_cache_key(agent_id, service_id, request_workspace_key)
+        request_agent_id = self.normalize_tenant_id(agent_id)
+        request_service_id = self.normalize_tenant_id(service_id)
+        request_workspace_key = self.normalize_tenant_id(
+            workspace_key,
+            default="default",
+        )
+        cache_key = self._build_cache_key(
+            request_agent_id,
+            request_service_id,
+            request_workspace_key,
+        )
         lock = self._get_lock(cache_key)
 
         registry = TenantCatalogRegistry.get_instance()
@@ -493,7 +522,9 @@ class TenantAgentPool:
                 # AGENT_RUNTIME: stable string instance id (legacy "aid_sid" form).
                 agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
                 manager_agent_id = (
-                    f"{agent_id}_{service_id}" if agent_runtime else request_agent_id
+                    f"{request_agent_id}_{request_service_id}"
+                    if agent_runtime
+                    else request_agent_id
                 )
 
                 from jiuwenswarm.server.runtime.agent_manager import AgentManager
@@ -563,10 +594,16 @@ class TenantAgentPool:
             agent_id: str,
             service_id: str | None,
             workspace_key: str | None = None,
-    ) -> tuple[str, str | None, str]:
+    ) -> tuple[str, str, str]:
         """Tenant pool key as a tuple to avoid delimiter collisions."""
-        wk = (workspace_key or "").strip() or "default"
-        return (agent_id, service_id, wk)
+        return (
+            TenantAgentPool.normalize_tenant_id(agent_id),
+            TenantAgentPool.normalize_tenant_id(service_id),
+            TenantAgentPool.normalize_tenant_id(
+                workspace_key,
+                default="default",
+            ),
+        )
 
     async def _evict_manager_cache(
             self, agent_id: str, service_id: str, workspace_key: str = "default",
@@ -650,6 +687,67 @@ class TenantAgentPool:
                 service_id,
             )
             return {"ok": False, "error": str(exc)}
+
+    async def prepare_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Schedule exact-session initialization for one OfficeClaw tenant."""
+
+        agent_id = self.normalize_tenant_id(params.get("agent_id"))
+        service_id = self.normalize_tenant_id(params.get("service_id"))
+        session_id = str(params.get("session_id") or "").strip()
+        channel_id = str(params.get("channel_id") or "officeclaw").strip()
+        mode = str(params.get("mode") or "agent").strip()
+        project_dir = str(params.get("project_dir") or "").strip() or None
+        project_id = str(params.get("project_id") or session_id).strip() or session_id
+        catalog_revision = str(params.get("catalog_revision") or "").strip()
+        if channel_id != "officeclaw":
+            raise ValueError("agent.session.prepare is restricted to officeclaw")
+        if not session_id:
+            raise ValueError("session_id is required")
+
+        spec = TenantCatalogRegistry.get_instance().get(service_id, agent_id)
+        if spec is None:
+            return {"status": "bypassed", "reason": "agent_not_in_catalog"}
+        if catalog_revision and spec.revision and catalog_revision != spec.revision:
+            return {"status": "bypassed", "reason": "catalog_revision_mismatch"}
+
+        agent_manager = await self._ensure_agent_manager(
+            agent_id,
+            service_id,
+            "default",
+            config_base=spec.config,
+            env_overrides=materialize_sync_env(spec.env),
+        )
+        status = await agent_manager.prepare_known_session(
+            channel_id=channel_id,
+            session_id=session_id,
+            mode=mode,
+            project_id=project_id,
+            project_dir=project_dir,
+            catalog_revision=catalog_revision or spec.revision,
+        )
+        mcp_schema_status = "bypassed"
+        raw_mcp = params.get("office_claw_mcp")
+        if isinstance(raw_mcp, dict) and raw_mcp:
+            try:
+                mcp_params = validate_office_claw_mcp_config(raw_mcp)
+                task = asyncio.create_task(
+                    list_office_claw_mcp_tools(mcp_params),
+                    name=f"office-claw-mcp-schema-prepare-{session_id}",
+                )
+                self._background_prepare_tasks.add(task)
+                task.add_done_callback(self._background_prepare_tasks.discard)
+                task.add_done_callback(_log_background_prepare_result)
+                mcp_schema_status = "scheduled"
+            except ValueError as exc:
+                logger.warning(
+                    "[TenantAgentPool] OfficeClaw MCP schema prewarm rejected: %s",
+                    exc,
+                )
+        return {
+            "status": status,
+            "session_id": session_id,
+            "mcp_schema_status": mcp_schema_status,
+        }
 
     async def sync_agents_configs(self, params: dict) -> dict[str, Any]:
         """Apply sync_agents_configs catalog revision for one service_id."""
@@ -866,6 +964,19 @@ class TenantAgentPool:
                     results.append(raw)
 
             if all_ok:
+                if self._last_sync_revision.get(service_id) not in (None, revision):
+                    invalidate_office_claw_mcp_schema_cache()
+                    managers = filter_cached_agent_managers(
+                        self._agent_wrappers.snapshot_values_nowait()
+                    )
+                    await asyncio.gather(
+                        *(
+                            manager.invalidate_known_session_prewarms()
+                            for manager in managers
+                            if str(getattr(manager, "env_service_id", "default")) == service_id
+                        ),
+                        return_exceptions=True,
+                    )
                 self._last_sync_revision[service_id] = revision
 
             return {
@@ -1027,6 +1138,7 @@ class TenantAgentPool:
             self, request: AgentRequest
     ):
         """处理流式请求."""
+        stream_started_at = time.monotonic()
         guard = self.require_officeclaw_agent(request)
         if guard is not None:
             yield AgentResponseChunk(
@@ -1044,8 +1156,24 @@ class TenantAgentPool:
         agent_id, service_id = self.resolve_control_rpc_tenant(request, agent_id, service_id)
         cache_key = self._build_cache_key(agent_id, service_id, workspace_key)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id, workspace_key)
+        manager_ready_at = time.monotonic()
+        first_chunk = True
         try:
             async for chunk in agent_manager.process_message_stream(request):
+                if first_chunk:
+                    first_chunk = False
+                    if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                        "1", "true", "yes", "on",
+                    }:
+                        logger.debug(
+                            "[TTFT] tenant pool first chunk: session_id=%s request_id=%s "
+                            "epoch_ms=%.3f manager_lookup_ms=%.1f manager_to_chunk_ms=%.1f",
+                            request.session_id,
+                            request.request_id,
+                            time.time_ns() / 1_000_000,
+                            (manager_ready_at - stream_started_at) * 1000,
+                            (time.monotonic() - manager_ready_at) * 1000,
+                        )
                 yield chunk
         finally:
             await self._refresh_agent_manager_cache(cache_key, agent_manager)

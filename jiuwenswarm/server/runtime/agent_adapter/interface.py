@@ -1194,7 +1194,7 @@ class JiuWenSwarm:
         if config_base is not None:
             create_kwargs["config_base"] = config_base
         await adapter.create_instance(config, **create_kwargs)
-        logger.info(
+        logger.debug(
             "[JiuWenSwarm] Agent instance created: sdk=%s, mode=%s, sub_mode=%s",
             self._sdk_name, mode, sub_mode,
         )
@@ -2518,6 +2518,10 @@ class JiuWenSwarm:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        perf_timing_enabled = os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        perf_stream_entered_at = time.perf_counter()
         # Streaming command.goal: get/pause/clear stay one-shot; set/resume
         # continue into the DeepAdapter attach→set/resume→read path below.
         if request.req_method == ReqMethod.COMMAND_GOAL:
@@ -2629,6 +2633,7 @@ class JiuWenSwarm:
                 return
 
         adapter = self._ensure_adapter(mode=self._adapter_mode_for_request(request))
+        perf_adapter_ready_at = time.perf_counter()
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -2649,6 +2654,7 @@ class JiuWenSwarm:
         # command.goal set history is written only after a successful set inside
         # the DeepAdapter stream path (same success gate as unary process_message).
         params_for_history = request.params if isinstance(request.params, dict) else {}
+        perf_history_started_at = time.perf_counter()
         if (
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
@@ -2664,8 +2670,9 @@ class JiuWenSwarm:
                 channel_metadata=request.metadata,
                 mode=params_for_history.get("mode", "unknown"),
             )
+        perf_history_ready_at = time.perf_counter()
 
-        logger.info(
+        logger.debug(
             "[JiuWenSwarm] 处理流式请求: request_id=%s channel_id=%s session_id=%s sdk=%s",
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
@@ -2688,6 +2695,19 @@ class JiuWenSwarm:
                 is_complete=True,
             )
             return
+        perf_inputs_ready_at = time.perf_counter()
+        if perf_timing_enabled:
+            logger.debug(
+                "[TTFT] adapter inputs ready: session_id=%s request_id=%s "
+                "epoch_ms=%.3f adapter_ms=%.1f history_ms=%.1f inputs_ms=%.1f total_ms=%.1f",
+                session_id,
+                request.request_id,
+                time.time_ns() / 1_000_000,
+                (perf_adapter_ready_at - perf_stream_entered_at) * 1000,
+                (perf_history_ready_at - perf_history_started_at) * 1000,
+                (perf_inputs_ready_at - perf_history_ready_at) * 1000,
+                (perf_inputs_ready_at - perf_stream_entered_at) * 1000,
+            )
 
         # Team 模式：使用原始 query，而不是 build_user_prompt 包装后的内容
         team_query_is_interactive_input = False
@@ -2806,7 +2826,7 @@ class JiuWenSwarm:
 
         async def run_stream_task():
             tenant_tokens, mem_token = self._bind_tenant_request_context()
-            logger.info("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
+            logger.debug("[JiuWenSwarm] run_stream_task started: request_id=%s session_id=%s", rid, session_id)
             _put_count = 0
             try:
                 try:
@@ -2830,7 +2850,7 @@ class JiuWenSwarm:
                             _n_tasks = 0
                             if isinstance(_pl, dict) and isinstance(_pl.get("tasks"), list):
                                 _n_tasks = len(_pl["tasks"])
-                            logger.info(
+                            logger.debug(
                                 "[JiuWenSwarm] run_stream_task chunk #%s: request_id=%s event_type=%s%s",
                                 _put_count,
                                 rid,
@@ -2893,7 +2913,7 @@ class JiuWenSwarm:
         a2ui_pending_render_sent = False
         a2ui_stream_probe = ""
         _yielded_from_queue = 0
-        logger.info(
+        logger.debug(
             "[JiuWenSwarm] consumer loop starting: request_id=%s is_team=%s is_first=%s",
             rid, is_team_mode, is_team_first_request,
         )
@@ -2909,7 +2929,7 @@ class JiuWenSwarm:
                 if _yielded_from_queue <= 3:
                     _pl = getattr(data, "payload", None) if event_type == "chunk" else None
                     _et = _pl.get("event_type", "") if isinstance(_pl, dict) else ""
-                    logger.info(
+                    logger.debug(
                         "[JiuWenSwarm] consumer loop yield #%s: request_id=%s event_type=%s item_type=%s",
                         _yielded_from_queue, rid, _et, event_type,
                     )

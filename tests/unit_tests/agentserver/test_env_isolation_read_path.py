@@ -97,7 +97,7 @@ async def test_assistant_overlay_ignores_global_after_office_reload():
         reset_task_env_overlay(token)
 
 
-def test_get_config_cache_bypasses_when_task_overlay_bound(monkeypatch):
+def test_get_config_cache_isolated_by_task_overlay_content(monkeypatch):
     from jiuwenswarm.common import config as config_module
     from jiuwenswarm.common.local_env_config import (
         apply_env_overrides_to_active,
@@ -130,10 +130,53 @@ def test_get_config_cache_bypasses_when_task_overlay_bound(monkeypatch):
         overlay_token = bind_task_env_overlay({"MODEL_NAME": "overlay-model"})
         try:
             third = config_module.get_config()
+            fourth = config_module.get_config()
             assert third is not first
+            assert fourth is third
             assert calls["count"] == 2
         finally:
             reset_task_env_overlay(overlay_token)
+
+        changed_overlay_token = bind_task_env_overlay({"MODEL_NAME": "other-model"})
+        try:
+            fifth = config_module.get_config()
+            assert fifth is not third
+            assert calls["count"] == 3
+        finally:
+            reset_task_env_overlay(changed_overlay_token)
     finally:
         reset_agent_env_ns(token)
+        config_module.clear_config_cache()
+
+
+def test_get_config_sealed_overlay_ignores_ttl_but_observes_source_change(monkeypatch):
+    from jiuwenswarm.common import config as config_module
+
+    config_module.clear_config_cache()
+    calls = {"count": 0}
+    clock = {"value": 10.0}
+    source = {"stamp": ((1, 100), (2, 200))}
+
+    def _read_config():
+        calls["count"] += 1
+        return {"preferred_language": "zh", "models": {}, "channels": {}}
+
+    monkeypatch.setattr(config_module, "get_merged_config_dict", _read_config)
+    monkeypatch.setattr(config_module, "_config_source_stamp", lambda: source["stamp"])
+    monkeypatch.setattr(config_module.time, "monotonic", lambda: clock["value"])
+
+    overlay_token = bind_task_env_overlay({"MODEL_NAME": "stable-model"})
+    try:
+        first = config_module.get_config()
+        clock["value"] += config_module._CONFIG_CACHE_TTL_SECONDS * 10
+        second = config_module.get_config()
+        assert second is first
+        assert calls["count"] == 1
+
+        source["stamp"] = ((1, 100), (3, 201))
+        third = config_module.get_config()
+        assert third is not first
+        assert calls["count"] == 2
+    finally:
+        reset_task_env_overlay(overlay_token)
         config_module.clear_config_cache()

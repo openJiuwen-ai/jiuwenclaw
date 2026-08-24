@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,69 @@ from jiuwenswarm.common.utils import (
 )
 
 _LANGUAGE_NAMES = {"cn": "Chinese (Simplified)", "zh": "Chinese (Simplified)", "en": "English"}
+_STATIC_CACHE_ENV = "JIUWENSWARM_STATIC_ASSEMBLY_CACHE"
+_STATIC_CACHE_ON = frozenset({"1", "true", "yes", "on"})
+_RUNTIME_STATE_CACHE_LIMIT = 64
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeStateCacheEntry:
+    mtime_ns: int
+    size: int
+    value: dict[str, Any]
+
+
+_runtime_state_cache: dict[str, _RuntimeStateCacheEntry] = {}
+_runtime_state_cache_lock = threading.RLock()
+
+
+def _runtime_state_cache_enabled() -> bool:
+    return str(os.environ.get(_STATIC_CACHE_ENV, "") or "").strip().lower() in _STATIC_CACHE_ON
+
+
+def _read_runtime_state(state_path: Path) -> dict[str, Any]:
+    """Read runtime YAML, reusing an unchanged prewarmed parse when enabled."""
+
+    cache_enabled = _runtime_state_cache_enabled()
+    cache_key = str(state_path)
+    try:
+        stat = state_path.stat()
+    except FileNotFoundError:
+        if cache_enabled:
+            with _runtime_state_cache_lock:
+                _runtime_state_cache.pop(cache_key, None)
+        return {}
+
+    if cache_enabled:
+        with _runtime_state_cache_lock:
+            cached = _runtime_state_cache.get(cache_key)
+        if cached is not None and cached.mtime_ns == stat.st_mtime_ns and cached.size == stat.st_size:
+            return dict(cached.value)
+
+    try:
+        with open(state_path, encoding="utf-8") as file:
+            value = yaml.safe_load(file) or {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(value, dict):
+        value = {}
+
+    if cache_enabled:
+        # Do not cache a parse under a fingerprint that changed during read.
+        try:
+            verified = state_path.stat()
+        except OSError:
+            return dict(value)
+        if verified.st_mtime_ns == stat.st_mtime_ns and verified.st_size == stat.st_size:
+            with _runtime_state_cache_lock:
+                if cache_key not in _runtime_state_cache and len(_runtime_state_cache) >= _RUNTIME_STATE_CACHE_LIMIT:
+                    _runtime_state_cache.pop(next(iter(_runtime_state_cache)))
+                _runtime_state_cache[cache_key] = _RuntimeStateCacheEntry(
+                    mtime_ns=verified.st_mtime_ns,
+                    size=verified.st_size,
+                    value=dict(value),
+                )
+    return dict(value)
 
 
 class RuntimePromptRail(DeepAgentRail):
@@ -140,6 +205,13 @@ class RuntimePromptRail(DeepAgentRail):
             if isinstance(session_id, str) and session_id.strip()
             else None
         )
+
+    def prewarm_runtime_state(self) -> None:
+        """Prime the fingerprinted stable runtime parse before the first click."""
+
+        if not _runtime_state_cache_enabled():
+            return
+        _read_runtime_state(get_runtime_state_path(self._session_id))
 
     def set_force_english(self, force: bool) -> None:
         """Force English for scaffolding sections (time/runtime/env) in code mode.
@@ -284,15 +356,12 @@ class RuntimePromptRail(DeepAgentRail):
         ))
 
         # ── runtime ──
-        runtime_state: dict[str, Any] = {}
         state_path = get_runtime_state_path(self._session_id)
         try:
-            with open(state_path, encoding="utf-8") as f:
-                runtime_state = yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            pass
+            runtime_state = _read_runtime_state(state_path)
         except Exception as e:
             logger.warning("Failed to read runtime state file %s: %s", state_path, e)
+            runtime_state = {}
 
         configured_models: list[str] = []
         raw_available_models = runtime_state.get("available_models") or []
@@ -466,45 +535,6 @@ class RuntimePromptRail(DeepAgentRail):
             content={"cn": env_content, "en": env_content},
             priority=89,
         ))
-
-        # ── Git status section ──
-        git_branch = str(runtime_state.get("git_branch") or "").strip()
-        if git_branch and git_branch != "N/A":
-            git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
-            git_status_text = str(runtime_state.get("git_status") or "").strip()
-            git_recent_commits = str(runtime_state.get("git_recent_commits") or "").strip()
-            git_user = str(runtime_state.get("git_user") or "").strip()
-
-            git_lines = [
-                "This is the git status at the start of the conversation. "
-                "Note that this status is a snapshot in time, and will not update during the conversation. "
-                "Run git yourself when you need the current state — for example before staging or "
-                "committing, or after anything may have changed the working tree.",
-                f"Current branch: {git_branch}",
-            ]
-            if git_main_branch:
-                git_lines.append(
-                    f"Main branch (you will usually use this for PRs): {git_main_branch}"
-                )
-            if git_user:
-                git_lines.append(f"Git user: {git_user}")
-            git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
-            git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
-
-            git_content = "\n\n".join(git_lines)
-
-            await self._upsert_prompt_attachment(
-                ctx,
-                section="git_status",
-                content=git_content,
-                kind=PromptAttachmentKind.WORKSPACE_DELTA,
-                priority=87,
-            )
-        else:
-            await self._clear_prompt_attachment(
-                ctx,
-                section="git_status",
-            )
 
         # ── Channel: browser_tool_policy or trusted_dirs_policy──
         if self._channel == "web":

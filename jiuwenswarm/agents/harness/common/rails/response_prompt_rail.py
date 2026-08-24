@@ -195,7 +195,7 @@ class ResponsePromptRail(DeepAgentRail):
                     )
                 )
 
-            logger.info(
+            logger.debug(
                 "A2UI prompt decision: request_id=%s conversation_id=%s "
                 "channel=%s enabled=%s injected=%s browser_workflows=%s skip_a2ui=%s",
                 request_id or "-",

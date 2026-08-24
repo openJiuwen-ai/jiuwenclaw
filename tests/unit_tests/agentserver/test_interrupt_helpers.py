@@ -127,8 +127,8 @@ def _scene_hook_input(normalized_tool_name: str, user_input):
 
 
 def _permission_scene_hook(monkeypatch: pytest.MonkeyPatch):
-    # build_permission_rail reads the process-effective permissions config, not
-    # the unused ``config`` argument — enable it explicitly for these unit tests.
+    # Permission policy remains process-effective; the resolved catalog config
+    # supplies static rail switches such as react.skill_turbo.
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.common.rails.permissions.config_loader.get_effective_permissions_config",
         lambda **_kwargs: {"enabled": True, "tools": {}, "rules": []},
@@ -138,6 +138,25 @@ def _permission_scene_hook(monkeypatch: pytest.MonkeyPatch):
     hook = rail._host.permission_scene_hook
     assert hook is not None
     return hook
+
+
+def test_permission_rail_uses_resolved_config_for_static_switches(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.rails.permissions.config_loader.get_effective_permissions_config",
+        lambda **_kwargs: {"enabled": True, "tools": {}, "rules": []},
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.common.config.get_config",
+        lambda: (_ for _ in ()).throw(AssertionError("global config must not be re-read")),
+    )
+
+    rail = build_permission_rail(
+        {"permissions": {"enabled": True}, "react": {"skill_turbo": {"enabled": False}}}
+    )
+
+    assert rail is not None
 
 
 def test_scene_hook_approves_ask_user_on_resume(monkeypatch: pytest.MonkeyPatch):

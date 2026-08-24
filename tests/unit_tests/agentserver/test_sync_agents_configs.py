@@ -795,6 +795,17 @@ def test_build_agent_spec_hash_stable():
 
 class TestOfficeclawGuard:
     @staticmethod
+    def test_cache_key_normalizes_missing_and_explicit_default_tenant_ids():
+        implicit = TenantAgentPool._build_cache_key("office", None, None)
+        explicit = TenantAgentPool._build_cache_key(
+            "office",
+            "default",
+            "default",
+        )
+
+        assert implicit == explicit == ("office", "default", "default")
+
+    @staticmethod
     def test_require_officeclaw_missing_ids_use_legacy_default_tenant():
         from jiuwenswarm.common.schema.agent import AgentRequest
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
-from jiuwenswarm.server.runtime.agent_manager import AgentManager
+from jiuwenswarm.server.runtime.agent_manager import AgentManager, _make_agent_cache_key
 
 
 class _SessionRuntimeAgent:
@@ -80,6 +81,53 @@ class _SlowCreateAgentManager(AgentManager):
         return agent
 
 
+class _StreamingAgent:
+    async def process_message_stream(self, _request):
+        yield "model-chunk"
+
+
+class _RecordingRequestManager(AgentManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_project_dirs: list[str | None] = []
+        self.streaming_agent = _StreamingAgent()
+
+    async def wait_for_session_prewarm(self, _session_id: str | None) -> None:
+        return None
+
+    async def get_agent(
+        self,
+        channel_id: str,
+        mode: str = "agent",
+        project_dir: str | None = None,
+        sub_mode: str | None = None,
+    ):
+        self.requested_project_dirs.append(project_dir)
+        return self.streaming_agent
+
+
+@pytest.mark.asyncio
+async def test_stream_request_reuses_project_dir_from_exact_session_prewarm() -> None:
+    manager = _RecordingRequestManager()
+    request = SimpleNamespace(
+        session_id="officeclaw_exact",
+        channel_id="officeclaw",
+        params={
+            "mode": "agent.plan",
+            "project_dir": "D:/workspace/thread-a",
+            "workspace_dir": "D:/legacy-must-not-win",
+        },
+    )
+
+    try:
+        chunks = [chunk async for chunk in manager.process_message_stream(request)]
+
+        assert chunks == ["model-chunk"]
+        assert manager.requested_project_dirs == ["D:/workspace/thread-a"]
+    finally:
+        await manager.cleanup()
+
+
 @pytest.mark.asyncio
 async def test_cleanup_session_runtime_reclaims_idle_tui_root_agent() -> None:
     manager = AgentManager()
@@ -123,7 +171,9 @@ async def test_concurrent_get_agent_creates_one_cached_root() -> None:
 async def test_same_key_creation_waits_for_old_root_cleanup() -> None:
     manager = _SlowCreateAgentManager()
     old_agent = _BlockingRootCleanupAgent()
-    cache_key = "code:normal:/tmp/shared-project"
+    # Match AgentManager's platform-specific absolute-path normalization.  A
+    # literal POSIX cache key does not identify the same project on Windows.
+    cache_key = _make_agent_cache_key("code", "normal", "/tmp/shared-project")
     manager.agents["tui"] = {cache_key: old_agent}
 
     cleanup_task = asyncio.create_task(
