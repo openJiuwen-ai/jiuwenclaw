@@ -85,6 +85,7 @@ def _make_stub_adapter(
     model_cache: dict | None = None,
     env_service_id: str = "test-svc",
     default_model: MagicMock | None = None,
+    default_baseline_model: MagicMock | None = None,
 ):
     """Create a stub adapter with _resolve_model_for_request and related methods.
 
@@ -97,12 +98,18 @@ def _make_stub_adapter(
     adapter._model_cache = model_cache if model_cache is not None else {}
     adapter._env_service_id = env_service_id
     adapter._model = default_model if default_model is not None else MagicMock()
+    # Mirror production: _default_model is the sync-reload baseline; switch_model
+    # does NOT touch it. None here means "fall back to _model" (cold start before
+    # any sync reload has run).
+    adapter._default_model = default_baseline_model
 
     def _resolve_model_for_request(request):
         params = request.params if isinstance(request.params, dict) else {}
         requested = str(params.get("model_name") or "").strip()
         if not requested:
-            return adapter._model
+            # Mirror production: return _default_model (sync-reload baseline)
+            # so a prior switch_model(self._model override) does not linger.
+            return adapter._default_model or adapter._model
         if requested in adapter._model_cache:
             return adapter._model_cache[requested]
         resolved = adapter._resolve_from_shared_model_cache(requested)
@@ -468,32 +475,58 @@ class TestServiceModelCacheLifecycle:
 
 class TestResolveModelForRequest:
     def test_no_model_name_returns_default(self):
-        adapter = _make_stub_adapter(default_model=MagicMock())
+        baseline = MagicMock(name="baseline")
+        adapter = _make_stub_adapter(default_baseline_model=baseline)
         req = MagicMock()
         req.params = {}
         result = adapter._resolve_model_for_request(req)
-        assert result is adapter._model
+        assert result is baseline
 
     def test_empty_model_name_returns_default(self):
-        adapter = _make_stub_adapter(default_model=MagicMock())
+        baseline = MagicMock(name="baseline")
+        adapter = _make_stub_adapter(default_baseline_model=baseline)
         req = MagicMock()
         req.params = {"model_name": ""}
         result = adapter._resolve_model_for_request(req)
-        assert result is adapter._model
+        assert result is baseline
 
     def test_whitespace_model_name_returns_default(self):
-        adapter = _make_stub_adapter(default_model=MagicMock())
+        baseline = MagicMock(name="baseline")
+        adapter = _make_stub_adapter(default_baseline_model=baseline)
         req = MagicMock()
         req.params = {"model_name": "   "}
         result = adapter._resolve_model_for_request(req)
-        assert result is adapter._model
+        assert result is baseline
 
     def test_non_dict_params_returns_default(self):
-        adapter = _make_stub_adapter(default_model=MagicMock())
+        baseline = MagicMock(name="baseline")
+        adapter = _make_stub_adapter(default_baseline_model=baseline)
         req = MagicMock()
         req.params = "not-a-dict"
         result = adapter._resolve_model_for_request(req)
-        assert result is adapter._model
+        assert result is baseline
+
+    def test_no_model_name_falls_back_to_model_when_default_none(self):
+        # Cold start: _default_model is None (no sync reload yet) → fall back
+        # to _model so the adapter still has a usable model.
+        current = MagicMock(name="current")
+        adapter = _make_stub_adapter(default_model=current, default_baseline_model=None)
+        req = MagicMock()
+        req.params = {}
+        result = adapter._resolve_model_for_request(req)
+        assert result is current
+
+    def test_no_model_name_returns_default_not_current_after_switch(self):
+        # switch_model changed _model to B, but _default_model stays A.
+        # Not passing model_name must return A (default), not B (switched).
+        baseline = MagicMock(name="baseline-A")
+        switched = MagicMock(name="switched-B")
+        adapter = _make_stub_adapter(default_model=switched, default_baseline_model=baseline)
+        req = MagicMock()
+        req.params = {}
+        result = adapter._resolve_model_for_request(req)
+        assert result is baseline
+        assert result is not switched
 
     def test_model_name_in_cache_returns_cached(self):
         mock_model = MagicMock()

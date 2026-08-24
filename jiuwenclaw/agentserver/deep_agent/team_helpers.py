@@ -1820,6 +1820,109 @@ async def _apply_resolved_model_to_team(
     )
 
 
+async def _reset_team_model_to_per_role_default(
+    team_name: str,
+    spec: Any,
+    *,
+    config_base: dict[str, Any] | None = None,
+) -> None:
+    """Reset leader + in-process teammate harnesses to their per-role default model.
+
+    Invoked on team-mode chat.send WITHOUT model_name so in-process teammates that
+    were hot-switched to a non-default model (via _apply_resolved_model_to_team on
+    a prior request carrying model_name) are hot-reloaded back to their per-role
+    default declared in ``spec.agents[role].model``. Subprocess teammates are
+    unaffected (no agent_ref) and will pick up the default on next spawn via
+    build_context_from_db which reads the freshly rebuilt spec.
+
+    For each role:
+      - If ``spec.agents[role].model`` is a TeamModelConfig → apply it directly.
+      - If None (yaml did not declare a per-role model) → fall back to
+        ``get_default_models(config_base)[0]`` rebuilt via _build_team_model_config
+        so the member still gets a usable default rather than staying on the
+        previously-switched model.
+    """
+    from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+    from jiuwenclaw.agentserver.team.team_manager import _runner_team_runtime_manager
+    from jiuwenclaw.config import get_default_models
+
+    runtime_mgr = _runner_team_runtime_manager(GLOBAL_RUNNER)
+    active_team = await runtime_mgr.pool.get(team_name)
+    if active_team is None or active_team.agent is None:
+        logger.info(
+            '[TeamHelpers] reset to per-role default skipped: no active team team=%s',
+            team_name,
+        )
+        return
+
+    agents_spec = getattr(spec, 'agents', None) if spec is not None else None
+    if not isinstance(agents_spec, dict):
+        logger.warning(
+            '[TeamHelpers] reset to per-role default: spec.agents not a dict, skip team=%s',
+            team_name,
+        )
+        return
+
+    fallback_model: Any = None
+    try:
+        entries = get_default_models(config_base)
+        if entries:
+            base_entry = entries[0]
+            fallback_model = _build_team_model_config({
+                "model_client_config": base_entry.get("model_client_config", {}),
+                "model_request_config": base_entry.get("model_config_obj") or {},
+            })
+    except Exception as exc:
+        logger.warning(
+            '[TeamHelpers] reset to per-role default: fallback model build failed team=%s error=%s',
+            team_name, exc,
+        )
+
+    team_agent = active_team.agent
+
+    def _resolve_role_model(role_value: str) -> Any | None:
+        role_model = None
+        role_spec = agents_spec.get(role_value)
+        if role_spec is not None:
+            role_model = getattr(role_spec, 'model', None)
+        if role_model is None and fallback_model is not None:
+            role_model = fallback_model
+        return role_model
+
+    # Leader hot-reload
+    leader_role = 'leader'
+    leader_harness = getattr(team_agent, 'harness', None)
+    if leader_harness is not None and hasattr(leader_harness, 'apply_model_config'):
+        leader_model = _resolve_role_model(leader_role)
+        if leader_model is not None:
+            leader_harness.apply_model_config(leader_model)
+
+    # In-process teammate hot-reload (subprocess teammates have no agent_ref)
+    spawn_mgr = getattr(team_agent, 'spawn_manager', None)
+    if spawn_mgr is not None:
+        handles = getattr(spawn_mgr, 'spawned_handles', {}) or {}
+        for member_name in list(handles.keys()):
+            handle = handles[member_name]
+            member_agent = getattr(handle, 'agent_ref', None)
+            if member_agent is None:
+                continue
+            member_harness = getattr(member_agent, 'harness', None)
+            if member_harness is None or not hasattr(member_harness, 'apply_model_config'):
+                continue
+            role_obj = getattr(member_agent, 'role', None)
+            role_value = getattr(role_obj, 'value', None) or str(role_obj or '')
+            role_model = _resolve_role_model(role_value)
+            if role_model is None:
+                continue
+            member_harness.apply_model_config(role_model)
+
+    logger.info(
+        '[TeamHelpers] reset to per-role default applied: team=%s roles=%s',
+        team_name,
+        sorted(agents_spec.keys()),
+    )
+
+
 async def process_team_message_stream(request: Any,
                                       inputs: dict[str,
                                                    Any],
@@ -2119,6 +2222,28 @@ async def process_team_message_stream(request: Any,
         except Exception as exc:
             logger.warning(
                 '[TeamHelpers] runtime model switch failed: '
+                'session_id=%s error=%s',
+                session_id,
+                exc,
+            )
+    elif team_name and is_first_request:
+        # New conversation (is_first_request) WITHOUT model_name → reset
+        # leader + in-process teammate harnesses to their per-role default so a
+        # prior hot-switch (carried by a previous request with model_name) does
+        # not linger. This covers both truly-cold starts and same-session new
+        # queries that jiuwen resolves to RESUME_FROM_PAUSE (relay reuses the
+        # session id). A genuine pause-resume that wants to keep the switched
+        # model is NOT affected: relay carries model_name on resume, so it
+        # enters the `if _resolved_model_config is not None` branch above
+        # (apply), not this else. Follow-up replies (is_first_request=False,
+        # e.g. tool confirmations) are also excluded by the is_first_request
+        # guard. Subprocess teammates are unaffected and will read the freshly
+        # rebuilt spec on next spawn. Cold start (team not built yet) is a no-op.
+        try:
+            await _reset_team_model_to_per_role_default(team_name, team_spec)
+        except Exception as exc:
+            logger.warning(
+                '[TeamHelpers] runtime model reset to per-role default failed: '
                 'session_id=%s error=%s',
                 session_id,
                 exc,

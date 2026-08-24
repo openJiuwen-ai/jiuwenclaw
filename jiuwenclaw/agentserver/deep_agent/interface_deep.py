@@ -1336,6 +1336,7 @@ class JiuWenClawDeepAdapter:
         self._video_tool_registered: bool = False
         self._image_gen_tool_registered: bool = False
         self._model: Model | None = None
+        self._default_model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
@@ -2517,6 +2518,7 @@ class JiuWenClawDeepAdapter:
         self._model_client_config = self._model.model_client_config
         self._model_request_config = self._model.model_config
         self._merge_service_model_cache()
+        self._default_model = self._model
         return self._model
 
     def _merge_service_model_cache(self) -> None:
@@ -2605,7 +2607,7 @@ class JiuWenClawDeepAdapter:
         params = request.params if isinstance(request.params, dict) else {}
         requested = str(params.get("model_name") or "").strip()
         if not requested:
-            return self._model
+            return getattr(self, "_default_model", None) or self._model
         if requested in self._model_cache:
             logger.info(
                 "[JiuWenClawDeepAdapter] model resolved by name: requested=%s",
