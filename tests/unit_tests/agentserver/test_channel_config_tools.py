@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from jiuwenswarm.agents.harness.common.tools import channel_config_tools
 from jiuwenswarm.agents.harness.common.tools.channel_config_tools import _request_gateway_control
 from jiuwenswarm.common.channel_config_registry import (
     CONFIGURABLE_THIRD_PARTY_CHANNEL_IDS,
@@ -124,3 +125,14 @@ async def test_gateway_control_includes_requester_channel_and_session(monkeypatc
         "channel_id": "qq",
         "session_id": "qq_c2c:user",
     }
+
+
+def test_gateway_control_url_uses_desktop_gateway_port(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("JIUWENSWARM_GATEWAY_CONTROL_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_PORT", raising=False)
+    monkeypatch.setenv("JIUWENSWARM_GATEWAY_PORT", "18591")
+
+    assert (
+        channel_config_tools._gateway_control_url()
+        == "ws://127.0.0.1:18591/channel-config"
+    )

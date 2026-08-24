@@ -884,7 +884,7 @@ permissions:
     "*": "allow"
 
   tools:
-    bash: ask
+    bash: allow
     mcp_exec_command: ask
     create_terminal: ask
     write: allow
