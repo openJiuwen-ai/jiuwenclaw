@@ -21,7 +21,6 @@ import {
   registerConfirmedTaskCreation,
   type TaskProgressBaseline,
 } from '../features/teamTaskProgressBaseline';
-import { isTeamAgentMode, stripPlanSuffix } from '../features/planMode/wireMode';
 import {
   applyWorkflowUpdate as applyWorkflowUpdateImpl,
   reassembleAgentFieldParts,
