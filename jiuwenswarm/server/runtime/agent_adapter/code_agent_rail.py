@@ -20,7 +20,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.workspace.workspace import Workspace
 
-from jiuwenswarm.common.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL, get_agent_skills_dir
+from jiuwenswarm.common.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenswarm.server.runtime.debug_trace import invoke_subagent_with_trace
 
 if TYPE_CHECKING:
@@ -251,15 +251,6 @@ class AgentTool(Tool):
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
             "restrict_to_work_dir": spec.restrict_to_work_dir,
-            # PR 3368: 子 agent 路径拦截白名单 —— restrict_to_work_dir 为 True 时，
-            # sandbox 默认只允许子 agent 自身的 workspace。将全局技能目录
-            # （~/.jiuwenswarm/agent/workspace/skills，即 officeAce 技能安装目录）
-            # 加入白名单，使子 agent 能读取全局安装的技能文件（SKILL.md 等）。
-            # 通过 get_agent_skills_dir() 获取标准路径，与 JiuwenSwarm 技能管理一致。
-            "allowed_paths": [
-                str(workspace.root_path),
-                str(get_agent_skills_dir()),
-            ],
         }
 
         factory_kwargs = dict(spec.factory_kwargs or {})
