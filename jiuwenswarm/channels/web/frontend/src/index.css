@@ -1900,6 +1900,11 @@ body.workspace-resize-active iframe {
     color: var(--color-text-secondary);
   }
 
+  .tool-tree-item__detail-badge.is-denied {
+    background: var(--color-feedback-warning-subtle);
+    color: var(--color-feedback-warning);
+  }
+
   .tool-tree-item__detail-badge.is-success {
     background: var(--color-feedback-success-subtle, rgba(22, 163, 74, 0.12));
     color: var(--color-feedback-success);
@@ -1944,6 +1949,18 @@ body.workspace-resize-active iframe {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: anywhere;
+  }
+
+  .tool-tree-item__detail-pre.is-denied {
+    color: var(--color-feedback-warning);
+  }
+
+  .tool-tree-item__detail-pre.is-error {
+    color: var(--color-feedback-danger);
+  }
+
+  .tool-tree__header-line-text.is-denied {
+    color: var(--color-feedback-warning);
   }
 
   .tool-tree-item__detail-status {
@@ -1991,6 +2008,10 @@ body.workspace-resize-active iframe {
 
   .tool-status-icon.is-error {
     color: var(--color-feedback-danger);
+  }
+
+  .tool-status-icon.is-denied {
+    color: var(--color-feedback-warning);
   }
 
   .tool-status-icon.is-pending {

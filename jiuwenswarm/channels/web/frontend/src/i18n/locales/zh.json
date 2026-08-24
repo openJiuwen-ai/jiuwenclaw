@@ -2242,6 +2242,7 @@
     "toolResult": {
       "success": "完成",
       "failed": "失败",
+      "denied": "已拒绝",
       "timeout": "执行超时",
       "running": "执行中...",
       "toolName": "工具名称",
@@ -2253,6 +2254,7 @@
       "running": "正在{{label}}",
       "completed": "已完成{{label}}",
       "failed": "{{label}}执行失败",
+      "denied": "已拒绝{{label}}",
       "category": {
         "file": "文件操作",
         "search": "搜索",

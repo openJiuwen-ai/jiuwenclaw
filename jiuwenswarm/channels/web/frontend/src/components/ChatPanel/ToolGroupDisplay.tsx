@@ -17,7 +17,27 @@ interface ToolGroupDisplayProps {
   viewedSkillIds?: string[];
 }
 
-type ToolStatusTone = 'success' | 'warning' | 'error' | 'pending';
+type ToolStatusTone = 'success' | 'warning' | 'error' | 'denied' | 'pending';
+
+const PERMISSION_DENIED_MARKERS = [
+  '[PERMISSION_DENIED]',
+  '[PERMISSION_REJECTED]',
+] as const;
+
+function isPermissionDeniedText(text?: string): boolean {
+  if (!text) {
+    return false;
+  }
+  const upper = text.toUpperCase();
+  return PERMISSION_DENIED_MARKERS.some((marker) => upper.includes(marker));
+}
+
+function isPermissionDeniedResult(result?: ToolExecution['result']): boolean {
+  if (!result) {
+    return false;
+  }
+  return isPermissionDeniedText(result.result) || isPermissionDeniedText(result.summary);
+}
 
 function ToolStatusIcon({
   tone,
@@ -32,6 +52,11 @@ function ToolStatusIcon({
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
           <circle cx="10" cy="10" r="6.8" />
           <path strokeLinecap="round" strokeLinejoin="round" d="M7.2 10.15 9.1 12.05l3.7-4.05" />
+        </svg>
+      ) : tone === 'denied' ? (
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="10" cy="10" r="6.8" />
+          <path strokeLinecap="round" d="M6.2 13.8 13.8 6.2" />
         </svg>
       ) : tone === 'error' ? (
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -58,7 +83,7 @@ export function isToolResultSuccessful(result?: ToolExecution['result']) {
   if (!result) {
     return false;
   }
-  if (result.timedOut) {
+  if (result.timedOut || isPermissionDeniedResult(result)) {
     return false;
   }
   return Boolean(result.success && !result.result.includes('success=False'));
@@ -153,6 +178,7 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
   const { t } = useTranslation();
   const { toolCall, result, status } = execution;
   const isTimeout = status === 'timeout' || Boolean(result?.timedOut);
+  const resultDenied = isPermissionDeniedResult(result);
   const failed = isToolExecutionFailed(execution);
   const resultSuccess = Boolean(result) && !failed;
   const hasArguments = Object.keys(toolCall.arguments).length > 0;
@@ -190,11 +216,15 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
                 data-variant={isTimeout ? 'timeout' : 'failed'}
                 className={clsx(
                   'tool-tree-item__detail-badge',
-                  'is-error',
-                  isTimeout && 'is-timeout'
+                  resultDenied ? 'is-denied' : 'is-error',
+                  !resultDenied && isTimeout && 'is-timeout'
                 )}
               >
-                {isTimeout ? t('chatUi.toolResult.timeout') : t('chatUi.toolResult.failed')}
+                {resultDenied
+                  ? t('chatUi.toolResult.denied')
+                  : isTimeout
+                    ? t('chatUi.toolResult.timeout')
+                    : t('chatUi.toolResult.failed')}
               </span>
             )}
             {resultSuccess && (
@@ -208,7 +238,8 @@ function ToolExecutionDetails({ execution }: { execution: ToolExecution }) {
             <pre
               className={clsx(
                 'tool-tree-item__detail-pre',
-                failed && 'is-failed',
+                resultDenied && 'is-denied',
+                failed && !resultDenied && 'is-failed',
                 result.skillTree && 'mt-2'
               )}
             >
@@ -259,6 +290,7 @@ interface GroupHeaderLine {
   text: string;
   running: boolean;
   failed: boolean;
+  denied: boolean;
   executions: ToolExecution[];
 }
 
@@ -274,6 +306,7 @@ function buildGroupLines(
   return executions.map((execution) => {
     const category = classifyToolCall(execution.toolCall.name);
     const running = isDisplayRunning(execution);
+    const denied = !running && isPermissionDeniedResult(execution.result);
     const failed = !running && isToolExecutionFailed(execution);
     const label = getExecutionLabel(execution, sessionCompletedLabel, t);
     return {
@@ -281,12 +314,15 @@ function buildGroupLines(
       category,
       running,
       failed,
+      denied,
       executions: [execution],
       text: running
         ? t('chatUi.toolGroup.running', { label })
-        : failed
-          ? t('chatUi.toolGroup.failed', { label })
-          : t('chatUi.toolGroup.completed', { label }),
+        : denied
+          ? t('chatUi.toolGroup.denied', { label })
+          : failed
+            ? t('chatUi.toolGroup.failed', { label })
+            : t('chatUi.toolGroup.completed', { label }),
     };
   });
 }
@@ -399,12 +435,17 @@ export function ToolGroupDisplay({
                   data-testid="chat-panel-tool-tree-header"
                 >
                   <span className="tool-tree__header-line" data-testid="chat-panel-tool-tree-header-line">
-                    <CategoryIcon category={line.category} />
+                    {line.denied ? (
+                      <ToolStatusIcon tone="denied" className="tool-tree__cat-icon" />
+                    ) : (
+                      <CategoryIcon category={line.category} />
+                    )}
                     <span
                       className={clsx(
                         'tool-tree__header-line-text',
                         line.running && 'is-running',
-                        line.failed && 'is-failed'
+                        line.denied && 'is-denied',
+                        line.failed && !line.denied && 'is-failed'
                       )}
                       data-testid="chat-panel-tool-tree-header-line-text"
                       data-variant={line.running ? 'running' : line.failed ? 'failed' : 'completed'}

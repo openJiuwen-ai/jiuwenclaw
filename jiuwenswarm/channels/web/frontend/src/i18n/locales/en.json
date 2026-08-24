@@ -2244,6 +2244,7 @@
     "toolResult": {
       "success": "done",
       "failed": "failed",
+      "denied": "denied",
       "timeout": "Execution timed out",
       "running": "Running...",
       "toolName": "Tool name",
@@ -2255,6 +2256,7 @@
       "running": "Running {{label}}",
       "completed": "Completed {{label}}",
       "failed": "{{label}} failed",
+      "denied": "Denied {{label}}",
       "category": {
         "file": "file operations",
         "search": "searches",

@@ -128,6 +128,14 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
   };
 }
 
+function isPermissionDeniedResultText(text: string): boolean {
+  const upper = text.toUpperCase();
+  return (
+    upper.includes('[PERMISSION_DENIED]') ||
+    upper.includes('[PERMISSION_REJECTED]')
+  );
+}
+
 export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedToolResult {
   const toolResultPayload = asRecord(payload.tool_result) ?? payload;
   const rawOutputRecord =
@@ -151,8 +159,10 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
   const timedOut = status === 'timeout' || status === 'timed_out';
   const statusFailed =
     timedOut || status === 'error' || status === 'failed' || status === 'failure';
-  const success =
-    typeof toolResultPayload.success === 'boolean'
+  const permissionDenied = isPermissionDeniedResultText(result);
+  const success = permissionDenied
+    ? false
+    : typeof toolResultPayload.success === 'boolean'
       ? toolResultPayload.success && !timedOut
       : status
         ? !statusFailed
