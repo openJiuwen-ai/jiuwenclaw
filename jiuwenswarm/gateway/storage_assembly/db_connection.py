@@ -44,7 +44,7 @@ def assert_replicas_db_compat() -> None:
 
 
 async def _init_all_tables(handler: Any) -> None:
-    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
 
     table_init_mod = import_manager_ws_client_module("models.table_init")
     await table_init_mod.init_all_tables(handler)
@@ -59,7 +59,7 @@ class GatewayDbConnection:
         self._lock = asyncio.Lock()
 
     def _bind_database(self) -> Any:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
 
         gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
         db = gateway_db_mod.GatewayDb.bind(None)

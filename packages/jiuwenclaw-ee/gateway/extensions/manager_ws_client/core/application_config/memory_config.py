@@ -29,7 +29,7 @@ def _row_to_dict(obj: Any) -> dict[str, Any]:
 
 
 def _apply_memory(body: dict[str, Any] | None, *, op: str) -> None:
-    from jiuwenswarm.agents.harness.common.memory.config import (
+    from jiuwenclaw.agentserver.memory.config import (
         apply_memory_config_payload,
         is_enterprise_memory_config_enabled,
     )

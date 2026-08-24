@@ -61,18 +61,18 @@ from openjiuwen_runtime.foundation.security.link_auth import (
     verify_and_pin,
 )
 
-from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
-from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
-from jiuwenswarm.common.e2a.models import E2AEnvelope, E2AResponse
-from jiuwenswarm.common.e2a.wire_codec import (
+from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
+from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
+from jiuwenclaw.e2a.wire_codec import (
     is_e2a_response_wire_dict,
     parse_agent_server_wire_chunk,
 )
-from jiuwenswarm.gateway.routing.agent_client import AgentServerClient, _wire_request_id_key
-from jiuwenswarm.gateway.routing.session_map import load_session_map_scope
-from jiuwenswarm.common.schema import AgentRequest
-from jiuwenswarm.common.schema.agent import AgentResponse, AgentResponseChunk
-from jiuwenswarm.gateway.message_handler import MessageHandler
+from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
+from jiuwenclaw.gateway.session_map import load_session_map_scope
+from jiuwenclaw.schema import AgentRequest
+from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.gateway.message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
     ):
         return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
-    from jiuwenswarm.infrastructure.module_importer import (
+    from jiuwenclaw.infrastructure.module_importer import (
         import_manager_ws_client_module,
     )
 
@@ -147,7 +147,7 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 async def load_all_service_configs() -> list[dict[str, Any]]:
     """查询当前 ``jiuwenclaw_id`` 下全量 ``service_config_template``（enabled=True）。"""
     try:
-        from jiuwenswarm.infrastructure.module_importer import (
+        from jiuwenclaw.infrastructure.module_importer import (
             import_manager_ws_client_module,
         )
 
@@ -199,7 +199,7 @@ def _coalesce_loaded_invoke_ids(
         if raw_ws and str(raw_ws).strip():
             workspace_dir = str(raw_ws).strip()
 
-    from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+    from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
 
     loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
     ctx = loader_mod.routing_context_from_request(request)

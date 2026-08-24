@@ -44,27 +44,12 @@ def _dedupe_extension_dirs(paths: list[str]) -> list[str]:
     return result
 
 
-def _bundled_ee_extension_dir() -> Path | None:
-    """仓库内 ``packages/jiuwenclaw-ee/gateway/extensions``（源码树部署时无需 EXTENSION_DIRS）。"""
-    bundled = (
-        Path(__file__).resolve().parents[2]
-        / "packages"
-        / "jiuwenclaw-ee"
-        / "gateway"
-        / "extensions"
-    )
-    return bundled if bundled.is_dir() else None
-
-
 def _extension_dir_paths_from_config(cfg: dict) -> list[str]:
     """读取 ``extensions.extension_dirs``（扩展包搜索目录：仅支持字符串，用 ';' 分割）。"""
     ext = cfg.get("extensions")
     dirs = ext.get("extension_dirs") if isinstance(ext, dict) else None
     paths = _split_extension_dirs(dirs) if isinstance(dirs, str) else []
     paths.append(_DEFAULT_EXTENSION_DIR)
-    bundled = _bundled_ee_extension_dir()
-    if bundled is not None:
-        paths.append(str(bundled))
     return _dedupe_extension_dirs(paths)
 
 

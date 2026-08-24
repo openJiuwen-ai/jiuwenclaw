@@ -45,7 +45,7 @@ def _trigger_runtime_management_config_update(op: str) -> None:
         op,
     )
     try:
-        from jiuwenswarm.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
 
         registry = ExtensionRegistry.get_instance()
         ext = registry.get_agent_server_client_extension()

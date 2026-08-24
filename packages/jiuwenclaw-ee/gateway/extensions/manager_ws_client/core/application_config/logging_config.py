@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jiuwenswarm.common.utils import apply_logging_config_payload
+from jiuwenclaw.utils import apply_logging_config_payload
 
 from ...infrastructure.db import ensure_db_handler
 from ...infrastructure.utils import format_ts, utc_now

@@ -463,7 +463,7 @@ class ManagerWsClient:
             if not jid:
                 continue
             try:
-                from jiuwenswarm.extensions.registry import ExtensionRegistry
+                from jiuwenclaw.extensions.registry import ExtensionRegistry
 
                 registry = ExtensionRegistry.get_instance()
                 ext = registry.get_agent_server_client_extension()

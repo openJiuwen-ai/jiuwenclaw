@@ -7,8 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from jiuwenswarm.extensions import ExtensionConfig
-from jiuwenswarm.extensions.sdk.agent_server_client import AgentServerClientExtension
+from jiuwenclaw.extensions import ExtensionConfig
+from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 
 logger = logging.getLogger(__name__)
 

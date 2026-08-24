@@ -77,7 +77,7 @@ async def _list_records_via_ee_handler(
     jiuwenclaw_id: str,
 ) -> list[dict[str, Any]] | None:
     try:
-        from jiuwenswarm.infrastructure.module_importer import import_manager_ws_client_module
+        from jiuwenclaw.infrastructure.module_importer import import_manager_ws_client_module
 
         db_mod = import_manager_ws_client_module("infrastructure.db")
         ensure_db_handler = getattr(db_mod, "ensure_db_handler", None)
