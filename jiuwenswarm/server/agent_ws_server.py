@@ -156,7 +156,9 @@ from jiuwenswarm.common.security.ws_origin import (
 logger = logging.getLogger(__name__)
 
 _INTERFACE_DEEP_MODULE = "jiuwenswarm.server.runtime.agent_adapter.interface_deep"
-_interface_deep_warmup_task: asyncio.Task[None] | None = None
+_skill_index_warmup_task: asyncio.Task[None] | None = None
+_skill_index_warmup_roots_cache: list[str] = []
+_skill_index_warmup_enabled_cache: str | None = None
 
 
 def _import_interface_deep_blocking() -> None:
@@ -164,32 +166,385 @@ def _import_interface_deep_blocking() -> None:
         importlib.import_module(_INTERFACE_DEEP_MODULE)
 
 
-async def _warm_interface_deep_import() -> None:
+async def _warm_interface_deep_module() -> None:
+    """Import interface_deep in a worker thread so listen is not blocked."""
     if _INTERFACE_DEEP_MODULE in sys.modules:
         logger.info("[AgentWebSocketServer] interface_deep_warmup cache=hit elapsed_ms=0.0")
         return
     t0 = time.perf_counter()
     logger.info("[AgentWebSocketServer] interface_deep_warmup cache=miss starting background import")
-    try:
-        await asyncio.to_thread(_import_interface_deep_blocking)
-    except Exception:
-        logger.warning(
-            "[AgentWebSocketServer] interface_deep_warmup failed elapsed_ms=%.1f",
-            (time.perf_counter() - t0) * 1000,
-            exc_info=True,
-        )
-        return
+    await asyncio.to_thread(_import_interface_deep_blocking)
     logger.info(
         "[AgentWebSocketServer] interface_deep_warmup cache=miss ok elapsed_ms=%.1f",
         (time.perf_counter() - t0) * 1000,
     )
 
 
-def _start_interface_deep_warmup() -> None:
-    global _interface_deep_warmup_task
-    if _interface_deep_warmup_task is not None and not _interface_deep_warmup_task.done():
+async def _startup_warmup_chain() -> None:
+    """Background after WS listen: interface_deep import then checkpointer warmup."""
+    try:
+        await _warm_interface_deep_module()
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] interface_deep_warmup failed",
+            exc_info=True,
+        )
         return
-    _interface_deep_warmup_task = asyncio.get_running_loop().create_task(_warm_interface_deep_import())
+    try:
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            ensure_persistent_checkpointer,
+        )
+
+        await ensure_persistent_checkpointer()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
+        )
+
+
+def _parse_shared_skills_dirs_from_env_dict(env: dict) -> list[str]:
+    """Extract shared skill roots from a sync/reload env object."""
+    from jiuwenswarm.common.local_env_config import canonical_product_env_key
+    from jiuwenswarm.common.utils import (
+        JIUWENSWARM_SHARED_SKILLS_DIRS_ENV,
+        parse_shared_skills_dirs_raw,
+    )
+
+    for key, value in env.items():
+        if canonical_product_env_key(str(key)) != JIUWENSWARM_SHARED_SKILLS_DIRS_ENV:
+            continue
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        return [str(path) for path in parse_shared_skills_dirs_raw(text)]
+    return []
+
+
+def _parse_enabled_skills_from_env_dict(env: dict) -> str | None:
+    from jiuwenswarm.common.local_env_config import canonical_product_env_key
+    from jiuwenswarm.server.runtime.skill.skill_manager import ENABLED_SKILLS_ENV
+
+    for key, value in env.items():
+        if canonical_product_env_key(str(key)) != ENABLED_SKILLS_ENV:
+            continue
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _shared_skills_dirs_from_sync_params(params: dict) -> list[str]:
+    agents = params.get("agents")
+    if not isinstance(agents, list):
+        return []
+    seen: set[str] = set()
+    roots: list[str] = []
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            continue
+        for path in _parse_shared_skills_dirs_from_env_dict(env):
+            if path not in seen:
+                seen.add(path)
+                roots.append(path)
+    return roots
+
+
+def _split_enabled_skills_csv(raw: str) -> list[str]:
+    return [
+        item.strip()
+        for item in str(raw).replace(";", ",").split(",")
+        if item.strip()
+    ]
+
+
+def _merge_enabled_skills_from_agents(agents: list) -> str | None:
+    """Union allowlists from all sync agents (stable order)."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            continue
+        enabled = _parse_enabled_skills_from_env_dict(env)
+        if enabled is None:
+            continue
+        for name in _split_enabled_skills_csv(enabled):
+            if name in seen:
+                continue
+            seen.add(name)
+            merged.append(name)
+    return ",".join(merged) if merged else None
+
+
+def _enabled_skills_from_sync_params(params: dict) -> str | None:
+    """Resolve ENABLED_SKILLS for process-index warmup.
+
+    OfficeAce stamps ``JIUWENSWARM_SHARED_SKILLS_DIRS`` onto every catalog
+    agent, each with its own short allowlist. Process warmup for the default
+    chat path only needs the general assistant (``agent_id=office``).
+    """
+    agents = params.get("agents")
+    if not isinstance(agents, list):
+        return None
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("agent_id", "")).strip().lower() != "office":
+            continue
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            continue
+        return _parse_enabled_skills_from_env_dict(env)
+    return None
+
+
+def _enabled_skills_from_tip_namespaces() -> str | None:
+    """Read ENABLED_SKILLS from synced agent tip bags (prefer default/office)."""
+    from jiuwenswarm.common.local_env_config import effective_tip
+
+    candidates: list[tuple[str | None, str | None]] = [
+        ("default", "office"),
+        ("default", "default"),
+        (None, None),
+    ]
+    try:
+        from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+            TenantCatalogRegistry,
+        )
+
+        registry = TenantCatalogRegistry.get_instance()
+        for service_id, agent_id in registry.list_pairs():
+            candidates.append((service_id, agent_id))
+    except Exception as exc:  # noqa: BLE001 - tip 枚举失败时退回固定候选
+        logger.debug(
+            "[AgentWebSocketServer] tip catalog list_pairs failed; "
+            "fall back to default tip candidates: %s",
+            exc,
+            exc_info=True,
+        )
+
+    for service_id, agent_id in candidates:
+        tip = None
+        try:
+            tip = effective_tip(service_id, agent_id)
+        except Exception as tip_exc:  # noqa: BLE001 - 单个 tip 失败则跳过
+            logger.debug(
+                "[AgentWebSocketServer] effective_tip failed for "
+                "service_id=%r agent_id=%r: %s",
+                service_id,
+                agent_id,
+                tip_exc,
+                exc_info=True,
+            )
+        if not isinstance(tip, dict):
+            continue
+        enabled = _parse_enabled_skills_from_env_dict(tip)
+        if enabled is not None:
+            return enabled
+    return None
+
+
+def _shared_skills_dirs_from_tip_namespaces() -> list[str]:
+    """Read SHARED_SKILLS_DIRS from synced agent tip bags (e.g. default/office)."""
+    from jiuwenswarm.common.local_env_config import effective_tip
+
+    seen: set[str] = set()
+    roots: list[str] = []
+    candidates: list[tuple[str | None, str | None]] = [
+        ("default", "office"),
+        ("default", "default"),
+        (None, None),
+    ]
+    try:
+        from jiuwenswarm.server.runtime.tenant_catalog_registry import (
+            TenantCatalogRegistry,
+        )
+
+        registry = TenantCatalogRegistry.get_instance()
+        for service_id, agent_id in registry.list_pairs():
+            candidates.append((service_id, agent_id))
+    except Exception as exc:  # noqa: BLE001 - tip 枚举失败时退回固定候选
+        logger.debug(
+            "[AgentWebSocketServer] tip catalog list_pairs failed; "
+            "fall back to default tip candidates: %s",
+            exc,
+            exc_info=True,
+        )
+
+    for service_id, agent_id in candidates:
+        tip = None
+        try:
+            tip = effective_tip(service_id, agent_id)
+        except Exception as tip_exc:  # noqa: BLE001 - 单个 tip 失败则跳过
+            logger.debug(
+                "[AgentWebSocketServer] effective_tip failed for "
+                "service_id=%r agent_id=%r: %s",
+                service_id,
+                agent_id,
+                tip_exc,
+                exc_info=True,
+            )
+        if not isinstance(tip, dict):
+            continue
+        paths = _parse_shared_skills_dirs_from_env_dict(tip)
+        for path in paths:
+            if path not in seen:
+                seen.add(path)
+                roots.append(path)
+    return roots
+
+
+def _skill_index_warmup_roots() -> list[str]:
+    """Resolve skill roots for process-index warmup (align with SkillUseRail)."""
+    if _skill_index_warmup_roots_cache:
+        return list(_skill_index_warmup_roots_cache)
+    try:
+        from jiuwenswarm.common.utils import (
+            get_agent_skills_dir,
+            get_shared_agent_skills_dirs,
+            resolve_agent_registered_skill_dirs,
+        )
+
+        seen: set[str] = set()
+        roots: list[str] = []
+        for source in (
+            [str(p) for p in get_shared_agent_skills_dirs()],
+            [str(p) for p in _shared_skills_dirs_from_tip_namespaces()],
+            [str(p) for p in resolve_agent_registered_skill_dirs()],
+        ):
+            for path in source:
+                if path in seen:
+                    continue
+                seen.add(path)
+                roots.append(path)
+        if roots:
+            return roots
+        return [str(get_agent_skills_dir())]
+    except Exception:
+        logger.debug(
+            "[AgentWebSocketServer] skill_index_warmup root resolve failed",
+            exc_info=True,
+        )
+        return []
+
+
+def _skill_index_warmup_enabled_skills() -> str | None:
+    """Optional ENABLED_SKILLS allowlist from tip/env (same as SkillUseRail)."""
+    if _skill_index_warmup_enabled_cache is not None:
+        return _skill_index_warmup_enabled_cache
+    try:
+        tip_enabled = _enabled_skills_from_tip_namespaces()
+        if tip_enabled is not None:
+            return tip_enabled
+        from jiuwenswarm.server.runtime.skill.skill_manager import (
+            enabled_skills_from_environ,
+        )
+
+        return enabled_skills_from_environ()
+    except Exception:
+        logger.debug(
+            "[AgentWebSocketServer] skill_index_warmup enabled_skills resolve failed",
+            exc_info=True,
+        )
+        return None
+
+
+async def _warm_skill_md_index() -> None:
+    """Background: frontmatter-only process skill index after WS listen."""
+    t0 = time.perf_counter()
+    roots = _skill_index_warmup_roots()
+    if not roots:
+        logger.info(
+            "[AgentWebSocketServer] skill_index_warmup skipped: no skill roots "
+            "elapsed_ms=%.1f",
+            (time.perf_counter() - t0) * 1000,
+        )
+        return
+    enabled = _skill_index_warmup_enabled_skills()
+    try:
+        from openjiuwen.harness.rails.skills import warmup_process_skill_index
+
+        stats = await asyncio.to_thread(
+            warmup_process_skill_index,
+            roots,
+            enabled_skills=enabled,
+        )
+    except Exception:
+        logger.warning(
+            "[AgentWebSocketServer] skill_index_warmup failed roots=%s elapsed_ms=%.1f",
+            roots,
+            (time.perf_counter() - t0) * 1000,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "[AgentWebSocketServer] skill_index_warmup ok roots=%s filled=%s hits=%s "
+        "entries=%s cost_ms=%s wall_ms=%.1f",
+        roots,
+        stats.get("filled"),
+        stats.get("hits"),
+        stats.get("entries"),
+        stats.get("cost_ms"),
+        (time.perf_counter() - t0) * 1000,
+    )
+
+
+def _start_skill_index_warmup(*, force: bool = False) -> None:
+    global _skill_index_warmup_task
+    if _skill_index_warmup_task is not None and not _skill_index_warmup_task.done():
+        if not force:
+            return
+        _skill_index_warmup_task.cancel()
+    _skill_index_warmup_task = asyncio.get_running_loop().create_task(
+        _warm_skill_md_index()
+    )
+
+
+def schedule_skill_index_warmup_after_sync(
+    *,
+    sync_params: dict | None = None,
+    force: bool = False,
+) -> None:
+    """Re-warm skill index once sync_agents_configs has injected shared skill dirs."""
+    global _skill_index_warmup_roots_cache, _skill_index_warmup_enabled_cache
+
+    roots: list[str] = []
+    if isinstance(sync_params, dict):
+        roots = _shared_skills_dirs_from_sync_params(sync_params)
+        enabled = _enabled_skills_from_sync_params(sync_params)
+        if enabled is not None:
+            _skill_index_warmup_enabled_cache = enabled
+    if not roots:
+        roots = _shared_skills_dirs_from_tip_namespaces()
+    if not roots:
+        try:
+            from jiuwenswarm.common.utils import get_shared_agent_skills_dirs
+
+            roots = [str(path) for path in get_shared_agent_skills_dirs()]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[AgentWebSocketServer] get_shared_agent_skills_dirs failed: %s",
+                exc,
+                exc_info=True,
+            )
+            roots = []
+    if not roots:
+        logger.info(
+            "[AgentWebSocketServer] schedule_skill_index_warmup_after_sync skipped: "
+            "no shared skill roots"
+        )
+        return
+    _skill_index_warmup_roots_cache = roots
+    _start_skill_index_warmup(force=force)
 
 
 from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
@@ -449,22 +804,11 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
-        _start_interface_deep_warmup()
-
-        # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
+        _start_skill_index_warmup()
+        # 端口已 listen: interface_deep 在 thread pool import，再预热 checkpointer.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
-        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
-
-        async def _warmup_checkpointer() -> None:
-            try:
-                await ensure_persistent_checkpointer()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[AgentWebSocketServer] checkpointer 预热失败 (首请求将兜底重试): %s", exc
-                )
-
         self._checkpointer_warmup_task = asyncio.create_task(
-            _warmup_checkpointer(), name="checkpointer-warmup"
+            _startup_warmup_chain(), name="startup-warmup"
         )
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
@@ -680,17 +1024,26 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
-        # 先取消 checkpointer 预热任务, 避免在 server 关闭后仍在后台跑.
-        warmup = self._checkpointer_warmup_task
-        self._checkpointer_warmup_task = None
-        if warmup is not None and not warmup.done():
-            warmup.cancel()
+        global _skill_index_warmup_task
+
+        async def _cancel_warmup_task(task: asyncio.Task[None] | None, label: str) -> None:
+            if task is None or task.done():
+                return
+            task.cancel()
             try:
-                await warmup
+                await task
             except asyncio.CancelledError:
                 pass
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[AgentWebSocketServer] checkpointer warmup cancel failed: %s", exc)
+                logger.warning("[AgentWebSocketServer] %s cancel failed: %s", label, exc)
+
+        # 先取消后台预热, 避免在 server 关闭后仍在后台跑.
+        warmup = self._checkpointer_warmup_task
+        self._checkpointer_warmup_task = None
+        await _cancel_warmup_task(warmup, "startup warmup")
+        skill_warmup = _skill_index_warmup_task
+        _skill_index_warmup_task = None
+        await _cancel_warmup_task(skill_warmup, "skill_index warmup")
         had_server = self._server is not None
         if had_server:
             self._server.close()
