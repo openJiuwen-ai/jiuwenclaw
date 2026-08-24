@@ -42,6 +42,7 @@ async def test_send_wire_payload_sends_small_wire_unchanged(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_send_wire_payload_counts_utf8_bytes(monkeypatch):
+    """UTF-8 byte counting should work correctly with chunking."""
     wire = {"request_id": "r1", "body": {"result": "你" * 400}}
     character_size = len(json.dumps(wire, ensure_ascii=False))
     byte_size = len(json.dumps(wire, ensure_ascii=False).encode("utf-8"))
@@ -49,12 +50,18 @@ async def test_send_wire_payload_counts_utf8_bytes(monkeypatch):
     ws = FakeWebSocket()
 
     assert character_size < 1200 < byte_size
-    assert await ws_send.send_wire_payload(ws, wire) is False
-    assert len(ws.sent[0].encode("utf-8")) <= 1200
+    # With chunking, the payload should be split and sent successfully
+    assert await ws_send.send_wire_payload(ws, wire) is True
+    # Multiple chunks should be sent
+    assert len(ws.sent) > 1
+    # Each chunk should fit within the budget
+    for sent in ws.sent:
+        assert len(sent.encode("utf-8")) <= 1200
 
 
 @pytest.mark.asyncio
-async def test_oversized_unary_sends_e2a_error(monkeypatch):
+async def test_oversized_unary_sends_chunked(monkeypatch):
+    """Oversized unary messages should be chunked instead of sending error."""
     monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
     source = encode_agent_response_for_wire(
         AgentResponse(
@@ -69,21 +76,25 @@ async def test_oversized_unary_sends_e2a_error(monkeypatch):
     source["session_id"] = "session-1"
     ws = FakeWebSocket()
 
-    assert await ws_send.send_wire_payload(ws, source) is False
-
-    fallback = json.loads(ws.sent[0])
-    assert fallback["response_kind"] == "e2a.error"
-    assert fallback["request_id"] == "r-unary"
-    assert fallback["session_id"] == "session-1"
-    assert fallback["agent_ref"] == {"mode": "code", "id": "default"}
-    assert fallback["body"]["details"]["code"] == "response_too_large"
-    assert fallback["body"]["details"]["actual_bytes"] > 2048
-    assert fallback["body"]["details"]["max_bytes"] == 2048
-    assert len(ws.sent[0].encode("utf-8")) <= 2048
+    # Should succeed via chunking
+    assert await ws_send.send_wire_payload(ws, source) is True
+    # Multiple chunks should be sent
+    assert len(ws.sent) > 1
+    # Each chunk should fit within the budget
+    for sent in ws.sent:
+        assert len(sent.encode("utf-8")) <= 2048
+    # First chunk should have routing keys preserved
+    first_chunk = json.loads(ws.sent[0])
+    assert first_chunk["request_id"] == "r-unary"
+    assert first_chunk["session_id"] == "session-1"
+    assert first_chunk["agent_ref"] == {"mode": "code", "id": "default"}
+    # Should have chunking metadata
+    assert "_chunking" in first_chunk.get("metadata", {})
 
 
 @pytest.mark.asyncio
-async def test_oversized_stream_sends_final_error_chunk(monkeypatch):
+async def test_oversized_stream_sends_chunked(monkeypatch):
+    """Oversized stream chunks should be chunked instead of sending error."""
     monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
     source = encode_agent_chunk_for_wire(
         AgentResponseChunk(
@@ -98,20 +109,24 @@ async def test_oversized_stream_sends_final_error_chunk(monkeypatch):
     )
     ws = FakeWebSocket()
 
-    assert await ws_send.send_wire_payload(ws, source) is False
-
-    raw_fallback = json.loads(ws.sent[0])
-    fallback = parse_agent_server_wire_chunk(raw_fallback)
-    assert raw_fallback["sequence"] == 7
-    assert raw_fallback["agent_ref"] == {"mode": "team", "id": "team-1"}
-    assert fallback.is_complete is True
-    assert fallback.payload["event_type"] == "chat.error"
-    assert fallback.payload["code"] == "response_too_large"
-    assert len(ws.sent[0].encode("utf-8")) <= 2048
+    # Should succeed via chunking
+    assert await ws_send.send_wire_payload(ws, source) is True
+    # Multiple chunks should be sent
+    assert len(ws.sent) > 1
+    # Each chunk should fit within the budget
+    for sent in ws.sent:
+        assert len(sent.encode("utf-8")) <= 2048
+    # First chunk should preserve routing keys
+    first_chunk = json.loads(ws.sent[0])
+    assert first_chunk["sequence"] == 7
+    assert first_chunk["agent_ref"] == {"mode": "team", "id": "team-1"}
+    # Should have chunking metadata
+    assert "_chunking" in first_chunk.get("metadata", {})
 
 
 @pytest.mark.asyncio
-async def test_oversized_server_push_preserves_push_marker(monkeypatch):
+async def test_oversized_server_push_sends_chunked(monkeypatch):
+    """Oversized server push messages should be chunked."""
     monkeypatch.setattr(ws_send, "AGENT_WS_SEND_BUDGET_BYTES", 2048)
     source = build_server_push_wire(
         {
@@ -123,12 +138,19 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
     )
     ws = FakeWebSocket()
 
-    assert await ws_send.send_wire_payload(ws, source) is False
-
-    fallback = json.loads(ws.sent[0])
-    assert fallback["metadata"][E2A_WIRE_SERVER_PUSH_KEY] is True
-    assert fallback["session_id"] == "session-push"
-    assert len(ws.sent[0].encode("utf-8")) <= 2048
+    # Should succeed via chunking
+    assert await ws_send.send_wire_payload(ws, source) is True
+    # Multiple chunks should be sent
+    assert len(ws.sent) > 1
+    # Each chunk should fit within the budget
+    for sent in ws.sent:
+        assert len(sent.encode("utf-8")) <= 2048
+    # First chunk should preserve routing keys and push marker
+    first_chunk = json.loads(ws.sent[0])
+    assert first_chunk["session_id"] == "session-push"
+    assert first_chunk["metadata"][E2A_WIRE_SERVER_PUSH_KEY] is True
+    # Should have chunking metadata
+    assert "_chunking" in first_chunk["metadata"]
 
 
 @pytest.mark.asyncio

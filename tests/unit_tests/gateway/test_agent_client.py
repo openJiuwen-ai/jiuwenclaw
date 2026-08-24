@@ -1,10 +1,16 @@
 import asyncio
+import json
 import logging
 
 import pytest
 from websockets.exceptions import ConnectionClosedError
 
 from jiuwenswarm.common.ws_limits import AGENT_WS_MAX_MESSAGE_BYTES
+from jiuwenswarm.common.ws_chunking import (
+    CHUNKING_META_KEY,
+    CHUNK_CONTENT_KEY,
+    split_wire_payload_for_chunking,
+)
 from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenswarm.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
@@ -375,3 +381,337 @@ async def test_send_request_clears_connection_when_send_fails():
     response = await asyncio.wait_for(task, timeout=0.1)
     assert response.ok is True
     assert client.has_message_queue_for_test("rid-after-send-close") is False
+
+
+# ---------------------------------------------------------------------------
+# Chunk reassembly tests
+# ---------------------------------------------------------------------------
+
+
+class ChunkedRecvWebSocket:
+    """WebSocket that yields pre-configured messages (including chunks)."""
+
+    def __init__(self, messages: list[dict]) -> None:
+        self._messages = list(messages)
+        self.recv_calls = 0
+
+    async def recv(self) -> str:
+        if not self._messages:
+            raise ConnectionClosedError(None, None)
+        self.recv_calls += 1
+        msg = self._messages.pop(0)
+        return json.dumps(msg)
+
+
+def _make_chunk(chunk_id: str, chunk_index: int, total_chunks: int, content: str, request_id: str) -> dict:
+    """Helper to build a chunk wire payload."""
+    return {
+        "request_id": request_id,
+        "metadata": {
+            CHUNKING_META_KEY: {
+                "chunk_id": chunk_id,
+                "chunk_index": chunk_index,
+                "total_chunks": total_chunks,
+            }
+        },
+        CHUNK_CONTENT_KEY: content,
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_reassembles_chunked_messages():
+    """Receiver loop should reassemble chunked messages before routing."""
+    # Build a large payload that will be split into chunks
+    original_wire = {
+        "request_id": "rid-chunked",
+        "type": "response",
+        "body": {"content": "x" * 100},
+    }
+    original_json = json.dumps(original_wire)
+
+    # Split into 3 chunks manually
+    piece_size = len(original_json) // 3
+    pieces = [
+        original_json[:piece_size],
+        original_json[piece_size:2*piece_size],
+        original_json[2*piece_size:],
+    ]
+
+    # Create chunk messages
+    chunks = [
+        _make_chunk("c1", 0, 3, pieces[0], "rid-chunked"),
+        _make_chunk("c1", 1, 3, pieces[1], "rid-chunked"),
+        _make_chunk("c1", 2, 3, pieces[2], "rid-chunked"),
+    ]
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket(chunks)
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    # Create queue for the request
+    queue = asyncio.Queue()
+    client.set_message_queue_for_test("rid-chunked", queue)
+
+    # Run receiver loop (will exit when ws raises ConnectionClosedError)
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # Verify the reassembled message was routed to the queue
+    # Note: queue may contain a _ReceiverFailure object after ConnectionClosedError
+    assert queue.qsize() >= 1
+    reassembled = queue.get_nowait()
+    assert reassembled == original_wire
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_handles_out_of_order_chunks():
+    """Receiver loop should reassemble chunks arriving out of order."""
+    original_wire = {
+        "request_id": "rid-outoforder",
+        "type": "response",
+        "body": {"data": "test"},
+    }
+    original_json = json.dumps(original_wire)
+
+    piece_size = len(original_json) // 3
+    pieces = [
+        original_json[:piece_size],
+        original_json[piece_size:2*piece_size],
+        original_json[2*piece_size:],
+    ]
+
+    # Send chunks out of order: 2, 0, 1
+    chunks = [
+        _make_chunk("c2", 2, 3, pieces[2], "rid-outoforder"),
+        _make_chunk("c2", 0, 3, pieces[0], "rid-outoforder"),
+        _make_chunk("c2", 1, 3, pieces[1], "rid-outoforder"),
+    ]
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket(chunks)
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    queue = asyncio.Queue()
+    client.set_message_queue_for_test("rid-outoforder", queue)
+
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # Should still reassemble correctly
+    # Note: queue may contain a _ReceiverFailure object after ConnectionClosedError
+    assert queue.qsize() >= 1
+    reassembled = queue.get_nowait()
+    assert reassembled == original_wire
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_passes_through_non_chunked_messages():
+    """Non-chunked messages should pass through unchanged."""
+    normal_wire = {
+        "request_id": "rid-normal",
+        "type": "response",
+        "body": {"result": "ok"},
+    }
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket([normal_wire])
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    queue = asyncio.Queue()
+    client.set_message_queue_for_test("rid-normal", queue)
+
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # Note: queue may contain a _ReceiverFailure object after ConnectionClosedError
+    assert queue.qsize() >= 1
+    received = queue.get_nowait()
+    assert received == normal_wire
+
+
+@pytest.mark.asyncio
+async def test_message_receiver_loop_handles_mixed_chunked_and_normal():
+    """Receiver loop should handle a mix of chunked and non-chunked messages."""
+    original_chunked = {
+        "request_id": "rid-mixed-chunk",
+        "type": "response",
+        "body": {"content": "chunked"},
+    }
+    original_chunked_json = json.dumps(original_chunked)
+
+    # Split chunked message into 2 pieces
+    mid = len(original_chunked_json) // 2
+    chunk1 = _make_chunk("c3", 0, 2, original_chunked_json[:mid], "rid-mixed-chunk")
+    chunk2 = _make_chunk("c3", 1, 2, original_chunked_json[mid:], "rid-mixed-chunk")
+
+    normal_wire = {
+        "request_id": "rid-mixed-normal",
+        "type": "response",
+        "body": {"result": "normal"},
+    }
+
+    # Interleave: chunk1, normal, chunk2
+    messages = [chunk1, normal_wire, chunk2]
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket(messages)
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    queue1 = asyncio.Queue()
+    queue2 = asyncio.Queue()
+    client.set_message_queue_for_test("rid-mixed-chunk", queue1)
+    client.set_message_queue_for_test("rid-mixed-normal", queue2)
+
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # Both messages should be routed correctly
+    # Note: queues may contain a _ReceiverFailure object after ConnectionClosedError
+    assert queue1.qsize() >= 1
+    assert queue2.qsize() >= 1
+    assert queue1.get_nowait() == original_chunked
+    assert queue2.get_nowait() == normal_wire
+
+
+@pytest.mark.asyncio
+async def test_disconnect_clears_chunk_buffer():
+    """disconnect() should clear the chunk buffer."""
+    client = AgentClientHarness()
+    client.set_ws_for_test(FakeWebSocket())
+
+    # Add incomplete chunks to buffer
+    chunk = _make_chunk("c4", 0, 3, "piece0", "rid-disconnect")
+    await client._chunk_buffer.add_chunk(chunk, "rid-disconnect")
+    assert client._chunk_buffer.pending_count() == 1
+
+    # Disconnect should clear the buffer
+    await client.disconnect()
+    assert client._chunk_buffer.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_receiver_clears_chunk_buffer():
+    """_stop_receiver_after_fatal_error() should clear the chunk buffer."""
+    client = AgentClientHarness()
+    client.set_ws_for_test(FakeWebSocket())
+    client.set_running_for_test(True)
+
+    # Add incomplete chunks to buffer
+    chunk = _make_chunk("c5", 0, 3, "piece0", "rid-fatal")
+    await client._chunk_buffer.add_chunk(chunk, "rid-fatal")
+    assert client._chunk_buffer.pending_count() == 1
+
+    # Stop receiver should clear the buffer
+    await client.stop_receiver_after_fatal_error_for_test(ConnectionClosedError(None, None))
+    assert client._chunk_buffer.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_chunk_buffer_initialization():
+    """WebSocketAgentServerClient should initialize with an empty chunk buffer."""
+    client = WebSocketAgentServerClient()
+    assert client._chunk_buffer is not None
+    assert client._chunk_buffer.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_periodic_chunk_cleanup_runs_in_receiver_loop():
+    """Verify that _periodic_chunk_cleanup task is created and cancelled properly."""
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket([])  # Empty, will immediately raise ConnectionClosedError
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    # Add an incomplete chunk that will expire
+    chunk = _make_chunk("c-expire", 0, 3, "piece0", "rid-expire")
+    await client._chunk_buffer.add_chunk(chunk, "rid-expire")
+    assert client._chunk_buffer.pending_count() == 1
+
+    # Run receiver loop (will exit immediately due to empty ws)
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # The cleanup task should have been cancelled when receiver loop exited
+    # Buffer should be cleared by _stop_receiver_after_fatal_error
+    assert client._chunk_buffer.pending_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_chunked_server_push_message():
+    """Chunked messages with server push metadata should be handled correctly."""
+    from jiuwenswarm.common.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+
+    original_wire = {
+        "request_id": "rid-push",
+        "type": "event",
+        "event": "response.push",
+        "metadata": {E2A_WIRE_SERVER_PUSH_KEY: True},
+        "payload": {"result": "pushed"},
+    }
+    original_json = json.dumps(original_wire)
+
+    # Split into 2 chunks
+    mid = len(original_json) // 2
+    chunks = [
+        _make_chunk("c-push", 0, 2, original_json[:mid], "rid-push"),
+        _make_chunk("c-push", 1, 2, original_json[mid:], "rid-push"),
+    ]
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket(chunks)
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    # Track server push calls
+    push_calls = []
+    async def on_push(data):
+        push_calls.append(data)
+
+    client.set_server_push_handler(on_push)
+
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # The reassembled message should be routed to server push handler
+    assert len(push_calls) == 1
+    assert push_calls[0] == original_wire
+    assert push_calls[0]["metadata"][E2A_WIRE_SERVER_PUSH_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_chunked_message_with_cancelled_request():
+    """Chunked messages for cancelled requests should be dropped after reassembly."""
+    original_wire = {
+        "request_id": "rid-cancelled",
+        "type": "response",
+        "body": {"result": "should be dropped"},
+    }
+    original_json = json.dumps(original_wire)
+
+    # Split into 2 chunks
+    mid = len(original_json) // 2
+    chunks = [
+        _make_chunk("c-cancel", 0, 2, original_json[:mid], "rid-cancelled"),
+        _make_chunk("c-cancel", 1, 2, original_json[mid:], "rid-cancelled"),
+    ]
+
+    client = AgentClientHarness()
+    ws = ChunkedRecvWebSocket(chunks)
+    client.set_ws_for_test(ws)
+    client.set_running_for_test(True)
+
+    # Mark request as cancelled
+    client._cancelled_request_ids.add("rid-cancelled")
+
+    # Create queue (should not receive the message)
+    queue = asyncio.Queue()
+    client.set_message_queue_for_test("rid-cancelled", queue)
+
+    await asyncio.wait_for(client.run_message_receiver_loop_for_test(), timeout=0.5)
+
+    # Queue should be empty (message dropped due to cancellation)
+    # Note: may contain _ReceiverFailure from connection close
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+
+    # Should only have _ReceiverFailure, not the actual message
+    assert all(not isinstance(item, dict) or item.get("type") != "response" for item in items)
