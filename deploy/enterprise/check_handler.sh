@@ -141,10 +141,12 @@ check_if_mysql_up() {
     info "Use built-in MySQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="3306"
-    DEPLOY_VARS["MANAGER_DB_USER"]="root"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+
+    for module in MANAGER GATEWAY IDENTITY
+    do
+        DEPLOY_VARS["${module}_DB_USER"]="root"
+        DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    done
 }
 
 check_if_postgresql_up() {
@@ -172,10 +174,12 @@ check_if_postgresql_up() {
     info "Use built-in PostgreSQL server"
     DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["DB_PORT"]="5432"
-    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    
+    for module in MANAGER GATEWAY IDENTITY
+    do
+        DEPLOY_VARS["${module}_DB_USER"]="postgres"
+        DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    done
 }
 
 
@@ -188,48 +192,24 @@ check_if_db_up() {
     check_if_${db_type}_up
 
     if [[ "${DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]}" == "true" || "${DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]}" == "true" ]]; then
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
+        for module in MANAGER GATEWAY IDENTITY WEB
+        do
+            if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+                DEPLOY_VARS["${module}_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
+            fi
 
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_USER"]:-}" ]; then
-            error "Please set up MANAGER_DB_USER or DB_USER."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_USER"]:-}" ]; then
+                error "Please set up ${module}_DB_USER or DB_USER."
+            fi
 
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["MANAGER_DB_PASSWORD"]:-}" ]; then
-            error "Please set up MANAGER_DB_PASSWORD or DB_PASSWORD."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+                DEPLOY_VARS["${module}_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
+            fi
 
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_USER"]:-}" ]; then
-            error "Please set up GATEWAY_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["GATEWAY_DB_PASSWORD"]:-}" ]; then
-            error "Please set up GATEWAY_DB_PASSWORD or DB_PASSWORD."
-        fi
-
-        if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
-            DEPLOY_VARS["WEB_DB_USER"]=${DEPLOY_VARS["DB_USER"]}
-        fi
-        if [ -z "${DEPLOY_VARS["WEB_DB_USER"]:-}" ]; then
-            error "Please set up WEB_DB_USER or DB_USER."
-        fi
-
-        if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
-            DEPLOY_VARS["WEB_DB_PASSWORD"]=${DEPLOY_VARS["DB_PASSWORD"]}
-        fi
-        if [ -z "${DEPLOY_VARS["WEB_DB_PASSWORD"]:-}" ]; then
-            error "Please set up WEB_DB_PASSWORD or DB_PASSWORD."
-        fi
+            if [ -z "${DEPLOY_VARS["${module}_DB_PASSWORD"]:-}" ]; then
+                error "Please set up ${module}_DB_PASSWORD or DB_PASSWORD."
+            fi
+        done
     fi
 }
 

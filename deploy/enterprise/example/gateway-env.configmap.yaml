@@ -49,7 +49,7 @@ data:
   GATEWAY_SQLITE_PATH: gateway.db
   HEARTBEAT_ENABLED: "FALSE"
   JINA_READER_ENDPOINT: https://r.jinaai.cn
-  JIUWENBOX_CODE_POD_PATH: /usr/local/lib/python3.11/site-packages/jiuwenbox
+  JIUWENBOX_POD_PKG_PATH: /usr/local/lib/python3.11/site-packages/jiuwenbox
   JIUWENBOX_CONTAINER_NAME: jiuwenbox
   JIUWENBOX_ENABLED: "true"
   JIUWENBOX_IMAGE: <<JIUWENBOX_IMAGE>>

@@ -196,10 +196,7 @@ uninstall_gateway() {
     info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
     exec_cmd kubectl delete -f "${gateway_file}" --ignore-not-found=true
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
-
-    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
-        delete_k8s_resource "configmap" "${envfile_name}" "${namespace}"
-    fi
+    delete_k8s_resource "configmap" "${envfile_name}" "${namespace}"
 
     if [[ "${mount_type}" == "pvc" && -z "${DEPLOY_VARS["CLAW_PVC"]:-}" ]]; then
         exec_cmd kubectl delete -f ${pvc_file}  --ignore-not-found=true

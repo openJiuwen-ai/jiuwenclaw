@@ -21,10 +21,10 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 5173
+              containerPort: <<WEB_HTTP_PORT>>
               protocol: TCP
             - name: websocket
-              containerPort: <<ENTERPRISE_WEB_WS_PORT>>
+              containerPort: <<WEB_WS_PORT>>
               protocol: TCP
           envFrom:
             - secretRef:
@@ -32,12 +32,12 @@ spec:
           env:
             - name: JIUWENCLAW_WEB_HOST
               value: "0.0.0.0"
-            - name: JIUWENCLAW_WEB_PORT
-              value: "5173"
+            - name: FRONTEND_PORT
+              value: "<<WEB_HTTP_PORT>>"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
             - name: ENTERPRISE_WEB_WS_PORT
-              value: "<<ENTERPRISE_WEB_WS_PORT>>"
+              value: "<<WEB_WS_PORT>>"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "<<WS_ORIGIN_CHECK_ENABLED>>"
             - name: WS_ALLOWED_ORIGINS
@@ -67,8 +67,8 @@ spec:
     app: <<WEB_NAME>>
   ports:
     - name: websocket
-      port: <<ENTERPRISE_WEB_WS_PORT>>         # Service 端口
-      targetPort: <<ENTERPRISE_WEB_WS_PORT>>   # 容器端口
+      port: <<WEB_WS_PORT>>         # Service 端口
+      targetPort: <<WEB_WS_PORT>>   # 容器端口
   type: ClusterIP                             # 集群内部访问，不需要外网
 
 ---
@@ -81,8 +81,8 @@ metadata:
 spec:
   type: NodePort
   ports:
-    - port: 5173                    # 集群内部端口
-      targetPort: 5173              # 容器端口
+    - port: <<WEB_HTTP_PORT>>                    # 集群内部端口
+      targetPort: <<WEB_HTTP_PORT>>              # 容器端口
       nodePort: <<WEB_NODE_PORT>>   # 外部访问端口（30000-32767）
   selector:
     app: <<WEB_NAME>>

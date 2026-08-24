@@ -36,7 +36,7 @@ spec:
               value: "5173"
             - name: ENTERPRISE_WEB_WS_HOST
               value: "0.0.0.0"
-            - name: ENTERPRISE_WEB_WS_PORT
+            - name: WEB_WS_PORT
               value: "19000"
             - name: WS_ORIGIN_CHECK_ENABLED
               value: "false"

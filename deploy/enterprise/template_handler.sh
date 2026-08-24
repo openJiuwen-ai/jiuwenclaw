@@ -126,12 +126,12 @@ run_frontend_dev() {
         web)
             [ -z "${DEPLOY_VARS["CLAW_POD_CODE_PATH"]:-}" ] && return
             workdir="${DEPLOY_VARS["CLAW_POD_CODE_PATH"]}/jiuwenswarm/channels/web/frontend"
-            port="5173"
+            port="${DEPLOY_VARS["WEB_HTTP_PORT"]}"
             ;;
         manager-web)
             [ -z "${DEPLOY_VARS["RUNTIME_CODE_PATH"]:-}" ] && return
             workdir="${DEPLOY_VARS["RUNTIME_POD_CODE_PATH"]}/applications/manager/manager_web"
-            port="5273"
+            port="${DEPLOY_VARS["MANAGER_WEB_PORT"]}"
             ;;
         *)
             warning "run_frontend_dev: unknown component '${comp}', skipping"
@@ -161,6 +161,9 @@ enable_dev_mode_if_needed() {
             run_frontend_dev "${file}" "${comp}"
             ;;
         manager-server)
+            mount_runtime_code "${file}"
+            ;;
+        identity)
             mount_runtime_code "${file}"
             ;;
         manager-web)

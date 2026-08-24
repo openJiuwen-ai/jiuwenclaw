@@ -30,6 +30,14 @@ spec:
               value: "<<MANAGER_WEB_PORT>>"
             - name: MANAGER_WEB_PROXY_TARGET
               value: "http://<<MANAGER_SERVER_NAME>>:<<MANAGER_REST_PORT>>"
+            - name: MANAGER_WEB_IDP_TARGET
+              value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>"
+            - name: MANAGER_WEB_GATEWAY_SSE
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_HTTP_PORT>>/web/invoke"
+            - name: MANAGER_WEB_USER_SERVER_TARGET
+              value: "http://<<WEB_NAME>>:<<WEB_WS_PORT>>"
+            - name: IDENTITY_PUBLIC_KEY_URL
+              value: "http://<<IDENTITY_NAME>>:<<IDENTITY_REST_PORT>>/v1/auth/public_key"
             - name: TZ
               value: "<<TIMEZONE>>"
 
